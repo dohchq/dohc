@@ -1094,11 +1094,13 @@ async fn pull_returns_fast_forwarded_text_and_binary_paths_for_materialization()
         pull["changedPaths"],
         json!([
             {
+                "versionId": "main",
                 "path": "assets/remote.bin",
                 "operation": "write",
                 "contentKind": "binary",
             },
             {
+                "versionId": "main",
                 "path": "notes/remote.md",
                 "operation": "write",
                 "contentKind": "text",

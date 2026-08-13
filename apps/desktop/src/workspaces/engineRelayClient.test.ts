@@ -90,11 +90,13 @@ class MockDaemon implements EngineDaemonClient {
             pendingCursor: { kind: "relay", token: "cursor-9" },
             changedPaths: [
               {
+                versionId: "main",
                 path: "notes/plan.md",
                 operation: "write",
                 contentKind: "text",
               },
               {
+                versionId: "main",
                 path: ".env",
                 operation: "write",
                 contentKind: "secret",
@@ -223,11 +225,13 @@ describe("EngineRelayClient", () => {
       nextCursor: 9,
       fastForwardedPaths: [
         {
+          versionId: "main",
           path: "notes/plan.md",
           operation: "write",
           contentKind: "text",
         },
         {
+          versionId: "main",
           path: ".env",
           operation: "write",
           contentKind: "secret",
@@ -337,6 +341,37 @@ describe("EngineRelayClient", () => {
         observedBytes: 22,
       },
     ]);
+    await sessions.closeAll();
+  });
+
+  it("rejects a workspace materialization path without its producing version", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "sync.pull") return undefined;
+      return {
+        status: "complete",
+        pushed: 0,
+        fetched: 1,
+        applied: 1,
+        skipped: 0,
+        conflictsOpened: 0,
+        hasMore: false,
+        nextCursor: 1,
+        pendingCursor: { kind: "relay", token: "cursor-1" },
+        changedPaths: [
+          {
+            path: ".env",
+            operation: "write",
+            contentKind: "secret",
+          },
+        ],
+        sharingDeclined: [],
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+
+    await expect(client.pull()).rejects.toThrow(
+      "Rust engine sync.pull.changedPaths[0].versionId must be a string.",
+    );
     await sessions.closeAll();
   });
 
@@ -1152,6 +1187,7 @@ describe("EngineRelayClient", () => {
           },
           changedPaths: [
             {
+              versionId: "main",
               path: first ? "first.md" : "second.md",
               operation: "write",
               contentKind: "text",

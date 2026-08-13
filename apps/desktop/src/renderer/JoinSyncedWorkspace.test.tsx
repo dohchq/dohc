@@ -104,6 +104,36 @@ describe("JoinSyncedWorkspace", () => {
     await waitFor(() => expect(onReady).toHaveBeenCalledWith(JOINED));
   });
 
+  it("drops the protected-file passphrase when the workspace code changes", async () => {
+    const user = userEvent.setup();
+    bridgeMock.cloudJoinWorkspace
+      .mockRejectedValueOnce(
+        new Error("Passphrase required to unlock synced secrets."),
+      )
+      .mockResolvedValueOnce({ workspace: JOINED });
+    render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
+    await fillJoinForm(user);
+
+    await user.click(screen.getByTestId("join-workspace-start"));
+    await user.type(
+      await screen.findByTestId("join-sync-passphrase"),
+      "workspace A passphrase",
+    );
+
+    const code = screen.getByTestId("join-sync-code");
+    await user.clear(code);
+    await user.type(code, "dohc-sync:ws-other:http://localhost:1788");
+    expect(screen.queryByTestId("join-sync-passphrase")).toBeNull();
+
+    await user.click(screen.getByTestId("join-workspace-start"));
+    await waitFor(() =>
+      expect(bridgeMock.cloudJoinWorkspace).toHaveBeenLastCalledWith({
+        syncCode: "dohc-sync:ws-other:http://localhost:1788",
+        rootPath: "/home/ice/dohc/notes",
+      }),
+    );
+  });
+
   it("stays disabled until both a code and a folder exist", async () => {
     const user = userEvent.setup();
     render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);

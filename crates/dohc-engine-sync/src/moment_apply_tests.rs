@@ -1811,6 +1811,7 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
             conflict: None,
             conflicts_opened: 0,
             materialization_changes: vec![crate::MomentMaterializationChange {
+                version_id: "main".to_owned(),
                 path: "active-at-apply.md".to_owned(),
                 operation: "write",
                 content_kind: "text",
@@ -1831,6 +1832,7 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
         crate::moment_apply::redelivered_materialization_changes(&store, &incoming)
             .expect("read durable decision"),
         [crate::MomentMaterializationChange {
+            version_id: "main".to_owned(),
             path: "active-at-apply.md".to_owned(),
             operation: "write",
             content_kind: "text",

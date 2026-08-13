@@ -11010,6 +11010,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             "nextCursor": pending_cursor.as_ref().map(|cursor| cursor.cursor),
             "pendingCursor": pending_cursor.as_ref().map(relay_cursor_json),
             "changedPaths": changed_paths.iter().map(|change| json!({
+                "versionId": change.version_id,
                 "path": change.path,
                 "operation": change.operation,
                 "contentKind": change.content_kind,
@@ -11045,6 +11046,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             "nextCursor": pending_cursor.cursor,
             "pendingCursor": relay_cursor_json(&pending_cursor),
             "changedPaths": changed_paths.iter().map(|change| json!({
+                "versionId": change.version_id,
                 "path": change.path,
                 "operation": change.operation,
                 "contentKind": change.content_kind,

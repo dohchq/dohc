@@ -375,6 +375,7 @@ function changedPaths(
   label: string,
   allowSecret: true,
 ): Array<{
+  versionId: string;
   path: string;
   operation: "write" | "delete";
   contentKind: "text" | "binary" | "secret";
@@ -402,6 +403,9 @@ function changedPaths(
   }
   return value.map((entry, index) => {
     const record = resultRecord(entry, `${label}.changedPaths[${index}]`);
+    const versionId = allowSecret
+      ? stringField(record, "versionId", `${label}.changedPaths[${index}]`)
+      : undefined;
     const path = stringField(record, "path", `${label}.changedPaths[${index}]`);
     const operation = record.operation;
     const contentKind = record.contentKind;
@@ -419,7 +423,12 @@ function changedPaths(
         `Rust engine ${label}.changedPaths[${index}].contentKind is invalid.`,
       );
     }
-    return { path, operation, contentKind };
+    return {
+      ...(versionId !== undefined ? { versionId } : {}),
+      path,
+      operation,
+      contentKind,
+    };
   });
 }
 
@@ -733,9 +742,10 @@ export class EngineRelayClient {
         const changed = new Map<
           string,
           {
-              path: string;
-              operation: "write" | "delete";
-              contentKind: "text" | "binary" | "secret";
+            versionId: string;
+            path: string;
+            operation: "write" | "delete";
+            contentKind: "text" | "binary" | "secret";
           }
         >();
         for (;;) {
@@ -767,7 +777,7 @@ export class EngineRelayClient {
             sharingDeclined(result.sharingDeclined, "sync.pull"),
           );
           for (const path of changedPaths(result.changedPaths, "sync.pull", true)) {
-            changed.set(path.path, path);
+            changed.set(`${path.versionId}\0${path.path}`, path);
           }
           if (!hasMore) {
             finalCursor = cursor;

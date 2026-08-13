@@ -159,6 +159,7 @@ pub(crate) fn redelivered_materialization_changes(
             }
         };
         changes.push(crate::MomentMaterializationChange {
+            version_id: payload.version_id.clone(),
             path,
             operation,
             content_kind: "text",

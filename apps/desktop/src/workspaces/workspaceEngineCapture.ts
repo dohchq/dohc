@@ -6318,6 +6318,11 @@ export function createWorkspaceEngineCapture(
           const activeVersionId = await activeVersionIdOf(engine);
           const materializations: MaterializeOperation[] = [];
           for (const change of changed) {
+            // A failed disk materialization leaves the relay cursor behind.
+            // If the user switches versions before the retry, the redelivered
+            // path still belongs to the version that produced it. Never read
+            // from or delete the newly active version's disk projection.
+            if (change.versionId !== activeVersionId) continue;
             if (change.operation === "delete") {
               materializations.push({
                 kind: "delete",
@@ -6329,7 +6334,7 @@ export function createWorkspaceEngineCapture(
             if (change.contentKind === "secret") {
               const materialized = await secretStoreFor().materializeSecretFile({
                 workspaceId,
-                versionId: activeVersionId,
+                versionId: change.versionId,
                 path: change.path,
               });
               if (!materialized.present) {
@@ -6347,7 +6352,7 @@ export function createWorkspaceEngineCapture(
             }
             const snapshot = await engine.readTextFile({
               workspaceId,
-              versionId: activeVersionId,
+              versionId: change.versionId,
               path: change.path,
             });
             if (!snapshot) continue;

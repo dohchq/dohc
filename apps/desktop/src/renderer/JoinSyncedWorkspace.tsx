@@ -171,7 +171,12 @@ export function JoinSyncedWorkspace(props: {
             <input
               data-testid="join-sync-code"
               value={code}
-              onChange={(event) => setCode(event.currentTarget.value)}
+              onChange={(event) => {
+                setCode(event.currentTarget.value);
+                setNeedsPassphrase(false);
+                setPassphrase("");
+                setError(null);
+              }}
               placeholder="dohc-sync:…"
               spellCheck={false}
               className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"

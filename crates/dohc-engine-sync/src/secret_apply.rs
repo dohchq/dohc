@@ -254,6 +254,7 @@ fn apply_fork(
             .into_iter()
             .filter(|path| !inserted.contains(path))
             .map(|path| crate::MomentMaterializationChange {
+                version_id: payload.to_version_id.clone(),
                 path,
                 operation: "delete",
                 content_kind: "secret",
@@ -262,6 +263,7 @@ fn apply_fork(
                 inserted_paths
                     .into_iter()
                     .map(|path| crate::MomentMaterializationChange {
+                        version_id: payload.to_version_id.clone(),
                         path,
                         operation: "write",
                         content_kind: "secret",
@@ -552,6 +554,7 @@ fn insert_moment(
     }
     let materialization_changes = if won && is_active_version(tx, &op.workspace_id, version_id)? {
         vec![crate::MomentMaterializationChange {
+            version_id: version_id.to_owned(),
             path: path.to_owned(),
             operation: if after.is_some() { "write" } else { "delete" },
             content_kind: "secret",

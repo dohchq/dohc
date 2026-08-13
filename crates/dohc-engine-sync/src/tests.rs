@@ -6567,7 +6567,11 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
             dohc_engine_collab::ReplicationApplyOutcome::Applied { .. }
         ))
     ));
-    let occupied_first_recovery = format!("notes/arbitrated (recovered {}).md", &loser_claim[..8]);
+    let recovery_projection = dohc_engine_storage::hex_sha256(b"losing draft plus edit");
+    let occupied_first_recovery = format!(
+        "notes/arbitrated (recovered {} {recovery_projection}).md",
+        &loser_claim[..8]
+    );
     seed_text_head(
         &mut engine,
         "unrelated-recovery-occupant",
@@ -6604,7 +6608,10 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
     assert_eq!(replacement.recovered_paths.len(), 1);
     assert_eq!(
         replacement.recovered_paths[0],
-        format!("notes/arbitrated (recovered {} 2).md", &loser_claim[..8])
+        format!(
+            "notes/arbitrated (recovered {} {recovery_projection} 2).md",
+            &loser_claim[..8]
+        )
     );
 
     let state: (String, String, String, String, i64, i64, i64, i64, i64, i64) = engine
@@ -6917,6 +6924,7 @@ fn lower_relay_base_recovers_the_loser_even_when_the_text_matches() {
         crate::ydoc_apply::redelivered_materialization_changes(&engine, &incoming)
             .expect("redelivered recovery materialization"),
         [MomentMaterializationChange {
+            version_id: "main".to_owned(),
             path: replacement.recovered_paths[0].clone(),
             operation: "write",
             content_kind: "text",
@@ -6993,7 +7001,11 @@ fn captured_disk_occupant_relocates_the_recovery_exactly_once() {
     let applied = apply_ydoc_envelope(&mut engine, &winner_base, &NoFaults, &NoLiveLeases)
         .expect("winning base");
     assert!(matches!(applied, ApplyOutcome::Applied(_)));
-    let first_recovery_path = format!("notes/disk-occupant (recovered {}).md", &loser_claim[..8]);
+    let recovery_projection = dohc_engine_storage::hex_sha256(b"losing local draft");
+    let first_recovery_path = format!(
+        "notes/disk-occupant (recovered {} {recovery_projection}).md",
+        &loser_claim[..8]
+    );
     let (first_recovery_object, first_recovery_moment): (String, String) = engine
         .read_with(|conn| {
             conn.query_row(
@@ -7045,8 +7057,10 @@ fn captured_disk_occupant_relocates_the_recovery_exactly_once() {
     ));
     let repaired = repair_conflicted_ydoc_recoveries(&mut engine, "ws", &NoFaults)
         .expect("resume the committed relocation");
-    let second_recovery_path =
-        format!("notes/disk-occupant (recovered {} 2).md", &loser_claim[..8]);
+    let second_recovery_path = format!(
+        "notes/disk-occupant (recovered {} {recovery_projection} 2).md",
+        &loser_claim[..8]
+    );
     assert_eq!(repaired.len(), 1);
     assert_eq!(repaired[0].path, second_recovery_path);
     let current_recovery_moment: String = engine
@@ -9879,6 +9893,7 @@ fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
         assert_eq!(
             changed_paths,
             [MomentMaterializationChange {
+                version_id: "main".to_owned(),
                 path: "notes/relay-path.md".to_owned(),
                 operation: "write",
                 content_kind: "text",
@@ -13656,6 +13671,7 @@ fn secret_put_reports_active_protected_disk_work_on_apply_and_redelivery() {
 
     let (_scratch, _path, mut engine) = store();
     seed_replication_version(&mut engine, "main", "main");
+    seed_replication_version(&mut engine, "feature", "branch");
     let ciphertext = b"protected relay bytes";
     let sha = engine
         .put_binary_blob(ciphertext)
@@ -13683,11 +13699,23 @@ fn secret_put_reports_active_protected_disk_work_on_apply_and_redelivery() {
             materialization_changes,
             ..
         }) if materialization_changes == [MomentMaterializationChange {
+            version_id: "main".to_owned(),
             path: ".env".to_owned(),
             operation: "write",
             content_kind: "secret",
         }]
     ));
+
+    engine
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO active_versions (workspace_id,version_id) VALUES ('ws','feature') \
+                 ON CONFLICT(workspace_id) DO UPDATE SET version_id=excluded.version_id",
+                [],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .expect("switch active version after protected put");
 
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases,),
@@ -13697,6 +13725,7 @@ fn secret_put_reports_active_protected_disk_work_on_apply_and_redelivery() {
         crate::router::redelivered_materialization_changes(&engine, &operation)
             .expect("redelivered protected put disk work"),
         [MomentMaterializationChange {
+            version_id: "main".to_owned(),
             path: ".env".to_owned(),
             operation: "write",
             content_kind: "secret",
@@ -13709,6 +13738,7 @@ fn secret_put_reports_active_protected_disk_work_on_apply_and_redelivery() {
 fn secret_delete_reports_active_protected_disk_work_on_apply_and_redelivery() {
     let (_scratch, _path, mut engine) = store();
     seed_replication_version(&mut engine, "main", "main");
+    seed_replication_version(&mut engine, "feature", "branch");
     let operation = envelope(
         "protected-delete-peer",
         0,
@@ -13728,11 +13758,23 @@ fn secret_delete_reports_active_protected_disk_work_on_apply_and_redelivery() {
             materialization_changes,
             ..
         }) if materialization_changes == [MomentMaterializationChange {
+            version_id: "main".to_owned(),
             path: ".env".to_owned(),
             operation: "delete",
             content_kind: "secret",
         }]
     ));
+
+    engine
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO active_versions (workspace_id,version_id) VALUES ('ws','feature') \
+                 ON CONFLICT(workspace_id) DO UPDATE SET version_id=excluded.version_id",
+                [],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .expect("switch active version after protected delete");
 
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases,),
@@ -13742,6 +13784,7 @@ fn secret_delete_reports_active_protected_disk_work_on_apply_and_redelivery() {
         crate::router::redelivered_materialization_changes(&engine, &operation)
             .expect("redelivered protected delete disk work"),
         [MomentMaterializationChange {
+            version_id: "main".to_owned(),
             path: ".env".to_owned(),
             operation: "delete",
             content_kind: "secret",
@@ -13795,11 +13838,13 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
     )]));
     let expected = vec![
         MomentMaterializationChange {
+            version_id: "feature".to_owned(),
             path: "app/.env".to_owned(),
             operation: "write",
             content_kind: "secret",
         },
         MomentMaterializationChange {
+            version_id: "feature".to_owned(),
             path: "stale.env".to_owned(),
             operation: "delete",
             content_kind: "secret",

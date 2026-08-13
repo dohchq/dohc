@@ -86,11 +86,11 @@ Rules the implementation must satisfy:
   deliberately suppresses replication). In the same transaction: index it,
   enqueue materialization, journal the outbound moment when the workspace
   replicates, and record the correlation that makes redelivery idempotent.
-- **Name it deterministically.** Derive the suffix from the losing claim
-  identity, not from a machine label or anything locale-dependent — the wire
-  payload carries no friendly name, and two locales must never choose two
-  durable paths. `todo (recovered 8f31c2ab).md` is the shape. Localize the
-  explanation in the UI, never the stored path.
+- **Name it deterministically.** Derive the suffix from the losing claim and
+  the exact recovered projection digest. Distinct projections then receive
+  distinct paths before peers exchange them. Do not use a machine label or
+  locale-dependent text. `todo (recovered 8f31c2ab <projection-sha256>).md` is
+  the shape. Localize the explanation in the UI, never the stored path.
 - **Never adopt an occupant.** The ordinary write path adopts an existing
   object at the target path. Probe the candidate first. A matching recovery
   correlation is a replay and reuses the same object; anything else picks the

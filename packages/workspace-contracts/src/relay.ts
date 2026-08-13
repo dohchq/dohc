@@ -5,6 +5,10 @@ export interface SyncRelayConnection {
 }
 
 export interface RelayMaterializedPath {
+  // The version that was active when the relay applied this change. Retries
+  // keep this binding even if the user enters another version before the
+  // caller materializes the path.
+  versionId: string;
   path: string;
   operation: "write" | "delete";
   contentKind: "text" | "binary" | "secret";

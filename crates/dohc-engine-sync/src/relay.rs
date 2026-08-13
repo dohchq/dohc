@@ -3905,7 +3905,7 @@ fn accumulate_pull_outcome(
     refused: &mut usize,
     skipped: &mut usize,
     conflicts_opened: &mut i64,
-    changed_paths: &mut BTreeMap<String, crate::MomentMaterializationChange>,
+    changed_paths: &mut BTreeMap<(String, String), crate::MomentMaterializationChange>,
     refusals: &mut Vec<crate::ReplicationRefusal>,
     sharing_declined: &mut Vec<crate::SharingDeclined>,
 ) -> Result<(), RelayError> {
@@ -3922,12 +3922,12 @@ fn accumulate_pull_outcome(
                 .checked_add(routed.conflicts_opened)
                 .ok_or(RelayError::InvalidResponse)?;
             for change in routed.materialization_changes {
-                changed_paths.insert(change.path.clone(), change);
+                insert_changed_path(changed_paths, change);
             }
             for change in
                 crate::router::redelivered_materialization_changes(store, op).map_err(local)?
             {
-                changed_paths.insert(change.path.clone(), change);
+                insert_changed_path(changed_paths, change);
             }
             *applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?;
         }
@@ -3945,7 +3945,7 @@ fn accumulate_pull_outcome(
             for change in
                 crate::router::redelivered_materialization_changes(store, op).map_err(local)?
             {
-                changed_paths.insert(change.path.clone(), change);
+                insert_changed_path(changed_paths, change);
             }
             *skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?;
         }
@@ -3955,6 +3955,13 @@ fn accumulate_pull_outcome(
         ApplyOutcome::WithDiagnostics { .. } => unreachable!("diagnostics were flattened"),
     }
     Ok(())
+}
+
+fn insert_changed_path(
+    changed_paths: &mut BTreeMap<(String, String), crate::MomentMaterializationChange>,
+    change: crate::MomentMaterializationChange,
+) {
+    changed_paths.insert((change.version_id.clone(), change.path.clone()), change);
 }
 
 fn push_refusal_once(
@@ -4105,6 +4112,33 @@ mod sharing_decline_tests {
                 .collect::<Vec<_>>(),
             ["notes/first.md", "notes/second.md"]
         );
+    }
+}
+
+#[cfg(test)]
+mod changed_path_tests {
+    use std::collections::BTreeMap;
+
+    use super::insert_changed_path;
+
+    #[test]
+    fn same_path_in_two_versions_keeps_both_materialization_changes() {
+        let mut changed = BTreeMap::new();
+        for version_id in ["main", "feature"] {
+            insert_changed_path(
+                &mut changed,
+                crate::MomentMaterializationChange {
+                    version_id: version_id.to_owned(),
+                    path: ".env".to_owned(),
+                    operation: "write",
+                    content_kind: "secret",
+                },
+            );
+        }
+
+        assert_eq!(changed.len(), 2);
+        assert!(changed.contains_key(&("main".to_owned(), ".env".to_owned())));
+        assert!(changed.contains_key(&("feature".to_owned(), ".env".to_owned())));
     }
 }
 

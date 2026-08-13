@@ -9,7 +9,8 @@ use dohc_engine_domain::{
     DomainError, WriteText, enqueue_write, select_snapshot_by_path_in_tx, write_text_in_tx,
 };
 use dohc_engine_files::{
-    PathClassification, classify_engine_file_path_normalized, search_policy::SearchPolicySnapshot,
+    MAX_CANONICAL_WORKSPACE_PATH_BYTES, PathClassification, classify_engine_file_path_normalized,
+    search_policy::SearchPolicySnapshot,
 };
 use dohc_engine_storage::{EngineStore, FaultInjector, Preimage, StorageError, TxnOutcome};
 use rusqlite::{OptionalExtension, params};
@@ -159,11 +160,18 @@ fn recovery_identity(
     key: &DocKey,
     original_path: &str,
     losing_claim_id: &str,
+    markdown: &str,
     collision_ordinal: u64,
 ) -> RecoveryIdentity {
+    let projection_sha256 = dohc_engine_storage::hex_sha256(markdown.as_bytes());
     let mut input = format!(
-        "ydoc-recovery:v1\0{}\0{}\0{}\0{}\0{}",
-        key.workspace_id, key.version_id, key.object_id, original_path, losing_claim_id
+        "ydoc-recovery:v2\0{}\0{}\0{}\0{}\0{}\0{}",
+        key.workspace_id,
+        key.version_id,
+        key.object_id,
+        original_path,
+        losing_claim_id,
+        projection_sha256
     );
     if collision_ordinal > 0 {
         input.push('\0');
@@ -223,9 +231,10 @@ fn file_parts(file_name: &str) -> (&str, &str) {
 fn recovered_path_candidate(
     original_path: &str,
     losing_claim_id: &str,
+    projection_sha256: &str,
     ordinal: u64,
 ) -> Result<String, SyncError> {
-    if !valid_claim_id(losing_claim_id) || ordinal == 0 {
+    if !valid_claim_id(losing_claim_id) || !valid_claim_id(projection_sha256) || ordinal == 0 {
         return Err(local_corruption("Y.Doc recovery identity is malformed"));
     }
     let (parent, file_name) = original_path
@@ -235,19 +244,53 @@ fn recovered_path_candidate(
         });
     let (stem, extension) = file_parts(file_name);
     let suffix = if ordinal == 1 {
-        format!(" (recovered {})", &losing_claim_id[..8])
+        format!(" (recovered {} {projection_sha256})", &losing_claim_id[..8])
     } else {
-        format!(" (recovered {} {ordinal})", &losing_claim_id[..8])
+        format!(
+            " (recovered {} {projection_sha256} {ordinal})",
+            &losing_claim_id[..8]
+        )
     };
-    let extension_fits = suffix.len() + extension.len() <= MAX_RECOVERED_NAME_BYTES
+    let same_parent_bytes = if parent.is_empty() {
+        0
+    } else {
+        parent.len() + 1
+    };
+    let same_parent_name_bytes = MAX_CANONICAL_WORKSPACE_PATH_BYTES
+        .checked_sub(same_parent_bytes)
+        .ok_or_else(|| local_corruption("Y.Doc recovery parent path is invalid"))?;
+    // A valid original can leave less room than the recovery marker in its
+    // directory. Keep the sibling beside it whenever possible; otherwise the
+    // workspace root is the only canonical location that can preserve it.
+    let parent = if suffix.len() <= same_parent_name_bytes {
+        parent
+    } else {
+        ""
+    };
+    let parent_bytes = if parent.is_empty() {
+        0
+    } else {
+        parent.len() + 1
+    };
+    let max_name_bytes = MAX_RECOVERED_NAME_BYTES.min(
+        MAX_CANONICAL_WORKSPACE_PATH_BYTES
+            .checked_sub(parent_bytes)
+            .ok_or_else(|| local_corruption("Y.Doc recovery parent path is invalid"))?,
+    );
+    let extension_fits = suffix.len() + extension.len() <= max_name_bytes
         && suffix.encode_utf16().count() + extension.encode_utf16().count()
             <= MAX_RECOVERED_NAME_UTF16_UNITS;
     let extension = if extension_fits { extension } else { "" };
     let fixed_bytes = suffix.len() + extension.len();
     let fixed_units = suffix.encode_utf16().count() + extension.encode_utf16().count();
+    if fixed_bytes > max_name_bytes {
+        return Err(local_corruption(
+            "Y.Doc recovery parent path has no room for a recovery name",
+        ));
+    }
     let stem = truncate_stem(
         stem,
-        MAX_RECOVERED_NAME_BYTES - fixed_bytes,
+        max_name_bytes - fixed_bytes,
         MAX_RECOVERED_NAME_UTF16_UNITS - fixed_units,
     );
     let name = format!("{stem}{suffix}{extension}");
@@ -268,13 +311,16 @@ fn recovered_path_candidate(
 fn is_recovered_path_candidate(
     original_path: &str,
     losing_claim_id: &str,
+    projection_sha256: &str,
     recovered_path: &str,
 ) -> Result<bool, SyncError> {
-    if recovered_path_candidate(original_path, losing_claim_id, 1)? == recovered_path {
+    if recovered_path_candidate(original_path, losing_claim_id, projection_sha256, 1)?
+        == recovered_path
+    {
         return Ok(true);
     }
     let recovered_name = recovered_path.rsplit('/').next().unwrap_or(recovered_path);
-    let marker = format!(" (recovered {} ", &losing_claim_id[..8]);
+    let marker = format!(" (recovered {} {projection_sha256} ", &losing_claim_id[..8]);
     let Some(marker_start) = recovered_name.rfind(&marker) else {
         return Ok(false);
     };
@@ -289,7 +335,10 @@ fn is_recovered_path_candidate(
     else {
         return Ok(false);
     };
-    Ok(recovered_path_candidate(original_path, losing_claim_id, ordinal)? == recovered_path)
+    Ok(
+        recovered_path_candidate(original_path, losing_claim_id, projection_sha256, ordinal)?
+            == recovered_path,
+    )
 }
 
 fn identity_available(
@@ -318,10 +367,12 @@ fn verify_recovery(
     decision: &RecoveryDecision,
     markdown: &str,
 ) -> Result<(), SyncError> {
+    let projection_sha256 = dohc_engine_storage::hex_sha256(markdown.as_bytes());
     if !valid_claim_id(&decision.losing_claim_id)
         || !is_recovered_path_candidate(
             &decision.original_path,
             &decision.losing_claim_id,
+            &projection_sha256,
             &decision.recovered_path,
         )?
     {
@@ -331,6 +382,7 @@ fn verify_recovery(
         key,
         &decision.original_path,
         &decision.losing_claim_id,
+        markdown,
         decision.collision_ordinal,
     );
     if identity.object_id != decision.recovery_object_id
@@ -593,7 +645,13 @@ fn create_recovery_in_tx(
 ) -> Result<CreatedRecovery, SyncError> {
     let mut collision_ordinal = first_collision_ordinal;
     let identity = loop {
-        let candidate = recovery_identity(key, original_path, losing_claim_id, collision_ordinal);
+        let candidate = recovery_identity(
+            key,
+            original_path,
+            losing_claim_id,
+            markdown,
+            collision_ordinal,
+        );
         if identity_available(tx, &key.workspace_id, &candidate)? {
             break candidate;
         }
@@ -602,8 +660,14 @@ fn create_recovery_in_tx(
             .ok_or_else(|| local_corruption("Y.Doc recovery identity sequence overflowed"))?;
     };
     let mut path_ordinal = 1_u64;
+    let projection_sha256 = dohc_engine_storage::hex_sha256(markdown.as_bytes());
     let recovered_path = loop {
-        let candidate = recovered_path_candidate(original_path, losing_claim_id, path_ordinal)?;
+        let candidate = recovered_path_candidate(
+            original_path,
+            losing_claim_id,
+            &projection_sha256,
+            path_ordinal,
+        )?;
         let alias_occupied: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM path_aliases
@@ -736,10 +800,25 @@ fn relocate_conflicted_recovery_in_tx(
         decision.object_id.clone(),
     )
     .map_err(map_collab_hard_error)?;
+    let recovery_markdown: Option<String> = tx
+        .query_row(
+            "SELECT blob.text FROM moments AS moment
+             JOIN blobs AS blob ON blob.sha256=moment.after_blob_sha256
+             WHERE moment.workspace_id=?1 AND moment.moment_id=?2",
+            params![workspace_id, decision.recovery_moment_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let Some(recovery_markdown) = recovery_markdown else {
+        return Ok(None);
+    };
+    let projection_sha256 = dohc_engine_storage::hex_sha256(recovery_markdown.as_bytes());
     if !valid_claim_id(&decision.losing_claim_id)
         || !is_recovered_path_candidate(
             &decision.original_path,
             &decision.losing_claim_id,
+            &projection_sha256,
             &decision.recovered_path,
         )?
     {
@@ -749,6 +828,7 @@ fn relocate_conflicted_recovery_in_tx(
         &key,
         &decision.original_path,
         &decision.losing_claim_id,
+        &recovery_markdown,
         decision.collision_ordinal,
     );
     if expected_identity.object_id != decision.recovery_object_id
@@ -812,20 +892,7 @@ fn relocate_conflicted_recovery_in_tx(
             ));
         }
     }
-    let markdown: Option<String> = tx
-        .query_row(
-            "SELECT blob.text FROM moments AS moment
-             JOIN blobs AS blob ON blob.sha256=moment.after_blob_sha256
-             WHERE moment.workspace_id=?1 AND moment.moment_id=?2",
-            params![workspace_id, decision.recovery_moment_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?;
-    let Some(markdown) = markdown else {
-        return Ok(None);
-    };
-    verify_recovery(tx, &key, &decision, &markdown)?;
+    verify_recovery(tx, &key, &decision, &recovery_markdown)?;
     let first_collision_ordinal = decision
         .collision_ordinal
         .checked_add(1)
@@ -835,7 +902,7 @@ fn relocate_conflicted_recovery_in_tx(
         &key,
         &decision.original_path,
         &decision.losing_claim_id,
-        &markdown,
+        &recovery_markdown,
         first_collision_ordinal,
         decision.recorded_at_ms,
         search_policy,
@@ -903,6 +970,7 @@ pub(crate) fn redelivered_change(
         .map_err(SyncError::corrupt)
     })?;
     Ok(still_exact.then_some(MomentMaterializationChange {
+        version_id: decision.version_id,
         path: decision.recovered_path,
         operation: "write",
         content_kind: "text",
@@ -935,18 +1003,112 @@ fn map_domain_hard_error(error: DomainError) -> SyncError {
 
 #[cfg(test)]
 mod tests {
-    use super::recovered_path_candidate;
+    use dohc_engine_collab::DocKey;
+    use dohc_engine_files::{
+        MAX_CANONICAL_WORKSPACE_PATH_BYTES, PathClassification,
+        classify_engine_file_path_normalized,
+    };
+
+    use super::{recovered_path_candidate, recovery_identity};
+
+    const CLAIM: &str = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
 
     #[test]
     fn recovered_path_is_deterministic_and_keeps_the_extension() {
-        let claim = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+        let projection = dohc_engine_storage::hex_sha256(b"draft");
         assert_eq!(
-            recovered_path_candidate("notes/draft.md", claim, 1).unwrap(),
-            "notes/draft (recovered 12345678).md"
+            recovered_path_candidate("notes/draft.md", CLAIM, &projection, 1).unwrap(),
+            format!("notes/draft (recovered 12345678 {projection}).md")
         );
         assert_eq!(
-            recovered_path_candidate("notes/draft.md", claim, 2).unwrap(),
-            "notes/draft (recovered 12345678 2).md"
+            recovered_path_candidate("notes/draft.md", CLAIM, &projection, 2).unwrap(),
+            format!("notes/draft (recovered 12345678 {projection} 2).md")
+        );
+    }
+
+    #[test]
+    fn recovered_path_stays_within_the_full_canonical_path_limit() {
+        let parent = [
+            "a".repeat(240),
+            "b".repeat(240),
+            "c".repeat(240),
+            "d".repeat(177),
+        ]
+        .join("/");
+        assert_eq!(parent.len(), 900);
+        let original = format!("{parent}/{}.md", "e".repeat(120));
+        assert_eq!(original.len(), MAX_CANONICAL_WORKSPACE_PATH_BYTES);
+
+        let projection = dohc_engine_storage::hex_sha256(b"draft");
+        let recovered = recovered_path_candidate(&original, CLAIM, &projection, 1).unwrap();
+
+        assert_eq!(recovered.len(), MAX_CANONICAL_WORKSPACE_PATH_BYTES);
+        assert!(recovered.starts_with(&format!("{parent}/")));
+        assert!(recovered.ends_with(&format!(" (recovered 12345678 {projection}).md")));
+        assert_eq!(
+            classify_engine_file_path_normalized(&recovered),
+            (PathClassification::Tracked, Some(recovered.clone()))
+        );
+    }
+
+    #[test]
+    fn recovered_path_uses_the_workspace_root_when_its_parent_has_no_name_budget() {
+        let parent = [
+            "a".repeat(250),
+            "b".repeat(250),
+            "c".repeat(250),
+            "d".repeat(250),
+        ]
+        .join("/");
+        assert_eq!(parent.len(), 1_003);
+        let original = format!("{parent}/{}", "e".repeat(20));
+        assert_eq!(original.len(), MAX_CANONICAL_WORKSPACE_PATH_BYTES);
+
+        let projection = dohc_engine_storage::hex_sha256(b"draft");
+        let recovered = recovered_path_candidate(&original, CLAIM, &projection, 1).unwrap();
+
+        assert_eq!(
+            recovered,
+            format!("{} (recovered 12345678 {projection})", "e".repeat(20))
+        );
+        assert_eq!(
+            classify_engine_file_path_normalized(&recovered),
+            (PathClassification::Tracked, Some(recovered.clone()))
+        );
+    }
+
+    #[test]
+    fn recovery_identity_distinguishes_distinct_recovered_projections() {
+        let key = DocKey::new("ws", "main", "object").expect("key");
+        let first_projection = dohc_engine_storage::hex_sha256(b"peer A draft");
+        let second_projection = dohc_engine_storage::hex_sha256(b"peer B draft");
+        let first = recovery_identity(&key, "notes/draft.md", CLAIM, "peer A draft", 0);
+        let second = recovery_identity(&key, "notes/draft.md", CLAIM, "peer B draft", 0);
+
+        assert_ne!(
+            (first.object_id, first.moment_id),
+            (second.object_id, second.moment_id),
+            "distinct recovered bodies must not alias durable identities"
+        );
+        assert_ne!(
+            recovered_path_candidate("notes/draft.md", CLAIM, &first_projection, 1).unwrap(),
+            recovered_path_candidate("notes/draft.md", CLAIM, &second_projection, 1).unwrap(),
+            "distinct recovered bodies must not alias visible paths"
+        );
+    }
+
+    #[test]
+    fn recovery_identity_converges_same_projection_and_is_stable_for_redelivery() {
+        let key = DocKey::new("ws", "main", "object").expect("key");
+        let projection = dohc_engine_storage::hex_sha256(b"same draft");
+
+        assert_eq!(
+            recovery_identity(&key, "notes/draft.md", CLAIM, "same draft", 0),
+            recovery_identity(&key, "notes/draft.md", CLAIM, "same draft", 0),
+        );
+        assert_eq!(
+            recovered_path_candidate("notes/draft.md", CLAIM, &projection, 1).unwrap(),
+            recovered_path_candidate("notes/draft.md", CLAIM, &projection, 1).unwrap(),
         );
     }
 }

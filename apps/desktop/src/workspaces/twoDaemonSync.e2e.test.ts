@@ -156,6 +156,7 @@ async function pullAndExpect(
   expect(pull.applied).toBeGreaterThan(0);
   if (contentKind !== undefined) {
     expect(pull.fastForwardedPaths).toContainEqual({
+      versionId: "main",
       path,
       operation: "write",
       contentKind,
