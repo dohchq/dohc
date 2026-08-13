@@ -6535,6 +6535,167 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
     );
 }
 
+#[test]
+fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let object_id = "retained-scene";
+    let path = "drawings/retained.excalidraw";
+    let imported = dohc_engine_collab::import_portable_scene(
+        &json!({
+            "type": "excalidraw",
+            "version": 2,
+            "source": "https://excalidraw.com",
+            "elements": [],
+            "appState": {},
+            "files": {}
+        })
+        .to_string(),
+    )
+    .expect("import scene");
+    let base_sha = engine
+        .put_binary_blob(&imported.initial_update)
+        .expect("store scene base");
+    let base = envelope(
+        "scene-base-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": path,
+            "contentKind": "scene",
+            "updateBlobSha256": base_sha,
+            "isBaseState": true
+        }),
+    );
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    let (scene_sha, updated_at_ms, latest_moment_id): (String, i64, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT blob_sha256,updated_at_ms,latest_moment_id \
+                 FROM snapshots WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [object_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("scene head");
+
+    let delete_payload = |moment_id: &str| {
+        json!({
+            "momentId": moment_id,
+            "versionId": "main",
+            "objectId": object_id,
+            "objectCreatedAtMs": 2_000,
+            "path": path,
+            "recordedAtMs": 3_100,
+            "operation": "delete",
+            "payloadBeforeBlobSha256": scene_sha,
+            "payloadBeforePath": path,
+            "payloadBeforeContentKind": "text",
+            "payloadAfterBlobSha256": scene_sha,
+            "payloadAfterPath": path,
+            "payloadAfterContentKind": "text",
+            "metadata": {"origin": "sync"},
+            "beforePresent": "present",
+            "beforeObjectId": object_id,
+            "beforeVersionId": "main",
+            "beforePath": path,
+            "beforeBlobSha256": scene_sha,
+            "beforeContentKind": "text",
+            "beforeUpdatedAtMs": updated_at_ms,
+            "beforeLatestMomentId": latest_moment_id,
+            "beforeMetadata": {"origin": "sync"}
+        })
+    };
+    let first_delete = envelope(
+        "first-scene-delete-peer",
+        0,
+        "moment.append",
+        delete_payload("first-scene-delete"),
+    );
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &first_delete, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    let key = dohc_engine_collab::DocKey::new("ws", "main", object_id).expect("scene key");
+    assert!(
+        dohc_engine_collab::read_marker(&engine, &key)
+            .expect("read retained marker")
+            .is_some(),
+        "scene rollback and asset authority require the deleted lineage"
+    );
+
+    let peer_delete = envelope(
+        "scene-delete-peer",
+        0,
+        "moment.append",
+        delete_payload("peer-scene-delete"),
+    );
+    let later = envelope("scene-delete-peer", 1, "workspace.init", json!({}));
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(Vec::new()),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![peer_delete, later],
+            next_cursor: 2,
+            has_more: false,
+        })),
+    });
+
+    let first = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 3_200)
+        .expect("retained scene delete must not wedge the relay");
+    let first_cursor = match first {
+        SyncPassOutcome::Complete {
+            applied: 2,
+            skipped: 0,
+            pending_cursor: Some(cursor),
+            ..
+        } => cursor,
+        other => panic!("unexpected first pull: {other:?}"),
+    };
+    assert_eq!(first_cursor.cursor, 2);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "scene-delete-peer").expect("peer ack"),
+        1,
+        "the operation after the peer delete must apply"
+    );
+
+    let replay = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 3_300)
+        .expect("cursor-crash replay must dedupe");
+    let replay_cursor = match replay {
+        SyncPassOutcome::Complete {
+            applied: 0,
+            skipped: 2,
+            pending_cursor: Some(cursor),
+            ..
+        } => cursor,
+        other => panic!("unexpected replay pull: {other:?}"),
+    };
+    assert_eq!(replay_cursor.cursor, 2);
+    client
+        .commit_pull_cursor(&mut engine, "ws", &replay_cursor, &NoFaults, 3_400)
+        .expect("commit replay cursor");
+    assert_eq!(
+        read_relay_cursor(&engine, "ws")
+            .expect("read relay cursor")
+            .map(|cursor| cursor.cursor),
+        Some(2)
+    );
+    assert!(
+        dohc_engine_collab::read_marker(&engine, &key)
+            .expect("read retained marker after peer delete")
+            .is_some(),
+        "peer-delete progress must not discard scene rollback state"
+    );
+}
+
 #[derive(Debug, Clone, Copy)]
 enum RelayFaultKind {
     Duplicate,

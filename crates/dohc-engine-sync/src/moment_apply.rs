@@ -473,7 +473,7 @@ fn apply_moment_append(
         .map_err(|_| SyncError::InvalidInput {
             reason: "moment.append Y.Doc coordinates are invalid",
         })?;
-        if crate::ydoc_apply::ydoc_lineage_has_durable_state_in_tx(tx, &key)? {
+        if crate::ydoc_apply::ydoc_lineage_blocks_absent_delete_in_tx(tx, &key)? {
             return Err(SyncError::RetryableState {
                 reason: "ydoc-lineage-unsettled",
             });

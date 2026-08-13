@@ -570,12 +570,13 @@ pub(crate) fn retire_complete_ydoc_lineage_in_tx(
     Ok(())
 }
 
-pub(crate) fn ydoc_lineage_has_durable_state_in_tx(
+pub(crate) fn ydoc_lineage_blocks_absent_delete_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
 ) -> Result<bool, SyncError> {
-    tx.query_row(
-        "SELECT EXISTS(
+    let has_durable_state: bool = tx
+        .query_row(
+            "SELECT EXISTS(
              SELECT 1 FROM ydoc_updates
               WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
              UNION ALL
@@ -590,10 +591,48 @@ pub(crate) fn ydoc_lineage_has_durable_state_in_tx(
                 AND (head_update_seq > 0 OR head_snapshot_seq > 0
                      OR lineage_claim_status <> 'unclaimed')
          )",
-        params![key.workspace_id, key.version_id, key.object_id],
-        |row| row.get(0),
-    )
-    .map_err(SyncError::corrupt)
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if !has_durable_state {
+        return Ok(false);
+    }
+
+    // A deleted scene keeps its complete lineage for rollback and asset
+    // authority. An authority tied to a non-record-only delete is durable
+    // proof of retained deleted state, not an unmaterialized local draft.
+    let retained_scene: bool = tx
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM ydoc_docs d
+                 JOIN scene_asset_delete_authorities a
+                   ON a.workspace_id=d.workspace_id
+                  AND a.version_id=d.version_id
+                  AND a.drawing_object_id=d.object_id
+                 JOIN moments m
+                   ON m.workspace_id=a.workspace_id
+                  AND m.version_id=a.version_id
+                  AND m.object_id=a.drawing_object_id
+                  AND m.moment_id=a.drawing_delete_moment_id
+                WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3
+                  AND d.content_kind='scene'
+                  AND m.operation='delete'
+                  AND COALESCE(m.sync_record_only,0)=0
+                  AND NOT EXISTS(
+                      SELECT 1 FROM moments later
+                       WHERE later.workspace_id=m.workspace_id
+                         AND later.version_id=m.version_id
+                         AND later.object_id=m.object_id
+                         AND later.moment_order > m.moment_order
+                         AND COALESCE(later.sync_record_only,0)=0
+                  )
+             )",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    Ok(!retained_scene)
 }
 
 enum YdocLineageCompleteness {
