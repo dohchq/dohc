@@ -126,12 +126,18 @@ export function reclaimStaleSlots({ root, slots, staleMs }) {
   try {
     mkdirSync(sweepLock);
   } catch {
+    // A live sweeper's lock defers to it. A dead sweeper's is taken over by
+    // whichever waiter wins the RENAME — remove-then-create would let two
+    // waiters both pass the staleness check and sweep together, the same
+    // race the lock exists to close.
     try {
       if (Date.now() - statSync(sweepLock).mtimeMs < 5 * 60_000) return 0;
-      rmSync(sweepLock, { recursive: true, force: true });
+      const tomb = `${sweepLock}.tomb-${randomBytes(4).toString("hex")}`;
+      renameSync(sweepLock, tomb);
+      rmSync(tomb, { recursive: true, force: true });
       mkdirSync(sweepLock);
     } catch {
-      return 0; // Another sweeper is live (or just beat us); its sweep counts.
+      return 0; // Another waiter won the takeover; its sweep counts.
     }
   }
   try {
