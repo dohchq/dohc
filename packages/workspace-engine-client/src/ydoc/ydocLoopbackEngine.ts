@@ -531,6 +531,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       contentKind,
       initialUpdateBase64: encodeBase64(Y.encodeStateAsUpdate(doc)),
       lineage: lineage ? "existing" : "absent",
+      lineageClaimId: null,
       head: file ? file.head : "absent",
       ...(seedMarkdown !== undefined ? { seedMarkdown } : {}),
     };
@@ -558,7 +559,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     this.journalSessionState(session);
     this.recordedUpdates.push(update);
     session.updateSeq += 1;
-    return { seq: session.updateSeq };
+    return { seq: session.updateSeq, lineageClaimId: null };
   }
 
   private settleSession(session: LoopbackSession): {
@@ -742,6 +743,8 @@ export class YdocLoopbackEngine implements EngineTransport {
     // stale.
     return {
       initialUpdateBase64: encodeBase64(Y.encodeStateAsUpdate(session.doc)),
+      lineageClaimId: null,
+      recoveredPaths: [],
     };
   }
 

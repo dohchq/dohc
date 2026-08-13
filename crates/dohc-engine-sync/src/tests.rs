@@ -7,10 +7,11 @@ use dohc_engine_domain::chats::{
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind,
-    ChatChannelKind, ChatReactionState, CreateFileThread, FollowState, FollowTargetKind,
-    GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, MAX_SECRET_FILE_BYTES, MAX_TEXT_BYTES,
-    ResolveDecision, SECRET_IV_BYTES, SECRET_TAG_BYTES, SaveBookmark, SendMessage, SetFollow,
-    SetReaction, StartChannelThread, VersionedTextStore, attachment_id_for, channel_slug_for_name,
+    ChatChannelKind, ChatReactionState, CreateFileThread, DeleteTextFile, FollowState,
+    FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, MAX_SECRET_FILE_BYTES,
+    MAX_TEXT_BYTES, RenameTextFile, ResolveDecision, SECRET_IV_BYTES, SECRET_TAG_BYTES,
+    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread, VersionedTextStore,
+    attachment_id_for, channel_slug_for_name,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -48,6 +49,7 @@ fn envelope(origin: &str, seq: i64, kind: &str, payload: serde_json::Value) -> R
         op_kind: kind.to_owned(),
         payload,
         recorded_at_ms: 2_000,
+        relay_seq: Some(seq),
     }
 }
 
@@ -354,6 +356,7 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
                             )
                         })?,
                         recorded_at_ms: row.get(4)?,
+                        relay_seq: None,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()
@@ -670,6 +673,7 @@ fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
             "path": "notes/live.md",
             "contentKind": "plaintext",
             "updateBlobSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "lineageClaimId": "1111111111111111111111111111111111111111111111111111111111111111",
             "isBaseState": false
         }),
     );
@@ -694,6 +698,7 @@ fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
             "path": "notes/live.md",
             "contentKind": "plaintext",
             "updateBlobSha256": blob_sha,
+            "lineageClaimId": "1111111111111111111111111111111111111111111111111111111111111111",
             "isBaseState": false
         }),
     );
@@ -988,6 +993,57 @@ fn join_identity_adoption_refuses_any_existing_replication_state() {
                 [],
             )
             .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO versioned_workspaces (workspace_id,main_version_id) \
+                 VALUES ('ws-ydoc-candidate','main')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+                 VALUES ('ws-ydoc-candidate','object-ydoc-candidate',1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO versioned_workspaces (workspace_id,main_version_id) \
+                 VALUES ('ws-ydoc-recovery','main')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO binary_blobs (sha256,byte_length,bytes) \
+                 VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1,X'00')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_base_relay_candidates \
+                 (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq) \
+                 VALUES ('ws-ydoc-candidate','main','object-ydoc-candidate', \
+                         'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+                         'origin-old',0)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_recovery_decisions ( \
+                     workspace_id,origin_id,origin_seq,version_id,object_id,original_path, \
+                     incoming_content_kind,incoming_update_blob_sha256, \
+                     incoming_lineage_claim_id,incoming_is_base_state,losing_claim_id, \
+                     recovered_path,recovery_collision_ordinal,recovery_object_id, \
+                     recovery_moment_id,recorded_at_ms \
+                 ) VALUES ( \
+                     'ws-ydoc-recovery','origin-old',0,'main','object-ydoc-recovery','doc.md', \
+                     'plaintext', \
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1, \
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+                     'doc.recovered.md','0','recovery-object','recovery-moment',1 \
+                 )",
+                [],
+            )
+            .map_err(SyncError::persist)?;
             Ok::<_, SyncError>(())
         })
         .expect("seed non-pristine state");
@@ -1004,6 +1060,8 @@ fn join_identity_adoption_refuses_any_existing_replication_state() {
         "ws-chat-pending",
         "ws-ydoc-pending",
         "ws-conflict-pending",
+        "ws-ydoc-candidate",
+        "ws-ydoc-recovery",
     ] {
         assert!(matches!(
             adopt_join_identity(
@@ -1181,7 +1239,8 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
             "objectId": "object-over-cap-projection",
             "path": "notes/over-cap-projection.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha,
             "isBaseState": true
         }),
     );
@@ -2906,6 +2965,7 @@ fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal(
                             )
                         })?,
                         recorded_at_ms: row.get(3)?,
+                        relay_seq: None,
                     })
                 },
             )
@@ -3693,6 +3753,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                             )
                         })?,
                         recorded_at_ms: row.get(4)?,
+                        relay_seq: None,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()
@@ -5530,11 +5591,20 @@ impl RelayTransport for FakeRelay {
         })
     }
     fn pull(&self, _req: PullRequest) -> Result<PullResponse, RelayError> {
-        self.pull
+        let mut page = self
+            .pull
             .lock()
             .expect("pull lock")
             .clone()
-            .ok_or(RelayError::InvalidResponse)
+            .ok_or(RelayError::InvalidResponse)?;
+        assign_fixture_relay_sequences(&mut page);
+        Ok(page)
+    }
+    fn lookup_log_coordinate(
+        &self,
+        _req: LogCoordinateRequest,
+    ) -> Result<LogCoordinateResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
     }
     fn probe(&self, _req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
         Ok(ProbeResponse { has_content: false })
@@ -5601,6 +5671,12 @@ impl RelayTransport for KeyConflictRelay {
         Err(RelayError::InvalidResponse)
     }
     fn pull(&self, _req: PullRequest) -> Result<PullResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn lookup_log_coordinate(
+        &self,
+        _req: LogCoordinateRequest,
+    ) -> Result<LogCoordinateResponse, RelayError> {
         Err(RelayError::InvalidResponse)
     }
     fn probe(&self, _req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
@@ -5712,22 +5788,72 @@ fn fresh_coordinate_does_not_canonicalize_payload_for_a_comparison_that_cannot_e
 struct PagedRelay {
     pages: BTreeMap<i64, PullResponse>,
     blobs: BTreeMap<String, Vec<u8>>,
+    coordinates: Mutex<BTreeMap<(String, i64), LogCoordinateResponse>>,
     pulls: Mutex<Vec<(i64, usize)>>,
 }
 
 impl PagedRelay {
     fn new(pages: impl IntoIterator<Item = (i64, PullResponse)>) -> Self {
+        let pages = pages
+            .into_iter()
+            .map(|(cursor, mut page)| {
+                assign_fixture_relay_sequences(&mut page);
+                (cursor, page)
+            })
+            .collect();
         Self {
-            pages: pages.into_iter().collect(),
+            pages,
             blobs: BTreeMap::new(),
+            coordinates: Mutex::new(BTreeMap::new()),
             pulls: Mutex::new(Vec::new()),
         }
+    }
+
+    fn with_coordinate(
+        mut self,
+        origin_id: &str,
+        origin_seq: i64,
+        response: LogCoordinateResponse,
+    ) -> Self {
+        self.coordinates
+            .get_mut()
+            .expect("coordinate responses")
+            .insert((origin_id.to_owned(), origin_seq), response);
+        self
+    }
+}
+
+fn assign_fixture_relay_sequences(page: &mut PullResponse) {
+    let Ok(count) = i64::try_from(page.ops.len()) else {
+        return;
+    };
+    let first = page.next_cursor.saturating_sub(count).saturating_add(1);
+    for (index, op) in page.ops.iter_mut().enumerate() {
+        op.relay_seq = i64::try_from(index)
+            .ok()
+            .and_then(|offset| first.checked_add(offset));
     }
 }
 
 impl RelayTransport for PagedRelay {
-    fn push(&self, _req: PushRequest) -> Result<PushResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
+    fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
+        let accepted = req.ops.len();
+        let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
+        let mut coordinates = self.coordinates.lock().expect("coordinate responses");
+        for op in req.ops {
+            let mut pulled = op;
+            pulled.relay_seq = Some(100 + pulled.origin_seq);
+            coordinates.insert(
+                (pulled.origin_id.clone(), pulled.origin_seq),
+                LogCoordinateResponse::Present(pulled),
+            );
+        }
+        Ok(PushResponse {
+            accepted,
+            inserted: accepted,
+            skipped: 0,
+            current_max_origin_seq,
+        })
     }
 
     fn pull(&self, req: PullRequest) -> Result<PullResponse, RelayError> {
@@ -5737,6 +5863,18 @@ impl RelayTransport for PagedRelay {
             .push((req.cursor, req.limit));
         self.pages
             .get(&req.cursor)
+            .cloned()
+            .ok_or(RelayError::InvalidResponse)
+    }
+
+    fn lookup_log_coordinate(
+        &self,
+        req: LogCoordinateRequest,
+    ) -> Result<LogCoordinateResponse, RelayError> {
+        self.coordinates
+            .lock()
+            .expect("coordinate responses")
+            .get(&(req.origin_id, req.origin_seq))
             .cloned()
             .ok_or(RelayError::InvalidResponse)
     }
@@ -5863,6 +6001,13 @@ impl RelayTransport for PagedShareRelay {
         Err(RelayError::InvalidResponse)
     }
 
+    fn lookup_log_coordinate(
+        &self,
+        _req: LogCoordinateRequest,
+    ) -> Result<LogCoordinateResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+
     fn probe(&self, _req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
         Err(RelayError::InvalidResponse)
     }
@@ -5979,6 +6124,1231 @@ fn seed_identity(engine: &mut EngineStore) {
     )
     .expect("identity");
     assert_eq!(outcome, TxnOutcome::Committed(0));
+}
+
+#[test]
+fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
+    for (label, response, expected) in [
+        (
+            "below-floor",
+            LogCoordinateResponse::PresentBelowEpochFloor { relay_seq: 7 },
+            (Some(7), 0_i64),
+        ),
+        ("absent", LogCoordinateResponse::Absent, (None, 1_i64)),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        seed_identity(&mut engine);
+        VersionedTextStore::new(&mut engine)
+            .ensure_main_version("ws", "main", 1_000, &NoFaults)
+            .expect("main version");
+        seed_text_head(
+            &mut engine,
+            &format!("object-{label}"),
+            &format!("notes/{label}.md"),
+            "legacy base",
+        );
+        let key = dohc_engine_collab::DocKey::new("ws", "main", format!("object-{label}"))
+            .expect("doc key");
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.plaintext_insert(0, "legacy base");
+        let base = doc.encode_full_state();
+        let claim_id = match dohc_engine_collab::claim_base(
+            &mut engine,
+            &key,
+            dohc_engine_collab::ContentKind::Plaintext,
+            &base,
+            &NoFaults,
+            1_100,
+        )
+        .expect("claim legacy base")
+        {
+            TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed {
+                base_snapshot_sha,
+            }) => base_snapshot_sha,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        let payload = json!({
+            "versionId": "main",
+            "objectId": key.object_id,
+            "path": format!("notes/{label}.md"),
+            "contentKind": "plaintext",
+            "updateBlobSha256": &claim_id,
+            "lineageClaimId": &claim_id,
+            "isBaseState": true,
+        });
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO replication_log (
+                         workspace_id,origin_id,origin_seq,op_kind,payload_json,
+                         recorded_at_ms,imported,apply_disposition
+                     ) VALUES ('ws','legacy-peer',0,'ydoc.update',?1,1100,1,'applied')",
+                    [payload.to_string()],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "INSERT INTO ydoc_base_relay_candidates (
+                         workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq
+                     ) VALUES ('ws','main',?1,?2,'legacy-peer',0)",
+                    params![key.object_id, claim_id],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("seed repair candidate");
+        let relay = PagedRelay::new([(
+            0,
+            PullResponse {
+                ops: Vec::new(),
+                next_cursor: 0,
+                has_more: false,
+            },
+        )])
+        .with_coordinate("legacy-peer", 0, response);
+        RelaySyncClient::new(relay)
+            .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_200)
+            .expect("repair legacy coordinate");
+        let repaired: (Option<i64>, i64, i64) = engine
+            .read_with(|conn| {
+                let marker = conn.query_row(
+                    "SELECT base_relay_seq,base_relay_confirmed_absent
+                       FROM ydoc_docs
+                      WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                    [&key.object_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let candidates = conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_base_relay_candidates
+                      WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                    [&key.object_id],
+                    |row| row.get(0),
+                )?;
+                Ok::<_, rusqlite::Error>((marker.0, marker.1, candidates))
+            })
+            .expect("read repaired marker");
+        assert_eq!(repaired, (expected.0, expected.1, 0));
+    }
+}
+
+#[test]
+fn invalid_pull_page_leaves_legacy_base_repair_and_pull_state_unchanged() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    seed_text_head(
+        &mut engine,
+        "object-invalid-page",
+        "notes/invalid-page.md",
+        "legacy base",
+    );
+    let key =
+        dohc_engine_collab::DocKey::new("ws", "main", "object-invalid-page").expect("doc key");
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.plaintext_insert(0, "legacy base");
+    let base = doc.encode_full_state();
+    let claim_id = match dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        &base,
+        &NoFaults,
+        1_100,
+    )
+    .expect("claim legacy base")
+    {
+        TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed { base_snapshot_sha }) => {
+            base_snapshot_sha
+        }
+        other => panic!("unexpected claim outcome: {other:?}"),
+    };
+    let payload = json!({
+        "versionId": "main",
+        "objectId": key.object_id,
+        "path": "notes/invalid-page.md",
+        "contentKind": "plaintext",
+        "updateBlobSha256": &claim_id,
+        "lineageClaimId": &claim_id,
+        "isBaseState": true,
+    });
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_log (
+                     workspace_id,origin_id,origin_seq,op_kind,payload_json,
+                     recorded_at_ms,imported,apply_disposition
+                 ) VALUES ('ws','legacy-peer',0,'ydoc.update',?1,1100,1,'applied')",
+                [payload.to_string()],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_base_relay_candidates (
+                     workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq
+                 ) VALUES ('ws','main',?1,?2,'legacy-peer',0)",
+                params![key.object_id, claim_id],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_deferred_updates (
+                     workspace_id,version_id,object_id,origin_id,origin_seq,
+                     recorded_at_ms,lineage_claim_id,relay_seq
+                 ) VALUES ('ws','main',?1,'deferred-peer',0,1150,?2,9)",
+                params![key.object_id, claim_id],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed pending repair state");
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![envelope(
+                "page-peer",
+                0,
+                "chat.reaction.set",
+                reaction_payload("added", "x", 20, "page-author"),
+            )],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )])
+    .with_coordinate(
+        "legacy-peer",
+        0,
+        LogCoordinateResponse::PresentBelowEpochFloor { relay_seq: 7 },
+    );
+    relay.pages.get_mut(&0).expect("page").ops[0].relay_seq = Some(2);
+
+    assert_eq!(
+        RelaySyncClient::new(relay).pull_chat_workspace(
+            &mut engine,
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_200,
+        ),
+        Err(RelayError::InvalidResponse)
+    );
+    let fingerprint = engine
+        .read_with(|conn| {
+            let marker = conn.query_row(
+                "SELECT base_relay_seq,base_relay_confirmed_absent
+                   FROM ydoc_docs
+                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [&key.object_id],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
+            )?;
+            let candidates = conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_base_relay_candidates
+                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [&key.object_id],
+                |row| row.get::<_, i64>(0),
+            )?;
+            let deferred = conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_deferred_updates
+                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [&key.object_id],
+                |row| row.get::<_, i64>(0),
+            )?;
+            let cursors = conn.query_row(
+                "SELECT COUNT(*) FROM sync_relay_cursors WHERE workspace_id='ws'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok::<_, rusqlite::Error>((marker.0, marker.1, candidates, deferred, cursors))
+        })
+        .expect("state fingerprint");
+    assert_eq!(
+        fingerprint,
+        (None, 0, 1, 1, 0),
+        "a malformed page must fail before repair, deferred apply, or cursor mutation"
+    );
+}
+
+#[test]
+fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    seed_text_head(
+        &mut engine,
+        "object-local-pending",
+        "notes/local-pending.md",
+        "local base",
+    );
+    let key =
+        dohc_engine_collab::DocKey::new("ws", "main", "object-local-pending").expect("doc key");
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.plaintext_insert(0, "local base");
+    let base = doc.encode_full_state();
+    let claim_id = match dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        &base,
+        &NoFaults,
+        1_100,
+    )
+    .expect("claim local base")
+    {
+        TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed { base_snapshot_sha }) => {
+            base_snapshot_sha
+        }
+        other => panic!("unexpected claim outcome: {other:?}"),
+    };
+    let payload = json!({
+        "versionId": "main",
+        "objectId": key.object_id,
+        "path": "notes/local-pending.md",
+        "contentKind": "plaintext",
+        "updateBlobSha256": &claim_id,
+        "lineageClaimId": &claim_id,
+        "isBaseState": true,
+    });
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_log (
+                     workspace_id,origin_id,origin_seq,op_kind,payload_json,
+                     recorded_at_ms,imported,apply_disposition
+                 ) VALUES ('ws','local',1,'ydoc.update',?1,1100,0,'applied')",
+                [payload.to_string()],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_base_relay_candidates (
+                     workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq
+                 ) VALUES ('ws','main',?1,?2,'local',1)",
+                params![key.object_id, claim_id],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed local pending coordinate");
+    let relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: Vec::new(),
+            next_cursor: 0,
+            has_more: false,
+        },
+    )])
+    .with_coordinate("local", 1, LogCoordinateResponse::Absent);
+    let client = RelaySyncClient::new(relay);
+
+    client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_200)
+        .expect("pull before push");
+    let pending = engine
+        .read_with(|conn| {
+            let marker = conn.query_row(
+                "SELECT base_relay_seq,base_relay_confirmed_absent
+                   FROM ydoc_docs
+                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [&key.object_id],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
+            )?;
+            let candidates = conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_base_relay_candidates
+                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [&key.object_id],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok::<_, rusqlite::Error>((marker.0, marker.1, candidates))
+        })
+        .expect("pending marker");
+    assert_eq!(pending, (None, 0, 1));
+
+    client
+        .push_workspace(&mut engine, "ws", &NoFaults, 1_300)
+        .expect("push local coordinate");
+    client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_400)
+        .expect("repair after push");
+    let repaired = engine
+        .read_with(|conn| {
+            let marker = conn.query_row(
+                "SELECT base_relay_seq,base_relay_confirmed_absent
+                   FROM ydoc_docs
+                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [&key.object_id],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
+            )?;
+            let candidates = conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_base_relay_candidates
+                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [&key.object_id],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok::<_, rusqlite::Error>((marker.0, marker.1, candidates))
+        })
+        .expect("repaired marker");
+    assert_eq!(repaired, (Some(101), 0, 0));
+}
+
+#[test]
+fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_cursors
+                 (workspace_id,cursor,replication_epoch,stream_identity)
+                 VALUES ('ws','0','epoch-1','stream-1')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("relay contact");
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    seed_text_head(
+        &mut engine,
+        "object-arbitrated",
+        "notes/arbitrated.md",
+        "losing draft",
+    );
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-arbitrated").expect("doc key");
+    let loser = dohc_engine_collab::Ydoc::wire();
+    loser.plaintext_insert(0, "losing draft");
+    let loser_bytes = loser.encode_full_state();
+    let loser_claim = dohc_engine_storage::hex_sha256(&loser_bytes);
+    let loser_coordinate =
+        dohc_engine_collab::BaseRelayCoordinate::new("loser", 0, 20).expect("coordinate");
+    assert!(matches!(
+        dohc_engine_collab::claim_base_at_relay(
+            &mut engine,
+            &key,
+            dohc_engine_collab::ContentKind::Plaintext,
+            &loser_bytes,
+            &loser_coordinate,
+            &NoFaults,
+            1_100,
+        ),
+        Ok(TxnOutcome::Committed(
+            dohc_engine_collab::ClaimOutcome::Claimed { .. }
+        ))
+    ));
+    engine
+        .write_with(&NoFaults, |tx| {
+            crate::ydoc_apply::project_and_write_in_tx(
+                tx,
+                &key,
+                "notes/arbitrated.md",
+                &loser,
+                dohc_engine_collab::ContentKind::Plaintext,
+                "loser",
+                0,
+                1_100,
+                None,
+            )
+        })
+        .expect("settle the losing base projection");
+    let loser_delta = loser.plaintext_insert(12, " plus edit");
+    assert!(matches!(
+        dohc_engine_collab::apply_remote_update(
+            &mut engine,
+            &key,
+            &dohc_engine_collab::RemoteUpdate {
+                origin_id: "loser".to_owned(),
+                origin_seq: 1,
+                bytes: loser_delta,
+            },
+            &NoFaults,
+            1_150,
+        ),
+        Ok(TxnOutcome::Committed(
+            dohc_engine_collab::ReplicationApplyOutcome::Applied { .. }
+        ))
+    ));
+    let occupied_first_recovery = format!("notes/arbitrated (recovered {}).md", &loser_claim[..8]);
+    seed_text_head(
+        &mut engine,
+        "unrelated-recovery-occupant",
+        &occupied_first_recovery,
+        "unrelated occupant",
+    );
+
+    let winner = dohc_engine_collab::Ydoc::wire();
+    winner.plaintext_insert(0, "relay winner");
+    let winner_bytes = winner.encode_full_state();
+    let winner_claim = engine.put_binary_blob(&winner_bytes).expect("winner blob");
+    let mut incoming = envelope(
+        "winner",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-arbitrated",
+            "path": "notes/arbitrated.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": winner_claim,
+            "lineageClaimId": winner_claim,
+            "isBaseState": true
+        }),
+    );
+    incoming.relay_seq = Some(10);
+    let applied = apply_ydoc_envelope(&mut engine, &incoming, &NoFaults, &NoLiveLeases)
+        .expect("winning base applies");
+    let ApplyOutcome::Applied(result) = applied else {
+        panic!("winning base did not apply: {applied:?}");
+    };
+    let replacement = result.lineage_replacement.expect("replacement result");
+    assert_eq!(replacement.winner_lineage_claim_id, winner_claim);
+    assert_eq!(replacement.recovered_paths.len(), 1);
+    assert_eq!(
+        replacement.recovered_paths[0],
+        format!("notes/arbitrated (recovered {} 2).md", &loser_claim[..8])
+    );
+
+    let state: (String, String, String, String, i64, i64, i64, i64, i64, i64) = engine
+        .read_with(|conn| {
+            let original = conn.query_row(
+                "SELECT blob.text FROM snapshots snapshot
+                 JOIN blobs blob ON blob.sha256=snapshot.blob_sha256
+                 WHERE snapshot.workspace_id='ws' AND snapshot.version_id='main'
+                   AND snapshot.path='notes/arbitrated.md'",
+                [],
+                |row| row.get(0),
+            )?;
+            let recovered = conn.query_row(
+                "SELECT blob.text FROM snapshots snapshot
+                 JOIN blobs blob ON blob.sha256=snapshot.blob_sha256
+                 WHERE snapshot.workspace_id='ws' AND snapshot.version_id='main'
+                   AND snapshot.path=?1",
+                [&replacement.recovered_paths[0]],
+                |row| row.get(0),
+            )?;
+            let active_claim = conn.query_row(
+                "SELECT lineage_claim_id FROM ydoc_docs
+                 WHERE workspace_id='ws' AND version_id='main'
+                   AND object_id='object-arbitrated'",
+                [],
+                |row| row.get(0),
+            )?;
+            let occupant = conn.query_row(
+                "SELECT blob.text FROM snapshots snapshot
+                 JOIN blobs blob ON blob.sha256=snapshot.blob_sha256
+                 WHERE snapshot.workspace_id='ws' AND snapshot.version_id='main'
+                   AND snapshot.path=?1",
+                [&occupied_first_recovery],
+                |row| row.get(0),
+            )?;
+            let decisions = conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_recovery_decisions WHERE workspace_id='ws'",
+                [],
+                |row| row.get(0),
+            )?;
+            let recovery_moments = conn.query_row(
+                "SELECT COUNT(*) FROM moments WHERE workspace_id='ws'
+                   AND metadata_correlation_id=?1",
+                [format!("ydoc-recovery:v1:{loser_claim}")],
+                |row| row.get(0),
+            )?;
+            let conflicts = conn.query_row(
+                "SELECT COUNT(*) FROM conflicts WHERE workspace_id='ws'",
+                [],
+                |row| row.get(0),
+            )?;
+            let outbound_moments = conn.query_row(
+                "SELECT COUNT(*) FROM replication_log
+                 WHERE workspace_id='ws' AND imported=0 AND op_kind='moment.append'",
+                [],
+                |row| row.get(0),
+            )?;
+            let recovery_materializations = conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs
+                 WHERE target_path=?1 AND operation='write'",
+                [&replacement.recovered_paths[0]],
+                |row| row.get(0),
+            )?;
+            let losing_updates = conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_updates
+                 WHERE workspace_id='ws' AND version_id='main'
+                   AND object_id='object-arbitrated' AND actor_origin_id='loser'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((
+                original,
+                recovered,
+                active_claim,
+                occupant,
+                decisions,
+                recovery_moments,
+                conflicts,
+                outbound_moments,
+                recovery_materializations,
+                losing_updates,
+            ))
+        })
+        .expect("arbitrated state");
+    assert_eq!(state.0, "relay winner");
+    assert_eq!(state.1, "losing draft plus edit");
+    assert_eq!(state.2, winner_claim);
+    assert_eq!(state.3, "unrelated occupant");
+    assert_eq!(
+        (state.4, state.5, state.6, state.7, state.8, state.9),
+        (1, 1, 0, 1, 1, 0),
+        "the losing delta is preserved in the sibling and purged from the winner"
+    );
+
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &incoming, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Skipped)
+    ));
+    let counts: (i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row("SELECT COUNT(*) FROM ydoc_recovery_decisions", [], |row| {
+                    row.get(0)
+                })?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments
+                     WHERE metadata_correlation_id=?1",
+                    [format!("ydoc-recovery:v1:{loser_claim}")],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("retry counts");
+    assert_eq!(counts, (1, 1), "retry must not duplicate recovery state");
+
+    let recovered_path = replacement.recovered_paths[0].clone();
+    let renamed_path = "notes/kept-recovery.md";
+    VersionedTextStore::new(&mut engine)
+        .rename_text_file(
+            &RenameTextFile {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                from_path: recovered_path.clone(),
+                to_path: renamed_path.to_owned(),
+                moment_id: "rename-recovered-sibling".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2_100,
+            },
+            &NoFaults,
+        )
+        .expect("rename recovered sibling");
+    let replay_recovery = |engine: &mut EngineStore| {
+        let replayed = engine
+            .write_with(&NoFaults, |tx| {
+                crate::ydoc_recovery::recover_lineage_in_tx(
+                    tx,
+                    &key,
+                    "notes/arbitrated.md",
+                    crate::ydoc_recovery::RecoveryEnvelopeBinding {
+                        content_kind: "plaintext",
+                        update_blob_sha256: &winner_claim,
+                        lineage_claim_id: &winner_claim,
+                        is_base_state: true,
+                    },
+                    &loser_claim,
+                    "losing draft plus edit",
+                    "winner",
+                    0,
+                    2_000,
+                    None,
+                )
+            })
+            .expect("replay recovery decision");
+        assert!(matches!(replayed, TxnOutcome::Committed(_)));
+    };
+    replay_recovery(&mut engine);
+    let paths_after_rename: (i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots
+                     WHERE workspace_id='ws' AND version_id='main' AND path=?1",
+                    [&recovered_path],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots
+                     WHERE workspace_id='ws' AND version_id='main' AND path=?1",
+                    [renamed_path],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("renamed recovery paths");
+    assert_eq!(
+        paths_after_rename,
+        (0, 1),
+        "replay must not recreate a sibling after the user renames it"
+    );
+
+    VersionedTextStore::new(&mut engine)
+        .delete_text_file(
+            &DeleteTextFile {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                path: renamed_path.to_owned(),
+                moment_id: "delete-recovered-sibling".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2_200,
+            },
+            &NoFaults,
+        )
+        .expect("delete recovered sibling");
+    replay_recovery(&mut engine);
+    let paths_after_delete: (i64, i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots
+                     WHERE workspace_id='ws' AND version_id='main' AND path=?1",
+                    [&recovered_path],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots
+                     WHERE workspace_id='ws' AND version_id='main' AND path=?1",
+                    [renamed_path],
+                    |row| row.get(0),
+                )?,
+                conn.query_row("SELECT COUNT(*) FROM ydoc_recovery_decisions", [], |row| {
+                    row.get(0)
+                })?,
+            ))
+        })
+        .expect("deleted recovery paths");
+    assert_eq!(
+        paths_after_delete,
+        (0, 0, 1),
+        "replay must preserve the decision without recreating a deleted sibling"
+    );
+}
+
+#[test]
+fn lower_relay_base_recovers_the_loser_even_when_the_text_matches() {
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    seed_text_head(
+        &mut engine,
+        "object-matching-lineages",
+        "notes/matching-lineages.md",
+        "same text",
+    );
+    let key =
+        dohc_engine_collab::DocKey::new("ws", "main", "object-matching-lineages").expect("doc key");
+    let loser = dohc_engine_collab::Ydoc::wire();
+    loser.plaintext_insert(0, "same text");
+    let loser_bytes = loser.encode_full_state();
+    let loser_claim = dohc_engine_storage::hex_sha256(&loser_bytes);
+    assert!(matches!(
+        dohc_engine_collab::claim_base_at_relay(
+            &mut engine,
+            &key,
+            dohc_engine_collab::ContentKind::Plaintext,
+            &loser_bytes,
+            &dohc_engine_collab::BaseRelayCoordinate::new("loser", 0, 20)
+                .expect("loser coordinate"),
+            &NoFaults,
+            1_100,
+        ),
+        Ok(TxnOutcome::Committed(
+            dohc_engine_collab::ClaimOutcome::Claimed { .. }
+        ))
+    ));
+
+    let winner = dohc_engine_collab::Ydoc::wire();
+    winner.plaintext_insert(0, "same text");
+    let winner_bytes = winner.encode_full_state();
+    let winner_claim = engine.put_binary_blob(&winner_bytes).expect("winner blob");
+    assert_ne!(
+        winner_claim, loser_claim,
+        "the test needs independent lineages"
+    );
+    let mut incoming = envelope(
+        "winner",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-matching-lineages",
+            "path": "notes/matching-lineages.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": winner_claim,
+            "lineageClaimId": winner_claim,
+            "isBaseState": true
+        }),
+    );
+    incoming.relay_seq = Some(10);
+    let ApplyOutcome::Applied(result) =
+        apply_ydoc_envelope(&mut engine, &incoming, &NoFaults, &NoLiveLeases)
+            .expect("winning base applies")
+    else {
+        panic!("winning base did not apply");
+    };
+    let replacement = result.lineage_replacement.expect("replacement result");
+    assert_eq!(replacement.recovered_paths.len(), 1);
+    let recovered_text: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT blob.text FROM snapshots snapshot
+                 JOIN blobs blob ON blob.sha256=snapshot.blob_sha256
+                 WHERE snapshot.workspace_id='ws' AND snapshot.version_id='main'
+                   AND snapshot.path=?1",
+                [&replacement.recovered_paths[0]],
+                |row| row.get(0),
+            )
+        })
+        .expect("recovered text");
+    assert_eq!(recovered_text, "same text");
+    assert_eq!(
+        crate::ydoc_apply::redelivered_materialization_changes(&engine, &incoming)
+            .expect("redelivered recovery materialization"),
+        [MomentMaterializationChange {
+            path: replacement.recovered_paths[0].clone(),
+            operation: "write",
+            content_kind: "text",
+        }],
+        "a converged primary projection must not hide its recovery sibling's disk write"
+    );
+}
+
+#[test]
+fn captured_disk_occupant_relocates_the_recovery_exactly_once() {
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    seed_identity(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_cursors
+                 (workspace_id,cursor,replication_epoch,stream_identity)
+                 VALUES ('ws','0','epoch-1','stream-1')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("relay contact");
+    seed_text_head(
+        &mut engine,
+        "object-disk-occupant-recovery",
+        "notes/disk-occupant.md",
+        "losing local draft",
+    );
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-disk-occupant-recovery")
+        .expect("doc key");
+    let loser = dohc_engine_collab::Ydoc::wire();
+    loser.plaintext_insert(0, "losing local draft");
+    let loser_bytes = loser.encode_full_state();
+    let loser_claim = dohc_engine_storage::hex_sha256(&loser_bytes);
+    assert!(matches!(
+        dohc_engine_collab::claim_base_at_relay(
+            &mut engine,
+            &key,
+            dohc_engine_collab::ContentKind::Plaintext,
+            &loser_bytes,
+            &dohc_engine_collab::BaseRelayCoordinate::new("loser", 0, 20)
+                .expect("loser coordinate"),
+            &NoFaults,
+            1_100,
+        ),
+        Ok(TxnOutcome::Committed(
+            dohc_engine_collab::ClaimOutcome::Claimed { .. }
+        ))
+    ));
+    let winner = dohc_engine_collab::Ydoc::wire();
+    winner.plaintext_insert(0, "winning remote lineage");
+    let winner_bytes = winner.encode_full_state();
+    let winner_claim = engine.put_binary_blob(&winner_bytes).expect("winner blob");
+    let mut winner_base = envelope(
+        "disk-occupant-winner",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-disk-occupant-recovery",
+            "path": "notes/disk-occupant.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": winner_claim,
+            "lineageClaimId": winner_claim,
+            "isBaseState": true
+        }),
+    );
+    winner_base.relay_seq = Some(10);
+    let applied = apply_ydoc_envelope(&mut engine, &winner_base, &NoFaults, &NoLiveLeases)
+        .expect("winning base");
+    assert!(matches!(applied, ApplyOutcome::Applied(_)));
+    let first_recovery_path = format!("notes/disk-occupant (recovered {}).md", &loser_claim[..8]);
+    let (first_recovery_object, first_recovery_moment): (String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT recovery_object_id,recovery_moment_id
+                   FROM ydoc_recovery_decisions
+                  WHERE workspace_id='ws' AND origin_id='disk-occupant-winner'
+                    AND origin_seq=0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("first recovery decision");
+
+    // Model the serialized disk boundary: the absent-preimage write found an
+    // unexpected file and capture then made those disk bytes authoritative.
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE materialization_jobs SET status='conflict'
+                  WHERE job_id='sync-mat_' || ?1",
+                [&first_recovery_moment],
+            )
+            .map_err(SyncError::persist)?;
+            dohc_engine_domain::capture_ingest_in_tx(
+                tx,
+                &dohc_engine_domain::CaptureIngest {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: first_recovery_path.clone(),
+                    text: "unexpected disk occupant".to_owned(),
+                    metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2_100,
+                    request_id: None,
+                    claim_foreign_head: true,
+                },
+            )
+            .map_err(|error| SyncError::corrupt(std::io::Error::other(error.to_string())))?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("capture unexpected disk occupant");
+
+    let after_commit = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
+    assert!(matches!(
+        repair_conflicted_ydoc_recoveries(&mut engine, "ws", after_commit.as_ref()),
+        Err(SyncError::FaultCrash)
+    ));
+    let repaired = repair_conflicted_ydoc_recoveries(&mut engine, "ws", &NoFaults)
+        .expect("resume the committed relocation");
+    let second_recovery_path =
+        format!("notes/disk-occupant (recovered {} 2).md", &loser_claim[..8]);
+    assert_eq!(repaired.len(), 1);
+    assert_eq!(repaired[0].path, second_recovery_path);
+    let current_recovery_moment: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT recovery_moment_id FROM ydoc_recovery_decisions
+                  WHERE workspace_id='ws' AND origin_id='disk-occupant-winner'
+                    AND origin_seq=0",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("current recovery moment");
+    assert_eq!(
+        repaired[0].materialization_job_id,
+        format!("sync-mat_{current_recovery_moment}")
+    );
+    let state: (String, String, String, String, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256
+                      WHERE s.workspace_id='ws' AND s.version_id='main' AND s.path=?1",
+                    [&first_recovery_path],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256
+                      WHERE s.workspace_id='ws' AND s.version_id='main' AND s.path=?1",
+                    [&second_recovery_path],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT recovered_path FROM ydoc_recovery_decisions
+                      WHERE workspace_id='ws' AND origin_id='disk-occupant-winner'
+                        AND origin_seq=0",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT status FROM materialization_jobs
+                      WHERE job_id='sync-mat_' || (
+                        SELECT recovery_moment_id FROM ydoc_recovery_decisions
+                         WHERE workspace_id='ws' AND origin_id='disk-occupant-winner'
+                           AND origin_seq=0
+                      )",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments
+                      WHERE workspace_id='ws' AND object_id=?1",
+                    [&first_recovery_object],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("relocated recovery state");
+    assert_eq!(
+        state,
+        (
+            "unexpected disk occupant".to_owned(),
+            "losing local draft".to_owned(),
+            second_recovery_path.clone(),
+            "pending".to_owned(),
+            2,
+        )
+    );
+    let replay_changes =
+        crate::ydoc_apply::redelivered_materialization_changes(&engine, &winner_base)
+            .expect("redelivered relocation ledger");
+    assert!(
+        replay_changes
+            .iter()
+            .any(|change| change.path == second_recovery_path)
+    );
+    assert!(
+        replay_changes
+            .iter()
+            .all(|change| change.path != first_recovery_path)
+    );
+}
+
+#[test]
+fn live_drain_stops_before_a_foreign_lineage_without_replacing_the_session() {
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    seed_text_head(
+        &mut engine,
+        "object-live-lineage",
+        "notes/live-lineage.md",
+        "base",
+    );
+    let key =
+        dohc_engine_collab::DocKey::new("ws", "main", "object-live-lineage").expect("doc key");
+    let current = dohc_engine_collab::Ydoc::wire();
+    current.plaintext_insert(0, "base");
+    let current_base = current.encode_full_state();
+    let current_claim = dohc_engine_storage::hex_sha256(&current_base);
+    assert!(matches!(
+        dohc_engine_collab::claim_base_at_relay(
+            &mut engine,
+            &key,
+            dohc_engine_collab::ContentKind::Plaintext,
+            &current_base,
+            &dohc_engine_collab::BaseRelayCoordinate::new("current", 0, 5)
+                .expect("current coordinate"),
+            &NoFaults,
+            1_100,
+        ),
+        Ok(TxnOutcome::Committed(
+            dohc_engine_collab::ClaimOutcome::Claimed { .. }
+        ))
+    ));
+
+    let current_delta = current.plaintext_insert(4, " live");
+    let current_delta_sha = engine
+        .put_binary_blob(&current_delta)
+        .expect("same-lineage delta blob");
+    let mut same_lineage = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-live-lineage",
+            "path": "notes/live-lineage.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": current_delta_sha,
+            "lineageClaimId": current_claim,
+            "isBaseState": false
+        }),
+    );
+    same_lineage.relay_seq = Some(10);
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &same_lineage, &NoFaults, &AlwaysLive),
+        Ok(ApplyOutcome::Applied(YdocApplyResult {
+            deferred: true,
+            ..
+        }))
+    ));
+
+    let foreign = dohc_engine_collab::Ydoc::wire();
+    foreign.plaintext_insert(0, "foreign");
+    let foreign_base = foreign.encode_full_state();
+    let foreign_claim = engine
+        .put_binary_blob(&foreign_base)
+        .expect("foreign base blob");
+    let mut foreign_lineage = envelope(
+        "peer",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-live-lineage",
+            "path": "notes/live-lineage.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": foreign_claim,
+            "lineageClaimId": foreign_claim,
+            "isBaseState": true
+        }),
+    );
+    foreign_lineage.relay_seq = Some(20);
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &foreign_lineage, &NoFaults, &AlwaysLive),
+        Ok(ApplyOutcome::Applied(YdocApplyResult {
+            deferred: true,
+            ..
+        }))
+    ));
+
+    let drained =
+        drain_deferred_ydoc_for_live_session(&mut engine, &key, Some(&current_claim), &NoFaults)
+            .expect("live-session drain");
+    assert_eq!(drained.drained, 1, "the current-lineage delta drains");
+    assert!(drained.lineage_replacements.is_empty());
+    let state: (String, i64, i64, String) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT lineage_claim_id FROM ydoc_docs
+                     WHERE workspace_id='ws' AND version_id='main'
+                       AND object_id='object-live-lineage'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_deferred_updates
+                     WHERE workspace_id='ws' AND version_id='main'
+                       AND object_id='object-live-lineage'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row("SELECT COUNT(*) FROM ydoc_recovery_decisions", [], |row| {
+                    row.get(0)
+                })?,
+                conn.query_row(
+                    "SELECT lineage_claim_id FROM ydoc_deferred_updates
+                     WHERE workspace_id='ws' AND version_id='main'
+                       AND object_id='object-live-lineage'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("live drain state");
+    assert_eq!(state, (current_claim, 1, 0, foreign_claim));
+    let persisted = dohc_engine_collab::load_persisted(&engine, &key)
+        .expect("persisted doc")
+        .expect("current lineage");
+    assert_eq!(
+        persisted
+            .doc
+            .project(dohc_engine_collab::ContentKind::Plaintext)
+            .expect("projection")
+            .markdown,
+        "base live"
+    );
+}
+
+#[test]
+fn a_losing_lineage_delta_is_acked_without_entering_the_winner() {
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    seed_text_head(
+        &mut engine,
+        "object-lineage-delta",
+        "notes/lineage-delta.md",
+        "winner",
+    );
+    let key =
+        dohc_engine_collab::DocKey::new("ws", "main", "object-lineage-delta").expect("doc key");
+    let winner = dohc_engine_collab::Ydoc::wire();
+    winner.plaintext_insert(0, "winner");
+    let winner_base = winner.encode_full_state();
+    let winner_claim = dohc_engine_storage::hex_sha256(&winner_base);
+    assert!(matches!(
+        dohc_engine_collab::claim_base_at_relay(
+            &mut engine,
+            &key,
+            dohc_engine_collab::ContentKind::Plaintext,
+            &winner_base,
+            &dohc_engine_collab::BaseRelayCoordinate::new("winner", 0, 1)
+                .expect("winner coordinate"),
+            &NoFaults,
+            1_100,
+        ),
+        Ok(TxnOutcome::Committed(
+            dohc_engine_collab::ClaimOutcome::Claimed { .. }
+        ))
+    ));
+
+    let loser = dohc_engine_collab::Ydoc::wire();
+    loser.plaintext_insert(0, "loser base");
+    let loser_claim = dohc_engine_storage::hex_sha256(&loser.encode_full_state());
+    let losing_delta = loser.plaintext_insert(10, " must not merge");
+    let losing_delta_sha = engine
+        .put_binary_blob(&losing_delta)
+        .expect("losing delta blob");
+    let mut incoming = envelope(
+        "loser",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-lineage-delta",
+            "path": "notes/lineage-delta.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": losing_delta_sha,
+            "lineageClaimId": loser_claim,
+            "isBaseState": false
+        }),
+    );
+    incoming.relay_seq = Some(2);
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &incoming, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(YdocApplyResult {
+            reason: Some("ydoc-lineage-lost"),
+            ..
+        }))
+    ));
+    let persisted = dohc_engine_collab::load_persisted(&engine, &key)
+        .expect("persisted doc")
+        .expect("winner lineage");
+    assert_eq!(persisted.marker.lineage_claim_id, Some(winner_claim));
+    assert_eq!(
+        persisted
+            .doc
+            .project(dohc_engine_collab::ContentKind::Plaintext)
+            .expect("winner projection")
+            .markdown,
+        "winner"
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "loser").expect("loser ack"),
+        0,
+        "the losing coordinate is durably handled"
+    );
 }
 
 fn journal_test_op(engine: &mut EngineStore, op_kind: &str, payload: &serde_json::Value) -> i64 {
@@ -6236,6 +7606,7 @@ fn recover_local_origin(engine: &mut EngineStore, new_origin_id: &str) {
                 op_kind: "probe.local".to_owned(),
                 payload: json!({}),
                 recorded_at_ms: 1_000,
+                relay_seq: Some(0),
             }],
             next_cursor: 1,
             has_more: false,
@@ -6623,6 +7994,7 @@ fn pull_rejects_op_for_foreign_workspace() {
         op_kind: "chat.channel.create".to_owned(),
         payload: json!({"channelId":"c1","name":"X","slug":"x","kind":"channel","createdAtMs":1}),
         recorded_at_ms: 2_000,
+        relay_seq: Some(0),
     };
     let fake = FakeRelay {
         pushes: Mutex::new(Vec::new()),
@@ -6687,6 +8059,7 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
             "ivBase64": iv, "authTagBase64": tag, "ciphertextSha256": sha, "byteLength": len
         }),
         recorded_at_ms: at,
+        relay_seq: Some(seq),
     };
     // put @10 wins over an empty tip.
     assert!(matches!(
@@ -6705,6 +8078,7 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
         op_kind: "secret.file.delete".to_owned(),
         payload: json!({"versionId":"v1","path":"app/.env","metadata":{"origin":"sync"}}),
         recorded_at_ms: 20,
+        relay_seq: Some(1),
     };
     assert!(matches!(
         apply_secret_envelope(&mut engine, &delete, &NoFaults),
@@ -6864,15 +8238,22 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
         })
         .expect("workspace scaffolding");
     let key = dohc_engine_collab::DocKey::new("ws", "main", "object-1").expect("key");
-    dohc_engine_collab::ensure_marker(
+    let base_bytes = dohc_engine_collab::Ydoc::wire().encode_full_state();
+    let lineage_claim_id = match dohc_engine_collab::claim_base(
         &mut engine,
         &key,
         dohc_engine_collab::ContentKind::Plaintext,
-        dohc_engine_collab::Regime::Replicated,
+        &base_bytes,
         &NoFaults,
         1_500,
     )
-    .expect("replicated marker");
+    .expect("replicated base claim")
+    {
+        TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed { base_snapshot_sha }) => {
+            base_snapshot_sha
+        }
+        other => panic!("unexpected base claim outcome: {other:?}"),
+    };
     let update_bytes = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "parked edit");
     let blob_sha = engine.put_binary_blob(&update_bytes).expect("store blob");
     let op = envelope(
@@ -6885,6 +8266,7 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
             "path": "notes/live.md",
             "contentKind": "plaintext",
             "updateBlobSha256": blob_sha,
+            "lineageClaimId": lineage_claim_id,
             "isBaseState": false
         }),
     );
@@ -6896,6 +8278,7 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
             deferred: true,
             reason: Some("ydoc-session-live"),
             conflicts_opened: 0,
+            lineage_replacement: None,
         })
     );
 
@@ -6974,7 +8357,8 @@ fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
             "objectId": "object-mat",
             "path": "notes/replicated.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha.clone(),
             "isBaseState": true
         }),
     );
@@ -7020,6 +8404,7 @@ fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
             "path": "notes/replicated.md",
             "contentKind": "plaintext",
             "updateBlobSha256": delta_sha,
+            "lineageClaimId": base_sha,
             "isBaseState": false
         }),
     );
@@ -7100,7 +8485,8 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
             "objectId": "object-div",
             "path": "notes/plan.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha.clone(),
             "isBaseState": true
         }),
     );
@@ -7112,6 +8498,7 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
             deferred: false,
             reason: Some("ydoc-base-conflict"),
             conflicts_opened: 1,
+            lineage_replacement: None,
         })
     );
     assert_eq!(
@@ -7194,6 +8581,7 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
             "path": "notes/plan.md",
             "contentKind": "plaintext",
             "updateBlobSha256": delta_sha,
+            "lineageClaimId": base_sha,
             "isBaseState": false
         }),
     );
@@ -7318,26 +8706,27 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
             "ydoc.update",
             json!({
                 "versionId": "main",
-                "objectId": "object-crashed",
-                "path": "notes/crashed.md",
-                "contentKind": "plaintext",
-                "updateBlobSha256": base_sha,
-                "isBaseState": true
+            "objectId": "object-crashed",
+            "path": "notes/crashed.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha,
+            "isBaseState": true
             }),
         ),
         &NoFaults,
         &NoLiveLeases,
     )
     .expect("base applies");
-    assert_eq!(
-        outcome,
-        ApplyOutcome::Applied(YdocApplyResult {
-            deferred: false,
-            reason: Some("ydoc-base-conflict"),
-            conflicts_opened: 1,
-        }),
-        "a head this lineage never produced must open a conflict"
-    );
+    let ApplyOutcome::Applied(result) = outcome else {
+        panic!("base did not apply: {outcome:?}");
+    };
+    assert_eq!(result.reason, Some("ydoc-base-conflict"));
+    assert_eq!(result.conflicts_opened, 1);
+    let replacement = result
+        .lineage_replacement
+        .expect("the local-only lineage is recovered");
+    assert_eq!(replacement.recovered_paths.len(), 1);
 
     let head: String = engine
         .read_with(|conn| {
@@ -7354,6 +8743,18 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
         head, "the user's external edit",
         "the external edit survives for review instead of being overwritten"
     );
+    let recovered: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+                 WHERE s.workspace_id='ws' AND s.version_id='main' AND s.path=?1",
+                [&replacement.recovered_paths[0]],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("recovered local-only draft");
+    assert_eq!(recovered, "crashed draft");
 }
 
 #[test]
@@ -7406,7 +8807,8 @@ fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
             "objectId": "object-same",
             "path": "notes/same.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha,
             "isBaseState": true
         }),
     );
@@ -7418,6 +8820,7 @@ fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
             deferred: false,
             reason: None,
             conflicts_opened: 0,
+            lineage_replacement: None,
         })
     );
     let conflicts: i64 = engine
@@ -7486,7 +8889,8 @@ fn a_coalesced_conflict_still_recounts_on_redelivery() {
             "objectId": "object-recount",
             "path": "notes/recount.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha.clone(),
             "isBaseState": true
         }),
     );
@@ -7504,6 +8908,7 @@ fn a_coalesced_conflict_still_recounts_on_redelivery() {
             "path": "notes/recount.md",
             "contentKind": "plaintext",
             "updateBlobSha256": delta_sha,
+            "lineageClaimId": base_sha,
             "isBaseState": false
         }),
     );
@@ -7688,6 +9093,11 @@ fn recounting_a_malformed_redelivery_returns_zero_instead_of_wedging() {
             .expect("a malformed redelivery must recount as zero, not abort the pull"),
         0
     );
+    assert!(
+        crate::router::redelivered_materialization_changes(&engine, &malformed)
+            .expect("a malformed redelivery cannot have a materialization")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -7741,11 +9151,12 @@ fn a_resolution_over_an_incomplete_lineage_refuses() {
             "ydoc.update",
             json!({
                 "versionId": "main",
-                "objectId": "object-partial",
-                "path": "notes/partial.md",
-                "contentKind": "plaintext",
-                "updateBlobSha256": base_sha,
-                "isBaseState": true
+            "objectId": "object-partial",
+            "path": "notes/partial.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha.clone(),
+            "isBaseState": true
             }),
         ),
         &NoFaults,
@@ -7767,11 +9178,12 @@ fn a_resolution_over_an_incomplete_lineage_refuses() {
             "ydoc.update",
             json!({
                 "versionId": "main",
-                "objectId": "object-partial",
-                "path": "notes/partial.md",
-                "contentKind": "plaintext",
-                "updateBlobSha256": dependent_sha,
-                "isBaseState": false
+            "objectId": "object-partial",
+            "path": "notes/partial.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": dependent_sha,
+            "lineageClaimId": base_sha,
+            "isBaseState": false
             }),
         ),
         &NoFaults,
@@ -8051,7 +9463,8 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
             "objectId": "object-storage-fault",
             "path": "notes/storage-fault.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha.clone(),
             "isBaseState": true
         }),
     );
@@ -8085,6 +9498,7 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
             "path": "notes/storage-fault.md",
             "contentKind": "plaintext",
             "updateBlobSha256": update_sha,
+            "lineageClaimId": base_sha,
             "isBaseState": false
         }),
     );
@@ -8127,6 +9541,7 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
             deferred: false,
             reason: None,
             conflicts_opened: 0,
+            lineage_replacement: None,
         }))
     ));
     assert_eq!(
@@ -8160,6 +9575,7 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
             "path": "notes/out-of-order.md",
             "contentKind": "plaintext",
             "updateBlobSha256": update_sha,
+            "lineageClaimId": base_sha.clone(),
             "isBaseState": false
         }),
     );
@@ -8170,6 +9586,7 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            lineage_replacement: None,
         })
     );
     assert_eq!(
@@ -8195,7 +9612,8 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
             "objectId": "object-out-of-order",
             "path": "notes/out-of-order.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha,
             "isBaseState": true
         }),
     );
@@ -8276,6 +9694,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 "path": path,
                 "contentKind": queued_kind,
                 "updateBlobSha256": queued_sha,
+                "lineageClaimId": base_sha.clone(),
                 "isBaseState": false
             }),
         );
@@ -8285,6 +9704,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 deferred: true,
                 reason: Some("ydoc-lineage-absent"),
                 conflicts_opened: 0,
+                lineage_replacement: None,
             }))
         ));
         let descendant = envelope(
@@ -8297,6 +9717,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 "path": path,
                 "contentKind": base_kind,
                 "updateBlobSha256": descendant_sha,
+                "lineageClaimId": base_sha.clone(),
                 "isBaseState": false
             }),
         );
@@ -8306,6 +9727,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 deferred: true,
                 reason: Some("ydoc-lineage-absent"),
                 conflicts_opened: 0,
+                lineage_replacement: None,
             }))
         ));
 
@@ -8318,7 +9740,8 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 "objectId": object_id,
                 "path": path,
                 "contentKind": base_kind,
-                "updateBlobSha256": base_sha,
+                "updateBlobSha256": base_sha.clone(),
+                "lineageClaimId": base_sha,
                 "isBaseState": true
             }),
         );
@@ -8423,7 +9846,8 @@ fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
             "objectId": "object-relay-path",
             "path": "notes/relay-path.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": sha256,
+            "updateBlobSha256": sha256.clone(),
+            "lineageClaimId": sha256.clone(),
             "isBaseState": true
         }),
     );
@@ -8511,6 +9935,7 @@ fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
             "path": "notes/b.md",
             "contentKind": "plaintext",
             "updateBlobSha256": update_sha,
+            "lineageClaimId": "1111111111111111111111111111111111111111111111111111111111111111",
             "isBaseState": false
         }),
     );
@@ -8568,6 +9993,7 @@ fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            lineage_replacement: None,
         }))
     ));
     let deferred: i64 = engine
@@ -8649,7 +10075,8 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
             "objectId": "device-y-object",
             "path": "notes/a.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha,
             "isBaseState": true
         }),
     );
@@ -8720,6 +10147,7 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
             deferred: false,
             reason: None,
             conflicts_opened: 0,
+            lineage_replacement: None,
         }))
     ));
     assert_eq!(
@@ -8758,6 +10186,7 @@ fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_crea
             "path": "notes/orphan.md",
             "contentKind": "plaintext",
             "updateBlobSha256": update_sha,
+            "lineageClaimId": "1111111111111111111111111111111111111111111111111111111111111111",
             "isBaseState": false
         }),
     );
@@ -8809,6 +10238,7 @@ fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_crea
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            lineage_replacement: None,
         }))
     ));
     assert_eq!(
@@ -8843,6 +10273,7 @@ fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
             "path": "notes/base-timestamp.md",
             "contentKind": "plaintext",
             "updateBlobSha256": update_sha,
+            "lineageClaimId": base_sha.clone(),
             "isBaseState": false
         }),
     );
@@ -8853,6 +10284,7 @@ fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            lineage_replacement: None,
         }))
     ));
     let placeholder_timestamp: i64 = engine
@@ -8876,7 +10308,8 @@ fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
             "objectId": "object-base-timestamp",
             "path": "notes/base-timestamp.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha,
             "isBaseState": true
         }),
     );
@@ -8943,6 +10376,7 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
                 "path": "notes/drain-refusal.md",
                 "contentKind": "plaintext",
                 "updateBlobSha256": sha,
+                "lineageClaimId": base_sha.clone(),
                 "isBaseState": false
             }),
         );
@@ -8952,6 +10386,7 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
                 deferred: true,
                 reason: Some("ydoc-lineage-absent"),
                 conflicts_opened: 0,
+                lineage_replacement: None,
             }))
         ));
     }
@@ -8965,7 +10400,8 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
             "objectId": "object-drain-refusal",
             "path": "notes/drain-refusal.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha,
             "isBaseState": true
         }),
     );
@@ -9066,6 +10502,7 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
             "path": "notes/b.md",
             "contentKind": "plaintext",
             "updateBlobSha256": update_sha,
+            "lineageClaimId": base_sha.clone(),
             "isBaseState": false
         }),
     );
@@ -9075,6 +10512,7 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            lineage_replacement: None,
         }))
     ));
     let base = envelope(
@@ -9086,7 +10524,8 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
             "objectId": "object-prebase-mismatch",
             "path": "notes/a.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha,
             "isBaseState": true
         }),
     );
@@ -9165,6 +10604,7 @@ fn retried_identity_blocked_ydoc_base_does_not_drain_its_prebase_queue() {
             "path": "notes/refused-base.md",
             "contentKind": "plaintext",
             "updateBlobSha256": queued_sha,
+            "lineageClaimId": base_sha.clone(),
             "isBaseState": false
         }),
     );
@@ -9190,7 +10630,8 @@ fn retried_identity_blocked_ydoc_base_does_not_drain_its_prebase_queue() {
             "objectId": "object-refused-base",
             "path": "notes/refused-base.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha,
             "isBaseState": true
         }),
     );
@@ -9269,7 +10710,8 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
             "objectId": "object-causal-refusal",
             "path": "notes/causal-refusal.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha.clone(),
             "isBaseState": true
         }),
     );
@@ -9293,6 +10735,7 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
             "path": "notes/occupied-causal.md",
             "contentKind": "plaintext",
             "updateBlobSha256": refused_sha,
+            "lineageClaimId": base_sha.clone(),
             "isBaseState": false
         }),
     );
@@ -9313,6 +10756,7 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
             "path": "notes/causal-refusal.md",
             "contentKind": "plaintext",
             "updateBlobSha256": descendant_sha,
+            "lineageClaimId": base_sha,
             "isBaseState": false
         }),
     );
@@ -9352,7 +10796,7 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
 }
 
 #[test]
-fn divergent_second_ydoc_base_is_hard_unacked_and_unjournaled() {
+fn later_losing_base_and_delta_are_acked_without_touching_the_winner() {
     let (_scratch, _path, mut engine) = store();
     seed_replication_version(&mut engine, "main", "main");
     let first_doc = dohc_engine_collab::Ydoc::wire();
@@ -9365,8 +10809,8 @@ fn divergent_second_ydoc_base_is_hard_unacked_and_unjournaled() {
     let second_sha = engine
         .put_binary_blob(&second_doc.encode_full_state())
         .expect("second base");
-    let base = |origin: &str, sha: &str| {
-        envelope(
+    let base = |origin: &str, relay_seq: i64, sha: &str| {
+        let mut envelope = envelope(
             origin,
             0,
             "ydoc.update",
@@ -9376,55 +10820,101 @@ fn divergent_second_ydoc_base_is_hard_unacked_and_unjournaled() {
                 "path": "notes/divergent-base.md",
                 "contentKind": "plaintext",
                 "updateBlobSha256": sha,
+                "lineageClaimId": sha,
                 "isBaseState": true
             }),
-        )
+        );
+        envelope.relay_seq = Some(relay_seq);
+        envelope
     };
     assert!(matches!(
         apply_ydoc_envelope(
             &mut engine,
-            &base("first-base-peer", &first_sha),
+            &base("first-base-peer", 1, &first_sha),
             &NoFaults,
             &NoLiveLeases
         ),
         Ok(ApplyOutcome::Applied(_))
     ));
 
-    let second = apply_ydoc_envelope(
+    let losing_base = apply_ydoc_envelope(
         &mut engine,
-        &base("second-base-peer", &second_sha),
+        &base("second-base-peer", 2, &second_sha),
         &NoFaults,
         &NoLiveLeases,
-    );
-    assert!(matches!(second, Err(SyncError::CoordinateDiverged)));
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "second-base-peer").expect("second-base ack"),
-        -1,
-        "a divergent lineage must not advance the peer coordinate"
-    );
-    let journaled: i64 = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM replication_log \
-                 WHERE workspace_id='ws' AND origin_id='second-base-peer'",
-                [],
-                |row| row.get(0),
-            )
+    )
+    .expect("later base is handled");
+    assert!(matches!(
+        losing_base,
+        ApplyOutcome::Applied(YdocApplyResult {
+            reason: Some("ydoc-base-already-won"),
+            lineage_replacement: None,
+            ..
         })
-        .expect("divergent journal count");
-    assert_eq!(
-        journaled, 0,
-        "MUTATION: mapping BaseStateDiverged to InvalidInput journals and ACKs the unusable lineage"
+    ));
+
+    let losing_delta = second_doc.plaintext_insert(6, " delta");
+    let losing_delta_sha = engine.put_binary_blob(&losing_delta).expect("losing delta");
+    let mut delta = envelope(
+        "second-base-peer",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-divergent-base",
+            "path": "notes/divergent-base.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": losing_delta_sha,
+            "lineageClaimId": second_sha,
+            "isBaseState": false
+        }),
     );
+    delta.relay_seq = Some(3);
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &delta, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(YdocApplyResult {
+            reason: Some("ydoc-lineage-lost"),
+            lineage_replacement: None,
+            ..
+        }))
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "second-base-peer").expect("loser ack"),
+        1,
+        "the losing lineage is durably handled"
+    );
+    let state: (i64, i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log \
+                     WHERE workspace_id='ws' AND origin_id='second-base-peer'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row("SELECT COUNT(*) FROM ydoc_recovery_decisions", [], |row| {
+                    row.get(0)
+                })?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments \
+                     WHERE metadata_correlation_id LIKE 'ydoc-recovery:v1:%'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("losing-lineage records");
+    assert_eq!(state, (2, 0, 0), "AlreadyWon never creates a sibling");
     let key =
         dohc_engine_collab::DocKey::new("ws", "main", "object-divergent-base").expect("doc key");
     let persisted = dohc_engine_collab::load_persisted(&engine, &key)
         .expect("load")
         .expect("lineage");
-    assert_eq!(
-        persisted.doc.plaintext_string(),
-        "first",
-        "the refusal savepoint must preserve the originally claimed base"
+    assert_eq!(persisted.marker.lineage_claim_id, Some(first_sha));
+    assert_eq!(persisted.doc.plaintext_string(), "first");
+    assert!(
+        !persisted.doc.has_pending_dependencies(),
+        "losing-lineage bytes must not add pending clocks to the winner"
     );
 }
 
@@ -9468,6 +10958,7 @@ fn live_lease_on_local_only_lineage_is_retryable_unacked_and_unjournaled() {
             "path": "notes/local-lease.md",
             "contentKind": "plaintext",
             "updateBlobSha256": sha,
+            "lineageClaimId": "1111111111111111111111111111111111111111111111111111111111111111",
             "isBaseState": false
         }),
     );
@@ -9499,13 +10990,10 @@ fn live_lease_on_local_only_lineage_is_retryable_unacked_and_unjournaled() {
 }
 
 #[test]
-fn a_pulled_base_over_leftover_local_rows_projects_the_merged_lineage() {
-    // A crash can leave LOCAL-ONLY update rows before the base envelope
-    // arrives; the claim promotes that lineage, and the projection must be
-    // the RECONSTRUCTED doc plus the base — not the base alone, which would
-    // drop durable local content from the visible head. Mutation check:
-    // rebuild base_doc from `Ydoc::wire()` instead of `load_persisted` in
-    // `apply_ydoc_envelope`'s base arm — the local-content assertion fails.
+fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
+    // A local-only lineage has no relay identity. The pulled base becomes the
+    // active lineage, and the durable local content becomes an ordinary
+    // recovery sibling. The two independent CRDT histories never merge.
     let (_scratch, _path, mut engine) = store();
     dohc_engine_domain::VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
@@ -9547,11 +11035,20 @@ fn a_pulled_base_over_leftover_local_rows_projects_the_merged_lineage() {
             "objectId": "object-promote",
             "path": "notes/promoted.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha,
             "isBaseState": true
         }),
     );
-    apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+    let ApplyOutcome::Applied(result) =
+        apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies")
+    else {
+        panic!("base did not apply");
+    };
+    let replacement = result
+        .lineage_replacement
+        .expect("local-only lineage replacement");
+    assert_eq!(replacement.recovered_paths.len(), 1);
 
     let head_text: String = engine
         .read_with(|conn| {
@@ -9567,14 +11064,201 @@ fn a_pulled_base_over_leftover_local_rows_projects_the_merged_lineage() {
             .map_err(SyncError::corrupt)
         })
         .expect("promoted head");
-    assert!(
-        head_text.contains("base-part"),
-        "head must contain the base: {head_text}"
+    assert_eq!(head_text, "base-part");
+    let recovered_text: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+                 WHERE s.workspace_id='ws' AND s.version_id='main' AND s.path=?1",
+                [&replacement.recovered_paths[0]],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("recovered local content");
+    assert_eq!(recovered_text, "local-part ");
+}
+
+#[test]
+fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+                 VALUES ('ws','object-deferred-promote',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("file object");
+    let key =
+        dohc_engine_collab::DocKey::new("ws", "main", "object-deferred-promote").expect("key");
+    dohc_engine_collab::ensure_marker(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        dohc_engine_collab::Regime::LocalOnly,
+        &NoFaults,
+        1_450,
+    )
+    .expect("local-only marker");
+    let local_update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "local-part ");
+    dohc_engine_collab::record_local_update(&mut engine, &key, &local_update, &NoFaults, 1_460)
+        .expect("local row");
+
+    let base_doc = dohc_engine_collab::Ydoc::wire();
+    base_doc.plaintext_insert(0, "base-part");
+    let base_bytes = base_doc.encode_full_state();
+    let base_sha = engine.put_binary_blob(&base_bytes).expect("base blob");
+    let payload = json!({
+        "versionId": "main",
+        "objectId": "object-deferred-promote",
+        "path": "notes/deferred-promoted.md",
+        "contentKind": "plaintext",
+        "updateBlobSha256": base_sha,
+        "lineageClaimId": base_sha,
+        "isBaseState": true
+    });
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_log \
+                 (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) \
+                 VALUES ('ws','deferred-base-peer',0,'ydoc.update',?1,2_000,1,'applied')",
+                [payload.to_string()],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_deferred_updates \
+                 (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,lineage_claim_id,relay_seq) \
+                 VALUES ('ws','main','object-deferred-promote','deferred-base-peer',0,2_000,?1,10)",
+                [base_sha],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("deferred base row");
+
+    let drained =
+        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("drain deferred base");
+    assert_eq!(drained.drained, 1);
+    let replacement = drained
+        .lineage_replacements
+        .first()
+        .expect("local-only lineage replacement");
+    assert_eq!(replacement.recovered_paths.len(), 1);
+    let (head, recovered, update_rows): (String, String, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+                     WHERE s.workspace_id='ws' AND s.version_id='main' \
+                       AND s.object_id='object-deferred-promote'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+                     WHERE s.workspace_id='ws' AND s.version_id='main' AND s.path=?1",
+                    [&replacement.recovered_paths[0]],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_updates \
+                     WHERE workspace_id='ws' AND version_id='main' \
+                       AND object_id='object-deferred-promote'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("deferred replacement state");
+    assert_eq!(head, "base-part");
+    assert_eq!(recovered, "local-part ");
+    assert_eq!(
+        update_rows, 0,
+        "the local lineage must not remain in the winner"
     );
-    assert!(
-        head_text.contains("local-part"),
-        "head must keep the leftover local rows: {head_text}"
+}
+
+#[test]
+fn divergent_base_waits_for_the_existing_base_relay_position() {
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+                 VALUES ('ws','object-pending-base-order',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("file object");
+    let key =
+        dohc_engine_collab::DocKey::new("ws", "main", "object-pending-base-order").expect("key");
+    let local = dohc_engine_collab::Ydoc::wire();
+    local.plaintext_insert(0, "local base");
+    let local_bytes = local.encode_full_state();
+    let local_claim = match dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        &local_bytes,
+        &NoFaults,
+        1_500,
+    )
+    .expect("claim base without relay position")
+    {
+        TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed { base_snapshot_sha }) => {
+            base_snapshot_sha
+        }
+        other => panic!("unexpected local base outcome: {other:?}"),
+    };
+    let incoming = dohc_engine_collab::Ydoc::wire();
+    incoming.plaintext_insert(0, "incoming base");
+    let incoming_bytes = incoming.encode_full_state();
+    let incoming_sha = engine
+        .put_binary_blob(&incoming_bytes)
+        .expect("incoming base blob");
+    let operation = envelope(
+        "pending-base-order-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-pending-base-order",
+            "path": "notes/pending-base-order.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": incoming_sha,
+            "lineageClaimId": incoming_sha,
+            "isBaseState": true
+        }),
     );
+
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        Err(SyncError::RetryableState {
+            reason: "Y.Doc base is waiting for its authenticated relay position"
+        })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "pending-base-order-peer").expect("ack"),
+        -1
+    );
+    let marker = dohc_engine_collab::read_marker(&engine, &key)
+        .expect("read marker")
+        .expect("marker");
+    assert_eq!(marker.lineage_claim_id, Some(local_claim));
+    assert_eq!(marker.base_relay_seq, None);
 }
 
 fn seed_replication_version(engine: &mut EngineStore, version_id: &str, kind: &str) {
@@ -11966,6 +13650,213 @@ fn secret_put_redelivery_skips_its_own_synthesized_moment() {
 }
 
 #[test]
+fn secret_put_reports_active_protected_disk_work_on_apply_and_redelivery() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let ciphertext = b"protected relay bytes";
+    let sha = engine
+        .put_binary_blob(ciphertext)
+        .expect("secret ciphertext blob");
+    let operation = envelope(
+        "protected-put-peer",
+        0,
+        "secret.file.put",
+        json!({
+            "versionId": "main",
+            "path": ".env",
+            "metadata": {"origin": "sync"},
+            "ivBase64": STANDARD.encode([1_u8; SECRET_IV_BYTES]),
+            "authTagBase64": STANDARD.encode([2_u8; SECRET_TAG_BYTES]),
+            "ciphertextSha256": sha,
+            "byteLength": ciphertext.len()
+        }),
+    );
+
+    let applied = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases)
+        .expect("apply protected put");
+    assert!(matches!(
+        applied,
+        ApplyOutcome::Applied(RoutedApply {
+            materialization_changes,
+            ..
+        }) if materialization_changes == [MomentMaterializationChange {
+            path: ".env".to_owned(),
+            operation: "write",
+            content_kind: "secret",
+        }]
+    ));
+
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases,),
+        Ok(ApplyOutcome::Skipped)
+    ));
+    assert_eq!(
+        crate::router::redelivered_materialization_changes(&engine, &operation)
+            .expect("redelivered protected put disk work"),
+        [MomentMaterializationChange {
+            path: ".env".to_owned(),
+            operation: "write",
+            content_kind: "secret",
+        }],
+        "a crash before cursor commit must make the exact protected write retryable"
+    );
+}
+
+#[test]
+fn secret_delete_reports_active_protected_disk_work_on_apply_and_redelivery() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let operation = envelope(
+        "protected-delete-peer",
+        0,
+        "secret.file.delete",
+        json!({
+            "versionId": "main",
+            "path": ".env",
+            "metadata": {"origin": "sync"}
+        }),
+    );
+
+    let applied = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases)
+        .expect("apply protected delete");
+    assert!(matches!(
+        applied,
+        ApplyOutcome::Applied(RoutedApply {
+            materialization_changes,
+            ..
+        }) if materialization_changes == [MomentMaterializationChange {
+            path: ".env".to_owned(),
+            operation: "delete",
+            content_kind: "secret",
+        }]
+    ));
+
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases,),
+        Ok(ApplyOutcome::Skipped)
+    ));
+    assert_eq!(
+        crate::router::redelivered_materialization_changes(&engine, &operation)
+            .expect("redelivered protected delete disk work"),
+        [MomentMaterializationChange {
+            path: ".env".to_owned(),
+            operation: "delete",
+            content_kind: "secret",
+        }],
+        "a crash before cursor commit must make the exact protected delete retryable"
+    );
+}
+
+#[test]
+fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
+    let (_scratch, path, mut engine) = store();
+    seed_identity(&mut engine);
+    let ciphertext = b"protected fork bytes";
+    let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
+    engine
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO active_versions (workspace_id,version_id) VALUES ('ws','feature') \
+                 ON CONFLICT(workspace_id) DO UPDATE SET version_id=excluded.version_id",
+                [],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .expect("activate fork destination");
+    let operation = envelope(
+        "active-fork-peer",
+        0,
+        "secret.version.fork",
+        json!({
+            "fromVersionId": "main",
+            "toVersionId": "feature",
+            "chunkIndex": 0,
+            "totalRows": 1,
+            "rows": [{
+                "path": "app/.env",
+                "ivBase64": iv,
+                "authTagBase64": tag,
+                "ciphertextSha256": sha,
+                "byteLength": ciphertext.len(),
+                "updatedAtMs": 100
+            }]
+        }),
+    );
+    let client = RelaySyncClient::new(PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![operation],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )]));
+    let expected = vec![
+        MomentMaterializationChange {
+            path: "app/.env".to_owned(),
+            operation: "write",
+            content_kind: "secret",
+        },
+        MomentMaterializationChange {
+            path: "stale.env".to_owned(),
+            operation: "delete",
+            content_kind: "secret",
+        },
+    ];
+
+    let faults = ScriptedFaults::crash_at(FaultPoint::SyncBetweenApplyAndCursorCommit);
+    let first = client
+        .pull_chat_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases, 2_000)
+        .expect("pull active secret fork");
+    assert!(matches!(
+        first,
+        SyncPassOutcome::CrashedAfterApply {
+            applied: 1,
+            changed_paths,
+            ..
+        } if changed_paths == expected
+    ));
+
+    drop(engine);
+    let mut reopened = EngineStore::open(&path, 3_000).expect("reopen after pull crash");
+    reopened
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE active_versions SET version_id='main' WHERE workspace_id='ws'",
+                [],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .expect("switch active version after apply");
+    let retry = client
+        .pull_chat_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases, 3_000)
+        .expect("redeliver active secret fork");
+    assert!(matches!(
+        retry,
+        SyncPassOutcome::Complete {
+            applied: 0,
+            skipped: 1,
+            changed_paths,
+            ..
+        } if changed_paths == expected
+    ));
+
+    let stored_paths: Vec<String> = reopened
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT path FROM secret_files \
+                 WHERE workspace_id='ws' AND version_id='feature' ORDER BY path",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect()
+        })
+        .expect("fork destination paths");
+    assert_eq!(stored_paths, ["app/.env"]);
+}
+
+#[test]
 fn central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compatibly() {
     for kind in crate::router::owned_op_kinds() {
         let (_scratch, _path, mut engine) = store();
@@ -12117,7 +14008,7 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
 }
 
 #[test]
-fn relay_pull_page_ceiling_stops_an_advancing_empty_stream() {
+fn relay_pull_page_ceiling_stops_an_advancing_sparse_stream() {
     // MUTATION: removing the page ceiling walks the unbounded advancing stream.
     let (_scratch, _path, mut engine) = store();
     seed_identity(&mut engine);
@@ -12127,7 +14018,12 @@ fn relay_pull_page_ceiling_stops_an_advancing_empty_stream() {
         pages.push((
             cursor,
             PullResponse {
-                ops: Vec::new(),
+                ops: vec![envelope(
+                    &format!("unrelated-{cursor}"),
+                    0,
+                    "opaque.test",
+                    json!({}),
+                )],
                 next_cursor: cursor + 1,
                 has_more: true,
             },
@@ -12138,7 +14034,12 @@ fn relay_pull_page_ceiling_stops_an_advancing_empty_stream() {
     pages.push((
         resume_cursor,
         PullResponse {
-            ops: Vec::new(),
+            ops: vec![envelope(
+                &format!("unrelated-{resume_cursor}"),
+                0,
+                "opaque.test",
+                json!({}),
+            )],
             next_cursor: resume_cursor + 1,
             has_more: false,
         },
@@ -12149,14 +14050,15 @@ fn relay_pull_page_ceiling_stops_an_advancing_empty_stream() {
         .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("page-bounded pull");
     let SyncPassOutcome::Complete {
-        fetched: 0,
+        fetched,
         has_more,
         pending_cursor: Some(pending),
         ..
     } = first
     else {
-        panic!("empty page prefix must complete: {first:?}");
+        panic!("sparse page prefix must complete: {first:?}");
     };
+    assert_eq!(fetched, crate::model::MAX_PULL_PAGES_PER_PASS);
     assert_eq!(pending.cursor, resume_cursor);
     assert!(
         has_more,
@@ -12178,7 +14080,12 @@ fn recover_origin_continues_an_advancing_stream_past_the_pull_page_ceiling() {
             (
                 cursor,
                 PullResponse {
-                    ops: Vec::new(),
+                    ops: vec![envelope(
+                        &format!("unrelated-{cursor}"),
+                        0,
+                        "opaque.test",
+                        json!({}),
+                    )],
                     next_cursor: cursor + 1,
                     has_more: cursor
                         < i64::try_from(crate::model::MAX_PULL_PAGES_PER_PASS)
@@ -12198,6 +14105,259 @@ fn recover_origin_continues_an_advancing_stream_past_the_pull_page_ceiling() {
         crate::model::MAX_PULL_PAGES_PER_PASS + 1,
         "MUTATION: restoring the recover page ceiling rejects before the terminal page"
     );
+}
+
+#[test]
+fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    seed_text_head(
+        &mut engine,
+        "object-recovered-base",
+        "notes/recovered-base.md",
+        "restored draft",
+    );
+    assert!(matches!(
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "probe.shared",
+            &json!({}),
+            1_001,
+            &NoFaults,
+        ),
+        Ok(TxnOutcome::Committed(1))
+    ));
+
+    let key =
+        dohc_engine_collab::DocKey::new("ws", "main", "object-recovered-base").expect("doc key");
+    let restored = dohc_engine_collab::Ydoc::wire();
+    restored.plaintext_insert(0, "restored draft");
+    let restored_base = restored.encode_full_state();
+    let restored_claim = match dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        &restored_base,
+        &NoFaults,
+        1_100,
+    )
+    .expect("claim restored base")
+    {
+        TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed { base_snapshot_sha }) => {
+            base_snapshot_sha
+        }
+        other => panic!("unexpected base claim: {other:?}"),
+    };
+    let base_payload = crate::ydoc_update_payload(
+        &key,
+        "notes/recovered-base.md",
+        dohc_engine_collab::ContentKind::Plaintext,
+        &restored_claim,
+        &restored_claim,
+        true,
+    );
+    let base_seq = journal_local_replication_op(
+        &mut engine,
+        "ws",
+        "local",
+        "epoch-1",
+        "stream-1",
+        "ydoc.update",
+        &base_payload,
+        1_100,
+        &NoFaults,
+    )
+    .expect("journal restored base");
+    assert_eq!(base_seq, TxnOutcome::Committed(2));
+    let delta_bytes = restored.plaintext_insert(14, " plus local delta");
+    let delta_sha = engine
+        .put_binary_blob(&delta_bytes)
+        .expect("store local delta");
+    let delta_payload = crate::ydoc_update_payload(
+        &key,
+        "notes/recovered-base.md",
+        dohc_engine_collab::ContentKind::Plaintext,
+        &delta_sha,
+        &restored_claim,
+        false,
+    );
+    let delta_seq = journal_local_replication_op(
+        &mut engine,
+        "ws",
+        "local",
+        "epoch-1",
+        "stream-1",
+        "ydoc.update",
+        &delta_payload,
+        1_101,
+        &NoFaults,
+    )
+    .expect("journal local delta");
+    assert_eq!(delta_seq, TxnOutcome::Committed(3));
+    engine
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_collab::record_base_coordinate_in_tx(
+                tx,
+                dohc_engine_collab::BaseCoordinateRecord {
+                    key: &key,
+                    lineage_claim_id: &restored_claim,
+                    origin_id: "local",
+                    origin_seq: 2,
+                    relay_seq: Some(99),
+                    now_ms: 1_100,
+                },
+            )
+            .map_err(SyncError::corrupt)?;
+            tx.execute(
+                "INSERT INTO ydoc_base_relay_candidates (
+                     workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq
+                 ) VALUES ('ws','main','object-recovered-base',?1,'local',2)",
+                [&restored_claim],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO ydoc_deferred_updates (
+                     workspace_id,version_id,object_id,origin_id,origin_seq,
+                     recorded_at_ms,lineage_claim_id,relay_seq
+                 ) VALUES ('ws','main','object-recovered-base','local',3,1101,?1,101)",
+                [&restored_claim],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed suffix coordinate sidecars");
+
+    let shared_prefix = vec![
+        ReplicationEnvelope {
+            workspace_id: "ws".to_owned(),
+            origin_id: "local".to_owned(),
+            origin_seq: 0,
+            relay_seq: Some(0),
+            op_kind: "probe.local".to_owned(),
+            payload: json!({}),
+            recorded_at_ms: 1_000,
+        },
+        ReplicationEnvelope {
+            workspace_id: "ws".to_owned(),
+            origin_id: "local".to_owned(),
+            origin_seq: 1,
+            relay_seq: Some(1),
+            op_kind: "probe.shared".to_owned(),
+            payload: json!({}),
+            recorded_at_ms: 1_001,
+        },
+    ];
+    let relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: shared_prefix,
+            next_cursor: 2,
+            has_more: false,
+        },
+    )]);
+    let client = RelaySyncClient::new(relay);
+    let recovered = client
+        .recover_origin(&mut engine, "ws", "recovered-ydoc", &NoFaults)
+        .expect("recover Y.Doc suffix");
+    assert_eq!(
+        (recovered.shared_prefix_length, recovered.preserved_ops),
+        (2, 2)
+    );
+
+    let rebased = engine
+        .read_with(|conn| {
+            let marker = conn.query_row(
+                "SELECT base_origin_id,base_origin_seq,base_relay_seq,
+                        base_relay_confirmed_absent
+                   FROM ydoc_docs
+                  WHERE workspace_id='ws' AND version_id='main'
+                    AND object_id='object-recovered-base'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )?;
+            let candidate = conn.query_row(
+                "SELECT origin_id,origin_seq FROM ydoc_base_relay_candidates
+                  WHERE workspace_id='ws' AND version_id='main'
+                    AND object_id='object-recovered-base'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )?;
+            let deferred = conn.query_row(
+                "SELECT origin_id,origin_seq,relay_seq FROM ydoc_deferred_updates
+                  WHERE workspace_id='ws' AND version_id='main'
+                    AND object_id='object-recovered-base'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )?;
+            Ok::<_, rusqlite::Error>((marker, candidate, deferred))
+        })
+        .expect("rebased Y.Doc coordinates");
+    assert_eq!(
+        rebased,
+        (
+            (Some("recovered-ydoc".to_owned()), Some(0), None, 0),
+            ("recovered-ydoc".to_owned(), 0),
+            ("recovered-ydoc".to_owned(), 1, None),
+        ),
+        "every local suffix coordinate must move with the replication log and lose stale relay metadata"
+    );
+
+    client
+        .push_workspace(&mut engine, "ws", &NoFaults, 1_200)
+        .expect("push recovered suffix");
+    client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_300)
+        .expect("stamp recovered base relay position");
+    let winner = dohc_engine_collab::Ydoc::wire();
+    winner.plaintext_insert(0, "relay winner");
+    let winner_bytes = winner.encode_full_state();
+    let winner_claim = engine
+        .put_binary_blob(&winner_bytes)
+        .expect("store competing base");
+    let mut competing = envelope(
+        "winning-peer",
+        0,
+        "ydoc.update",
+        crate::ydoc_update_payload(
+            &key,
+            "notes/recovered-base.md",
+            dohc_engine_collab::ContentKind::Plaintext,
+            &winner_claim,
+            &winner_claim,
+            true,
+        ),
+    );
+    competing.relay_seq = Some(50);
+    let applied = apply_ydoc_envelope(&mut engine, &competing, &NoFaults, &NoLiveLeases)
+        .expect("apply lower relay base");
+    assert!(matches!(
+        applied,
+        ApplyOutcome::Applied(YdocApplyResult {
+            lineage_replacement: Some(YdocLineageReplacement {
+                winner_lineage_claim_id,
+                ..
+            }),
+            ..
+        }) if winner_lineage_claim_id == winner_claim
+    ));
 }
 
 #[test]
@@ -12223,6 +14383,7 @@ fn recover_origin_rebases_each_current_lww_projection_coordinate() {
                 op_kind: "probe.local".to_owned(),
                 payload: json!({}),
                 recorded_at_ms: 1_000,
+                relay_seq: Some(0),
             }],
             next_cursor: 1,
             has_more: false,
@@ -14176,6 +16337,7 @@ fn share_view_boundary_without_a_grant_admits_nothing() {
         op_kind: "moment.append".to_owned(),
         payload: json!({"path": "docs/a.md", "operation": "write"}),
         recorded_at_ms: 10,
+        relay_seq: None,
     };
 
     assert!(
@@ -14755,7 +16917,8 @@ fn relay_hydrates_text_and_binary_rows_for_one_shared_digest() {
             "objectId": "dual-kind-object",
             "path": "dual-kind.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": sha256,
+            "updateBlobSha256": sha256.clone(),
+            "lineageClaimId": sha256.clone(),
             "isBaseState": true
         }),
     );
@@ -15325,6 +17488,7 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
             "path": "notes/prior-page-drain.md",
             "contentKind": "plaintext",
             "updateBlobSha256": invalid_sha,
+            "lineageClaimId": base_sha.clone(),
             "isBaseState": false
         }),
     );
@@ -15334,6 +17498,7 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
+            lineage_replacement: None,
         }))
     ));
 
@@ -15346,7 +17511,8 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
             "objectId": "object-prior-page-drain",
             "path": "notes/prior-page-drain.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha,
             "isBaseState": true
         }),
     );
@@ -15501,6 +17667,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
             "path": "notes/post-pull-drain.md",
             "contentKind": "plaintext",
             "updateBlobSha256": invalid_sha,
+            "lineageClaimId": base_sha.clone(),
             "isBaseState": false
         }),
     );
@@ -15560,7 +17727,8 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
             "objectId": "object-post-pull-drain",
             "path": "notes/post-pull-drain.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha,
             "isBaseState": true
         }),
     );
@@ -15606,7 +17774,18 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
     let second_client = RelaySyncClient::new(FakeRelay {
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
-            ops: Vec::new(),
+            ops: vec![envelope(
+                "second-report-peer",
+                0,
+                "chat.channel.create",
+                json!({
+                    "channelId": "second-report-channel",
+                    "name": "Second",
+                    "slug": "second",
+                    "kind": "channel",
+                    "createdAtMs": 2
+                }),
+            )],
             next_cursor: 2,
             has_more: false,
         })),
@@ -16327,7 +18506,8 @@ fn a_ydoc_base_over_the_captured_file_cap_still_hydrates() {
             "objectId": "object-oversize-base",
             "path": "notes/oversize.md",
             "contentKind": "richdoc",
-            "updateBlobSha256": sha256,
+            "updateBlobSha256": sha256.clone(),
+            "lineageClaimId": sha256.clone(),
             "isBaseState": true
         }),
     );

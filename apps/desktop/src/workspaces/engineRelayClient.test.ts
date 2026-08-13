@@ -8,6 +8,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import {
   MAX_REPORTED_REFUSALS,
+  RelayKeyEnvelopeMissingError,
   RelayOriginDivergedError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
@@ -92,6 +93,11 @@ class MockDaemon implements EngineDaemonClient {
                 path: "notes/plan.md",
                 operation: "write",
                 contentKind: "text",
+              },
+              {
+                path: ".env",
+                operation: "write",
+                contentKind: "secret",
               },
             ],
             sharingDeclined: [],
@@ -220,6 +226,11 @@ describe("EngineRelayClient", () => {
           path: "notes/plan.md",
           operation: "write",
           contentKind: "text",
+        },
+        {
+          path: ".env",
+          operation: "write",
+          contentKind: "secret",
         },
       ],
     });
@@ -529,10 +540,48 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("keeps join enrollment inside the capture-free identity session", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "keys.download") {
+        throw new DaemonRefusalError(
+          {
+            code: "KEY_ENVELOPE_MISSING",
+            message: "relay key envelope missing",
+            retry: "no",
+          },
+          new Error("refused"),
+        );
+      }
+      return undefined;
+    });
+    const { sessions, client } = await harness(daemon);
+
+    await client.bootstrapJoinIdentity(
+      {
+        replicationEpoch: "epoch-relay",
+        streamIdentity: "stream-relay",
+      },
+      async () => {
+        await expect(client.downloadKeyEnvelope()).rejects.toBeInstanceOf(
+          RelayKeyEnvelopeMissingError,
+        );
+      },
+    );
+
+    expect(daemon.requests.map((request) => request.method)).toEqual([
+      "workspace.open",
+      "sync.adoptJoinIdentity",
+      "keys.download",
+      "workspace.close",
+    ]);
+    expect(daemon.requests[0]?.params).toMatchObject({ captureMode: "none" });
+    await sessions.closeAll();
+  });
+
   it("orders join identity bootstrap before registration and activity capture", async () => {
     const source = await readFile(new URL("../main.ts", import.meta.url), "utf8");
     const bootstrap = source.indexOf(
-      "await daemonRelay.bootstrapJoinIdentity(probe.identity);",
+      "await bootstrapJoinedWorkspace({",
     );
     const registration = source.indexOf(
       "registerWorkspace({ ...created, joinBootstrapPending: true });",

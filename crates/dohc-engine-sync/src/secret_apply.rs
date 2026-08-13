@@ -9,6 +9,11 @@ use std::collections::HashSet;
 
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct SecretApplyResult {
+    pub(crate) materialization_changes: Vec<crate::MomentMaterializationChange>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Metadata {
@@ -63,6 +68,14 @@ pub fn apply_secret_envelope(
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
 ) -> Result<ApplyOutcome<()>, SyncError> {
+    apply_secret_envelope_detailed(store, envelope, faults).map(|outcome| outcome.map(|_| ()))
+}
+
+pub(crate) fn apply_secret_envelope_detailed(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+) -> Result<ApplyOutcome<SecretApplyResult>, SyncError> {
     if !matches!(
         envelope.op_kind.as_str(),
         "secret.file.put" | "secret.file.delete" | "secret.version.fork"
@@ -77,6 +90,19 @@ pub fn apply_secret_envelope(
             _ => Err(SyncError::UnsupportedOperation),
         }
     })
+}
+
+pub(crate) fn redelivered_materialization_changes(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
+    if !matches!(
+        envelope.op_kind.as_str(),
+        "secret.file.put" | "secret.file.delete" | "secret.version.fork"
+    ) {
+        return Ok(Vec::new());
+    }
+    crate::moment_apply::stored_materialization_changes(store, envelope)
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(value: &serde_json::Value) -> Result<T, SyncError> {
@@ -139,7 +165,7 @@ fn apply_put(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
     p: SecretPut,
-) -> Result<(), SyncError> {
+) -> Result<SecretApplyResult, SyncError> {
     validate_common(tx, op, &p.version_id, &p.path, &p.metadata)?;
     let iv = STANDARD
         .decode(&p.iv_base64)
@@ -180,7 +206,7 @@ fn apply_delete(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
     p: SecretDelete,
-) -> Result<(), SyncError> {
+) -> Result<SecretApplyResult, SyncError> {
     validate_common(tx, op, &p.version_id, &p.path, &p.metadata)?;
     insert_moment(tx, op, &p.version_id, &p.path, &p.metadata, None)
 }
@@ -189,10 +215,26 @@ fn apply_fork(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
     payload: SecretFork,
-) -> Result<(), SyncError> {
+) -> Result<SecretApplyResult, SyncError> {
     validate_fork_versions(tx, op, &payload.from_version_id, &payload.to_version_id)?;
     validate_fork_rows(&payload.rows, payload.total_rows)?;
 
+    let active = is_active_version(tx, &op.workspace_id, &payload.to_version_id)?;
+    let previous_paths = if active && payload.chunk_index == 0 {
+        tx.prepare(
+            "SELECT path FROM secret_files \
+             WHERE workspace_id=?1 AND version_id=?2 ORDER BY path",
+        )
+        .map_err(SyncError::corrupt)?
+        .query_map(params![op.workspace_id, payload.to_version_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::corrupt)?
+    } else {
+        Vec::new()
+    };
     if payload.chunk_index == 0 {
         tx.execute(
             "DELETE FROM secret_files WHERE workspace_id=?1 AND version_id=?2",
@@ -205,7 +247,34 @@ fn apply_fork(
         )
         .map_err(SyncError::persist)?;
     }
-    insert_fork_rows(tx, op, &payload.to_version_id, payload.rows)
+    let inserted_paths = insert_fork_rows(tx, op, &payload.to_version_id, payload.rows)?;
+    let materialization_changes = if active {
+        let inserted = inserted_paths.iter().cloned().collect::<HashSet<_>>();
+        previous_paths
+            .into_iter()
+            .filter(|path| !inserted.contains(path))
+            .map(|path| crate::MomentMaterializationChange {
+                path,
+                operation: "delete",
+                content_kind: "secret",
+            })
+            .chain(
+                inserted_paths
+                    .into_iter()
+                    .map(|path| crate::MomentMaterializationChange {
+                        path,
+                        operation: "write",
+                        content_kind: "secret",
+                    }),
+            )
+            .collect()
+    } else {
+        Vec::new()
+    };
+    crate::moment_apply::record_materialization_changes(tx, op, &materialization_changes)?;
+    Ok(SecretApplyResult {
+        materialization_changes,
+    })
 }
 
 fn validate_fork_versions(
@@ -254,12 +323,13 @@ fn insert_fork_rows(
     op: &ReplicationEnvelope,
     to_version_id: &str,
     rows: Vec<SecretForkRow>,
-) -> Result<(), SyncError> {
+) -> Result<Vec<String>, SyncError> {
+    let mut inserted_paths = Vec::new();
     for (index, row) in rows.into_iter().enumerate() {
         let ciphertext = load_ciphertext(tx, &row.ciphertext_sha256, row.byte_length)?;
         let ciphertext_base64 = STANDARD.encode(ciphertext);
         let latest_moment_id = format!("secret-sync-{}-{}-{index}", op.origin_id, op.origin_seq);
-        tx.execute(
+        let inserted = tx.execute(
             "INSERT OR IGNORE INTO secret_files \
              (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length,updated_at_ms,latest_moment_id) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
@@ -276,6 +346,9 @@ fn insert_fork_rows(
             ],
         )
         .map_err(SyncError::persist)?;
+        if inserted == 1 {
+            inserted_paths.push(row.path.clone());
+        }
         tx.execute(
             "INSERT OR IGNORE INTO secret_fork_bases \
              (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length,updated_at_ms) \
@@ -293,7 +366,7 @@ fn insert_fork_rows(
         )
         .map_err(SyncError::persist)?;
     }
-    Ok(())
+    Ok(inserted_paths)
 }
 
 fn require_version(
@@ -403,7 +476,7 @@ fn insert_moment(
     path: &str,
     metadata: &Metadata,
     after: Option<(&str, &str, &str, i64)>,
-) -> Result<(), SyncError> {
+) -> Result<SecretApplyResult, SyncError> {
     let previous: i64 = tx
         .query_row(
             "SELECT COALESCE(MAX(moment_order),0) FROM secret_moments WHERE workspace_id=?1",
@@ -457,7 +530,8 @@ fn insert_moment(
             reason: "replicated secret moment id collides with existing history",
         });
     }
-    if remote_wins(tx, op, version_id, path, after)? {
+    let won = remote_wins(tx, op, version_id, path, after)?;
+    if won {
         if let Some((iv, tag, ciphertext, byte_length)) = after {
             tx.execute(
                 "INSERT INTO secret_files \
@@ -476,7 +550,38 @@ fn insert_moment(
             .map_err(SyncError::persist)?;
         }
     }
-    Ok(())
+    let materialization_changes = if won && is_active_version(tx, &op.workspace_id, version_id)? {
+        vec![crate::MomentMaterializationChange {
+            path: path.to_owned(),
+            operation: if after.is_some() { "write" } else { "delete" },
+            content_kind: "secret",
+        }]
+    } else {
+        Vec::new()
+    };
+    crate::moment_apply::record_materialization_changes(tx, op, &materialization_changes)?;
+    Ok(SecretApplyResult {
+        materialization_changes,
+    })
+}
+
+fn is_active_version(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<bool, SyncError> {
+    let active: Option<String> = tx
+        .query_row(
+            "SELECT COALESCE( \
+               (SELECT version_id FROM active_versions WHERE workspace_id=?1), \
+               (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1) \
+             )",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    Ok(active.as_deref() == Some(version_id))
 }
 
 fn remote_wins(

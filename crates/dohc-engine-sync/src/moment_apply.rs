@@ -302,6 +302,7 @@ pub(crate) fn stored_materialization_changes(
             let content_kind = match value.get("contentKind").and_then(serde_json::Value::as_str) {
                 Some("text") => "text",
                 Some("binary") => "binary",
+                Some("secret") => "secret",
                 _ => return Err(SyncError::CoordinateDiverged),
             };
             Ok(MomentMaterializationChange {

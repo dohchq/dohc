@@ -375,20 +375,69 @@ export const ENGINE_YDOC_UPDATE_MAX_BYTES = 16 * 1024 * 1024;
 export interface EngineYDocRemoteUpdateEvent {
   sessionId: string;
   update: Uint8Array;
+  lineageGeneration: number;
 }
 
 export function parseEngineYDocRemoteUpdateEvent(
   value: unknown,
 ): EngineYDocRemoteUpdateEvent | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  if (!Object.hasOwn(value, "sessionId") || !Object.hasOwn(value, "update")) return null;
-  const { sessionId, update } = value as { sessionId?: unknown; update?: unknown };
+  if (
+    !Object.hasOwn(value, "sessionId") ||
+    !Object.hasOwn(value, "update") ||
+    !Object.hasOwn(value, "lineageGeneration")
+  ) {
+    return null;
+  }
+  const { sessionId, update, lineageGeneration } = value as {
+    sessionId?: unknown;
+    update?: unknown;
+    lineageGeneration?: unknown;
+  };
   if (!isBoundedString(sessionId, ENGINE_YDOC_SESSION_ID_MAX_CHARS)) return null;
   // Structured clone preserves a Uint8Array as a real Uint8Array; anything else
   // (a plain object, an ArrayBuffer, a tampered value) is rejected.
   if (!(update instanceof Uint8Array)) return null;
   if (update.byteLength === 0 || update.byteLength > ENGINE_YDOC_UPDATE_MAX_BYTES) return null;
-  return { sessionId, update };
+  if (
+    typeof lineageGeneration !== "number" ||
+    !Number.isSafeInteger(lineageGeneration) ||
+    lineageGeneration < 1
+  ) {
+    return null;
+  }
+  return { sessionId, update, lineageGeneration };
+}
+
+export interface EngineYDocLineageReplacementEvent {
+  sessionId: string;
+  update: Uint8Array;
+  recoveredPaths: string[];
+  lineageGeneration: number;
+}
+
+export function parseEngineYDocLineageReplacementEvent(
+  value: unknown,
+): EngineYDocLineageReplacementEvent | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { sessionId, update, recoveredPaths, lineageGeneration } = value as {
+    sessionId?: unknown;
+    update?: unknown;
+    recoveredPaths?: unknown;
+    lineageGeneration?: unknown;
+  };
+  if (!isBoundedString(sessionId, ENGINE_YDOC_SESSION_ID_MAX_CHARS)) return null;
+  if (!(update instanceof Uint8Array)) return null;
+  if (update.byteLength === 0 || update.byteLength > ENGINE_YDOC_UPDATE_MAX_BYTES) return null;
+  if (!Array.isArray(recoveredPaths) || !recoveredPaths.every(isSafeRelativePath)) return null;
+  if (
+    typeof lineageGeneration !== "number" ||
+    !Number.isSafeInteger(lineageGeneration) ||
+    lineageGeneration < 1
+  ) {
+    return null;
+  }
+  return { sessionId, update, recoveredPaths, lineageGeneration };
 }
 
 // The editor's save indicator, pushed from main on every real settle outcome.
@@ -635,6 +684,7 @@ export const CHANNELS = {
   engineYDocApplyUpdate: "desktop:engine-ydoc-apply-update",
   engineYDocClose: "desktop:engine-ydoc-close",
   engineYDocRemoteUpdate: "desktop:engine-ydoc-remote-update",
+  engineYDocLineageReplacement: "desktop:engine-ydoc-lineage-replacement",
   engineYDocSaveState: "desktop:engine-ydoc-save-state",
   menuCommand: "desktop:menu-command",
   workspaceActivated: "desktop:workspace-activated",

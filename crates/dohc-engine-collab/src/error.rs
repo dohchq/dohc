@@ -61,6 +61,24 @@ pub enum CollabError {
     #[error("incoming base state diverges from the claimed base")]
     BaseStateDiverged,
 
+    /// The local base exists, but its relay position is still unknown. The
+    /// caller must retain the incoming base and retry after exact lookup.
+    #[error("the claimed base has no authenticated relay position yet")]
+    BaseRelaySequencePending,
+
+    /// A relay position is globally unique and cannot name two base blobs.
+    #[error("different Y.Doc bases carry relay sequence {relay_seq}")]
+    BaseRelaySequenceCollision { relay_seq: i64 },
+
+    /// An open editor tried to append after its durable lineage was replaced.
+    #[error(
+        "Y.Doc lineage changed while editing: expected {expected:?}, observed {observed:?}; resync before writing"
+    )]
+    LineageWriteStale {
+        expected: Option<String>,
+        observed: Option<String>,
+    },
+
     /// A successor base could not reproduce its canonical text exactly.
     #[error(
         "successor projection mismatch: expected text {expected_sha256}, observed {observed_sha256}"
@@ -178,6 +196,9 @@ impl CollabError {
             CollabError::ContentKindMismatch => "content-kind-mismatch",
             CollabError::BaseAlreadyClaimed => "base-already-claimed",
             CollabError::BaseStateDiverged => "base-state-diverged",
+            CollabError::BaseRelaySequencePending => "base-relay-sequence-pending",
+            CollabError::BaseRelaySequenceCollision { .. } => "base-relay-sequence-collision",
+            CollabError::LineageWriteStale { .. } => "lineage-write-stale",
             CollabError::SuccessorProjectionMismatch { .. } => "successor-projection-mismatch",
             CollabError::SuccessorResultMismatch { .. } => "successor-result-mismatch",
             CollabError::LineageEpochChanged { .. } => "lineage-epoch-changed",

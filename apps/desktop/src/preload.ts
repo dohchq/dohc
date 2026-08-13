@@ -31,6 +31,7 @@ import {
   isMenuCommand,
   isWorkbenchMenuCommand,
   parseEngineYDocRemoteUpdateEvent,
+  parseEngineYDocLineageReplacementEvent,
   parseEngineYDocSaveStateEvent,
   parseSearchResultsEvent,
   parseUpdateStateEvent,
@@ -479,6 +480,15 @@ const bridge: DohcDesktopBridge = {
     };
     ipcRenderer.on(CHANNELS.engineYDocRemoteUpdate, handler);
     return () => ipcRenderer.removeListener(CHANNELS.engineYDocRemoteUpdate, handler);
+  },
+  onEngineYDocLineageReplacement: (listener) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      const parsed = parseEngineYDocLineageReplacementEvent(raw);
+      if (parsed) listener(parsed);
+    };
+    ipcRenderer.on(CHANNELS.engineYDocLineageReplacement, handler);
+    return () =>
+      ipcRenderer.removeListener(CHANNELS.engineYDocLineageReplacement, handler);
   },
   onEngineYDocSaveState: (listener) => {
     const handler = (_event: unknown, raw: unknown) => {

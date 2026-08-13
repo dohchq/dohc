@@ -37,6 +37,7 @@ import {
   isYdocRemoteUpdatesPendingRefusal,
   isYdocUnsettledCloseRefusal,
   YdocReleasedWithSettleFailureError,
+  YdocAdapterError,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
   type EngineTransport,
@@ -432,6 +433,7 @@ export interface WorkspaceEngineCapture {
   openYDocSession(input: {
     path: string;
     onRemoteUpdate: (update: Uint8Array) => void;
+    onLineageReplaced?: (update: Uint8Array, recoveredPaths: string[]) => void;
     contentKind?: YdocContentKind;
     // The HONEST save state for this document, reported on every settle:
     // "settling" when one starts, "saved" only when the projection AND the
@@ -670,6 +672,15 @@ function isTransientEngineCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isTransientEngineRefusal);
 }
 
+function isLineageChangedCause(error: unknown): boolean {
+  return hasRefusalInCauseChain(
+    error,
+    (candidate) =>
+      candidate instanceof YdocAdapterError &&
+      candidate.code === "lineage-changed",
+  );
+}
+
 /**
  * What the document may claim after a settle failed.
  *
@@ -748,6 +759,17 @@ function announceOnce(announce: (() => void) | undefined): () => void {
     announced = true;
     announce?.();
   };
+}
+
+function sharesYDocHistory(left: Y.Doc, right: Y.Doc): boolean {
+  // Shared client clocks prove shared CRDT structs; equal text does not.
+  const leftState = Y.decodeStateVector(Y.encodeStateVector(left));
+  const rightState = Y.decodeStateVector(Y.encodeStateVector(right));
+  if (leftState.size === 0 && rightState.size === 0) return true;
+  for (const [clientId, leftClock] of leftState) {
+    if (leftClock > 0 && (rightState.get(clientId) ?? 0) > 0) return true;
+  }
+  return false;
 }
 
 function sha256Utf8(text: string): string {
@@ -1679,6 +1701,7 @@ export function createWorkspaceEngineCapture(
     onDead: () => void;
     onAlive: () => void;
     onRemoteUpdate: (update: Uint8Array) => void;
+    onLineageReplaced: (update: Uint8Array, recoveredPaths: string[]) => void;
     onSettled: (
       result: {
         sha256: string;
@@ -1706,6 +1729,7 @@ export function createWorkspaceEngineCapture(
       openEngineYdocProviderSession;
     const workspace = { workspaceId, rootPath };
     let canonicalDoc: Y.Doc | null = null;
+    let canonicalLineageClaimId: string | null = null;
     let current: EngineYdocProviderSession | null = null;
     let releaseObligation: EngineYdocProviderSession | null = null;
     let closed = false;
@@ -1833,6 +1857,17 @@ export function createWorkspaceEngineCapture(
               Y.applyUpdate(canonicalDoc, update);
               input.onRemoteUpdate(update);
             },
+            onLineageReplaced: (replacement, recoveredPaths) => {
+              if (current !== opened || canonicalDoc === null) return;
+              const retired = canonicalDoc;
+              canonicalDoc = replacement;
+              canonicalLineageClaimId = opened?.lineageClaimId ?? null;
+              input.onLineageReplaced?.(
+                Y.encodeStateAsUpdate(replacement),
+                recoveredPaths,
+              );
+              retired.destroy();
+            },
             onLocalEditError: requestReconnect,
             // requestReconnect returns early for anything that is not a
             // reconnect error, so it is NOT an error sink: every settle
@@ -1873,6 +1908,25 @@ export function createWorkspaceEngineCapture(
       onReplayArmed?: () => void,
     ): Promise<void> => {
       try {
+        const replacementClaimId = replacement.lineageClaimId ?? null;
+        const claimChanged = replacementClaimId !== canonicalLineageClaimId;
+        const promotedSameLineage =
+          canonicalLineageClaimId === null &&
+          replacementClaimId !== null &&
+          sharesYDocHistory(doc, replacement.doc);
+        if (claimChanged && !promotedSameLineage) {
+          openingRemoteUpdates.delete(replacement);
+          canonicalDoc = replacement.doc;
+          canonicalLineageClaimId = replacementClaimId;
+          current = replacement;
+          input.onLineageReplaced?.(
+            Y.encodeStateAsUpdate(replacement.doc),
+            [],
+          );
+          doc.destroy();
+          markAlive();
+          return;
+        }
         const opening = openingRemoteUpdates.get(replacement);
         const updatesIncludedInRemoteDelta = opening?.updates.length ?? 0;
 
@@ -1908,6 +1962,7 @@ export function createWorkspaceEngineCapture(
             input.onRemoteUpdate(update);
           }
         }
+        canonicalLineageClaimId = replacementClaimId;
       } catch (error) {
         openingRemoteUpdates.delete(replacement);
         try {
@@ -2044,6 +2099,7 @@ export function createWorkspaceEngineCapture(
     // outside that budget, and keep the full ladder.
     current = await openGeneration(true);
     canonicalDoc = current.doc;
+    canonicalLineageClaimId = current.lineageClaimId ?? null;
     const initialOpening = openingRemoteUpdates.get(current);
     if (initialOpening) {
       initialOpening.installed = true;
@@ -2063,8 +2119,14 @@ export function createWorkspaceEngineCapture(
     const openedLineage = current.lineage;
 
     const restartSafeSession: RestartSafeYDocSession = {
-      doc: canonicalDoc,
+      get doc() {
+        if (canonicalDoc === null) throw closedError();
+        return canonicalDoc;
+      },
       initialUpdate,
+      get lineageClaimId() {
+        return canonicalLineageClaimId;
+      },
       contentKind,
       path: sessionPath,
       applyLocalUpdate(update, onArmed) {
@@ -2115,6 +2177,12 @@ export function createWorkspaceEngineCapture(
             // once-guard makes announcing there a no-op when the failure was
             // asynchronous and the count already rose.
             Y.applyUpdate(doc, update);
+            // This is an invariant breach, not a reconnect. Rebinding would
+            // replace this still-visible editor with the winner and silently
+            // discard the refused keystroke. Keep the old document visible
+            // and report the failure; the server's live-session drain rule
+            // makes this branch unreachable in an ordinary arbitration.
+            if (isLineageChangedCause(error)) throw error;
             // A transient refusal is not a broken generation, and rebinding
             // for one is worse than doing nothing. The provider holds what the
             // engine refused and has already re-armed its own ladder to resend
@@ -3756,6 +3824,10 @@ export function createWorkspaceEngineCapture(
             noteUpdate();
             input.onRemoteUpdate(update);
           },
+          onLineageReplaced: (update, recoveredPaths) => {
+            noteUpdate();
+            input.onLineageReplaced?.(update, recoveredPaths);
+          },
           onSettled,
           onSettleStart,
           onSettleError,
@@ -4108,6 +4180,9 @@ export function createWorkspaceEngineCapture(
                   // that never reached Markdown. Bumping the sequence is
                   // the whole record: whether it outran a settle is
                   // decided by comparing it to what that settle covers.
+                  updateSeq += 1;
+                },
+                onLineageReplaced: () => {
                   updateSeq += 1;
                 },
                 onSettleStart: () => undefined,
@@ -4673,8 +4748,13 @@ export function createWorkspaceEngineCapture(
         // keeps that session and something must still be able to close it.
         liveYDocSessions.set(input.path, liveEntry);
         return {
-          doc: session.doc,
+          get doc() {
+            return session.doc;
+          },
           initialUpdate: session.initialUpdate,
+          get lineageClaimId() {
+            return session.lineageClaimId;
+          },
           contentKind: session.contentKind,
           path: session.path,
           // TWO counters ride this call, and they are not the same count.
@@ -6225,18 +6305,44 @@ export function createWorkspaceEngineCapture(
 
     runRelaySync(task) {
       return enqueueResult("relay sync", async () => {
+        // A joined daemon can pull before any capture task has opened the
+        // versioned store. The incoming moments target `main`, so create that
+        // version before the relay applies them.
+        const engine = await engineStore();
         const result = await task();
         const changed = result.fastForwardedPaths;
         if (changed.length > 0) {
-          // Policy/engine reads only when there is disk work: a quiescent
-          // relay tick must not pay for policy I/O it never uses.
+          // Policy and active-version reads only when there is disk work: a
+          // quiescent relay tick does not need either one.
           const policy = await readPolicyForTask();
-          const engine = await engineStore();
           const activeVersionId = await activeVersionIdOf(engine);
           const materializations: MaterializeOperation[] = [];
           for (const change of changed) {
             if (change.operation === "delete") {
-              materializations.push({ kind: "delete", path: change.path });
+              materializations.push({
+                kind: "delete",
+                path: change.path,
+                ...(change.contentKind === "secret" ? { protected: true } : {}),
+              });
+              continue;
+            }
+            if (change.contentKind === "secret") {
+              const materialized = await secretStoreFor().materializeSecretFile({
+                workspaceId,
+                versionId: activeVersionId,
+                path: change.path,
+              });
+              if (!materialized.present) {
+                throw new Error(
+                  `Protected content for ${change.path} is no longer available.`,
+                );
+              }
+              materializations.push({
+                kind: "write",
+                path: change.path,
+                text: materialized.text,
+                protected: true,
+              });
               continue;
             }
             const snapshot = await engine.readTextFile({
@@ -6248,6 +6354,13 @@ export function createWorkspaceEngineCapture(
             materializations.push(await materializeWriteForSnapshot(engine, snapshot));
           }
           await materialize(materializations, policy);
+          // The daemon watcher must manifest the pulled disk state before the
+          // caller can make its next edit. Otherwise a fast local edit can
+          // coalesce with this materialization as the path's first sight, and
+          // capture correctly refuses to claim the foreign sync head.
+          if (options.daemonOwnsCapture) {
+            await engine.reconcileCapture?.();
+          }
         }
         // Only NOW is the pulled state durable on disk — commit the relay
         // fetch cursor. A throw above leaves the cursor behind so the next

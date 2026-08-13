@@ -3,10 +3,10 @@
 //! post-lease read, the derived key belongs to a DIFFERENT object and the
 //! drain would mutate that doc behind any live editor of it.
 
-use dohc_engine_collab::{ContentKind, DocKey, Regime};
+use dohc_engine_collab::DocKey;
 use dohc_engine_runtime::{CancellationToken, CaptureIngest, NoFaults, WorkspaceSupervisor};
 use dohc_engine_storage::EngineStore;
-use dohc_engine_sync::{LeaseProbe, ReplicationEnvelope, apply_ydoc_envelope};
+use dohc_engine_sync::{LeaseProbe, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
 use dohc_engine_testkit::ScratchDir;
 use std::sync::Arc;
 
@@ -69,21 +69,37 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
     let key = DocKey::new(WS, "main", &object_id).expect("key");
     {
         let mut store = EngineStore::open(&db, 100).expect("open store");
-        dohc_engine_collab::ensure_marker(
-            &mut store,
-            &key,
-            ContentKind::Plaintext,
-            Regime::Replicated,
-            &NoFaults,
-            110,
-        )
-        .expect("replicated marker");
-        let update_bytes = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "parked");
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.plaintext_insert(0, "before");
+        let base_bytes = doc.encode_full_state();
+        let base_sha = store.put_binary_blob(&base_bytes).expect("base blob");
+        let base = ReplicationEnvelope {
+            workspace_id: WS.to_owned(),
+            origin_id: "peer".to_owned(),
+            origin_seq: 0,
+            relay_seq: Some(0),
+            op_kind: "ydoc.update".to_owned(),
+            payload: serde_json::json!({
+                "versionId": "main",
+                "objectId": object_id,
+                "path": PATH,
+                "contentKind": "plaintext",
+                "updateBlobSha256": base_sha.clone(),
+                "lineageClaimId": base_sha.clone(),
+                "isBaseState": true
+            }),
+            recorded_at_ms: 110,
+        };
+        apply_ydoc_envelope(&mut store, &base, &NoFaults, &NoLiveLeases)
+            .expect("apply verified base");
+
+        let update_bytes = doc.plaintext_insert(6, " parked");
         let blob_sha = store.put_binary_blob(&update_bytes).expect("blob");
         let envelope = ReplicationEnvelope {
             workspace_id: WS.to_owned(),
             origin_id: "peer".to_owned(),
-            origin_seq: 0,
+            origin_seq: 1,
+            relay_seq: Some(1),
             op_kind: "ydoc.update".to_owned(),
             payload: serde_json::json!({
                 "versionId": "main",
@@ -91,6 +107,7 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
                 "path": PATH,
                 "contentKind": "plaintext",
                 "updateBlobSha256": blob_sha,
+                "lineageClaimId": base_sha,
                 "isBaseState": false
             }),
             recorded_at_ms: 120,

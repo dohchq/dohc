@@ -20,12 +20,19 @@ import { useEngineDoc } from "./useEngineDoc";
 afterEach(cleanup);
 
 type SaveStateListener = (event: EngineYDocSaveStateEvent) => void;
+type LineageReplacementListener = (event: {
+  sessionId: string;
+  update: Uint8Array;
+  recoveredPaths: string[];
+  lineageGeneration: number;
+}) => void;
 
 function harnessBridge() {
   const saveStateListeners = new Set<SaveStateListener>();
   const remoteUpdateListeners = new Set<
     (event: { sessionId: string; update: Uint8Array }) => void
   >();
+  const lineageReplacementListeners = new Set<LineageReplacementListener>();
   const applied: Array<{ sessionId: string; seq: number }> = [];
   let openedSessionId: string | null = null;
   const doc = new Y.Doc();
@@ -48,7 +55,11 @@ function harnessBridge() {
       if (removalInProgress) {
         return { available: false, removalInProgress };
       }
-      return { available: true, initialUpdate: Y.encodeStateAsUpdate(doc) };
+      return {
+        available: true,
+        initialUpdate: Y.encodeStateAsUpdate(doc),
+        lineageGeneration: 1,
+      };
     },
     async applyEngineYDocUpdate(payload: { sessionId: string; seq: number }) {
       applied.push({ sessionId: payload.sessionId, seq: payload.seq });
@@ -58,6 +69,10 @@ function harnessBridge() {
     ) => {
       remoteUpdateListeners.add(listener);
       return () => remoteUpdateListeners.delete(listener);
+    },
+    onEngineYDocLineageReplacement: (listener: LineageReplacementListener) => {
+      lineageReplacementListeners.add(listener);
+      return () => lineageReplacementListeners.delete(listener);
     },
     onEngineYDocSaveState: (listener: SaveStateListener) => {
       saveStateListeners.add(listener);
@@ -82,6 +97,22 @@ function harnessBridge() {
     const event = { sessionId: openedSessionId, update };
     act(() => {
       for (const listener of [...remoteUpdateListeners]) listener(event);
+    });
+  }
+
+  function emitLineageReplacement(text: string): void {
+    if (openedSessionId === null) throw new Error("session not open yet");
+    const replacement = new Y.Doc();
+    replacement.getMap("meta").set("contentKind", "plain-text");
+    replacement.getText("plainText").insert(0, text);
+    const event = {
+      sessionId: openedSessionId,
+      update: Y.encodeStateAsUpdate(replacement),
+      recoveredPaths: [],
+      lineageGeneration: 2,
+    };
+    act(() => {
+      for (const listener of [...lineageReplacementListeners]) listener(event);
     });
   }
 
@@ -113,6 +144,7 @@ function harnessBridge() {
     emit,
     emitNow,
     emitRemoteEdit,
+    emitLineageReplacement,
     applied,
     sessionId: () => openedSessionId,
     setRemovalInProgress(value: typeof removalInProgress) {
@@ -200,6 +232,18 @@ it("never flips back to Saved on a timer — only a real settle report clears it
   // Only main's real report clears it.
   harness.emit("saved", harness.applied.at(-1)!.seq);
   expect(screen.getByTestId("state").textContent).toBe("saved");
+});
+
+it("observes unsaved edits on a replacement document", async () => {
+  await mountBound();
+  harness.emitLineageReplacement("winner");
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+
+  expect(screen.getByTestId("state").textContent).toBe("saving");
+  expect(harness.applied).toHaveLength(1);
 });
 
 it("shows the failure when a settle fails, instead of reading Saved", async () => {

@@ -21,6 +21,17 @@ function handlerSource(channel: string): string {
 }
 
 describe("engine Y.Doc save-state reporting in main", () => {
+  it("pairs the open generation with the live document state at hand-over", () => {
+    const handler = handlerSource("engineYDocOpen");
+    const answerAt = handler.lastIndexOf(
+      "return OpenEngineYDocSessionResult.parse({",
+    );
+    const answer = handler.slice(answerAt, handler.indexOf("});", answerAt) + 3);
+    expect(answer).toContain("initialUpdate: Y.encodeStateAsUpdate(session.doc)");
+    expect(answer).toContain("lineageGeneration");
+    expect(answer).not.toContain("initialUpdate: session.initialUpdate");
+  });
+
   it("keeps each move and delete capture lifecycle inside one exclusive workspace operation", () => {
     for (const channel of ["moveWorkspacePath", "deleteWorkspacePath"]) {
       const handler = handlerSource(channel);

@@ -1,11 +1,19 @@
 import { expect, test, type Page } from "@playwright/test";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   DohcDesktopBridge,
   SyncStatusResult,
 } from "../src/ipc/bridgeContract";
 import { RelayFilePeer } from "../src/testing/relayFilePeer";
+import { createWorkspaceEngineCapture } from "../src/workspaces/workspaceEngineCapture";
+import {
+  loadSecretDataKey,
+  SECRET_KEY_RELATIVE_PATH,
+} from "../src/workspaces/workspaceDataKey";
+import { enrollWorkspaceKeyEnvelope } from "../src/workspaces/workspaceKeyEnvelopeEnrollment";
+import { waitForPathMoments } from "../src/workspaces/waitForPathMoments";
+import { openLiveDaemonWorkspace } from "./helpers/daemonSeed";
 import { claimRelayWorkspace, relayServesWorkspace } from "./helpers/relayPeer";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -34,17 +42,18 @@ import {
 // because the serial harness cannot run two Electron instances. The relay is
 // the real service, spawned as a child process with its SQLite on tmpfs.
 //
-// Spec 1: join flow — seed a synced workspace from the protocol peer, drive
+// Spec 1: two real daemon-backed machines edit offline. The Electron app
+//         reviews and resolves the conflict through the product UI.
+// Spec 2: join flow — seed a synced workspace from the protocol peer, drive
 //         the app's "Join a synced workspace" UI, assert files, history, chats
 //         and search all arrived.
-// Spec 2: enabling sync claims the workspace on the relay, with no
+// Spec 3: enabling sync claims the workspace on the relay, with no
 //         workspace-api preclaim.
-//
-// A third spec (offline divergence -> conflict notice -> resolve) was removed;
-// see the note below where it used to live.
 
 const TOKEN = "test:e2e-user";
 type SyncStatusBridge = Pick<DohcDesktopBridge, "getSyncStatus">;
+type WorkspaceRegistryBridge = Pick<DohcDesktopBridge, "getWorkspaceRegistry">;
+type EngineMomentsBridge = Pick<DohcDesktopBridge, "listEngineMoments">;
 
 async function readSyncStatus(
   page: Page,
@@ -79,10 +88,230 @@ async function waitForLaterSync(
   );
 }
 
-// The two-machine conflict-review scenario that lived here was deleted: it was
-// `test.fixme`d because file content never reaches the relay (#356), and its
-// acceptance criteria are recorded there.
+async function workspaceIsRegistered(
+  page: Page,
+  workspaceId: string,
+): Promise<boolean> {
+  return await page.evaluate(async (id) => {
+    const api = (window as unknown as { dohcDesktop?: WorkspaceRegistryBridge })
+      .dohcDesktop;
+    if (!api) throw new Error("desktop bridge is unavailable");
+    const registry = await api.getWorkspaceRegistry();
+    return registry.workspaces.some((workspace) => workspace.workspaceId === id);
+  }, workspaceId);
+}
 
+async function pathMomentCount(
+  page: Page,
+  workspaceId: string,
+  path: string,
+): Promise<number> {
+  return await page.evaluate(async ({ workspaceId, path }) => {
+    const api = (window as unknown as { dohcDesktop?: EngineMomentsBridge })
+      .dohcDesktop;
+    if (!api) throw new Error("desktop bridge is unavailable");
+    const result = await api.listEngineMoments({ workspaceId, limit: 500 });
+    return result.moments.filter((moment) => moment.path === path).length;
+  }, { workspaceId, path });
+}
+
+async function fileMatches(path: string, expected: Buffer): Promise<boolean> {
+  try {
+    return (await readFile(path)).equals(expected);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+test("offline edits reach the Electron conflict review and its resolution survives restart", async () => {
+  test.setTimeout(240_000);
+  const temp = await createTempWorkspace();
+  const workspaceId = "conflict-review-e2e";
+  const path = "notes/plan.md";
+  const base = "shared draft\n";
+  const appEdit = "edit from this machine\n";
+  const peerEdit = "edit from the other machine\n";
+  const sourceRoot = join(temp.baseDir, "conflict-source");
+  const relayDb = join(temp.baseDir, "conflict-relay.sqlite");
+  let relay: SyncRelayHandle | null = null;
+  let sourceWorkspace: Awaited<
+    ReturnType<typeof openLiveDaemonWorkspace>
+  > | null = null;
+  let sourceCapture: ReturnType<typeof createWorkspaceEngineCapture> | null =
+    null;
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await mkdir(join(sourceRoot, "notes"), { recursive: true });
+    relay = await spawnSyncRelay({ dbPath: relayDb });
+    const relayPort = relay.port;
+    const relayConfig = { baseUrl: relay.baseUrl, token: TOKEN };
+
+    const liveSource = await openLiveDaemonWorkspace(
+      { workspaceId, rootPath: sourceRoot },
+      { maxRestarts: 0 },
+    );
+    sourceWorkspace = liveSource;
+    const capture = createWorkspaceEngineCapture({
+      workspaceId,
+      rootPath: sourceRoot,
+      rustEngineSessions: liveSource.sessions,
+      daemonOwnsCapture: true,
+    });
+    sourceCapture = capture;
+    const sourceRelay = liveSource.relay.bind({
+      workspaceId,
+      rootPath: sourceRoot,
+      relay: relayConfig,
+    });
+
+    await sourceRelay.claim();
+    await liveSource.chats.ensureGeneralChannel({ workspaceId });
+    expect((await sourceRelay.push()).pushed).toBeGreaterThan(0);
+    await writeFile(join(sourceRoot, path), base);
+    capture.captureBatch([{ path, operation: "update" }]);
+    await waitForPathMoments(capture, path, 1);
+    expect((await sourceRelay.push()).pushed).toBeGreaterThan(0);
+
+    await seedCloudCredentials(temp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      userId: "e2e-user",
+    });
+    desktop = await launchDesktopApp({
+      workspace: temp,
+      env: {
+        DOHC_TEST_SYNC_DEBOUNCE_MS: "150",
+        DOHC_TEST_SYNC_BACKOFF_MS: "250",
+      },
+    });
+    let page = desktop.page;
+    await page.getByTestId("first-run-join-synced").click();
+    await page
+      .getByTestId("join-sync-code")
+      .fill(`dohc-sync:${workspaceId}:${relay.baseUrl}`);
+    await page.getByTestId("join-choose-folder").click();
+    await page.getByTestId("join-workspace-start").click();
+    await waitForWorkspaceReady(page);
+    await waitForWorkspaceFile(page, workspaceId, path);
+    expect(await readFile(join(temp.rootPath, path), "utf8")).toBe(base);
+
+    const appMomentsBeforeEdit = await pathMomentCount(page, workspaceId, path);
+
+    // Both machines edit from the same base while the relay is unavailable.
+    await relay.stop();
+    relay = null;
+    await writeWorkspaceFiles(temp, [{ path, contents: appEdit }]);
+    await expect
+      .poll(() => pathMomentCount(page, workspaceId, path), {
+        timeout: 30_000,
+      })
+      .toBeGreaterThan(appMomentsBeforeEdit);
+    await writeFile(join(sourceRoot, path), peerEdit);
+    capture.captureBatch([{ path, operation: "update" }]);
+    await waitForPathMoments(capture, path, 2);
+
+    // The same relay data returns on the same address. The source pushes its
+    // edit, and the Electron app pushes its queued edit before it pulls.
+    relay = await spawnSyncRelay({ dbPath: relayDb, port: relayPort });
+    expect((await sourceRelay.push()).pushed).toBeGreaterThan(0);
+    await writeWorkspaceFiles(temp, [
+      { path: "notes/sync-nudge.md", contents: "sync now\n" },
+    ]);
+
+    await expect(page.getByTestId("sync-status")).toHaveAttribute(
+      "data-state",
+      "conflict",
+      { timeout: 90_000 },
+    );
+    await page.getByTestId("notice-center-toggle").click();
+    const notice = page.getByTestId("notice-sync-conflict");
+    await expect(notice).toBeVisible();
+    await expect(notice).toContainText("changed on two machines");
+    await notice.getByRole("button", { name: "Review", exact: true }).click();
+
+    const dialog = page.getByTestId("conflict-review-dialog");
+    await expect(dialog).toBeVisible();
+    const card = dialog.locator(
+      `[data-testid="version-conflict"][data-conflict-path="${path}"]`,
+    );
+    await expect(card).toBeVisible();
+    await expect(card.getByText("On this machine", { exact: true })).toBeVisible();
+    await expect(
+      card.getByText("On your other machine", { exact: true }),
+    ).toBeVisible();
+    await expect(card).toContainText(appEdit.trim());
+    await expect(card).toContainText(peerEdit.trim());
+
+    // Pull the app's edit into the source daemon before resolving. This proves
+    // that the later zero count closes a real mirror conflict.
+    await expect
+      .poll(
+        async () => {
+          await capture.runRelaySync(() => sourceRelay.pull());
+          return await capture.countOpenConflicts();
+        },
+        { timeout: 90_000, intervals: [500] },
+      )
+      .toBe(1);
+
+    await card.getByTestId("version-conflict-keep-incoming").click();
+    await expect(page.getByTestId("conflict-review-empty")).toBeVisible();
+    await page.getByTestId("conflict-review-done").click();
+    await expect
+      .poll(() => readFile(join(temp.rootPath, path), "utf8"), {
+        timeout: 30_000,
+      })
+      .toBe(peerEdit);
+
+    await expect
+      .poll(
+        async () => {
+          await capture.runRelaySync(() => sourceRelay.pull());
+          return await capture.countOpenConflicts();
+        },
+        { timeout: 90_000, intervals: [500] },
+      )
+      .toBe(0);
+    expect(await readFile(join(sourceRoot, path), "utf8")).toBe(peerEdit);
+
+    // Relaunch the real app and daemon with the same profile and workspace.
+    // The selected bytes and the closed conflict must remain durable.
+    await desktop.close();
+    desktop = null;
+    desktop = await launchDesktopApp({
+      workspace: temp,
+      env: {
+        DOHC_TEST_SYNC_DEBOUNCE_MS: "150",
+        DOHC_TEST_SYNC_BACKOFF_MS: "250",
+      },
+    });
+    page = desktop.page;
+    await waitForWorkspaceReady(page);
+    expect((await activeWorkspace(page, temp.rootPath)).workspaceId).toBe(
+      workspaceId,
+    );
+    expect(await readFile(join(temp.rootPath, path), "utf8")).toBe(peerEdit);
+    const remaining = await page.evaluate(async (id) => {
+      const api = (window as unknown as { dohcDesktop?: DohcDesktopBridge })
+        .dohcDesktop;
+      if (!api) throw new Error("desktop bridge is unavailable");
+      return await api.listWorkspaceVersionConflicts({ workspaceId: id });
+    }, workspaceId);
+    expect(remaining.conflicts).toEqual([]);
+    expect(remaining.nextAfterConflictId).toBeNull();
+    await expect(page.getByTestId("sync-status")).not.toHaveAttribute(
+      "data-state",
+      "conflict",
+    );
+  } finally {
+    await sourceCapture?.stop().catch(() => undefined);
+    await sourceWorkspace?.close().catch(() => undefined);
+    await relay?.stop();
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
 
 test("join flow: paste the sync code, pick a folder, and the workspace arrives with history, chats, and search", async () => {
   test.setTimeout(240_000);
@@ -291,6 +520,157 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
   } finally {
     // Stop the relay child before removing the temp tree it holds open, or
     // Windows leaks the dir with EBUSY (POSIX tolerates the reverse order).
+    await relay?.stop();
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("protected join rolls back for a missing passphrase, then restores exact secret and binary bytes across restart", async () => {
+  test.setTimeout(240_000);
+  const temp = await createTempWorkspace();
+  const workspaceId = "protected-join-e2e";
+  const passphrase = "correct horse battery staple";
+  const secretPath = ".env";
+  const binaryPath = "exact-bytes.bin";
+  const secretBytes = Buffer.from(
+    "ACCESS_TOKEN=galaxy-brain-secret\r\nEMPTY=\r\n",
+    "utf8",
+  );
+  const binaryBytes = Buffer.from([0x00, 0xff, 0x80, 0x0a, 0x7f, 0x42]);
+  const sourceRoot = join(temp.baseDir, "protected-source");
+  let relay: SyncRelayHandle | null = null;
+  let sourceWorkspace: Awaited<
+    ReturnType<typeof openLiveDaemonWorkspace>
+  > | null = null;
+  let sourceCapture: ReturnType<typeof createWorkspaceEngineCapture> | null =
+    null;
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await mkdir(sourceRoot, { recursive: true });
+    relay = await spawnSyncRelay({
+      dbPath: join(temp.baseDir, "protected-relay.sqlite"),
+    });
+    const relayConfig = { baseUrl: relay.baseUrl, token: TOKEN };
+
+    // Seed through the same daemon capture, relay journal, and key-envelope
+    // protocol that the product uses. Only the source machine is test-driven;
+    // the joining machine below goes through the public renderer and IPC.
+    sourceWorkspace = await openLiveDaemonWorkspace(
+      { workspaceId, rootPath: sourceRoot },
+      { maxRestarts: 0 },
+    );
+    sourceCapture = createWorkspaceEngineCapture({
+      workspaceId,
+      rootPath: sourceRoot,
+      rustEngineSessions: sourceWorkspace.sessions,
+      daemonOwnsCapture: true,
+    });
+    const sourceRelay = sourceWorkspace.relay.bind({
+      workspaceId,
+      rootPath: sourceRoot,
+      relay: relayConfig,
+    });
+    await sourceRelay.claim();
+    const dataKey = await loadSecretDataKey(sourceRoot, {
+      createIfMissing: true,
+    });
+    await enrollWorkspaceKeyEnvelope({
+      workspaceId,
+      dataKey,
+      passphrase,
+      transport: sourceRelay,
+      installDataKey: async () => {
+        throw new Error("The source workspace must keep its existing key.");
+      },
+    });
+
+    // Establish the relay position before file capture so the moments are
+    // journaled on the claimed replication coordinate.
+    await sourceWorkspace.chats.ensureGeneralChannel({ workspaceId });
+    expect((await sourceRelay.push()).pushed).toBeGreaterThan(0);
+    await writeFile(join(sourceRoot, secretPath), secretBytes);
+    await writeFile(join(sourceRoot, binaryPath), binaryBytes);
+    sourceCapture.captureBatch([
+      { path: secretPath, operation: "update" },
+      { path: binaryPath, operation: "update" },
+    ]);
+    await Promise.all([
+      waitForPathMoments(sourceCapture, secretPath, 1),
+      waitForPathMoments(sourceCapture, binaryPath, 1),
+    ]);
+    expect((await sourceRelay.push()).pushed).toBeGreaterThan(0);
+
+    // Release the source daemon before Electron starts. The relay remains the
+    // only shared boundary between the two machines.
+    await sourceCapture.stop();
+    sourceCapture = null;
+    await sourceWorkspace.close();
+    sourceWorkspace = null;
+
+    await seedCloudCredentials(temp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      userId: "e2e-user",
+    });
+    desktop = await launchDesktopApp({ workspace: temp });
+    let page = desktop.page;
+
+    await page.getByTestId("first-run-join-synced").click();
+    await page
+      .getByTestId("join-sync-code")
+      .fill(`dohc-sync:${workspaceId}:${relay.baseUrl}`);
+    await page.getByTestId("join-choose-folder").click();
+    await page.getByTestId("join-workspace-start").click();
+
+    // The missing passphrase is discovered at the public IPC boundary. The
+    // attempt must leave neither local files nor a hidden registry entry.
+    await expect(page.getByTestId("join-sync-passphrase")).toBeVisible();
+    await expect(page.getByTestId("join-error")).toHaveText(
+      "This workspace has protected files. Enter the protected-file passphrase to join.",
+    );
+    await expect
+      .poll(async () => (await readdir(temp.rootPath)).sort())
+      .toEqual([]);
+    await expect.poll(() => workspaceIsRegistered(page, workspaceId)).toBe(false);
+
+    // Retry through the same public button. Successful materialization proves
+    // the envelope key was installed before the pull tried to decrypt .env.
+    await page.getByTestId("join-sync-passphrase").fill(passphrase);
+    await page.getByTestId("join-workspace-start").click();
+    await waitForWorkspaceReady(page);
+    expect((await activeWorkspace(page, temp.rootPath)).workspaceId).toBe(
+      workspaceId,
+    );
+    await expect
+      .poll(() => fileMatches(join(temp.rootPath, secretPath), secretBytes))
+      .toBe(true);
+    await expect
+      .poll(() => fileMatches(join(temp.rootPath, binaryPath), binaryBytes))
+      .toBe(true);
+    expect(
+      (await readFile(join(temp.rootPath, SECRET_KEY_RELATIVE_PATH))).length,
+    ).toBeGreaterThan(0);
+
+    // Relaunch with the same profile and registry. The joined key and both
+    // exact payloads must remain usable without another enrollment prompt.
+    await desktop.close();
+    desktop = null;
+    desktop = await launchDesktopApp({ workspace: temp });
+    page = desktop.page;
+    await waitForWorkspaceReady(page);
+    expect((await activeWorkspace(page, temp.rootPath)).workspaceId).toBe(
+      workspaceId,
+    );
+    expect(await fileMatches(join(temp.rootPath, secretPath), secretBytes)).toBe(
+      true,
+    );
+    expect(await fileMatches(join(temp.rootPath, binaryPath), binaryBytes)).toBe(
+      true,
+    );
+  } finally {
+    await sourceCapture?.stop().catch(() => undefined);
+    await sourceWorkspace?.close().catch(() => undefined);
     await relay?.stop();
     await cleanupDesktopWorkspace(desktop, temp);
   }

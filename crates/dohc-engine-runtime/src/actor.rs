@@ -86,13 +86,13 @@ use dohc_engine_sync::{
     ApplyOutcome, BlobDownloadRequest, BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse,
     BlobUploadRequest, ClaimRequest, ClaimResponse, ConflictApplyResult, EpochRequest,
     EpochResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
-    KeyEnvelopeResponse, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
-    PushResponse, RecoverResponse, RelayCursor, RelayError, RelaySyncClient, RelayTransport,
-    ReplicationEnvelope, ShareBlobRequest, ShareCursor, ShareViewPullOutcome, ShareViewRequest,
-    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRequest,
-    SharedChannelResponse, SyncPassOutcome, adopt_join_identity, apply_conflict_envelope,
-    read_replayed_refusal, read_sync_identity, retain_refusal_for_direct_retry,
-    ydoc_update_payload,
+    KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, ProbeRequest, ProbeResponse,
+    PullRequest, PullResponse, PushRequest, PushResponse, RecoverResponse, RelayCursor, RelayError,
+    RelaySyncClient, RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareCursor,
+    ShareViewPullOutcome, ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome,
+    SharedChannelPushOutcome, SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
+    adopt_join_identity, apply_conflict_envelope, read_replayed_refusal, read_sync_identity,
+    retain_refusal_for_direct_retry, ydoc_update_payload,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use rusqlite::{OptionalExtension, params};
@@ -227,7 +227,16 @@ pub struct YdocOpenState {
     /// the session's settle preimage expectation until its first settle.
     pub head_blob_sha256: Option<String>,
     pub lineage_existing: bool,
+    pub lineage_claim_id: Option<String>,
     pub seed_markdown: Option<String>,
+}
+
+/// Actor-owned state returned when a live session refreshes its Y.Doc.
+#[derive(Debug)]
+pub struct YdocResyncState {
+    pub initial_update: Vec<u8>,
+    pub lineage_claim_id: Option<String>,
+    pub recovered_paths: Vec<String>,
 }
 
 /// Result of the single moment+snapshot+materialization settlement path.
@@ -346,6 +355,7 @@ const RELAY_IO_PENDING: &str = "relay-io-pending";
 enum RelayIoRequest {
     Push(PushRequest),
     Pull(PullRequest),
+    LookupCoordinate(LogCoordinateRequest),
     Probe(ProbeRequest),
     Claim(ClaimRequest),
     RotateEpoch(EpochRequest),
@@ -364,6 +374,7 @@ enum RelayIoRequest {
 enum RelayIoResponse {
     Push(PushResponse),
     Pull(PullResponse),
+    LookupCoordinate(LogCoordinateResponse),
     Probe(ProbeResponse),
     Claim(ClaimResponse),
     RotateEpoch(EpochResponse),
@@ -506,6 +517,13 @@ macro_rules! relay_transport_method {
 impl RelayTransport for DeferredRelayTransport {
     relay_transport_method!(push, PushRequest, Push, PushResponse, Push);
     relay_transport_method!(pull, PullRequest, Pull, PullResponse, Pull);
+    relay_transport_method!(
+        lookup_log_coordinate,
+        LogCoordinateRequest,
+        LookupCoordinate,
+        LogCoordinateResponse,
+        LookupCoordinate
+    );
     relay_transport_method!(probe, ProbeRequest, Probe, ProbeResponse, Probe);
     relay_transport_method!(claim_workspace, ClaimRequest, Claim, ClaimResponse, Claim);
     relay_transport_method!(
@@ -598,6 +616,7 @@ mod deferred_relay_tests {
                     workspace_id: "workspace".to_owned(),
                     origin_id: "origin".to_owned(),
                     origin_seq: i64::try_from(origin_seq).expect("sequence"),
+                    relay_seq: None,
                     op_kind: "probe".to_owned(),
                     payload: serde_json::json!({"body": "retained until consumed"}),
                     recorded_at_ms: 1_000,
@@ -805,6 +824,11 @@ pub trait SelfWriteRecorder: Send + Sync {
     /// whose materialization conflicted (the file was never replaced, so the
     /// entry must not survive to suppress a genuine capture).
     fn retract(&self, workspace_id: &str, path: &str, sha256: &str);
+}
+
+struct YdocCloseMaterialization {
+    root_dir: PathBuf,
+    self_writes: Arc<dyn SelfWriteRecorder>,
 }
 
 enum Command {
@@ -1184,6 +1208,7 @@ enum Command {
         update: Vec<u8>,
         request_id: Option<String>,
         actor_origin_id: Option<String>,
+        expected_lineage_claim_id: Option<String>,
         require_empty_lineage: bool,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
@@ -1195,6 +1220,7 @@ enum Command {
         key: DocKey,
         path: String,
         content_kind: ContentKind,
+        expected_lineage_claim_id: Option<String>,
         expected_head_sha: Option<String>,
         session_id: String,
         self_writes: Arc<dyn SelfWriteRecorder>,
@@ -1205,15 +1231,25 @@ enum Command {
     },
     YdocResync {
         key: DocKey,
+        expected_lineage_claim_id: Option<String>,
         token: CancellationToken,
-        reply: oneshot::Sender<Result<Vec<u8>, RuntimeError>>,
+        reply: oneshot::Sender<Result<YdocResyncState, RuntimeError>>,
     },
     YdocCloseSession {
         key: DocKey,
+        materialization: Option<YdocCloseMaterialization>,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Option<CloseOutcome>, RuntimeError>>,
+    },
+    RepairConflictedYdocRecoveries {
+        workspace_id: String,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<
+            Result<Vec<dohc_engine_sync::YdocRecoveryMaterialization>, RuntimeError>,
+        >,
     },
     MaterializeReplayPending {
         root_dir: PathBuf,
@@ -1225,6 +1261,14 @@ enum Command {
         root_dir: PathBuf,
         workspace_id: String,
         self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<(), RuntimeError>>,
+    },
+    MaterializeReplaySelectedForFence {
+        root_dir: PathBuf,
+        workspace_id: String,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        materialization_job_ids: Vec<String>,
         now_ms: i64,
         reply: oneshot::Sender<Result<(), RuntimeError>>,
     },
@@ -3313,6 +3357,7 @@ impl ActorHandle {
         regime: Regime,
         update: Vec<u8>,
         actor_origin_id: Option<String>,
+        expected_lineage_claim_id: Option<String>,
         require_empty_lineage: bool,
         request_id: Option<String>,
         now_ms: i64,
@@ -3329,6 +3374,7 @@ impl ActorHandle {
                 update,
                 request_id,
                 actor_origin_id,
+                expected_lineage_claim_id,
                 require_empty_lineage,
                 now_ms,
                 faults,
@@ -3347,6 +3393,7 @@ impl ActorHandle {
         key: DocKey,
         path: String,
         content_kind: ContentKind,
+        expected_lineage_claim_id: Option<String>,
         expected_head_sha: Option<String>,
         session_id: String,
         self_writes: Arc<dyn SelfWriteRecorder>,
@@ -3361,6 +3408,7 @@ impl ActorHandle {
                 key,
                 path,
                 content_kind,
+                expected_lineage_claim_id,
                 expected_head_sha,
                 session_id,
                 self_writes,
@@ -3377,11 +3425,17 @@ impl ActorHandle {
     pub async fn ydoc_resync(
         &self,
         key: DocKey,
+        expected_lineage_claim_id: Option<String>,
         token: CancellationToken,
-    ) -> Result<Vec<u8>, RuntimeError> {
+    ) -> Result<YdocResyncState, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
-            .send(Command::YdocResync { key, token, reply })
+            .send(Command::YdocResync {
+                key,
+                expected_lineage_claim_id,
+                token,
+                reply,
+            })
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
@@ -3394,11 +3448,69 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<Option<CloseOutcome>, RuntimeError> {
+        self.ydoc_close_session_inner(key, None, now_ms, faults, token)
+            .await
+    }
+
+    /// Close a live Y.Doc and materialize only the projection jobs created by
+    /// deferred updates that the close releases.
+    pub async fn ydoc_close_session_materialized(
+        &self,
+        root_dir: PathBuf,
+        key: DocKey,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Option<CloseOutcome>, RuntimeError> {
+        self.ydoc_close_session_inner(
+            key,
+            Some(YdocCloseMaterialization {
+                root_dir,
+                self_writes,
+            }),
+            now_ms,
+            faults,
+            token,
+        )
+        .await
+    }
+
+    async fn ydoc_close_session_inner(
+        &self,
+        key: DocKey,
+        materialization: Option<YdocCloseMaterialization>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Option<CloseOutcome>, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::YdocCloseSession {
                 key,
+                materialization,
                 now_ms,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Move disk-conflicted Y.Doc recovery artifacts to deterministic free
+    /// paths after capture has ingested the unexpected occupants.
+    pub async fn repair_conflicted_ydoc_recoveries(
+        &self,
+        workspace_id: String,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Vec<dohc_engine_sync::YdocRecoveryMaterialization>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::RepairConflictedYdocRecoveries {
+                workspace_id,
                 faults,
                 token,
                 reply,
@@ -3446,6 +3558,31 @@ impl ActorHandle {
                 root_dir,
                 workspace_id,
                 self_writes,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Strictly replay one caller-owned set of pending materialization jobs.
+    /// Jobs outside this set retain their existing status for ordinary replay.
+    pub async fn materialize_replay_selected_for_fence(
+        &self,
+        root_dir: PathBuf,
+        workspace_id: String,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        materialization_job_ids: Vec<String>,
+        now_ms: i64,
+    ) -> Result<(), RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::MaterializeReplaySelectedForFence {
+                root_dir,
+                workspace_id,
+                self_writes,
+                materialization_job_ids,
                 now_ms,
                 reply,
             })
@@ -6300,6 +6437,9 @@ fn execute_http_request(
     match request {
         RelayIoRequest::Push(request) => transport.push(request).map(RelayIoResponse::Push),
         RelayIoRequest::Pull(request) => transport.pull(request).map(RelayIoResponse::Pull),
+        RelayIoRequest::LookupCoordinate(request) => transport
+            .lookup_log_coordinate(request)
+            .map(RelayIoResponse::LookupCoordinate),
         RelayIoRequest::Probe(request) => transport.probe(request).map(RelayIoResponse::Probe),
         RelayIoRequest::Claim(request) => transport
             .claim_workspace(request)
@@ -7363,6 +7503,7 @@ fn worker_main(
                 update,
                 request_id,
                 actor_origin_id,
+                expected_lineage_claim_id,
                 require_empty_lineage,
                 now_ms,
                 faults,
@@ -7377,6 +7518,7 @@ fn worker_main(
                     regime,
                     &update,
                     actor_origin_id,
+                    expected_lineage_claim_id,
                     require_empty_lineage,
                     request_id,
                     now_ms,
@@ -7390,6 +7532,7 @@ fn worker_main(
                 key,
                 path,
                 content_kind,
+                expected_lineage_claim_id,
                 expected_head_sha,
                 session_id,
                 self_writes,
@@ -7404,6 +7547,7 @@ fn worker_main(
                     &key,
                     &path,
                     content_kind,
+                    expected_lineage_claim_id.as_deref(),
                     expected_head_sha,
                     &session_id,
                     self_writes.as_ref(),
@@ -7413,19 +7557,54 @@ fn worker_main(
                 );
                 let _ = reply.send(outcome);
             }
-            Command::YdocResync { key, token, reply } => {
-                let outcome = ydoc_resync_on_store(&mut store, &key, &token);
+            Command::YdocResync {
+                key,
+                expected_lineage_claim_id,
+                token,
+                reply,
+            } => {
+                let outcome = ydoc_resync_on_store(
+                    &mut store,
+                    &key,
+                    expected_lineage_claim_id.as_deref(),
+                    &token,
+                );
                 let _ = reply.send(outcome);
             }
             Command::YdocCloseSession {
                 key,
+                materialization,
                 now_ms,
                 faults,
                 token,
                 reply,
             } => {
-                let outcome =
-                    ydoc_close_session_on_store(&mut store, &key, now_ms, faults.as_ref(), &token);
+                let outcome = ydoc_close_session_on_store(
+                    &mut store,
+                    &key,
+                    materialization.as_ref(),
+                    now_ms,
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::RepairConflictedYdocRecoveries {
+                workspace_id,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    dohc_engine_sync::repair_conflicted_ydoc_recoveries(
+                        &mut store,
+                        &workspace_id,
+                        faults.as_ref(),
+                    )
+                    .map_err(RuntimeError::from)
+                };
                 let _ = reply.send(outcome);
             }
             Command::MaterializeReplayPending {
@@ -7478,6 +7657,38 @@ fn worker_main(
                         Err(RuntimeError::ActiveVersionMaterializationIncomplete {
                             failed_jobs: summary.failed,
                         })
+                    }
+                });
+                let _ = reply.send(outcome);
+            }
+            Command::MaterializeReplaySelectedForFence {
+                root_dir,
+                workspace_id,
+                self_writes,
+                materialization_job_ids,
+                now_ms,
+                reply,
+            } => {
+                let selected: HashSet<String> = materialization_job_ids.into_iter().collect();
+                let outcome = replay_pending_materializations(
+                    &mut store,
+                    &root_dir,
+                    MaterializationReplayScope {
+                        workspace_id: &workspace_id,
+                        self_writes: Some(self_writes.as_ref()),
+                    },
+                    now_ms,
+                    &NoFaults,
+                    Some(&selected),
+                    false,
+                )
+                .and_then(|summary| {
+                    let failed_jobs =
+                        summary.failed + selected.len().saturating_sub(summary.selected_seen);
+                    if failed_jobs == 0 {
+                        Ok(())
+                    } else {
+                        Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs })
                     }
                 });
                 let _ = reply.send(outcome);
@@ -8945,7 +9156,7 @@ fn ydoc_open_state_on_store(
     let lineage_existing = persisted
         .as_ref()
         .is_some_and(|persisted| ydoc_marker_has_durable_state(&persisted.marker));
-    let (content_kind, regime, initial_update) = match persisted {
+    let (content_kind, regime, initial_update, lineage_claim_id) = match persisted {
         Some(persisted) => {
             let marker = &persisted.marker;
             let mut kind = marker.content_kind;
@@ -8974,7 +9185,12 @@ fn ydoc_open_state_on_store(
                     }
                 }
             }
-            (kind, marker.regime, persisted.doc.encode_full_state())
+            (
+                kind,
+                marker.regime,
+                persisted.doc.encode_full_state(),
+                marker.lineage_claim_id.clone(),
+            )
         }
         None => {
             let doc = Ydoc::wire();
@@ -8986,6 +9202,7 @@ fn ydoc_open_state_on_store(
                 requested_content_kind.unwrap_or(ContentKind::Plaintext),
                 Regime::LocalOnly,
                 doc.encode_full_state(),
+                None,
             )
         }
     };
@@ -8996,6 +9213,7 @@ fn ydoc_open_state_on_store(
         regime,
         initial_update,
         lineage_existing,
+        lineage_claim_id,
         seed_markdown: (!lineage_existing)
             .then(|| head.map(|snapshot| snapshot.text))
             .flatten(),
@@ -9011,6 +9229,7 @@ fn ydoc_record_update_on_store(
     regime: Regime,
     update: &[u8],
     actor_origin_id: Option<String>,
+    expected_lineage_claim_id: Option<String>,
     require_empty_lineage: bool,
     request_id: Option<String>,
     now_ms: i64,
@@ -9036,7 +9255,7 @@ fn ydoc_record_update_on_store(
     let journal_key = key.clone();
     let journal_path = path.to_owned();
     let journal_kind = content_kind;
-    match dohc_engine_collab::record_local_update_creating_marker_guarded(
+    match dohc_engine_collab::record_local_update_creating_marker_guarded_for_lineage(
         store,
         key,
         Some(path),
@@ -9044,6 +9263,7 @@ fn ydoc_record_update_on_store(
         regime,
         update,
         actor_origin_id.as_deref(),
+        expected_lineage_claim_id.as_deref(),
         // Parent row, seed guard, marker, append, and outbound journal all
         // commit in ONE transaction — no bare-parent crash window, and a
         // timed-out-commit seed retry DEDUPES inside the guard instead of
@@ -9076,6 +9296,11 @@ fn ydoc_record_update_on_store(
                 dohc_engine_sync::BaseOrigination::NothingToDo => false,
             };
             if !base_originated && outcome.emit_outbound {
+                let lineage_claim_id = dohc_engine_collab::read_marker_in_tx(tx, &journal_key)?
+                    .and_then(|marker| marker.lineage_claim_id)
+                    .ok_or_else(|| dohc_engine_collab::CollabError::Corrupt {
+                        reason: "exact Y.Doc lineage has no claim id".to_owned(),
+                    })?;
                 dohc_engine_sync::journal_local_op_in_tx(
                     tx,
                     &journal_key.workspace_id,
@@ -9085,6 +9310,7 @@ fn ydoc_record_update_on_store(
                         &journal_path,
                         journal_kind,
                         &update_sha,
+                        &lineage_claim_id,
                         false,
                     ),
                     now_ms,
@@ -9104,10 +9330,15 @@ fn ydoc_record_update_on_store(
             Ok(())
         },
     )? {
-        TxnOutcome::Committed(outcome) => Ok(YdocAppend {
-            outcome,
-            sharing_declined,
-        }),
+        TxnOutcome::Committed(outcome) => {
+            let lineage_claim_id = dohc_engine_collab::read_marker(store, key)?
+                .and_then(|marker| marker.lineage_claim_id);
+            Ok(YdocAppend {
+                outcome,
+                sharing_declined,
+                lineage_claim_id,
+            })
+        }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
 }
@@ -9122,6 +9353,7 @@ fn ydoc_record_update_on_store(
 pub struct YdocAppend {
     pub outcome: AppendOutcome,
     pub sharing_declined: Option<dohc_engine_sync::SharingDeclined>,
+    pub lineage_claim_id: Option<String>,
 }
 
 fn ydoc_settle_disk_preimage(
@@ -9164,6 +9396,7 @@ fn ydoc_settle_on_store(
     key: &DocKey,
     path: &str,
     content_kind: ContentKind,
+    expected_lineage_claim_id: Option<&str>,
     expected_head_sha: Option<String>,
     session_id: &str,
     self_writes: &dyn SelfWriteRecorder,
@@ -9186,6 +9419,13 @@ fn ydoc_settle_on_store(
         Some(marker) => {
             if !ydoc_marker_has_durable_state(&marker) {
                 return Err(dohc_engine_collab::CollabError::NoMarker.into());
+            }
+            if marker.lineage_claim_id.as_deref() != expected_lineage_claim_id {
+                return Err(dohc_engine_collab::CollabError::LineageWriteStale {
+                    expected: expected_lineage_claim_id.map(ToOwned::to_owned),
+                    observed: marker.lineage_claim_id,
+                }
+                .into());
             }
             // An open sync conflict on this object FREEZES the settle: the
             // lineage may hold a peer's base the user has not reviewed, and
@@ -9215,7 +9455,12 @@ fn ydoc_settle_on_store(
             // never saw while they keep editing stale state. Refuse; the
             // client resyncs (which also drains) and settles again.
             if marker.regime == Regime::Replicated {
-                let drained = drain_deferred_ydoc_for_local_rpc(store, key, faults)?;
+                let drained = drain_deferred_ydoc_for_live_session_rpc(
+                    store,
+                    key,
+                    expected_lineage_claim_id,
+                    faults,
+                )?;
                 if drained.drained > 0 {
                     return Err(dohc_engine_domain::DomainError::InvalidInput {
                         reason: "ydoc-remote-updates-pending",
@@ -9644,28 +9889,56 @@ fn ydoc_settle_on_store(
 fn ydoc_resync_on_store(
     store: &mut EngineStore,
     key: &DocKey,
+    expected_lineage_claim_id: Option<&str>,
     token: &CancellationToken,
-) -> Result<Vec<u8>, RuntimeError> {
+) -> Result<YdocResyncState, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
     // Resync is the staleness RECOVERY path: an envelope acked-but-deferred
     // because THIS session held the lease may be the very edit that made the
     // client stale — drain it first or the recovery response still misses it.
-    if dohc_engine_collab::read_marker(store, key)?
+    let marker = dohc_engine_collab::read_marker(store, key)?;
+    let observed_lineage_claim_id = marker
+        .as_ref()
+        .and_then(|marker| marker.lineage_claim_id.as_deref());
+    // A claim mismatch means arbitration already replaced the generation the
+    // session opened. Resync is the explicit replacement handshake: return
+    // the winner below, but do not consume any queued foreign coordinate while
+    // the old session still owns its lease.
+    let drained = if marker
+        .as_ref()
         .is_some_and(|marker| marker.regime == Regime::Replicated)
+        && observed_lineage_claim_id == expected_lineage_claim_id
     {
-        drain_deferred_ydoc_for_local_rpc(store, key, &NoFaults)?;
-    }
-    Ok(match dohc_engine_collab::load_persisted(store, key)? {
-        Some(persisted) => persisted.doc.encode_full_state(),
-        None => Ydoc::wire().encode_full_state(),
+        drain_deferred_ydoc_for_live_session_rpc(store, key, expected_lineage_claim_id, &NoFaults)?
+    } else {
+        dohc_engine_sync::YdocDrainResult::default()
+    };
+    let persisted = dohc_engine_collab::load_persisted(store, key)?;
+    let lineage_claim_id = persisted
+        .as_ref()
+        .and_then(|persisted| persisted.marker.lineage_claim_id.clone());
+    let initial_update = persisted.map_or_else(
+        || Ydoc::wire().encode_full_state(),
+        |persisted| persisted.doc.encode_full_state(),
+    );
+    let recovered_paths = drained
+        .lineage_replacements
+        .into_iter()
+        .flat_map(|replacement| replacement.recovered_paths)
+        .collect();
+    Ok(YdocResyncState {
+        initial_update,
+        lineage_claim_id,
+        recovered_paths,
     })
 }
 
 fn ydoc_close_session_on_store(
     store: &mut EngineStore,
     key: &DocKey,
+    materialization: Option<&YdocCloseMaterialization>,
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
@@ -9696,9 +9969,86 @@ fn ydoc_close_session_on_store(
         // The drain PROJECTS internally now (idempotent-by-sha, dependency-
         // gated): drained remote content reaches the visible head with no
         // session left to settle it.
-        drain_deferred_ydoc_for_local_rpc(store, key, faults)?;
+        let drained = drain_deferred_ydoc_for_local_rpc(store, key, faults)?;
+        if let Some(materialization) = materialization {
+            materialize_ydoc_drain(store, key, &drained, materialization, now_ms, faults)?;
+        }
     }
     Ok(Some(outcome))
+}
+
+fn materialize_ydoc_drain(
+    store: &mut EngineStore,
+    key: &DocKey,
+    drained: &dohc_engine_sync::YdocDrainResult,
+    materialization: &YdocCloseMaterialization,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    if drained.drained == 0 {
+        return Ok(());
+    }
+    let selected = store.read_with(|conn| {
+        let mut selected = HashSet::new();
+        let winner_job: Option<String> = conn
+            .query_row(
+                "SELECT job.job_id FROM snapshots AS snapshot \
+                 JOIN materialization_jobs AS job \
+                   ON job.job_id='ydoc-mat_' || snapshot.latest_moment_id \
+                  AND job.workspace_id=snapshot.workspace_id \
+                  AND job.status='pending' \
+                 WHERE snapshot.workspace_id=?1 AND snapshot.version_id=?2 \
+                   AND snapshot.object_id=?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::corrupt_public)?;
+        selected.extend(winner_job);
+        for recovered_path in drained
+            .lineage_replacements
+            .iter()
+            .flat_map(|replacement| &replacement.recovered_paths)
+        {
+            let recovery_job: Option<String> = conn
+                .query_row(
+                    "SELECT job.job_id FROM snapshots AS snapshot \
+                     JOIN materialization_jobs AS job \
+                       ON job.job_id='sync-mat_' || snapshot.latest_moment_id \
+                      AND job.workspace_id=snapshot.workspace_id \
+                      AND job.status='pending' \
+                     WHERE snapshot.workspace_id=?1 AND snapshot.version_id=?2 \
+                       AND snapshot.path=?3",
+                    params![key.workspace_id, key.version_id, recovered_path],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(StorageError::corrupt_public)?;
+            selected.extend(recovery_job);
+        }
+        Ok::<_, StorageError>(selected)
+    })?;
+    if selected.is_empty() {
+        return Ok(());
+    }
+    let replay = replay_pending_materializations(
+        store,
+        &materialization.root_dir,
+        MaterializationReplayScope {
+            workspace_id: &key.workspace_id,
+            self_writes: Some(materialization.self_writes.as_ref()),
+        },
+        now_ms,
+        faults,
+        Some(&selected),
+        false,
+    )?;
+    let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
+    if failed_jobs == 0 {
+        Ok(())
+    } else {
+        Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs })
+    }
 }
 
 /// Local Y.Doc RPCs have no sync-pass result. Keep an actionable origination
@@ -9709,6 +10059,27 @@ fn drain_deferred_ydoc_for_local_rpc(
     faults: &dyn FaultInjector,
 ) -> Result<dohc_engine_sync::YdocDrainResult, RuntimeError> {
     let drained = dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?;
+    for declined in &drained.sharing_declined {
+        eprintln!("engine: {declined}");
+    }
+    Ok(drained)
+}
+
+/// Live sessions can consume only coordinates for the lineage they opened.
+/// A foreign base and every row behind it stay queued until close releases the
+/// lease, so resync cannot replace the lineage behind the active editor.
+fn drain_deferred_ydoc_for_live_session_rpc(
+    store: &mut EngineStore,
+    key: &DocKey,
+    expected_lineage_claim_id: Option<&str>,
+    faults: &dyn FaultInjector,
+) -> Result<dohc_engine_sync::YdocDrainResult, RuntimeError> {
+    let drained = dohc_engine_sync::drain_deferred_ydoc_for_live_session(
+        store,
+        key,
+        expected_lineage_claim_id,
+        faults,
+    )?;
     for declined in &drained.sharing_declined {
         eprintln!("engine: {declined}");
     }

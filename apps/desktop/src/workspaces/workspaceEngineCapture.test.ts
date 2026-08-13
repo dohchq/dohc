@@ -1615,6 +1615,84 @@ describe("workspaceEngineCapture expected engine events", () => {
 });
 
 describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
+  it("initializes the main version before the first relay task", async () => {
+    const root = await tempRoot();
+    const requests: Request[] = [];
+    const engine = liveCapture(root, new VersionedLoopbackEngine(), {
+      daemonOwnsCapture: true,
+      requests,
+    });
+
+    let initializedWhenTaskRan = false;
+    await engine.runRelaySync(async () => {
+      initializedWhenTaskRan = requests.some(
+        (request) => request.method === VERSIONED_METHOD.versionsEnsureMain,
+      );
+      return { fastForwardedPaths: [] };
+    });
+
+    expect(initializedWhenTaskRan).toBe(true);
+    await engine.stop();
+  });
+
+  it("settles daemon capture after relay materialization before committing the cursor", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    let settled = true;
+    const engine = capture(root, {
+      daemonOwnsCapture: true,
+      rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
+        settled,
+        running: true,
+        degraded: !settled,
+      })),
+    });
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "notes/remote.md",
+      text: "remote machine wrote this\n",
+      origin: "sync",
+    });
+    let flushedWhenCommitted = false;
+
+    await engine.runRelaySync(async () => ({
+      fastForwardedPaths: [
+        { path: "notes/remote.md", operation: "write" as const, contentKind: "text" as const },
+      ],
+      commitFetchCursor: async () => {
+        flushedWhenCommitted = requests.some(
+          (request) => request.method === "capture.reconcile",
+        );
+      },
+    }));
+
+    expect(flushedWhenCommitted).toBe(true);
+
+    settled = false;
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "notes/remote.md",
+      text: "new remote text\n",
+      origin: "sync",
+    });
+    const commitWhileUnsettled = vi.fn(async () => {});
+    await expect(
+      engine.runRelaySync(async () => ({
+        fastForwardedPaths: [
+          { path: "notes/remote.md", operation: "write" as const, contentKind: "text" as const },
+        ],
+        commitFetchCursor: commitWhileUnsettled,
+      })),
+    ).rejects.toThrow("did not settle");
+    expect(commitWhileUnsettled).not.toHaveBeenCalled();
+
+    settled = true;
+    await engine.stop();
+  });
+
   it("materializes pull-fast-forwarded paths to disk and suppresses the watcher echo", async () => {
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
@@ -1694,6 +1772,57 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     await engine.runRelaySync(async () => ({ fastForwardedPaths: [] }));
     await engine.flush();
     expect(await liveMoments(engine)).toHaveLength(momentsBefore);
+    await engine.stop();
+  });
+
+  it("materializes protected writes and deletes before committing the relay cursor", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
+    loopback.seedSecretFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: ".env",
+      text: "ACCESS_TOKEN=protected\r\n",
+      origin: "sync",
+    });
+    const commitOrder: string[] = [];
+
+    await engine.runRelaySync(async () => ({
+      fastForwardedPaths: [
+        { path: ".env", operation: "write" as const, contentKind: "secret" as const },
+      ],
+      commitFetchCursor: async () => {
+        expect(await readFile(join(root, ".env"), "utf8")).toBe(
+          "ACCESS_TOKEN=protected\r\n",
+        );
+        commitOrder.push("write");
+      },
+    }));
+
+    await loopback.sendRequest({
+      id: -3,
+      method: VERSIONED_METHOD.secretsDelete,
+      workspace: WORKSPACE_ID,
+      params: {
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        origin: "sync",
+        momentId: "remote-secret-delete",
+      },
+    });
+    await engine.runRelaySync(async () => ({
+      fastForwardedPaths: [
+        { path: ".env", operation: "delete" as const, contentKind: "secret" as const },
+      ],
+      commitFetchCursor: async () => {
+        expect(existsSync(join(root, ".env"))).toBe(false);
+        commitOrder.push("delete");
+      },
+    }));
+
+    expect(commitOrder).toEqual(["write", "delete"]);
     await engine.stop();
   });
 

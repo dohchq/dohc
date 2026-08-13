@@ -576,6 +576,7 @@ describe("sync relay handler", () => {
       request(null, "/sync/workspace-a/epoch", jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 })),
       request(null, "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [op(0)] })),
       request(null, "/sync/workspace-a/log?since=0", { method: "GET" }),
+      request(null, "/sync/workspace-a/log/origin-a/0", { method: "GET" }),
     ];
     for (const req of cases) {
       const response = await h(req);
@@ -608,6 +609,7 @@ describe("sync relay handler", () => {
       (ws: string) => request("intruder", `/sync/${ws}/epoch`, jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 })),
       (ws: string) => request("intruder", `/sync/${ws}/log`, jsonBody({ originId: "origin-b", ops: [op(0)] })),
       (ws: string) => request("intruder", `/sync/${ws}/log?since=0`, { method: "GET" }),
+      (ws: string) => request("intruder", `/sync/${ws}/log/origin-a/0`, { method: "GET" }),
     ];
 
     for (const makeRequest of cases) {
@@ -722,6 +724,88 @@ describe("sync relay handler", () => {
     expect((secondPage.ops as Array<{ originId: string; originSeq: number }>).map((row) => [row.originId, row.originSeq])).toEqual([
       ["origin-a", 1],
     ]);
+  });
+
+  it("looks up an exact authenticated log coordinate across the epoch floor", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/log",
+            jsonBody(withIdentity({ originId: "origin-a", ops: [op(0)] })),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    const present = await json(
+      await h(
+        request(
+          "a",
+          `/sync/workspace-a/log/origin-a/0?${identityQuery()}`,
+          { method: "GET" },
+        ),
+      ),
+    );
+    expect(present).toMatchObject({
+      status: "present",
+      op: {
+        relaySeq: 1,
+        workspaceId: "workspace-a",
+        originId: "origin-a",
+        originSeq: 0,
+      },
+    });
+
+    const absent = await json(
+      await h(
+        request(
+          "a",
+          `/sync/workspace-a/log/origin-a/1?${identityQuery()}`,
+          { method: "GET" },
+        ),
+      ),
+    );
+    expect(absent).toMatchObject({ status: "absent" });
+
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/epoch",
+            jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    const belowFloor = await json(
+      await h(
+        request(
+          "a",
+          `/sync/workspace-a/log/origin-a/0?${identityQuery(EPOCH_2, STREAM_2)}`,
+          { method: "GET" },
+        ),
+      ),
+    );
+    expect(belowFloor).toMatchObject({
+      status: "presentBelowEpochFloor",
+      relaySeq: 1,
+    });
+    const emptyPage = await json(
+      await h(
+        request(
+          "a",
+          `/sync/workspace-a/log?since=0&${identityQuery(EPOCH_2, STREAM_2)}`,
+          { method: "GET" },
+        ),
+      ),
+    );
+    expect(emptyPage).toMatchObject({ ops: [], nextCursor: 0, hasMore: false });
   });
 
   it("accepts and returns unknown opaque op payloads without op-kind semantics", async () => {

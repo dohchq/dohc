@@ -12,7 +12,13 @@ import {
 function mockTransport(seedMarkdownLines: string[] = ["Start."]): {
   transport: EngineYDocTransport;
   shipped: Uint8Array[];
-  pushRemote: (update: Uint8Array) => void;
+  shippedGenerations: number[];
+  pushRemote: (update: Uint8Array, lineageGeneration?: number) => void;
+  replaceLineage: (input: {
+    update: Uint8Array;
+    recoveredPaths: string[];
+    lineageGeneration: number;
+  }) => void;
   closed: () => boolean;
   mainDoc: Y.Doc;
 } {
@@ -28,14 +34,29 @@ function mockTransport(seedMarkdownLines: string[] = ["Start."]): {
     }
   });
   const shipped: Uint8Array[] = [];
-  let remoteListener: ((u: Uint8Array) => void) | null = null;
+  const shippedGenerations: number[] = [];
+  let remoteListener:
+    | ((update: Uint8Array, lineageGeneration: number) => void)
+    | null = null;
+  let replacementListener:
+    | ((input: {
+        update: Uint8Array;
+        recoveredPaths: string[];
+        lineageGeneration: number;
+      }) => void)
+    | null = null;
   let closed = false;
   const transport: EngineYDocTransport = {
     async open() {
-      return { available: true, initialUpdate: Y.encodeStateAsUpdate(mainDoc) };
+      return {
+        available: true,
+        initialUpdate: Y.encodeStateAsUpdate(mainDoc),
+        lineageGeneration: 1,
+      };
     },
-    applyLocalUpdate(update) {
+    applyLocalUpdate(update, lineageGeneration) {
       shipped.push(update);
+      shippedGenerations.push(lineageGeneration);
       // Reflect the shipped edit into the "main" doc, like recordUpdate +
       // apply would, so a subsequent remote diff is computed against it.
       Y.applyUpdate(mainDoc, update);
@@ -46,6 +67,12 @@ function mockTransport(seedMarkdownLines: string[] = ["Start."]): {
         remoteListener = null;
       };
     },
+    onLineageReplacement(listener) {
+      replacementListener = listener;
+      return () => {
+        replacementListener = null;
+      };
+    },
     async close() {
       closed = true;
     },
@@ -53,7 +80,10 @@ function mockTransport(seedMarkdownLines: string[] = ["Start."]): {
   return {
     transport,
     shipped,
-    pushRemote: (update) => remoteListener?.(update),
+    shippedGenerations,
+    pushRemote: (update, lineageGeneration = 1) =>
+      remoteListener?.(update, lineageGeneration),
+    replaceLineage: (input) => replacementListener?.(input),
     closed: () => closed,
     mainDoc,
   };
@@ -118,6 +148,9 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       onRemoteUpdate() {
         return () => undefined;
       },
+      onLineageReplacement() {
+        return () => undefined;
+      },
       async close() {},
     };
     const binding = await bindEngineYDoc(transport);
@@ -140,6 +173,40 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     expect(mock.shipped.length).toBe(shippedBefore);
 
     // Idempotent.
+    await binding.destroy();
+  });
+
+  it("replaces an independent lineage instead of merging it and rejects stale updates", async () => {
+    const mock = mockTransport(["Losing root."]);
+    const binding = await bindEngineYDoc(mock.transport);
+    const losingDoc = binding.doc!;
+    const replacements: Y.Doc[] = [];
+    binding.onDocumentReplaced((doc) => replacements.push(doc));
+
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+    mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(winner),
+      recoveredPaths: ["notes/live (recovered).md"],
+      lineageGeneration: 2,
+    });
+
+    expect(binding.doc).not.toBe(losingDoc);
+    expect(bodyText(binding.doc!)).toContain("Winning root.");
+    expect(bodyText(binding.doc!)).not.toContain("Losing root.");
+    expect(replacements).toEqual([binding.doc]);
+
+    const staleRemote = new Y.Doc();
+    typeIntoBody(staleRemote, "Stale remote.");
+    mock.pushRemote(Y.encodeStateAsUpdate(staleRemote), 1);
+    expect(bodyText(binding.doc!)).not.toContain("Stale remote.");
+
+    const shippedBefore = mock.shipped.length;
+    typeIntoBody(losingDoc, "Queued stale local.");
+    expect(mock.shipped).toHaveLength(shippedBefore);
+
+    typeIntoBody(binding.doc!, "Fresh local.");
+    expect(mock.shippedGenerations.at(-1)).toBe(2);
     await binding.destroy();
   });
 });

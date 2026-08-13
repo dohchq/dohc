@@ -31,6 +31,7 @@ import {
   WORKBENCH_MENU_COMMANDS,
   ENGINE_YDOC_SAVE_STATES,
   type EngineYDocRemoteUpdateEvent,
+  type EngineYDocLineageReplacementEvent,
   type EngineYDocSaveStateEvent,
   type SearchResultsEvent,
 } from "./channels";
@@ -2496,6 +2497,7 @@ export type CloudEnableSyncPayload = z.infer<typeof CloudEnableSyncPayload>;
 export const CloudJoinWorkspacePayload = z.object({
   syncCode: z.string().min(1).max(4096),
   rootPath: z.string().min(1).max(4096),
+  passphrase: z.string().max(4096).optional(),
 });
 export type CloudJoinWorkspacePayload = z.infer<typeof CloudJoinWorkspacePayload>;
 
@@ -3352,6 +3354,7 @@ export type OpenEngineYDocSessionPayload = z.infer<typeof OpenEngineYDocSessionP
 export const OpenEngineYDocSessionResult = z.object({
   available: z.boolean(),
   initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
+  lineageGeneration: z.number().int().positive().optional(),
   // The path is not in the version the workspace is on — a version switch
   // removed it while this open was queued behind that switch (#534). Every
   // other available:false reason downgrades the document to the writable plain
@@ -3381,6 +3384,7 @@ export type OpenEngineYDocSessionResult = z.infer<typeof OpenEngineYDocSessionRe
 export const ApplyEngineYDocUpdatePayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
   update: ENGINE_YDOC_UPDATE,
+  lineageGeneration: z.number().int().positive(),
   // Monotonic per-session local-edit counter. Main echoes the seq a settle
   // STARTED at back on the save-state channel so the renderer never shows
   // "Saved" for a settle that predates the user's latest keystroke.
@@ -3401,6 +3405,14 @@ export type CloseEngineYDocSessionPayload = z.infer<typeof CloseEngineYDocSessio
 export const EngineYDocRemoteUpdateEventSchema = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
   update: ENGINE_YDOC_UPDATE,
+  lineageGeneration: z.number().int().positive(),
+});
+
+export const EngineYDocLineageReplacementEventSchema = z.object({
+  sessionId: ENGINE_YDOC_SESSION_ID,
+  update: ENGINE_YDOC_UPDATE,
+  recoveredPaths: z.array(PATH_STRING),
+  lineageGeneration: z.number().int().positive(),
 });
 
 export const EngineYDocSaveStateEventSchema = z.object({
@@ -3787,6 +3799,9 @@ export interface DohcDesktopBridge {
   // session currently bound. Returns an unsubscribe function.
   onEngineYDocRemoteUpdate(
     listener: (event: EngineYDocRemoteUpdateEvent) => void,
+  ): () => void;
+  onEngineYDocLineageReplacement(
+    listener: (event: EngineYDocLineageReplacementEvent) => void,
   ): () => void;
   // The document's REAL save state, pushed on every settle outcome. The editor
   // must never claim "Saved" from anything else: a settle can fail (and used to

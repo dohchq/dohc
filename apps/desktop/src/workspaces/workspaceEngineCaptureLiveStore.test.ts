@@ -34,6 +34,11 @@ const OVER_CAP_SHA256 = createHash("sha256")
   .update(OVER_CAP_BYTES)
   .digest("hex");
 
+// These real over-cap UTF-8 hydrations take less than one second alone but
+// exceeded 5 seconds under the eight-worker desktop suite on 2026-08-13.
+// Keep the contention budget local to tests that process the large bodies.
+const BLOB_HYDRATION_TEST_TIMEOUT_MS = 15_000;
+
 function sessionsFor(
   client: EngineDaemonClient,
   optionsSeen: Array<EngineWorkspaceRunOptions | undefined> = [],
@@ -872,6 +877,7 @@ describe("createCaptureLiveStores", () => {
           .map((request) => (request.params as { sha256: string }).sha256),
       ).toEqual(blobDigests);
     },
+    BLOB_HYDRATION_TEST_TIMEOUT_MS,
   );
 
   it("mutation proof: preserves a rename moment's source path", async () => {
@@ -1353,6 +1359,7 @@ describe("createCaptureLiveStores", () => {
         ),
       ).toHaveLength(surface.blobReads);
     },
+    BLOB_HYDRATION_TEST_TIMEOUT_MS,
   );
 
   it("rejects a withheld text moment that carries no digest to hydrate from", async () => {

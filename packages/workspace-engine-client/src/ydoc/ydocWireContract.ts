@@ -49,6 +49,7 @@ export type YdocOpenResult = JsonObject & {
   // daemon resurrects is lineage-existing and head-absent. Only both absent
   // means the session is bound to an EMPTY doc over nothing.
   lineage: "existing" | "absent";
+  lineageClaimId: string | null;
 };
 
 export type YdocRecordUpdateParams = JsonObject & {
@@ -59,6 +60,13 @@ export type YdocRecordUpdateParams = JsonObject & {
 
 export type YdocRecordUpdateResult = JsonObject & {
   seq: number;
+  lineageClaimId: string | null;
+};
+
+export type YdocResyncResult = JsonObject & {
+  initialUpdateBase64: string;
+  lineageClaimId: string | null;
+  recoveredPaths: string[];
 };
 
 export type YdocSettleParams = JsonObject & {
@@ -159,8 +167,17 @@ const OpenResultSchema = mutableStruct({
   initialUpdateBase64: Schema.String,
   head: Schema.Literals(["present", "absent"]),
   lineage: Schema.Literals(["existing", "absent"]),
+  lineageClaimId: Schema.NullOr(Schema.String),
 });
-const RecordUpdateResultSchema = mutableStruct({ seq: Schema.Int });
+const RecordUpdateResultSchema = mutableStruct({
+  seq: Schema.Int,
+  lineageClaimId: Schema.NullOr(Schema.String),
+});
+const ResyncResultSchema = mutableStruct({
+  initialUpdateBase64: Schema.String,
+  lineageClaimId: Schema.NullOr(Schema.String),
+  recoveredPaths: Schema.mutable(Schema.Array(Schema.String)),
+});
 const ProjectionProvenanceSchema = mutableStruct({
   contentKind: YdocContentKindSchema,
   sourceStateVectorSha256: Schema.String,
@@ -204,6 +221,14 @@ export function decodeYdocRecordUpdateResult(
     value,
     "ydoc.recordUpdate result",
   ) as YdocRecordUpdateResult;
+}
+
+export function decodeYdocResyncResult(value: JsonValue): YdocResyncResult {
+  return decodeYdocSchema(
+    ResyncResultSchema,
+    value,
+    "ydoc.resync result",
+  ) as YdocResyncResult;
 }
 
 export function decodeYdocSettleResult(value: JsonValue): YdocSettleResult {

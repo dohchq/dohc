@@ -69,6 +69,41 @@ describe("JoinSyncedWorkspace", () => {
     );
   });
 
+  it("prompts for the protected-file passphrase and retries the product join", async () => {
+    const user = userEvent.setup();
+    const onReady = vi.fn();
+    bridgeMock.cloudJoinWorkspace
+      .mockRejectedValueOnce(
+        new Error(
+          "Error invoking remote method 'desktop:cloud-join-workspace': Error: " +
+            "Passphrase required to unlock synced secrets.",
+        ),
+      )
+      .mockResolvedValueOnce({ workspace: JOINED });
+    render(<JoinSyncedWorkspace onWorkspaceReady={onReady} onBack={() => {}} />);
+    await fillJoinForm(user);
+
+    await user.click(screen.getByTestId("join-workspace-start"));
+    const passphrase = await screen.findByTestId("join-sync-passphrase");
+    expect(screen.getByTestId("join-error").textContent).toContain(
+      "Enter the protected-file passphrase",
+    );
+    expect((screen.getByTestId("join-workspace-start") as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+
+    await user.type(passphrase, "shared protected-files passphrase");
+    await user.click(screen.getByTestId("join-workspace-start"));
+    await waitFor(() =>
+      expect(bridgeMock.cloudJoinWorkspace).toHaveBeenLastCalledWith({
+        syncCode: "dohc-sync:ws-joined:http://localhost:1788",
+        rootPath: "/home/ice/dohc/notes",
+        passphrase: "shared protected-files passphrase",
+      }),
+    );
+    await waitFor(() => expect(onReady).toHaveBeenCalledWith(JOINED));
+  });
+
   it("stays disabled until both a code and a folder exist", async () => {
     const user = userEvent.setup();
     render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);

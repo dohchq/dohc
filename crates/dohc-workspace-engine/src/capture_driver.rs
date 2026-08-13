@@ -68,6 +68,7 @@ struct CaptureApplyProbeInner {
     gate_wait_entered: tokio::sync::Semaphore,
     version_scan_count: std::sync::atomic::AtomicU64,
     manifest_refresh_count: std::sync::atomic::AtomicU64,
+    layer_start_count: std::sync::atomic::AtomicU64,
 }
 
 #[cfg(feature = "harness")]
@@ -89,6 +90,7 @@ impl Default for CaptureApplyProbeInner {
             gate_wait_entered: tokio::sync::Semaphore::new(0),
             version_scan_count: std::sync::atomic::AtomicU64::new(0),
             manifest_refresh_count: std::sync::atomic::AtomicU64::new(0),
+            layer_start_count: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -180,6 +182,10 @@ impl CaptureApplyProbe {
         self.inner.manifest_refresh_count.load(Ordering::Acquire)
     }
 
+    pub fn layer_start_count(&self) -> u64 {
+        self.inner.layer_start_count.load(Ordering::Acquire)
+    }
+
     async fn pause_if_armed(&self) {
         if self.inner.armed.swap(false, Ordering::AcqRel) {
             self.inner.entered.add_permits(1);
@@ -236,6 +242,10 @@ impl CaptureApplyProbe {
         self.inner
             .manifest_refresh_count
             .fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn record_layer_start(&self) {
+        self.inner.layer_start_count.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -2408,6 +2418,10 @@ impl DriverEnv for RealEnv {
                 Err(_) => false,
             };
         }
+        #[cfg(feature = "harness")]
+        if let Some(probe) = &self.apply_probe {
+            probe.record_layer_start();
+        }
         Ok(fresh)
     }
 
@@ -2447,6 +2461,9 @@ impl DriverEnv for RealEnv {
             // racing this tick, and it must not be mistaken for quiescence.
             Ok(ReconcileRun::Cancelled) => TickIo::Cancelled,
             Ok(ReconcileRun::Converged) => {
+                if !apply_run(self.apply_context(), layer, ReconcileRun::Converged).await {
+                    return TickIo::Applied { clean: false };
+                }
                 if self.status.degraded() {
                     match layer.files.handle().stats().await {
                         Ok(stats) if stats.quarantined > 0 => TickIo::Applied { clean: false },
@@ -2740,9 +2757,35 @@ async fn apply_run_with_handle(
         provenance,
         events,
     } = context;
+    let now_ms = wall_now_ms();
     let plan = match run {
         ReconcileRun::Completed(plan) => plan,
-        ReconcileRun::Converged | ReconcileRun::Cancelled => return true,
+        ReconcileRun::Converged => {
+            return match repair_and_materialize_ydoc_recoveries(
+                root,
+                actor,
+                workspace_id,
+                self_writes,
+                now_ms,
+            )
+            .await
+            {
+                Ok(recovered_paths) => {
+                    if !recovered_paths.is_empty() {
+                        events.emit(
+                            CAPTURE_MOMENT_RECORDED_EVENT,
+                            moment_recorded_payload(workspace_id, &recovered_paths, &[]),
+                        );
+                    }
+                    true
+                }
+                Err(_) => {
+                    status.mark_degraded();
+                    false
+                }
+            };
+        }
+        ReconcileRun::Cancelled => return true,
     };
     // The ACTIVE version, precisely: only a genuinely uninitialized
     // workspace falls back to "main" (bootstrapped by ensure_main_version).
@@ -2766,7 +2809,6 @@ async fn apply_run_with_handle(
     let apply_leases = leases.clone();
     let apply_self_writes = self_writes.clone();
     let version_for_retire = version_id.clone();
-    let now_ms = wall_now_ms();
     // A DEDICATED plain thread, not spawn_blocking: the sink's blocking actor
     // calls assert they run OUTSIDE any tokio runtime context, and
     // spawn_blocking threads carry the runtime handle. Awaiting the oneshot
@@ -2907,6 +2949,17 @@ async fn apply_run_with_handle(
             }
         }
     }
+    if result.failed_applies.is_empty() && !result.degraded && result.completed() {
+        match repair_and_materialize_ydoc_recoveries(root, actor, workspace_id, self_writes, now_ms)
+            .await
+        {
+            Ok(recovered_paths) => result.applied_paths.extend(recovered_paths),
+            Err(_) => {
+                result.degraded = true;
+                status.mark_degraded();
+            }
+        }
+    }
     if result.degraded {
         status.mark_degraded();
     }
@@ -2942,6 +2995,53 @@ async fn apply_run_with_handle(
     clean
 }
 
+async fn repair_and_materialize_ydoc_recoveries(
+    root: &Path,
+    actor: &ActorHandle,
+    workspace_id: &str,
+    self_writes: &SelfWriteSuppression,
+    now_ms: i64,
+) -> Result<Vec<String>, RuntimeError> {
+    let recoveries = actor
+        .repair_conflicted_ydoc_recoveries(
+            workspace_id.to_owned(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await?;
+    if recoveries.is_empty() {
+        return Ok(Vec::new());
+    }
+    materialize_ydoc_recoveries(root, actor, workspace_id, self_writes, now_ms, recoveries).await
+}
+
+async fn materialize_ydoc_recoveries(
+    root: &Path,
+    actor: &ActorHandle,
+    workspace_id: &str,
+    self_writes: &SelfWriteSuppression,
+    now_ms: i64,
+    recoveries: Vec<dohc_engine_sync::YdocRecoveryMaterialization>,
+) -> Result<Vec<String>, RuntimeError> {
+    let materialization_job_ids = recoveries
+        .iter()
+        .map(|recovery| recovery.materialization_job_id.clone())
+        .collect();
+    actor
+        .materialize_replay_selected_for_fence(
+            root.to_path_buf(),
+            workspace_id.to_owned(),
+            Arc::new(self_writes.clone()),
+            materialization_job_ids,
+            now_ms,
+        )
+        .await?;
+    Ok(recoveries
+        .into_iter()
+        .map(|recovery| recovery.path)
+        .collect())
+}
+
 /// Resolve a prepared plan whose apply never ran: acknowledge with EVERY op
 /// marked failed, clearing the controller's `outstanding` latch while keeping
 /// the paths dirty for the next cycle's retry.
@@ -2957,5 +3057,110 @@ async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<D
     };
     if files.acknowledge_capture(plan, receipt).await.is_err() {
         status.mark_degraded();
+    }
+}
+
+#[cfg(test)]
+mod selected_recovery_replay_tests {
+    use super::*;
+    use dohc_engine_runtime::WorkspaceSupervisor;
+    use dohc_engine_storage::{EngineStore, MaterializationJobSpec, Preimage, enqueue_job};
+    use dohc_engine_testkit::ScratchDir;
+
+    const WORKSPACE_ID: &str = "ws-selected-recovery-replay";
+    const RECOVERY_PATH: &str = "notes/recovered.md";
+    const RECOVERY_JOB: &str = "sync-mat_ydoc-recovery-moment-selected";
+    const UNRELATED_PATH: &str = "unrelated.md";
+    const UNRELATED_JOB: &str = "unrelated-older-pending";
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recovery_replay_ignores_an_older_unrelated_failing_pending_job() {
+        let scratch = ScratchDir::new().expect("scratch");
+        std::fs::write(scratch.path().join(UNRELATED_PATH), b"external occupant")
+            .expect("unrelated occupant");
+        let db = scratch.engine_db_path().expect("engine database path");
+        let mut store = EngineStore::open(&db, 1).expect("open fixture store");
+        let unrelated_sha = store
+            .put_binary_blob(b"unrelated intended bytes")
+            .expect("unrelated blob");
+        let recovery_sha = store
+            .put_binary_blob(b"recovered lineage")
+            .expect("recovery blob");
+        store
+            .write_with(&NoFaults, |tx| {
+                enqueue_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: UNRELATED_JOB.to_owned(),
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        target_path: UNRELATED_PATH.to_owned(),
+                        content_sha256: unrelated_sha.clone(),
+                        preimage: Preimage::Absent,
+                        target_generation: 1,
+                        now_ms: 1,
+                    },
+                )?;
+                enqueue_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: RECOVERY_JOB.to_owned(),
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        target_path: RECOVERY_PATH.to_owned(),
+                        content_sha256: recovery_sha.clone(),
+                        preimage: Preimage::Absent,
+                        target_generation: 2,
+                        now_ms: 2,
+                    },
+                )?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .expect("seed pending jobs");
+        drop(store);
+
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 3).expect("open actor").actor;
+        let paths = materialize_ydoc_recoveries(
+            scratch.path(),
+            &actor,
+            WORKSPACE_ID,
+            &SelfWriteSuppression::default(),
+            4,
+            vec![dohc_engine_sync::YdocRecoveryMaterialization {
+                path: RECOVERY_PATH.to_owned(),
+                materialization_job_id: RECOVERY_JOB.to_owned(),
+            }],
+        )
+        .await
+        .expect("selected recovery materializes");
+        assert_eq!(paths, vec![RECOVERY_PATH]);
+        assert_eq!(
+            std::fs::read(scratch.path().join(RECOVERY_PATH)).expect("recovery bytes"),
+            b"recovered lineage"
+        );
+        assert_eq!(
+            std::fs::read(scratch.path().join(UNRELATED_PATH)).expect("unrelated bytes"),
+            b"external occupant",
+            "selected recovery replay must not touch an unrelated target"
+        );
+
+        let read_only = EngineStore::open_read_only(&db).expect("open read-only store");
+        let statuses: (String, String) = read_only
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row(
+                        "SELECT status FROM materialization_jobs WHERE job_id=?1",
+                        [RECOVERY_JOB],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT status FROM materialization_jobs WHERE job_id=?1",
+                        [UNRELATED_JOB],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .expect("materialization statuses");
+        assert_eq!(statuses, ("complete".to_owned(), "pending".to_owned()));
+        supervisor.close(&db).expect("close actor");
     }
 }

@@ -458,26 +458,20 @@ export function CloudLogin(props: {
                 )}
               </>
             ) : (
-              <>
-                {/* Gated on #356: nothing drains the file-write journal, so
-                    enrolling would badge this workspace "synced" while every
-                    file edit stayed local. */}
-                <PrimaryButton
-                  type="button"
-                  data-testid="cloud-enable-sync"
-                  disabled
-                  className="mt-3"
-                >
-                  Sync this workspace
-                </PrimaryButton>
-                <p
-                  data-testid="cloud-sync-unavailable"
-                  className="mb-0 mt-2 text-xs leading-relaxed text-muted"
-                >
-                  Workspace sync isn&apos;t ready yet — your files wouldn&apos;t
-                  upload. It stays off until that genuinely works.
-                </p>
-              </>
+              <PrimaryButton
+                type="button"
+                data-testid="cloud-enable-sync"
+                disabled={
+                  syncBusy ||
+                  (needsPassphrase &&
+                    passphrasePurpose === "protect" &&
+                    passphrase.length === 0)
+                }
+                onClick={() => void enableSync()}
+                className="mt-3"
+              >
+                {syncBusy ? "Turning on sync…" : "Sync this workspace"}
+              </PrimaryButton>
             )
           ) : null}
           {needsPassphrase ? (

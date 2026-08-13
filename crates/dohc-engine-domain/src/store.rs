@@ -2295,7 +2295,9 @@ where
         Some(next_order) => next_order,
         None => next_moment_order(tx)?,
     };
-    let moment_id = derive_capture_moment_id(&input.workspace_id, &object_id, next_order);
+    let producer_id = capture_producer_id(tx, &input.workspace_id)?;
+    let moment_id =
+        derive_capture_moment_id(&producer_id, &input.workspace_id, &object_id, next_order);
     let write = WriteText {
         workspace_id: input.workspace_id.clone(),
         version_id: input.version_id.clone(),
@@ -2446,7 +2448,9 @@ pub fn capture_retire_in_tx(
         }
     }
     let next_order = next_moment_order(tx)?;
-    let moment_id = derive_capture_retire_moment_id(&input.workspace_id, &object_id, next_order);
+    let producer_id = capture_producer_id(tx, &input.workspace_id)?;
+    let moment_id =
+        derive_capture_retire_moment_id(&producer_id, &input.workspace_id, &object_id, next_order);
     let delete = DeleteTextFile {
         workspace_id: input.workspace_id.clone(),
         version_id: input.version_id.clone(),
@@ -2664,7 +2668,9 @@ where
         Some(next_order) => next_order,
         None => next_moment_order(tx)?,
     };
-    let moment_id = derive_capture_moment_id(&input.workspace_id, &object_id, next_order);
+    let producer_id = capture_producer_id(tx, &input.workspace_id)?;
+    let moment_id =
+        derive_capture_moment_id(&producer_id, &input.workspace_id, &object_id, next_order);
     if moment_exists(tx, &input.workspace_id, &moment_id)? {
         return Err(DomainError::DuplicateMomentId.into());
     }
@@ -5701,11 +5707,24 @@ fn derive_disambiguated_capture_object_id(
     )
 }
 
-/// Derive a capture moment id from its workspace, object, and next monotonic
-/// moment order: `moment-` plus lowercase-hex SHA-256 over those length-prefixed
-/// fields. The store allocates the same order inside the caller-owned write
-/// transaction, so delete/recreate cycles never reuse an id.
+fn capture_producer_id(tx: &Transaction<'_>, workspace_id: &str) -> Result<String, DomainError> {
+    tx.query_row(
+        "SELECT COALESCE(\
+             (SELECT origin_id FROM sync_identity WHERE workspace_id = ?1), \
+             (SELECT engine_uuid FROM engine_ownership WHERE rowid_guard = 1))",
+        [workspace_id],
+        |row| row.get(0),
+    )
+    .map_err(DomainError::sql_corrupt)
+}
+
+/// Derive a capture moment id from its producer, workspace, object, and next
+/// monotonic moment order: `moment-` plus lowercase-hex SHA-256 over those
+/// length-prefixed fields. The producer is the replica origin when the
+/// workspace has one and the durable engine id before that. This keeps equal
+/// local orders distinct across replicas.
 pub fn derive_capture_moment_id(
+    producer_id: &str,
     workspace_id: &str,
     object_id: &str,
     next_moment_order: i64,
@@ -5714,6 +5733,7 @@ pub fn derive_capture_moment_id(
     format!(
         "moment-{}",
         hash_fields(&[
+            producer_id.as_bytes(),
             workspace_id.as_bytes(),
             object_id.as_bytes(),
             next_moment_order.as_bytes(),
@@ -5724,11 +5744,12 @@ pub fn derive_capture_moment_id(
 /// Derive a capture delete moment id with the same order-based scheme as a
 /// capture write.
 pub fn derive_capture_retire_moment_id(
+    producer_id: &str,
     workspace_id: &str,
     object_id: &str,
     next_moment_order: i64,
 ) -> String {
-    derive_capture_moment_id(workspace_id, object_id, next_moment_order)
+    derive_capture_moment_id(producer_id, workspace_id, object_id, next_moment_order)
 }
 
 /// Deterministic fingerprint over length-framed fields (idempotency

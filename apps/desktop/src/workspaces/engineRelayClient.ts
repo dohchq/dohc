@@ -373,10 +373,29 @@ function assertRelayPullProgress(
 function changedPaths(
   value: JsonValue | undefined,
   label: string,
+  allowSecret: true,
+): Array<{
+  path: string;
+  operation: "write" | "delete";
+  contentKind: "text" | "binary" | "secret";
+}>;
+function changedPaths(
+  value: JsonValue | undefined,
+  label: string,
+  allowSecret?: false,
 ): Array<{
   path: string;
   operation: "write" | "delete";
   contentKind: "text" | "binary";
+}>;
+function changedPaths(
+  value: JsonValue | undefined,
+  label: string,
+  allowSecret = false,
+): Array<{
+  path: string;
+  operation: "write" | "delete";
+  contentKind: "text" | "binary" | "secret";
 }> {
   if (!Array.isArray(value)) {
     throw new Error(`Rust engine ${label}.changedPaths must be an array.`);
@@ -391,7 +410,11 @@ function changedPaths(
         `Rust engine ${label}.changedPaths[${index}].operation is invalid.`,
       );
     }
-    if (contentKind !== "text" && contentKind !== "binary") {
+    if (
+      contentKind !== "text" &&
+      contentKind !== "binary" &&
+      !(allowSecret && contentKind === "secret")
+    ) {
       throw new Error(
         `Rust engine ${label}.changedPaths[${index}].contentKind is invalid.`,
       );
@@ -497,7 +520,10 @@ export interface EngineRelayWorkspaceClient {
   ): Promise<CommitRelayCursorResult>;
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
   claim(): Promise<void>;
-  bootstrapJoinIdentity(identity: RelayWorkspaceIdentity | null): Promise<void>;
+  bootstrapJoinIdentity(
+    identity: RelayWorkspaceIdentity | null,
+    initialize?: () => Promise<void>,
+  ): Promise<void>;
   probe(): Promise<ProbeRelayWorkspaceResult>;
   uploadKeyEnvelope(input: {
     envelopeJson: string;
@@ -707,9 +733,9 @@ export class EngineRelayClient {
         const changed = new Map<
           string,
           {
-            path: string;
-            operation: "write" | "delete";
-            contentKind: "text" | "binary";
+              path: string;
+              operation: "write" | "delete";
+              contentKind: "text" | "binary" | "secret";
           }
         >();
         for (;;) {
@@ -740,7 +766,7 @@ export class EngineRelayClient {
             declines,
             sharingDeclined(result.sharingDeclined, "sync.pull"),
           );
-          for (const path of changedPaths(result.changedPaths, "sync.pull")) {
+          for (const path of changedPaths(result.changedPaths, "sync.pull", true)) {
             changed.set(path.path, path);
           }
           if (!hasMore) {
@@ -800,13 +826,17 @@ export class EngineRelayClient {
         };
       },
       claim,
-      bootstrapJoinIdentity: async (identity) => {
+      bootstrapJoinIdentity: async (identity, initialize) => {
         try {
           if (identity === null) {
             await claimWith(bootstrapRequest);
-            return;
+          } else {
+            await adoptJoinIdentity(identity, bootstrapRequest);
           }
-          await adoptJoinIdentity(identity, bootstrapRequest);
+          // Join-only initialization shares the capture-free binding. This
+          // lets the product download and install a wrapped workspace key
+          // before capture opens and before the first pull materializes files.
+          await initialize?.();
         } finally {
           // The bootstrap session is intentionally capture-free. Close it so
           // activity.open creates the ordinary captured session only after the

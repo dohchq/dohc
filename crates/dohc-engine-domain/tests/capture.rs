@@ -1,7 +1,7 @@
 use dohc_engine_domain::{
     CaptureIngest, CaptureIngestBinary, CaptureRetire, DomainError, ListMomentsQuery, NoFaults,
-    RenameTextFile, VersionedTextStore, binary_rollback_job_identity, derive_capture_moment_id,
-    derive_capture_object_id,
+    RenameTextFile, VersionedTextStore, WriteText, binary_rollback_job_identity,
+    derive_capture_moment_id, derive_capture_object_id, write_text_in_tx,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
@@ -51,6 +51,21 @@ fn open_store() -> (ScratchDir, EngineStore) {
     (scratch, store)
 }
 
+fn seed_sync_origin(store: &mut EngineStore, origin_id: &str) {
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "INSERT INTO sync_identity \
+                 (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+                 VALUES (?1, ?2, 'epoch', 'stream', 1)",
+                [WS, origin_id],
+            )
+            .expect("seed sync identity");
+            Ok::<_, DomainError>(())
+        })
+        .expect("write sync identity");
+}
+
 fn moment_count(store: &mut EngineStore) -> usize {
     VersionedTextStore::new(store)
         .list_moments(&ListMomentsQuery {
@@ -63,6 +78,20 @@ fn moment_count(store: &mut EngineStore) -> usize {
         .expect("list moments")
         .moments
         .len()
+}
+
+fn capture_producer_id(store: &mut EngineStore) -> String {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COALESCE(\
+                     (SELECT origin_id FROM sync_identity WHERE workspace_id = ?1), \
+                     (SELECT engine_uuid FROM engine_ownership WHERE rowid_guard = 1))",
+                [WS],
+                |row| row.get(0),
+            )
+        })
+        .expect("capture producer id")
 }
 
 #[test]
@@ -239,6 +268,7 @@ fn content_revert_gets_a_third_distinct_moment() {
 #[test]
 fn retire_then_recapture_reuses_the_object_and_appends_new_history() {
     let (_scratch, mut store) = open_store();
+    let producer_id = capture_producer_id(&mut store);
     let mut versions = VersionedTextStore::new(&mut store);
     let first = versions
         .capture_ingest(&ingest("a.md", "X", 10), &NO_FAULTS)
@@ -259,15 +289,30 @@ fn retire_then_recapture_reuses_the_object_and_appends_new_history() {
     assert_ne!(retired.moment.moment_id, recreated.moment.moment_id);
     assert_eq!(
         first.moment.moment_id,
-        derive_capture_moment_id(WS, &first.snapshot.object_id, first.moment.moment_order)
+        derive_capture_moment_id(
+            &producer_id,
+            WS,
+            &first.snapshot.object_id,
+            first.moment.moment_order,
+        )
     );
     assert_eq!(
         retired.moment.moment_id,
-        derive_capture_moment_id(WS, &first.snapshot.object_id, retired.moment.moment_order)
+        derive_capture_moment_id(
+            &producer_id,
+            WS,
+            &first.snapshot.object_id,
+            retired.moment.moment_order,
+        )
     );
     assert_eq!(
         recreated.moment.moment_id,
-        derive_capture_moment_id(WS, &first.snapshot.object_id, recreated.moment.moment_order)
+        derive_capture_moment_id(
+            &producer_id,
+            WS,
+            &first.snapshot.object_id,
+            recreated.moment.moment_order,
+        )
     );
     assert_eq!(recreated.snapshot.text, "X");
     assert_eq!(moment_count(&mut store), 3);
@@ -334,16 +379,96 @@ fn retire_removes_the_head_and_repeated_or_unknown_paths_are_clean_no_ops() {
 
 #[test]
 fn moment_id_derivation_is_deterministic_for_equal_inputs() {
-    let first = derive_capture_moment_id("workspace", "object-id", 42);
-    let second = derive_capture_moment_id("workspace", "object-id", 42);
+    let first = derive_capture_moment_id("producer", "workspace", "object-id", 42);
+    let second = derive_capture_moment_id("producer", "workspace", "object-id", 42);
 
     assert_eq!(first, second);
     assert_eq!(first.len(), "moment-".len() + 64);
     assert_ne!(
         first,
-        derive_capture_moment_id("workspace", "object-id", 43)
+        derive_capture_moment_id("producer", "workspace", "object-id", 43)
     );
-    assert_ne!(first, derive_capture_moment_id("other", "object-id", 42));
+    assert_ne!(
+        first,
+        derive_capture_moment_id("producer", "other", "object-id", 42)
+    );
+    assert_ne!(
+        first,
+        derive_capture_moment_id("other-producer", "workspace", "object-id", 42)
+    );
+}
+
+#[test]
+fn concurrent_capture_moment_ids_are_namespaced_by_replica_origin() {
+    let (_scratch_a, mut store_a) = open_store();
+    let (_scratch_b, mut store_b) = open_store();
+    seed_sync_origin(&mut store_a, "origin-a");
+    seed_sync_origin(&mut store_b, "origin-b");
+
+    let captured_a = VersionedTextStore::new(&mut store_a)
+        .capture_ingest(&ingest("same.md", "edit from A", 10), &NO_FAULTS)
+        .expect("capture A");
+    let captured_b = VersionedTextStore::new(&mut store_b)
+        .capture_ingest(&ingest("same.md", "edit from B", 10), &NO_FAULTS)
+        .expect("capture B");
+
+    assert_eq!(captured_a.snapshot.object_id, captured_b.snapshot.object_id);
+    assert_eq!(
+        captured_a.moment.moment_order,
+        captured_b.moment.moment_order
+    );
+    assert_ne!(captured_a.moment.moment_id, captured_b.moment.moment_id);
+}
+
+#[test]
+fn local_capture_does_not_collide_with_an_imported_replica_moment() {
+    let (_scratch, mut store) = open_store();
+    seed_sync_origin(&mut store, "origin-b");
+    let path = "same.md";
+    let object_id = derive_capture_object_id(WS, VERSION, path);
+    let imported_moment_id = derive_capture_moment_id("origin-a", WS, &object_id, 1);
+
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            write_text_in_tx(
+                tx,
+                &WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: VERSION.to_owned(),
+                    object_id: object_id.clone(),
+                    path: path.to_owned(),
+                    text: "shared base".to_owned(),
+                    moment_id: imported_moment_id.clone(),
+                    request_id: None,
+                    metadata_origin: "replication".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                },
+            )?;
+            tx.execute(
+                "DELETE FROM materialization_jobs WHERE workspace_id = ?1 AND job_id = ?2",
+                [WS, imported_moment_id.as_str()],
+            )
+            .expect("remove local materialization artifact");
+            tx.execute(
+                "UPDATE moments SET moment_order = 0 \
+                 WHERE workspace_id = ?1 AND moment_id = ?2",
+                [WS, imported_moment_id.as_str()],
+            )
+            .expect("assign imported local order");
+            Ok::<_, DomainError>(())
+        })
+        .expect("import remote moment");
+
+    let captured = VersionedTextStore::new(&mut store)
+        .capture_ingest(&ingest(path, "local edit", 20), &NO_FAULTS)
+        .expect("capture local edit after import");
+
+    assert_eq!(captured.moment.moment_order, 1);
+    assert_ne!(captured.moment.moment_id, imported_moment_id);
+    assert_eq!(captured.snapshot.text, "local edit");
 }
 
 #[test]

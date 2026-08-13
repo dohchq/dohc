@@ -11,6 +11,15 @@ shape and broke it in another, so the mechanism changed. Read "How the loser
 survives" below before touching this code; the conflict-row approach and
 everything built on it is withdrawn.
 
+**IMPLEMENTED — 2026-08-13.** Every Y.Doc operation carries its immutable
+lineage claim. Pulled operations also carry their relay position. The engine
+validates a complete pull page before it changes state. When two bases differ,
+the lower relay position wins. The losing peer writes its exact projection as
+one ordinary recovered file before it installs the winner. Live sessions use
+the claim as a write fence and replace their Y.Doc after a lineage change.
+Legacy claims without a relay position use an authenticated exact-coordinate
+lookup and remain pending while the answer is ambiguous.
+
 ## The problem
 
 Two machines each create the same path (say `notes/todo.md`) before either
@@ -106,6 +115,10 @@ State these honestly rather than discovering them later.
 - Arbitration removes the same-path collision. It does not remove every
   namespace collision: a peer may independently occupy the recovered path,
   and ordinary moment application handles that the ordinary way.
+- Recovery has one producer: the losing peer. If that peer uploads its lineage
+  and then disappears before it learns that it lost, another peer cannot safely
+  reconstruct edits that it has never seen. The relay keeps the bytes, but this
+  design does not elect a second recovery producer.
 
 ## Lineage identity — required by this shard
 
@@ -121,10 +134,12 @@ from deltas made after the loser re-seeded. Backward compatibility is not
 required, so change the contract rather than inferring the boundary from
 origin sequences.
 
-## Open, independent of this decision
+## Relay-position repair
 
-`base_relay_seq` is NULL on documents claimed before the arbitration
-migration, and nothing re-stamps it: the local base's own echo is already
-behind the cursor. A divergent base then retries forever and wedges the whole
-workspace pull. Repair the stored coordinate before any destructive
-arbitration path can run.
+`base_relay_seq` can be NULL on documents claimed before the arbitration
+migration. Before arbitration, the engine asks the relay for the exact stored
+origin coordinate. A present coordinate supplies the relay position, including
+a retained coordinate below the current epoch floor. A confirmed absence
+permits replacement only after any local unpublished base is pushed. A missing,
+malformed, tampered, or otherwise ambiguous answer keeps the operation pending
+without changing the lineage or pull cursor.

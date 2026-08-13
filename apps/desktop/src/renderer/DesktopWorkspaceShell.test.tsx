@@ -9596,11 +9596,16 @@ describe("set-aside draft recovery", () => {
     Object.assign(bridge, {
       openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
         sessionId = payload.sessionId;
-        return { available: true, initialUpdate: Y.encodeStateAsUpdate(doc) };
+        return {
+          available: true,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          lineageGeneration: 1,
+        };
       }),
       applyEngineYDocUpdate: vi.fn(async () => undefined),
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(
         (listener: (event: EngineYDocSaveStateEvent) => void) => {
           saveStateListeners.add(listener);

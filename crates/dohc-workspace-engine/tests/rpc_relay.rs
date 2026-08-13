@@ -687,6 +687,7 @@ async fn first_push_replays_a_live_never_settled_ydoc_to_a_clean_peer() {
                 workspace_id: workspace_id.to_owned(),
                 origin_id: origin_id.clone(),
                 origin_seq: op["originSeq"].as_i64().expect("origin seq"),
+                relay_seq: Some(op["originSeq"].as_i64().expect("origin seq")),
                 op_kind: op["opKind"].as_str().expect("op kind").to_owned(),
                 payload: op["payload"].clone(),
                 recorded_at_ms: op["recordedAtMs"].as_i64().expect("recorded at"),

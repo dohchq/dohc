@@ -9,11 +9,11 @@ use std::time::Duration;
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_sync::{
     BlobDownloadRequest, BlobHaveRequest, BlobKind, BlobUploadRequest, ClaimRequest, EpochRequest,
-    KeyEnvelopeDownloadRequest, KeyEnvelopeRequest, NoLiveLeases, ObservedBytes, ProbeRequest,
-    PullRequest, RelayError, RelaySyncClient, RelayTransport, ReplicationEnvelope,
-    ShareBlobRequest, ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest,
-    SyncPassOutcome, blob_ceiling, journal_local_replication_op, read_pushed_seq,
-    read_relay_cursor,
+    KeyEnvelopeDownloadRequest, KeyEnvelopeRequest, LogCoordinateRequest, LogCoordinateResponse,
+    NoLiveLeases, ObservedBytes, ProbeRequest, PullRequest, RelayError, RelaySyncClient,
+    RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareReplicationEnvelope,
+    ShareViewRequest, SharedChannelRequest, SyncPassOutcome, blob_ceiling,
+    journal_local_replication_op, read_pushed_seq, read_relay_cursor,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use dohc_engine_testkit::ScratchDir;
@@ -679,7 +679,7 @@ fn pull_accepts_the_relays_integral_float_normalization() {
 }
 
 #[test]
-fn pull_deserializes_rows_without_the_discarded_relay_sequence() {
+fn pull_rejects_rows_without_the_mandatory_relay_sequence() {
     let server = FakeServer::start(|_| {
         log_page(
             vec![json!({
@@ -694,6 +694,27 @@ fn pull_deserializes_rows_without_the_discarded_relay_sequence() {
             false,
         )
     });
+    let error = transport(&server)
+        .pull(PullRequest {
+            workspace_id: "ws".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            cursor: 0,
+            limit: 1,
+        })
+        .expect_err("every pulled workspace row needs a relaySeq");
+    assert_eq!(error, RelayError::InvalidResponse);
+}
+
+#[test]
+fn pull_captures_the_relay_sequence() {
+    let server = FakeServer::start(|_| {
+        log_page(
+            vec![remote_row("peer", 0, "workspace.init", json!({}))],
+            1,
+            false,
+        )
+    });
     let response = transport(&server)
         .pull(PullRequest {
             workspace_id: "ws".to_owned(),
@@ -702,8 +723,48 @@ fn pull_deserializes_rows_without_the_discarded_relay_sequence() {
             cursor: 0,
             limit: 1,
         })
-        .expect("relaySeq is not part of the client contract");
-    assert_eq!(response.ops.len(), 1);
+        .expect("pull relay row");
+    assert_eq!(response.ops[0].relay_seq, Some(1));
+}
+
+#[test]
+fn exact_log_coordinate_lookup_is_authenticated_and_preserves_relay_order() {
+    let server = FakeServer::start(|request| {
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path(), "/sync/ws/log/peer%2Fdevice/7");
+        assert_eq!(request.header("authorization"), Some("Bearer test-token"));
+        assert!(request.target.contains("replicationEpoch=epoch"));
+        assert!(request.target.contains("streamIdentity=stream"));
+        TestResponse::json(
+            200,
+            json!({
+                "ok": true,
+                "status": "present",
+                "op": {
+                    "relaySeq": 11,
+                    "workspaceId": "ws",
+                    "originId": "peer/device",
+                    "originSeq": 7,
+                    "opKind": "workspace.init",
+                    "payload": {},
+                    "recordedAtMs": 1
+                }
+            }),
+        )
+    });
+    let response = transport(&server)
+        .lookup_log_coordinate(LogCoordinateRequest {
+            workspace_id: "ws".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            origin_id: "peer/device".to_owned(),
+            origin_seq: 7,
+        })
+        .expect("lookup exact relay coordinate");
+    let LogCoordinateResponse::Present(envelope) = response else {
+        panic!("expected a present coordinate");
+    };
+    assert_eq!(envelope.relay_seq, Some(11));
 }
 
 #[test]
@@ -745,6 +806,7 @@ fn direct_transport_rejects_an_oversized_outbound_payload_before_io() {
                 workspace_id: "ws".to_owned(),
                 origin_id: "local".to_owned(),
                 origin_seq: 0,
+                relay_seq: None,
                 op_kind: "workspace.init".to_owned(),
                 payload,
                 recorded_at_ms: 1,
@@ -1099,6 +1161,7 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
                 workspace_id: "ws".to_owned(),
                 origin_id: "local".to_owned(),
                 origin_seq: 0,
+                relay_seq: None,
                 op_kind: "probe".to_owned(),
                 payload: json!({}),
                 recorded_at_ms: 1,

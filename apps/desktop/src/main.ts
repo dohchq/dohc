@@ -30,6 +30,7 @@ import {
   utilityProcess,
   type IpcMainInvokeEvent,
 } from "electron";
+import * as Y from "yjs";
 import { existsSync, statSync } from "node:fs";
 import { mkdir, readdir } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -248,6 +249,7 @@ import {
   ApplyEngineYDocUpdatePayload,
   CloseEngineYDocSessionPayload,
   EngineYDocRemoteUpdateEventSchema,
+  EngineYDocLineageReplacementEventSchema,
   EngineYDocSaveStateEventSchema,
   UpdateActionResult,
   UpdateCheckResult,
@@ -457,6 +459,7 @@ import {
 import { fetchSharedChannelInfo } from "./workspaces/sharedChannelInfo";
 import { installWorkspaceDataKey } from "./workspaces/workspaceDataKey";
 import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
+import { bootstrapJoinedWorkspace } from "./workspaces/workspaceJoinEnrollment";
 import {
   readWorkspaceDataKeyForEnrollment,
   readWorkspaceSecretState,
@@ -3063,6 +3066,10 @@ interface EngineYDocSessionEntry {
   // before pushing a save state back.
   sender: Electron.WebContents;
   generation: number;
+  // Session-local renderer generation. It changes only when the daemon
+  // replaces the durable lineage, so updates from the retired Y.Doc cannot
+  // be journaled into the winner.
+  lineageGeneration: number;
   // Edit/settle bookkeeping for the honest save indicator. Several settles
   // are routinely in flight at once, so this is a FIFO, not a scalar — see
   // engineYDocSaveSeq.ts.
@@ -4829,7 +4836,16 @@ function registerIpcHandlers(
         rootPath: created.rootPath,
         relay,
       });
-      await daemonRelay.bootstrapJoinIdentity(probe.identity);
+      await bootstrapJoinedWorkspace({
+        workspaceId: parsed.workspaceId,
+        identity: probe.identity,
+        ...(input.passphrase === undefined
+          ? {}
+          : { passphrase: input.passphrase }),
+        transport: daemonRelay,
+        installDataKey: async (unwrapped) =>
+          await installWorkspaceDataKey(created.rootPath, unwrapped),
+      });
 
       registerWorkspace({ ...created, joinBootstrapPending: true });
       refreshNativeWorkspaceSurfaces();
@@ -4866,6 +4882,12 @@ function registerIpcHandlers(
       await resetFailedJoinFolder(rootPath).catch(() => undefined);
       refreshNativeWorkspaceSurfaces();
       notifyRenderer();
+      if (
+        error instanceof Error &&
+        /^(?:Passphrase required|Passphrase could not)\b/u.test(error.message)
+      ) {
+        throw error;
+      }
       throw new Error(
         "Couldn't download the workspace. Nothing was added on this machine — check your connection and try again.",
       );
@@ -8886,6 +8908,8 @@ function registerIpcHandlers(
       const saveSeq = createEngineYDocSaveSeqState();
       // Stop callbacks after this open loses its session id to another document.
       let refused = false;
+      let lineageGeneration = 1;
+      let registeredEntry: EngineYDocSessionEntry | null = null;
       let session: WorkspaceEngineYDocProviderSession;
       try {
         session = await capture.openYDocSession({
@@ -8934,11 +8958,42 @@ function registerIpcHandlers(
             try {
               sender.send(
                 CHANNELS.engineYDocRemoteUpdate,
-                EngineYDocRemoteUpdateEventSchema.parse({ sessionId: input.sessionId, update }),
+                EngineYDocRemoteUpdateEventSchema.parse({
+                  sessionId: input.sessionId,
+                  update,
+                  lineageGeneration,
+                }),
               );
             } catch {
               // A malformed delta is DROPPED, never thrown through the session's
               // update observer (an uncaught throw there would wedge main).
+            }
+          },
+          onLineageReplaced: (update, recoveredPaths) => {
+            if (
+              refused ||
+              sender.isDestroyed() ||
+              rendererGeneration(sender.id) !== generation
+            ) {
+              return;
+            }
+            lineageGeneration += 1;
+            if (registeredEntry !== null) {
+              registeredEntry.lineageGeneration = lineageGeneration;
+            }
+            try {
+              sender.send(
+                CHANNELS.engineYDocLineageReplacement,
+                EngineYDocLineageReplacementEventSchema.parse({
+                  sessionId: input.sessionId,
+                  update,
+                  recoveredPaths,
+                  lineageGeneration,
+                }),
+              );
+            } catch {
+              // The provider already installed the winner. A malformed event
+              // must not re-enter its observer or restore the retired lineage.
             }
           },
         });
@@ -8985,8 +9040,10 @@ function registerIpcHandlers(
         path: input.path,
         sender,
         generation,
+        lineageGeneration,
         saveSeq,
       };
+      registeredEntry = entry;
       // Every path below that refuses this session releases it through the
       // same helper, and answers read-only unless the release succeeded.
       const release = (reason: string): Promise<boolean> => {
@@ -9049,7 +9106,8 @@ function registerIpcHandlers(
       }
       return OpenEngineYDocSessionResult.parse({
         available: true,
-        initialUpdate: session.initialUpdate,
+        initialUpdate: Y.encodeStateAsUpdate(session.doc),
+        lineageGeneration,
       });
     } finally {
       finishPendingOpen();
@@ -9066,6 +9124,7 @@ function registerIpcHandlers(
       engineYDocSessionKey(event.sender.id, input.sessionId),
     );
     if (!entry) return;
+    if (input.lineageGeneration !== entry.lineageGeneration) return;
     if (entry.deleted) {
       sendEngineYDocSaveState(
         entry.sender,

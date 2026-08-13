@@ -8,14 +8,17 @@ mod common;
 use common::*;
 use dohc_engine_collab::ContentKind;
 use dohc_engine_collab::{
-    apply_remote_update, claim_base, close_session, ensure_marker, fresh_successor_base,
-    load_persisted, read_marker, record_local_update, record_local_update_creating_marker_guarded,
-    replace_lineage_with_successor, settle, ClaimOutcome, CloseOutcome, CollabError, DocKey,
-    LeaseRegistry, LineageClaimStatus, Regime, RemoteUpdate, ReplicationApplyOutcome,
+    apply_remote_update, claim_base, claim_base_at_relay, close_session, ensure_marker,
+    fresh_successor_base, load_persisted, read_marker, record_base_coordinate, record_local_update,
+    record_local_update_creating_marker_guarded,
+    record_local_update_creating_marker_guarded_for_lineage, replace_lineage_with_successor,
+    settle, BaseCoordinateRecord, BaseRelayCoordinate, ClaimOutcome, CloseOutcome, CollabError,
+    DocKey, LeaseRegistry, LineageClaimStatus, Regime, RemoteUpdate, ReplicationApplyOutcome,
     SettleOutcome, SuccessorIdentity, SuccessorIdentityInput, SuccessorInstallOutcome,
     SuccessorReplacement, Ydoc,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
+use rusqlite::OptionalExtension;
 
 fn committed<T>(o: TxnOutcome<T>) -> T {
     match o {
@@ -56,8 +59,20 @@ fn plaintext_base_and_delta() -> (Vec<u8>, Vec<u8>) {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct StoredMarkerFingerprint {
+    content_kind: String,
+    regime: String,
+    updated_at_ms: i64,
+    base_origin_id: Option<String>,
+    base_origin_seq: Option<i64>,
+    base_relay_seq: Option<i64>,
+    base_relay_confirmed_absent: i64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct LineageStorageFingerprint {
     active_claim: Option<String>,
+    marker: Option<StoredMarkerFingerprint>,
     base: Option<(String, String)>,
     updates: i64,
     snapshots: i64,
@@ -75,6 +90,29 @@ fn lineage_storage_fingerprint(store: &EngineStore, key: &DocKey) -> LineageStor
                     rusqlite::params![key.workspace_id, key.version_id, key.object_id],
                     |row| row.get(0),
                 )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?;
+            let marker = conn
+                .query_row(
+                    "SELECT content_kind,regime,updated_at_ms,base_origin_id,
+                            base_origin_seq,base_relay_seq,base_relay_confirmed_absent
+                       FROM ydoc_docs
+                      WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| {
+                        Ok(StoredMarkerFingerprint {
+                            content_kind: row.get(0)?,
+                            regime: row.get(1)?,
+                            updated_at_ms: row.get(2)?,
+                            base_origin_id: row.get(3)?,
+                            base_origin_seq: row.get(4)?,
+                            base_relay_seq: row.get(5)?,
+                            base_relay_confirmed_absent: row.get(6)?,
+                        })
+                    },
+                )
+                .optional()
                 .map_err(|error| CollabError::Corrupt {
                     reason: error.to_string(),
                 })?;
@@ -110,6 +148,7 @@ fn lineage_storage_fingerprint(store: &EngineStore, key: &DocKey) -> LineageStor
                 })?;
             Ok(LineageStorageFingerprint {
                 active_claim,
+                marker,
                 base: snapshot.0.zip(snapshot.1),
                 updates: count("ydoc_updates")?,
                 snapshots: count("ydoc_snapshots")?,
@@ -257,6 +296,62 @@ fn record_update_request_identity_binds_path_before_any_mutation() {
         record_update_transaction_fingerprint(&ts.store, &key),
         committed_state,
         "a path-mismatched replay must roll back every durable mutation"
+    );
+}
+
+#[test]
+fn record_update_lineage_guard_refuses_stale_sessions_before_any_mutation() {
+    let mut ts = fresh_store("record-update-lineage-guard");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    let (base, _) = plaintext_base_and_delta();
+    let claim_id = match committed(
+        claim_base(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &base,
+            &NoFaults,
+            1_050,
+        )
+        .expect("claim active lineage"),
+    ) {
+        ClaimOutcome::Claimed { base_snapshot_sha } => base_snapshot_sha,
+        other => panic!("unexpected claim outcome: {other:?}"),
+    };
+    let peer = Ydoc::wire();
+    peer.apply(&base).expect("load active lineage");
+    let update = peer.plaintext_insert(6, "session edit");
+    let before = record_update_transaction_fingerprint(&ts.store, &key);
+
+    let error = record_local_update_creating_marker_guarded_for_lineage(
+        &mut ts.store,
+        &key,
+        Some("notes/stale-session.md"),
+        ContentKind::Plaintext,
+        Regime::LocalOnly,
+        &update,
+        Some("local-origin"),
+        Some(&"0".repeat(64)),
+        true,
+        false,
+        Some("stale-session-request"),
+        &NoFaults,
+        1_100,
+        |_tx, _outcome| panic!("a stale lineage must not reach post-append"),
+    )
+    .expect_err("stale session claim must refuse the write");
+    assert!(matches!(
+        error,
+        CollabError::LineageWriteStale {
+            expected: Some(expected),
+            observed: Some(observed),
+        } if expected == "0".repeat(64) && observed == claim_id
+    ));
+    assert_eq!(
+        record_update_transaction_fingerprint(&ts.store, &key),
+        before,
+        "the lineage guard runs before path, parent, blob, update, request, and log mutation"
     );
 }
 
@@ -1149,6 +1244,7 @@ fn base_is_claimed_exactly_once() {
     let first_sha = match first {
         ClaimOutcome::Claimed { base_snapshot_sha } => base_snapshot_sha,
         ClaimOutcome::Resumed => panic!("first claim must mint the base"),
+        other => panic!("local first claim cannot arbitrate: {other:?}"),
     };
     assert_eq!(
         read_marker(&ts.store, &key)
@@ -1263,6 +1359,139 @@ fn base_is_claimed_exactly_once() {
 }
 
 #[test]
+fn relay_base_arbitration_is_ordered_and_claim_safe() {
+    let mut ts = fresh_store("relay-base-arbitration");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    let (first_base, _) = plaintext_base_and_delta();
+    let first_claim = match committed(
+        claim_base(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &first_base,
+            &NoFaults,
+            1_000,
+        )
+        .expect("claim local base"),
+    ) {
+        ClaimOutcome::Claimed { base_snapshot_sha } => base_snapshot_sha,
+        other => panic!("unexpected first claim: {other:?}"),
+    };
+    committed(
+        record_base_coordinate(
+            &mut ts.store,
+            BaseCoordinateRecord {
+                key: &key,
+                lineage_claim_id: &first_claim,
+                origin_id: "first-origin",
+                origin_seq: 7,
+                relay_seq: Some(10),
+                now_ms: 1_010,
+            },
+            &NoFaults,
+        )
+        .expect("stamp first relay coordinate"),
+    );
+
+    let later = Ydoc::wire();
+    later.plaintext_insert(0, "later base");
+    let later_base = later.encode_full_state();
+    let before_later = lineage_storage_fingerprint(&ts.store, &key);
+    let already_won = committed(
+        claim_base_at_relay(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &later_base,
+            &BaseRelayCoordinate::new("later-origin", 2, 20).expect("later coordinate"),
+            &NoFaults,
+            1_020,
+        )
+        .expect("earlier base wins"),
+    );
+    match already_won {
+        ClaimOutcome::AlreadyWon { winner } => {
+            assert_eq!(
+                winner.lineage_claim_id.as_deref(),
+                Some(first_claim.as_str())
+            );
+            assert_eq!(winner.content_kind, ContentKind::Plaintext);
+        }
+        other => panic!("expected AlreadyWon, got {other:?}"),
+    }
+    assert_eq!(lineage_storage_fingerprint(&ts.store, &key), before_later);
+
+    let collision = claim_base_at_relay(
+        &mut ts.store,
+        &key,
+        ContentKind::Plaintext,
+        &later_base,
+        &BaseRelayCoordinate::new("collision-origin", 4, 10).expect("collision coordinate"),
+        &NoFaults,
+        1_030,
+    )
+    .expect_err("one relay position cannot name different base bytes");
+    assert!(matches!(
+        collision,
+        CollabError::BaseRelaySequenceCollision { relay_seq: 10 }
+    ));
+
+    let earlier = Ydoc::wire();
+    earlier.plaintext_insert(0, "earlier base");
+    let earlier_base = earlier.encode_full_state();
+    let earlier_claim = dohc_engine_collab::hex_sha256(&earlier_base);
+    let replaced = committed(
+        claim_base_at_relay(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &earlier_base,
+            &BaseRelayCoordinate::new("earlier-origin", 3, 5).expect("earlier coordinate"),
+            &NoFaults,
+            1_040,
+        )
+        .expect("lower relay position replaces"),
+    );
+    match replaced {
+        ClaimOutcome::Replaced {
+            losing_lineage_claim_id,
+            winner,
+        } => {
+            assert_eq!(losing_lineage_claim_id, first_claim);
+            assert_eq!(
+                winner.lineage_claim_id.as_deref(),
+                Some(earlier_claim.as_str())
+            );
+        }
+        other => panic!("expected Replaced, got {other:?}"),
+    }
+
+    let replay = committed(
+        claim_base_at_relay(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &earlier_base,
+            &BaseRelayCoordinate::new("earlier-origin", 3, 5).expect("replay coordinate"),
+            &NoFaults,
+            1_050,
+        )
+        .expect("replay winner"),
+    );
+    assert!(matches!(replay, ClaimOutcome::Resumed));
+    assert_eq!(
+        read_marker(&ts.store, &key)
+            .expect("read winner")
+            .expect("winner marker")
+            .lineage_claim_id
+            .as_deref(),
+        Some(earlier_claim.as_str()),
+        "replay must not change the durable live-lineage token"
+    );
+}
+
+#[test]
 fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
     let scratch = unique_dir("successor-cas");
     let mut store = open_at(&scratch, 1_000);
@@ -1282,6 +1511,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
     ) {
         ClaimOutcome::Claimed { base_snapshot_sha } => base_snapshot_sha,
         ClaimOutcome::Resumed => panic!("the first base must be claimed"),
+        other => panic!("local first claim cannot arbitrate: {other:?}"),
     };
     committed(
         apply_remote_update(

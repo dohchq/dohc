@@ -7,7 +7,7 @@ export interface SyncRelayConnection {
 export interface RelayMaterializedPath {
   path: string;
   operation: "write" | "delete";
-  contentKind: "text" | "binary";
+  contentKind: "text" | "binary" | "secret";
 }
 
 export interface SharingDeclined {
