@@ -1263,6 +1263,12 @@ export class YdocLiveAdapter {
       typeof result.seedContent === "string"
     ) {
       try {
+        if (result.contentKind === "scene") {
+          throw new YdocAdapterError(
+            "response-mismatch",
+            "The engine returned text seed content for a scene. The engine must seed scenes in the initial Y.Doc update.",
+          );
+        }
         if (!isWellFormedUtf16(result.seedContent)) {
           throw new IllFormedUtf16EditError();
         }

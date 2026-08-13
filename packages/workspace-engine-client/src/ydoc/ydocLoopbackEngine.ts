@@ -210,6 +210,11 @@ function project(session: LoopbackSession): string {
   if (session.contentKind === "plaintext") {
     return session.doc.getText("plainText").toString();
   }
+  if (session.contentKind === "scene") {
+    throw new Error(
+      "The Y.Doc loopback cannot project scene documents. Use the workspace engine to settle scenes.",
+    );
+  }
   return session.doc
     .getXmlFragment("body")
     .toArray()
@@ -233,10 +238,11 @@ export interface YdocLoopbackEngineOptions {
   // that reads the file back then sees content only because something else
   // wrote it. Tests that read the file pass this in.
   //
-  // It writes on EVERY settle, including the one the daemon answers from the
-  // lineage without touching a drifted file. That is more than the daemon
-  // does, so no test may use this hook to prove what happens to a file the
-  // daemon leaves alone — those cases belong to a real-daemon test.
+  // It writes on every supported text settle, including one the daemon answers
+  // from the lineage without touching a drifted file. That is more than the
+  // daemon does, so no test may use this hook to prove what happens to a file
+  // the daemon leaves alone. Those cases belong to a real-daemon test. Scene
+  // settles refuse because the loopback has no store-backed asset projector.
   materialize?: (input: { path: string; content: string }) => void;
 }
 

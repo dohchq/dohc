@@ -66,8 +66,9 @@ export type YdocOpenResult = JsonObject & {
   // Metadata only. Asset bytes stay in the versioned binary store and are
   // hydrated through its workspace-authorized read contract.
   artifactAssets?: ArtifactAssetDescriptor[];
-  // Present only when the engine opened a captured artifact without durable
-  // CRDT lineage. The client records this content as the lineage's first update.
+  // Present only when the engine opened captured text without durable CRDT
+  // lineage. The client records this content as the lineage's first update.
+  // Scene opens return their seed in initialUpdateBase64 instead.
   seedContent?: string;
 };
 

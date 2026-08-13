@@ -104,9 +104,10 @@ export interface EngineYdocProviderSessionOptions {
 export interface EngineYdocProviderSession {
   readonly doc: Y.Doc;
   readonly initialUpdate: Uint8Array;
-  // Optional only for injected test providers. The daemon-backed provider
-  // always supplies both values.
+  // Injected test providers may omit these values. The daemon open response
+  // supplies objectId.
   readonly objectId?: string;
+  // The provider echoes the requested versionId.
   readonly versionId?: string;
   readonly contentKind: YdocContentKind;
   readonly artifactAssets?: readonly ArtifactAssetDescriptor[];

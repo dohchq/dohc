@@ -133,6 +133,35 @@ describe("scene artifact seed admission", () => {
     adapter.dispose();
     expect(engine.requests[0]?.params).not.toHaveProperty("seedFromArtifact");
   });
+
+  it("rejects text seed content for a scene without recording it as Markdown", async () => {
+    const engine = new YdocLoopbackEngine();
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: "drawings/board.excalidraw",
+      content: '{"type":"excalidraw","elements":[]}',
+      contentKind: "scene",
+    });
+    const adapter = new YdocLiveAdapter(engine);
+
+    await expect(
+      adapter.openSession({
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: "drawings/board.excalidraw",
+        contentKind: "scene",
+      }),
+    ).rejects.toMatchObject({
+      name: "YdocAdapterError",
+      code: "response-mismatch",
+      message:
+        "The engine returned text seed content for a scene. The engine must seed scenes in the initial Y.Doc update.",
+    });
+    expect(engine.recordedUpdates).toHaveLength(0);
+    expect(engine.activeSessionIds()).toHaveLength(0);
+    adapter.dispose();
+  });
 });
 
 function findPartiallyAppliedMalformedUpdate(fullUpdate: Uint8Array): Uint8Array {
@@ -238,6 +267,37 @@ describe("YdocLiveAdapter", () => {
     );
 
     await reopened.evict();
+    adapter.dispose();
+  });
+
+  it("refuses scene settlement instead of reporting an empty materialization", async () => {
+    const materialized: Array<{ path: string; content: string }> = [];
+    const engine = new YdocLoopbackEngine({
+      materialize: (input) => materialized.push(input),
+    });
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: "drawing.excalidraw",
+      contentKind: "scene",
+    });
+    await session.applyLocalEdit((doc) => {
+      doc.getMap(EXCALIDRAW_SCENE_ROOTS.revisions).set("revision", "one");
+    });
+
+    await expect(session.settle()).rejects.toThrow(
+      "The Y.Doc loopback cannot project scene documents. Use the workspace engine to settle scenes.",
+    );
+    expect(materialized).toHaveLength(0);
+    expect(
+      engine.responses.some((response) => {
+        const result = response.result as Record<string, unknown>;
+        return result.materialized === true;
+      }),
+    ).toBe(false);
+
+    await session.evict();
     adapter.dispose();
   });
 
