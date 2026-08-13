@@ -15,9 +15,9 @@ import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { createWorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import {
+  mutatePluginRecord,
   pluginStateFileName,
   readPluginLocalState,
-  setPluginDisabled,
 } from "./pluginLocalState";
 import { readPluginManifestFile } from "./pluginManifest";
 import { invokePluginSdkHost } from "./pluginSdkHost";
@@ -198,6 +198,40 @@ function createProcessHarness(options: {
   };
 }
 
+function createCrashAccountingHarness(): {
+  spawnTransport: PluginHostOptions["spawnTransport"];
+  beginFreshCode: () => void;
+} {
+  let phase: "crash-loop" | "fresh-code" = "crash-loop";
+  let freshCodeSpawns = 0;
+  const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(
+    (params) => {
+      if (phase === "fresh-code") freshCodeSpawns += 1;
+      const shouldCrash =
+        phase === "crash-loop" || freshCodeSpawns <= 2;
+      return {
+        request<T = unknown>(method: string): Promise<T> {
+          const result = method === PLUGIN_HOST_METHODS.activate
+            ? { commands: [] }
+            : {};
+          if (method === PLUGIN_HOST_METHODS.activate && shouldCrash) {
+            setTimeout(() => params.onExit({ code: 1, signal: null }), 0);
+          }
+          return Promise.resolve(result as T);
+        },
+        dispose: () => Promise.resolve(),
+      };
+    },
+  );
+  return {
+    spawnTransport,
+    beginFreshCode() {
+      phase = "fresh-code";
+      freshCodeSpawns = 0;
+    },
+  };
+}
+
 function trackHost(options: PluginHostOptions): PluginHost {
   const host = new PluginHost(options);
   hosts.push(host);
@@ -206,6 +240,20 @@ function trackHost(options: PluginHostOptions): PluginHost {
 
 function defaultRouter(): Promise<unknown> {
   return Promise.resolve({});
+}
+
+function mutateDisabledState(
+  localStateDir: string,
+  root: string,
+  pluginId: string,
+  disabled: boolean,
+): Promise<void> {
+  return mutatePluginRecord(
+    localStateDir,
+    root,
+    pluginId,
+    (record) => ({ ...record, disabled }),
+  );
 }
 
 afterEach(async () => {
@@ -426,7 +474,7 @@ describe("PluginHost", () => {
   it("does not spawn a durably disabled plugin", async () => {
     const root = await workspaceRoot();
     const localStateDir = await stateDir();
-    await setPluginDisabled(localStateDir, root, "hello-plugin", true);
+    await mutateDisabledState(localStateDir, root, "hello-plugin", true);
     const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(() => {
       throw new Error("Disabled plugin was spawned.");
     });
@@ -758,6 +806,79 @@ describe("PluginHost", () => {
     if (!localState.ok) throw new Error(localState.warning);
     expect(localState.state.plugins["hello-plugin"]?.disabled).toBe(true);
   }, 15_000);
+
+  it("lets freshly built code use a new fast-failure window after reset", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const harness = createCrashAccountingHarness();
+    const host = trackHost({
+      stateDir: localStateDir,
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+    const manifest = await fixtureManifest();
+
+    await host.start(helloPluginRoot, manifest);
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "disabled",
+      "Initial crash loop did not disable the plugin.",
+    );
+    expect(harness.spawnTransport).toHaveBeenCalledTimes(3);
+
+    await host.stop("hello-plugin");
+    await mutateDisabledState(localStateDir, root, "hello-plugin", false);
+    harness.beginFreshCode();
+    host.resetCrashAccounting("hello-plugin");
+    await host.start(helloPluginRoot, manifest);
+    await waitFor(
+      () =>
+        vi.mocked(harness.spawnTransport).mock.calls.length === 6 &&
+        host.getStatus("hello-plugin") === "ready",
+      "Fresh code did not receive a new fast-failure window.",
+    );
+    await delay(50);
+
+    expect(host.getStatus("hello-plugin")).toBe("ready");
+    expect(harness.spawnTransport).toHaveBeenCalledTimes(6);
+    const localState = await readPluginLocalState(localStateDir, root);
+    if (!localState.ok) throw new Error(localState.warning);
+    expect(localState.state.plugins["hello-plugin"]?.disabled).toBe(false);
+  });
+
+  it("keeps crash accounting across a rebuild when it is not reset", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const harness = createCrashAccountingHarness();
+    const host = trackHost({
+      stateDir: localStateDir,
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+    const manifest = await fixtureManifest();
+
+    await host.start(helloPluginRoot, manifest);
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "disabled",
+      "Initial crash loop did not disable the plugin.",
+    );
+    await host.stop("hello-plugin");
+    await mutateDisabledState(localStateDir, root, "hello-plugin", false);
+    harness.beginFreshCode();
+
+    await host.start(helloPluginRoot, manifest);
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "disabled",
+      "Preserved crash accounting did not disable the plugin.",
+    );
+    await delay(50);
+
+    expect(harness.spawnTransport).toHaveBeenCalledTimes(4);
+    const localState = await readPluginLocalState(localStateDir, root);
+    if (!localState.ok) throw new Error(localState.warning);
+    expect(localState.state.plugins["hello-plugin"]?.disabled).toBe(true);
+  });
 
   it("counts fast crashes after successful activations", async () => {
     const root = await workspaceRoot();

@@ -79,6 +79,16 @@ export interface SnapshotPluginSourceInput {
   manifest: DohcPluginManifest;
 }
 
+export interface PluginSourceFileDigest {
+  relPath: string;
+  sha256: string;
+}
+
+export interface PluginSourceDigest {
+  sourceHash: string;
+  files: PluginSourceFileDigest[];
+}
+
 export type PluginSourceSnapshotResult =
   | {
     ok: true;
@@ -615,19 +625,39 @@ async function listSnapshotFiles(
   return files;
 }
 
-async function canonicalSourceHash(snapshotRoot: string): Promise<string> {
-  const paths = await listSnapshotFiles(snapshotRoot);
-  paths.sort(lexicalCompare);
+export function canonicalPluginSourceHash(
+  files: readonly PluginSourceFileDigest[],
+): string {
   const canonical = createHash("sha256");
-  for (const posixRelativePath of paths) {
-    const bytes = await readFile(join(snapshotRoot, ...posixRelativePath.split("/")));
-    const fileHash = createHash("sha256").update(bytes).digest("hex");
-    canonical.update(posixRelativePath, "utf8");
+  const sortedFiles = [...files].sort((left, right) =>
+    lexicalCompare(left.relPath, right.relPath)
+  );
+  for (const file of sortedFiles) {
+    canonical.update(file.relPath, "utf8");
     canonical.update("\0", "utf8");
-    canonical.update(fileHash, "utf8");
+    canonical.update(file.sha256, "utf8");
     canonical.update("\n", "utf8");
   }
   return canonical.digest("hex");
+}
+
+export async function hashPluginSourceFiles(
+  sourceRoot: string,
+): Promise<PluginSourceDigest> {
+  const paths = await listSnapshotFiles(sourceRoot);
+  paths.sort(lexicalCompare);
+  const files: PluginSourceFileDigest[] = [];
+  for (const relPath of paths) {
+    const bytes = await readFile(join(sourceRoot, ...relPath.split("/")));
+    files.push({
+      relPath,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    });
+  }
+  return {
+    sourceHash: canonicalPluginSourceHash(files),
+    files,
+  };
 }
 
 function isWindowsRenameLock(error: unknown): boolean {
@@ -785,7 +815,7 @@ export async function snapshotPluginSource(
     await copySourceTree(realPluginRoot, stagingRoot, realPluginRoot);
     await readAndValidatePackageJson(stagingRoot);
     await readAndValidatePnpmLockfile(stagingRoot);
-    const sourceHash = await canonicalSourceHash(stagingRoot);
+    const { sourceHash } = await hashPluginSourceFiles(stagingRoot);
     const snapshotRoot = join(output.pluginDataRoot, "snapshot");
     await replaceSnapshot(stagingRoot, snapshotRoot);
     stagingRoot = null;

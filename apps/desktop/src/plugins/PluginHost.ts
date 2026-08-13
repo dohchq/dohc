@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
-import { readPluginLocalState, setPluginDisabled } from "./pluginLocalState";
+import {
+  mutatePluginRecord,
+  readPluginLocalState,
+} from "./pluginLocalState";
 import {
   PLUGIN_ACTIVATION_TIMEOUT_MS,
   PLUGIN_CRASH_LOOP_THRESHOLD,
@@ -277,6 +280,10 @@ export class PluginHost {
     this.currentGeneration += 1;
   }
 
+  resetCrashAccounting(pluginId: string): void {
+    this.consecutiveFastFailures.delete(pluginId);
+  }
+
   private spawn(record: PluginRecord): void {
     const spawn: PluginSpawn = {
       spawnId: randomUUID(),
@@ -401,11 +408,11 @@ export class PluginHost {
 
     if (failures >= PLUGIN_CRASH_LOOP_THRESHOLD) {
       try {
-        await setPluginDisabled(
+        await mutatePluginRecord(
           this.options.stateDir,
           this.options.workspaceRoot,
           record.pluginId,
-          true,
+          (pluginRecord) => ({ ...pluginRecord, disabled: true }),
         );
       } catch (error) {
         this.appendLog(

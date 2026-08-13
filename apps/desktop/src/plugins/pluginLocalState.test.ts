@@ -13,9 +13,9 @@ import { createTestScratch } from "../workspaces/testTemp";
 import {
   DEFAULT_PLUGIN_LOCAL_STATE,
   MAX_PLUGIN_LOCAL_STATE_FILE_BYTES,
+  mutatePluginRecord,
   pluginStateFileName,
   readPluginLocalState,
-  setPluginDisabled,
 } from "./pluginLocalState";
 
 const roots: string[] = [];
@@ -34,6 +34,20 @@ async function stateDir(): Promise<string> {
 
 function statePath(localStateDir: string, root: string): string {
   return join(localStateDir, "plugin-state", pluginStateFileName(root));
+}
+
+function mutateDisabledState(
+  localStateDir: string,
+  root: string,
+  pluginId: string,
+  disabled: boolean,
+): Promise<void> {
+  return mutatePluginRecord(
+    localStateDir,
+    root,
+    pluginId,
+    (record) => ({ ...record, disabled }),
+  );
 }
 
 afterEach(async () => {
@@ -72,7 +86,7 @@ describe("plugin local state", () => {
         pluginStateFileName(root),
       );
 
-      await setPluginDisabled(localStateDir, root, "hello-plugin", true);
+      await mutateDisabledState(localStateDir, root, "hello-plugin", true);
 
       expect(await readPluginLocalState(localStateDir, differentlySpelledRoot)).toEqual({
         ok: true,
@@ -101,7 +115,7 @@ describe("plugin local state", () => {
       );
       expect(pluginStateFileName(aliasPath)).toBe(pluginStateFileName(root));
 
-      await setPluginDisabled(localStateDir, root, "hello-plugin", true);
+      await mutateDisabledState(localStateDir, root, "hello-plugin", true);
 
       expect(await readPluginLocalState(localStateDir, aliasPath)).toEqual({
         ok: true,
@@ -135,7 +149,7 @@ describe("plugin local state", () => {
     const root = await workspaceRoot();
     const localStateDir = await stateDir();
 
-    await setPluginDisabled(localStateDir, root, "hello-plugin", true);
+    await mutateDisabledState(localStateDir, root, "hello-plugin", true);
 
     expect(await readPluginLocalState(localStateDir, root)).toEqual({
       ok: true,
@@ -146,19 +160,58 @@ describe("plugin local state", () => {
     });
   });
 
+  it("round-trips the installed baseline hash without a version bump", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const installedBaselineHash = "a".repeat(64);
+
+    await mutatePluginRecord(
+      localStateDir,
+      root,
+      "hello-plugin",
+      (record) => ({ ...record, installedBaselineHash }),
+    );
+
+    expect(await readPluginLocalState(localStateDir, root)).toEqual({
+      ok: true,
+      state: {
+        version: 1,
+        plugins: { "hello-plugin": { installedBaselineHash } },
+      },
+    });
+  });
+
+  it("removes a plugin record when the updater returns undefined", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+
+    await mutateDisabledState(localStateDir, root, "hello-plugin", true);
+    await mutatePluginRecord(
+      localStateDir,
+      root,
+      "hello-plugin",
+      () => undefined,
+    );
+
+    expect(await readPluginLocalState(localStateDir, root)).toEqual({
+      ok: true,
+      state: DEFAULT_PLUGIN_LOCAL_STATE,
+    });
+  });
+
   it("keeps different workspaces isolated under one state directory", async () => {
     const firstRoot = await workspaceRoot();
     const secondRoot = await workspaceRoot();
     const localStateDir = await stateDir();
 
-    await setPluginDisabled(localStateDir, firstRoot, "first-plugin", true);
+    await mutateDisabledState(localStateDir, firstRoot, "first-plugin", true);
 
     expect(await readPluginLocalState(localStateDir, secondRoot)).toEqual({
       ok: true,
       state: DEFAULT_PLUGIN_LOCAL_STATE,
     });
 
-    await setPluginDisabled(localStateDir, secondRoot, "second-plugin", true);
+    await mutateDisabledState(localStateDir, secondRoot, "second-plugin", true);
 
     expect(pluginStateFileName(firstRoot)).not.toBe(
       pluginStateFileName(secondRoot),
@@ -188,7 +241,7 @@ describe("plugin local state", () => {
     await mkdir(metadataRoot);
 
     await expect(stat(pluginStateDir)).rejects.toMatchObject({ code: "ENOENT" });
-    await setPluginDisabled(localStateDir, root, "hello-plugin", true);
+    await mutateDisabledState(localStateDir, root, "hello-plugin", true);
 
     expect((await stat(pluginStateDir)).isDirectory()).toBe(true);
     expect((await stat(path)).isFile()).toBe(true);
@@ -298,7 +351,7 @@ describe("plugin local state", () => {
     const before = await readFile(path);
     let thrown: unknown;
     try {
-      await setPluginDisabled(localStateDir, root, "hello-plugin", true);
+      await mutateDisabledState(localStateDir, root, "hello-plugin", true);
     } catch (error) {
       thrown = error;
     }
@@ -330,7 +383,7 @@ describe("plugin local state", () => {
     const before = await readFile(path);
     let thrown: unknown;
     try {
-      await setPluginDisabled(localStateDir, root, "one-more-plugin", true);
+      await mutateDisabledState(localStateDir, root, "one-more-plugin", true);
     } catch (error) {
       thrown = error;
     }
@@ -341,22 +394,38 @@ describe("plugin local state", () => {
     expect(await readFile(path)).toEqual(before);
   });
 
-  it("keeps both updates when two writes overlap", async () => {
+  it("queues overlapping mutations so each updater sees the previous result", async () => {
     const root = await workspaceRoot();
     const localStateDir = await stateDir();
+    const approvedHash = "a".repeat(64);
+    const installedBaselineHash = "b".repeat(64);
+    let recordSeenBySecondMutation: unknown;
 
     await Promise.all([
-      setPluginDisabled(localStateDir, root, "first-plugin", true),
-      setPluginDisabled(localStateDir, root, "second-plugin", true),
+      mutatePluginRecord(
+        localStateDir,
+        root,
+        "hello-plugin",
+        (record) => ({ ...record, approvedHash }),
+      ),
+      mutatePluginRecord(
+        localStateDir,
+        root,
+        "hello-plugin",
+        (record) => {
+          recordSeenBySecondMutation = record;
+          return { ...record, installedBaselineHash };
+        },
+      ),
     ]);
 
+    expect(recordSeenBySecondMutation).toEqual({ approvedHash });
     expect(await readPluginLocalState(localStateDir, root)).toEqual({
       ok: true,
       state: {
         version: 1,
         plugins: {
-          "first-plugin": { disabled: true },
-          "second-plugin": { disabled: true },
+          "hello-plugin": { approvedHash, installedBaselineHash },
         },
       },
     });

@@ -14,24 +14,30 @@ import { formatZodIssues } from "./zodDiagnostics";
 
 export const MAX_PLUGIN_LOCAL_STATE_FILE_BYTES = 256 * 1024;
 
+const PluginSourceHash = z.string().regex(
+  /^[0-9a-f]{64}$/,
+  "must be a 64-character lowercase hex sha256 digest",
+);
+
+export const PluginRecord = z.object({
+  disabled: z.boolean().optional(),
+  approvedHash: PluginSourceHash.optional(),
+  installedBaselineHash: PluginSourceHash.optional(),
+}).strict();
+export type PluginRecordShape = z.infer<typeof PluginRecord>;
+
 export const PluginLocalState = z.object({
   version: z.literal(1),
   // For ordinary UTF-8 plugin ids, indented JSON at these bounds is
-  // 26 + 500 × 316 + 499 + 13,513 (the writer's indentation/newlines) =
-  // 172,038 bytes, 90,106 below MAX_PLUGIN_LOCAL_STATE_FILE_BYTES (262,144).
+  // 221,538 bytes with every optional field present, 40,606 below
+  // MAX_PLUGIN_LOCAL_STATE_FILE_BYTES (262,144).
   // A plugin id built almost entirely from characters JSON must escape can
   // inflate past that on paper; the read/write byte-size gate — not this
   // schema — is the actual backstop against an oversize file either way.
   plugins: z.record(
     // Plugin ids are manifest names, whose schema allows at most 214 characters.
     z.string().min(1).max(214, "plugin id must be 214 characters or fewer"),
-    z.object({
-      disabled: z.boolean().optional(),
-      approvedHash: z.string().regex(
-        /^[0-9a-f]{64}$/,
-        "must be a 64-character lowercase hex sha256 digest",
-      ).optional(),
-    }).strict(),
+    PluginRecord,
   ),
 }).strict().superRefine((state, ctx) => {
   if (Object.keys(state.plugins).length > 500) {
@@ -169,11 +175,13 @@ function queuePluginLocalStateWrite<T>(
   return result;
 }
 
-export function setPluginDisabled(
+export function mutatePluginRecord(
   stateDir: string,
   workspaceRoot: string,
   pluginId: string,
-  disabled: boolean,
+  updater: (
+    record: PluginRecordShape | undefined,
+  ) => PluginRecordShape | undefined,
 ): Promise<void> {
   const path = pluginLocalStatePath(stateDir, workspaceRoot);
   return queuePluginLocalStateWrite(path, async () => {
@@ -182,15 +190,16 @@ export function setPluginDisabled(
       throw new Error(result.warning);
     }
     const { state } = result;
+    const plugins = { ...state.plugins };
+    const updatedRecord = updater(plugins[pluginId]);
+    if (updatedRecord === undefined) {
+      delete plugins[pluginId];
+    } else {
+      plugins[pluginId] = updatedRecord;
+    }
     await writePluginLocalState(stateDir, workspaceRoot, {
       ...state,
-      plugins: {
-        ...state.plugins,
-        [pluginId]: {
-          ...state.plugins[pluginId],
-          disabled,
-        },
-      },
+      plugins,
     });
   });
 }
