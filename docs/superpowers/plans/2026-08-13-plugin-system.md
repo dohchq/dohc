@@ -45,12 +45,23 @@ many.
 
 Three pieces. The engine stays the core.
 
-- **Plugin host** — one Node child process **per plugin**, spawned by
-  `apps/desktop`, speaking JSON-RPC over stdio like the agent drivers
-  already do (`apps/desktop/src/agents/JsonRpcTransport.ts` is the
-  precedent). Per-plugin processes are what make "a crash kills only that
-  plugin" true; a shared host cannot deliver it. The host is a client of
-  the daemon RPC, same as the desktop app.
+- **Plugin host** — one Electron `utilityProcess` **per plugin**, spawned
+  by `apps/desktop`, speaking the agent drivers' line JSON-RPC over stdio
+  (`apps/desktop/src/agents/JsonRpcTransport.ts` is the wire precedent).
+  A plain Node child is unshippable: packaged builds fuse `runAsNode` off
+  and end users have no system Node; `utilityProcess` ships Node inside
+  the app. Per-plugin processes are what make "a crash kills only that
+  plugin" true. The host contract also owns two hard edges:
+  - **Descendant teardown.** Disposal must terminate the plugin's whole
+    process tree cross-platform (the existing tree-kill covers Windows
+    only; POSIX needs process-group kill), and a crashed host's orphans
+    must be recovered — a wrapper plugin like t3 leaves a server holding
+    ports otherwise.
+  - **Generation-guarded registration.** Activation results carry the
+    workspace and a host generation; stale registrations arriving after a
+    workspace switch or reload are rejected, per the repo's async-guard
+    invariant.
+  The host is a client of the daemon RPC, same as the desktop app.
 - **`@dohc/sdk`** — the existing package (`packages/sdk`), extended. Today
   it serves sandboxed site previews over a postMessage transport. Plugins
   reuse its API and add a Node transport for the host side, plus
@@ -93,14 +104,20 @@ Constraints these choices create:
   But the `capture.setAuthor` slot is workspace-ambient — the capture
   driver holds one mutable author sampled at capture time
   (`crates/dohc-workspace-engine/src/lib.rs:3560`), so concurrent plugin
-  sessions cannot share it. Plugin writes must carry `MomentAuthor` on
-  each operation (the per-operation `author` params that
-  `moment.append`-family calls already accept), never through the ambient
-  slot.
-- The install/build pipeline (PR2) has a working precedent: workspace
-  sites already detect, install, build, and preview user code
-  (`packages/workspace-core/src/sites.ts`). Reuse its shape before
-  inventing a new one.
+  sessions cannot share it. Plugin writes carry `MomentAuthor` on each
+  operation — and **the host derives and stamps it**; author fields
+  supplied by plugin code are ignored. The daemon shape-checks but does
+  not authenticate authors (`validated_author`), so a full-trust plugin
+  that bypasses the SDK can forge history the same way any local process
+  can; that is the stated full-trust trade, not a gap the SDK path
+  shares.
+- The install/build pipeline (PR2) has partial precedents: sites
+  detection/config parsing (`packages/workspace-core/src/sites.ts`) and
+  build/preview execution (`apps/desktop/src/workspaces/siteRunner.ts`).
+  Nothing in the repo installs dependencies today — that part of PR2 is
+  genuinely new. Generated bundles go under an engine-excluded path
+  (`.dohc/plugins/`), never inside the captured `plugins/` tree, so
+  builds are not versioned, synced, or watcher-looped.
 
 ## Build plan
 
@@ -110,17 +127,23 @@ Spike first, then three stacked PRs, each independently green.
   child process, its served UI loads in a sandboxed iframe (the same
   surface PR1 ships), and a session round-trips. Output: the bridge
   contract for PR3, including the pinned package version.
-- **PR1 — host + manifest + minimal SDK.** Child-process host lifecycle
-  (one process per plugin, `disabled` flag, crash-loop auto-disable),
-  `dohc-plugin.json` format, the panel surface on the site-preview
-  sandbox, a Node transport and contribution registration in `@dohc/sdk`,
-  and a hello-plugin test fixture that exercises the host end to end.
-  This PR sets the contracts; it gets the heavyweight review.
+- **PR1a — host + manifest + SDK Node transport.** Host lifecycle (one
+  `utilityProcess` per plugin, `disabled` flag, crash-loop auto-disable,
+  descendant teardown, generation guard), `dohc-plugin.json` format, the
+  `@dohc/sdk/node` transport, and a hello-plugin fixture activating end
+  to end. No renderer surface. Sets the contracts; heavyweight review.
+- **PR1b — panel surface.** The sandboxed-iframe panel page, the
+  `dohc://plugin-panel/` tab kind, and the main-owned panel SDK
+  authority, on PR1a's contribution registry. Split from PR1a because
+  the measured combined scope (~5–8k lines) is past where review
+  quality holds.
 - **PR2 — install/build pipeline.** `plugins/` source + lockfile → dep
   install + esbuild bundle → hot reload on change. Ships the visible
-  reverse path: disable and uninstall for any installed plugin. (PR1's
-  host already honors a `disabled` flag and auto-disables a plugin that
-  crash-loops, so a broken plugin can never wedge app startup.)
+  reverse paths: disable, re-enable, and uninstall for any installed
+  plugin — re-enable is the reverse of auto-disable; uninstall is not.
+  (PR1a's host already honors a `disabled` flag and auto-disables a
+  plugin that crash-loops, so a broken plugin can never wedge app
+  startup.)
 - **PR3 — the t3 code plugin.** Manifest + glue over the spike's bridge
   contract.
 
