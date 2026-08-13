@@ -9,13 +9,13 @@
 // parallelism to an even share of the cores while it holds it.
 //
 // A slot is a directory because directory creation is atomic. The owner
-// heartbeats by touching its `owner.json`; reclamation is owner-safe, not
-// age-guessed: a slot is reclaimable only when its heartbeat is stale AND its
-// owner pid is provably dead, and the reclaim renames the directory to a
-// tombstone first, so the slot NAME is freed atomically and never shared.
-// Denials and reclaims are appended to `events.log` beside the slots — not to
-// a tracked file, which a mid-run gate write would turn into a provenance
-// failure.
+// heartbeats by touching its `owner.json`; reclamation requires a stale
+// heartbeat and, when the owner is readable, a provably dead pid (see
+// reclaimStaleSlots for the full rule), renames to a tombstone so the slot
+// name is freed atomically, and is serialized through a sweep lock so two
+// reclaimers cannot judge one slot together. Denials and reclaims are
+// appended to `events.log` beside the slots — not to a tracked file, which a
+// mid-run gate write would turn into a provenance failure.
 
 import {
   appendFileSync,
@@ -106,59 +106,106 @@ function holders(root, slots) {
 }
 
 /**
- * Reclaim slots whose heartbeat is more than `staleMs` old AND whose owner
- * pid is provably dead. Both conditions, because either alone reclaims a live
- * lane: a wedged-but-alive owner stops heartbeating, and a dead pid with a
- * fresh heartbeat is a pid the OS already reused. A slot with no readable
- * owner is never reclaimed — ownership that cannot be read cannot be proven
- * dead. Returns how many slots were freed.
+ * Reclaim dead slots. The owner file's mtime IS the heartbeat: a live owner
+ * refreshes it every minute whatever its content, so a slot is a candidate
+ * only when that heartbeat is more than `staleMs` old. A readable owner must
+ * ALSO be provably dead — a wedged-but-alive lane stops heartbeating and
+ * still owns its slot. A slot whose owner file is missing or unreadable for
+ * that long has no working heartbeat by construction (a crash between mkdir
+ * and the owner write, or a torn write) and is reclaimed too — refusing
+ * those permanently eats a lane on every interrupted acquisition.
+ *
+ * Sweeps are serialized through a `reclaim.lock` directory: two concurrent
+ * sweepers could otherwise both judge one slot dead, and the slower rename
+ * would steal the directory the faster sweeper's waiter had already
+ * re-claimed. The lock is held for milliseconds; one left by a dead sweeper
+ * is removed after 5 minutes. Returns how many slots were freed.
  */
 export function reclaimStaleSlots({ root, slots, staleMs }) {
-  let reclaimed = 0;
-  for (let i = 1; i <= slots; i += 1) {
-    const dir = slotDir(root, i);
-    const ownerPath = join(dir, "owner.json");
-    let heartbeatAt;
+  const sweepLock = join(root, "reclaim.lock");
+  try {
+    mkdirSync(sweepLock);
+  } catch {
     try {
-      heartbeatAt = statSync(ownerPath).mtimeMs;
+      if (Date.now() - statSync(sweepLock).mtimeMs < 5 * 60_000) return 0;
+      rmSync(sweepLock, { recursive: true, force: true });
+      mkdirSync(sweepLock);
     } catch {
-      continue;
+      return 0; // Another sweeper is live (or just beat us); its sweep counts.
     }
-    if (Date.now() - heartbeatAt <= staleMs) continue;
-    let pid;
-    try {
-      pid = JSON.parse(readFileSync(ownerPath, "utf8")).pid;
-    } catch {
-      continue;
-    }
-    if (!Number.isInteger(pid) || pid <= 0 || pidAlive(pid)) continue;
-    const tomb = `${dir}.tomb-${randomBytes(4).toString("hex")}`;
-    try {
-      renameSync(dir, tomb);
-    } catch {
-      continue; // A racing owner touched it first; its slot, not ours.
-    }
-    try {
-      rmSync(tomb, { recursive: true, force: true });
-    } catch {
-      // The rename already freed the slot name; the tombstone is debris.
-    }
-    logEvent(
-      root,
-      `reclaimed build-slot-${i}: pid ${pid} dead, heartbeat ` +
-        `${Math.round((Date.now() - heartbeatAt) / 60_000)} min stale`,
-    );
-    reclaimed += 1;
   }
-  return reclaimed;
+  try {
+    let reclaimed = 0;
+    for (let i = 1; i <= slots; i += 1) {
+      const dir = slotDir(root, i);
+      const ownerPath = join(dir, "owner.json");
+      let heartbeatAt;
+      let why;
+      try {
+        heartbeatAt = statSync(ownerPath).mtimeMs;
+      } catch {
+        try {
+          heartbeatAt = statSync(dir).mtimeMs;
+          why = "no owner file";
+        } catch {
+          continue; // Slot is free.
+        }
+      }
+      if (Date.now() - heartbeatAt <= staleMs) continue;
+      if (why === undefined) {
+        let pid;
+        try {
+          pid = JSON.parse(readFileSync(ownerPath, "utf8")).pid;
+        } catch {
+          pid = null;
+        }
+        if (pid === null) {
+          why = "owner unreadable";
+        } else if (!Number.isInteger(pid) || pid <= 0) {
+          why = `owner pid invalid (${pid})`;
+        } else if (pidAlive(pid)) {
+          continue;
+        } else {
+          why = `pid ${pid} dead`;
+        }
+      }
+      const tomb = `${dir}.tomb-${randomBytes(4).toString("hex")}`;
+      try {
+        renameSync(dir, tomb);
+      } catch {
+        continue; // A racing owner touched it first; its slot, not ours.
+      }
+      try {
+        rmSync(tomb, { recursive: true, force: true });
+      } catch {
+        // The rename already freed the slot name; the tombstone is debris.
+      }
+      logEvent(
+        root,
+        `reclaimed build-slot-${i}: ${why}, heartbeat ` +
+          `${Math.round((Date.now() - heartbeatAt) / 60_000)} min stale`,
+      );
+      reclaimed += 1;
+    }
+    return reclaimed;
+  } finally {
+    rmSync(sweepLock, { recursive: true, force: true });
+  }
 }
 
 function claimSlot(dir, name, heartbeatMs) {
   const ownerPath = join(dir, "owner.json");
-  writeFileSync(
-    ownerPath,
-    JSON.stringify({ pid: process.pid, start: new Date().toISOString() }),
-  );
+  try {
+    writeFileSync(
+      ownerPath,
+      JSON.stringify({ pid: process.pid, start: new Date().toISOString() }),
+    );
+  } catch (error) {
+    // A slot without its owner file only frees after the 30-minute reclaim
+    // window; give the name back now instead.
+    rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
   const beat = setInterval(() => {
     try {
       const now = new Date();

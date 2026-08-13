@@ -146,29 +146,74 @@ test("a stale slot with a dead owner is reclaimed; acquisition proceeds", async 
   }
 });
 
-test("neither staleness nor a dead pid alone reclaims a slot", () => {
+test("a live owner is never reclaimed: fresh heartbeat or alive pid protects it", () => {
   const root = slotRoot();
   try {
     // Dead owner, fresh heartbeat: the OS may have reused the pid.
     plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 0 });
     // Live owner, stale heartbeat: a wedged-but-alive lane still owns it.
     plantSlot(root, 2, { pid: process.pid, heartbeatAgeMs: 45 * 60_000 });
-    // Unreadable owner, stale: ownership that cannot be read cannot be
-    // proven dead.
-    const corrupt = plantSlot(root, 3, {
+    assert.equal(
+      reclaimStaleSlots({ root, slots: 2, staleMs: 30 * 60_000 }),
+      0,
+    );
+    assert.equal(existsSync(join(root, "build-slot-1")), true);
+    assert.equal(existsSync(join(root, "build-slot-2")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a slot with no working heartbeat for the stale window is reclaimed", () => {
+  const root = slotRoot();
+  try {
+    // Torn owner write: unreadable content, stale mtime. A live owner would
+    // have refreshed the mtime every minute whatever the content says.
+    const corrupt = plantSlot(root, 1, {
       pid: process.pid,
       heartbeatAgeMs: 45 * 60_000,
     });
     writeFileSync(join(corrupt, "owner.json"), "not json");
     const then = new Date(Date.now() - 45 * 60_000);
     utimesSync(join(corrupt, "owner.json"), then, then);
+    // Crash between mkdir and the owner write: a bare directory, old.
+    const bare = join(root, "build-slot-2");
+    mkdirSync(bare, { recursive: true });
+    utimesSync(bare, then, then);
+    assert.equal(
+      reclaimStaleSlots({ root, slots: 2, staleMs: 30 * 60_000 }),
+      2,
+    );
+    assert.equal(existsSync(corrupt), false);
+    assert.equal(existsSync(bare), false);
+    // But the same states with fresh timestamps stay held.
+    const fresh = plantSlot(root, 3, { pid: process.pid, heartbeatAgeMs: 0 });
+    writeFileSync(join(fresh, "owner.json"), "not json");
     assert.equal(
       reclaimStaleSlots({ root, slots: 3, staleMs: 30 * 60_000 }),
       0,
     );
-    assert.equal(existsSync(join(root, "build-slot-1")), true);
-    assert.equal(existsSync(join(root, "build-slot-2")), true);
-    assert.equal(existsSync(join(root, "build-slot-3")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a live sweep lock defers reclamation to the sweeper that holds it", () => {
+  const root = slotRoot();
+  try {
+    plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 45 * 60_000 });
+    mkdirSync(join(root, "reclaim.lock"), { recursive: true });
+    assert.equal(
+      reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000 }),
+      0,
+    );
+    // A dead sweeper's lock is removed after its own stale window.
+    const then = new Date(Date.now() - 6 * 60_000);
+    utimesSync(join(root, "reclaim.lock"), then, then);
+    assert.equal(
+      reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000 }),
+      1,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
