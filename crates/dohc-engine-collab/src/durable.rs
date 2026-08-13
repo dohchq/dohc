@@ -946,6 +946,10 @@ pub struct SuccessorReplacement<'a> {
     pub expected_predecessor_state_vector_sha256: &'a str,
     pub path: &'a str,
     pub successor: &'a SuccessorBase,
+    /// The selected portable artifact for a scene successor. Scene Y.Docs keep
+    /// asset references, not bytes, so validating the canonical artifact needs
+    /// the exact text whose embedded files supply those bytes.
+    pub scene_result: Option<&'a str>,
     pub now_ms: i64,
 }
 
@@ -954,7 +958,7 @@ pub fn replace_lineage_with_successor(
     replacement: SuccessorReplacement<'_>,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<SuccessorInstallOutcome>, CollabError> {
-    validate_successor_base(replacement.successor)?;
+    validate_successor_base(replacement.successor, replacement.scene_result)?;
     store.write_with(faults, |tx| {
         replace_lineage_with_successor_in_tx(tx, replacement)
     })
@@ -971,9 +975,10 @@ pub fn replace_lineage_with_successor_in_tx(
         expected_predecessor_state_vector_sha256,
         path,
         successor,
+        scene_result,
         now_ms,
     } = replacement;
-    validate_successor_base(successor)?;
+    validate_successor_base(successor, scene_result)?;
     if successor.predecessor_state_vector_sha256 != expected_predecessor_state_vector_sha256 {
         return Err(CollabError::InvalidSuccessorBase {
             constraint: "predecessor state vector matches the successor CAS",
@@ -1211,7 +1216,10 @@ fn load_exact_active_lineage(
     Ok((marker, doc, state_vector))
 }
 
-fn validate_successor_base(successor: &SuccessorBase) -> Result<(), CollabError> {
+fn validate_successor_base(
+    successor: &SuccessorBase,
+    scene_result: Option<&str>,
+) -> Result<(), CollabError> {
     validate_update_bytes(&successor.update)?;
     let observed_claim = crate::hex_sha256(&successor.update);
     if observed_claim != successor.lineage_claim_id {
@@ -1248,7 +1256,29 @@ fn validate_successor_base(successor: &SuccessorBase) -> Result<(), CollabError>
             observed: crate::hex_sha256(&observed_state_vector),
         });
     }
-    let projected = doc.project(successor.content_kind)?.content;
+    let projected = if successor.content_kind == ContentKind::Scene {
+        let scene_result = scene_result.ok_or_else(|| CollabError::InvalidSuccessorBase {
+            constraint: "scene successor portable artifact",
+            expected: successor.result_sha256.clone(),
+            observed: "missing".to_owned(),
+        })?;
+        let parsed = crate::scene::parse_portable_scene(scene_result).map_err(|error| {
+            CollabError::InvalidSuccessorBase {
+                constraint: "scene successor portable artifact",
+                expected: successor.result_sha256.clone(),
+                observed: error.to_string(),
+            }
+        })?;
+        let asset_bytes = parsed
+            .files
+            .into_iter()
+            .map(|(id, file)| (id, file.bytes))
+            .collect();
+        doc.fold_scene()
+            .portable_json_with_asset_bytes(&asset_bytes)?
+    } else {
+        doc.project(successor.content_kind)?.content
+    };
     let observed_result = crate::hex_sha256(projected.as_bytes());
     if observed_result != successor.result_sha256 {
         return Err(CollabError::InvalidSuccessorBase {

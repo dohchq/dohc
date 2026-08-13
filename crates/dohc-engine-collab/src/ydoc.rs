@@ -115,6 +115,7 @@ const SUCCESSOR_CLIENT_DOMAIN: &[u8] = b"dohc:ydoc-successor-client:v1";
 /// The deterministic identity of one fresh successor lineage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuccessorIdentity {
+    key: crate::DocKey,
     epoch_tag: String,
     client_id: u64,
     content_kind: ContentKind,
@@ -176,6 +177,7 @@ impl SuccessorIdentity {
         client_bytes.copy_from_slice(&digest[..8]);
         let client_id = (u64::from_be_bytes(client_bytes) & ((1_u64 << 53) - 1)).max(1);
         Self {
+            key: key.clone(),
             epoch_tag,
             client_id,
             content_kind,
@@ -204,28 +206,19 @@ pub struct SuccessorBase {
     pub state_vector: Vec<u8>,
 }
 
-/// Build a fresh Y.Doc from canonical text without merging predecessor items.
+/// Build a fresh Y.Doc from a canonical artifact without merging predecessor items.
 pub fn fresh_successor_base(
     identity: &SuccessorIdentity,
-    markdown: &str,
+    artifact: &str,
 ) -> Result<SuccessorBase, CollabError> {
-    if identity.content_kind == ContentKind::Scene {
-        return Err(CollabError::MarkdownRewriteUnsupported { kind: "scene" });
-    }
-    let observed_result = crate::hex_sha256(markdown.as_bytes());
+    let observed_result = crate::hex_sha256(artifact.as_bytes());
     if observed_result != identity.result_sha256 {
         return Err(CollabError::SuccessorResultMismatch {
             expected: identity.result_sha256.clone(),
             observed: observed_result,
         });
     }
-    let doc = Ydoc {
-        doc: Doc::with_options(Options {
-            client_id: yrs::ClientID::new(identity.client_id),
-            offset_kind: yrs::OffsetKind::Utf16,
-            ..Options::default()
-        }),
-    };
+    let doc = Ydoc::with_client_id(identity.client_id);
     let meta = doc.doc.get_or_insert_map(ROOT_META);
     {
         let mut txn = doc.doc.transact_mut();
@@ -239,11 +232,22 @@ pub fn fresh_successor_base(
             identity.epoch_tag.as_str(),
         );
     }
-    doc.rewrite_content_to_markdown(identity.content_kind, markdown)?;
-    let projected = doc.project(identity.content_kind)?.content;
-    if projected != markdown {
+    let projected = if identity.content_kind == ContentKind::Scene {
+        let asset_bytes = crate::scene::seed_portable_scene(&doc, &identity.key, artifact)
+            .map_err(|error| CollabError::InvalidSuccessorBase {
+                constraint: "scene successor portable artifact",
+                expected: "a valid portable Excalidraw scene".to_owned(),
+                observed: error.to_string(),
+            })?;
+        doc.fold_scene()
+            .portable_json_with_asset_bytes(&asset_bytes)?
+    } else {
+        doc.rewrite_content_to_markdown(identity.content_kind, artifact)?;
+        doc.project(identity.content_kind)?.content
+    };
+    if projected != artifact {
         return Err(CollabError::SuccessorProjectionMismatch {
-            expected_sha256: crate::hex_sha256(markdown.as_bytes()),
+            expected_sha256: crate::hex_sha256(artifact.as_bytes()),
             observed_sha256: crate::hex_sha256(projected.as_bytes()),
         });
     }
@@ -314,6 +318,19 @@ impl Ydoc {
             offset_kind,
             ..Options::default()
         });
+        Self::from_doc(doc)
+    }
+
+    fn with_client_id(client_id: u64) -> Self {
+        let doc = Doc::with_options(Options {
+            client_id: yrs::ClientID::new(client_id),
+            offset_kind: yrs::OffsetKind::Utf16,
+            ..Options::default()
+        });
+        Self::from_doc(doc)
+    }
+
+    fn from_doc(doc: Doc) -> Self {
         // Yjs v1 updates do not carry root kinds. Declare every scene root as a
         // map before any update is applied, including replay reconstruction.
         doc.get_or_insert_map(ROOT_SCENE_REVISIONS);
@@ -4378,6 +4395,71 @@ mod projection_tests {
             .content;
         assert_ne!(projection, RESOLVED);
         assert!(projection.contains("peer unseen edit"));
+    }
+
+    #[test]
+    fn a_scene_successor_is_byte_stable_and_reproduces_embedded_assets() {
+        let key = crate::DocKey::new("ws", "main", "drawing-object").expect("valid key");
+        let external = serde_json::to_string(&json!({
+            "type": "excalidraw",
+            "version": 2,
+            "source": "https://excalidraw.com",
+            "elements": [{
+                "id": "image",
+                "type": "image",
+                "version": 1,
+                "versionNonce": 7,
+                "isDeleted": false,
+                "index": "a0",
+                "fileId": "image-file"
+            }],
+            "appState": { "viewBackgroundColor": "#ffffff" },
+            "files": {
+                "image-file": {
+                    "id": "image-file",
+                    "mimeType": "image/png",
+                    "created": 10,
+                    "dataURL": "data:image/png;base64,AQID"
+                }
+            }
+        }))
+        .expect("external scene");
+        let canonical_doc = Ydoc::wire();
+        let asset_bytes = crate::scene::seed_portable_scene(&canonical_doc, &key, &external)
+            .expect("seed canonical scene");
+        let canonical = canonical_doc
+            .fold_scene()
+            .portable_json_with_asset_bytes(&asset_bytes)
+            .expect("canonical portable scene");
+        let result_sha = crate::hex_sha256(canonical.as_bytes());
+        let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &"a".repeat(64),
+            predecessor_state_vector_sha256: &"b".repeat(64),
+            artifact_op_kind: "conflict.resolve",
+            artifact_id: "scene-conflict",
+            artifact_preimage_sha256: &"c".repeat(64),
+            content_kind: ContentKind::Scene,
+            result_sha256: &result_sha,
+        });
+
+        let first = fresh_successor_base(&identity, &canonical).expect("scene successor");
+        let replay = fresh_successor_base(&identity, &canonical).expect("scene replay");
+        assert_eq!(first, replay, "one scene identity has one exact base");
+
+        let loaded = Ydoc::wire();
+        loaded.apply(&first.update).expect("load scene successor");
+        assert_eq!(
+            loaded.lineage_epoch_tag().as_deref(),
+            Some(first.epoch_tag.as_str())
+        );
+        assert_eq!(
+            loaded
+                .fold_scene()
+                .portable_json_with_asset_bytes(&asset_bytes)
+                .expect("project scene successor"),
+            canonical,
+        );
     }
 
     #[test]

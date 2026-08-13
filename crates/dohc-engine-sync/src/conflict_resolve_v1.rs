@@ -134,6 +134,7 @@ pub(crate) struct EffectV1 {
 pub(crate) enum SuccessorContentKindV1 {
     Plaintext,
     Richdoc,
+    Scene,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -766,6 +767,7 @@ fn parse_successor(value: &Value) -> Result<Option<SuccessorV1>, SyncError> {
     let content_kind = match string(field(record, "contentKind")?)? {
         "plaintext" => SuccessorContentKindV1::Plaintext,
         "richdoc" => SuccessorContentKindV1::Richdoc,
+        "scene" => SuccessorContentKindV1::Scene,
         _ => return Err(invalid("conflict.resolve successor contentKind is invalid")),
     };
     Ok(Some(SuccessorV1 {
@@ -1187,6 +1189,7 @@ fn lineage_transition_value(transition: Option<&LineageTransitionV1>) -> Value {
                 "contentKind": match successor.content_kind {
                     SuccessorContentKindV1::Plaintext => "plaintext",
                     SuccessorContentKindV1::Richdoc => "richdoc",
+                    SuccessorContentKindV1::Scene => "scene",
                 },
                 "resultSha256": successor.result_sha256,
                 "updateBlobSha256": successor.update_blob_sha256,
@@ -1783,6 +1786,7 @@ fn imported_successor(
         content_kind: match successor.content_kind {
             SuccessorContentKindV1::Plaintext => ContentKind::Plaintext,
             SuccessorContentKindV1::Richdoc => ContentKind::Richdoc,
+            SuccessorContentKindV1::Scene => ContentKind::Scene,
         },
         predecessor_state_vector_sha256: transition.predecessor_state_vector_sha256.clone(),
         artifact_preimage_sha256: transition.artifact_preimage_sha256.clone(),
@@ -1790,6 +1794,50 @@ fn imported_successor(
         update,
         state_vector,
     })
+}
+
+fn scene_successor_result(
+    tx: &Transaction<'_>,
+    successor: &SuccessorBase,
+) -> Result<Option<String>, SyncError> {
+    if successor.content_kind != ContentKind::Scene {
+        return Ok(None);
+    }
+    let text: String = tx
+        .query_row(
+            "SELECT text FROM blobs WHERE sha256=?1",
+            [&successor.result_sha256],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if dohc_engine_storage::hex_sha256(text.as_bytes()) != successor.result_sha256 {
+        return Err(SyncError::BlobInvalid);
+    }
+    Ok(Some(text))
+}
+
+fn validate_scene_successor_with_store(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    successor: &SuccessorBase,
+    scene_result: Option<&str>,
+) -> Result<(), SyncError> {
+    if successor.content_kind != ContentKind::Scene {
+        return Ok(());
+    }
+    let scene_result = scene_result.ok_or(SyncError::InvalidInput {
+        reason: "scene conflict successor has no portable artifact",
+    })?;
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&successor.update)
+        .map_err(map_local_collab_error)?;
+    let projected = crate::project_ydoc_with_store(tx, key, &doc, ContentKind::Scene)?;
+    if projected.content != scene_result {
+        return Err(SyncError::InvalidInput {
+            reason: "scene conflict successor does not match its portable artifact",
+        });
+    }
+    Ok(())
 }
 
 fn commit_imported_lineage(
@@ -1809,6 +1857,8 @@ fn commit_imported_lineage(
         let result = payload.result.present().ok_or(SyncError::InvalidInput {
             reason: "conflict.resolve successor has no result",
         })?;
+        let scene_result = scene_successor_result(tx, &successor_base)?;
+        validate_scene_successor_with_store(tx, key, &successor_base, scene_result.as_deref())?;
         dohc_engine_collab::replace_lineage_with_successor_in_tx(
             tx,
             SuccessorReplacement {
@@ -1818,6 +1868,7 @@ fn commit_imported_lineage(
                     .predecessor_state_vector_sha256,
                 path: &payload.paths[result.path_ref],
                 successor: &successor_base,
+                scene_result: scene_result.as_deref(),
                 now_ms,
             },
         )
@@ -2089,7 +2140,11 @@ fn archive_conflicting_successor(
             current.object_id,
             successor.lineage_claim_id,
             transition.predecessor_claim_id,
-            match successor.content_kind { SuccessorContentKindV1::Plaintext => "plaintext", SuccessorContentKindV1::Richdoc => "richdoc" },
+            match successor.content_kind {
+                SuccessorContentKindV1::Plaintext => "plaintext",
+                SuccessorContentKindV1::Richdoc => "richdoc",
+                SuccessorContentKindV1::Scene => "scene",
+            },
             payload.paths[payload.result.path_ref()],
             successor.epoch_tag,
             successor.update_blob_sha256,
@@ -2218,6 +2273,7 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
             path,
             successor,
         } => {
+            let scene_result = scene_successor_result(tx, successor)?;
             dohc_engine_collab::replace_lineage_with_successor_in_tx(
                 tx,
                 SuccessorReplacement {
@@ -2226,6 +2282,7 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
                     expected_predecessor_state_vector_sha256: predecessor_state_vector_sha256,
                     path,
                     successor,
+                    scene_result: scene_result.as_deref(),
                     now_ms: result.conflict.updated_at_ms,
                 },
             )
@@ -2602,6 +2659,7 @@ fn prepare_local_lineage_in_tx(
                         .ok_or_else(|| corrupt_local("text successor has no canonical body"))?,
                 )
                 .map_err(map_local_collab_error)?;
+                validate_scene_successor_with_store(tx, &key, &successor, result_text)?;
                 Ok(LocalLineagePlan::ExactSuccessor {
                     key,
                     predecessor_claim_id,
@@ -2641,11 +2699,7 @@ fn lineage_transition(plan: &LocalLineagePlan) -> Result<Option<LineageTransitio
                 content_kind: match successor.content_kind {
                     ContentKind::Plaintext => SuccessorContentKindV1::Plaintext,
                     ContentKind::Richdoc => SuccessorContentKindV1::Richdoc,
-                    ContentKind::Scene => {
-                        return Err(SyncError::InvalidInput {
-                            reason: "scene conflict resolution cannot create a Markdown successor",
-                        });
-                    }
+                    ContentKind::Scene => SuccessorContentKindV1::Scene,
                 },
                 result_sha256: successor.result_sha256.clone(),
                 update_blob_sha256: successor.lineage_claim_id.clone(),
@@ -2948,6 +3002,7 @@ fn map_local_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
         },
         CollabError::SuccessorProjectionMismatch { .. }
         | CollabError::SuccessorResultMismatch { .. }
+        | CollabError::InvalidSuccessorBase { .. }
         | CollabError::ProjectionTooComplex { .. } => SyncError::InvalidInput {
             reason: "ydoc-resolution-not-representable",
         },
@@ -2961,6 +3016,8 @@ fn corrupt_local(reason: &'static str) -> SyncError {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use serde_json::{Value, json};
 
     use super::*;
@@ -2970,6 +3027,42 @@ mod tests {
     };
     use dohc_engine_storage::{EngineStore, NoFaults};
     use dohc_engine_testkit::ScratchDir;
+
+    fn canonical_scene(element_id: &str) -> String {
+        let source = serde_json::to_string(&json!({
+            "type": "excalidraw",
+            "version": 2,
+            "source": "https://excalidraw.com",
+            "elements": [{
+                "id": element_id,
+                "type": "rectangle",
+                "version": 1,
+                "versionNonce": 1,
+                "isDeleted": false,
+                "index": "a0"
+            }],
+            "appState": {},
+            "files": {}
+        }))
+        .expect("scene source");
+        let imported = dohc_engine_collab::import_portable_scene(&source).expect("import scene");
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&imported.initial_update)
+            .expect("apply scene seed");
+        doc.project(ContentKind::Scene)
+            .expect("project canonical scene")
+            .content
+    }
+
+    fn sync_as_domain(error: SyncError) -> dohc_engine_domain::DomainError {
+        match error {
+            SyncError::Storage(storage) => dohc_engine_domain::DomainError::Storage(storage),
+            SyncError::InvalidInput { reason } => {
+                dohc_engine_domain::DomainError::InvalidInput { reason }
+            }
+            other => dohc_engine_domain::DomainError::Storage(StorageError::corrupt_public(other)),
+        }
+    }
 
     fn compact_path_change() -> Value {
         let current_sha = dohc_engine_storage::hex_sha256(b"current text");
@@ -3397,6 +3490,171 @@ mod tests {
             effects: Vec::new(),
             lineage_transition: None,
         }
+    }
+
+    #[test]
+    fn same_path_scene_resolution_installs_an_exact_scene_successor() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db path"), 1_000).expect("store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1_000, &NoFaults)
+            .expect("workspace");
+        let current_text = canonical_scene("current-box");
+        let incoming_text = canonical_scene("incoming-box");
+        let current = VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "drawing-object".to_owned(),
+                    path: "drawing.excalidraw".to_owned(),
+                    text: current_text.clone(),
+                    moment_id: "moment-current".to_owned(),
+                    metadata_origin: "sync".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("current scene");
+        let key = DocKey::new("ws", "main", "drawing-object").expect("scene key");
+        let imported =
+            dohc_engine_collab::import_portable_scene(&current_text).expect("import current scene");
+        dohc_engine_collab::claim_base(
+            &mut store,
+            &key,
+            ContentKind::Scene,
+            &imported.initial_update,
+            &NoFaults,
+            11,
+        )
+        .expect("claim scene base");
+        let incoming = TextSnapshot {
+            workspace_id: "ws".to_owned(),
+            version_id: "peer".to_owned(),
+            object_id: "peer-drawing-object".to_owned(),
+            path: "drawing.excalidraw".to_owned(),
+            text: incoming_text.clone(),
+            blob_sha256: dohc_engine_storage::hex_sha256(incoming_text.as_bytes()),
+            updated_at_ms: 12,
+            latest_moment_id: "moment-incoming".to_owned(),
+            metadata_origin: "sync".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+        };
+        let conflict = TextConflict {
+            conflict_id: "scene-conflict".to_owned(),
+            workspace_id: "ws".to_owned(),
+            path: "drawing.excalidraw".to_owned(),
+            target_version_id: "main".to_owned(),
+            source_version_id: "peer".to_owned(),
+            created_at_ms: 12,
+            updated_at_ms: 12,
+            status: ConflictStatus::Open,
+            chosen_from: ConflictChoice::Current,
+            resolution: None,
+            metadata: ConflictMetadata::origin("sync"),
+            base: ConflictFileState::text("drawing.excalidraw", None),
+            current: ConflictFileState::text("drawing.excalidraw", Some(current.snapshot)),
+            incoming: ConflictFileState::text("drawing.excalidraw", Some(incoming)),
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                insert_text_conflict_if_absent(tx, &conflict).map(|_| ())
+            })
+            .expect("open scene conflict");
+        let input = ResolveTextConflict {
+            workspace_id: "ws".to_owned(),
+            conflict_id: "scene-conflict".to_owned(),
+            resolution: ResolveConflictKind::ApplyIncoming,
+            object_id: "drawing-object".to_owned(),
+            write_moment_id: "moment-resolved".to_owned(),
+            delete_moment_id: "moment-delete-unused".to_owned(),
+            metadata_origin: "sync".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 20,
+            request_id: Some("resolve-scene".to_owned()),
+            conflict_answer_budget_bytes: usize::MAX,
+        };
+        let prepare_input = input.clone();
+        let built = RefCell::new(None);
+        let result = VersionedTextStore::new(&mut store)
+            .resolve_text_conflict_with(
+                &input,
+                &NoFaults,
+                |tx, conflict, _| {
+                    let prepared =
+                        prepare_local_conflict_resolve_v1_in_tx(tx, &prepare_input, conflict)
+                            .map_err(sync_as_domain)?;
+                    prepared
+                        .ensure_no_live_ydoc_session(&crate::NoLiveLeases)
+                        .map_err(sync_as_domain)?;
+                    Ok(prepared)
+                },
+                |tx, result, prepared| {
+                    *built.borrow_mut() = Some(prepared.built.clone());
+                    commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                        .map_err(sync_as_domain)
+                },
+            )
+            .expect("resolve scene conflict");
+        assert_eq!(result.conflict.status, ConflictStatus::Resolved);
+        let built = built.into_inner().expect("captured replicated carrier");
+        assert!(matches!(
+            built
+                .validated
+                .payload
+                .lineage_transition
+                .as_ref()
+                .and_then(|transition| transition.successor.as_ref())
+                .map(|successor| successor.content_kind),
+            Some(SuccessorContentKindV1::Scene)
+        ));
+        let marker = dohc_engine_collab::read_marker(&store, &key)
+            .expect("read scene marker")
+            .expect("scene successor marker");
+        assert_eq!(marker.content_kind, ContentKind::Scene);
+        let loaded = dohc_engine_collab::load_persisted(&store, &key)
+            .expect("load scene successor")
+            .expect("active scene successor");
+        assert_eq!(
+            loaded
+                .doc
+                .project(ContentKind::Scene)
+                .expect("project resolved scene")
+                .content,
+            incoming_text,
+        );
+        let replicated = ReplicationEnvelope {
+            workspace_id: "ws".to_owned(),
+            origin_id: "resolution-peer".to_owned(),
+            origin_seq: 0,
+            op_kind: "conflict.resolve".to_owned(),
+            payload: built.value,
+            recorded_at_ms: 20,
+        };
+        assert!(matches!(
+            crate::apply_replication_envelope(
+                &mut store,
+                &replicated,
+                &NoFaults,
+                &crate::NoLiveLeases,
+            ),
+            Ok(crate::ApplyOutcome::Applied(_))
+        ));
+        assert_eq!(
+            dohc_engine_collab::read_marker(&store, &key)
+                .expect("read replayed scene marker")
+                .and_then(|marker| marker.lineage_claim_id),
+            Some(loaded.marker.lineage_claim_id.expect("exact scene claim")),
+            "replicating the exact scene resolution is a no-op replay",
+        );
     }
 
     #[test]

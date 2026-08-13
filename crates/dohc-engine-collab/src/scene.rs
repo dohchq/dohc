@@ -51,6 +51,12 @@ pub struct ImportedScene {
     pub files: BTreeMap<String, ImportedSceneFile>,
 }
 
+pub(crate) struct ParsedPortableScene {
+    pub revisions: BTreeMap<String, String>,
+    pub app_state: BTreeMap<String, String>,
+    pub files: BTreeMap<String, ImportedSceneFile>,
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SceneImportError {
     #[error("invalid Excalidraw artifact: {reason}")]
@@ -368,7 +374,7 @@ pub fn scene_asset_directory(
 /// external-file reader accepts legacy documents with optional metadata and
 /// missing/null scene collections. This function matches that import floor;
 /// it does not choose workspace paths or write storage.
-pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImportError> {
+pub(crate) fn parse_portable_scene(content: &str) -> Result<ParsedPortableScene, SceneImportError> {
     let value: Value = serde_json::from_str(content).map_err(|_| SceneImportError::Invalid {
         reason: "content must be JSON",
     })?;
@@ -510,12 +516,62 @@ pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImport
         files.insert(file_id, file);
     }
 
-    let doc = crate::Ydoc::wire();
-    let initial_update = doc.seed_scene_maps(&revisions, &app_state, &BTreeMap::new());
-    Ok(ImportedScene {
-        initial_update,
+    Ok(ParsedPortableScene {
+        revisions,
+        app_state,
         files,
     })
+}
+
+pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImportError> {
+    let parsed = parse_portable_scene(content)?;
+    let doc = crate::Ydoc::wire();
+    let initial_update =
+        doc.seed_scene_maps(&parsed.revisions, &parsed.app_state, &BTreeMap::new());
+    Ok(ImportedScene {
+        initial_update,
+        files: parsed.files,
+    })
+}
+
+pub(crate) fn seed_portable_scene(
+    doc: &crate::Ydoc,
+    key: &crate::DocKey,
+    content: &str,
+) -> Result<BTreeMap<String, Vec<u8>>, SceneImportError> {
+    let parsed = parse_portable_scene(content)?;
+    let mut asset_records = BTreeMap::new();
+    let mut asset_bytes = BTreeMap::new();
+    for (id, file) in parsed.files {
+        let sha256 = dohc_engine_storage::hex_sha256(&file.bytes);
+        let path = scene_asset_ref(
+            &key.workspace_id,
+            &key.version_id,
+            &key.object_id,
+            &sha256,
+            &file.mime_type,
+        )?;
+        let mut record = Map::new();
+        record.insert("created".to_owned(), Value::from(file.created));
+        record.insert("id".to_owned(), Value::String(id.clone()));
+        if let Some(last_retrieved) = file.last_retrieved {
+            record.insert("lastRetrieved".to_owned(), Value::from(last_retrieved));
+        }
+        record.insert("mimeType".to_owned(), Value::String(file.mime_type));
+        record.insert("ref".to_owned(), Value::String(path));
+        record.insert("sha256".to_owned(), Value::String(sha256));
+        if let Some(version) = file.version {
+            record.insert("version".to_owned(), Value::from(version));
+        }
+        let record =
+            canonical_json_string(&Value::Object(record)).ok_or(SceneImportError::Invalid {
+                reason: "a scene asset record could not be encoded",
+            })?;
+        asset_records.insert(id.clone(), record);
+        asset_bytes.insert(id, file.bytes);
+    }
+    doc.seed_scene_maps(&parsed.revisions, &parsed.app_state, &asset_records);
+    Ok(asset_bytes)
 }
 
 fn repair_imported_element_indices(elements: &mut [Value]) -> Result<(), SceneImportError> {
