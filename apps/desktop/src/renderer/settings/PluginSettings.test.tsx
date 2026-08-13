@@ -459,4 +459,48 @@ describe("PluginSettings", () => {
       (await screen.findByTestId("plugin-status")).getAttribute("data-status"),
     ).toBe("starting");
   });
+
+  it("lets a status event newer than an in-flight action's response win (fixround Section B item 14)", async () => {
+    const fresh = plugin("fresh-plugin", {
+      status: "discovered",
+      runtimeStatus: null,
+      sourceHash: null,
+      approvedHash: null,
+      installedBaselineHash: null,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [fresh] });
+    const install = deferred<{ ok: true; plugin: PluginStatusRecord }>();
+    bridgeMock.installPlugin.mockReturnValue(install.promise);
+
+    render(<PluginSettings workspaceId="ws-1" />);
+    await userEvent.click(await screen.findByTestId("plugin-install"));
+    await waitFor(() => expect(statusListener).not.toBeNull());
+
+    // A status event carrying real, newer progress arrives while
+    // installPlugin's own request is still in flight.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("fresh-plugin", { status: "building", runtimeStatus: null }),
+      });
+    });
+    expect(
+      (await screen.findByTestId("plugin-status")).getAttribute("data-status"),
+    ).toBe("building");
+
+    // installPlugin's own response finally resolves, but with a snapshot
+    // from before that newer event — it must not roll the row backward.
+    await act(async () => {
+      install.resolve({
+        ok: true,
+        plugin: plugin("fresh-plugin", { status: "installing", runtimeStatus: null }),
+      });
+      await install.promise;
+    });
+
+    expect(
+      screen.getByTestId("plugin-status").getAttribute("data-status"),
+    ).toBe("building");
+  });
 });

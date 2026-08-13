@@ -293,11 +293,28 @@ export function PluginSettings(props: { workspaceId: string }) {
     );
   }
 
+  // An action's own response can resolve with a snapshot older than one the
+  // live onPluginStatusChanged listener already applied while the action was
+  // still in flight (install/build progress keeps moving during a slow
+  // request) — applying the response unconditionally would overwrite the
+  // newer state with a stale one. revisionAtStart, captured before the
+  // request began, is compared against this plugin's latest recorded event;
+  // a newer one already reflects everything the response could tell us.
+  function replacePluginUnlessSuperseded(
+    plugin: PluginStatusRecord,
+    revisionAtStart: number,
+  ) {
+    const newer = pendingStatusEvents.current.get(plugin.id);
+    if (newer && newer.revision > revisionAtStart) return;
+    replacePlugin(plugin);
+  }
+
   async function runAction(
     plugin: PluginStatusRecord,
     action: Exclude<PluginAction, "preflight" | "uninstall">,
   ) {
     const epoch = workspaceEpoch.current;
+    const revisionAtStart = statusRevision.current;
     setBusy((current) => ({ ...current, [plugin.id]: action }));
     setErrors((current) => ({ ...current, [plugin.id]: undefined }));
     try {
@@ -312,9 +329,9 @@ export function PluginSettings(props: { workspaceId: string }) {
               : await bridge().approvePlugin(payload);
       if (epoch !== workspaceEpoch.current) return;
       if (result.ok) {
-        replacePlugin(result.plugin);
+        replacePluginUnlessSuperseded(result.plugin, revisionAtStart);
       } else {
-        if (result.plugin) replacePlugin(result.plugin);
+        if (result.plugin) replacePluginUnlessSuperseded(result.plugin, revisionAtStart);
         setErrors((current) => ({
           ...current,
           [plugin.id]: actionError(action, plugin.id, result.error),
@@ -373,6 +390,7 @@ export function PluginSettings(props: { workspaceId: string }) {
     const currentConfirmation = confirmation;
     const pluginId = currentConfirmation.plugin.id;
     const epoch = workspaceEpoch.current;
+    const revisionAtStart = statusRevision.current;
     setBusy((current) => ({ ...current, [pluginId]: "uninstall" }));
     try {
       const result = await bridge().uninstallPlugin({
@@ -392,7 +410,7 @@ export function PluginSettings(props: { workspaceId: string }) {
             : current,
         );
       } else {
-        if (result.plugin) replacePlugin(result.plugin);
+        if (result.plugin) replacePluginUnlessSuperseded(result.plugin, revisionAtStart);
         setErrors((current) => ({
           ...current,
           [pluginId]: `dohc could not uninstall ${pluginId}. ${result.error.message}`,
