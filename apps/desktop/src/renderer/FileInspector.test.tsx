@@ -3445,6 +3445,11 @@ describe("markdown editor unmount flush", () => {
 
     await user.click(content);
     await user.keyboard("{End} Draft");
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("view-text-save-state").getAttribute("data-state"),
+      ).toBe("saving"),
+    );
     await expect(flush!()).rejects.toThrow(
       "The file changed on disk while dohc saved it.",
     );
@@ -3458,6 +3463,11 @@ describe("markdown editor unmount flush", () => {
 
     await user.click(content);
     await user.keyboard("{End} Draft");
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("view-text-save-state").getAttribute("data-state"),
+      ).toBe("saving"),
+    );
     await expect(flush!()).rejects.toThrow(
       "The file changed on disk while dohc saved it.",
     );
