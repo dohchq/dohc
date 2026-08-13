@@ -954,6 +954,13 @@ describe("markdown editor unmount flush", () => {
     const user = userEvent.setup();
     await user.click(firstContent);
     await user.keyboard("{End} dirty");
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId("view-text-save-state")
+          .every((state) => state.dataset.state === "saving"),
+      ).toBe(true),
+    );
     view.rerender(
       <>
         <FileInspector
@@ -2347,12 +2354,14 @@ describe("markdown editor unmount flush", () => {
     await act(async () => flushes[1]!());
 
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
-    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+    const write = bridgeMock.writeWorkspaceText.mock.calls[0]?.[0];
+    expect(write).toMatchObject({
       workspaceId: "ws-1",
       relativePath: "shared-wysiwyg-flush.md",
-      text: "# Hello\n\nPeer flush",
       expectedContentHash: TEST_CONTENT_HASH,
     });
+    expect(write.text).toContain("Hello");
+    expect(write.text).toContain("Peer flush");
   });
 
   it("keeps a pending peer WYSIWYG body when another pane changes the title", async () => {

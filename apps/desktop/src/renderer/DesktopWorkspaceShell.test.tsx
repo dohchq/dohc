@@ -1275,8 +1275,11 @@ describe("editor groups", () => {
       await user.click(content);
       await user.keyboard("{End} changed");
       await waitFor(() =>
-        expect(within(left).getByTestId("tab-dirty")).toBeTruthy(),
+        expect(within(left).getByTestId("view-text-save-state").dataset.state).toBe(
+          "saving",
+        ),
       );
+      expect(within(left).getByTestId("tab-dirty")).toBeTruthy();
 
       fireEvent.pointerDown(right);
       await waitFor(() => expect(right.dataset.active).toBe("true"));
