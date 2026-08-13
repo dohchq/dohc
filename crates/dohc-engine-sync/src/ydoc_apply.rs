@@ -880,7 +880,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
                 observed_bytes: update.len(),
             });
         }
-        let refolded = project_ydoc_with_store(tx, &key, &doc, marker.content_kind)?;
+        let refolded = project_ydoc_with_store(tx, key, doc, marker.content_kind)?;
         if refolded.content != chosen_text {
             return Err(SyncError::InvalidInput {
                 reason: "ydoc-resolution-not-representable",
