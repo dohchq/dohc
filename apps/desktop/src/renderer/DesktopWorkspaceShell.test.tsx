@@ -1948,6 +1948,7 @@ describe("editor groups", () => {
     const openEngineYDocSession = vi.fn(async () => ({
       available: true,
       initialUpdate: Y.encodeStateAsUpdate(doc),
+      lineageGeneration: 1,
     }));
     Object.assign(bridge, {
       openEngineYDocSession,
@@ -1955,6 +1956,8 @@ describe("editor groups", () => {
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
     });
     renderShell(bridge);
     await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
