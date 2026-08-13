@@ -11,6 +11,7 @@ const electronRendererTarget = "chrome148";
 
 export const mainBundledWorkspaceDeps = [
   "@dohc/cli",
+  "@dohc/sdk",
   "@dohc/security-contract",
   "@dohc/workspace-core",
   "@dohc/workspace-contracts",
@@ -56,7 +57,12 @@ export default defineConfig({
     build: {
       target: electronMainTarget,
       outDir: "dist/main",
-      lib: { entry: "src/main.ts" },
+      lib: {
+        entry: {
+          main: "src/main.ts",
+          "plugin-host": "src/plugins/pluginHostProcess.ts",
+        },
+      },
     },
   },
   preload: {
