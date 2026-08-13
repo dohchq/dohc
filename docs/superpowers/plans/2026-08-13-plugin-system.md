@@ -210,7 +210,10 @@ Spike first, then three stacked PRs, each independently green.
   to end. No renderer surface. Sets the contracts; heavyweight review.
 - **PR1b — panel surface.** The sandboxed-iframe panel page, the
   `dohc://plugin-panel/` tab kind, and the main-owned panel SDK
-  authority, on PR1a's contribution registry. Split from PR1a because
+  authority, on PR1a's contribution registry. Panel requests route
+  through the plugin SDK router (plugin-attributed, per-operation
+  authors), never bare `siteSdkHost` — a panel write must carry its
+  plugin's identity, not a site's. Split from PR1a because
   the measured combined scope (~5–8k lines) is past where review
   quality holds.
 - **PR2 — install/build pipeline.** `plugins/` source + lockfile → dep
@@ -238,7 +241,11 @@ Spike first, then three stacked PRs, each independently green.
   skips silently, so after install the pipeline scans for any lifecycle
   script pnpm skipped — in every installed package and in the plugin
   root itself, whatever the hook's name — and fails the plugin build
-  naming each one, an error an author's agent can act on.
+  naming each one, an error an author's agent can act on. An author who
+  knows a dependency ships usable prebuilt output can assert it in the
+  manifest (`allowSkippedScripts`), which converts that package's
+  failure to a named warning — the override is the measured escape
+  valve the rejection rule requires.
   Plugins distribute `pnpm-lock.yaml` (the lockfile pnpm actually
   reads); a plugin authored with npm runs `pnpm import` before
   publishing. Plugin child processes (a
