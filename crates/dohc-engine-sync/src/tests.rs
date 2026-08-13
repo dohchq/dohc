@@ -8489,6 +8489,15 @@ fn an_old_scene_asset_tombstone_cannot_authorize_a_reused_path() {
     )
     .expect("asset ref");
     let replacement_bytes = vec![9_u8, 8, 7, 6];
+    let replacement_sha = dohc_engine_storage::hex_sha256(&replacement_bytes);
+    let replacement_ref = dohc_engine_collab::scene_asset_ref(
+        "ws",
+        "main",
+        drawing_object_id,
+        &replacement_sha,
+        "image/png",
+    )
+    .expect("replacement asset ref");
 
     {
         let mut versioned = VersionedTextStore::new(&mut engine);
@@ -8535,7 +8544,7 @@ fn an_old_scene_asset_tombstone_cannot_authorize_a_reused_path() {
                     version_id: "main".to_owned(),
                     object_id: "asset-b".to_owned(),
                     path: asset_ref.clone(),
-                    bytes: replacement_bytes,
+                    bytes: replacement_bytes.clone(),
                     moment_id: "asset-b-write".to_owned(),
                     metadata_origin: "api".to_owned(),
                     metadata_summary: None,
@@ -8564,6 +8573,42 @@ fn an_old_scene_asset_tombstone_cannot_authorize_a_reused_path() {
                 &NoFaults,
             )
             .expect("delete replacement");
+        versioned
+            .write_binary(
+                &WriteBinary {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "asset-c".to_owned(),
+                    path: replacement_ref.clone(),
+                    bytes: replacement_bytes,
+                    moment_id: "asset-c-write".to_owned(),
+                    metadata_origin: "ydoc".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_800,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("write current canonical asset");
+        versioned
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: replacement_ref.clone(),
+                    moment_id: "asset-c-delete".to_owned(),
+                    request_id: None,
+                    metadata_origin: "capture".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_900,
+                },
+                &NoFaults,
+            )
+            .expect("retire current canonical asset");
     }
 
     let portable = json!({
@@ -8600,6 +8645,40 @@ fn an_old_scene_asset_tombstone_cannot_authorize_a_reused_path() {
             reason: "scene asset head is pending"
         })
     ));
+
+    let current_records = BTreeMap::from([(
+        "file".to_owned(),
+        json!({ "created": 1, "id": "file", "mimeType": "image/png",
+            "ref": replacement_ref, "sha256": replacement_sha })
+        .to_string(),
+    )]);
+    let current_assets =
+        dohc_engine_collab::encode_scene_asset_records(&current_records).expect("asset record");
+    let current_update = dohc_engine_collab::merge_updates(&[
+        dohc_engine_collab::import_portable_scene(&portable)
+            .expect("scene import")
+            .initial_update,
+        current_assets,
+    ])
+    .expect("scene update");
+    let current_doc = dohc_engine_collab::Ydoc::wire();
+    current_doc.apply(&current_update).expect("apply scene");
+    let projection = engine
+        .read_with(|conn| {
+            project_ydoc_with_store(
+                conn,
+                &key,
+                &current_doc,
+                dohc_engine_collab::ContentKind::Scene,
+            )
+        })
+        .expect("the current retired asset projects");
+    let projected: serde_json::Value =
+        serde_json::from_str(&projection.content).expect("projected scene");
+    assert_eq!(
+        projected["files"]["file"]["dataURL"],
+        "data:image/png;base64,CQgHBg=="
+    );
 }
 
 #[test]
