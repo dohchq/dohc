@@ -65,9 +65,7 @@ function nodeForkProcess(
     onError: (listener) => {
       child.once("error", (error) => listener(error.message));
     },
-    terminate: () => {
-      child.kill();
-    },
+    terminate: () => child.kill(),
   };
 }
 

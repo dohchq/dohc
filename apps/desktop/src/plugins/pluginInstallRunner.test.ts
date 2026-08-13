@@ -15,6 +15,7 @@ import {
   installPluginDependencies,
   PLUGIN_INSTALL_ARGS,
   resolvePluginPnpmEntry,
+  TERMINATE_FAILURE_GRACE_MS,
   type InstallPluginDependenciesInput,
   type PluginInstallFork,
   type PluginInstallForkOptions,
@@ -41,7 +42,7 @@ const roots: string[] = [];
 class FakeInstallProcess implements PluginInstallProcessHandle {
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
-  readonly terminate = vi.fn(() => undefined);
+  readonly terminate = vi.fn(() => true);
   private readonly exitListeners: Array<(code: number) => void> = [];
   private readonly errorListeners: Array<(message: string) => void> = [];
   private exitedCode: number | undefined;
@@ -139,9 +140,7 @@ function nodeForkProcess(
     onError: (listener) => {
       child.once("error", (error) => listener(error.message));
     },
-    terminate: () => {
-      child.kill();
-    },
+    terminate: () => child.kill(),
   };
 }
 
@@ -232,6 +231,52 @@ describe("installPluginDependencies", () => {
     expect(observedEnv?.npm_config_registry).toBe("https://registry.npmjs.org/");
   });
 
+  it("classifies a lockfile mismatch even when its marker token is split across stream chunks (CodeRabbit #779 R17)", async () => {
+    const fixture = await createInstallFixture();
+    const child = new FakeInstallProcess();
+    const started = deferred<void>();
+    const forkProcess = vi.fn<PluginInstallFork>(() => {
+      started.resolve();
+      return child;
+    });
+
+    const install = installPluginDependencies({ ...fixture.input, forkProcess });
+    await started.promise;
+    // Both listeners are attached synchronously right after forkProcess
+    // returns, above — these writes land as two separate "data" events,
+    // the exact marker token split mid-word across an OS pipe-buffer
+    // boundary that real pnpm output can produce. The surrounding text is
+    // deliberately neutral (no "not up to date"/"mismatch" phrasing of its
+    // own) so only the ERR_PNPM_ token match can make this pass.
+    child.stdout.write("pnpm reported ERR_PNPM_OUTDATED_LOCK");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    child.stdout.write("FILE while installing.\n");
+    child.exit(1);
+
+    const failure = requireFailure(await install);
+
+    expect(failure.error.code).toBe("lockfile-mismatch");
+  });
+
+  it("names the real forked module (the runner entry, not pnpmEntry) on the default production fork path (CodeRabbit #779 R19)", async () => {
+    const fixture = await createInstallFixture();
+    const pnpmRunnerEntry = join(fixture.root, "pnpm-runner.js");
+    // No forkProcess override: this exercises usingDefaultFork === true,
+    // previously untested. The real forkElectronUtilityProcess dynamically
+    // imports "electron" and calls utilityProcess.fork — outside a real
+    // Electron process that fails immediately, which is exactly the
+    // spawn-failed path this test pins the message for.
+    const failure = requireFailure(
+      await installPluginDependencies({ ...fixture.input, pnpmRunnerEntry }),
+    );
+
+    expect(failure.error.code).toBe("spawn-failed");
+    expect(failure.error.message).toContain(pnpmRunnerEntry);
+    expect(failure.error.message).not.toContain(
+      resolvePluginPnpmEntry(fixture.resourcesBasePath),
+    );
+  });
+
   it("returns a structured missing-lockfile failure without spawning pnpm", async () => {
     const fixture = await createInstallFixture({ lockfile: false });
     const forkProcess = vi.fn<PluginInstallFork>();
@@ -280,6 +325,41 @@ describe("installPluginDependencies", () => {
     const failure = requireFailure(await install);
     expect(failure.error).toMatchObject({ code: "aborted", exitCode: 143 });
     expect(failure.error.logs.at(-1)?.text).toBe("Install cancelled by the caller.");
+  });
+
+  it("resolves within a bounded grace period when terminate() reports it never sent the request (CodeRabbit #779 R20)", async () => {
+    vi.useFakeTimers();
+    const fixture = await createInstallFixture();
+    const child = new FakeInstallProcess();
+    child.terminate.mockReturnValue(false);
+    const started = deferred<void>();
+    const controller = new AbortController();
+    const forkProcess = vi.fn<PluginInstallFork>(() => {
+      started.resolve();
+      return child;
+    });
+
+    let settled = false;
+    const install = installPluginDependencies({
+      ...fixture.input,
+      forkProcess,
+      signal: controller.signal,
+    }).then((result) => {
+      settled = true;
+      return result;
+    });
+    await started.promise;
+    controller.abort();
+    await Promise.resolve();
+
+    expect(child.terminate).toHaveBeenCalledTimes(1);
+    expect(settled).toBe(false);
+    // The child never exits — terminate() never actually reached it.
+    await vi.advanceTimersByTimeAsync(TERMINATE_FAILURE_GRACE_MS);
+
+    const failure = requireFailure(await install);
+    expect(failure.error.code).toBe("spawn-failed");
+    expect(failure.error.message).toContain(`${TERMINATE_FAILURE_GRACE_MS} ms`);
   });
 
   it("terminates on timeout and reports the measured limit after exit", async () => {

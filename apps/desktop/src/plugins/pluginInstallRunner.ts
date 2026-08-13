@@ -8,6 +8,11 @@ import {
 
 const MAX_LOG_ENTRIES = 500;
 const PLUGIN_INSTALL_SERVICE_NAME = "dohc.plugin.install";
+// Bounded fallback when terminate() itself reports it never sent the
+// request (CodeRabbit #779 R20) — short because this only fires on that
+// abnormal path, not the normal exit-gated resolution every other job
+// takes.
+export const TERMINATE_FAILURE_GRACE_MS = 5_000;
 
 // CodeRabbit #779 R18 (Critical): this install's cwd is a copy of
 // plugin-authored source, whose pnpm-lock.yaml/.npmrc the plugin author
@@ -83,7 +88,11 @@ export interface PluginInstallProcessHandle {
   stderr: NodeJS.ReadableStream | null;
   onExit(listener: (code: number) => void): void;
   onError(listener: (message: string) => void): void;
-  terminate(): void;
+  /** True once the termination request was actually sent (Electron's
+   * utilityProcess.kill() can return false, e.g. before the child has a
+   * PID) — false here means no exit event may ever follow, so the caller
+   * must not wait for one unbounded (CodeRabbit #779 R20). */
+  terminate(): boolean;
 }
 
 export type PluginInstallFork = (
@@ -163,6 +172,34 @@ function pushLog(
   }
 }
 
+// A raw stream "data" chunk boundary can land mid-line — pushLog alone
+// would then record each half as its own log entry, and lockfileMismatch's
+// later re-join with "\n" inserts a newline exactly where the token was
+// split, breaking substring matches like "ERR_PNPM_OUTDATED_LOCKFILE"
+// (CodeRabbit #779 R17). This buffers each stream's own partial trailing
+// line across chunks instead of assuming one chunk is one or more whole
+// lines.
+function createStreamLineBuffer(
+  logs: PluginInstallLogEntry[],
+  stream: PluginInstallLogStream,
+): { onData: (chunk: unknown) => void; flush: () => void } {
+  let pending = "";
+  return {
+    onData(chunk: unknown) {
+      pending += String(chunk);
+      const lastNewline = pending.lastIndexOf("\n");
+      if (lastNewline === -1) return;
+      pushLog(logs, stream, pending.slice(0, lastNewline));
+      pending = pending.slice(lastNewline + 1);
+    },
+    flush() {
+      if (pending.length === 0) return;
+      pushLog(logs, stream, pending);
+      pending = "";
+    },
+  };
+}
+
 function failure(
   code: PluginInstallFailureCode,
   message: string,
@@ -211,9 +248,7 @@ async function forkElectronUtilityProcess(
         );
       });
     },
-    terminate: () => {
-      child.kill();
-    },
+    terminate: () => child.kill(),
   };
 }
 
@@ -289,20 +324,22 @@ async function runInstallJob(
       stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (error) {
+    // modulePath is the file that was actually forked (the pnpm-runner
+    // wrapper on the production path, pnpmEntry only on the test-supplied
+    // forkProcess path) — name what really failed to start, not always
+    // pnpmEntry (CodeRabbit #779 R19).
     return failure(
       "spawn-failed",
-      `pnpm could not start from ${pnpmEntry}: ${errorMessage(error)}`,
+      `pnpm could not start from ${modulePath}: ${errorMessage(error)}`,
       timeoutMs,
       logs,
     );
   }
 
-  child.stdout?.on("data", (chunk: unknown) => {
-    pushLog(logs, "stdout", String(chunk));
-  });
-  child.stderr?.on("data", (chunk: unknown) => {
-    pushLog(logs, "stderr", String(chunk));
-  });
+  const stdoutBuffer = createStreamLineBuffer(logs, "stdout");
+  const stderrBuffer = createStreamLineBuffer(logs, "stderr");
+  child.stdout?.on("data", stdoutBuffer.onData);
+  child.stderr?.on("data", stderrBuffer.onData);
 
   return await new Promise<PluginInstallResult>((resolveResult) => {
     let timer: NodeJS.Timeout | undefined;
@@ -323,7 +360,32 @@ async function runInstallJob(
       } else {
         pushLog(logs, "system", "Install cancelled by the caller.");
       }
-      child.terminate();
+      const sent = child.terminate();
+      if (sent) return;
+      // terminate() reports it never sent the request (e.g. the child has
+      // no PID yet) — no exit event may ever follow, so this cannot wait
+      // for one unbounded (CodeRabbit #779 R20).
+      pushLog(
+        logs,
+        "system",
+        `Termination request was not sent. Forcing a result after ` +
+          `${TERMINATE_FAILURE_GRACE_MS} ms if the process never exits.`,
+      );
+      setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        stdoutBuffer.flush();
+        stderrBuffer.flush();
+        resolveResult(failure(
+          "spawn-failed",
+          `Plugin "${input.pluginId}" dependency install could not be ` +
+            `terminated (${reason}) and did not exit within ` +
+            `${TERMINATE_FAILURE_GRACE_MS} ms afterward.`,
+          timeoutMs,
+          logs,
+        ));
+      }, TERMINATE_FAILURE_GRACE_MS);
     };
 
     function abortInstall(): void {
@@ -340,6 +402,8 @@ async function runInstallJob(
       if (settled) return;
       settled = true;
       cleanup();
+      stdoutBuffer.flush();
+      stderrBuffer.flush();
 
       if (termination === "timeout") {
         resolveResult(failure(
