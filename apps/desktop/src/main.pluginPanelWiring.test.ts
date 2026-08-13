@@ -85,6 +85,36 @@ describe("plugin panel main-process wiring", () => {
     );
   });
 
+  it("routes a plugin's own door-written source write into its pipeline (A5)", () => {
+    const routerStart = mainSource.indexOf("function invokeWorkspacePluginSdk");
+    const routerEnd = mainSource.indexOf(
+      "\n}\n\nfunction registeredPlugin",
+      routerStart,
+    );
+    expect(routerEnd).toBeGreaterThan(-1);
+    const router = mainSource.slice(routerStart, routerEnd);
+    const writeAt = router.indexOf(
+      "await capture.writeAuthoredTextFile(absolutePath, text, author, {",
+    );
+    const ownerAt = router.indexOf(
+      "?.pluginIdForPath(absolutePath);",
+      writeAt,
+    );
+    const notifyAt = router.indexOf(
+      "?.handleDoorWrittenSourceChange(ownerId);",
+      ownerAt,
+    );
+
+    // A door-attributed write (files.write, stamped with MomentAuthor above)
+    // must tell the owning plugin's pipeline directly — the plan doc's
+    // auto-approve predicate is attribution through the door, not topology —
+    // rather than only reaching the pipeline as an unattributed watcher
+    // event, which never auto-approves.
+    expect(writeAt).toBeGreaterThan(-1);
+    expect(ownerAt).toBeGreaterThan(writeAt);
+    expect(notifyAt).toBeGreaterThan(ownerAt);
+  });
+
   it("uses utilityProcess and tears plugin hosts down with their owners", () => {
     const hostStart = mainSource.indexOf("function createPluginPipeline");
     const hostEnd = mainSource.indexOf(

@@ -1,7 +1,7 @@
 import type { WatcherEvent } from "@dohc/workspace-core";
-import { randomUUID } from "node:crypto";
-import { lstat, rm } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, readFile, rm } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import {
   PLUGIN_PIPELINE_ERROR_STAGES,
   PLUGIN_PIPELINE_STATUSES,
@@ -25,6 +25,7 @@ import {
 } from "./pluginLifecycleScan";
 import {
   mutatePluginRecord,
+  pluginDataDir,
   readPluginLocalState,
   type PluginRecordShape,
 } from "./pluginLocalState";
@@ -103,6 +104,7 @@ interface PluginPipelineOperations {
   uninstallPreflight: typeof pluginUninstallPreflight;
   removePath: typeof rm;
   inspectPath: typeof lstat;
+  readFile: typeof readFile;
 }
 
 export interface PluginPipelineOptions {
@@ -163,6 +165,7 @@ const DEFAULT_OPERATIONS: PluginPipelineOperations = {
   uninstallPreflight: pluginUninstallPreflight,
   removePath: rm,
   inspectPath: lstat,
+  readFile,
 };
 
 function errorMessage(error: unknown): string {
@@ -235,7 +238,7 @@ export class PluginPipeline {
 
   constructor(private readonly options: PluginPipelineOptions) {
     this.workspaceRoot = resolve(options.workspaceRoot);
-    this.dohcDir = join(this.workspaceRoot, ".dohc");
+    this.dohcDir = pluginDataDir(options.stateDir, this.workspaceRoot);
     this.operations = { ...DEFAULT_OPERATIONS, ...options.operations };
   }
 
@@ -295,6 +298,26 @@ export class PluginPipeline {
       left.directoryName.localeCompare(right.directoryName) ||
       left.id.localeCompare(right.id)
     );
+  }
+
+  /**
+   * Resolves an absolute workspace path to the id of the discovered plugin
+   * whose root contains it, or null when no plugin owns that path. Lets a
+   * door-attributed write (main.ts's writeAuthoredText) tell this pipeline
+   * which plugin's source just changed, so it can route the change through
+   * handleDoorWrittenSourceChange instead of waiting for the watcher.
+   */
+  pluginIdForPath(absolutePath: string): string | null {
+    const target = resolve(absolutePath);
+    for (const candidate of this.discovery) {
+      const root = resolve(candidate.rootPath);
+      if (target === root) return candidate.id;
+      const fromRoot = relative(root, target);
+      if (fromRoot.length > 0 && !fromRoot.startsWith("..") && !isAbsolute(fromRoot)) {
+        return candidate.id;
+      }
+    }
+    return null;
   }
 
   install(pluginId: string): Promise<PluginPipelineActionResult> {
@@ -358,47 +381,12 @@ export class PluginPipeline {
       }
 
       const current = this.statuses.get(pluginId);
-      const resetCrashAccounting = current?.disabledReason === "crash-loop";
-      const liveRoot = this.liveRoot(pluginId);
-      const hasBundle = await this.hasLiveBundle(liveRoot);
-      if (!hasBundle) {
-        return this.runFullBuild({
-          candidate,
-          startRuntime: true,
-          disabledReasonAfterBuild: null,
-          resetCrashAccounting,
-          freshInstall: false,
-        });
-      }
-
-      try {
-        await this.operations.mutateRecord(
-          this.options.stateDir,
-          this.workspaceRoot,
-          pluginId,
-          (record) => ({ ...record, disabled: false }),
-        );
-        if (resetCrashAccounting) {
-          this.options.pluginHost.resetCrashAccounting(pluginId);
-        }
-        if (!this.options.pluginHost.getStatus(pluginId)) {
-          await this.options.pluginHost.start(
-            liveRoot,
-            generatedManifest(candidate.manifest),
-          );
-        }
-        return this.success(this.setStatus(candidate, {
-          status: "starting",
-          disabledReason: null,
-          runtimeStatus: "starting",
-          error: null,
-        }));
-      } catch (error) {
-        return this.failure(
-          pluginId,
-          pipelineError("runtime", "enable-failed", errorMessage(error)),
-        );
-      }
+      return this.startVerified(candidate, state, {
+        clearDisabled: true,
+        resetCrashAccounting: current?.disabledReason === "crash-loop",
+        freshInstall: false,
+        runtimeErrorCode: "enable-failed",
+      });
     });
   }
 
@@ -450,37 +438,12 @@ export class PluginPipeline {
         return this.holdForApproval(candidate, snapshot.value.sourceHash);
       }
 
-      const liveRoot = this.liveRoot(pluginId);
-      const hasBundle = await this.hasLiveBundle(liveRoot);
-      if (!hasBundle) {
-        return this.runFullBuild({
-          candidate,
-          startRuntime: true,
-          disabledReasonAfterBuild: null,
-          resetCrashAccounting: false,
-          freshInstall: false,
-        });
-      }
-
-      try {
-        if (!this.options.pluginHost.getStatus(pluginId)) {
-          await this.options.pluginHost.start(
-            liveRoot,
-            generatedManifest(candidate.manifest),
-          );
-        }
-        return this.success(this.setStatus(candidate, {
-          status: "starting",
-          disabledReason: null,
-          runtimeStatus: "starting",
-          error: null,
-        }));
-      } catch (error) {
-        return this.failure(
-          pluginId,
-          pipelineError("runtime", "start-failed", errorMessage(error)),
-        );
-      }
+      return this.startVerified(candidate, state, {
+        clearDisabled: false,
+        resetCrashAccounting: false,
+        freshInstall: false,
+        runtimeErrorCode: "start-failed",
+      });
     });
   }
 
@@ -566,7 +529,7 @@ export class PluginPipeline {
         const candidate = this.requireValidCandidate(pluginId);
         const record = await this.localRecord(pluginId);
         const preflight = await this.operations.uninstallPreflight({
-          workspaceRoot: this.workspaceRoot,
+          dohcDir: this.dohcDir,
           pluginId,
           pluginRoot: candidate.rootPath,
           installedBaselineHash: record?.installedBaselineHash,
@@ -622,7 +585,7 @@ export class PluginPipeline {
       }
       const record = await this.localRecord(pluginId);
       const currentPreflight = await this.operations.uninstallPreflight({
-        workspaceRoot: this.workspaceRoot,
+        dohcDir: this.dohcDir,
         pluginId,
         pluginRoot: candidate.rootPath,
         installedBaselineHash: record?.installedBaselineHash,
@@ -780,28 +743,25 @@ export class PluginPipeline {
         sameRoot.id !== oldCandidate.id;
       if (!identityChanged) continue;
 
-      const oldRecord = await this.localRecord(oldCandidate.id);
-      const wasInstalled = oldRecord?.approvedHash !== undefined;
       await this.enqueueActionValue(oldCandidate.id, () =>
         this.removeOldIdentity(oldCandidate));
 
+      // The old identity's approval never carries to the replacement
+      // (CERT779 A4): a manifest-name change or root swap is a new identity,
+      // and reconcileApprovedCandidate keys approval strictly by this
+      // identity's own (id, content hash) record — matching a mismatch or
+      // a never-approved id the same way any other unapproved discovery
+      // does, and continuing seamlessly only when this identity's own
+      // approval already matches its current content.
       const replacement = sameRoot ?? sameId;
       if (
-        wasInstalled &&
         replacement?.valid &&
         replacement.manifest &&
         !replaced.has(candidateKey(replacement))
       ) {
         replaced.add(candidateKey(replacement));
-        await this.enqueueActionValue(replacement.id, async () => {
-          await this.runFullBuild({
-            candidate: replacement,
-            startRuntime: true,
-            disabledReasonAfterBuild: null,
-            resetCrashAccounting: true,
-            freshInstall: true,
-          });
-        });
+        this.enqueueSourceRefresh(replacement.id, () =>
+          this.reconcileApprovedCandidate(replacement.id, true));
       }
     }
 
@@ -956,7 +916,7 @@ export class PluginPipeline {
 
       this.setStatus(candidate, { status: "building" });
       const build = await this.operations.build({
-        workspaceRoot: this.workspaceRoot,
+        dohcDir: this.dohcDir,
         pluginId: candidate.id,
         snapshotRoot: snapshot.snapshotRoot,
         manifest: candidate.manifest,
@@ -971,7 +931,7 @@ export class PluginPipeline {
 
       try {
         await this.operations.writeBaseline({
-          workspaceRoot: this.workspaceRoot,
+          dohcDir: this.dohcDir,
           pluginId: candidate.id,
           baselineDigest,
           installedBaselineHash: snapshot.sourceHash,
@@ -984,6 +944,7 @@ export class PluginPipeline {
             disabled: !input.startRuntime,
             approvedHash: snapshot.sourceHash,
             installedBaselineHash: snapshot.sourceHash,
+            approvedBundleHash: built.bundleHash,
           }),
         );
       } catch (error) {
@@ -1094,6 +1055,7 @@ export class PluginPipeline {
     this.setStatus(candidate, { status: "snapshotting", error: null });
     const snapshot = await this.operations.snapshot({
       workspaceRoot: this.workspaceRoot,
+      stateDir: this.options.stateDir,
       dohcDir: this.dohcDir,
       pluginId: candidate.id,
       pluginRoot: candidate.rootPath,
@@ -1186,15 +1148,91 @@ export class PluginPipeline {
     return join(this.dohcDir, "plugins", pluginIdToSafePath(pluginId));
   }
 
-  private async hasLiveBundle(liveRoot: string): Promise<boolean> {
+  /**
+   * A live bundle is trusted to start only when it is present AND its
+   * content still hashes to what this pipeline itself built and recorded as
+   * approvedBundleHash (CERT779: a bundle tampered after the build, with its
+   * source tree untouched, previously started because only file presence
+   * was checked, never content).
+   */
+  private async verifiedLiveBundle(
+    liveRoot: string,
+    approvedBundleHash: string | undefined,
+  ): Promise<boolean> {
+    if (!approvedBundleHash) return false;
     try {
-      const [bundle, manifest] = await Promise.all([
-        this.operations.inspectPath(join(liveRoot, "bundle.mjs")),
+      const [manifest, bundleBytes] = await Promise.all([
         this.operations.inspectPath(join(liveRoot, "dohc-plugin.generated.json")),
+        this.operations.readFile(join(liveRoot, "bundle.mjs")),
       ]);
-      return bundle.isFile() && manifest.isFile();
+      if (!manifest.isFile()) return false;
+      const bundleHash = createHash("sha256").update(bundleBytes).digest("hex");
+      return bundleHash === approvedBundleHash;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * The shared tail of enable() and ensureStarted(): the candidate's source
+   * hash already matches its approvedHash, so the only remaining question is
+   * whether the already-built bundle.mjs on disk can still be trusted to run
+   * as-is. When it can, this starts the host directly; when it can't (never
+   * built, or tampered since — CERT779), this rebuilds from the still-
+   * approved source rather than starting whatever bytes are on disk.
+   */
+  private async startVerified(
+    candidate: InstalledPluginRecord & { manifest: DohcPluginManifest },
+    state: PluginRecordShape,
+    options: {
+      clearDisabled: boolean;
+      resetCrashAccounting: boolean;
+      freshInstall: boolean;
+      runtimeErrorCode: string;
+    },
+  ): Promise<PluginPipelineActionResult> {
+    const pluginId = candidate.id;
+    const liveRoot = this.liveRoot(pluginId);
+    const verified = await this.verifiedLiveBundle(liveRoot, state.approvedBundleHash);
+    if (!verified) {
+      return this.runFullBuild({
+        candidate,
+        startRuntime: true,
+        disabledReasonAfterBuild: null,
+        resetCrashAccounting: options.resetCrashAccounting,
+        freshInstall: options.freshInstall,
+      });
+    }
+
+    try {
+      if (options.clearDisabled) {
+        await this.operations.mutateRecord(
+          this.options.stateDir,
+          this.workspaceRoot,
+          pluginId,
+          (record) => ({ ...record, disabled: false }),
+        );
+      }
+      if (options.resetCrashAccounting) {
+        this.options.pluginHost.resetCrashAccounting(pluginId);
+      }
+      if (!this.options.pluginHost.getStatus(pluginId)) {
+        await this.options.pluginHost.start(
+          liveRoot,
+          generatedManifest(candidate.manifest),
+        );
+      }
+      return this.success(this.setStatus(candidate, {
+        status: "starting",
+        disabledReason: null,
+        runtimeStatus: "starting",
+        error: null,
+      }));
+    } catch (error) {
+      return this.failure(
+        pluginId,
+        pipelineError("runtime", options.runtimeErrorCode, errorMessage(error)),
+      );
     }
   }
 

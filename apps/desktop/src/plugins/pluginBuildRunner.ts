@@ -1,7 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
   mkdir,
+  readFile,
   realpath,
   rename,
   rm,
@@ -16,13 +17,13 @@ import {
   resolve,
   sep,
 } from "node:path";
-import {
-  build,
-  stop,
-  type BuildOptions,
-  type BuildResult,
-  type Message,
-  type Metafile,
+import type {
+  build as esbuildBuild,
+  stop as esbuildStop,
+  BuildOptions,
+  BuildResult,
+  Message,
+  Metafile,
 } from "esbuild";
 import {
   DohcPluginManifest as DohcPluginManifestSchema,
@@ -66,6 +67,11 @@ export type PluginBuildResult =
     ok: true;
     liveRoot: string;
     bundlePath: string;
+    /** SHA-256 of bundle.mjs read back from its final, post-atomic-swap
+     * location — the executing artifact's own hash (CERT779: source hash
+     * alone verified a tree that never runs; this is what PluginPipeline
+     * records as approvedBundleHash and re-checks before every start). */
+    bundleHash: string;
     manifestPath: string;
     metafilePath: string;
     metafile: Metafile;
@@ -82,7 +88,11 @@ export type PluginBundleBuild = (
 ) => Promise<BuildResult>;
 
 export interface BuildPluginBundleInput {
-  workspaceRoot: string;
+  /** The app's userData-resident plugin-data root for this workspace
+   * (PluginPipeline's dohcDir) — never a workspace-relative path. The live
+   * build root resolves to <dohcDir>/plugins/<safeId>, matching
+   * pluginSourceSnapshot.ts's own output containment. */
+  dohcDir: string;
   pluginId: string;
   snapshotRoot: string;
   manifest: DohcPluginManifest;
@@ -124,6 +134,31 @@ class PluginBuildRunnerError extends Error {
 }
 
 let buildQueue: Promise<void> = Promise.resolve();
+
+// esbuild reads ESBUILD_BINARY_PATH from process.env exactly once, into a
+// module-scope const frozen the moment its own module first evaluates
+// (node_modules/esbuild/lib/main.js) — a static top-level `import "esbuild"`
+// in this file would evaluate that module before any of our code runs,
+// making a later `process.env.ESBUILD_BINARY_PATH = ...` assignment a no-op
+// against the real binary esbuild actually spawns (CodeRabbit R18/#779: the
+// staged/pinned binary was never the one that ran). Deferring esbuild's own
+// import until after the env var is set, and only ever importing it once,
+// makes the pin real for this process's one, unchanging staged binary.
+let esbuildModule: Promise<{
+  build: typeof esbuildBuild;
+  stop: typeof esbuildStop;
+}> | null = null;
+
+function loadEsbuild(esbuildBinary: string): Promise<{
+  build: typeof esbuildBuild;
+  stop: typeof esbuildStop;
+}> {
+  if (!esbuildModule) {
+    process.env.ESBUILD_BINARY_PATH = esbuildBinary;
+    esbuildModule = import("esbuild");
+  }
+  return esbuildModule;
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -216,8 +251,8 @@ async function inspectBuildPaths(
     );
   }
 
-  const workspaceRoot = resolve(input.workspaceRoot);
-  const liveRoot = join(workspaceRoot, ".dohc", "plugins", safeId);
+  const dohcDir = resolve(input.dohcDir);
+  const liveRoot = join(dohcDir, "plugins", safeId);
   const expectedSnapshotRoot = join(liveRoot, "snapshot");
   const snapshotRoot = resolve(input.snapshotRoot);
   if (relative(expectedSnapshotRoot, snapshotRoot) !== "") {
@@ -259,12 +294,12 @@ async function inspectBuildPaths(
     );
   }
 
-  let realWorkspaceRoot: string;
+  let realDohcDir: string;
   let realLiveRoot: string;
   let realSnapshotRoot: string;
   try {
-    [realWorkspaceRoot, realLiveRoot, realSnapshotRoot] = await Promise.all([
-      realpath(workspaceRoot),
+    [realDohcDir, realLiveRoot, realSnapshotRoot] = await Promise.all([
+      realpath(dohcDir),
       realpath(liveRoot),
       realpath(snapshotRoot),
     ]);
@@ -276,11 +311,11 @@ async function inspectBuildPaths(
       snapshotRoot,
     );
   }
-  if (!isInside(realWorkspaceRoot, realLiveRoot)) {
+  if (!isInside(realDohcDir, realLiveRoot)) {
     throw new PluginBuildRunnerError(
       "invalid-snapshot",
-      `Plugin build root at ${liveRoot} resolves outside the real workspace ` +
-        `root at ${realWorkspaceRoot}.`,
+      `Plugin build root at ${liveRoot} resolves outside the real plugin-data ` +
+        `directory at ${realDohcDir}.`,
       liveRoot,
     );
   }
@@ -363,9 +398,15 @@ async function buildWithDeadline(
   input: BuildPluginBundleInput,
   options: BuildOptions,
   timeoutMs: number,
+  esbuildBinary: string,
 ): Promise<BuildOutcome> {
-  const buildFunction = input.buildFunction ?? build;
-  const stopBuild = input.stopBuild ?? stop;
+  let buildFunction = input.buildFunction;
+  let stopBuild = input.stopBuild;
+  if (!buildFunction || !stopBuild) {
+    const esbuild = await loadEsbuild(esbuildBinary);
+    buildFunction ??= esbuild.build;
+    stopBuild ??= esbuild.stop;
+  }
   let timer: NodeJS.Timeout | undefined;
   let abortBuild: (() => void) | undefined;
 
@@ -560,18 +601,7 @@ async function runBuildJob(
       logLevel: "silent",
     } satisfies BuildOptions;
 
-    const previousBinaryPath = process.env.ESBUILD_BINARY_PATH;
-    process.env.ESBUILD_BINARY_PATH = esbuildBinary;
-    let outcome: BuildOutcome;
-    try {
-      outcome = await buildWithDeadline(input, options, timeoutMs);
-    } finally {
-      if (previousBinaryPath === undefined) {
-        delete process.env.ESBUILD_BINARY_PATH;
-      } else {
-        process.env.ESBUILD_BINARY_PATH = previousBinaryPath;
-      }
-    }
+    const outcome = await buildWithDeadline(input, options, timeoutMs, esbuildBinary);
 
     if (outcome.kind === "timeout") {
       throw new PluginBuildRunnerError(
@@ -615,10 +645,16 @@ async function runBuildJob(
     const cleanupWarning = await replaceLiveRoot(paths.liveRoot, stagingRoot);
     stagingRoot = null;
 
+    const bundlePath = join(paths.liveRoot, "bundle.mjs");
+    const bundleHash = createHash("sha256")
+      .update(await readFile(bundlePath))
+      .digest("hex");
+
     return {
       ok: true,
       liveRoot: paths.liveRoot,
-      bundlePath: join(paths.liveRoot, "bundle.mjs"),
+      bundlePath,
+      bundleHash,
       manifestPath: join(paths.liveRoot, "dohc-plugin.generated.json"),
       metafilePath: join(paths.liveRoot, "meta.json"),
       metafile: outcome.result.metafile,

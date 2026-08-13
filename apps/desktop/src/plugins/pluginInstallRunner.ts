@@ -9,6 +9,52 @@ import {
 const MAX_LOG_ENTRIES = 500;
 const PLUGIN_INSTALL_SERVICE_NAME = "dohc.plugin.install";
 
+// CodeRabbit #779 R18 (Critical): this install's cwd is a copy of
+// plugin-authored source, whose pnpm-lock.yaml/.npmrc the plugin author
+// controls. Forwarding this app's full process.env let a plugin-supplied
+// .npmrc interpolate any ambient credential (auth tokens, cloud creds) into
+// a request to a registry the plugin itself points at — npm-family config
+// resolution reads `${VAR}` references straight out of the environment.
+// Only inherit what pnpm and the tools it shells out to (git, tar) actually
+// need to run; everything else — including HOME/USERPROFILE, so this
+// machine's real ~/.npmrc is never read — is pinned to a plugin-scoped
+// location below instead of inherited.
+const INHERITED_ENV_KEYS = [
+  "PATH",
+  "Path",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "SystemRoot",
+  "windir",
+  "ComSpec",
+] as const;
+
+function buildPluginInstallEnv(pnpmPaths: PluginPnpmPaths): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of INHERITED_ENV_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  // A definitely-absent file: npm/pnpm treat a missing user/global config
+  // file as "no additional config" rather than an error, so this reliably
+  // disables both without depending on what this machine happens to have.
+  const disabledConfigFile = join(pnpmPaths.homeDir, ".npmrc-disabled");
+  env.HOME = pnpmPaths.homeDir;
+  env.USERPROFILE = pnpmPaths.homeDir;
+  env.npm_config_userconfig = disabledConfigFile;
+  env.npm_config_globalconfig = disabledConfigFile;
+  // Env-provided config outranks a project .npmrc in npm/pnpm's own
+  // resolution order, so this also stops a plugin-supplied .npmrc from
+  // silently redirecting the install at an attacker-controlled registry.
+  env.npm_config_registry = "https://registry.npmjs.org/";
+  env.PNPM_CONFIG_STORE_DIR = pnpmPaths.storeDir;
+  env.PNPM_CONFIG_CACHE_DIR = pnpmPaths.cacheDir;
+  env.PNPM_CONFIG_STATE_DIR = pnpmPaths.stateDir;
+  env.PNPM_CONFIG_UPDATE_NOTIFIER = "false";
+  return env;
+}
+
 export const PLUGIN_INSTALL_ARGS = [
   "install",
   "--ignore-scripts",
@@ -222,13 +268,7 @@ async function runInstallJob(
 
   const logs: PluginInstallLogEntry[] = [];
   const pnpmEntry = resolvePluginPnpmEntry(input.resourcesBasePath);
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    PNPM_CONFIG_STORE_DIR: input.pnpmPaths.storeDir,
-    PNPM_CONFIG_CACHE_DIR: input.pnpmPaths.cacheDir,
-    PNPM_CONFIG_STATE_DIR: input.pnpmPaths.stateDir,
-    PNPM_CONFIG_UPDATE_NOTIFIER: "false",
-  };
+  const env = buildPluginInstallEnv(input.pnpmPaths);
   // A supplied forkProcess (tests) runs pnpm directly — a plain Node
   // child process exits normally on its own. The default Electron path goes
   // through the wrapper instead; see InstallPluginDependenciesInput.pnpmRunnerEntry.

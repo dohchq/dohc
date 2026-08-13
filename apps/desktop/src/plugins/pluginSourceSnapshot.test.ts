@@ -23,12 +23,21 @@ import {
   snapshotPluginSource,
   type PluginSourceSnapshotResult,
 } from "./pluginSourceSnapshot";
+import { workspaceStateKey } from "./pluginLocalState";
 
 interface PluginFixture {
   root: string;
+  stateDir: string;
   dohcDir: string;
   pluginRoot: string;
   manifest: DohcPluginManifestShape;
+}
+
+// Matches PluginPipeline's own computation exactly: derived plugin
+// artifacts live under <stateDir>/plugin-data/<workspaceStateKey>, never
+// inside the workspace folder (CERT779).
+function dohcDirFor(stateDir: string, workspaceRoot: string): string {
+  return join(stateDir, "plugin-data", workspaceStateKey(workspaceRoot));
 }
 
 type DependencyField =
@@ -55,6 +64,12 @@ async function createWorkspaceRoot(prefix = "dohc-plugin-snapshot-"): Promise<st
   roots.push(root);
   await mkdir(join(root, "plugins"));
   return root;
+}
+
+async function createStateDir(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "dohc-plugin-snapshot-state-"));
+  roots.push(dir);
+  return dir;
 }
 
 async function writeSourceFiles(
@@ -88,10 +103,17 @@ async function createPluginFixture(
   pluginId = "example-plugin",
 ): Promise<PluginFixture> {
   const root = await createWorkspaceRoot();
+  const stateDir = await createStateDir();
   const pluginRoot = join(root, "plugins", "source-directory");
   await mkdir(pluginRoot);
   const manifest = await writeSourceFiles(pluginRoot, pluginId);
-  return { root, dohcDir: join(root, ".dohc"), pluginRoot, manifest };
+  return {
+    root,
+    stateDir,
+    dohcDir: dohcDirFor(stateDir, root),
+    pluginRoot,
+    manifest,
+  };
 }
 
 function runSnapshot(
@@ -99,6 +121,7 @@ function runSnapshot(
 ): Promise<PluginSourceSnapshotResult> {
   return snapshotPluginSource({
     workspaceRoot: fixture.root,
+    stateDir: fixture.stateDir,
     dohcDir: fixture.dohcDir,
     pluginId: fixture.manifest.name,
     pluginRoot: fixture.pluginRoot,
@@ -153,6 +176,7 @@ describe("pluginIdToSafePath", () => {
 describe("snapshotPluginSource containment", () => {
   it("rejects a symlinked or junction plugin root", async () => {
     const root = await createWorkspaceRoot();
+    const stateDir = await createStateDir();
     const targetRoot = join(root, "outside-plugin");
     await mkdir(targetRoot);
     const manifest = await writeSourceFiles(targetRoot, "linked-plugin");
@@ -161,7 +185,8 @@ describe("snapshotPluginSource containment", () => {
 
     const failure = requireFailure(await snapshotPluginSource({
       workspaceRoot: root,
-      dohcDir: join(root, ".dohc"),
+      stateDir,
+      dohcDir: dohcDirFor(stateDir, root),
       pluginId: manifest.name,
       pluginRoot: linkedRoot,
       manifest,
@@ -193,13 +218,15 @@ describe("snapshotPluginSource containment", () => {
 
   it("rejects a plugin root outside the workspace plugins tree", async () => {
     const root = await createWorkspaceRoot();
+    const stateDir = await createStateDir();
     const outsideRoot = join(root, "outside-plugin");
     await mkdir(outsideRoot);
     const manifest = await writeSourceFiles(outsideRoot, "outside-plugin");
 
     const failure = requireFailure(await snapshotPluginSource({
       workspaceRoot: root,
-      dohcDir: join(root, ".dohc"),
+      stateDir,
+      dohcDir: dohcDirFor(stateDir, root),
       pluginId: manifest.name,
       pluginRoot: outsideRoot,
       manifest,
@@ -246,6 +273,7 @@ describe("snapshotPluginSource containment", () => {
       storeDir: join(fixture.dohcDir, "pnpm", "store"),
       cacheDir: join(fixture.dohcDir, "pnpm", "cache"),
       stateDir: join(fixture.dohcDir, "pnpm", "state"),
+      homeDir: join(fixture.dohcDir, "pnpm", "home"),
     });
     await Promise.all(Object.values(result.pnpmPaths).map(async (path) => {
       expect((await lstat(path)).isDirectory()).toBe(true);

@@ -51,7 +51,11 @@ export interface PluginChildProcessHandle {
 }
 
 export interface PluginChildProcessBrokerOptions {
-  workspaceRoot: string;
+  /** The app's userData-resident plugin-data root for this workspace
+   * (PluginPipeline's dohcDir) — never a workspace-relative path (CERT779).
+   * A brokered child's cwd/modulePath must resolve inside
+   * <dohcDir>/plugins/<safeId>. */
+  dohcDir: string;
   forkProcess?: (
     modulePath: string,
     args: string[],
@@ -682,8 +686,7 @@ export class PluginChildProcessBroker {
 
   private async pluginRoot(pluginId: string): Promise<string> {
     const pluginsParent = resolve(
-      this.options.workspaceRoot,
-      ".dohc",
+      this.options.dohcDir,
       "plugins",
     );
     const realPluginsParent = await realpath(pluginsParent).catch(

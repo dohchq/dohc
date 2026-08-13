@@ -107,6 +107,7 @@ async function createInstallFixture(
       storeDir: join(workspaceRoot, ".dohc", "pnpm", "store"),
       cacheDir: join(workspaceRoot, ".dohc", "pnpm", "cache"),
       stateDir: join(workspaceRoot, ".dohc", "pnpm", "state"),
+      homeDir: join(workspaceRoot, ".dohc", "pnpm", "home"),
     },
   };
   return { root, workspaceRoot, snapshotRoot, resourcesBasePath, input };
@@ -166,13 +167,31 @@ describe("installPluginDependencies", () => {
 
     expect(result.ok).toBe(true);
     expect(forkProcess).toHaveBeenCalledTimes(1);
+    const homeDir = fixture.input.pnpmPaths.homeDir;
     expect(forkProcess).toHaveBeenCalledWith(
       resolvePluginPnpmEntry(fixture.resourcesBasePath),
       [...PLUGIN_INSTALL_ARGS],
       {
         cwd: fixture.snapshotRoot,
+        // R18 (CodeRabbit #779): an explicit allowlist, never a full
+        // process.env spread — see the canary/user-.npmrc pins below for
+        // why.
         env: {
-          ...process.env,
+          ...(process.env.PATH !== undefined ? { PATH: process.env.PATH } : {}),
+          ...(process.env.Path !== undefined ? { Path: process.env.Path } : {}),
+          ...(process.env.TEMP !== undefined ? { TEMP: process.env.TEMP } : {}),
+          ...(process.env.TMP !== undefined ? { TMP: process.env.TMP } : {}),
+          ...(process.env.TMPDIR !== undefined ? { TMPDIR: process.env.TMPDIR } : {}),
+          ...(process.env.SystemRoot !== undefined
+            ? { SystemRoot: process.env.SystemRoot }
+            : {}),
+          ...(process.env.windir !== undefined ? { windir: process.env.windir } : {}),
+          ...(process.env.ComSpec !== undefined ? { ComSpec: process.env.ComSpec } : {}),
+          HOME: homeDir,
+          USERPROFILE: homeDir,
+          npm_config_userconfig: join(homeDir, ".npmrc-disabled"),
+          npm_config_globalconfig: join(homeDir, ".npmrc-disabled"),
+          npm_config_registry: "https://registry.npmjs.org/",
           PNPM_CONFIG_STORE_DIR: fixture.input.pnpmPaths.storeDir,
           PNPM_CONFIG_CACHE_DIR: fixture.input.pnpmPaths.cacheDir,
           PNPM_CONFIG_STATE_DIR: fixture.input.pnpmPaths.stateDir,
@@ -182,6 +201,35 @@ describe("installPluginDependencies", () => {
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
+  });
+
+  it("never forwards the parent process's ambient env, only the pinned allowlist (CodeRabbit #779 R18 PoC)", async () => {
+    const fixture = await createInstallFixture();
+    const child = new FakeInstallProcess();
+    const forkProcess = vi.fn<PluginInstallFork>(() => {
+      queueMicrotask(() => child.exit(0));
+      return child;
+    });
+    const canaryKey = "DOHC_TEST_CANARY_SECRET";
+    process.env[canaryKey] = "leak-me-if-this-test-is-red";
+    try {
+      await installPluginDependencies({ ...fixture.input, forkProcess });
+    } finally {
+      delete process.env[canaryKey];
+    }
+
+    const observedEnv = forkProcess.mock.calls[0]?.[2].env;
+    expect(observedEnv).toBeDefined();
+    expect(observedEnv?.[canaryKey]).toBeUndefined();
+    // A real ~/.npmrc on this machine (if any) must never be read: HOME and
+    // pnpm/npm's own config-location overrides all point inside the
+    // plugin-scoped pnpmPaths.homeDir instead.
+    expect(observedEnv?.HOME).toBe(fixture.input.pnpmPaths.homeDir);
+    expect(observedEnv?.USERPROFILE).toBe(fixture.input.pnpmPaths.homeDir);
+    expect(observedEnv?.npm_config_userconfig).toBe(
+      join(fixture.input.pnpmPaths.homeDir, ".npmrc-disabled"),
+    );
+    expect(observedEnv?.npm_config_registry).toBe("https://registry.npmjs.org/");
   });
 
   it("returns a structured missing-lockfile failure without spawning pnpm", async () => {
@@ -354,6 +402,7 @@ it.skipIf(!realInstallAvailable)(
         storeDir: join(pnpmRoot, "store"),
         cacheDir: join(pnpmRoot, "cache"),
         stateDir: join(pnpmRoot, "state"),
+        homeDir: join(pnpmRoot, "home"),
       },
       forkProcess: nodeForkProcess,
     };

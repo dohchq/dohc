@@ -14,6 +14,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stop } from "esbuild";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import { PluginPipeline } from "./PluginPipeline";
@@ -23,6 +24,7 @@ import {
   type PluginInstallProcessHandle,
 } from "./pluginInstallRunner";
 import { resolvePluginEsbuildBinary } from "./pluginBuildRunner";
+import { workspaceStateKey } from "./pluginLocalState";
 
 interface Deferred {
   promise: Promise<void>;
@@ -144,6 +146,23 @@ async function createPluginWorkspace(): Promise<{
   return { root, workspaceRoot, pluginRoot, entryPath, stateDir };
 }
 
+// Matches PluginPipeline's own dohcDir computation exactly: derived plugin
+// artifacts live under <stateDir>/plugin-data/<workspaceStateKey>, never
+// inside the workspace folder (CERT779).
+function liveBundlePath(
+  fixture: { stateDir: string; workspaceRoot: string },
+  pluginId: string,
+): string {
+  return join(
+    fixture.stateDir,
+    "plugin-data",
+    workspaceStateKey(fixture.workspaceRoot),
+    "plugins",
+    pluginId,
+    "bundle.mjs",
+  );
+}
+
 async function waitFor(
   condition: () => boolean,
   message: string,
@@ -173,6 +192,10 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  // R7 fix: real builds above spawn esbuild's shared service process from
+  // the staged binary under resourcesParent, which holds the executable
+  // open until stopped — that blocks deleting it on Windows.
+  await stop();
   await rm(resourcesParent, {
     recursive: true,
     force: true,
@@ -218,6 +241,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     try {
       await pipeline.start();
       expect(pipeline.list()[0]?.status).toBe("discovered");
+      // A5: a door-written write's absolute path must resolve to the plugin
+      // that owns it, so main.ts can route it into
+      // handleDoorWrittenSourceChange instead of only the watcher path.
+      expect(pipeline.pluginIdForPath(fixture.entryPath)).toBe("example-plugin");
+      expect(pipeline.pluginIdForPath(fixture.pluginRoot)).toBe("example-plugin");
+      expect(pipeline.pluginIdForPath(join(fixture.workspaceRoot, "notes.md")))
+        .toBeNull();
 
       const installed = await pipeline.install("example-plugin");
       if (!installed.ok) {
@@ -232,7 +262,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const firstHash = pipeline.list()[0]?.approvedHash;
       expect(firstHash).toMatch(/^[0-9a-f]{64}$/);
       expect(await readFile(
-        join(fixture.workspaceRoot, ".dohc", "plugins", "example-plugin", "bundle.mjs"),
+        liveBundlePath(fixture, "example-plugin"),
         "utf8",
       )).toContain("one");
 
@@ -262,7 +292,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(installCalls).toBe(3);
       expect(pipeline.list()[0]?.approvedHash).not.toBe(firstHash);
       expect(await readFile(
-        join(fixture.workspaceRoot, ".dohc", "plugins", "example-plugin", "bundle.mjs"),
+        liveBundlePath(fixture, "example-plugin"),
         "utf8",
       )).toContain("three");
 
@@ -293,6 +323,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         "Plugin did not reach ready after approval.",
       );
 
+      // CERT779 A4 PoC: renaming an approved plugin's manifest identity must
+      // not carry its approval forward. "renamed-plugin" is an identity this
+      // pipeline has never approved, even though "example-plugin" at the
+      // same root was fully approved and running a moment ago.
       await writeFile(join(fixture.pluginRoot, "dohc-plugin.json"), `${JSON.stringify({
         version: 1,
         name: "renamed-plugin",
@@ -305,17 +339,34 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }]);
       await waitFor(
         () => pipeline.list().some((plugin) =>
-          plugin.id === "renamed-plugin" && plugin.status === "ready"
+          plugin.id === "renamed-plugin" && plugin.status === "discovered"
         ),
-        "Manifest id change did not install the replacement identity.",
+        "Manifest identity change did not land as an unapproved discovery.",
       );
       expect(pipeline.list().some((plugin) => plugin.id === "example-plugin")).toBe(false);
+      expect(
+        pipeline.list().find((plugin) => plugin.id === "renamed-plugin")?.approvedHash,
+      ).toBeNull();
       await expect(lstat(join(
-        fixture.workspaceRoot,
-        ".dohc",
+        fixture.stateDir,
+        "plugin-data",
+        workspaceStateKey(fixture.workspaceRoot),
         "plugins",
         "example-plugin",
       ))).rejects.toMatchObject({ code: "ENOENT" });
+
+      const renamedInstall = await pipeline.install("renamed-plugin");
+      if (!renamedInstall.ok) {
+        throw new Error(
+          `${renamedInstall.error.stage}/${renamedInstall.error.code}: ${renamedInstall.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list().some((plugin) =>
+          plugin.id === "renamed-plugin" && plugin.status === "ready"
+        ),
+        "Renamed identity did not reach ready after its own fresh install.",
+      );
 
       const preflight = await pipeline.uninstallPreflight("renamed-plugin");
       if (!preflight.ok) throw new Error(preflight.error.message);
@@ -333,4 +384,72 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.dispose();
     }
   }, 120_000);
+
+  it("refuses to start a bundle tampered after the build, even though its source hash is unchanged (CERT779 PoC)", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const spawnTransport = fakeSpawnTransport();
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport,
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceId: "workspace-1",
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      const approvedHashBeforeTamper = pipeline.list()[0]?.approvedHash;
+
+      // The exact CERT779 attack: tamper bundle.mjs directly on disk. The
+      // plugin's source under plugins/ is never touched, so its hash — and
+      // therefore approvedHash — does not change either.
+      const bundlePath = liveBundlePath(fixture, "example-plugin");
+      const builtBundle = await readFile(bundlePath, "utf8");
+      expect(builtBundle).toContain("one");
+      await writeFile(bundlePath, builtBundle.replaceAll("one", "TAMPERED-PAYLOAD"));
+
+      // Stop the running (legitimate) instance and ask the pipeline to start
+      // it again — ensureStarted()'s fast path, the exact call #777's panel
+      // surface makes every time a panel opens, and the path this pipeline
+      // takes on every app restart for an already-approved plugin whose host
+      // isn't running yet.
+      await host.stop("example-plugin");
+      const result = await pipeline.ensureStarted("example-plugin");
+
+      expect(result.ok).toBe(true);
+      // Source was still approved, so the pipeline self-heals with a fresh,
+      // trustworthy rebuild rather than refusing outright — but it must
+      // never start, or leave live, the tampered bytes.
+      const liveBundleAfter = await readFile(bundlePath, "utf8");
+      expect(liveBundleAfter).not.toContain("TAMPERED-PAYLOAD");
+      expect(liveBundleAfter).toContain("one");
+      expect(pipeline.list()[0]?.approvedHash).toBe(approvedHashBeforeTamper);
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
 });

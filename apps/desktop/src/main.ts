@@ -556,6 +556,8 @@ import {
 import { invokePluginSdkHost } from "./plugins/pluginSdkHost";
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
+import { pluginDataDir } from "./plugins/pluginLocalState";
+import { pluginIdToSafePath } from "./plugins/pluginSourceSnapshot";
 import { createSitePreviewSdkAuthorityRegistry } from "./workspaces/sitePreviewSdkAuthority";
 import { stopPluginPanelPreview } from "./plugins/pluginPanelLifecycle";
 import {
@@ -787,9 +789,8 @@ function notifyPluginStatusChanged(
 
 function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
   let pipeline: PluginPipeline | null = null;
-  const childProcessBroker = new PluginChildProcessBroker({
-    workspaceRoot: workspace.rootPath,
-  });
+  const dohcDir = pluginDataDir(stateDir(), workspace.rootPath);
+  const childProcessBroker = new PluginChildProcessBroker({ dohcDir });
   const pluginHost = new PluginHost({
     stateDir: stateDir(),
     workspaceRoot: workspace.rootPath,
@@ -2796,6 +2797,17 @@ function invokeWorkspacePluginSdk(input: {
           createOnly: !overwrite,
           signal: input.signal,
         });
+        // This write is door-written (per-operation authored, stamped with
+        // MomentAuthor above) — the plan doc's auto-approve predicate is
+        // attribution through the door, not topology. Tell the owning
+        // plugin's pipeline directly rather than waiting for the watcher to
+        // observe the same write as an unattributed disk change.
+        const ownerId = pluginPipelines.get(input.workspaceId)
+          ?.pluginIdForPath(absolutePath);
+        if (ownerId) {
+          pluginPipelines.get(input.workspaceId)
+            ?.handleDoorWrittenSourceChange(ownerId);
+        }
         return { path };
       },
     },
@@ -2809,6 +2821,20 @@ function registeredPlugin(
   pluginId: string,
 ): RegisteredPlugin | undefined {
   return pluginRegistrations.get(workspaceId)?.get(pluginId);
+}
+
+// Panels serve from the approved, hash-verified snapshot — never from
+// plugin.pluginRoot (live, unverified workspace-folder source) — matching
+// ensurePluginStarted's own hash-verify-before-execute gate (CERT779: a
+// panel is code from this plugin as much as its process is, and the plan
+// doc's userData-residency rule applies the same way).
+function pluginSnapshotRoot(workspace: CreatedWorkspace, pluginId: string): string {
+  return join(
+    pluginDataDir(stateDir(), workspace.rootPath),
+    "plugins",
+    pluginIdToSafePath(pluginId),
+    "snapshot",
+  );
 }
 
 function rememberPluginRegistration(
@@ -6233,9 +6259,10 @@ function registerIpcHandlers(
           await stopRunningPluginPanelPreview(previous);
         }
 
-        const entryPath = join(plugin.pluginRoot, panel.entry);
+        const snapshotRoot = pluginSnapshotRoot(workspace, input.pluginId);
+        const entryPath = join(snapshotRoot, panel.entry);
         const handle = await startStaticDirectoryPreview(dirname(entryPath), {
-          containmentRoot: plugin.pluginRoot,
+          containmentRoot: snapshotRoot,
           entry: basename(entryPath),
           entryLabel: "plugin panel entry",
         });

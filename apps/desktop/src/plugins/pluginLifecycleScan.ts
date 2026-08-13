@@ -28,12 +28,11 @@ const ROOT_HOOKS = [
   "prepare",
   "postprepare",
 ] as const;
-const DEPENDENCY_HOOKS = [
-  "preinstall",
-  "install",
-  "postinstall",
-  "prepare",
-] as const;
+// The design doc requires catching a skipped lifecycle script "whatever the
+// hook's name" for every installed package, not a hand-picked subset — reuse
+// ROOT_HOOKS verbatim so the two can never drift apart again (CERT779
+// finding 2: a dependency declaring only preprepare scanned clean).
+const DEPENDENCY_HOOKS = ROOT_HOOKS;
 
 // Measured on 2026-08-13 from pnpm@11.20.0 isolated installs. The fresh
 // small fixture's zod manifest was 3,796 bytes. The repository install's

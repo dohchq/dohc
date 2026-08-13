@@ -181,6 +181,33 @@ describe("scanPluginLifecycleScripts", () => {
     expect(error.userFacingLines[0]).not.toContain("build-native");
   });
 
+  it("reports a dependency preprepare hook (CERT779 PoC: dependency hooks matched the root set, not a hand-picked subset)", async () => {
+    // Reproduces cert779-report.md finding 2 exactly: a dependency
+    // declaring only preprepare (no prepare) previously scanned clean
+    // (ok: true, zero warnings) because DEPENDENCY_HOOKS omitted
+    // preprepare/postprepare/pnpm:devPreinstall that ROOT_HOOKS included.
+    const fixture = await createLifecycleFixture();
+    const manifestPath = await addPhysicalPackage(fixture, {
+      entry: "prepack-only@2.0.0",
+      name: "prepack-only",
+      version: "2.0.0",
+      scripts: { preprepare: "node ./generate-native-addon.js" },
+    });
+
+    const error = requireUnsupported(await scan(fixture));
+
+    expect(error.findings).toEqual([{
+      name: "prepack-only",
+      version: "2.0.0",
+      hook: "preprepare",
+      command: "node ./generate-native-addon.js",
+      manifestPath,
+    }]);
+    expect(error.userFacingLines).toEqual([
+      'Package "prepack-only" 2.0.0 defines skipped preprepare hook.',
+    ]);
+  });
+
   it("inspects a physical scoped package one level below its scope", async () => {
     const fixture = await createLifecycleFixture();
     const manifestPath = await addPhysicalPackage(fixture, {

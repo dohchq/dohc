@@ -15,7 +15,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { BuildResult } from "esbuild";
+import { stop, type BuildResult } from "esbuild";
 import {
   afterAll,
   afterEach,
@@ -43,7 +43,7 @@ import {
 
 interface BuildFixture {
   root: string;
-  workspaceRoot: string;
+  dohcDir: string;
   liveRoot: string;
   snapshotRoot: string;
   entryPath: string;
@@ -100,11 +100,12 @@ async function createBuildFixture(
 ): Promise<BuildFixture> {
   const root = await mkdtemp(join(tmpdir(), "dohc-plugin-build-"));
   roots.push(root);
-  const workspaceRoot = join(root, "workspace");
+  // Stands in for PluginPipeline's userData-resident dohcDir — never a
+  // workspace-relative path (CERT779).
+  const dohcDir = join(root, "userdata-plugin-data");
   const pluginId = options.pluginId ?? "example-plugin";
   const liveRoot = join(
-    workspaceRoot,
-    ".dohc",
+    dohcDir,
     "plugins",
     pluginIdToSafePath(pluginId),
   );
@@ -135,13 +136,13 @@ async function createBuildFixture(
   );
   return {
     root,
-    workspaceRoot,
+    dohcDir,
     liveRoot,
     snapshotRoot,
     entryPath,
     manifest,
     input: {
-      workspaceRoot,
+      dohcDir,
       pluginId,
       snapshotRoot,
       manifest,
@@ -186,6 +187,13 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  // The R7 fix means real builds above now genuinely spawn esbuild's shared
+  // service process from the staged binary under stagedResourcesParent —
+  // that process holds the executable open until stopped, which blocks
+  // deleting it on Windows. Node's ESM cache resolves this import to the
+  // same module esbuild.ts loaded internally, so this stops that same
+  // service.
+  await stop();
   await rm(stagedResourcesParent, {
     recursive: true,
     force: true,
@@ -339,9 +347,7 @@ describe("buildPluginBundle", () => {
     const started = deferred<void>();
     const controller = new AbortController();
     let rejectBuild: ((error: unknown) => void) | undefined;
-    let observedBinaryPath: string | undefined;
     const buildFunction = vi.fn<PluginBundleBuild>(() => {
-      observedBinaryPath = process.env.ESBUILD_BINARY_PATH;
       started.resolve();
       return new Promise<BuildResult>((_resolveBuild, reject) => {
         rejectBuild = reject;
@@ -366,9 +372,6 @@ describe("buildPluginBundle", () => {
       timeoutMs: PLUGIN_BUNDLE_TIMEOUT_MS,
     });
     expect(stopBuild).toHaveBeenCalledTimes(1);
-    expect(observedBinaryPath).toBe(
-      resolvePluginEsbuildBinary(stagedResourcesRoot),
-    );
     await expect(readFile(oldBundlePath)).resolves.toEqual(oldBytes);
     await expectNoStaging(fixture.liveRoot);
   });

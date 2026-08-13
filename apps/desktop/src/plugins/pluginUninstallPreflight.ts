@@ -104,14 +104,17 @@ export interface PluginUninstallPreflightResult {
 }
 
 export interface WritePluginBaselineManifestInput {
-  workspaceRoot: string;
+  /** The app's userData-resident plugin-data root (PluginPipeline's
+   * dohcDir), never a workspace-relative path (CERT779). */
+  dohcDir: string;
   pluginId: string;
   baselineDigest: PluginSourceDigest;
   installedBaselineHash: string;
 }
 
 export interface PluginUninstallPreflightInput {
-  workspaceRoot: string;
+  /** See WritePluginBaselineManifestInput.dohcDir. */
+  dohcDir: string;
   pluginId: string;
   pluginRoot: string;
   installedBaselineHash: string | undefined;
@@ -155,12 +158,11 @@ function captureLimitDetail(): string {
 }
 
 export function pluginBaselineManifestPath(
-  workspaceRoot: string,
+  dohcDir: string,
   pluginId: string,
 ): string {
   return join(
-    resolve(workspaceRoot),
-    ".dohc",
+    resolve(dohcDir),
     "plugins",
     pluginIdToSafePath(pluginId),
     BASELINE_MANIFEST_FILE_NAME,
@@ -190,7 +192,7 @@ export async function writePluginBaselineManifest(
     );
   }
   const manifest = manifestFromDigest(digest);
-  const path = pluginBaselineManifestPath(input.workspaceRoot, input.pluginId);
+  const path = pluginBaselineManifestPath(input.dohcDir, input.pluginId);
   const temporaryPath = `${path}.tmp-${process.pid}-${randomUUID()}`;
   await mkdir(dirname(path), { recursive: true });
   try {
@@ -402,7 +404,7 @@ export async function pluginUninstallPreflight(
   input: PluginUninstallPreflightInput,
 ): Promise<PluginUninstallPreflightResult> {
   const manifestPath = pluginBaselineManifestPath(
-    input.workspaceRoot,
+    input.dohcDir,
     input.pluginId,
   );
   let liveDigest: PluginSourceDigest;

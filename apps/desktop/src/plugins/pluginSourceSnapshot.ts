@@ -18,6 +18,7 @@ import {
   NPM_PACKAGE_NAME,
   type DohcPluginManifest,
 } from "./pluginManifestSchema";
+import { workspaceStateKey } from "./pluginLocalState";
 
 export const PINNED_PLUGIN_PNPM_VERSION = "11.20.0";
 export const PINNED_PLUGIN_PACKAGE_MANAGER =
@@ -69,10 +70,18 @@ export interface PluginPnpmPaths {
   storeDir: string;
   cacheDir: string;
   stateDir: string;
+  /** HOME/USERPROFILE for the install child process (CodeRabbit #779 R18) —
+   * plugin-scoped and empty, so pnpm never reads this machine's real
+   * ~/.npmrc (which can hold registry auth tokens) for a plugin-authored
+   * install. */
+  homeDir: string;
 }
 
 export interface SnapshotPluginSourceInput {
   workspaceRoot: string;
+  /** The app's own userData directory (WorkspaceRegistry.stateDir()), never
+   * a workspace-relative path. dohcDir below must resolve inside it. */
+  stateDir: string;
   dohcDir: string;
   pluginId: string;
   pluginRoot: string;
@@ -483,6 +492,7 @@ async function ensureContainedDirectory(
 }
 
 async function prepareOutputDirectories(
+  stateDir: string,
   workspaceRoot: string,
   dohcDir: string,
   safeId: string,
@@ -490,8 +500,20 @@ async function prepareOutputDirectories(
   pluginDataRoot: string;
   pnpmPaths: PluginPnpmPaths;
 }> {
-  const resolvedWorkspaceRoot = resolve(workspaceRoot);
-  const expectedDohcDir = join(resolvedWorkspaceRoot, ".dohc");
+  // Every derived plugin artifact (snapshot, installed node_modules, pnpm
+  // store/cache/state, and — via pluginBuildRunner.ts, which shares this
+  // same dohcDir — the built bundle) lives under the app's own userData,
+  // never inside the workspace folder: "anything inside the workspace can
+  // be replaced by a git/Dropbox mirror, and a mirror-writable bundle would
+  // bypass source hashing entirely" (design doc). workspaceRoot is used
+  // only to derive the workspace's own key below and to contain the
+  // *source* plugin root elsewhere in this module — never to place output.
+  const resolvedStateDir = resolve(stateDir);
+  const expectedDohcDir = join(
+    resolvedStateDir,
+    "plugin-data",
+    workspaceStateKey(workspaceRoot),
+  );
   const resolvedDohcDir = resolve(dohcDir);
   if (relative(expectedDohcDir, resolvedDohcDir) !== "") {
     throw new SnapshotError(
@@ -500,11 +522,11 @@ async function prepareOutputDirectories(
       resolvedDohcDir,
     );
   }
-  const realWorkspaceRoot = await realpath(resolvedWorkspaceRoot);
+  const realStateDir = await realpath(resolvedStateDir);
   const realDohcDir = await ensureContainedDirectory(
     resolvedDohcDir,
-    realWorkspaceRoot,
-    "Workspace .dohc directory",
+    realStateDir,
+    "App plugin-data directory",
   );
   const pluginDataParent = join(resolvedDohcDir, "plugins");
   const realPluginDataParent = await ensureContainedDirectory(
@@ -529,11 +551,13 @@ async function prepareOutputDirectories(
     storeDir: join(pnpmRoot, "store"),
     cacheDir: join(pnpmRoot, "cache"),
     stateDir: join(pnpmRoot, "state"),
+    homeDir: join(pnpmRoot, "home"),
   } satisfies PluginPnpmPaths;
   await Promise.all([
     ensureContainedDirectory(pnpmPaths.storeDir, realPnpmRoot, "Shared pnpm store"),
     ensureContainedDirectory(pnpmPaths.cacheDir, realPnpmRoot, "Shared pnpm cache"),
     ensureContainedDirectory(pnpmPaths.stateDir, realPnpmRoot, "Shared pnpm state"),
+    ensureContainedDirectory(pnpmPaths.homeDir, realPnpmRoot, "Shared pnpm home"),
   ]);
   return { pluginDataRoot, pnpmPaths };
 }
@@ -788,6 +812,7 @@ export async function snapshotPluginSource(
     storeDir: join(resolvedDohcDir, "pnpm", "store"),
     cacheDir: join(resolvedDohcDir, "pnpm", "cache"),
     stateDir: join(resolvedDohcDir, "pnpm", "state"),
+    homeDir: join(resolvedDohcDir, "pnpm", "home"),
   };
   let stagingRoot: string | null = null;
   try {
@@ -804,6 +829,7 @@ export async function snapshotPluginSource(
       input.pluginRoot,
     );
     const output = await prepareOutputDirectories(
+      input.stateDir,
       input.workspaceRoot,
       input.dohcDir,
       safeId,

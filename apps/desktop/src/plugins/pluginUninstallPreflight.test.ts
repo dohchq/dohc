@@ -21,15 +21,19 @@ const pluginId = "hello-plugin";
 
 interface PreflightFixture {
   workspaceRoot: string;
+  // Stands in for PluginPipeline's userData-resident dohcDir — never a
+  // workspace-relative path (CERT779).
+  dohcDir: string;
   pluginRoot: string;
 }
 
 async function createFixture(): Promise<PreflightFixture> {
   const workspaceRoot = await createTestScratch("dohc-plugin-uninstall-");
   roots.push(workspaceRoot);
+  const dohcDir = join(workspaceRoot, "userdata-plugin-data");
   const pluginRoot = join(workspaceRoot, "plugins", "hello-source");
   await mkdir(pluginRoot, { recursive: true });
-  return { workspaceRoot, pluginRoot };
+  return { workspaceRoot, dohcDir, pluginRoot };
 }
 
 async function writeSourceFile(
@@ -45,7 +49,7 @@ async function writeSourceFile(
 async function saveBaseline(fixture: PreflightFixture): Promise<string> {
   const digest = await hashPluginSourceFiles(fixture.pluginRoot);
   await writePluginBaselineManifest({
-    workspaceRoot: fixture.workspaceRoot,
+    dohcDir: fixture.dohcDir,
     pluginId,
     baselineDigest: digest,
     installedBaselineHash: digest.sourceHash,
@@ -58,7 +62,7 @@ async function runPreflight(
   installedBaselineHash: string,
 ) {
   return pluginUninstallPreflight({
-    workspaceRoot: fixture.workspaceRoot,
+    dohcDir: fixture.dohcDir,
     pluginId,
     pluginRoot: fixture.pluginRoot,
     installedBaselineHash,
@@ -95,7 +99,7 @@ describe("plugin uninstall preflight", () => {
     expect(
       JSON.parse(
         await readFile(
-          pluginBaselineManifestPath(fixture.workspaceRoot, pluginId),
+          pluginBaselineManifestPath(fixture.dohcDir, pluginId),
           "utf8",
         ),
       ),

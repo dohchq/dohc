@@ -58,8 +58,11 @@ async function createFixture(
 ): Promise<BrokerFixture> {
   const root = await createTestScratch("dohc-plugin-child-broker-");
   roots.push(root);
+  // Stands in for PluginPipeline's userData-resident dohcDir directly (no
+  // extra ".dohc" segment — CERT779: this test's root already plays the
+  // role of that userData plugin-data directory).
   for (const safeId of ["plugin-a", "plugin-b"]) {
-    const pluginRoot = join(root, ".dohc", "plugins", safeId);
+    const pluginRoot = join(root, "plugins", safeId);
     await mkdir(join(pluginRoot, "data"), { recursive: true });
     await writeFile(join(pluginRoot, "server.mjs"), "export {};\n");
   }
@@ -67,7 +70,7 @@ async function createFixture(
   const forks: BrokerFixture["forks"] = [];
   const windowsTreeKills: number[] = [];
   const broker = new PluginChildProcessBroker({
-    workspaceRoot: root,
+    dohcDir: root,
     platform: options.platform ?? "win32",
     forkProcess: (modulePath, args, forkOptions) => {
       const child = new FakeUtilityProcess(10_000 + children.length);
@@ -149,7 +152,6 @@ describe("PluginChildProcessBroker", () => {
     expect(fixture.forks[0]).toMatchObject({
       modulePath: resolve(
         fixture.root,
-        ".dohc",
         "plugins",
         "plugin-a",
         "server.mjs",
@@ -158,7 +160,6 @@ describe("PluginChildProcessBroker", () => {
       options: {
         cwd: resolve(
           fixture.root,
-          ".dohc",
           "plugins",
           "plugin-a",
           "data",
@@ -196,7 +197,7 @@ describe("PluginChildProcessBroker", () => {
     await mkdir(outside);
     await symlink(
       outside,
-      join(fixture.root, ".dohc", "plugins", "plugin-a", "escape"),
+      join(fixture.root, "plugins", "plugin-a", "escape"),
       process.platform === "win32" ? "junction" : "dir",
     );
 
@@ -412,7 +413,7 @@ describe("PluginChildProcessBroker", () => {
     });
 
     try {
-      const pluginRoot = join(fixture.root, ".dohc", "plugins", "plugin-a");
+      const pluginRoot = join(fixture.root, "plugins", "plugin-a");
       await host.start(pluginRoot, {
         version: 1,
         name: "plugin-a",

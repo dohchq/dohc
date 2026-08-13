@@ -23,6 +23,12 @@ export const PluginRecord = z.object({
   disabled: z.boolean().optional(),
   approvedHash: PluginSourceHash.optional(),
   installedBaselineHash: PluginSourceHash.optional(),
+  // SHA-256 of bundle.mjs at the moment it was last (re)built from approved
+  // source — the EXECUTING artifact's own hash, re-checked before every
+  // start alongside approvedHash (CERT779: approvedHash alone verified a
+  // source tree that never runs; a tampered bundle.mjs with an unchanged
+  // source tree previously loaded without detection).
+  approvedBundleHash: PluginSourceHash.optional(),
 }).strict();
 export type PluginRecordShape = z.infer<typeof PluginRecord>;
 
@@ -70,7 +76,11 @@ function unreadableState(path: string, problem: string): PluginLocalStateResult 
   };
 }
 
-export function pluginStateFileName(workspaceRoot: string): string {
+// Shared with pluginSourceSnapshot.ts/PluginPipeline.ts: this same hash is
+// the per-workspace directory name under userData where every derived
+// plugin artifact (snapshot, node_modules, bundle) lives — one canonical
+// workspace identity, one place it's computed.
+export function workspaceStateKey(workspaceRoot: string): string {
   const resolvedRoot = resolve(workspaceRoot);
   let canonicalRoot: string;
   try {
@@ -79,8 +89,20 @@ export function pluginStateFileName(workspaceRoot: string): string {
     canonicalRoot = resolvedRoot;
   }
   if (process.platform === "win32") canonicalRoot = canonicalRoot.toLowerCase();
-  const key = createHash("sha256").update(canonicalRoot).digest("hex");
-  return `${key}.json`;
+  return createHash("sha256").update(canonicalRoot).digest("hex");
+}
+
+export function pluginStateFileName(workspaceRoot: string): string {
+  return `${workspaceStateKey(workspaceRoot)}.json`;
+}
+
+// The single computation for where every derived plugin artifact
+// (snapshot, installed node_modules, pnpm store/cache/state, built bundle)
+// lives: under the app's own userData, keyed by workspace, never inside the
+// workspace folder itself (CERT779 — a workspace-folder-resident bundle is
+// sync/mirror-writable and bypasses source hashing entirely).
+export function pluginDataDir(stateDir: string, workspaceRoot: string): string {
+  return join(resolve(stateDir), "plugin-data", workspaceStateKey(workspaceRoot));
 }
 
 function pluginLocalStatePath(stateDir: string, workspaceRoot: string): string {
