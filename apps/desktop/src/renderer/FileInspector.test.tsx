@@ -2398,9 +2398,10 @@ describe("markdown editor unmount flush", () => {
     expect(write.text).toContain("Peer flush");
   });
 
-  it("keeps a pending peer WYSIWYG body when another pane changes the title", async () => {
+  it("keeps a pending peer WYSIWYG body when another pane changes a property", async () => {
+    const path = "shared-wysiwyg-properties.md";
     bridgeMock.readWorkspaceText.mockResolvedValue({
-      text: "---\ntitle: Plan\n---\n\n# Hello\n\n",
+      text: "---\ntitle: Plan\nstatus: draft\n---\n\n# Hello\n\n",
       truncated: false,
       contentHash: TEST_CONTENT_HASH,
     });
@@ -2412,7 +2413,7 @@ describe("markdown editor unmount flush", () => {
           <FileInspector
             key={index}
             workspaceId="ws-1"
-            path="shared-wysiwyg-title.md"
+            path={path}
             registerDraftFlush={(flush) => {
               if (flush) flushes[index] = flush;
             }}
@@ -2424,28 +2425,25 @@ describe("markdown editor unmount flush", () => {
     await waitFor(() => expect(flushes).toHaveLength(2));
     await user.click(editors[0]!);
     await user.type(editors[0]!, "Body A");
-    await waitFor(() =>
-      expect(
-        screen
-          .getAllByTestId("markdown-save-state")
-          .every((state) => state.dataset.state === "saving"),
-      ).toBe(true),
-    );
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
 
-    const peerTitle = screen.getAllByTestId("page-title")[1] as HTMLInputElement;
-    fireEvent.focus(peerTitle);
-    fireEvent.change(peerTitle, { target: { value: "Retitled" } });
-    fireEvent.blur(peerTitle);
-    await waitFor(() =>
-      expect(
-        (screen.getAllByTestId("page-title")[0] as HTMLInputElement).value,
-      ).toBe("Retitled"),
-    );
+    const peerStatus = screen.getAllByLabelText(
+      "Property status value",
+    )[1] as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(peerStatus, { target: { value: "ready" } });
+    });
+    const shared = getSharedLocalDocument(
+      documentVersionKey("ws-1", path, undefined),
+    ).getSnapshot().body;
+    expect(shared).toContain("status: ready");
+    expect(shared).toContain("Body A");
+
     await act(async () => flushes[1]!());
 
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
     const written = bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text;
-    expect(written).toContain("title: Retitled");
+    expect(written).toContain("status: ready");
     expect(written).toContain("Body A");
   });
 

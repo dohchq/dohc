@@ -2632,7 +2632,7 @@ function MarkdownView(props: {
 
   function onPropertiesDraft(next: string) {
     if (readOnly) return;
-    const pending = props.localBuffer.takePendingDraft(localSource.current);
+    const pending = props.localBuffer.materializePendingDraft();
     const combined = pending
       ? mergeMarkdownEditorBody(next, markdownEditorBody(pending))
       : next;
