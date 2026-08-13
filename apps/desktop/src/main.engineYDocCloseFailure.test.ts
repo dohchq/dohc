@@ -191,6 +191,22 @@ describe("engine Y.Doc registry: a registration never replaces a live session", 
   });
 });
 
+describe("workspace text writes: a live Y.Doc stays canonical", () => {
+  it("refuses the direct disk writer while any session owns the path", () => {
+    const handler = handlerSource("writeWorkspaceText");
+    const sessionGuardAt = handler.indexOf(
+      "for (const entry of engineYDocSessions.values())",
+    );
+    const diskWriteAt = handler.indexOf("await writeWorkspaceText(");
+
+    expect(sessionGuardAt).toBeGreaterThan(-1);
+    expect(sessionGuardAt).toBeLessThan(diskWriteAt);
+    expect(handler).toContain("entry.workspaceId === workspace.workspaceId");
+    expect(handler).toContain("entry.path === input.relativePath");
+    expect(handler).toContain("The engine owns this live document.");
+  });
+});
+
 describe("engine Y.Doc artifact assets stay bound to one authorized session", () => {
   it("derives authority from the sender session and its pinned descriptor", () => {
     const handler = handlerSource("engineYDocReadArtifactAsset");
