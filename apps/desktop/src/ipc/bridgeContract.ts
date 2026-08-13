@@ -3332,6 +3332,10 @@ export const OpenEngineYDocSessionResult = z.object({
   // closed. The caller stays read-only, states the reason, and offers a retry —
   // which is also what discharges what the failure left behind.
   engineMayHoldDocument: z.boolean().optional(),
+  // The engine committed the drawing, but its image records conflict with
+  // authoritative storage. The drawing stays read-only. Retrying cannot
+  // repair this terminal state.
+  artifactAssetsInvalid: z.boolean().optional(),
   // A delete or move owns this path for an interval. The renderer must stay
   // read-only and offer a retry, without claiming that the operation finished.
   removalInProgress: z

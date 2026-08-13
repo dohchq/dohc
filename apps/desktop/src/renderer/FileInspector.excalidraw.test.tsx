@@ -836,6 +836,36 @@ describe("FileInspector Excalidraw view", () => {
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
+  it("keeps a drawing with invalid asset authority read-only without a futile retry", async () => {
+    const bridge = bridgeFor(drawing("disk"));
+    bridge.openEngineYDocSession = vi.fn(async () => ({
+      available: false,
+      artifactAssetsInvalid: true,
+    }));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
+
+    const notice = await screen.findByTestId(
+      "engine-artifact-assets-invalid-notice",
+    );
+    expect(notice.textContent).toContain(
+      "dohc could not verify this drawing's images.",
+    );
+    expect(notice.textContent).toContain("The drawing is read-only.");
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(screen.getByTestId("mock-excalidraw-canvas").dataset.readOnly).toBe(
+      "true",
+    );
+    expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1);
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open externally" }));
+    expect(bridge.openFileExternally).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "drawing.excalidraw",
+    });
+  });
+
   it("shows an actionable error for invalid drawing JSON", async () => {
     const bridge = bridgeFor("not json");
     vi.stubGlobal("dohcDesktop", bridge);

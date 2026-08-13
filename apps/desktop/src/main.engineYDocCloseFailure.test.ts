@@ -80,13 +80,16 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
     ).toContain("engineMayHoldDocument: true");
   });
 
-  it("keeps a canonical scene read-only when linked asset authority is corrupt", () => {
+  it("reports corrupt scene asset authority as terminal instead of retryable", () => {
     const handler = handlerSource("engineYDocOpen");
     const predicateAt = handler.indexOf("isYdocArtifactAssetsInvalidRefusal(error)");
     expect(predicateAt).toBeGreaterThan(-1);
-    expect(
-      handler.slice(predicateAt, handler.indexOf("const entry:", predicateAt)),
-    ).toContain("engineMayHoldDocument: true");
+    const invalidBranch = handler.slice(
+      predicateAt,
+      handler.indexOf("isEngineWorkspaceOpenRefusedError(error)", predicateAt),
+    );
+    expect(invalidBranch).toContain("artifactAssetsInvalid: true");
+    expect(invalidBranch).not.toContain("engineMayHoldDocument: true");
   });
 
   it("retries a failed close BY PATH before it binds anything", () => {

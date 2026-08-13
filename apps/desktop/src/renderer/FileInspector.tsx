@@ -3501,6 +3501,7 @@ function DrawingView({
     engine.deletedWhileEditing ||
     engine.readOnlyWhileEditing ||
     engine.engineMayHoldDocument ||
+    engine.artifactAssetsInvalid ||
     engine.removalInProgress !== null;
   const editor = useAutosavedTextDraft({
     body,
@@ -3694,6 +3695,9 @@ function DrawingView({
           onRetry={onRetryEngineOpen}
           contentShown={document.value !== null}
         />
+      ) : null}
+      {engine.artifactAssetsInvalid ? (
+        <EngineArtifactAssetsInvalidNotice workspaceId={workspaceId} path={path} />
       ) : null}
       {assetRefused ? (
         <div
@@ -3902,6 +3906,34 @@ function EngineMayHoldDocumentNotice(props: {
         className="text-subtle hover:text-ink"
       >
         Try again
+      </button>
+    </div>
+  );
+}
+
+function EngineArtifactAssetsInvalidNotice(props: {
+  workspaceId: string;
+  path: string;
+}) {
+  return (
+    <div
+      data-testid="engine-artifact-assets-invalid-notice"
+      className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
+    >
+      <span>
+        dohc could not verify this drawing's images. The drawing is read-only.
+      </span>
+      <button
+        type="button"
+        onClick={() =>
+          void bridge().openFileExternally({
+            workspaceId: props.workspaceId,
+            relativePath: props.path,
+          })
+        }
+        className="text-subtle hover:text-ink"
+      >
+        Open externally
       </button>
     </div>
   );
@@ -4135,6 +4167,7 @@ export function FileInspector(props: {
     notInVersion ||
     engine.opening ||
     engine.engineMayHoldDocument ||
+    engine.artifactAssetsInvalid ||
     switchUnresyncedRef.current ||
     engine.deletedWhileEditing ||
     engine.readOnlyWhileEditing ||

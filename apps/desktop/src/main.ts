@@ -8429,12 +8429,13 @@ function registerIpcHandlers(
                 },
               }
             : {}),
-          ...(isEngineWorkspaceOpenRefusedError(error) ||
-          isYDocSessionUnreleasedError(error) ||
-          isYdocArtifactAssetsPendingRefusal(error) ||
-          isYdocArtifactAssetsInvalidRefusal(error)
-            ? { engineMayHoldDocument: true }
-            : {}),
+          ...(isYdocArtifactAssetsInvalidRefusal(error)
+            ? { artifactAssetsInvalid: true }
+            : isEngineWorkspaceOpenRefusedError(error) ||
+                isYDocSessionUnreleasedError(error) ||
+                isYdocArtifactAssetsPendingRefusal(error)
+              ? { engineMayHoldDocument: true }
+              : {}),
         });
       }
       const entry: EngineYDocSessionEntry = {

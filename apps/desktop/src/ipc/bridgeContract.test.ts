@@ -1709,6 +1709,18 @@ describe("engine Y.Doc update IPC contract", () => {
     });
   });
 
+  it("keeps terminal invalid scene asset authority distinct from a retryable open", () => {
+    expect(
+      OpenEngineYDocSessionResult.parse({
+        available: false,
+        artifactAssetsInvalid: true,
+      }),
+    ).toEqual({
+      available: false,
+      artifactAssetsInvalid: true,
+    });
+  });
+
   it("keeps a removal-window open refusal operation-aware in the renderer", () => {
     expect(
       OpenEngineYDocSessionResult.parse({

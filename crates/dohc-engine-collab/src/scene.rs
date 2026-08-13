@@ -390,8 +390,9 @@ pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImport
     };
     let mut elements = Vec::with_capacity(element_values.len());
     let mut element_keys = Vec::with_capacity(element_values.len());
-    for element in element_values {
-        let element_object = element.as_object().ok_or(SceneImportError::Invalid {
+    for source_element in element_values {
+        let mut element = source_element.clone();
+        let element_object = element.as_object_mut().ok_or(SceneImportError::Invalid {
             reason: "each element must be an object",
         })?;
         let id = element_object
@@ -400,31 +401,38 @@ pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImport
             .filter(|id| !id.is_empty())
             .ok_or(SceneImportError::Invalid {
                 reason: "each element needs a non-empty id",
-            })?;
-        let version =
-            element_object
-                .get("version")
-                .and_then(safe_u64)
-                .ok_or(SceneImportError::Invalid {
-                    reason: "each element needs a JS-safe nonnegative version",
-                })?;
-        let nonce = element_object
-            .get("versionNonce")
-            .and_then(safe_u64)
-            .ok_or(SceneImportError::Invalid {
-                reason: "each element needs a JS-safe nonnegative versionNonce",
-            })?;
-        let key = RevisionKey {
-            id: id.to_owned(),
-            version,
-            nonce,
+            })?
+            .to_owned();
+        let version = match element_object.get("version") {
+            None | Some(Value::Null) => 1,
+            Some(value) => match safe_u64(value) {
+                Some(0) => 1,
+                Some(version) => version,
+                None => {
+                    return Err(SceneImportError::Invalid {
+                        reason: "each element needs a JS-safe nonnegative version",
+                    });
+                }
+            },
         };
-        if !valid_element_snapshot(element, &key) {
+        let nonce = match element_object.get("versionNonce") {
+            None | Some(Value::Null) => 0,
+            Some(value) => safe_u64(value).ok_or(SceneImportError::Invalid {
+                reason: "each element needs a JS-safe nonnegative versionNonce",
+            })?,
+        };
+        if matches!(element_object.get("isDeleted"), None | Some(Value::Null)) {
+            element_object.insert("isDeleted".to_owned(), Value::Bool(false));
+        }
+        element_object.insert("version".to_owned(), Value::from(version));
+        element_object.insert("versionNonce".to_owned(), Value::from(nonce));
+        let key = RevisionKey { id, version, nonce };
+        if !valid_element_snapshot(&element, &key) {
             return Err(SceneImportError::Invalid {
                 reason: "an element has an invalid native snapshot shape",
             });
         }
-        elements.push(element.clone());
+        elements.push(element);
         element_keys.push(key);
     }
     repair_imported_element_indices(&mut elements)?;
@@ -492,11 +500,9 @@ pub fn import_portable_scene(content: &str) -> Result<ImportedScene, SceneImport
     };
     let mut files = BTreeMap::new();
     for file_id in image_file_ids {
-        let value = files_object
-            .get(&file_id)
-            .ok_or(SceneImportError::Invalid {
-                reason: "a live image references a missing embedded file",
-            })?;
+        let Some(value) = files_object.get(&file_id) else {
+            continue;
+        };
         let file = import_file(&file_id, value)?;
         files.insert(file_id, file);
     }
@@ -1875,6 +1881,81 @@ mod tests {
     }
 
     #[test]
+    fn native_import_normalizes_upstream_revision_defaults() {
+        let content = canonical(json!({
+            "type":"excalidraw",
+            "elements":[
+                {"id":"missing","type":"rectangle"},
+                {
+                    "id":"null",
+                    "isDeleted":null,
+                    "type":"rectangle",
+                    "version":null,
+                    "versionNonce":null
+                },
+                {
+                    "id":"zero-version",
+                    "isDeleted":false,
+                    "type":"rectangle",
+                    "version":0,
+                    "versionNonce":7
+                }
+            ]
+        }));
+
+        let imported = import_portable_scene(&content).expect("legacy scene imports");
+        let doc = crate::Ydoc::wire();
+        doc.apply(&imported.initial_update).expect("initial update");
+        let by_id = doc
+            .fold_scene()
+            .elements
+            .into_iter()
+            .map(|element| {
+                (
+                    element["id"].as_str().expect("element id").to_owned(),
+                    element,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        for id in ["missing", "null"] {
+            assert_eq!(by_id[id]["version"], json!(1));
+            assert_eq!(by_id[id]["versionNonce"], json!(0));
+            assert_eq!(by_id[id]["isDeleted"], json!(false));
+        }
+        assert_eq!(by_id["zero-version"]["version"], json!(1));
+        assert_eq!(by_id["zero-version"]["versionNonce"], json!(7));
+    }
+
+    #[test]
+    fn native_import_repairs_a_dangling_image_file_reference() {
+        let content = canonical(json!({
+            "type":"excalidraw",
+            "elements":[{
+                "fileId":"missing",
+                "id":"image",
+                "isDeleted":false,
+                "type":"image",
+                "version":1,
+                "versionNonce":1
+            }],
+            "files":{}
+        }));
+
+        let imported = import_portable_scene(&content).expect("dangling image imports");
+        assert!(imported.files.is_empty());
+        let doc = crate::Ydoc::wire();
+        doc.apply(&imported.initial_update).expect("initial update");
+        let folded = doc.fold_scene();
+        assert_eq!(folded.elements[0]["fileId"], Value::Null);
+        let portable: Value =
+            serde_json::from_str(&folded.portable_json().expect("portable scene serializes"))
+                .expect("portable scene parses");
+        assert_eq!(portable["elements"][0]["fileId"], Value::Null);
+        assert_eq!(portable["files"], json!({}));
+    }
+
+    #[test]
     fn native_import_accepts_the_upstream_external_file_floor() {
         for external in [
             json!({"type":"excalidraw"}),
@@ -1900,7 +1981,7 @@ mod tests {
     }
 
     #[test]
-    fn native_import_still_rejects_wrong_type_and_missing_image_bytes() {
+    fn native_import_still_rejects_wrong_types_and_malformed_image_files() {
         for wrong_type in [json!({}), json!({"type":"other"})] {
             assert!(matches!(
                 import_portable_scene(&canonical(wrong_type)),
@@ -1908,23 +1989,48 @@ mod tests {
             ));
         }
 
-        let missing = json!({
+        for element in [
+            json!({"id":"wrong-version","type":"rectangle","version":"1"}),
+            json!({"id":"wrong-nonce","type":"rectangle","versionNonce":"0"}),
+            json!({"id":"wrong-deleted","type":"rectangle","isDeleted":"false"}),
+            json!({"id":"selection","type":"selection"}),
+            json!({
+                "id":"unsafe",
+                "type":"rectangle",
+                "version":MAX_JS_SAFE_INTEGER + 1
+            }),
+        ] {
+            assert!(matches!(
+                import_portable_scene(&canonical(json!({
+                    "type":"excalidraw",
+                    "elements":[element]
+                }))),
+                Err(SceneImportError::Invalid { .. })
+            ));
+        }
+
+        let malformed = json!({
             "appState": {},
             "elements": [{
-                "fileId":"missing",
+                "fileId":"malformed",
                 "id":"image",
                 "isDeleted":false,
                 "type":"image",
                 "version":1,
                 "versionNonce":1
             }],
-            "files": {},
+            "files": {
+                "malformed": {
+                    "id":"malformed",
+                    "mimeType":"image/png"
+                }
+            },
             "source": "https://excalidraw.com",
             "type": "excalidraw",
             "version": 2
         });
         assert!(matches!(
-            import_portable_scene(&canonical(missing)),
+            import_portable_scene(&canonical(malformed)),
             Err(SceneImportError::Invalid { .. })
         ));
     }

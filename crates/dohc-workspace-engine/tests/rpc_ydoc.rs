@@ -352,6 +352,82 @@ async fn scene_open_seeds_large_embedded_assets_in_the_engine_and_rehydrates_on_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scene_open_seeds_legacy_elements_and_repairs_a_dangling_image() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let artifact = serde_json::to_string(&json!({
+        "type":"excalidraw",
+        "elements":[
+            {"id":"legacy","type":"rectangle"},
+            {"fileId":"missing","id":"image","type":"image"}
+        ],
+        "files":{}
+    }))
+    .expect("portable scene");
+    write_file(
+        scratch.path(),
+        "drawings/legacy.excalidraw",
+        artifact.as_bytes(),
+    );
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-legacy-scene", 1).await;
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({
+            "versionId":"main",
+            "path":"drawings/legacy.excalidraw",
+            "contentKind":"scene",
+            "seedFromArtifact":true
+        }),
+    )
+    .await;
+
+    assert_eq!(opened["contentKind"], json!("scene"));
+    assert_eq!(opened["head"], json!("present"));
+    assert_eq!(opened["lineage"], json!("existing"));
+    assert!(opened.get("artifactAssets").is_none());
+    let initial = base64::engine::general_purpose::STANDARD
+        .decode(
+            opened["initialUpdateBase64"]
+                .as_str()
+                .expect("initial update"),
+        )
+        .expect("base64 update");
+    let doc = Ydoc::wire();
+    doc.apply(&initial).expect("seeded state applies");
+    let by_id = doc
+        .fold_scene()
+        .elements
+        .into_iter()
+        .map(|element| {
+            (
+                element["id"].as_str().expect("element id").to_owned(),
+                element,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(by_id["legacy"]["version"], json!(1));
+    assert_eq!(by_id["legacy"]["versionNonce"], json!(0));
+    assert_eq!(by_id["legacy"]["isDeleted"], json!(false));
+    assert_eq!(by_id["image"]["fileId"], Value::Null);
+
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.evict",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    call(&transport, &handle, 4, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn default_close_settles_and_releases_a_seeded_image_scene_after_an_edit() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");

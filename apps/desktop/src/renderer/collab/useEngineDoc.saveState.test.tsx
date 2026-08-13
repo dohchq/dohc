@@ -71,6 +71,7 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   } | null = null;
   let emitDeletedDuringOpen = false;
   let artifactAssets: readonly typeof IMAGE_DESCRIPTOR[] = [];
+  let artifactAssetsInvalid = false;
   let readArtifactAsset: (assetId: string) => Promise<{
     descriptor: typeof IMAGE_DESCRIPTOR;
     bytes: Uint8Array;
@@ -88,6 +89,9 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       }
       if (removalInProgress) {
         return { available: false, removalInProgress };
+      }
+      if (artifactAssetsInvalid) {
+        return { available: false, artifactAssetsInvalid: true };
       }
       return {
         available: true,
@@ -200,6 +204,9 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       artifactAssets = descriptors;
       readArtifactAsset = reader;
     },
+    setArtifactAssetsInvalid(value: boolean) {
+      artifactAssetsInvalid = value;
+    },
   };
 }
 
@@ -225,6 +232,9 @@ function Harness(props: {
       <span data-testid="state">{engine.saveState}</span>
       <span data-testid="save-error">{engine.saveError ?? "none"}</span>
       <span data-testid="available">{String(engine.available)}</span>
+      <span data-testid="artifact-assets-invalid">
+        {String(engine.artifactAssetsInvalid)}
+      </span>
       <span data-testid="deleted">{String(engine.deletedWhileEditing)}</span>
       <span data-testid="read-only-transition">
         {String(engine.readOnlyWhileEditing)}
@@ -734,6 +744,23 @@ it("keeps a failed delete interval retryable without storing a deleted verdict",
   await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
   expect(screen.getByTestId("removal-operation").textContent).toBe("none");
   expect(screen.getByTestId("deleted").textContent).toBe("false");
+});
+
+it("keeps invalid scene asset authority as a distinct unavailable outcome", async () => {
+  harness = harnessBridge("scene");
+  harness.setArtifactAssetsInvalid(true);
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+
+  await waitFor(() =>
+    expect(screen.getByTestId("artifact-assets-invalid").textContent).toBe(
+      "true",
+    ),
+  );
+  expect(screen.getByTestId("available").textContent).toBe("false");
+  expect(harness.applied).toHaveLength(0);
 });
 
 it("passes a file-locked report through, and a real settle clears it", async () => {

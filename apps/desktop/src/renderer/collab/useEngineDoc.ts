@@ -239,6 +239,9 @@ export type UseEngineDoc = {
   // stays read-only, states the reason, and offers a retry (bump retryKey),
   // which is also what discharges what the failure left behind.
   engineMayHoldDocument: boolean;
+  // The canonical drawing's image records conflict with authoritative
+  // storage. Retrying cannot repair this state.
+  artifactAssetsInvalid: boolean;
   // Main confirmed that it removed this file while the live session was
   // bound. The current document is retained for recovery only.
   deletedWhileEditing: boolean;
@@ -303,6 +306,7 @@ type EngineDocOpenOutcome =
   // behind one flag.
   | { key: string; kind: "not-in-version" }
   | { key: string; kind: "engine-may-hold-document" }
+  | { key: string; kind: "artifact-assets-invalid" }
   | { key: string; kind: "removal-in-progress"; removal: EngineRemovalInProgress };
 
 let engineDocSessionCounter = 0;
@@ -341,6 +345,7 @@ function makeTransport(
           : {}),
         ...(result.notInVersion ? { notInVersion: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
+        ...(result.artifactAssetsInvalid ? { artifactAssetsInvalid: true } : {}),
         ...(result.removalInProgress
           ? { removalInProgress: result.removalInProgress }
           : {}),
@@ -439,6 +444,7 @@ export function useEngineDoc(input: {
   // repaints the document they just entered.
   const notInVersion = settled?.kind === "not-in-version";
   const engineMayHoldDocument = settled?.kind === "engine-may-hold-document";
+  const artifactAssetsInvalid = settled?.kind === "artifact-assets-invalid";
   const artifactAssets =
     settled?.kind === "bound" ? settled.artifactAssets : [];
   const readArtifactAsset =
@@ -846,6 +852,8 @@ export function useEngineDoc(input: {
           // race the session it still binds (#564, #657).
           if (bound.notInVersion) {
             setOutcome({ key, kind: "not-in-version" });
+          } else if (bound.artifactAssetsInvalid) {
+            setOutcome({ key, kind: "artifact-assets-invalid" });
           } else if (bound.engineMayHoldDocument) {
             setOutcome({ key, kind: "engine-may-hold-document" });
           } else if (bound.removalInProgress) {
@@ -938,6 +946,7 @@ export function useEngineDoc(input: {
     saveError,
     notInVersion,
     engineMayHoldDocument,
+    artifactAssetsInvalid,
     deletedWhileEditing,
     deletedDraftId,
     deletedRecoveryAssets,

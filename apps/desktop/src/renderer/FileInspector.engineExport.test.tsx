@@ -27,6 +27,7 @@ const engineDocState: UseEngineDoc = {
   saveError: null,
   notInVersion: false,
   engineMayHoldDocument: false,
+  artifactAssetsInvalid: false,
   deletedWhileEditing: false,
   deletedDraftId: null,
   deletedRecoveryAssets: null,
