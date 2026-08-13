@@ -1266,6 +1266,73 @@ fn valid_element_snapshot(element: &Value, key: &RevisionKey) -> bool {
             .get("type")
             .and_then(Value::as_str)
             .is_some_and(|kind| !kind.is_empty() && kind != "selection")
+        && valid_restorable_element(object)
+}
+
+fn valid_restorable_element(element: &Map<String, Value>) -> bool {
+    if !matches!(
+        element.get("link"),
+        None | Some(Value::Null | Value::String(_))
+    ) {
+        return false;
+    }
+
+    if element.get("type").and_then(Value::as_str) == Some("text")
+        && (!matches!(element.get("font"), None | Some(Value::String(_)))
+            || !matches!(element.get("text"), None | Some(Value::String(_))))
+    {
+        return false;
+    }
+
+    if !matches!(
+        element.get("boundElementIds"),
+        None | Some(Value::Null | Value::Array(_))
+    ) {
+        return false;
+    }
+    if let Some(Value::Array(bindings)) = element.get("boundElements") {
+        if bindings.iter().any(|binding| {
+            binding
+                .as_object()
+                .and_then(|binding| binding.get("id"))
+                .and_then(Value::as_str)
+                .is_none()
+        }) {
+            return false;
+        }
+    } else if !matches!(element.get("boundElements"), None | Some(Value::Null)) {
+        return false;
+    }
+
+    let points_required = matches!(
+        element.get("type").and_then(Value::as_str),
+        Some("line" | "arrow" | "freedraw")
+    );
+    match element.get("points") {
+        Some(Value::Array(points)) if points.iter().all(valid_point) => {}
+        None if !points_required => {}
+        _ => return false,
+    }
+
+    ["startBinding", "endBinding"].into_iter().all(|key| {
+        let Some(binding) = element.get(key) else {
+            return true;
+        };
+        if binding.is_null() {
+            return true;
+        }
+        let Some(binding) = binding.as_object() else {
+            return false;
+        };
+        matches!(binding.get("fixedPoint"), None | Some(Value::Null))
+            || binding.get("fixedPoint").is_some_and(valid_point)
+    })
+}
+
+fn valid_point(value: &Value) -> bool {
+    value.as_array().is_some_and(|point| {
+        point.len() >= 2 && point[0].as_f64().is_some() && point[1].as_f64().is_some()
+    })
 }
 
 fn fold_assets(assets: &BTreeMap<String, String>) -> BTreeMap<String, SceneAsset> {
@@ -1707,6 +1774,7 @@ mod tests {
             "endBinding": {"elementId":"gone"},
             "id": "arrow",
             "isDeleted": false,
+            "points": [[0,0],[1,1]],
             "startBinding": {"elementId":"live"},
             "type": "arrow",
             "version": 1,
@@ -2122,6 +2190,42 @@ mod tests {
             import_portable_scene(&canonical(malformed)),
             Err(SceneImportError::Invalid { .. })
         ));
+    }
+
+    #[test]
+    fn native_import_rejects_elements_that_the_live_canvas_cannot_restore() {
+        for element in [
+            json!({"id":"line","type":"line"}),
+            json!({"id":"arrow","type":"arrow","points":null}),
+            json!({"id":"freedraw","type":"freedraw","points":[[0]]}),
+            json!({"id":"text-font","type":"text","font":12}),
+            json!({"id":"text-content","type":"text","text":{}}),
+            json!({"id":"link","type":"rectangle","link":{}}),
+            json!({"id":"legacy-bindings","type":"rectangle","boundElementIds":{}}),
+            json!({
+                "id":"bindings",
+                "type":"rectangle",
+                "boundElements":[{"id":12}]
+            }),
+            json!({
+                "id":"point-binding",
+                "type":"arrow",
+                "points":[[0,0],[1,1]],
+                "startBinding":{"fixedPoint":[0]}
+            }),
+        ] {
+            let description = element.to_string();
+            assert!(
+                matches!(
+                    import_portable_scene(&canonical(json!({
+                        "type":"excalidraw",
+                        "elements":[element]
+                    }))),
+                    Err(SceneImportError::Invalid { .. })
+                ),
+                "unexpectedly imported {description}"
+            );
+        }
     }
 
     #[test]

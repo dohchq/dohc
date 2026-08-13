@@ -227,20 +227,8 @@ fn canonical_scene_assets(
             return Err(CollabError::MissingDependencies);
         }
         let folded = doc.fold_scene();
-        let live_file_ids = folded
-            .elements
-            .iter()
-            .filter(|element| {
-                element.get("type").and_then(serde_json::Value::as_str) == Some("image")
-                    && element
-                        .get("isDeleted")
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(false)
-            })
-            .filter_map(|element| element.get("fileId").and_then(serde_json::Value::as_str))
-            .collect::<HashSet<_>>();
         for asset in folded.assets.into_values() {
-            if !live_file_ids.contains(asset.id.as_str()) {
+            if !folded.referenced_asset_ids.contains(asset.id.as_str()) {
                 continue;
             }
             if scene_asset_ref_is_owned(directory, &asset.path, &asset.sha256) {

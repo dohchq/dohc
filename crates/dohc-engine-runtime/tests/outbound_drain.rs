@@ -193,6 +193,46 @@ fn apply_remote_scene_asset_authority(
     ));
 }
 
+fn apply_remote_scene_image_tombstone(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    drawing_object_id: &str,
+    now_ms: i64,
+) {
+    let key = DocKey::new(workspace_id, "main", drawing_object_id).expect("scene doc key");
+    let scene = import_portable_scene(
+        &serde_json::json!({
+            "type": "excalidraw",
+            "elements": [{
+                "id": "image-element",
+                "type": "image",
+                "version": 2,
+                "versionNonce": 2,
+                "isDeleted": true,
+                "index": "a0",
+                "fileId": "image-file"
+            }]
+        })
+        .to_string(),
+    )
+    .expect("import image tombstone");
+    assert!(matches!(
+        apply_remote_update(
+            store,
+            &key,
+            &RemoteUpdate {
+                origin_id: "origin-scene-source".to_owned(),
+                origin_seq: 2,
+                bytes: scene.initial_update,
+            },
+            &NoFaults,
+            now_ms,
+        )
+        .expect("apply remote image tombstone"),
+        TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. })
+    ));
+}
+
 fn local_ops(db: &Path) -> Vec<LoggedOp> {
     let store = EngineStore::open(db, 500).expect("open store");
     store
@@ -2413,8 +2453,7 @@ async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() 
     assert_eq!(restored_asset.bytes, ONE_PIXEL_PNG);
 }
 
-#[tokio::test]
-async fn peer_local_scene_delete_retires_a_live_synced_asset_and_rollback_restores_it() {
+async fn assert_peer_local_scene_delete_retires_a_synced_asset(tombstoned: bool) {
     let source = ScratchDir::new().expect("source scratch");
     let source_db = source.engine_db_path().expect("source db");
     let workspace_id = "ws-live-synced-scene-delete";
@@ -2583,6 +2622,9 @@ async fn peer_local_scene_delete_retires_a_live_synced_asset_and_rollback_restor
         &hex_sha256(&asset_bytes),
         7,
     );
+    if tombstoned {
+        apply_remote_scene_image_tombstone(&mut peer_store, workspace_id, "live-drawing-object", 8);
+    }
     let replicated_heads: Vec<(String, String)> = peer_store
         .read_with(|conn| {
             let mut statement = conn.prepare(
@@ -2706,6 +2748,11 @@ async fn peer_local_scene_delete_retires_a_live_synced_asset_and_rollback_restor
     );
     drop(deleted_store);
 
+    if tombstoned {
+        peer_supervisor.close(&peer_db).expect("close peer actor");
+        return;
+    }
+
     let before_rollback_ops = local_ops(&peer_db).len();
     let rollback = peer_actor
         .versioned_text_rollback(
@@ -2790,6 +2837,16 @@ async fn peer_local_scene_delete_retires_a_live_synced_asset_and_rollback_restor
             .expect("read adjacent asset")
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn peer_local_scene_delete_retires_a_live_synced_asset_and_rollback_restores_it() {
+    assert_peer_local_scene_delete_retires_a_synced_asset(false).await;
+}
+
+#[tokio::test]
+async fn peer_local_scene_delete_retires_a_tombstoned_synced_asset() {
+    assert_peer_local_scene_delete_retires_a_synced_asset(true).await;
 }
 
 #[tokio::test]
