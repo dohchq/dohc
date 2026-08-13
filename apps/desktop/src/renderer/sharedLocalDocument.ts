@@ -133,6 +133,26 @@ export class SharedLocalDocument {
     this.deleteWhenUnused();
   }
 
+  retireCapturedDraft(source: object): void {
+    if (this.writers !== 0) return;
+    const ownsPendingDraft = this.pendingDraft?.source === source;
+    const ownsDirtySnapshot =
+      this.snapshot.dirty && this.snapshot.source === source;
+    if (!ownsPendingDraft && !ownsDirtySnapshot) return;
+    if (ownsPendingDraft) this.pendingDraft = null;
+    if (ownsDirtySnapshot) {
+      this.replace(
+        { body: this.snapshot.body, contentHash: this.snapshot.contentHash },
+        source,
+        false,
+        "error",
+      );
+    } else {
+      this.notify();
+    }
+    this.deleteWhenUnused();
+  }
+
   beginRead(): number {
     this.latestReadTicket += 1;
     return this.latestReadTicket;

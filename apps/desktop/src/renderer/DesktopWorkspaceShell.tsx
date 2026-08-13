@@ -47,7 +47,10 @@ import {
 } from "./shareSkipNotice";
 import { buildChatCollaboration } from "./collab/chatCollaboration";
 import type { SearchResultsEventEntry } from "../ipc/channels";
-import { rendererMarks } from "../performance/rendererMarks";
+import {
+  fileOpenStartMark,
+  rendererMarks,
+} from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import { useSnapshotLane } from "./snapshotLane";
 import { momentDiffSides } from "./workbench/momentDiffSides";
@@ -185,6 +188,21 @@ import {
 // from an agent/open flow ("Shared-With-Me/…") renders read-only too.
 function isMountedSharePath(path: string | null): boolean {
   return !!path && isSharedWithMePath(path);
+}
+
+function groupsMountingNewDocument(
+  current: WorkbenchState,
+  next: WorkbenchState,
+): string[] {
+  return current.editorGroups.flatMap((before) => {
+    const after = next.editorGroups.find((group) => group.id === before.id);
+    return after !== undefined &&
+      after.activeTab !== before.activeTab &&
+      after.activeTab !== null &&
+      !isVirtualTabPath(after.activeTab)
+      ? [before.id]
+      : [];
+  });
 }
 
 function chatsDestinationKey(nav: ChatsNav | null): string {
@@ -1930,6 +1948,7 @@ export function DesktopWorkspaceShell(props: {
     const current = wbRef.current;
     const next = pruneMissingRestoredTabs(current, closable, fileExists);
     if (next === current) return;
+    const groupsOpeningFiles = groupsMountingNewDocument(current, next);
     if (
       next.activeEditorGroup !== current.activeEditorGroup ||
       activeTabPath(next) !== activeTabPath(current)
@@ -1940,13 +1959,12 @@ export function DesktopWorkspaceShell(props: {
       // — otherwise an in-flight DM navigation still passes its isCurrent()
       // check and lands its destination on top of the tab we just activated.
       invalidateDmNavigation(dmNavigationRequest);
-      // Activating a neighbour remounts the keyed inspector — that is an OPEN
-      // (closeFileTab idiom). Without the mark, the inspector's mount measure
-      // brackets whatever stale mark came before it.
-      const nextActiveTab = activeTabPath(next);
-      if (nextActiveTab !== null && !isVirtualTabPath(nextActiveTab)) {
-        rendererMarks.mark("file-open-start");
-      }
+    }
+    // Activating a neighbour remounts the keyed inspector — that is an OPEN
+    // (closeFileTab idiom). Without the mark, the inspector's mount measure
+    // brackets whatever stale mark came before it.
+    for (const groupId of groupsOpeningFiles) {
+      rendererMarks.mark(fileOpenStartMark(groupId));
     }
     setWb((state) => pruneMissingRestoredTabs(state, closable, fileExists));
   }, [
@@ -2693,7 +2711,7 @@ export function DesktopWorkspaceShell(props: {
         const current = wbRef.current;
         if (!current.editorGroups.some((group) => group.id === targetGroupId)) return;
         if (openTab(current, path, targetGroupId) !== current) {
-          rendererMarks.mark("file-open-start");
+          rendererMarks.mark(fileOpenStartMark(targetGroupId));
         }
         // Every open also records recency (quick-open ranking, Phase E5.0).
         mutateWb((state) =>
@@ -3002,7 +3020,7 @@ export function DesktopWorkspaceShell(props: {
       setHeadingTarget(null);
       if (/\.(md|markdown)$/i.test(path)) preloadMarkdownEditor();
       if (group.activeTab !== path) {
-        rendererMarks.mark("file-open-start");
+        rendererMarks.mark(fileOpenStartMark(groupId));
       }
       mutateWb((state) =>
         recordRecentFile(activateTab(state, groupId, path), path),
@@ -3098,17 +3116,8 @@ export function DesktopWorkspaceShell(props: {
       const commitClose = () => {
         const current = wbRef.current;
         const next = closeRequestedTabs(current);
-        const mountsNewDocument = current.editorGroups.some((before) => {
-          const after = next.editorGroups.find((group) => group.id === before.id);
-          return (
-            after !== undefined &&
-            after.activeTab !== before.activeTab &&
-            after.activeTab !== null &&
-            !isVirtualTabPath(after.activeTab)
-          );
-        });
-        if (mountsNewDocument) {
-          rendererMarks.mark("file-open-start");
+        for (const groupId of groupsMountingNewDocument(current, next)) {
+          rendererMarks.mark(fileOpenStartMark(groupId));
         }
         mutateWb(closeRequestedTabs);
       };
@@ -3305,11 +3314,8 @@ export function DesktopWorkspaceShell(props: {
       const next = remapWorkbenchPaths(current, (path) =>
         projectTreePath(path, changes),
       );
-      if (
-        activeTabPath(next) !== activeTabPath(current) &&
-        activeTabPath(next) !== null
-      ) {
-        rendererMarks.mark("file-open-start");
+      for (const groupId of groupsMountingNewDocument(current, next)) {
+        rendererMarks.mark(fileOpenStartMark(groupId));
       }
       mutateWb((state) =>
         remapWorkbenchPaths(state, (path) => projectTreePath(path, changes)),
@@ -3618,7 +3624,7 @@ export function DesktopWorkspaceShell(props: {
         );
         const viewKind = classifyForView(tab.path);
         if (viewKind === "markdown" || viewKind === "database") {
-          rendererMarks.mark("file-open-start");
+          rendererMarks.mark(fileOpenStartMark(newGroupId));
         }
         mutateWb(splitState);
       };
@@ -4811,6 +4817,7 @@ export function DesktopWorkspaceShell(props: {
                 key={tabPath}
                 workspaceId={workspaceId}
                 path={tabPath}
+                fileOpenStartMark={fileOpenStartMark(editorGroup.id)}
                 // History growth, version switches, AND share-mount pulls all
                 // re-read the open file (every counter only ever increases).
                 refreshKey={historyRefreshCounter + versionEpoch + mountContentEpoch}

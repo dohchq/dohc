@@ -62,6 +62,15 @@ async function flushAnimationFrames(count = 2): Promise<void> {
   });
 }
 
+function selectionTextOffset(element: HTMLElement): number | null {
+  const selection = document.getSelection();
+  if (!selection?.anchorNode) return null;
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.setEnd(selection.anchorNode, selection.anchorOffset);
+  return range.toString().length;
+}
+
 beforeEach(() => {
   vi.stubGlobal(
     "ResizeObserver",
@@ -1319,22 +1328,14 @@ describe("MarkdownEditor markdown export: code fence widening (#704)", () => {
     editor.scrollLeft = 11;
     act(() => ref.current?.focus("start"));
     await waitFor(() => expect(document.activeElement).toBe(editor));
-    const selectionOffset = () => {
-      const selection = document.getSelection();
-      if (!selection?.anchorNode) return null;
-      const range = document.createRange();
-      range.selectNodeContents(editor);
-      range.setEnd(selection.anchorNode, selection.anchorOffset);
-      return range.toString().length;
-    };
-    const offsetBefore = selectionOffset();
+    const offsetBefore = selectionTextOffset(editor);
     expect(offsetBefore).not.toBeNull();
 
     act(() => ref.current?.replaceMarkdown("# After\n\nPeer edit"));
 
     expect(screen.getByTestId("markdown-editor")).toBe(editor);
     expect(document.activeElement).toBe(editor);
-    expect(selectionOffset()).toBe(offsetBefore);
+    expect(selectionTextOffset(editor)).toBe(offsetBefore);
     expect(editor.textContent).toContain("After");
     expect(editor.textContent).toContain("Peer edit");
     expect(editor.scrollTop).toBe(37);
@@ -1346,6 +1347,36 @@ describe("MarkdownEditor markdown export: code fence widening (#704)", () => {
     expect(editor.textContent).toContain("After");
     expect(editor.textContent).not.toContain("Before");
     expect(onDirty).not.toHaveBeenCalled();
+  });
+
+  it("maps an end cursor across peer content prepended by replacement", async () => {
+    const ref = createRef<MarkdownEditorHandle>();
+    const onDirty = vi.fn();
+    const user = userEvent.setup();
+    render(
+      createElement(MarkdownEditor, {
+        ref,
+        value: "# Target\n\nTail",
+        onDirty,
+        workspaceId: "workspace-1",
+        path: "notes/shared.md",
+        knownFiles: [],
+      }),
+    );
+    const editor = await screen.findByTestId("markdown-editor");
+    act(() => ref.current?.focus("end"));
+    await waitFor(() => expect(document.activeElement).toBe(editor));
+    expect(selectionTextOffset(editor)).toBe(editor.textContent?.length);
+
+    act(() =>
+      ref.current?.replaceMarkdown("# Peer\n\n# Target\n\nTail"),
+    );
+
+    expect(document.activeElement).toBe(editor);
+    expect(selectionTextOffset(editor)).toBe(editor.textContent?.length);
+    expect(onDirty).not.toHaveBeenCalled();
+    await user.keyboard("!");
+    expect(editor.textContent).toMatch(/Tail!$/);
   });
 
   it("widens a code fence in the live editor's getMarkdown when the block content contains a fence", async () => {

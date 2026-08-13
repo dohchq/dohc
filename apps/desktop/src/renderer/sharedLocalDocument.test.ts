@@ -87,6 +87,87 @@ describe("SharedLocalDocument", () => {
     expect(getSharedLocalDocument(key)).toBe(buffer);
   });
 
+  it("retires a captured draft owned by an unmounted pane while the parent retains it", () => {
+    const key = documentVersionKey("ws", "captured-switch.txt", 2);
+    const parent = acquireSharedLocalDocument(key);
+    const source = {};
+    parent.buffer.publishDraft("during-switch draft", source);
+
+    parent.buffer.retireCapturedDraft(source);
+
+    expect(parent.buffer.getSnapshot()).toMatchObject({
+      body: "during-switch draft",
+      dirty: false,
+      saveState: "error",
+    });
+    expect(
+      parent.buffer.acceptRead(
+        "version body",
+        "hash-v2",
+        {},
+        false,
+        parent.buffer.beginRead(),
+      ),
+    ).toBe(true);
+    expect(parent.buffer.getSnapshot()).toMatchObject({
+      body: "version body",
+      contentHash: "hash-v2",
+      dirty: false,
+      saveState: "saved",
+    });
+    parent.release();
+  });
+
+  it("does not retire a peer-owned dirty or pending draft", () => {
+    const key = documentVersionKey("ws", "captured-peer.txt", 2);
+    const buffer = getSharedLocalDocument(key);
+    const capturedSource = {};
+    const peerSource = {};
+    buffer.initializeRead("before", "hash-1", buffer.beginRead());
+    buffer.publishDraft("peer draft", peerSource);
+    buffer.setPendingDraft({
+      source: peerSource,
+      materialize: () => "peer pending draft",
+    });
+
+    buffer.retireCapturedDraft(capturedSource);
+
+    expect(buffer.getSnapshot()).toMatchObject({
+      body: "peer draft",
+      dirty: true,
+      saveState: "saving",
+      source: peerSource,
+    });
+    expect(buffer.getPendingDraftSource()).toBe(peerSource);
+  });
+
+  it("does not retire an owned draft while its writer is active", async () => {
+    const key = documentVersionKey("ws", "captured-writing.txt", 2);
+    const buffer = getSharedLocalDocument(key);
+    const source = {};
+    buffer.initializeRead("before", "hash-1", buffer.beginRead());
+    buffer.publishDraft("captured draft", source);
+    let finishWrite!: () => void;
+    const heldWrite = new Promise<void>((resolve) => {
+      finishWrite = resolve;
+    });
+    const writing = buffer.write(source, async () => {
+      await heldWrite;
+      return { status: "conflict", currentContentHash: "hash-2" };
+    });
+
+    buffer.retireCapturedDraft(source);
+
+    expect(buffer.getSnapshot()).toMatchObject({
+      body: "captured draft",
+      dirty: true,
+      saveState: "saving",
+      source,
+    });
+    finishWrite();
+    await writing;
+  });
+
   it("acquires one identity while an unmounted writer settles", async () => {
     const key = documentVersionKey("ws", "acquire-race.txt", 1);
     const writingBuffer = getSharedLocalDocument(key);

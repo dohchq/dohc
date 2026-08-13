@@ -4516,6 +4516,85 @@ describe("markdown editor unmount flush", () => {
     );
   });
 
+  it("retires a captured plain-text switch draft so the automatic retry and remount can land", async () => {
+    const firstBody = "Old version";
+    const thirdBody = "New version";
+    let rejectReread!: (reason: Error) => void;
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 1) {
+        return {
+          text: firstBody,
+          truncated: false,
+          contentHash: TEST_CONTENT_HASH,
+        };
+      }
+      if (reads === 2) {
+        return await new Promise<never>((_resolve, reject) => {
+          rejectReread = reject;
+        });
+      }
+      return {
+        text: thirdBody,
+        truncated: false,
+        contentHash: "b".repeat(64),
+      };
+    });
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        engineVersionKey={1}
+        refreshKey={1}
+      />,
+    );
+    let editor = await screen.findByTestId("view-text-editor");
+    const content = editor.querySelector(".cm-content") as HTMLElement;
+    await user.click(content);
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        engineVersionKey={2}
+        refreshKey={2}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    await user.keyboard("{End} captured");
+
+    await act(async () => {
+      rejectReread(new Error("reread failed"));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(reads).toBe(3));
+    editor = await screen.findByTestId("view-text-editor");
+    await waitFor(() => expect(editor.textContent).toContain(thirdBody));
+    expect(editor.textContent).not.toContain("captured");
+    expect(screen.getByTestId("orphaned-draft-notice")).toBeTruthy();
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(`${firstBody} captured`),
+    );
+
+    view.unmount();
+    const remount = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        engineVersionKey={2}
+        refreshKey={3}
+      />,
+    );
+    editor = await screen.findByTestId("view-text-editor");
+    await waitFor(() => expect(editor.textContent).toContain(thirdBody));
+    expect(editor.textContent).not.toContain("captured");
+    remount.unmount();
+  });
+
   it("can start editing an empty CSV as a table", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "",

@@ -162,6 +162,10 @@ function storedTabs(state: WorkspaceUiState): string[] {
   return state.editorGroups.flatMap((group) => group.tabs);
 }
 
+function isFileOpenStartMark(name: string): boolean {
+  return name.startsWith("file-open-start:");
+}
+
 // One canonical DM, as the graph node a click starts a navigation from and as
 // the record syncDms answers with.
 const DM_GRAPH_NODE = {
@@ -2601,7 +2605,7 @@ describe("ui-state merge-on-load", () => {
     renderShell(bridge);
 
     const openStartCalls = () =>
-      mark.mock.calls.filter(([name]) => name === "file-open-start").length;
+      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)).length;
 
     // Wait for the RESTORE to land first, or the assertions below pass
     // vacuously against the empty default state.
@@ -3906,6 +3910,115 @@ describe("workspace shell errors", () => {
 // active row used to mark anyway — no remount/measure follows, so the stale
 // mark corrupts the NEXT open's latency measure.
 describe("file-open-start marking", () => {
+  it("measures overlapping Markdown opens from each editor group's start", async () => {
+    const leftRead = deferred<{
+      text: string;
+      truncated: false;
+      contentHash: string;
+    }>();
+    const rightRead = deferred<{
+      text: string;
+      truncated: false;
+      contentHash: string;
+    }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          {
+            id: "left",
+            tabs: ["left-old.md"],
+            activeTab: "left-old.md",
+            size: 0.5,
+          },
+          {
+            id: "right",
+            tabs: ["right-old.md"],
+            activeTab: "right-old.md",
+            size: 0.5,
+          },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    const paths = ["left-old.md", "right-old.md", "left-new.md", "right-new.md"];
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: paths.map((path) => ({ path, kind: "file" as const })),
+      folders: [],
+    }));
+    bridge.readWorkspaceText = vi.fn((payload: ReadWorkspaceTextPayload) => {
+      if (payload.relativePath === "left-new.md") return leftRead.promise;
+      if (payload.relativePath === "right-new.md") return rightRead.promise;
+      return Promise.resolve({
+        text: "# Ready\n",
+        truncated: false as const,
+        contentHash: "a".repeat(64),
+      });
+    });
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+    const mark = vi.spyOn(rendererMarks, "mark");
+    const measureSince = vi.spyOn(rendererMarks, "measureSince");
+    const user = userEvent.setup();
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+
+    await user.click(
+      screen
+        .getAllByTestId("tree-row")
+        .find((row) => row.dataset.path === "left-new.md")!,
+    );
+    fireEvent.pointerDown(right);
+    await waitFor(() => expect(right.dataset.active).toBe("true"));
+    await user.click(
+      screen
+        .getAllByTestId("tree-row")
+        .find((row) => row.dataset.path === "right-new.md")!,
+    );
+
+    await act(async () => {
+      rightRead.resolve({
+        text: "# Right\n",
+        truncated: false,
+        contentHash: "b".repeat(64),
+      });
+      await rightRead.promise;
+    });
+    await waitFor(() =>
+      expect(measureSince).toHaveBeenCalledWith(
+        "markdown-open",
+        "file-open-start:right",
+      ),
+    );
+
+    await act(async () => {
+      leftRead.resolve({
+        text: "# Left\n",
+        truncated: false,
+        contentHash: "c".repeat(64),
+      });
+      await leftRead.promise;
+    });
+    await waitFor(() =>
+      expect(measureSince).toHaveBeenCalledWith(
+        "markdown-open",
+        "file-open-start:left",
+      ),
+    );
+    expect(mark).toHaveBeenCalledWith("file-open-start:left");
+    expect(mark).toHaveBeenCalledWith("file-open-start:right");
+    expect(within(left).getByTestId("tab-left-new.md").dataset.active).toBe(
+      "true",
+    );
+    expect(within(right).getByTestId("tab-right-new.md").dataset.active).toBe(
+      "true",
+    );
+    mark.mockRestore();
+    measureSince.mockRestore();
+  });
+
   it("marks before a Markdown split mounts another inspector", async () => {
     const mark = vi.spyOn(rendererMarks, "mark");
     const bridge = makeBridge(
@@ -3915,7 +4028,7 @@ describe("file-open-start marking", () => {
 
     await screen.findByTestId("view-markdown");
     const openStartCalls = () =>
-      mark.mock.calls.filter(([name]) => name === "file-open-start").length;
+      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)).length;
     const before = openStartCalls();
 
     await userEvent.click(screen.getByTestId("create-editor-group-right"));
@@ -3943,7 +4056,7 @@ describe("file-open-start marking", () => {
 
     await screen.findByTestId("view-database");
     const openStartCalls = () =>
-      mark.mock.calls.filter(([name]) => name === "file-open-start").length;
+      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)).length;
     const before = openStartCalls();
 
     await userEvent.click(screen.getByTestId("create-editor-group-right"));
@@ -3972,7 +4085,7 @@ describe("file-open-start marking", () => {
 
     await screen.findByTestId("tab-a.md");
     const openStartCalls = () =>
-      mark.mock.calls.filter(([name]) => name === "file-open-start").length;
+      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)).length;
     const before = openStartCalls();
     await user.click(
       within(screen.getAllByTestId("open-editor-group")[0]!).getByTitle("a.md"),
@@ -3994,7 +4107,7 @@ describe("file-open-start marking", () => {
     renderShell(bridge);
 
     const openStartCalls = () =>
-      mark.mock.calls.filter(([name]) => name === "file-open-start").length;
+      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)).length;
 
     const row = await screen.findByText("a.md");
     await user.click(row);
@@ -4037,7 +4150,7 @@ describe("file-open-start marking", () => {
     await screen.findByTestId("tab-c.md");
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const before = mark.mock.calls.filter(
-      ([name]) => name === "file-open-start",
+      ([name]) => isFileOpenStartMark(name),
     ).length;
     await userEvent.click(
       within(left).getByRole("button", { name: "Close b.md" }),
@@ -4045,8 +4158,9 @@ describe("file-open-start marking", () => {
 
     await screen.findByTestId("tab-a.md");
     expect(
-      mark.mock.calls.filter(([name]) => name === "file-open-start"),
+      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)),
     ).toHaveLength(before + 1);
+    expect(mark).toHaveBeenCalledWith("file-open-start:left");
     mark.mockRestore();
   });
 
@@ -4067,7 +4181,7 @@ describe("file-open-start marking", () => {
     await screen.findByTestId("tab-b.md");
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const before = mark.mock.calls.filter(
-      ([name]) => name === "file-open-start",
+      ([name]) => isFileOpenStartMark(name),
     ).length;
     await userEvent.click(
       within(left).getByRole("button", { name: "Close a.md" }),
@@ -4078,7 +4192,7 @@ describe("file-open-start marking", () => {
     );
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
     expect(
-      mark.mock.calls.filter(([name]) => name === "file-open-start"),
+      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)),
     ).toHaveLength(before);
     mark.mockRestore();
   });

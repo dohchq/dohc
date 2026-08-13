@@ -11,6 +11,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseSnapshotResult } from "../ipc/bridgeContract";
+import { rendererMarks } from "../performance/rendererMarks";
 import { DatabaseStudioView } from "./DatabaseStudioView";
 
 const baseSnapshot: DatabaseSnapshotResult = {
@@ -91,6 +92,25 @@ afterEach(() => {
 });
 
 describe("DatabaseStudioView", () => {
+  it("measures the first page from its editor group's open start", async () => {
+    const measureSince = vi.spyOn(rendererMarks, "measureSince");
+    render(
+      <DatabaseStudioView
+        workspaceId="ws-1"
+        path="imports/wallet.sqlite"
+        fileOpenStartMark="file-open-start:right"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(measureSince).toHaveBeenCalledWith(
+        "sqlite-first-page",
+        "file-open-start:right",
+      ),
+    );
+    measureSince.mockRestore();
+  });
+
   it("renders table stats, schema chips, and filters loaded rows", async () => {
     const user = userEvent.setup();
     renderStudio();

@@ -4,6 +4,10 @@ import { createMarkRecorder, type MarksSnapshot } from "./desktopMarks";
 // the renderer is a separate bundle and process).
 export const rendererMarks = createMarkRecorder();
 
+export function fileOpenStartMark(groupId: string): string {
+  return `file-open-start:${groupId}`;
+}
+
 declare global {
   interface Window {
     // Present only when the preload exposed the test bridge (DOHC_DESKTOP_TEST=1).

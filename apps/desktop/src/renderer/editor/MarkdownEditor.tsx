@@ -19,7 +19,9 @@ import { Markdown } from "@tiptap/markdown";
 import { TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
+import { StepMap } from "@tiptap/pm/transform";
 import type { EditorView } from "@tiptap/pm/view";
 import {
   Bold,
@@ -360,6 +362,24 @@ function renderInlineText(editor: Editor, source: string): string {
   } catch {
     return source;
   }
+}
+
+function documentReplacementMap(
+  before: ProseMirrorNode,
+  after: ProseMirrorNode,
+): StepMap {
+  const start = before.content.findDiffStart(after.content);
+  if (start === null) return StepMap.empty;
+  const end = before.content.findDiffEnd(after.content);
+  if (end === null) {
+    return new StepMap([0, before.content.size, after.content.size]);
+  }
+  const mapStart = Math.min(start, end.a, end.b);
+  return new StepMap([
+    mapStart,
+    end.a - mapStart,
+    end.b - mapStart,
+  ]);
 }
 
 const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInnerProps>(
@@ -975,7 +995,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         },
         replaceMarkdown(markdown) {
           if (!editor || collabActive) return;
-          const { from, to } = editor.state.selection;
+          const documentBefore = editor.state.doc;
+          const selection = editor.state.selection.getBookmark();
           const scrollTop = editor.view.dom.scrollTop;
           const scrollLeft = editor.view.dom.scrollLeft;
           editor
@@ -989,11 +1010,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               return true;
             })
             .run();
-          const max = editor.state.doc.content.size;
-          editor.commands.setTextSelection({
-            from: Math.min(from, max),
-            to: Math.min(to, max),
-          });
+          const documentAfter = editor.state.doc;
+          const mappedSelection = selection
+            .map(documentReplacementMap(documentBefore, documentAfter))
+            .resolve(documentAfter);
+          editor.view.dispatch(editor.state.tr.setSelection(mappedSelection));
           editor.view.dom.scrollTop = scrollTop;
           editor.view.dom.scrollLeft = scrollLeft;
         },

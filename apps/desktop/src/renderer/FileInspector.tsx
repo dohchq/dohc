@@ -794,6 +794,8 @@ function useAutosavedTextDraft(props: {
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [writerSettledEpoch, setWriterSettledEpoch] = useState(0);
   const localSource = useRef<object>({});
+  const localBufferRef = useRef(props.localBuffer);
+  localBufferRef.current = props.localBuffer;
   const sharedSnapshot = useSyncExternalStore(
     props.localBuffer.subscribe,
     props.localBuffer.getSnapshot,
@@ -1276,7 +1278,9 @@ function useAutosavedTextDraft(props: {
       if (writesBlocked()) {
         unsavedDraft.current = false;
         captureOrphanedDraft(workspaceId, path, latestDraft.current);
-        props.localBuffer.releaseUnusedDraft();
+        const localBuffer = localBufferRef.current;
+        localBuffer.retireCapturedDraft(localSource.current);
+        localBuffer.releaseUnusedDraft();
         return;
       }
       const text = latestDraft.current;
@@ -1411,6 +1415,7 @@ function MarkdownView(props: {
   refreshAfterConflict: () => void;
   workspaceId: string;
   path: string;
+  fileOpenStartMark: string;
   truncated?: boolean;
   truncatedNotice?: React.ReactNode;
   // A pending search-result jump for this path (Phase E5.0).
@@ -1485,6 +1490,8 @@ function MarkdownView(props: {
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
   const [writerSettledEpoch, setWriterSettledEpoch] = useState(0);
   const localSource = useRef<object>({});
+  const localBufferRef = useRef(props.localBuffer);
+  localBufferRef.current = props.localBuffer;
   const sharedSnapshot = useSyncExternalStore(
     props.localBuffer.subscribe,
     props.localBuffer.getSnapshot,
@@ -2446,11 +2453,11 @@ function MarkdownView(props: {
   // loaded, so this post-commit effect brackets click → IPC read → markdown
   // parse → rendered document.
   useEffect(() => {
-    rendererMarks.measureSince("markdown-open", "file-open-start");
+    rendererMarks.measureSince("markdown-open", props.fileOpenStartMark);
     // Last-wins: readers poll this epoch to know the measure above belongs to
     // the open they triggered (never a stale value from the previous file).
     rendererMarks.mark("markdown-opened");
-  }, [props.path]);
+  }, [props.fileOpenStartMark, props.path]);
 
   async function writeDraftNow(
     options: {
@@ -2811,7 +2818,9 @@ function MarkdownView(props: {
       // to observe the refusal. Kept as a backstop, not as covered code.
       if (writesBlocked() || openingRef.current) {
         captureOrphanedDraft(workspaceId, path, text);
-        props.localBuffer.releaseUnusedDraft();
+        const localBuffer = localBufferRef.current;
+        localBuffer.retireCapturedDraft(localSource.current);
+        localBuffer.releaseUnusedDraft();
         return;
       }
       // Join the same queue as every mounted save. The hash is read when this
@@ -4055,6 +4064,7 @@ function AffordanceCard(props: {
 type FileInspectorProps = {
   workspaceId: string;
   path: string;
+  fileOpenStartMark?: string;
   refreshKey?: number;
   onOpenPath?: (path: string, headingTarget?: HeadingTarget) => void;
   onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
@@ -4399,6 +4409,7 @@ export function FileInspector(props: FileInspectorProps) {
             refreshAfterConflict={refreshAfterConflict}
             workspaceId={props.workspaceId}
             path={props.path}
+            fileOpenStartMark={props.fileOpenStartMark ?? "file-open-start"}
             truncated={truncated}
             truncatedNotice={truncatedNotice}
             scrollTarget={props.scrollTarget}
@@ -4564,6 +4575,7 @@ export function FileInspector(props: FileInspectorProps) {
             <LazyDatabaseStudioView
               workspaceId={props.workspaceId}
               path={props.path}
+              fileOpenStartMark={props.fileOpenStartMark}
               refreshKey={props.refreshKey}
               onSharePath={props.onSharePath}
               readOnly={props.readOnly}
