@@ -2673,7 +2673,7 @@ function MarkdownView(props: {
     saveTimer.current = setTimeout(() => void saveNow(), AUTOSAVE_DEBOUNCE_MS);
   }
 
-  function onWysiwygFocus() {
+  function onLocalEditorFocus() {
     const owner = props.localBuffer.getPendingDraftSource();
     if (owner === null || owner === localSource.current) return;
     const text = props.localBuffer.materializePendingDraft();
@@ -3203,6 +3203,7 @@ function MarkdownView(props: {
           autoFocus={props.autoFocus ?? true}
           value={draft}
           readOnly={readOnly}
+          onFocus={onLocalEditorFocus}
           onChange={(e) => onDraft(e.target.value)}
           onKeyDown={(e) => {
             if ((e.metaKey || e.ctrlKey) && e.key === "s") {
@@ -3253,7 +3254,7 @@ function MarkdownView(props: {
                 onDirty={(materialize) =>
                   scheduleSave("wysiwyg", materialize)
                 }
-                onFocus={onWysiwygFocus}
+                onFocus={onLocalEditorFocus}
                 workspaceId={props.workspaceId}
                 path={props.path}
                 knownFiles={knownFiles}

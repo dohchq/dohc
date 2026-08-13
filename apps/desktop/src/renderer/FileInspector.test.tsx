@@ -2447,6 +2447,58 @@ describe("markdown editor unmount flush", () => {
     expect(written).toContain("Body A");
   });
 
+  it("hands a pending WYSIWYG body to a duplicate source editor before typing", async () => {
+    const path = "shared-wysiwyg-source-handoff.md";
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "# Hello\n\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const toggles: Array<(() => void) | null> = [null, null];
+    const flushes: DraftFlush[] = [];
+    const user = userEvent.setup();
+    render(
+      <>
+        {[0, 1].map((index) => (
+          <FileInspector
+            key={index}
+            workspaceId="ws-1"
+            path={path}
+            registerSourceToggle={(toggle) => {
+              toggles[index] = toggle;
+            }}
+            registerDraftFlush={(flush) => {
+              if (flush) flushes[index] = flush;
+            }}
+          />
+        ))}
+      </>,
+    );
+    const editors = await screen.findAllByTestId("markdown-editor");
+    await waitFor(() => expect(flushes).toHaveLength(2));
+    await toggleSourceOnce(() => toggles[1]);
+    const sourceEditor = screen
+      .getAllByTestId("markdown-editor")
+      .find(
+        (editor): editor is HTMLTextAreaElement =>
+          editor instanceof HTMLTextAreaElement,
+      );
+    expect(sourceEditor).toBeDefined();
+
+    await user.click(editors[0]!);
+    await user.type(editors[0]!, "Body A");
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    await user.click(sourceEditor!);
+    await user.keyboard("{End}Source B");
+    await act(async () => flushes[1]!());
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    const written = bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text;
+    expect(written).toContain("Body A");
+    expect(written).toContain("Source B");
+  });
+
   it("settles one pane's pending WYSIWYG edit before another pane types", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValue({
       text: "# Hello\n\n",
