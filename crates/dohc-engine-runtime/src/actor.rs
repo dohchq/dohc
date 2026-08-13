@@ -9150,15 +9150,7 @@ fn scene_asset_descriptors_for_open(doc: &Ydoc) -> Vec<ArtifactAssetDescriptor> 
         .referenced_asset_ids
         .iter()
         .filter_map(|id| folded.assets.get(id))
-        .map(|asset| ArtifactAssetDescriptor {
-            id: asset.id.clone(),
-            mime_type: asset.mime_type.clone(),
-            created: asset.created,
-            path: asset.path.clone(),
-            sha256: asset.sha256.clone(),
-            last_retrieved: asset.last_retrieved,
-            version: asset.version,
-        })
+        .cloned()
         .collect()
 }
 

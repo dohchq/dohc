@@ -1858,7 +1858,7 @@ fn install_scene_successor_assets(
         let dohc_engine_collab::SceneImportError::Invalid { reason } = error;
         SyncError::InvalidInput { reason }
     })?;
-    let version_is_active: bool = tx
+    let version_is_active: Option<bool> = tx
         .query_row(
             "SELECT ?2 = COALESCE( \
                  (SELECT version_id FROM active_versions WHERE workspace_id = ?1), \
@@ -1917,7 +1917,15 @@ fn install_scene_successor_assets(
         let object_id = format!(
             "scene-asset-object-{}",
             dohc_engine_storage::hex_sha256(
-                format!("{}\0{}\0{path}", key.workspace_id, key.version_id).as_bytes(),
+                format!(
+                    "{}\0{}\0{}\0{}\0{}",
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    successor.lineage_claim_id,
+                    path,
+                )
+                .as_bytes(),
             )
         );
         let moment_id = format!(
@@ -1928,7 +1936,7 @@ fn install_scene_successor_assets(
                     key.workspace_id,
                     key.version_id,
                     key.object_id,
-                    successor.result_sha256,
+                    successor.lineage_claim_id,
                     file.id,
                 )
                 .as_bytes(),
@@ -1943,11 +1951,11 @@ fn install_scene_successor_assets(
                 path,
                 binary_sha256: sha256,
                 moment_id,
-                metadata_origin: "sync".to_owned(),
+                metadata_origin: "ydoc".to_owned(),
                 metadata_summary: Some("Imported drawing asset".to_owned()),
                 metadata_correlation_id: Some(successor.lineage_claim_id.clone()),
                 author_json: None,
-                materialize: version_is_active.then_some(Preimage::Absent),
+                materialize: (version_is_active == Some(true)).then_some(Preimage::Absent),
                 now_ms,
             },
         )
@@ -3147,8 +3155,9 @@ mod tests {
 
     use super::*;
     use dohc_engine_domain::{
-        BinaryResolveWrite, ConflictFileState, ConflictMetadata, ConflictStatus, FileObjectRecord,
-        ListMomentsQuery, ResolveTextConflictResult, VersionedTextStore, WriteResult, WriteText,
+        BinaryResolveWrite, ConflictFileState, ConflictMetadata, ConflictStatus, DeleteTextFile,
+        FileObjectRecord, ListMomentsQuery, ResolveTextConflictResult, VersionedTextStore,
+        WriteResult, WriteText,
     };
     use dohc_engine_storage::{EngineStore, NoFaults};
     use dohc_engine_testkit::ScratchDir;
@@ -3336,6 +3345,182 @@ mod tests {
             }
             other => dohc_engine_domain::DomainError::Storage(StorageError::corrupt_public(other)),
         }
+    }
+
+    fn open_scene_conflict(
+        store: &mut EngineStore,
+        conflict_id: &str,
+        incoming_text: &str,
+        ordinal: i64,
+    ) {
+        let current = VersionedTextStore::new(store)
+            .read_text("ws", "main", "drawing.excalidraw")
+            .expect("read current scene")
+            .expect("current scene");
+        let incoming = TextSnapshot {
+            workspace_id: "ws".to_owned(),
+            version_id: "peer".to_owned(),
+            object_id: "peer-drawing-object".to_owned(),
+            path: "drawing.excalidraw".to_owned(),
+            text: incoming_text.to_owned(),
+            blob_sha256: dohc_engine_storage::hex_sha256(incoming_text.as_bytes()),
+            updated_at_ms: ordinal,
+            latest_moment_id: format!("moment-incoming-{ordinal}"),
+            metadata_origin: "sync".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+        };
+        let conflict = TextConflict {
+            conflict_id: conflict_id.to_owned(),
+            workspace_id: "ws".to_owned(),
+            path: "drawing.excalidraw".to_owned(),
+            target_version_id: "main".to_owned(),
+            source_version_id: "peer".to_owned(),
+            created_at_ms: ordinal,
+            updated_at_ms: ordinal,
+            status: ConflictStatus::Open,
+            chosen_from: ConflictChoice::Current,
+            resolution: None,
+            metadata: ConflictMetadata::origin("sync"),
+            base: ConflictFileState::text("drawing.excalidraw", None),
+            current: ConflictFileState::text("drawing.excalidraw", Some(current)),
+            incoming: ConflictFileState::text("drawing.excalidraw", Some(incoming)),
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                insert_text_conflict_if_absent(tx, &conflict).map(|_| ())
+            })
+            .expect("open scene conflict");
+    }
+
+    fn resolve_scene_conflict(
+        store: &mut EngineStore,
+        conflict_id: &str,
+        ordinal: i64,
+    ) -> BuiltConflictResolveV1 {
+        let input = ResolveTextConflict {
+            workspace_id: "ws".to_owned(),
+            conflict_id: conflict_id.to_owned(),
+            resolution: ResolveConflictKind::ApplyIncoming,
+            object_id: "drawing-object".to_owned(),
+            write_moment_id: format!("moment-resolved-{ordinal}"),
+            delete_moment_id: format!("moment-delete-unused-{ordinal}"),
+            metadata_origin: "sync".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: ordinal,
+            request_id: Some(format!("resolve-scene-{ordinal}")),
+            conflict_answer_budget_bytes: usize::MAX,
+        };
+        let prepare_input = input.clone();
+        let built = RefCell::new(None);
+        let result = VersionedTextStore::new(store)
+            .resolve_text_conflict_with(
+                &input,
+                &NoFaults,
+                |tx, conflict, _| {
+                    let prepared =
+                        prepare_local_conflict_resolve_v1_in_tx(tx, &prepare_input, conflict)
+                            .map_err(sync_as_domain)?;
+                    prepared
+                        .ensure_no_live_ydoc_session(&crate::NoLiveLeases)
+                        .map_err(sync_as_domain)?;
+                    Ok(prepared)
+                },
+                |tx, result, prepared| {
+                    *built.borrow_mut() = Some(prepared.built.clone());
+                    commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                        .map_err(sync_as_domain)
+                },
+            )
+            .expect("resolve scene conflict");
+        assert_eq!(result.conflict.status, ConflictStatus::Resolved);
+        built.into_inner().expect("captured replicated carrier")
+    }
+
+    fn copy_resolution_roots(
+        sender: &EngineStore,
+        receiver: &mut EngineStore,
+        built: &BuiltConflictResolveV1,
+    ) {
+        for sha256 in &built.validated.text_blob_sha256s {
+            let text: String = sender
+                .read_with(|tx| {
+                    tx.query_row("SELECT text FROM blobs WHERE sha256=?1", [sha256], |row| {
+                        row.get(0)
+                    })
+                    .map_err(StorageError::corrupt_public)
+                })
+                .expect("read replicated text root");
+            receiver
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                        params![sha256, i64::try_from(text.len()).unwrap(), text],
+                    )
+                    .map_err(StorageError::persist_public)?;
+                    Ok::<_, StorageError>(())
+                })
+                .expect("copy replicated text root");
+        }
+        for sha256 in built
+            .validated
+            .binary_blob_sha256s
+            .iter()
+            .chain(&built.validated.ydoc_blob_sha256s)
+        {
+            let bytes: Vec<u8> = sender
+                .read_with(|tx| {
+                    tx.query_row(
+                        "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                        [sha256],
+                        |row| row.get(0),
+                    )
+                    .map_err(StorageError::corrupt_public)
+                })
+                .expect("read replicated binary root");
+            receiver
+                .write_with(&NoFaults, |tx| put_binary_blob(tx, &bytes).map(|_| ()))
+                .expect("copy replicated binary root");
+        }
+    }
+
+    fn scene_asset_head(store: &EngineStore) -> (String, String, String, String) {
+        store
+            .read_with(|tx| {
+                tx.query_row(
+                    "SELECT a.path,a.object_id,s.latest_moment_id,s.metadata_origin \
+                     FROM path_aliases a JOIN snapshots s ON s.workspace_id=a.workspace_id \
+                       AND s.version_id=a.version_id AND s.object_id=a.object_id \
+                     WHERE a.workspace_id='ws' AND a.version_id='main' \
+                       AND a.path GLOB 'assets/excalidraw/*'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .map_err(StorageError::corrupt_public)
+            })
+            .expect("read installed scene asset")
+    }
+
+    fn delete_scene_asset(store: &mut EngineStore, path: &str, ordinal: i64) {
+        VersionedTextStore::new(store)
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: path.to_owned(),
+                    moment_id: format!("moment-delete-asset-{ordinal}"),
+                    request_id: None,
+                    metadata_origin: "ydoc".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: ordinal,
+                },
+                &NoFaults,
+            )
+            .expect("delete installed scene asset");
     }
 
     fn compact_path_change() -> Value {
@@ -3779,45 +3964,7 @@ mod tests {
             .get_binary_blob(&predecessor_claim)
             .expect("read predecessor update")
             .expect("predecessor update");
-        let input = ResolveTextConflict {
-            workspace_id: "ws".to_owned(),
-            conflict_id: "scene-conflict".to_owned(),
-            resolution: ResolveConflictKind::ApplyIncoming,
-            object_id: "drawing-object".to_owned(),
-            write_moment_id: "moment-resolved".to_owned(),
-            delete_moment_id: "moment-delete-unused".to_owned(),
-            metadata_origin: "sync".to_owned(),
-            metadata_summary: None,
-            metadata_correlation_id: None,
-            author_json: None,
-            now_ms: 20,
-            request_id: Some("resolve-scene".to_owned()),
-            conflict_answer_budget_bytes: usize::MAX,
-        };
-        let prepare_input = input.clone();
-        let built = RefCell::new(None);
-        let result = VersionedTextStore::new(&mut store)
-            .resolve_text_conflict_with(
-                &input,
-                &NoFaults,
-                |tx, conflict, _| {
-                    let prepared =
-                        prepare_local_conflict_resolve_v1_in_tx(tx, &prepare_input, conflict)
-                            .map_err(sync_as_domain)?;
-                    prepared
-                        .ensure_no_live_ydoc_session(&crate::NoLiveLeases)
-                        .map_err(sync_as_domain)?;
-                    Ok(prepared)
-                },
-                |tx, result, prepared| {
-                    *built.borrow_mut() = Some(prepared.built.clone());
-                    commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
-                        .map_err(sync_as_domain)
-                },
-            )
-            .expect("resolve scene conflict");
-        assert_eq!(result.conflict.status, ConflictStatus::Resolved);
-        let built = built.into_inner().expect("captured replicated carrier");
+        let built = resolve_scene_conflict(&mut store, "scene-conflict", 20);
         assert!(matches!(
             built
                 .validated
@@ -3851,46 +3998,7 @@ mod tests {
 
         let (_receiver_scratch, mut receiver, receiver_key) =
             scene_conflict_store(&current_text, &incoming_text, Some(&predecessor_update));
-        for sha256 in &built.validated.text_blob_sha256s {
-            let text: String = store
-                .read_with(|tx| {
-                    tx.query_row("SELECT text FROM blobs WHERE sha256=?1", [sha256], |row| {
-                        row.get(0)
-                    })
-                    .map_err(StorageError::corrupt_public)
-                })
-                .expect("read replicated text root");
-            receiver
-                .write_with(&NoFaults, |tx| {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
-                        params![sha256, i64::try_from(text.len()).unwrap(), text],
-                    )
-                    .map_err(StorageError::persist_public)?;
-                    Ok::<_, StorageError>(())
-                })
-                .expect("copy replicated text root");
-        }
-        for sha256 in built
-            .validated
-            .binary_blob_sha256s
-            .iter()
-            .chain(&built.validated.ydoc_blob_sha256s)
-        {
-            let bytes: Vec<u8> = store
-                .read_with(|tx| {
-                    tx.query_row(
-                        "SELECT bytes FROM binary_blobs WHERE sha256=?1",
-                        [sha256],
-                        |row| row.get(0),
-                    )
-                    .map_err(StorageError::corrupt_public)
-                })
-                .expect("read replicated binary root");
-            receiver
-                .write_with(&NoFaults, |tx| put_binary_blob(tx, &bytes).map(|_| ()))
-                .expect("copy replicated binary root");
-        }
+        copy_resolution_roots(&store, &mut receiver, &built);
         let replicated = ReplicationEnvelope {
             workspace_id: "ws".to_owned(),
             origin_id: "resolution-peer".to_owned(),
@@ -3930,6 +4038,135 @@ mod tests {
                 .expect("project replayed scene")
                 .content,
             incoming_text,
+        );
+
+        let first_sender_asset = scene_asset_head(&store);
+        let first_receiver_asset = scene_asset_head(&receiver);
+        assert_eq!(first_receiver_asset, first_sender_asset);
+        assert_eq!(first_sender_asset.3, "ydoc");
+        delete_scene_asset(&mut store, &first_sender_asset.0, 30);
+        delete_scene_asset(&mut receiver, &first_receiver_asset.0, 30);
+
+        open_scene_conflict(&mut store, "scene-conflict-reinstall", &incoming_text, 31);
+        open_scene_conflict(
+            &mut receiver,
+            "scene-conflict-reinstall",
+            &incoming_text,
+            31,
+        );
+        let reinstall = resolve_scene_conflict(&mut store, "scene-conflict-reinstall", 32);
+        let second_sender_asset = scene_asset_head(&store);
+        assert_eq!(second_sender_asset.0, first_sender_asset.0);
+        assert_ne!(second_sender_asset.1, first_sender_asset.1);
+        assert_ne!(second_sender_asset.2, first_sender_asset.2);
+        assert_eq!(second_sender_asset.3, "ydoc");
+
+        copy_resolution_roots(&store, &mut receiver, &reinstall);
+        let replayed_reinstall = ReplicationEnvelope {
+            workspace_id: "ws".to_owned(),
+            origin_id: "resolution-peer".to_owned(),
+            origin_seq: 1,
+            op_kind: "conflict.resolve".to_owned(),
+            payload: reinstall.value,
+            recorded_at_ms: 32,
+        };
+        let applied = crate::apply_replication_envelope(
+            &mut receiver,
+            &replayed_reinstall,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        );
+        assert!(
+            matches!(applied, Ok(crate::ApplyOutcome::Applied(_))),
+            "scene asset reinstall replay failed: {applied:?}",
+        );
+        assert_eq!(scene_asset_head(&receiver), second_sender_asset);
+        for (store, key) in [(&store, &key), (&receiver, &receiver_key)] {
+            let loaded = dohc_engine_collab::load_persisted(store, key)
+                .expect("load reinstalled scene successor")
+                .expect("active reinstalled scene successor");
+            assert_eq!(
+                store
+                    .read_with(|tx| crate::project_ydoc_with_store(
+                        tx,
+                        key,
+                        &loaded.doc,
+                        ContentKind::Scene,
+                    ))
+                    .expect("project reinstalled scene")
+                    .content,
+                incoming_text,
+            );
+        }
+    }
+
+    #[test]
+    fn conflict_installed_scene_asset_is_owned_by_the_drawing_delete_lifecycle() {
+        let current_text = canonical_scene("current-box");
+        let incoming_text = canonical_image_scene("incoming-image");
+        let (_scratch, mut store, key) = scene_conflict_store(&current_text, &incoming_text, None);
+        resolve_scene_conflict(&mut store, "scene-conflict", 20);
+        let asset = scene_asset_head(&store);
+        assert_eq!(asset.3, "ydoc");
+
+        let authority = store
+            .write_with(&NoFaults, |tx| {
+                let drawing_delete = dohc_engine_domain::delete_text_in_tx(
+                    tx,
+                    &DeleteTextFile {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        path: "drawing.excalidraw".to_owned(),
+                        moment_id: "moment-delete-drawing".to_owned(),
+                        request_id: None,
+                        metadata_origin: "api".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 30,
+                    },
+                )
+                .map_err(StorageError::corrupt_public)?;
+                let authority = dohc_engine_collab::freeze_scene_asset_delete_authority_in_tx(
+                    tx,
+                    &key,
+                    &drawing_delete.moment.moment_id,
+                )
+                .map_err(StorageError::corrupt_public)?;
+                for candidate in &authority {
+                    dohc_engine_domain::delete_text_in_tx(
+                        tx,
+                        &DeleteTextFile {
+                            workspace_id: "ws".to_owned(),
+                            version_id: "main".to_owned(),
+                            path: candidate.path.clone(),
+                            moment_id: candidate.asset_delete_moment_id.clone(),
+                            request_id: None,
+                            metadata_origin: "ydoc".to_owned(),
+                            metadata_summary: None,
+                            metadata_correlation_id: Some(drawing_delete.moment.moment_id.clone()),
+                            author_json: None,
+                            now_ms: 30,
+                        },
+                    )
+                    .map_err(StorageError::corrupt_public)?;
+                }
+                crate::retire_ydoc_lineage_in_tx(tx, "ws", "main", "drawing-object")
+                    .map_err(StorageError::corrupt_public)?;
+                Ok::<_, StorageError>(authority)
+            })
+            .expect("delete drawing and its owned scene asset");
+        let dohc_engine_storage::TxnOutcome::Committed(authority) = authority else {
+            panic!("scene lifecycle transaction crashed")
+        };
+
+        assert_eq!(authority.len(), 1);
+        assert_eq!(authority[0].path, asset.0);
+        assert!(
+            VersionedTextStore::new(&mut store)
+                .read_text("ws", "main", &asset.0)
+                .expect("read retired asset")
+                .is_none()
         );
     }
 

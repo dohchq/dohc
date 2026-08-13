@@ -454,6 +454,14 @@ pub(crate) fn parse_portable_scene(content: &str) -> Result<ParsedPortableScene,
         if matches!(element_object.get("isDeleted"), None | Some(Value::Null)) {
             element_object.insert("isDeleted".to_owned(), Value::Bool(false));
         }
+        if element_object.get("type").and_then(Value::as_str) == Some("text")
+            && element_object.get("isDeleted").and_then(Value::as_bool) == Some(false)
+            && element_object.get("text").and_then(Value::as_str) == Some("")
+        {
+            return Err(SceneImportError::Invalid {
+                reason: "a live text element cannot have empty text",
+            });
+        }
         element_object.insert("version".to_owned(), Value::from(version));
         element_object.insert("versionNonce".to_owned(), Value::from(nonce));
         let key = RevisionKey { id, version, nonce };
@@ -2200,6 +2208,7 @@ mod tests {
             json!({"id":"freedraw","type":"freedraw","points":[[0]]}),
             json!({"id":"text-font","type":"text","font":12}),
             json!({"id":"text-content","type":"text","text":{}}),
+            json!({"id":"empty-live-text","type":"text","text":"","isDeleted":false}),
             json!({"id":"link","type":"rectangle","link":{}}),
             json!({"id":"legacy-bindings","type":"rectangle","boundElementIds":{}}),
             json!({

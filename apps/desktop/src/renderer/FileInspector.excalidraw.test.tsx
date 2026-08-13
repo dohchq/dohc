@@ -621,7 +621,14 @@ describe("FileInspector Excalidraw view", () => {
     const secondScene = new Y.Doc();
     declareSceneRoots(firstScene);
     declareSceneRoots(secondScene);
+    const secondDescriptor = {
+      ...ARTIFACT_DESCRIPTOR,
+      id: "file-2",
+      ref: "assets/excalidraw/image-2.png",
+      sha256: "b".repeat(64),
+    };
     putSceneAsset(firstScene, ARTIFACT_DESCRIPTOR);
+    putSceneAsset(firstScene, secondDescriptor);
     let resolveAsset!: (value: {
       descriptor: typeof ARTIFACT_DESCRIPTOR;
       bytes: Uint8Array;
@@ -639,7 +646,9 @@ describe("FileInspector Excalidraw view", () => {
         payload.path === "first.excalidraw" ? firstScene : secondScene,
       ),
       artifactAssets:
-        payload.path === "first.excalidraw" ? [ARTIFACT_DESCRIPTOR] : [],
+        payload.path === "first.excalidraw"
+          ? [ARTIFACT_DESCRIPTOR, secondDescriptor]
+          : [],
     }));
     bridge.readEngineYDocArtifactAsset = vi.fn(() => pendingAsset);
     vi.stubGlobal("dohcDesktop", bridge);
@@ -660,6 +669,7 @@ describe("FileInspector Excalidraw view", () => {
     resolveAsset({ descriptor: ARTIFACT_DESCRIPTOR, bytes: largeValidPng() });
 
     await expect(pendingHydration).resolves.toEqual([]);
+    expect(bridge.readEngineYDocArtifactAsset).toHaveBeenCalledTimes(1);
     expect(
       (canvas.props as unknown as ExcalidrawCanvasProps).hydrateAssets,
     ).toBeUndefined();
