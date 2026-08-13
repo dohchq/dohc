@@ -1134,6 +1134,23 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it.each(["drawing.excalidraw", "drawing.EXCALIDRAW"])(
+    "does not demote invalid UTF-8 scene %s to a binary head",
+    async (path) => {
+      const root = await tempRoot();
+      const bytes = Buffer.from([0xff, 0xfe, 0xfd]);
+      await write(root, path, bytes);
+      const loopback = new VersionedLoopbackEngine();
+      const engine = liveCapture(root, loopback);
+      engine.captureBatch([{ path, operation: "update" }]);
+      await engine.flush();
+
+      expect(await liveTrackedFiles(loopback)).toEqual([]);
+      expect(await liveMoments(engine)).toHaveLength(0);
+      await engine.stop();
+    },
+  );
+
   it("retires an over-text-cap valid-UTF-8 text file instead of demoting it to binary", async () => {
     const root = await tempRoot();
     await write(root, "big.md", "small\n");

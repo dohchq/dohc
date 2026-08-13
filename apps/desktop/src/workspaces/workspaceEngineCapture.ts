@@ -26,6 +26,7 @@ import {
   type VersionedTextMomentSummary,
   type VersionedTextStore,
 } from "@dohc/workspace-contracts/engine";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import type { RelayMaterializedPath } from "@dohc/workspace-contracts/relay";
 import {
   openEngineYdocProviderSession,
@@ -1124,7 +1125,7 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
     // else is binary in disguise, not engine-ownable as text.
     if (!Buffer.from(text, "utf8").equals(bytes)) {
       if (
-        path.toLowerCase().endsWith(".excalidraw") ||
+        liveDocumentKindForPath(path) === "scene" ||
         bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES
       ) {
         return { kind: "untracked-content", sha256: sha256Bytes(bytes) };

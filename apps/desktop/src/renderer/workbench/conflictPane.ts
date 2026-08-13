@@ -1,3 +1,12 @@
+import {
+  exceedsUtf8Bytes,
+  utf8ByteLength,
+} from "../../workspaces/workspaceTextLimits";
+
+// Keep the established conflict-pane API while the shared workspace helper
+// owns the UTF-8 algorithm.
+export { exceedsUtf8Bytes, utf8ByteLength };
+
 // What one conflict side is allowed to paint, and what a combined copy is
 // allowed to hold (#536).
 //
@@ -194,55 +203,6 @@ export function conflictPreview(text: string, windows: number): ConflictPreview 
 
 function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code < 0xdc00;
-}
-
-
-// One walk of the UTF-8 encoding, stopping as soon as the count passes
-// `stopAbove`. UTF-8 spends one byte per ASCII unit, two below U+0800, four
-// across a surrogate PAIR, and three for everything else including a lone
-// surrogate (which encodes as the replacement character).
-function utf8Bytes(text: string, stopAbove: number): number {
-  let bytes = 0;
-  for (let index = 0; index < text.length; index += 1) {
-    const code = text.charCodeAt(index);
-    if (code < 0x80) {
-      bytes += 1;
-    } else if (code < 0x800) {
-      bytes += 2;
-    } else if (isHighSurrogate(code)) {
-      const next = index + 1 < text.length ? text.charCodeAt(index + 1) : 0;
-      if (next >= 0xdc00 && next < 0xe000) {
-        bytes += 4;
-        index += 1;
-      } else {
-        bytes += 3;
-      }
-    } else {
-      bytes += 3;
-    }
-    if (bytes > stopAbove) return bytes;
-  }
-  return bytes;
-}
-
-/// Whether `text` is more than `limitBytes` of UTF-8, without encoding it.
-///
-/// `new TextEncoder().encode(text).length` copies the whole body to count it,
-/// and this runs on every keystroke in the combine textarea. UTF-8 spends at
-/// least one byte and at most three per UTF-16 code unit, so the two cheap
-/// comparisons settle almost every call and the exact walk that follows stops
-/// as soon as it passes the limit.
-export function exceedsUtf8Bytes(text: string, limitBytes: number): boolean {
-  if (text.length > limitBytes) return true;
-  if (text.length * 3 <= limitBytes) return false;
-  return utf8Bytes(text, limitBytes) > limitBytes;
-}
-
-/// The exact UTF-8 byte length, for the message that reports what the user
-/// wrote. Only called on a body already known to be over the limit, so the
-/// walk is paid on a body the user cannot apply anyway.
-export function utf8ByteLength(text: string): number {
-  return utf8Bytes(text, Number.POSITIVE_INFINITY);
 }
 
 /// What one change to the combined copy does: it is taken, or it is refused
