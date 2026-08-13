@@ -3438,9 +3438,21 @@ mod tests {
                  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
                  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
                  13, 14
+             );
+             INSERT INTO ydoc_deferred_updates (
+                 workspace_id, version_id, object_id, origin_id, origin_seq,
+                 recorded_at_ms, lineage_claim_id
+             ) VALUES (
+                 'ws', 'main', 'inactive', 'peer', 17, 15,
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
              );",
         )
         .expect("seed a completed pre-scene store");
+        let docs_before = dump_table_rows(&conn, "ydoc_docs");
+        let updates_before = dump_table_rows(&conn, "ydoc_updates");
+        let snapshots_before = dump_table_rows(&conn, "ydoc_snapshots");
+        let inactive_before = dump_table_rows(&conn, "ydoc_inactive_lineages");
+        let deferred_before = dump_table_rows(&conn, "ydoc_deferred_updates");
 
         drop(conn);
         let store =
@@ -3458,19 +3470,73 @@ mod tests {
             )
             .expect("scene migration ledger row");
         assert_eq!(scene_migration, 1);
-        let preserved: (i64, i64, i64, i64) = (
-            conn.query_row("SELECT COUNT(*) FROM ydoc_docs", [], |row| row.get(0))
-                .expect("live rows"),
-            conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))
-                .expect("update rows"),
-            conn.query_row("SELECT COUNT(*) FROM ydoc_snapshots", [], |row| row.get(0))
-                .expect("snapshot rows"),
-            conn.query_row("SELECT COUNT(*) FROM ydoc_inactive_lineages", [], |row| {
-                row.get(0)
-            })
-            .expect("inactive rows"),
+        assert_eq!(dump_table_rows(&conn, "ydoc_docs"), docs_before);
+        assert_eq!(dump_table_rows(&conn, "ydoc_updates"), updates_before);
+        assert_eq!(dump_table_rows(&conn, "ydoc_snapshots"), snapshots_before);
+        assert_eq!(
+            dump_table_rows(&conn, "ydoc_inactive_lineages"),
+            inactive_before
         );
-        assert_eq!(preserved, (1, 1, 1, 1));
+        assert_eq!(
+            dump_table_rows(&conn, "ydoc_deferred_updates"),
+            deferred_before
+        );
+
+        let index_columns = |name: &str| -> Vec<String> {
+            conn.prepare(&format!(
+                "SELECT name FROM pragma_index_info('{name}') ORDER BY seqno"
+            ))
+            .expect("prepare index columns")
+            .query_map([], |row| row.get(0))
+            .expect("query index columns")
+            .collect::<rusqlite::Result<_>>()
+            .expect("collect index columns")
+        };
+        for (name, expected) in [
+            (
+                "idx_ydoc_updates_doc_seq",
+                &["workspace_id", "version_id", "object_id", "seq"][..],
+            ),
+            (
+                "idx_ydoc_updates_doc_blob",
+                &[
+                    "workspace_id",
+                    "version_id",
+                    "object_id",
+                    "update_blob_sha256",
+                ][..],
+            ),
+            (
+                "idx_ydoc_snapshots_doc_uptoseq",
+                &["workspace_id", "version_id", "object_id", "up_to_seq"][..],
+            ),
+            (
+                "ydoc_inactive_lineages_by_disposition",
+                &[
+                    "workspace_id",
+                    "version_id",
+                    "object_id",
+                    "disposition",
+                    "lineage_claim_id",
+                ][..],
+            ),
+            (
+                "ydoc_inactive_lineages_by_parent",
+                &[
+                    "workspace_id",
+                    "version_id",
+                    "object_id",
+                    "parent_claim_id",
+                    "lineage_claim_id",
+                ][..],
+            ),
+            (
+                "ydoc_inactive_lineages_by_open_conflict",
+                &["workspace_id", "open_conflict_id"][..],
+            ),
+        ] {
+            assert_eq!(index_columns(name), expected);
+        }
 
         conn.execute(
             "INSERT INTO ydoc_docs (
