@@ -18,6 +18,7 @@ import {
   type DohcPluginManifest as DohcPluginManifestShape,
 } from "./pluginManifestSchema";
 import {
+  MAX_PLUGIN_LOCKFILE_BYTES,
   PINNED_PLUGIN_PACKAGE_MANAGER,
   pluginIdToSafePath,
   snapshotPluginSource,
@@ -386,6 +387,46 @@ describe("snapshotPluginSource dependency validation", () => {
     expect(failure.error.message).toContain('"pnpm@10.0.0"');
     expect(failure.error.message).toContain(`"${PINNED_PLUGIN_PACKAGE_MANAGER}"`);
   });
+
+  it("rejects a pnpm-lock.yaml over its configured byte limit before parsing it (CodeRabbit #779 R25)", async () => {
+    const fixture = await createPluginFixture();
+    const oversizedLockfile =
+      `${minimalLockfile()}# ${"x".repeat(MAX_PLUGIN_LOCKFILE_BYTES)}\n`;
+    await writeFile(join(fixture.pluginRoot, "pnpm-lock.yaml"), oversizedLockfile);
+
+    const failure = requireFailure(await runSnapshot(fixture));
+
+    expect(failure.error.code).toBe("invalid-lockfile");
+    expect(failure.error.message).toContain(
+      `the configured limit is ${MAX_PLUGIN_LOCKFILE_BYTES} bytes`,
+    );
+  });
+
+  it("resolves a deeply diamond-aliased pnpm-lock.yaml without exponential blowup (CodeRabbit #779 R25)", async () => {
+    const fixture = await createPluginFixture();
+    // Each level's two keys alias the SAME next-level anchor — a real,
+    // legitimate YAML shape (pnpm lockfiles share specs via &anchor/*alias)
+    // that revisits one shared subtree exponentially many times under a
+    // stack-only cycle guard. 24 levels is 2^24 (16.7M) redundant visits
+    // under the old code; a persistent visited set makes this linear.
+    const depth = 24;
+    const lines = ["lockfileVersion: '9.0'", "", "importers:", "  .: {}", "", "snapshots:"];
+    lines.push(`  leaf: &l0`);
+    lines.push(`    resolution: {}`);
+    for (let level = 1; level <= depth; level += 1) {
+      lines.push(`  level${level}: &l${level}`);
+      lines.push(`    a: *l${level - 1}`);
+      lines.push(`    b: *l${level - 1}`);
+    }
+    await writeFile(join(fixture.pluginRoot, "pnpm-lock.yaml"), `${lines.join("\n")}\n`);
+
+    const started = Date.now();
+    const result = await runSnapshot(fixture);
+    const elapsedMs = Date.now() - started;
+
+    requireSuccess(result);
+    expect(elapsedMs).toBeLessThan(5_000);
+  }, 15_000);
 });
 
 describe("snapshotPluginSource canonical hash and replacement", () => {

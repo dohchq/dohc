@@ -20,6 +20,17 @@ import {
 } from "./pluginManifestSchema";
 import { workspaceStateKey } from "./pluginLocalState";
 
+// CodeRabbit #779 R25: a byte bound before JSON.parse/js-yaml load, so an
+// oversized plugin-authored package.json/pnpm-lock.yaml fails with a named
+// limit instead of forcing a full parse of arbitrary-size, attacker-
+// controlled text. Measured 2026-08-13 (see
+// docs/superpowers/plans/2026-08-13-plugin-timeout-measurements.md): the
+// real "large" reference fixture's package.json was 490 bytes and its
+// pnpm-lock.yaml (209 entries) was 71,329 bytes. Both bounds round upward
+// to a clean value with comfortable headroom over that measured maximum.
+export const MAX_PLUGIN_PACKAGE_JSON_BYTES = 262_144;
+export const MAX_PLUGIN_LOCKFILE_BYTES = 1_048_576;
+
 export const PINNED_PLUGIN_PNPM_VERSION = "11.20.0";
 export const PINNED_PLUGIN_PACKAGE_MANAGER =
   `pnpm@${PINNED_PLUGIN_PNPM_VERSION}`;
@@ -222,10 +233,17 @@ function dependencyFailure(
 function scanDependencyMap(
   value: unknown,
   field: string,
+  visited: WeakSet<object>,
 ): LocalDependencySpec | null {
   if (!isRecord(value)) return null;
   for (const [packageName, specValue] of Object.entries(value)) {
-    const match = findLocalDependencySpec(specValue, packageName, field, new WeakSet());
+    const match = findLocalDependencySpec(
+      specValue,
+      packageName,
+      field,
+      new WeakSet(),
+      visited,
+    );
     if (match) return match;
   }
   return null;
@@ -236,31 +254,43 @@ function findLocalDependencySpec(
   packageName: string,
   field: string,
   stack: WeakSet<object>,
+  // Persists across this whole validatePackageJson/validatePnpmLockfile call
+  // (never cleared, unlike stack) so a node already found to have no match
+  // is never re-walked. YAML's &anchor/*alias syntax — legitimate and
+  // common in pnpm lockfiles for shared dependency specs — parses repeated
+  // aliases to the SAME object reference, so without this a diamond-shaped
+  // alias structure can revisit one shared subtree once per path reaching
+  // it, compounding multiplicatively across levels (CodeRabbit #779 R25).
+  // stack alone only catches true cycles (a node its own ancestor), not
+  // this DAG re-visitation.
+  visited: WeakSet<object>,
 ): LocalDependencySpec | null {
   if (typeof value === "string") {
     const protocol = localDependencyProtocol(value);
     return protocol ? { packageName, spec: value, protocol, field } : null;
   }
   if (typeof value !== "object" || value === null) return null;
-  if (stack.has(value)) return null;
+  if (stack.has(value) || visited.has(value)) return null;
   stack.add(value);
   try {
     if (Array.isArray(value)) {
       for (const item of value) {
-        const match = findLocalDependencySpec(item, packageName, field, stack);
+        const match = findLocalDependencySpec(item, packageName, field, stack, visited);
         if (match) return match;
       }
+      visited.add(value);
       return null;
     }
     for (const [key, nested] of Object.entries(value)) {
       if ((DEPENDENCY_FIELDS as readonly string[]).includes(key)) {
-        const match = scanDependencyMap(nested, `${field}.${key}`);
+        const match = scanDependencyMap(nested, `${field}.${key}`, visited);
         if (match) return match;
         continue;
       }
-      const match = findLocalDependencySpec(nested, packageName, field, stack);
+      const match = findLocalDependencySpec(nested, packageName, field, stack, visited);
       if (match) return match;
     }
+    visited.add(value);
     return null;
   } finally {
     stack.delete(value);
@@ -288,6 +318,7 @@ function packageNameFromLockfileKey(
 function scanLockfileSection(
   value: unknown,
   sectionName: string,
+  visited: WeakSet<object>,
 ): LocalDependencySpec | null {
   if (!isRecord(value)) return null;
   for (const [entryKey, entryValue] of Object.entries(value)) {
@@ -312,6 +343,7 @@ function scanLockfileSection(
       packageName,
       `${sectionName}.${entryKey}`,
       new WeakSet(),
+      visited,
     );
     if (nested) return nested;
   }
@@ -340,8 +372,9 @@ function validatePackageJson(packagePath: string, value: unknown): void {
     );
   }
 
+  const visited = new WeakSet<object>();
   for (const field of DEPENDENCY_FIELDS) {
-    const match = scanDependencyMap(value[field], field);
+    const match = scanDependencyMap(value[field], field, visited);
     if (match) throw dependencyFailure(packagePath, "package.json field", match);
   }
 }
@@ -354,8 +387,9 @@ function validatePnpmLockfile(lockfilePath: string, value: unknown): void {
       lockfilePath,
     );
   }
+  const visited = new WeakSet<object>();
   for (const sectionName of ["importers", "packages", "snapshots"] as const) {
-    const match = scanLockfileSection(value[sectionName], sectionName);
+    const match = scanLockfileSection(value[sectionName], sectionName, visited);
     if (match) throw dependencyFailure(lockfilePath, "pnpm-lock.yaml", match);
   }
 }
@@ -369,6 +403,15 @@ async function readAndValidatePackageJson(stagingRoot: string): Promise<void> {
     throw new SnapshotError(
       "invalid-package-json",
       `package.json at ${packagePath} could not be read: ${errorMessage(error)}`,
+      packagePath,
+    );
+  }
+  const packageJsonBytes = Buffer.byteLength(body, "utf8");
+  if (packageJsonBytes > MAX_PLUGIN_PACKAGE_JSON_BYTES) {
+    throw new SnapshotError(
+      "invalid-package-json",
+      `package.json at ${packagePath} is ${packageJsonBytes} bytes; the ` +
+        `configured limit is ${MAX_PLUGIN_PACKAGE_JSON_BYTES} bytes.`,
       packagePath,
     );
   }
@@ -394,6 +437,15 @@ async function readAndValidatePnpmLockfile(stagingRoot: string): Promise<void> {
     throw new SnapshotError(
       "invalid-lockfile",
       `pnpm-lock.yaml at ${lockfilePath} could not be read: ${errorMessage(error)}`,
+      lockfilePath,
+    );
+  }
+  const lockfileBytes = Buffer.byteLength(body, "utf8");
+  if (lockfileBytes > MAX_PLUGIN_LOCKFILE_BYTES) {
+    throw new SnapshotError(
+      "invalid-lockfile",
+      `pnpm-lock.yaml at ${lockfilePath} is ${lockfileBytes} bytes; the ` +
+        `configured limit is ${MAX_PLUGIN_LOCKFILE_BYTES} bytes.`,
       lockfilePath,
     );
   }
