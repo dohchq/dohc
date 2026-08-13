@@ -21,6 +21,12 @@ Do not run the cargo steps by hand and call the result a gate verdict. The
 gate's evidence line is the only artifact the verifier
 (`tools/rust-engine-program/require-ci-pass-verdict.mjs`) accepts.
 
+The test steps run through cargo-nextest. If the `test --workspace` step
+fails with "no such command: nextest", install it with
+`cargo install cargo-nextest --locked` and rerun. The separate `doctests`
+row is required: nextest runs no doctests by design, and that row is what
+proves the workspace's doctests still ran.
+
 ## What the gate does for you
 
 On a host with a build-slot root (the shared Windows dev machine), the gate

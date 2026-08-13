@@ -10,9 +10,10 @@
 // PowerShell and Git Bash (spawns through the platform shell).
 //
 // Steps: native target (see below), fixture drift, cargo fmt --check, cargo
-// clippy -D warnings, cargo build --workspace, cargo test --workspace, the
-// collab crash tier (which only compiles under `--features fault-injection`,
-// so the plain workspace run never sees it), then cargo-deny / cargo-audit IF
+// clippy -D warnings, cargo build --workspace, the workspace test run (cargo
+// nextest), the doctest run (nextest runs no doctests by design), the collab
+// crash tier (which only compiles under `--features fault-injection`, so the
+// plain workspace run never sees it), then cargo-deny / cargo-audit IF
 // installed (skip-with-warning when absent, never fail on a missing tool).
 //
 // A REQUIRED step that SKIPs fails the verdict: a gate that silently drops a
@@ -101,7 +102,10 @@ const slot = budget ? await acquireBuildSlot(budget) : null;
 process.env.CARGO_INCREMENTAL = "0";
 if (budget) {
   process.env.CARGO_BUILD_JOBS ??= String(budget.jobs);
+  // Both runners: nextest reads its own variable, libtest (the doctest
+  // step) reads RUST_TEST_THREADS.
   process.env.RUST_TEST_THREADS ??= String(budget.jobs);
+  process.env.NEXTEST_TEST_THREADS ??= String(budget.jobs);
 }
 const capsField = `jobs ${process.env.CARGO_BUILD_JOBS ?? "default"}, test-threads ${process.env.RUST_TEST_THREADS ?? "default"}`;
 // Hand the tests the absolute root instead of a name they would re-derive.
@@ -165,14 +169,21 @@ const required = [
     cmd: "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
   },
   { name: "build --workspace", cmd: "cargo build --locked --workspace" },
-  { name: "test --workspace", cmd: "cargo test --locked --workspace" },
+  // nextest schedules the workspace's ~73 test binaries in parallel where
+  // `cargo test` runs them one at a time — measured, that was ~90% of the
+  // gate's wall clock. nextest runs no doctests BY DESIGN, so the `doctests`
+  // row exists to keep the ones the workspace has (one, in collab) from
+  // silently vanishing — a required row, because a runner swap that drops
+  // tests without a row is exactly the blind spot this gate refuses.
+  { name: "test --workspace", cmd: "cargo nextest run --locked --workspace" },
+  { name: "doctests", cmd: "cargo test --locked --workspace --doc" },
   {
     // The crash-recovery / exactly-once tests in dohc-engine-collab are behind
     // its `fault-injection` feature, which nothing in the workspace graph
     // enables — `cargo test --workspace` compiles them out. The workspace root
     // is virtual, so the feature must be enabled through an explicit `-p` run.
     name: "test collab crash tier",
-    cmd: "cargo test --locked -p dohc-engine-collab --features fault-injection",
+    cmd: "cargo nextest run --locked -p dohc-engine-collab --features fault-injection",
   },
 ];
 

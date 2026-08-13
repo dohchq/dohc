@@ -226,9 +226,9 @@ test("the gate stamps the tree it read, at every step boundary", () => {
     assert.match(run.evidence, /tree provenance=PASS/);
 
     // One reading before the first step and one after each: 1 + native target
-    // + 6 required + 2 optional. Endpoints alone would read 2, which is the
+    // + 7 required + 2 optional. Endpoints alone would read 2, which is the
     // shape that cannot see a tree that changes and changes back.
-    assert.match(run.evidence, /, 10 reads\)/);
+    assert.match(run.evidence, /, 11 reads\)/);
 
     // The stamp names the commit this checkout is on, not any commit.
     const head = spawnSync("git rev-parse HEAD", {
@@ -263,6 +263,7 @@ test("the caps and the scratch root reach every cargo child", () => {
     assert.match(child, /CARGO_INCREMENTAL=0/);
     assert.match(child, /CARGO_BUILD_JOBS=\d+/);
     assert.match(child, /RUST_TEST_THREADS=\d+/);
+    assert.match(child, /NEXTEST_TEST_THREADS=\d+/);
     assert.match(child, /DOHC_TEST_SCRATCH_ROOT=./);
 
     // And the evidence line records caps, ahead of the head stamp.
