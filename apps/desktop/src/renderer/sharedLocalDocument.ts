@@ -21,14 +21,6 @@ export type LocalDocumentWriteResult =
 
 const buffers = new Map<string, SharedLocalDocument>();
 
-export function localDocumentKey(
-  workspaceId: string,
-  path: string,
-  reopenKey: number | undefined,
-): string {
-  return JSON.stringify([workspaceId, path, reopenKey ?? null]);
-}
-
 export function getSharedLocalDocument(key: string): SharedLocalDocument {
   let buffer = buffers.get(key);
   if (!buffer) {
@@ -36,6 +28,14 @@ export function getSharedLocalDocument(key: string): SharedLocalDocument {
     buffers.set(key, buffer);
   }
   return buffer;
+}
+
+export function acquireSharedLocalDocument(key: string): {
+  buffer: SharedLocalDocument;
+  release: () => void;
+} {
+  const buffer = getSharedLocalDocument(key);
+  return { buffer, release: buffer.retain() };
 }
 
 export function resetSharedLocalDocumentsForTests(): void {
@@ -54,6 +54,7 @@ export class SharedLocalDocument {
   private writers = 0;
   private latestReadTicket = 0;
   private latestAcceptedReadTicket = 0;
+  private releaseDirtyWhenUnused = false;
   private snapshot: LocalDocumentSnapshot = {
     initialized: false,
     body: "",
@@ -68,6 +69,7 @@ export class SharedLocalDocument {
 
   retain(): () => void {
     if (!buffers.has(this.key)) buffers.set(this.key, this);
+    this.releaseDirtyWhenUnused = false;
     this.refs += 1;
     let released = false;
     return () => {
@@ -103,6 +105,7 @@ export class SharedLocalDocument {
     const text = pending.materialize();
     if (this.pendingDraft === pending) this.pendingDraft = null;
     this.notify();
+    this.deleteWhenUnused();
     return text;
   }
 
@@ -121,6 +124,13 @@ export class SharedLocalDocument {
     if (this.pendingDraft?.source !== source) return;
     this.pendingDraft = null;
     this.notify();
+    this.deleteWhenUnused();
+  }
+
+  releaseUnusedDraft(): void {
+    if (this.refs !== 0) return;
+    this.releaseDirtyWhenUnused = true;
+    this.deleteWhenUnused();
   }
 
   beginRead(): number {
@@ -173,13 +183,20 @@ export class SharedLocalDocument {
     if (readTicket !== undefined) {
       this.latestAcceptedReadTicket = readTicket;
     }
-    if (this.snapshot.dirty || this.writers > 0) {
-      const ownedByCaller = this.snapshot.source === source;
-      const canReplaceOwnDraft = force && ownedByCaller && this.writers === 0;
+    const pendingDraft = this.pendingDraft;
+    if (this.snapshot.dirty || this.writers > 0 || pendingDraft !== null) {
+      const ownsDirtySnapshot =
+        !this.snapshot.dirty || this.snapshot.source === source;
+      const ownsPendingDraft =
+        pendingDraft === null || pendingDraft.source === source;
+      const ownsAllDrafts = ownsDirtySnapshot && ownsPendingDraft;
+      const canReplaceOwnDraft =
+        force && ownsAllDrafts && this.writers === 0;
       if (!canReplaceOwnDraft) {
-        if (force && !ownedByCaller) this.markError();
+        if (force && !ownsAllDrafts) this.markError();
         return false;
       }
+      if (this.pendingDraft === pendingDraft) this.pendingDraft = null;
     }
     this.initialized = true;
     this.replace(
@@ -188,6 +205,7 @@ export class SharedLocalDocument {
       false,
       force ? "error" : "saved",
     );
+    this.deleteWhenUnused();
     return true;
   }
 
@@ -299,7 +317,14 @@ export class SharedLocalDocument {
   }
 
   private deleteWhenUnused(): void {
-    if (this.refs !== 0 || this.writers !== 0) return;
+    if (
+      this.refs !== 0 ||
+      this.writers !== 0 ||
+      ((this.snapshot.dirty || this.pendingDraft !== null) &&
+        !this.releaseDirtyWhenUnused)
+    ) {
+      return;
+    }
     if (buffers.get(this.key) === this) buffers.delete(this.key);
   }
 }

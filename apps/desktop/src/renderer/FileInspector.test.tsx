@@ -49,9 +49,9 @@ import * as orphanedDraftsModule from "./orphanedDrafts";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import {
   getSharedLocalDocument,
-  localDocumentKey,
   resetSharedLocalDocumentsForTests,
 } from "./sharedLocalDocument";
+import { documentVersionKey } from "./documentVersionKey";
 
 afterEach(() => resetSharedLocalDocumentsForTests());
 
@@ -636,10 +636,38 @@ describe("markdown editor unmount flush", () => {
     return { user, view };
   }
 
+  it("retains the local buffer through StrictMode without a blank committed view", () => {
+    const path = "assets/identity.png";
+    const key = documentVersionKey("ws-1", path, undefined);
+    const view = render(
+      <StrictMode>
+        <FileInspector workspaceId="ws-1" path={path} />
+      </StrictMode>,
+    );
+
+    expect(screen.getByTestId("file-inspector")).toBeTruthy();
+    const retained = getSharedLocalDocument(key);
+
+    const nextPath = "assets/next-identity.png";
+    const nextKey = documentVersionKey("ws-1", nextPath, undefined);
+    view.rerender(
+      <StrictMode>
+        <FileInspector workspaceId="ws-1" path={nextPath} />
+      </StrictMode>,
+    );
+    expect(screen.getAllByText("next-identity.png").length).toBeGreaterThan(0);
+    expect(getSharedLocalDocument(key)).not.toBe(retained);
+    const nextRetained = getSharedLocalDocument(nextKey);
+
+    view.unmount();
+
+    expect(getSharedLocalDocument(nextKey)).not.toBe(nextRetained);
+  });
+
   it("shows a no-baseline flush error in both duplicate text panes", async () => {
     const path = "notes/shared-no-baseline.txt";
     const buffer = getSharedLocalDocument(
-      localDocumentKey("ws-1", path, undefined),
+      documentVersionKey("ws-1", path, undefined),
     );
     buffer.publishDraft("unsaved", {});
     const flushes: DraftFlush[] = [];
@@ -771,7 +799,7 @@ describe("markdown editor unmount flush", () => {
     await user.click(firstEditor);
     await user.keyboard("{End} peer draft");
     const buffer = getSharedLocalDocument(
-      localDocumentKey("ws-1", "notes/versioned.md", 2),
+      documentVersionKey("ws-1", "notes/versioned.md", 2),
     );
     expect(buffer.getSnapshot()).toMatchObject({
       body: "# New\n peer draft",
@@ -2095,7 +2123,7 @@ describe("markdown editor unmount flush", () => {
     await user.click(first);
     await user.keyboard("{End} peer draft");
     const buffer = getSharedLocalDocument(
-      localDocumentKey("ws-1", "notes/conflict.txt", undefined),
+      documentVersionKey("ws-1", "notes/conflict.txt", undefined),
     );
     // Make the state under test explicit. Under combined-suite load, typing
     // can span the debounce and the default instant writer can legitimately
@@ -2166,7 +2194,7 @@ describe("markdown editor unmount flush", () => {
       await newer;
     });
     const buffer = getSharedLocalDocument(
-      localDocumentKey("ws-1", "notes/ordered.txt", undefined),
+      documentVersionKey("ws-1", "notes/ordered.txt", undefined),
     );
     await waitFor(() => expect(buffer.getSnapshot().body).toBe("newer"));
 
@@ -2239,7 +2267,7 @@ describe("markdown editor unmount flush", () => {
     });
 
     const buffer = getSharedLocalDocument(
-      localDocumentKey("ws-1", "notes/fallback.txt", undefined),
+      documentVersionKey("ws-1", "notes/fallback.txt", undefined),
     );
     await waitFor(() =>
       expect(buffer.getSnapshot()).toMatchObject({
@@ -2275,7 +2303,7 @@ describe("markdown editor unmount flush", () => {
       contentHash: TEST_CONTENT_HASH,
     });
     const buffer = getSharedLocalDocument(
-      localDocumentKey("ws-1", "shared-wysiwyg.md", undefined),
+      documentVersionKey("ws-1", "shared-wysiwyg.md", undefined),
     );
     const publishDraft = vi.spyOn(buffer, "publishDraft");
     const user = userEvent.setup();
@@ -2454,6 +2482,83 @@ describe("markdown editor unmount flush", () => {
     expect(written).toContain("Pane B");
   });
 
+  it("keeps a pending WYSIWYG baseline when its duplicate rereads external content", async () => {
+    const oldHash = "1".repeat(64);
+    const externalHash = "2".repeat(64);
+    bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: "# Before\n\n",
+        truncated: false,
+        contentHash: oldHash,
+      })
+      .mockResolvedValueOnce({
+        text: "# Before\n\n",
+        truncated: false,
+        contentHash: oldHash,
+      })
+      .mockResolvedValueOnce({
+        text: "# External\n\n",
+        truncated: false,
+        contentHash: externalHash,
+      });
+    bridgeMock.writeWorkspaceText.mockResolvedValueOnce({
+      status: "conflict",
+      currentContentHash: externalHash,
+    });
+    const flushes: DraftFlush[] = [];
+    const user = userEvent.setup();
+    const panes = (peerRefreshKey: number) => (
+      <>
+        <FileInspector
+          key="writer"
+          workspaceId="ws-1"
+          path="shared-wysiwyg-reread.md"
+          registerDraftFlush={(flush) => {
+            if (flush) flushes[0] = flush;
+          }}
+        />
+        <FileInspector
+          key="reader"
+          workspaceId="ws-1"
+          path="shared-wysiwyg-reread.md"
+          refreshKey={peerRefreshKey}
+          registerDraftFlush={(flush) => {
+            if (flush) flushes[1] = flush;
+          }}
+        />
+      </>
+    );
+    const view = render(panes(0));
+    const editors = await screen.findAllByTestId("markdown-editor");
+    await waitFor(() => expect(flushes).toHaveLength(2));
+    await user.type(editors[0]!, "Local");
+    const buffer = getSharedLocalDocument(
+      documentVersionKey("ws-1", "shared-wysiwyg-reread.md", undefined),
+    );
+    expect(buffer.getPendingDraftSource()).not.toBeNull();
+
+    view.rerender(panes(1));
+    await waitFor(() =>
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(3),
+    );
+    expect(buffer.getPendingDraftSource()).not.toBeNull();
+    expect(buffer.getSnapshot()).toMatchObject({
+      body: "# Before\n\n",
+      contentHash: oldHash,
+      dirty: false,
+    });
+
+    await expect(flushes[1]!()).rejects.toThrow(
+      "The file changed on disk while dohc saved it.",
+    );
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "shared-wysiwyg-reread.md",
+      text: expect.stringContaining("Local"),
+      expectedContentHash: oldHash,
+    });
+  });
+
   it("does not replay a duplicate Markdown draft after its peer saves the same body", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValue({
       text: "# Hello\n\n",
@@ -2532,7 +2637,7 @@ describe("markdown editor unmount flush", () => {
     );
     bridgeMock.writeWorkspaceText.mockImplementationOnce(() => firstWrite);
     const buffer = getSharedLocalDocument(
-      localDocumentKey("ws-1", "queued.md", undefined),
+      documentVersionKey("ws-1", "queued.md", undefined),
     );
     // Hold this pane's subscriber behind the queue interleaving. The write
     // seam must remain safe even before React applies a peer snapshot.
@@ -2602,7 +2707,7 @@ describe("markdown editor unmount flush", () => {
       expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
     );
     const buffer = getSharedLocalDocument(
-      localDocumentKey("ws-1", "peer-owned.md", undefined),
+      documentVersionKey("ws-1", "peer-owned.md", undefined),
     );
     const peerSource = {};
 
@@ -2628,7 +2733,7 @@ describe("markdown editor unmount flush", () => {
     "rejects a %s flush when the shared draft has no content hash",
     async (_label, path, viewTestId) => {
       const buffer = getSharedLocalDocument(
-        localDocumentKey("ws-1", path, undefined),
+        documentVersionKey("ws-1", path, undefined),
       );
       buffer.publishDraft("unsaved", {});
       let flush: DraftFlush | null = null;
@@ -9368,7 +9473,7 @@ describe("markdown document opening state", () => {
     await user.type(pendingTitle, "During read");
     await user.tab();
     const switchedBuffer = getSharedLocalDocument(
-      localDocumentKey("ws-1", "a.md", 2),
+      documentVersionKey("ws-1", "a.md", 2),
     );
     expect(switchedBuffer.getSnapshot()).toMatchObject({
       initialized: true,
@@ -9435,7 +9540,7 @@ describe("markdown document opening state", () => {
       ),
     );
     const oldBuffer = getSharedLocalDocument(
-      localDocumentKey("ws-1", "a.md", 1),
+      documentVersionKey("ws-1", "a.md", 1),
     );
     expect(oldBuffer.getSnapshot().revision).toBe(1);
     await act(async () => {
@@ -9446,7 +9551,7 @@ describe("markdown document opening state", () => {
 
     const peerBody = `---\ntitle: Peer\n---\n\n# Peer\n\n${"peer word ".repeat(14_000)}\n`;
     const peerBuffer = getSharedLocalDocument(
-      localDocumentKey("ws-1", "a.md", 2),
+      documentVersionKey("ws-1", "a.md", 2),
     );
     peerBuffer.initializeRead(
       oldBody,

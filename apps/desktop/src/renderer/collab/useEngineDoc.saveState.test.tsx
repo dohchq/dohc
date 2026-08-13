@@ -30,6 +30,7 @@ function harnessBridge() {
   const applied: Array<{ sessionId: string; seq: number }> = [];
   let applyAttempts = 0;
   let applyFailuresRemaining = 0;
+  let deferredApplyFailure: Promise<never> | null = null;
   let closeCount = 0;
   let openedSessionId: string | null = null;
   const doc = new Y.Doc();
@@ -60,6 +61,11 @@ function harnessBridge() {
       seq: number;
     }) {
       applyAttempts += 1;
+      if (deferredApplyFailure) {
+        const failure = deferredApplyFailure;
+        deferredApplyFailure = null;
+        return failure;
+      }
       if (applyFailuresRemaining > 0) {
         applyFailuresRemaining -= 1;
         throw new Error("renderer update delivery failed");
@@ -131,6 +137,7 @@ function harnessBridge() {
     applied,
     applyAttempts: () => applyAttempts,
     closeCount: () => closeCount,
+    mainText: () => doc.getText("plainText").toString(),
     sessionId: () => openedSessionId,
     setRemovalInProgress(value: typeof removalInProgress) {
       removalInProgress = value;
@@ -140,6 +147,13 @@ function harnessBridge() {
     },
     failNextApply(count = 1) {
       applyFailuresRemaining = count;
+    },
+    deferNextApplyFailure() {
+      let rejectFailure!: (error: Error) => void;
+      deferredApplyFailure = new Promise<never>((_resolve, reject) => {
+        rejectFailure = reject;
+      });
+      return () => rejectFailure(new Error("renderer update delivery failed"));
     },
   };
 }
@@ -241,6 +255,57 @@ it("shows the failure when a settle fails, instead of reading Saved", async () =
   expect(screen.getByTestId("state").textContent).toBe("error");
 });
 
+it("does not report Saved until a rejected earlier update is repaired", async () => {
+  await mountBound();
+  const rejectFirst = harness.deferNextApplyFailure();
+
+  act(() => {
+    screen.getByTestId("type").click();
+    screen.getByTestId("type").click();
+  });
+  expect(harness.applyAttempts()).toBe(2);
+  expect(harness.applied.at(-1)?.seq).toBe(2);
+
+  // Main accepted the later delta, but the first delivery has not answered.
+  // Its settle cannot make the renderer claim the whole mirror is durable.
+  harness.emit("saved", 2);
+  expect(screen.getByTestId("state").textContent).toBe("saving");
+
+  rejectFirst();
+  await waitFor(() => expect(harness.applyAttempts()).toBe(3));
+  expect(harness.mainText()).toBe("seed!!");
+  expect(harness.applied.at(-1)?.seq).toBe(3);
+  expect(screen.getByTestId("state").textContent).toBe("saving");
+
+  harness.emit("saved", 3);
+  expect(screen.getByTestId("state").textContent).toBe("saved");
+});
+
+it("stays Saving until a delayed full-state repair converges", async () => {
+  await mountBound();
+  harness.failNextApply(2);
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(harness.applyAttempts()).toBe(2);
+  expect(screen.getByTestId("state").textContent).toBe("saving");
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(250);
+  });
+  await waitFor(() => expect(harness.applyAttempts()).toBe(3));
+  expect(harness.mainText()).toBe("seed!");
+  expect(screen.getByTestId("state").textContent).toBe("saving");
+
+  harness.emit("saved", harness.applied.at(-1)!.seq);
+  expect(screen.getByTestId("state").textContent).toBe("saved");
+});
+
 it("delivers the final mirror state before the final consumer closes and reopens", async () => {
   const view = render(
     <Harness workspaceId="ws-1" path="notes/big.md" enabled />,
@@ -253,8 +318,8 @@ it("delivers the final mirror state before the final consumer closes and reopens
   act(() => {
     screen.getByTestId("type").click();
   });
-  await waitFor(() => expect(harness.applyAttempts()).toBe(1));
-  expect(harness.applied).toHaveLength(0);
+  await waitFor(() => expect(harness.applyAttempts()).toBe(2));
+  expect(harness.applied).toHaveLength(1);
 
   view.unmount();
   await waitFor(() => expect(harness.closeCount()).toBe(1));
@@ -292,14 +357,14 @@ it("delivers a rejected edit before retry replaces the live session", async () =
   expect(harness.applied).toHaveLength(1);
 });
 
-it("sets aside the final mirror when both delivery attempts fail", async () => {
+it("sets aside the final mirror when live repair and final delivery fail", async () => {
   const view = render(
     <Harness workspaceId="ws-1" path="notes/big.md" enabled />,
   );
   await waitFor(() =>
     expect(screen.getByTestId("available").textContent).toBe("true"),
   );
-  harness.failNextApply(2);
+  harness.failNextApply(3);
 
   act(() => {
     screen.getByTestId("type").click();
@@ -314,7 +379,7 @@ it("sets aside the final mirror when both delivery attempts fail", async () => {
   );
   expect(screen.getByTestId("text").textContent).toBe("seed");
   expect(screen.getByTestId("draft").textContent).toBe("seed!");
-  expect(harness.applyAttempts()).toBe(2);
+  expect(harness.applyAttempts()).toBe(3);
   expect(harness.applied).toHaveLength(0);
 });
 
@@ -551,7 +616,9 @@ it("does not claim Saved for a settle that predates the newest keystroke", async
 
   // The follow-up settle covers it.
   harness.emit("saved", secondSeq);
-  expect(screen.getByTestId("state").textContent).toBe("saved");
+  await waitFor(() =>
+    expect(screen.getByTestId("state").textContent).toBe("saved"),
+  );
 });
 
 it("degrades to not-engine-backed on a bridge without the save-state channel, instead of blanking the editor", async () => {
@@ -586,5 +653,7 @@ it("ignores a save-state report addressed to a different session", async () => {
   expect(screen.getByTestId("state").textContent).toBe("saving");
 
   harness.emit("saved", seq);
-  expect(screen.getByTestId("state").textContent).toBe("saved");
+  await waitFor(() =>
+    expect(screen.getByTestId("state").textContent).toBe("saved"),
+  );
 });

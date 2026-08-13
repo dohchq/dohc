@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
 import { bridge } from "../bridge";
+import { documentVersionKey } from "../documentVersionKey";
 import {
   captureOrphanedDraft,
   replaceOrphanedDraft,
@@ -376,6 +377,8 @@ function createEngineDocSession(
   let deletionDraftId: number | null = null;
   let deletionQueue: Promise<void> = Promise.resolve();
   let deletionPending = false;
+  let deliveryPending = false;
+  let pendingSavedSeq: number | null = null;
   let lifecycle: Promise<void> = Promise.resolve();
   let disposePromise: Promise<void> | null = null;
 
@@ -401,6 +404,23 @@ function createEngineDocSession(
   const reportSaveState = (state: EngineDocSaveState): void => {
     saveStateRef.current = state;
     publish((current) => ({ ...current, saveState: state }));
+  };
+
+  const onDeliveryPendingChange = (pending: boolean): void => {
+    deliveryPending = pending;
+    if (pending) {
+      pendingSavedSeq = null;
+      return;
+    }
+    if (
+      pendingSavedSeq !== null &&
+      !disposed &&
+      !writesRefused.current &&
+      pendingSavedSeq >= localSeq.current
+    ) {
+      reportSaveState("saved");
+    }
+    pendingSavedSeq = null;
   };
 
   // forceCreate false means the file was settled when main removed it. A later
@@ -480,6 +500,7 @@ function createEngineDocSession(
   const onSaveState = (event: EngineYDocSaveStateEvent): void => {
     if (disposed || event.sessionId !== sessionId) return;
     if (event.state === "deleted") {
+      pendingSavedSeq = null;
       const doc = binding?.doc;
       if (!doc) {
         deletionPending = true;
@@ -494,6 +515,15 @@ function createEngineDocSession(
       return;
     }
     if (writesRefused.current) return;
+    if (event.state === "saved") {
+      if (deliveryPending) {
+        pendingSavedSeq = Math.max(pendingSavedSeq ?? 0, event.seq);
+        return;
+      }
+      if (event.seq >= localSeq.current) reportSaveState("saved");
+      return;
+    }
+    pendingSavedSeq = null;
     if (event.state === "file-locked") {
       if (event.seq >= localSeq.current) reportSaveState(event.state);
       return;
@@ -510,7 +540,6 @@ function createEngineDocSession(
       reportSaveState("saving");
       return;
     }
-    if (event.seq >= localSeq.current) reportSaveState("saved");
   };
 
   const destroyBinding = async (): Promise<void> => {
@@ -539,6 +568,7 @@ function createEngineDocSession(
           unsubscribeSaveState = bridge().onEngineYDocSaveState(onSaveState);
           const bound = await bindEngineYDoc(transport, {
             onDeliveryFailure: captureUndeliveredSnapshot,
+            onDeliveryPendingChange,
           });
           binding = bound;
           if (disposed) {
@@ -781,11 +811,11 @@ function retainEngineDocLease(
   requestKey: string,
   isRetry: boolean,
 ): EngineDocLease {
-  const versionKey = JSON.stringify([
+  const versionKey = documentVersionKey(
     input.workspaceId,
     input.path,
-    input.reopenKey ?? null,
-  ]);
+    input.reopenKey,
+  );
   let lease = engineDocLeases.get(versionKey);
   if (!lease) {
     const documentKey = JSON.stringify([input.workspaceId, input.path]);
@@ -807,11 +837,11 @@ function retainEngineDocLease(
 export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const requestKey = engineDocRequestKey(input);
   const retryKey = input.retryKey ?? 0;
-  const versionKey = JSON.stringify([
+  const versionKey = documentVersionKey(
     input.workspaceId,
     input.path,
-    input.reopenKey ?? null,
-  ]);
+    input.reopenKey,
+  );
   const committedRequestRef = useRef<{
     versionKey: string;
     retryKey: number;

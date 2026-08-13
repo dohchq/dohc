@@ -21,6 +21,9 @@ import * as Y from "yjs";
 // (initial state, forwarded remote deltas). The local-edit observer ignores it.
 const ENGINE_SOURCED_ORIGIN: unique symbol = Symbol("dohc.engineSourcedUpdate");
 
+const REPAIR_RETRY_INITIAL_MS = 250;
+const REPAIR_RETRY_MAX_MS = 5_000;
+
 // One name for one concept, shared by the transport's open answer and the
 // binding it produces (and re-exported from useEngineDoc.ts) — three inline
 // copies of the same shape could drift silently if a third operation joins
@@ -86,6 +89,10 @@ type EngineYDocBindingOptions = {
     snapshot: Uint8Array,
     error: unknown,
   ) => void | Promise<void>;
+  // Main can report a later update as saved before an earlier rejected IPC
+  // delivery is repaired. Keep the owner informed until every accepted local
+  // update, including a full-state repair, has finished.
+  onDeliveryPendingChange?: (pending: boolean) => void;
 };
 
 // Bind a mirror Y.Doc to an engine session over `transport`. On success the
@@ -118,7 +125,81 @@ export async function bindEngineYDoc(
 
   let destroyed = false;
   let destroyPromise: Promise<void> | null = null;
-  let deliveryTail: Promise<void> = Promise.resolve();
+  const activeDeliveries = new Set<Promise<void>>();
+  let deliveryPending = false;
+  let repairNeeded = false;
+  let repairRunning = false;
+  let repairRequested = false;
+  let repairRetryDelayMs = REPAIR_RETRY_INITIAL_MS;
+  let repairRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const setDeliveryPending = (pending: boolean): void => {
+    if (deliveryPending === pending) return;
+    deliveryPending = pending;
+    options.onDeliveryPendingChange?.(pending);
+  };
+
+  const finishDeliveryIfSafe = (): void => {
+    if (
+      activeDeliveries.size === 0 &&
+      !repairNeeded &&
+      !repairRunning
+    ) {
+      setDeliveryPending(false);
+    }
+  };
+
+  const trackDelivery = (delivery: Promise<void>): void => {
+    let tracked!: Promise<void>;
+    tracked = delivery.finally(() => {
+      activeDeliveries.delete(tracked);
+      finishDeliveryIfSafe();
+    });
+    activeDeliveries.add(tracked);
+    void tracked.catch(() => undefined);
+  };
+
+  const clearRepairRetry = (): void => {
+    if (repairRetryTimer === null) return;
+    clearTimeout(repairRetryTimer);
+    repairRetryTimer = null;
+  };
+
+  const scheduleRepairRetry = (): void => {
+    if (destroyed || repairRetryTimer !== null || !repairNeeded) return;
+    const delay = repairRetryDelayMs;
+    repairRetryDelayMs = Math.min(delay * 2, REPAIR_RETRY_MAX_MS);
+    repairRetryTimer = setTimeout(() => {
+      repairRetryTimer = null;
+      startRepair();
+    }, delay);
+  };
+
+  function startRepair(): void {
+    if (destroyed || repairRunning || !repairNeeded) return;
+    clearRepairRetry();
+    repairNeeded = false;
+    repairRunning = true;
+    repairRequested = false;
+    const snapshot = Y.encodeStateAsUpdate(doc);
+    const repair = (async () => {
+      let repaired = false;
+      try {
+        await transport.applyLocalUpdate(snapshot);
+        repaired = true;
+      } catch {
+        repairNeeded = true;
+      } finally {
+        repairRunning = false;
+        if (repaired) repairRetryDelayMs = REPAIR_RETRY_INITIAL_MS;
+        if (repairNeeded) {
+          if (repaired || repairRequested) startRepair();
+          else scheduleRepairRetry();
+        }
+      }
+    })();
+    trackDelivery(repair);
+  }
 
   // Ship every LOCAL editor edit to main. A Tiptap edit carries a non-ENGINE
   // origin; an engine-sourced apply carries ENGINE_SOURCED_ORIGIN and is
@@ -126,25 +207,25 @@ export async function bindEngineYDoc(
   const onUpdate = (update: Uint8Array, origin: unknown): void => {
     if (destroyed) return;
     if (origin === ENGINE_SOURCED_ORIGIN) return;
+    setDeliveryPending(true);
+    if (repairRunning) repairRequested = true;
     let delivery: Promise<void>;
     try {
-      // Start synchronously, as before. Main owns update ordering; the tail
-      // below is the teardown join, not a second delivery queue.
+      // Start synchronously, as before. Main owns update ordering; the
+      // acknowledgement tracking below is not a second delivery queue.
       delivery = transport.applyLocalUpdate(update);
     } catch (error: unknown) {
       delivery = Promise.reject(error);
     }
-    const previous = deliveryTail;
-    deliveryTail = Promise.allSettled([previous, delivery]).then((results) => {
-      const rejected = results.find(
-        (result): result is PromiseRejectedResult =>
-          result.status === "rejected",
-      );
-      if (rejected) throw rejected.reason;
+    const observed = delivery.catch((error: unknown) => {
+      repairNeeded = true;
+      startRepair();
+      throw error;
     });
-    // Teardown joins and handles the failure. This observer must not create an
-    // unhandled rejection while the document remains open.
-    void deliveryTail.catch(() => undefined);
+    trackDelivery(observed);
+    // A new edit is a delivery opportunity, so it need not wait for a
+    // scheduled repair retry.
+    startRepair();
   };
   doc.on("update", onUpdate);
 
@@ -164,14 +245,16 @@ export async function bindEngineYDoc(
     destroy() {
       if (destroyPromise) return destroyPromise;
       destroyed = true;
+      clearRepairRetry();
       doc.off("update", onUpdate);
       unsubscribe();
       destroyPromise = (async () => {
         let deliveryError: unknown = null;
         let recoveryError: unknown = null;
-        try {
-          await deliveryTail;
-        } catch {
+        while (activeDeliveries.size > 0) {
+          await Promise.allSettled([...activeDeliveries]);
+        }
+        if (repairNeeded) {
           const finalSnapshot = Y.encodeStateAsUpdate(doc);
           try {
             // Full state, not the failed delta: this also covers every edit

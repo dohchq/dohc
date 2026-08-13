@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
   bindEngineYDoc,
@@ -182,6 +182,125 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     expect(attempts).toBe(2);
     expect(bodyText(mock.mainDoc)).toContain("Recovered edit.");
     expect(mock.closed()).toBe(true);
+  });
+
+  it("repairs a rejected update while the document remains open", async () => {
+    const mock = mockTransport();
+    let attempts = 0;
+    let rejectFirst!: (error: Error) => void;
+    const firstDelivery = new Promise<void>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    mock.transport.applyLocalUpdate = async (update) => {
+      attempts += 1;
+      if (attempts === 1) return firstDelivery;
+      Y.applyUpdate(mock.mainDoc, update);
+    };
+    const binding = await bindEngineYDoc(mock.transport);
+
+    typeIntoBody(binding.doc!, "Edit A.");
+    typeIntoBody(binding.doc!, "Edit B.");
+    expect(attempts).toBe(2);
+
+    rejectFirst(new Error("delivery failed"));
+    for (let turn = 0; turn < 10 && attempts < 3; turn += 1) {
+      await Promise.resolve();
+    }
+
+    expect(attempts).toBe(3);
+    expect(bodyText(mock.mainDoc)).toContain("Edit A.");
+    expect(bodyText(mock.mainDoc)).toContain("Edit B.");
+
+    await binding.destroy();
+    expect(attempts).toBe(3);
+  });
+
+  it("retries outstanding delivery debt when another edit arrives", async () => {
+    const mock = mockTransport();
+    let attempts = 0;
+    mock.transport.applyLocalUpdate = async (update) => {
+      attempts += 1;
+      if (attempts <= 2) throw new Error("delivery failed");
+      Y.applyUpdate(mock.mainDoc, update);
+    };
+    const binding = await bindEngineYDoc(mock.transport);
+
+    typeIntoBody(binding.doc!, "Edit A.");
+    for (let turn = 0; turn < 10 && attempts < 2; turn += 1) {
+      await Promise.resolve();
+    }
+    expect(attempts).toBe(2);
+
+    typeIntoBody(binding.doc!, "Edit B.");
+    for (let turn = 0; turn < 10 && attempts < 4; turn += 1) {
+      await Promise.resolve();
+    }
+
+    expect(attempts).toBe(4);
+    expect(bodyText(mock.mainDoc)).toContain("Edit A.");
+    expect(bodyText(mock.mainDoc)).toContain("Edit B.");
+
+    await binding.destroy();
+    expect(attempts).toBe(4);
+  });
+
+  it("retries failed live repair after backoff without another edit", async () => {
+    vi.useFakeTimers();
+    try {
+      const mock = mockTransport();
+      let attempts = 0;
+      mock.transport.applyLocalUpdate = async (update) => {
+        attempts += 1;
+        if (attempts <= 2) throw new Error("delivery unavailable");
+        Y.applyUpdate(mock.mainDoc, update);
+      };
+      const binding = await bindEngineYDoc(mock.transport);
+
+      typeIntoBody(binding.doc!, "Recovered after backoff.");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attempts).toBe(2);
+      expect(bodyText(mock.mainDoc)).not.toContain("Recovered after backoff.");
+
+      await vi.advanceTimersByTimeAsync(249);
+      expect(attempts).toBe(2);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(attempts).toBe(3);
+      expect(bodyText(mock.mainDoc)).toContain("Recovered after backoff.");
+
+      await binding.destroy();
+      await vi.runAllTimersAsync();
+      expect(attempts).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a scheduled live repair before final teardown recovery", async () => {
+    vi.useFakeTimers();
+    try {
+      const mock = mockTransport();
+      let attempts = 0;
+      mock.transport.applyLocalUpdate = async (update) => {
+        attempts += 1;
+        if (attempts <= 2) throw new Error("delivery unavailable");
+        Y.applyUpdate(mock.mainDoc, update);
+      };
+      const binding = await bindEngineYDoc(mock.transport);
+
+      typeIntoBody(binding.doc!, "Recovered on close.");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attempts).toBe(2);
+
+      await binding.destroy();
+      expect(attempts).toBe(3);
+      expect(bodyText(mock.mainDoc)).toContain("Recovered on close.");
+
+      await vi.runAllTimersAsync();
+      expect(attempts).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("captures the final mirror before close when delivery stays unavailable", async () => {

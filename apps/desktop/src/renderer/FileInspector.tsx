@@ -12,6 +12,7 @@ import {
   lazy,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -62,10 +63,11 @@ import {
   resolveWorkspaceHeadingAnchorTarget,
 } from "../workspaces/workspaceHeadings";
 import {
+  acquireSharedLocalDocument,
   getSharedLocalDocument,
-  localDocumentKey,
   type SharedLocalDocument,
 } from "./sharedLocalDocument";
+import { documentVersionKey } from "./documentVersionKey";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -1099,11 +1101,13 @@ function useAutosavedTextDraft(props: {
       fromFlush?: boolean;
       textSnapshot?: string;
       captureOnFailure?: boolean;
+      releaseUnusedDraft?: boolean;
     } = {},
   ): Promise<void> {
     if (flushBarrier.current && !options.fromFlush) {
       if (options.captureOnFailure && options.textSnapshot !== undefined) {
         captureLatestConflictDraft(options.textSnapshot);
+        if (options.releaseUnusedDraft) props.localBuffer.releaseUnusedDraft();
       }
       return;
     }
@@ -1121,6 +1125,7 @@ function useAutosavedTextDraft(props: {
         }
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
+          if (options.releaseUnusedDraft) props.localBuffer.releaseUnusedDraft();
         }
         return;
       }
@@ -1131,7 +1136,7 @@ function useAutosavedTextDraft(props: {
       unsavedDraft.current = false;
       if (!unmounted.current) setSaveState("saving");
       try {
-        const result = await props.localBuffer.write(
+        const writing = props.localBuffer.write(
           localSource.current,
           (text, expectedContentHash) =>
             bridge().writeWorkspaceText({
@@ -1141,6 +1146,8 @@ function useAutosavedTextDraft(props: {
               expectedContentHash,
             }),
         );
+        if (options.releaseUnusedDraft) props.localBuffer.releaseUnusedDraft();
+        const result = await writing;
         const text = result.body;
         latestDraft.current = props.localBuffer.getSnapshot().body;
         if (result.status === "skipped") {
@@ -1258,6 +1265,7 @@ function useAutosavedTextDraft(props: {
             if (!unsavedDraft.current) return;
             unsavedDraft.current = false;
             captureOrphanedDraft(workspaceId, path, latestDraft.current);
+            props.localBuffer.releaseUnusedDraft();
           });
         }
         return;
@@ -1270,10 +1278,15 @@ function useAutosavedTextDraft(props: {
       if (writesBlocked()) {
         unsavedDraft.current = false;
         captureOrphanedDraft(workspaceId, path, latestDraft.current);
+        props.localBuffer.releaseUnusedDraft();
         return;
       }
       const text = latestDraft.current;
-      void writeDraftNow({ textSnapshot: text, captureOnFailure: true });
+      void writeDraftNow({
+        textSnapshot: text,
+        captureOnFailure: true,
+        releaseUnusedDraft: true,
+      });
     };
     // `disabled` is deliberately NOT a dep: as one it made every flip run this
     // cleanup with the PREVIOUS render's value captured, so turning writes off
@@ -2443,11 +2456,13 @@ function MarkdownView(props: {
       fromFlush?: boolean;
       textSnapshot?: string;
       captureOnFailure?: boolean;
+      releaseUnusedDraft?: boolean;
     } = {},
   ): Promise<void> {
     if (flushBarrier.current && !options.fromFlush) {
       if (options.captureOnFailure && options.textSnapshot !== undefined) {
         captureLatestConflictDraft(options.textSnapshot);
+        if (options.releaseUnusedDraft) props.localBuffer.releaseUnusedDraft();
       }
       return;
     }
@@ -2482,6 +2497,7 @@ function MarkdownView(props: {
         }
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
+          if (options.releaseUnusedDraft) props.localBuffer.releaseUnusedDraft();
         }
         if (!unmounted.current) setSaveState("error");
         return;
@@ -2502,7 +2518,7 @@ function MarkdownView(props: {
       unsavedDraft.current = false;
       if (!unmounted.current) setSaveState("saving");
       try {
-        const result = await props.localBuffer.write(
+        const writing = props.localBuffer.write(
           localSource.current,
           (text, expectedContentHash) =>
             bridge().writeWorkspaceText({
@@ -2512,6 +2528,8 @@ function MarkdownView(props: {
               expectedContentHash,
             }),
         );
+        if (options.releaseUnusedDraft) props.localBuffer.releaseUnusedDraft();
+        const result = await writing;
         const text = result.body;
         latestDraft.current = props.localBuffer.getSnapshot().body;
         if (result.status === "skipped") {
@@ -2755,6 +2773,7 @@ function MarkdownView(props: {
             if (!unsavedDraft.current) return;
             unsavedDraft.current = false;
             captureOrphanedDraft(workspaceId, path, latestDraft.current);
+            props.localBuffer.releaseUnusedDraft();
           });
         }
         return;
@@ -2779,13 +2798,18 @@ function MarkdownView(props: {
       // to observe the refusal. Kept as a backstop, not as covered code.
       if (writesBlocked() || openingRef.current) {
         captureOrphanedDraft(workspaceId, path, text);
+        props.localBuffer.releaseUnusedDraft();
         return;
       }
       // Join the same queue as every mounted save. The hash is read when this
       // task reaches the head, after any in-flight write has advanced it.
       // Capture the text now because the editor is gone before the task runs.
       latestDraft.current = text;
-      void writeDraftNow({ textSnapshot: text, captureOnFailure: true });
+      void writeDraftNow({
+        textSnapshot: text,
+        captureOnFailure: true,
+        releaseUnusedDraft: true,
+      });
     };
   }, [workspaceId, path]);
 
@@ -4014,7 +4038,7 @@ function AffordanceCard(props: {
   );
 }
 
-export function FileInspector(props: {
+type FileInspectorProps = {
   workspaceId: string;
   path: string;
   refreshKey?: number;
@@ -4056,17 +4080,34 @@ export function FileInspector(props: {
   // Editor groups keep inactive inspectors mounted. They pass false so a
   // source textarea mounting there cannot steal focus from the active group.
   autoFocus?: boolean;
-}) {
+};
+
+function useRetainedLocalDocument(key: string): SharedLocalDocument {
+  const [, retry] = useState(0);
+  const buffer = getSharedLocalDocument(key);
+  useLayoutEffect(() => {
+    // React can yield after the render lookup. Acquire and retain again during
+    // commit. If an unmounted writer replaced the entry, retry before paint.
+    const acquired = acquireSharedLocalDocument(key);
+    if (acquired.buffer !== buffer) {
+      acquired.release();
+      retry((revision) => revision + 1);
+      return;
+    }
+    return acquired.release;
+  }, [buffer, key]);
+  return buffer;
+}
+
+export function FileInspector(props: FileInspectorProps) {
+  const key = documentVersionKey(
+    props.workspaceId,
+    props.path,
+    props.engineVersionKey,
+  );
+  const localBuffer = useRetainedLocalDocument(key);
   const kind = classifyForView(props.path);
   const isText = kind === "markdown" || kind === "csv" || kind === "json" || kind === "text";
-  const localBuffer = useMemo(
-    () =>
-      getSharedLocalDocument(
-        localDocumentKey(props.workspaceId, props.path, props.engineVersionKey),
-      ),
-    [props.workspaceId, props.path, props.engineVersionKey],
-  );
-  useEffect(() => localBuffer.retain(), [localBuffer]);
   const localBufferSnapshot = useSyncExternalStore(
     localBuffer.subscribe,
     localBuffer.getSnapshot,
