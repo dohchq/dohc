@@ -1170,6 +1170,76 @@ describe("MarkdownEditor remote carets", () => {
 // content held a ``` line closed its fence early and truncated on
 // re-import (#704).
 describe("MarkdownEditor markdown export: code fence widening (#704)", () => {
+  it("reports an asynchronous image insert after the editor loses focus", async () => {
+    let resolveSettings!: (value: unknown) => void;
+    const settings = new Promise((resolve) => {
+      resolveSettings = resolve;
+    });
+    const writeWorkspaceAsset = vi.fn().mockResolvedValue(undefined);
+    window.dohcDesktop = {
+      getWorkspaceSettings: vi.fn(() => settings),
+      writeWorkspaceAsset,
+    } as never;
+    const onDirty = vi.fn();
+    const file = new File([new Uint8Array([1, 2, 3])], "photo.png", {
+      type: "image/png",
+    });
+    Object.defineProperty(file, "arrayBuffer", {
+      configurable: true,
+      value: async () => new Uint8Array([1, 2, 3]).buffer,
+    });
+
+    try {
+      render(
+        createElement(
+          "div",
+          null,
+          createElement("button", { type: "button" }, "Other pane"),
+          createElement(MarkdownEditor, {
+            value: "# Before\n",
+            onDirty,
+            workspaceId: "workspace-1",
+            path: "notes/shared.md",
+            knownFiles: [],
+          }),
+        ),
+      );
+      const editor = await screen.findByTestId("markdown-editor");
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+      editor.focus();
+      onDirty.mockClear();
+      fireEvent.paste(editor, {
+        clipboardData: {
+          files: [file],
+          getData: () => "",
+          types: ["Files"],
+        },
+      });
+      screen.getByRole("button", { name: "Other pane" }).focus();
+
+      resolveSettings({
+        settings: {
+          files: {
+            attachmentLocation: "per-document",
+            attachmentFolderName: "assets",
+          },
+        },
+      });
+
+      await waitFor(() => expect(writeWorkspaceAsset).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(
+          onDirty.mock.calls.some(([materialize]) =>
+            (materialize as () => string)().includes("assets/photo-"),
+          ),
+        ).toBe(true),
+      );
+      expect(document.activeElement).not.toBe(editor);
+    } finally {
+      delete window.dohcDesktop;
+    }
+  });
+
   it("replaces local Markdown without remounting or reporting a user edit", async () => {
     const ref = createRef<MarkdownEditorHandle>();
     const onDirty = vi.fn();
