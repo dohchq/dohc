@@ -212,6 +212,37 @@ describe("SharedLocalDocument", () => {
     release();
   });
 
+  it("rejects a read that started before a shared write completed", async () => {
+    const buffer = getSharedLocalDocument(
+      documentVersionKey("ws", "write-before-read.txt", 1),
+    );
+    const release = buffer.retain();
+    const source = {};
+    buffer.initializeRead("before", "hash-0", buffer.beginRead());
+    const staleRead = buffer.beginRead();
+    buffer.publishDraft("after", source);
+
+    await buffer.write(source, async () => ({
+      status: "written",
+      contentHash: "hash-1",
+    }));
+
+    expect(
+      buffer.acceptRead("before", "hash-0", {}, false, staleRead),
+    ).toBe(false);
+    expect(buffer.getSnapshot()).toMatchObject({
+      body: "after",
+      contentHash: "hash-1",
+      dirty: false,
+      saveState: "saved",
+    });
+    const freshRead = buffer.beginRead();
+    expect(buffer.acceptRead("fresh", "hash-2", {}, false, freshRead)).toBe(
+      true,
+    );
+    release();
+  });
+
   it("recovers after a writer rejects without poisoning later writes", async () => {
     const buffer = getSharedLocalDocument(
       documentVersionKey("ws", "retry-after-error.txt", 1),

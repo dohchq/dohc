@@ -554,6 +554,39 @@ it("does not reuse a retained lease from another active version", async () => {
   );
 });
 
+it("closes a pending old-version open before opening the replacement version", async () => {
+  const releaseOpen = harness.holdNextOpen();
+  const view = render(<Pair reopenKey={1} />);
+  await waitFor(() =>
+    expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(1),
+  );
+
+  view.rerender(<Pair reopenKey={2} />);
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(1);
+
+  releaseOpen();
+  await waitFor(() => {
+    expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(1);
+    expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("available-first").textContent).toBe("true");
+    expect(screen.getByTestId("available-second").textContent).toBe("true");
+  });
+  expect(
+    harness.api.closeEngineYDocSession.mock.invocationCallOrder[0],
+  ).toBeLessThan(
+    harness.api.openEngineYDocSession.mock.invocationCallOrder[1]!,
+  );
+
+  view.unmount();
+  await waitFor(() =>
+    expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(2),
+  );
+});
+
 it("opens one fresh shared lease for each version or retry key", async () => {
   const view = render(<Pair reopenKey={1} retryKey={0} />);
   await waitForPair();

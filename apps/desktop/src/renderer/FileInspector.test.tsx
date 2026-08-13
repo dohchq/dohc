@@ -52,8 +52,12 @@ import {
   resetSharedLocalDocumentsForTests,
 } from "./sharedLocalDocument";
 import { documentVersionKey } from "./documentVersionKey";
+import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
 
-afterEach(() => resetSharedLocalDocumentsForTests());
+afterEach(async () => {
+  await disposeEngineDocLeasesForTests();
+  resetSharedLocalDocumentsForTests();
+});
 
 // Build legacy app-model path markers through interpolation so this test does
 // not contain the raw deprecated folder or manifest filenames that the
@@ -603,6 +607,9 @@ describe("markdown editor unmount flush", () => {
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "default" as const,
     })),
+    writeWorkspaceAsset: vi.fn<DohcDesktopBridge["writeWorkspaceAsset"]>(
+      async () => undefined,
+    ),
   };
 
   beforeEach(() => {
@@ -617,6 +624,7 @@ describe("markdown editor unmount flush", () => {
       status: "written",
       contentHash: TEST_CONTENT_HASH,
     });
+    bridgeMock.writeWorkspaceAsset.mockReset().mockResolvedValue(undefined);
     vi.stubGlobal("dohcDesktop", bridgeMock);
   });
 
@@ -2497,6 +2505,251 @@ describe("markdown editor unmount flush", () => {
     const written = bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text;
     expect(written).toContain("Body A");
     expect(written).toContain("Source B");
+  });
+
+  it("rebases an asynchronous image insert over a duplicate's pending body", async () => {
+    const path = "shared-wysiwyg-image-handoff.md";
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "# Hello\n\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    type SettingsResult = {
+      settings: typeof DEFAULT_WORKSPACE_SETTINGS;
+      source: "default";
+    };
+    let resolveSettings!: (result: SettingsResult) => void;
+    const settings = new Promise<SettingsResult>((resolve) => {
+      resolveSettings = resolve;
+    });
+    bridgeMock.getWorkspaceSettings.mockImplementationOnce(() => settings);
+    const flushes: DraftFlush[] = [];
+    const user = userEvent.setup();
+    render(
+      <>
+        {[0, 1].map((index) => (
+          <FileInspector
+            key={index}
+            workspaceId="ws-1"
+            path={path}
+            registerDraftFlush={(flush) => {
+              if (flush) flushes[index] = flush;
+            }}
+          />
+        ))}
+      </>,
+    );
+    const editors = await screen.findAllByTestId("markdown-editor");
+    await waitFor(() => expect(flushes).toHaveLength(2));
+    const image = new File([new Uint8Array([1, 2, 3])], "photo.png", {
+      type: "image/png",
+    });
+    Object.defineProperty(image, "arrayBuffer", {
+      configurable: true,
+      value: async () => new Uint8Array([1, 2, 3]).buffer,
+    });
+
+    await user.click(editors[0]!);
+    fireEvent.paste(editors[0]!, {
+      clipboardData: {
+        files: [image],
+        getData: () => "",
+        types: ["Files"],
+      },
+    });
+    await waitFor(() =>
+      expect(bridgeMock.getWorkspaceSettings).toHaveBeenCalledOnce(),
+    );
+    await user.click(editors[1]!);
+    await user.type(editors[1]!, "Pane B");
+
+    resolveSettings({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "default",
+    });
+    await waitFor(() =>
+      expect(bridgeMock.writeWorkspaceAsset).toHaveBeenCalledOnce(),
+    );
+    await act(async () => flushes[0]!());
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    const written = bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text;
+    expect(written).toContain("Pane B");
+    expect(written).toContain("assets/photo-");
+  });
+
+  it("rebases an asynchronous image insert over a duplicate source draft", async () => {
+    const path = "shared-wysiwyg-image-source-handoff.md";
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "# Hello\n\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    type SettingsResult = {
+      settings: typeof DEFAULT_WORKSPACE_SETTINGS;
+      source: "default";
+    };
+    let resolveSettings!: (result: SettingsResult) => void;
+    const settings = new Promise<SettingsResult>((resolve) => {
+      resolveSettings = resolve;
+    });
+    bridgeMock.getWorkspaceSettings.mockImplementationOnce(() => settings);
+    let resolveAsset!: () => void;
+    const assetWrite = new Promise<void>((resolve) => {
+      resolveAsset = resolve;
+    });
+    bridgeMock.writeWorkspaceAsset.mockImplementationOnce(() => assetWrite);
+    const toggles: Array<(() => void) | null> = [null, null];
+    const flushes: DraftFlush[] = [];
+    const user = userEvent.setup();
+    render(
+      <>
+        {[0, 1].map((index) => (
+          <FileInspector
+            key={index}
+            workspaceId="ws-1"
+            path={path}
+            registerSourceToggle={(toggle) => {
+              toggles[index] = toggle;
+            }}
+            registerDraftFlush={(flush) => {
+              if (flush) flushes[index] = flush;
+            }}
+          />
+        ))}
+      </>,
+    );
+    const editors = await screen.findAllByTestId("markdown-editor");
+    await waitFor(() => expect(flushes).toHaveLength(2));
+    const image = new File([new Uint8Array([1, 2, 3])], "photo.png", {
+      type: "image/png",
+    });
+    Object.defineProperty(image, "arrayBuffer", {
+      configurable: true,
+      value: async () => new Uint8Array([1, 2, 3]).buffer,
+    });
+
+    await user.click(editors[0]!);
+    fireEvent.paste(editors[0]!, {
+      clipboardData: {
+        files: [image],
+        getData: () => "",
+        types: ["Files"],
+      },
+    });
+    await waitFor(() =>
+      expect(bridgeMock.getWorkspaceSettings).toHaveBeenCalledOnce(),
+    );
+
+    resolveSettings({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "default",
+    });
+    await waitFor(() =>
+      expect(bridgeMock.writeWorkspaceAsset).toHaveBeenCalledOnce(),
+    );
+
+    await toggleSourceOnce(() => toggles[1]);
+    const sourceEditor = screen
+      .getAllByTestId("markdown-editor")
+      .find(
+        (editor): editor is HTMLTextAreaElement =>
+          editor instanceof HTMLTextAreaElement,
+    );
+    expect(sourceEditor).toBeDefined();
+    const setTextareaValue = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!;
+    setTextareaValue.call(sourceEditor, "# Hello\n\nSource B");
+    sourceEditor!.dispatchEvent(new Event("input", { bubbles: true }));
+    resolveAsset();
+    await act(async () => flushes[0]!());
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    const written = bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text;
+    expect(written).toContain("Source B");
+    expect(written).toContain("assets/photo-");
+  });
+
+  it("keeps an empty pending WYSIWYG body when another pane changes a property", async () => {
+    const path = "shared-wysiwyg-empty-properties.md";
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "# Restore me\n\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const flushes: DraftFlush[] = [];
+    const user = userEvent.setup();
+    render(
+      <>
+        {[0, 1].map((index) => (
+          <FileInspector
+            key={index}
+            workspaceId="ws-1"
+            path={path}
+            registerDraftFlush={(flush) => {
+              if (flush) flushes[index] = flush;
+            }}
+          />
+        ))}
+      </>,
+    );
+    const editors = await screen.findAllByTestId("markdown-editor");
+    await waitFor(() => expect(flushes).toHaveLength(2));
+    await user.click(editors[0]!);
+    await user.keyboard("{Control>}a{/Control}{Backspace}");
+    expect(editors[0]!.textContent).toBe("");
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    await user.click(screen.getAllByTestId("property-add")[1]!);
+    await user.type(screen.getByLabelText("Property 1 name"), "status");
+    await user.type(
+      screen.getAllByLabelText("Property status value")[1]!,
+      "ready",
+    );
+    await act(async () => flushes[1]!());
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    const written = bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text;
+    expect(written).toContain("status: ready");
+    expect(written).not.toContain("Restore me");
+  });
+
+  it("routes the Markdown shortcut only to the active editor group", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "# Hello\n\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    render(
+      <>
+        <FileInspector
+          workspaceId="ws-1"
+          path="shortcut-left.md"
+          autoFocus={false}
+        />
+        <FileInspector
+          workspaceId="ws-1"
+          path="shortcut-right.md"
+          autoFocus
+        />
+      </>,
+    );
+    const toggles = await screen.findAllByTestId("markdown-edit-toggle");
+    expect(toggles.map((toggle) => toggle.textContent)).toEqual([
+      "Source",
+      "Source",
+    ]);
+
+    fireEvent.keyDown(window, { key: "/", ctrlKey: true });
+
+    await waitFor(() =>
+      expect(toggles.map((toggle) => toggle.textContent)).toEqual([
+        "Source",
+        "WYSIWYG",
+      ]),
+    );
   });
 
   it("settles one pane's pending WYSIWYG edit before another pane types", async () => {

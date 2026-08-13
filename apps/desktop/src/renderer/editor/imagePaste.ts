@@ -181,6 +181,9 @@ export type ImagePasteContext = {
   // Absent → the per-document/"assets" default, so callers that never set it
   // (and any failure to read) keep working.
   readAttachments?: () => Promise<AttachmentSettings>;
+  // Reconcile any peer edit that landed while an async picker, read, or asset
+  // write was pending. The insertion then applies to the current document.
+  onBeforeInsert?: () => void;
   // Opens the native `/image` picker (a main-process dialog at the workspace
   // root). Absent → `/image` simply cannot pick; paste and drop are unaffected.
   pickImages?: PickImages;
@@ -331,6 +334,7 @@ export async function placeImageFiles(
       console.warn(`[dohc] could not write image "${filename}":`, error);
       continue;
     }
+    context.onBeforeInsert?.();
     pos = insertImageAtPosition(view, { src: relativeSrc, alt: "" }, pos);
   }
 }

@@ -924,6 +924,166 @@ describe("editor groups", () => {
     expect(screen.getByTestId("tab-a.md")).toBeTruthy();
   });
 
+  it("keeps newer group focus when split creation finishes saving", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    bridge.readWorkspaceText = vi.fn(async () => ({
+      text: "# Doc\n\n",
+      truncated: false as const,
+      contentHash: "a".repeat(64),
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    await user.click(within(right).getByTestId("markdown-edit-toggle"));
+    await user.type(within(right).getByTestId("markdown-editor"), "Draft");
+    await waitFor(() => expect(within(right).getByTestId("tab-dirty")).toBeTruthy());
+
+    await user.click(within(right).getByTestId("create-editor-group-right"));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+    fireEvent.pointerDown(left);
+    await waitFor(() => expect(left.dataset.active).toBe("true"));
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    const split = await screen.findByRole("region", { name: "Editor group 3" });
+    expect(within(split).getByTestId("tab-b.md")).toBeTruthy();
+    expect(left.dataset.active).toBe("true");
+    expect(split.dataset.active).not.toBe("true");
+  });
+
+  it("keeps a newer tab focused when a delayed move creates a group", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
+    );
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    bridge.showWorkbenchMenu.mockResolvedValue("move-tab-to-new-group");
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(screen.getByTestId("markdown-editor"), "Draft");
+    await waitFor(() => expect(screen.getByTestId("tab-dirty")).toBeTruthy());
+
+    fireEvent.contextMenu(screen.getByTestId("tab-a.md"));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+    await user.click(screen.getByTestId("tab-b.md"));
+    expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    const left = await screen.findByRole("region", { name: "Editor group 1" });
+    const right = await screen.findByRole("region", { name: "Editor group 2" });
+    expect(within(right).getByTestId("tab-a.md")).toBeTruthy();
+    expect(within(left).getByTestId("tab-b.md").dataset.active).toBe("true");
+    expect(left.dataset.active).toBe("true");
+  });
+
+  it("keeps a newer destination tab focused when a delayed drag completes", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          {
+            id: "right",
+            tabs: ["b.md", "c.md"],
+            activeTab: "b.md",
+            size: 0.5,
+          },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["a.md", "b.md", "c.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    Object.defineProperty(Element.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    Object.defineProperty(Element.prototype, "hasPointerCapture", {
+      configurable: true,
+      value: vi.fn(() => false),
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), "Draft");
+    await waitFor(() => expect(within(left).getByTestId("tab-dirty")).toBeTruthy());
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: vi.fn(() => right),
+    });
+
+    const source = within(left).getByTestId("tab-a.md");
+    fireEvent.pointerDown(source, {
+      button: 0,
+      pointerId: 7,
+      clientX: 10,
+      clientY: 10,
+    });
+    fireEvent.pointerMove(source, {
+      buttons: 1,
+      pointerId: 7,
+      clientX: 30,
+      clientY: 40,
+    });
+    fireEvent.pointerUp(source, {
+      pointerId: 7,
+      clientX: 30,
+      clientY: 40,
+    });
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+    await user.click(within(right).getByTestId("tab-c.md"));
+    expect(within(right).getByTestId("tab-c.md").dataset.active).toBe("true");
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    await waitFor(() => expect(within(left).queryByTestId("tab-a.md")).toBeNull());
+    expect(within(right).getByTestId("tab-a.md")).toBeTruthy();
+    expect(within(right).getByTestId("tab-c.md").dataset.active).toBe("true");
+    expect(right.dataset.active).toBe("true");
+  });
+
   it("closes an empty editor group from its visible control", async () => {
     renderShell(
       makeBridge(
@@ -3746,6 +3906,27 @@ describe("workspace shell errors", () => {
 // active row used to mark anyway — no remount/measure follows, so the stale
 // mark corrupts the NEXT open's latency measure.
 describe("file-open-start marking", () => {
+  it("marks before a Markdown split mounts another inspector", async () => {
+    const mark = vi.spyOn(rendererMarks, "mark");
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
+    );
+    renderShell(bridge);
+
+    await screen.findByTestId("view-markdown");
+    const openStartCalls = () =>
+      mark.mock.calls.filter(([name]) => name === "file-open-start").length;
+    const before = openStartCalls();
+
+    await userEvent.click(screen.getByTestId("create-editor-group-right"));
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+
+    expect(openStartCalls()).toBe(before + 1);
+    mark.mockRestore();
+  });
+
   it("focuses an already-mounted Open Editors tab without marking a file open", async () => {
     const mark = vi.spyOn(rendererMarks, "mark");
     const bridge = makeBridge(

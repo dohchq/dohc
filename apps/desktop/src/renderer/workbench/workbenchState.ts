@@ -173,6 +173,8 @@ export interface WorkbenchState {
   recentFiles: string[];
 }
 
+type EditorTransitionActivation = "target" | "preserve";
+
 export const SIDEBAR_MIN_WIDTH = 160;
 export const SIDEBAR_MAX_WIDTH = 2400;
 export const SIDEBAR_DEFAULT_WIDTH = 240;
@@ -336,6 +338,12 @@ export function openTab(
   path: string,
   targetGroupId: string = state.activeEditorGroup,
 ): WorkbenchState {
+  if (isChatsTabPath(path)) {
+    const existingGroup = state.editorGroups.find((group) =>
+      group.tabs.some((tab) => tab.path === path),
+    );
+    if (existingGroup) return activateTab(state, existingGroup.id, path);
+  }
   const target = state.editorGroups.find((group) => group.id === targetGroupId)
     ? targetGroupId
     : state.activeEditorGroup;
@@ -417,6 +425,7 @@ export function moveTabToGroup(
   targetGroupId: string,
   path: string,
   toIndex: number,
+  activation: EditorTransitionActivation = "target",
 ): WorkbenchState {
   if (!Number.isInteger(toIndex)) return state;
   const source = state.editorGroups.find((group) => group.id === sourceGroupId);
@@ -439,11 +448,23 @@ export function moveTabToGroup(
       return detached.group;
     }
     if (group.id === targetGroupId) {
-      return { ...group, tabs: targetTabs, activeTab: path };
+      return {
+        ...group,
+        tabs: targetTabs,
+        activeTab:
+          activation === "target" || group.activeTab === null
+            ? path
+            : group.activeTab,
+      };
     }
     return group;
   });
-  return { ...state, editorGroups, activeEditorGroup: targetGroupId };
+  return {
+    ...state,
+    editorGroups,
+    activeEditorGroup:
+      activation === "target" ? targetGroupId : state.activeEditorGroup,
+  };
 }
 
 export function moveTabToNewGroup(
@@ -451,6 +472,7 @@ export function moveTabToNewGroup(
   sourceGroupId: string,
   path: string,
   newGroupId: string,
+  activation: EditorTransitionActivation = "target",
 ): WorkbenchState {
   if (
     newGroupId.length === 0 ||
@@ -465,7 +487,10 @@ export function moveTabToNewGroup(
   // the actual persisted-payload limit.
   const baseGroups = normalizeEditorGroupSizes(
     state.editorGroups.filter(
-      (group) => group.id === sourceGroupId || group.tabs.length > 0,
+      (group) =>
+        group.id === sourceGroupId ||
+        group.tabs.length > 0 ||
+        (activation === "preserve" && group.id === state.activeEditorGroup),
     ),
   );
   const sourceIndex = baseGroups.findIndex(
@@ -483,13 +508,19 @@ export function moveTabToNewGroup(
     { ...detached.group, size: splitSize },
     { id: newGroupId, tabs: [detached.tab], activeTab: path, size: splitSize },
   );
-  return { ...state, editorGroups, activeEditorGroup: newGroupId };
+  return {
+    ...state,
+    editorGroups,
+    activeEditorGroup:
+      activation === "target" ? newGroupId : state.activeEditorGroup,
+  };
 }
 
 export function createEditorGroupRight(
   state: WorkbenchState,
   sourceGroupId: string,
   newGroupId: string,
+  activation: EditorTransitionActivation = "target",
 ): WorkbenchState {
   if (
     newGroupId.length === 0 ||
@@ -498,11 +529,18 @@ export function createEditorGroupRight(
   ) {
     return state;
   }
+  const requestedSource = state.editorGroups.find(
+    (group) => group.id === sourceGroupId,
+  );
+  if (isChatsTabPath(requestedSource?.activeTab ?? null)) return state;
   let base: WorkbenchState = {
     ...state,
     editorGroups: normalizeEditorGroupSizes(
       state.editorGroups.filter(
-        (group) => group.id === sourceGroupId || group.tabs.length > 0,
+        (group) =>
+          group.id === sourceGroupId ||
+          group.tabs.length > 0 ||
+          (activation === "preserve" && group.id === state.activeEditorGroup),
       ),
     ),
   };
@@ -531,7 +569,12 @@ export function createEditorGroupRight(
       size: splitSize,
     },
   );
-  return { ...state, editorGroups, activeEditorGroup: newGroupId };
+  return {
+    ...state,
+    editorGroups,
+    activeEditorGroup:
+      activation === "target" ? newGroupId : state.activeEditorGroup,
+  };
 }
 
 // Resize an adjacent pair. `leftSize` is the left group's normalized size;

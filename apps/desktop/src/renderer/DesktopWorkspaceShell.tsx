@@ -628,6 +628,24 @@ type EditorRegistrationCallbacks = {
   registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
 };
 
+type EditorFocus = {
+  groupId: string;
+  tab: WorkbenchTab | null;
+};
+
+function editorFocus(state: WorkbenchState): EditorFocus {
+  const group = activeGroup(state);
+  return {
+    groupId: group.id,
+    tab: group.tabs.find((tab) => tab.path === group.activeTab) ?? null,
+  };
+}
+
+function hasEditorFocus(state: WorkbenchState, focus: EditorFocus): boolean {
+  const current = editorFocus(state);
+  return current.groupId === focus.groupId && current.tab === focus.tab;
+}
+
 // Engine history diff page (PR 0M-5, flagged workspaces): one MOMENT's
 // before/after through the shared unified-diff rendering, with engine-routed
 // restore. Restore returns the file to its state BEFORE this moment and
@@ -3195,6 +3213,7 @@ export function DesktopWorkspaceShell(props: {
       );
       const tab = sourceGroup?.tabs.find((candidate) => candidate.path === path);
       if (!tab) return;
+      const focus = editorFocus(wbRef.current);
 
       const commitMove = () => {
         const current = wbRef.current;
@@ -3218,6 +3237,7 @@ export function DesktopWorkspaceShell(props: {
             targetGroupId,
             path,
             toIndex,
+            hasEditorFocus(state, focus) ? "target" : "preserve",
           ),
         );
       };
@@ -3506,6 +3526,7 @@ export function DesktopWorkspaceShell(props: {
       if (!group || !tabPath) return;
       const tab = group.tabs.find((candidate) => candidate.path === tabPath);
       if (!tab) return;
+      const focus = editorFocus(current);
       // Mint outside mutateWb: that seam probes the updater before React calls
       // it, so generating inside would produce two IDs for one command.
       const newGroupId = crypto.randomUUID();
@@ -3519,7 +3540,15 @@ export function DesktopWorkspaceShell(props: {
           current.activeEditorGroup,
           newGroupId,
         );
-        mutateWb((state) => moveTabToNewGroup(state, groupId, tabPath, newGroupId));
+        mutateWb((state) =>
+          moveTabToNewGroup(
+            state,
+            groupId,
+            tabPath,
+            newGroupId,
+            hasEditorFocus(state, focus) ? "target" : "preserve",
+          ),
+        );
       };
       commitAfterTabFlush(
         groupId,
@@ -3544,6 +3573,7 @@ export function DesktopWorkspaceShell(props: {
         (candidate) => candidate.path === group.activeTab,
       );
       if (!group || !tab) return;
+      const focus = editorFocus(wbRef.current);
       const newGroupId = crypto.randomUUID();
       const commitSplit = () => {
         const current = wbRef.current;
@@ -3554,11 +3584,22 @@ export function DesktopWorkspaceShell(props: {
           (candidate) => candidate.path === liveGroup.activeTab,
         );
         if (liveTab !== tab) return;
+        const splitState = (state: WorkbenchState) =>
+          createEditorGroupRight(
+            state,
+            groupId,
+            newGroupId,
+            hasEditorFocus(state, focus) ? "target" : "preserve",
+          );
+        if (splitState(current) === current) return;
         invalidateDeferredFileOpenForGroupChange(
           current.activeEditorGroup,
           newGroupId,
         );
-        mutateWb((state) => createEditorGroupRight(state, groupId, newGroupId));
+        if (classifyForView(tab.path) === "markdown") {
+          rendererMarks.mark("file-open-start");
+        }
+        mutateWb(splitState);
       };
       commitAfterTabFlush(
         groupId,

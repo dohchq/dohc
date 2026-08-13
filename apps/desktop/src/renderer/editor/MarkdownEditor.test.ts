@@ -52,6 +52,16 @@ const scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(
   "scrollIntoView",
 );
 
+async function flushAnimationFrames(count = 2): Promise<void> {
+  await act(async () => {
+    for (let frame = 0; frame < count; frame += 1) {
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => resolve());
+      });
+    }
+  });
+}
+
 beforeEach(() => {
   vi.stubGlobal(
     "ResizeObserver",
@@ -1201,7 +1211,7 @@ describe("MarkdownEditor markdown export: code fence widening (#704)", () => {
       }),
     );
     const editor = await screen.findByTestId("markdown-editor");
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    await flushAnimationFrames();
     editor.focus();
     await user.keyboard("{Control>}h{/Control}");
     const find = await screen.findByPlaceholderText("Find");
@@ -1256,7 +1266,7 @@ describe("MarkdownEditor markdown export: code fence widening (#704)", () => {
         ),
       );
       const editor = await screen.findByTestId("markdown-editor");
-      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+      await flushAnimationFrames();
       editor.focus();
       onDirty.mockClear();
       fireEvent.paste(editor, {

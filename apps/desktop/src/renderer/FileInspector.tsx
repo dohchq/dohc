@@ -2633,7 +2633,7 @@ function MarkdownView(props: {
   function onPropertiesDraft(next: string) {
     if (readOnly) return;
     const pending = props.localBuffer.materializePendingDraft();
-    const combined = pending
+    const combined = pending !== null
       ? mergeMarkdownEditorBody(next, markdownEditorBody(pending))
       : next;
     setDraft(combined);
@@ -2674,10 +2674,20 @@ function MarkdownView(props: {
   }
 
   function onLocalEditorFocus() {
-    const owner = props.localBuffer.getPendingDraftSource();
-    if (owner === null || owner === localSource.current) return;
-    const text = props.localBuffer.materializePendingDraft();
-    if (text === null) return;
+    const pendingOwner = props.localBuffer.getPendingDraftSource();
+    if (pendingOwner !== null && pendingOwner !== localSource.current) {
+      props.localBuffer.materializePendingDraft();
+    }
+    const shared = props.localBuffer.getSnapshot();
+    if (
+      !shared.initialized ||
+      shared.source === null ||
+      shared.source === localSource.current ||
+      shared.body === latestDraft.current
+    ) {
+      return;
+    }
+    const text = shared.body;
     latestDraft.current = text;
     setDraft(text);
     wysiwygRef.current?.replaceMarkdown(markdownEditorBody(text));
@@ -2717,6 +2727,7 @@ function MarkdownView(props: {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (!(event.metaKey || event.ctrlKey) || event.key !== "/") return;
+      if (props.autoFocus === false) return;
       event.preventDefault();
       // Engine mode: the same keystroke drives the source-view toggle (the
       // legacy mode cycle is meaningless there — the CRDT editor is the only

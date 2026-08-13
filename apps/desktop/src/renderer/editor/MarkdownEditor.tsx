@@ -483,6 +483,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           folderName: result.settings.files.attachmentFolderName,
         };
       },
+      onBeforeInsert: () => onFocusRef.current?.(),
     });
 
     useEffect(() => {

@@ -297,6 +297,7 @@ type EngineDocSession = {
   getSnapshot: () => EngineDocLeaseSnapshot;
   start: () => void;
   dispose: () => Promise<void>;
+  whenClosed: () => Promise<void>;
 };
 
 type EngineDocLease = Omit<EngineDocSession, "start"> & {
@@ -327,7 +328,8 @@ async function settleEngineDocCleanup(
 }
 
 function trackEngineDocDisposal(lease: EngineDocLease): Promise<void> {
-  const disposal = lease.dispose();
+  void lease.dispose();
+  const disposal = lease.whenClosed();
   const previous = engineDocDisposalBarriers.get(lease.documentKey);
   const barrier = previous
     ? Promise.all([previous, disposal]).then(() => undefined)
@@ -380,6 +382,7 @@ function createEngineDocSession(
   let pendingSavedSeq: number | null = null;
   let lifecycle: Promise<void> = Promise.resolve();
   let disposePromise: Promise<void> | null = null;
+  let closeBarrierPromise: Promise<void> | null = null;
 
   const publish = (
     update: (current: EngineDocLeaseSnapshot) => EngineDocLeaseSnapshot,
@@ -623,9 +626,15 @@ function createEngineDocSession(
       detachSaveObserver?.();
       detachSaveObserver = null;
       const immediateDestroy = binding ? destroyBinding() : null;
+      closeBarrierPromise = immediateDestroy
+        ? immediateDestroy
+        : lifecycle.then(
+            () => undefined,
+            () => undefined,
+          );
       disposePromise = (async () => {
         if (immediateDestroy) {
-          await immediateDestroy;
+          await closeBarrierPromise;
         } else {
           // An open can remain unanswered indefinitely. The lifecycle observes
           // disposed and closes a binding if it eventually arrives; cleanup
@@ -639,6 +648,9 @@ function createEngineDocSession(
         listeners.clear();
       })();
       return disposePromise;
+    },
+    whenClosed() {
+      return closeBarrierPromise ?? Promise.resolve();
     },
   };
   return session;
@@ -667,6 +679,7 @@ function createEngineDocLease(
   let transitionGeneration = 0;
   let transition: Promise<void> = Promise.resolve();
   let disposePromise: Promise<void> | null = null;
+  let closeBarrierPromise: Promise<void> | null = null;
   const initialSession = createEngineDocSession(input, requestKey);
   let activeSession: EngineDocSession | null = null;
   let unsubscribeSession: (() => void) | null = null;
@@ -736,8 +749,10 @@ function createEngineDocLease(
       transition = settleEngineDocCleanup(
         transition.then(async () => {
           await settleEngineDocCleanup(previous?.dispose());
+          await settleEngineDocCleanup(previous?.whenClosed());
           if (disposed || generation !== transitionGeneration) {
             await settleEngineDocCleanup(replacement.dispose());
+            await settleEngineDocCleanup(replacement.whenClosed());
             return;
           }
           attach(replacement);
@@ -763,6 +778,7 @@ function createEngineDocLease(
         settleEngineDocCleanup(barrier).then(async () => {
           if (disposed || generation !== transitionGeneration) {
             await settleEngineDocCleanup(initialSession.dispose());
+            await settleEngineDocCleanup(initialSession.whenClosed());
             return;
           }
           attach(initialSession);
@@ -778,12 +794,21 @@ function createEngineDocLease(
       const current = activeSession;
       activeSession = null;
       const immediateDispose = settleEngineDocCleanup(current?.dispose());
+      const immediateClose = settleEngineDocCleanup(current?.whenClosed());
       disposePromise = (async () => {
         await settleEngineDocCleanup(transition);
         await immediateDispose;
         listeners.clear();
       })();
+      closeBarrierPromise = (async () => {
+        await settleEngineDocCleanup(transition);
+        await immediateDispose;
+        await immediateClose;
+      })();
       return disposePromise;
+    },
+    whenClosed() {
+      return closeBarrierPromise ?? disposePromise ?? Promise.resolve();
     },
   };
   return lease;
@@ -795,12 +820,11 @@ function createEngineDocLease(
 export async function disposeEngineDocLeasesForTests(): Promise<void> {
   const leases = [...new Set(engineDocLeases.values())];
   engineDocLeases.clear();
-  const barriers = [...new Set(engineDocDisposalBarriers.values())];
-  await Promise.all([
-    ...barriers,
-    ...leases.map((lease) => lease.dispose()),
-  ]);
+  // Test bridges can deliberately leave an open request unanswered forever.
+  // Clear its close barrier with the registry; ordinary disposal still marks
+  // the session disposed so a late answer closes instead of binding.
   engineDocDisposalBarriers.clear();
+  await Promise.all(leases.map((lease) => lease.dispose()));
 }
 
 function retainEngineDocLease(

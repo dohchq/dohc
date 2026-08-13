@@ -164,6 +164,101 @@ describe("tabs", () => {
     expect(state.activeEditorGroup).toBe("right");
   });
 
+  it("keeps the current tab focused when a delayed split completes", () => {
+    const original: WorkbenchState = {
+      ...defaultWorkbenchState(),
+      editorGroups: [
+        { id: "left", tabs: [{ path: "a.md" }], activeTab: "a.md", size: 0.5 },
+        { id: "right", tabs: [{ path: "b.md" }], activeTab: "b.md", size: 0.5 },
+      ],
+      activeEditorGroup: "right",
+    };
+
+    const state = createEditorGroupRight(original, "left", "split", "preserve");
+
+    expect(state.editorGroups.map((group) => group.id)).toEqual([
+      "left",
+      "split",
+      "right",
+    ]);
+    expect(state.activeEditorGroup).toBe("right");
+    expect(activeTabPath(state)).toBe("b.md");
+  });
+
+  it("keeps the current tab focused when a delayed move creates a group", () => {
+    const original = withTabs("a.md", "b.md");
+
+    const state = moveTabToNewGroup(
+      original,
+      DEFAULT_EDITOR_GROUP_ID,
+      "a.md",
+      "right",
+      "preserve",
+    );
+
+    expect(state.editorGroups[0].activeTab).toBe("b.md");
+    expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
+    expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual(["a.md"]);
+  });
+
+  it("keeps the destination tab focused when a delayed cross-group move completes", () => {
+    const original: WorkbenchState = {
+      ...defaultWorkbenchState(),
+      editorGroups: [
+        { id: "left", tabs: [{ path: "a.md" }], activeTab: "a.md", size: 0.5 },
+        {
+          id: "right",
+          tabs: [{ path: "b.md" }, { path: "c.md" }],
+          activeTab: "c.md",
+          size: 0.5,
+        },
+      ],
+      activeEditorGroup: "right",
+    };
+
+    const state = moveTabToGroup(
+      original,
+      "left",
+      "right",
+      "a.md",
+      0,
+      "preserve",
+    );
+
+    expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual([
+      "a.md",
+      "b.md",
+      "c.md",
+    ]);
+    expect(state.editorGroups[1].activeTab).toBe("c.md");
+    expect(state.activeEditorGroup).toBe("right");
+  });
+
+  it("keeps Chats in its existing editor group", () => {
+    let state = withTabs(CHATS_TAB_PATH, "a.md");
+    state = moveTabToNewGroup(
+      state,
+      DEFAULT_EDITOR_GROUP_ID,
+      "a.md",
+      "right",
+    );
+
+    state = openTab(state, CHATS_TAB_PATH, "right");
+
+    expect(
+      allTabs(state).filter((tab) => tab.path === CHATS_TAB_PATH),
+    ).toHaveLength(1);
+    expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
+    expect(activeTabPath(state)).toBe(CHATS_TAB_PATH);
+    expect(
+      createEditorGroupRight(
+        state,
+        DEFAULT_EDITOR_GROUP_ID,
+        "split",
+      ),
+    ).toBe(state);
+  });
+
   it("repeated single-tab splits replace the obsolete empty drop target", () => {
     let state = moveTabToNewGroup(
       withTabs("a.md"),

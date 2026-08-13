@@ -249,6 +249,11 @@ export class SharedLocalDocument {
           this.markError();
           return { ...written, body, expectedContentHash };
         }
+        // A read that started before this write still carries the old body and
+        // baseline. Keep it from replacing the just-written snapshot when its
+        // response arrives later; the next read receives a newer ticket.
+        this.latestReadTicket += 1;
+        this.latestAcceptedReadTicket = this.latestReadTicket;
         const newerDraft = this.snapshot.body !== body;
         this.replace(
           { body: this.snapshot.body, contentHash: written.contentHash },
