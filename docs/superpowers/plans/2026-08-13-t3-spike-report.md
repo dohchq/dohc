@@ -1,4 +1,5 @@
 # Spike: can dohc embed t3 code as a plugin?
+> Editorial note (2026-08-13, post-review): the spawn contract below was proven in DEV, where `ELECTRON_RUN_AS_NODE=1` works. Packaged dohc builds fuse `runAsNode` off, so PR3 must launch the t3 server through the plugin host's brokered `utilityProcess` spawn instead of `process.execPath`-as-Node. The readiness, shutdown, redaction, and state contracts apply unchanged. Distribution lockfile is `pnpm-lock.yaml` (via `pnpm import`), not npm's.
 
 Date: 2026-08-13 (Asia/Manila)
 

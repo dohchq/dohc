@@ -122,9 +122,13 @@ Constraints these choices create:
   the device has not approved does not execute: the plugin is held
   disabled until the local user approves the change. While a workspace
   has no sync peers — true for this whole milestone — local edits
-  auto-approve, so solo hot reload stays frictionless. This gate is a
-  hard precondition for shipping plugin sync, not an optional
-  hardening.
+  auto-approve, so solo hot reload stays frictionless — with one
+  exception: writes arriving through the site SDK never auto-approve,
+  and `siteSdkHost` refuses writes under `plugins/` outright (as it
+  already refuses database files and canonical Markdown). Otherwise a
+  sandboxed site could write plugin source and escalate to full-trust
+  execution. This gate is a hard precondition for shipping plugin sync,
+  not an optional hardening.
 
 - The engine's capture floor excludes `node_modules` at any depth. The
   lockfile is therefore what makes a reverted plugin rebuildable. The
@@ -135,10 +139,12 @@ Constraints these choices create:
   cap fix moves into this milestone instead of waiting for versioning
   stage 2.
 - **Attribution is recorded, never required.** Plugin and agent writes
-  through the door get stamped (author, session, gate). Outside edits are
-  captured as anonymous moments. Nothing is ever refused for lacking
-  identity. Do not let any future change make attribution a write
-  precondition. The engine already carries the shape: `MomentAuthor`.
+  through the door get stamped (author, session, gate). Outside edits
+  are still captured — with the workspace's ambient attribution at
+  capture time (anonymous, or a running agent's; see design rule 2).
+  Nothing is ever refused for lacking identity. Do not let any future
+  change make attribution a write precondition.
+  The engine already carries the shape: `MomentAuthor`.
   But the `capture.setAuthor` slot is workspace-ambient — the capture
   driver holds one mutable author sampled at capture time
   (`crates/dohc-workspace-engine/src/lib.rs:3560`), so concurrent plugin
@@ -184,16 +190,27 @@ Spike first, then three stacked PRs, each independently green.
   install + esbuild bundle → hot reload on change. Ships the visible
   reverse paths: disable, re-enable, and uninstall for any installed
   plugin — re-enable is the reverse of auto-disable; uninstall is not.
+  Uninstalling a user-modified plugin warns before it runs that the
+  edited source is deleted and recoverable only file-by-file from
+  history until folder restore ships (versioning stage 2); the engine's
+  moment log retains every byte, so nothing is truly lost, but the
+  visible path back is per-file today.
   (PR1a's host already honors a `disabled` flag and auto-disables a
   plugin that crash-loops, so a broken plugin can never wedge app
   startup.) Packaged installs have no system Node, so dependency
   install runs pnpm's standalone script under a `utilityProcess`, with
   `--ignore-scripts` and `--ignore-workspace` (without the latter, a
   dohc workspace that is itself a pnpm monorepo absorbs the plugin into
-  its own workspace instead of installing from the plugin's lockfile) — lifecycle scripts would need a real `node` and
-  are also npm's main attack surface, so dependencies that require
-  install scripts are unsupported until a shipped-Node decision is made,
-  and the install error says exactly that. Plugin child processes (a
+  its own workspace instead of installing from the plugin's lockfile) —
+  lifecycle scripts would need a real `node` and are also npm's main
+  attack surface, so dependencies that require install scripts are
+  unsupported until a shipped-Node decision is made. `--ignore-scripts`
+  skips silently, so after install the pipeline scans installed
+  packages for declared install/postinstall hooks and fails the plugin
+  build naming each one — an error an author's agent can act on.
+  Plugins distribute `pnpm-lock.yaml` (the lockfile pnpm actually
+  reads); a plugin authored with npm runs `pnpm import` before
+  publishing. Plugin child processes (a
   wrapper's server, like t3's) never spawn `node` themselves; the SDK
   brokers them as host-spawned `utilityProcess` instances. Exercise all
   of this in the fused packaged environment, not only in dev.
