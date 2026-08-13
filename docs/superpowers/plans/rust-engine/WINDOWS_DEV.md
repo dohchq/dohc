@@ -23,9 +23,8 @@ running cargo locally follows these rules.
   start time) whose mtime the owner touches as a heartbeat every minute while
   building. Reclamation is owner-safe, not age-guessed: a slot is reclaimable
   only when its heartbeat is >30 minutes stale AND the owner pid is dead;
-  reclamation renames the slot dir to a tombstone (atomic — a racing owner's
-  next heartbeat fails loudly instead of silently sharing a slot) before
-  deleting it. Denied acquisitions and reclaims are appended to
+  reclamation renames the slot dir to a tombstone (atomic — the slot name is
+  freed in one step and can never be shared) before deleting it. Denied acquisitions and reclaims are appended to
   `C:\w\_locks\events.log`, not to a tracked file — a mid-run write to the
   repo would fail the gate's own tree-provenance row.
 - **A slot is a share of the cores, not just admission.** A slot holder caps

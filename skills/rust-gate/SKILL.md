@@ -23,8 +23,10 @@ gate's evidence line is the only artifact the verifier
 
 ## What the gate does for you
 
-The gate enforces the machine's build budget itself (WINDOWS_DEV.md, "Build
-economics"). You do not set these up:
+On a host with a build-slot root (the shared Windows dev machine), the gate
+enforces the machine's build budget itself (WINDOWS_DEV.md, "Build
+economics"). A host with no slot root, such as a CI runner, runs uncapped.
+You do not set these up:
 
 - It refuses to start below 40 GB free disk. The error names the floor.
 - It takes one of 4 build slots before any cargo runs. If all slots are

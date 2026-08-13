@@ -62,14 +62,22 @@ test("the budget is an even share of the cores across four slots", () => {
     diskFloorGb: 40,
   });
 
-  // A small machine still gets a workable floor rather than jobs=0.
+  // The share is cores/slots with no invented minimum: four cores, one job.
   assert.equal(
     resolveBuildBudget({ DOHC_BUILD_SLOT_ROOT: "X:" }, { cores: 4 }).jobs,
-    2,
+    1,
   );
 
-  // No slot root, no budget: a single-tenant host runs uncapped.
+  // No slot root, no budget: a single-tenant host runs uncapped. An empty
+  // string is "no root", not a root.
   assert.equal(resolveBuildBudget({}, { platform: "linux", cores: 32 }), null);
+  assert.equal(
+    resolveBuildBudget(
+      { DOHC_BUILD_SLOT_ROOT: "" },
+      { platform: "linux", cores: 32 },
+    ),
+    null,
+  );
 });
 
 test("acquire takes a free slot, writes its owner, and release frees it", async () => {
@@ -145,12 +153,22 @@ test("neither staleness nor a dead pid alone reclaims a slot", () => {
     plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 0 });
     // Live owner, stale heartbeat: a wedged-but-alive lane still owns it.
     plantSlot(root, 2, { pid: process.pid, heartbeatAgeMs: 45 * 60_000 });
+    // Unreadable owner, stale: ownership that cannot be read cannot be
+    // proven dead.
+    const corrupt = plantSlot(root, 3, {
+      pid: process.pid,
+      heartbeatAgeMs: 45 * 60_000,
+    });
+    writeFileSync(join(corrupt, "owner.json"), "not json");
+    const then = new Date(Date.now() - 45 * 60_000);
+    utimesSync(join(corrupt, "owner.json"), then, then);
     assert.equal(
-      reclaimStaleSlots({ root, slots: 2, staleMs: 30 * 60_000 }),
+      reclaimStaleSlots({ root, slots: 3, staleMs: 30 * 60_000 }),
       0,
     );
     assert.equal(existsSync(join(root, "build-slot-1")), true);
     assert.equal(existsSync(join(root, "build-slot-2")), true);
+    assert.equal(existsSync(join(root, "build-slot-3")), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -11,13 +11,15 @@
 // A slot is a directory because directory creation is atomic. The owner
 // heartbeats by touching its `owner.json`; reclamation is owner-safe, not
 // age-guessed: a slot is reclaimable only when its heartbeat is stale AND its
-// owner pid is dead, and the reclaim renames the directory to a tombstone
-// first so a racing owner's next heartbeat fails loudly instead of silently
-// sharing the slot. Denials and reclaims are appended to `events.log` beside
-// the slots — not to a tracked file, which a mid-run gate write would turn
-// into a provenance failure.
+// owner pid is provably dead, and the reclaim renames the directory to a
+// tombstone first, so the slot NAME is freed atomically and never shared.
+// Denials and reclaims are appended to `events.log` beside the slots — not to
+// a tracked file, which a mid-run gate write would turn into a provenance
+// failure.
 
 import {
+  appendFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -26,13 +28,10 @@ import {
   statfsSync,
   utimesSync,
   writeFileSync,
-  appendFileSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { availableParallelism, platform } from "node:os";
 import { randomBytes } from "node:crypto";
-
-const HEARTBEAT_MS = 60_000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -46,15 +45,15 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export function resolveBuildBudget(env = process.env, host = {}) {
   const os = host.platform ?? platform();
   const root =
-    env.DOHC_BUILD_SLOT_ROOT ?? (os === "win32" ? "C:\\w\\_locks" : null);
-  if (root === null) return null;
+    env.DOHC_BUILD_SLOT_ROOT || (os === "win32" ? "C:\\w\\_locks" : null);
+  if (!root) return null;
   const slots = 4;
   const cores = host.cores ?? availableParallelism();
-  const floor = Number(env.DOHC_GATE_DISK_FLOOR_GB ?? 40);
+  const floor = Number(env.DOHC_GATE_DISK_FLOOR_GB);
   return {
     root,
     slots,
-    jobs: Math.max(2, Math.floor(cores / slots)),
+    jobs: Math.max(1, Math.floor(cores / slots)),
     diskFloorGb: Number.isFinite(floor) ? floor : 40,
   };
 }
@@ -70,7 +69,6 @@ export function freeDiskGb(path) {
 }
 
 function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
@@ -92,16 +90,16 @@ function slotDir(root, i) {
   return join(root, `build-slot-${i}`);
 }
 
+/** The held slots, as `build-slot-N: pid P since T` lines. */
 function holders(root, slots) {
   const held = [];
   for (let i = 1; i <= slots; i += 1) {
+    const dir = slotDir(root, i);
     try {
-      const owner = JSON.parse(
-        readFileSync(join(slotDir(root, i), "owner.json"), "utf8"),
-      );
+      const owner = JSON.parse(readFileSync(join(dir, "owner.json"), "utf8"));
       held.push(`build-slot-${i}: pid ${owner.pid} since ${owner.start}`);
     } catch {
-      held.push(`build-slot-${i}: owner unreadable`);
+      if (existsSync(dir)) held.push(`build-slot-${i}: owner unreadable`);
     }
   }
   return held.join("; ");
@@ -109,10 +107,11 @@ function holders(root, slots) {
 
 /**
  * Reclaim slots whose heartbeat is more than `staleMs` old AND whose owner
- * pid is dead. Both conditions, because either alone reclaims a live lane: a
- * long single cargo step does not touch the heartbeat file mid-step if the
- * owner process is wedged-but-alive, and a dead pid with a fresh heartbeat is
- * a pid the OS already reused. Returns how many slots were freed.
+ * pid is provably dead. Both conditions, because either alone reclaims a live
+ * lane: a wedged-but-alive owner stops heartbeating, and a dead pid with a
+ * fresh heartbeat is a pid the OS already reused. A slot with no readable
+ * owner is never reclaimed — ownership that cannot be read cannot be proven
+ * dead. Returns how many slots were freed.
  */
 export function reclaimStaleSlots({ root, slots, staleMs }) {
   let reclaimed = 0;
@@ -123,21 +122,16 @@ export function reclaimStaleSlots({ root, slots, staleMs }) {
     try {
       heartbeatAt = statSync(ownerPath).mtimeMs;
     } catch {
-      // No owner.json: a half-created slot. Its directory's own age decides.
-      try {
-        heartbeatAt = statSync(dir).mtimeMs;
-      } catch {
-        continue; // Slot is free.
-      }
+      continue;
     }
     if (Date.now() - heartbeatAt <= staleMs) continue;
-    let pid = null;
+    let pid;
     try {
       pid = JSON.parse(readFileSync(ownerPath, "utf8")).pid;
     } catch {
-      // Unreadable owner + stale heartbeat: nothing left to be safe for.
+      continue;
     }
-    if (pid !== null && pidAlive(pid)) continue;
+    if (!Number.isInteger(pid) || pid <= 0 || pidAlive(pid)) continue;
     const tomb = `${dir}.tomb-${randomBytes(4).toString("hex")}`;
     try {
       renameSync(dir, tomb);
@@ -151,7 +145,7 @@ export function reclaimStaleSlots({ root, slots, staleMs }) {
     }
     logEvent(
       root,
-      `reclaimed build-slot-${i}: pid ${pid ?? "unknown"} dead, heartbeat ` +
+      `reclaimed build-slot-${i}: pid ${pid} dead, heartbeat ` +
         `${Math.round((Date.now() - heartbeatAt) / 60_000)} min stale`,
     );
     reclaimed += 1;
@@ -159,7 +153,7 @@ export function reclaimStaleSlots({ root, slots, staleMs }) {
   return reclaimed;
 }
 
-function claimSlot(dir, heartbeatMs) {
+function claimSlot(dir, name, heartbeatMs) {
   const ownerPath = join(dir, "owner.json");
   writeFileSync(
     ownerPath,
@@ -188,7 +182,17 @@ function claimSlot(dir, heartbeatMs) {
     }
   };
   process.once("exit", release);
-  return { name: basename(dir), dir, release };
+  // Signal death skips 'exit' listeners; release first so an interrupted gate
+  // frees its slot instead of parking it for the 30-minute reclaim window.
+  process.once("SIGINT", () => {
+    release();
+    process.exit(130);
+  });
+  process.once("SIGTERM", () => {
+    release();
+    process.exit(143);
+  });
+  return { name, dir, release };
 }
 
 /**
@@ -198,12 +202,11 @@ function claimSlot(dir, heartbeatMs) {
  */
 export async function acquireBuildSlot({
   root,
-  slots = 4,
+  slots,
   waitMs = 90 * 60_000,
   pollMs = 15_000,
   staleMs = 30 * 60_000,
-  heartbeatMs = HEARTBEAT_MS,
-  log = console,
+  heartbeatMs = 60_000,
 }) {
   mkdirSync(root, { recursive: true });
   const deadline = Date.now() + waitMs;
@@ -213,10 +216,11 @@ export async function acquireBuildSlot({
       const dir = slotDir(root, i);
       try {
         mkdirSync(dir);
-      } catch {
-        continue; // Held.
+      } catch (error) {
+        if (error.code === "EEXIST") continue; // Held.
+        throw error; // EACCES etc. is a fault, not contention.
       }
-      return claimSlot(dir, heartbeatMs);
+      return claimSlot(dir, `build-slot-${i}`, heartbeatMs);
     }
     if (reclaimStaleSlots({ root, slots, staleMs }) > 0) continue;
     if (!denied) {
@@ -228,11 +232,12 @@ export async function acquireBuildSlot({
         `no build slot freed within ${Math.round(waitMs / 60_000)} minutes: ` +
           `the concurrency budget is ${slots} concurrent cargo lanes ` +
           `(WINDOWS_DEV.md build economics) and all ${slots} slots at ${root} ` +
-          `are held — ${holders(root, slots)}. Wait for a lane to finish, or ` +
-          `delete a dead lane's slot directory and rerun.`,
+          `are held — ${holders(root, slots)}. Wait for a lane to finish and ` +
+          `rerun; a dead lane's slot is reclaimed automatically once its ` +
+          `heartbeat is 30 minutes stale.`,
       );
     }
-    log.log?.(`  waiting for a build slot: all ${slots} held — ${holders(root, slots)}`);
+    console.log(`  waiting for a build slot: all ${slots} held — ${holders(root, slots)}`);
     await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())));
   }
 }

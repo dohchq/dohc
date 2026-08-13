@@ -19,11 +19,7 @@
 // row is how the fault-injection tests went unrun for a month. Optional tools
 // may still skip.
 //
-// BUDGET: on the shared dev machine the run holds one of four build slots and
-// caps cargo jobs and test threads to its share (build-slot.mjs, per
-// WINDOWS_DEV.md "Build economics"); concurrent gate runs queue on the slots
-// instead of oversubscribing the machine. The evidence line records the caps
-// it ran under.
+// BUDGET: see the `budget` block below and WINDOWS_DEV.md "Build economics".
 //
 // PROVENANCE: the run reads the tree at every step boundary and stamps the
 // commit into both the summary block and the evidence line. A verdict that
@@ -87,17 +83,19 @@ if (budget) {
   }
 }
 const slot = budget ? await acquireBuildSlot(budget) : null;
-const stepEnv = {
-  ...process.env,
-  CARGO_INCREMENTAL: process.env.CARGO_INCREMENTAL ?? "0",
-  ...(budget
-    ? {
-        CARGO_BUILD_JOBS: process.env.CARGO_BUILD_JOBS ?? String(budget.jobs),
-        RUST_TEST_THREADS:
-          process.env.RUST_TEST_THREADS ?? String(budget.jobs),
-      }
-    : {}),
-};
+// The caps ride process.env so every child sees them — including the
+// native-target probe, which spawns its own cargo. A snapshot handed to
+// spawnSync would REPLACE the child environment and silently drop whatever
+// this file exports after the snapshot; that defect shipped once and made
+// the scratch-leak row vacuous. Jobs and test threads honor an explicitly
+// set value; incremental is always off in the gate — a full-workspace run
+// never reuses incremental caches, it only pays their disk.
+process.env.CARGO_INCREMENTAL = "0";
+if (budget) {
+  process.env.CARGO_BUILD_JOBS ??= String(budget.jobs);
+  process.env.RUST_TEST_THREADS ??= String(budget.jobs);
+}
+const capsField = `jobs ${process.env.CARGO_BUILD_JOBS ?? "default"}, test-threads ${process.env.RUST_TEST_THREADS ?? "default"}`;
 // Hand the tests the absolute root instead of a name they would re-derive.
 // `os.tmpdir()` and Rust's `std::env::temp_dir()` read different variables and
 // agree only by luck: under WSL the inherited TEMP/TMP point at /mnt/c, which
@@ -115,14 +113,15 @@ writeFileSync(join(scratchRunRoot, SCRATCH_SENTINEL), scratchRunId);
 function run(cmd) {
   // shell:true so `cargo`/`cargo.exe` resolve identically under PowerShell,
   // Git Bash, and a Linux/WSL shell. stdio inherited so output streams live.
+  const startedAt = Date.now();
   const res = spawnSync(cmd, {
     cwd: repoRoot,
     shell: true,
     stdio: "inherit",
-    env: stepEnv,
   });
-  if (res.error) return { ok: false, code: null, error: res.error };
-  return { ok: res.status === 0, code: res.status };
+  const durationMs = Date.now() - startedAt;
+  if (res.error) return { ok: false, code: null, error: res.error, durationMs };
+  return { ok: res.status === 0, code: res.status, durationMs };
 }
 
 // The steps' own shell, so the provenance is read exactly where they ran.
@@ -215,9 +214,7 @@ console.log(`host: ${platform()} ${arch()} (${release()})`);
 console.log(`repo: ${repoRoot}`);
 console.log(
   `budget: ${slot ? `${slot.name} of ${budget.slots}` : "uncapped (no slot root; single-tenant host)"}, ` +
-    `jobs ${stepEnv.CARGO_BUILD_JOBS ?? "default"}, ` +
-    `test-threads ${stepEnv.RUST_TEST_THREADS ?? "default"}, ` +
-    `incremental ${stepEnv.CARGO_INCREMENTAL === "0" ? "off" : "on"}`,
+    `${capsField}, incremental off`,
 );
 console.log(`tree at start: ${formatTreeState(readings[0].state)}\n`);
 
@@ -245,9 +242,7 @@ readTreeAfter("native target");
 // runs — and the expensive steps are the ones worth skipping.
 for (const step of native.ok ? required : []) {
   console.log(`\n--- ${step.name} ---`);
-  const startedAt = Date.now();
   const r = run(step.cmd);
-  const durationMs = Date.now() - startedAt;
   // Read as soon as the command returns, before anything else can touch the
   // tree, so the interval this reading closes is the step's own.
   readTreeAfter(step.name);
@@ -262,7 +257,7 @@ for (const step of native.ok ? required : []) {
       name: step.name,
       status: "SKIP",
       reason: `${step.skipReason}; required step skipped → verdict FAIL`,
-      durationMs,
+      durationMs: r.durationMs,
     });
     continue;
   }
@@ -270,7 +265,7 @@ for (const step of native.ok ? required : []) {
   results.push({
     name: step.name,
     status: r.ok ? "PASS" : "FAIL",
-    durationMs,
+    durationMs: r.durationMs,
   });
   if (r.error) console.error(`  (spawn error: ${r.error.message})`);
 }
@@ -287,12 +282,14 @@ for (const step of native.ok ? optional : []) {
     results.push({ name: step.name, status: "SKIP" });
     continue;
   }
-  const startedAt = Date.now();
   const r = run(step.cmd);
-  const durationMs = Date.now() - startedAt;
   readTreeAfter(step.name);
   if (!r.ok) failed = true;
-  results.push({ name: step.name, status: r.ok ? "PASS" : "FAIL", durationMs });
+  results.push({
+    name: step.name,
+    status: r.ok ? "PASS" : "FAIL",
+    durationMs: r.durationMs,
+  });
 }
 
 console.log(`\n--- scratch leak ---`);
@@ -364,7 +361,7 @@ for (const r of results) {
 const verdict = failed ? "FAIL" : "PASS";
 console.log(`\nEVIDENCE (paste into EXECUTION_LOG.md):`);
 console.log(
-  `- ${stamp} | run-rust-checks | ${platform()}/${arch()} (rust cfg ${native.ok ? native.cfg : "UNVERIFIED"}, jobs ${stepEnv.CARGO_BUILD_JOBS ?? "default"}, test-threads ${stepEnv.RUST_TEST_THREADS ?? "default"}, head ${treeStamp}) | ${verdict} | ${summary}`,
+  `- ${stamp} | run-rust-checks | ${platform()}/${arch()} (rust cfg ${native.ok ? native.cfg : "UNVERIFIED"}, ${capsField}, head ${treeStamp}) | ${verdict} | ${summary}`,
 );
 
 process.exit(failed ? 1 : 0);
