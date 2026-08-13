@@ -56,3 +56,16 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 # Strict-but-ergonomic clippy posture; the runner escalates these to errors.
 all = { level = "warn", priority = -1 }
+
+# Build economics for the gate and every dev build. Stock `debug = 2` made
+# MSVC debuginfo dominate link time and target-dir size across the workspace's
+# ~100 linked targets. Members keep line tables so test backtraces still name
+# source lines; dependencies carry none — nothing steps through tokio here.
+# (Incremental compilation stays on for the dev loop; the gate turns it off
+# per run via CARGO_INCREMENTAL=0 in run-rust-checks.mjs.)
+[profile.dev]
+debug = "line-tables-only"
+
+# The "*" spec matches dependencies only, never workspace members.
+[profile.dev.package."*"]
+debug = false

@@ -1,8 +1,54 @@
 # @dohc/sdk
 
-The default `dohc` export assumes a browser preview context with a dohc host
-window. In SSR or Node.js, import `createDohcClient` and provide an explicit
-transport instead.
+The default `dohc` export uses a browser preview context with a dohc host
+window.
+
+## Node plugin runtime
+
+The `@dohc/sdk/node` entry provides the process transport and plugin authoring
+types.
+
+The trusted plugin host uses the process transport:
+
+```ts
+import {
+  createDohcClient,
+  createProcessTransport,
+} from "@dohc/sdk/node";
+
+const transport = createProcessTransport();
+const client = createDohcClient({ transport });
+```
+
+A plugin entry module default-exports its lifecycle handler:
+
+```ts
+import type {
+  PluginActivateContext,
+  PluginHandler,
+} from "@dohc/sdk/node";
+
+const activate = (ctx: PluginActivateContext) => {
+  ctx.commands.register("example.run", () => ctx.client.capabilities());
+};
+
+const handler: PluginHandler = {
+  activate,
+  deactivate() {
+    // Release plugin resources here.
+  },
+};
+
+export default handler;
+```
+
+The type-only import adds no runtime dependency on `@dohc/sdk`.
+
+This contract never requires the plugin and host to share a loaded SDK module
+instance, so it remains safe when the plugin carries its own dependencies.
+
+`createProcessTransport()` detects an Electron utility-process message channel
+or plain stdio. Plugin authors do not select the binding.
 
 Sites can use the typed APIs for common dohc operations:
 

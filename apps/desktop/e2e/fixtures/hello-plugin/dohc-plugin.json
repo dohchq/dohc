@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "hello-plugin",
+  "displayName": "Hello Plugin",
+  "entry": "plugin.mjs",
+  "panels": [{ "id": "main", "title": "Hello", "entry": "panel/index.html" }],
+  "commands": [{ "id": "hello.write", "title": "Write hello note" }]
+}

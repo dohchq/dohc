@@ -111,7 +111,7 @@ The evidence line records a platform, so the gate verifies it. Its first step
 runs
 
 ```sh
-cargo rustc -p dohc-engine-protocol --lib --profile check -- --print cfg
+cargo rustc --locked -p dohc-engine-protocol --lib --profile check -- --print cfg
 ```
 
 and compares the reported `target_arch`/`target_os` against the host Node

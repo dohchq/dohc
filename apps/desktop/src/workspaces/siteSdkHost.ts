@@ -52,7 +52,7 @@ export type SiteSdkSearchStarter = typeof startRipgrepSearch;
 const MAX_LIST_RESULTS = 10_000;
 const MAX_SEARCH_RESULTS = 2_000;
 
-function record(value: unknown, label = "parameters"): RecordValue {
+export function record(value: unknown, label = "parameters"): RecordValue {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -100,6 +100,23 @@ function isAtOrBelow(path: string, root: string): boolean {
   return root === "." || path === root || path.startsWith(`${root}/`);
 }
 
+export function assertRawTextWritable(path: string): void {
+  // SQLite files are canonical structured artifacts. Replacing their raw
+  // bytes/text would bypass the operation log, transactions, provenance,
+  // and collaboration convergence used by databases.edit.
+  if (isDatabaseFile(path) || isDatabaseSidecar(path)) {
+    throw new Error(
+      "files.write cannot overwrite database files. Use databases.edit so structured transactions, history, and collaboration are preserved.",
+    );
+  }
+  // Live documents are projected from canonical Y.Doc state. This host does
+  // not own the session or review context for a canonical transaction.
+  if (liveDocumentKindForPath(path) !== null) {
+    throw new Error(
+      "files.write cannot overwrite live documents. Use a dohc document editing capability so locks, history, and collaboration are preserved.",
+    );
+  }
+}
 function capabilities(context: SiteSdkHostContext) {
   const canWrite = context.writable && !normalizeScopeRoot(context.scopeRoot);
   return {
@@ -278,23 +295,7 @@ export async function invokeSiteSdkHost(
       }
       const input = record(params);
       const path = siteSdkWorkspacePath(null, input.path, "write");
-      // SQLite files are canonical structured artifacts. Replacing their raw
-      // bytes/text would bypass the operation log, transactions, provenance,
-      // and collaboration convergence used by databases.edit.
-      if (isDatabaseFile(path) || isDatabaseSidecar(path)) {
-        throw new Error(
-          "files.write cannot overwrite database files. Use databases.edit so structured transactions, history, and collaboration are preserved.",
-        );
-      }
-      // A live document is projected from its canonical Y.Doc. This host does
-      // not own the session or review context for a canonical transaction.
-      // Keep ordinary source writes useful while the SDK lacks a live-document
-      // editing capability.
-      if (liveDocumentKindForPath(path) !== null) {
-        throw new Error(
-          "files.write cannot overwrite live documents. Use a dohc document editing capability so locks, history, and collaboration are preserved.",
-        );
-      }
+      assertRawTextWritable(path);
       const body = typeof input.text === "string" ? input.text : null;
       if (body === null) throw new Error("files.write text must be a string.");
       if (input.overwrite === false) {

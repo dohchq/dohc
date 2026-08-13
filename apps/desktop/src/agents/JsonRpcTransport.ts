@@ -41,6 +41,13 @@ export interface JsonRpcTransportOptions {
   args: string[];
   cwd: string;
   env?: Record<string, string | undefined>;
+  /**
+   * POSIX only. Spawns the child as the leader of a new process group so
+   * dispose() can signal the whole group, not just the direct child. Ignored
+   * on win32 (killChildTreeWin32 already handles the whole tree there).
+   * Defaults to false, preserving existing behavior for every current caller.
+   */
+  detached?: boolean;
   label?: string;
   onNotification?: (method: string, params: unknown) => void;
   onRequest?: (method: string, params: unknown) => Promise<unknown> | unknown;
@@ -107,6 +114,7 @@ export class JsonRpcTransport {
     const child = spawn(resolved.command, resolved.args, {
       cwd: options.cwd,
       env,
+      detached: options.detached === true,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       windowsVerbatimArguments: resolved.windowsVerbatimArguments,
@@ -142,14 +150,32 @@ export class JsonRpcTransport {
     // as its cwd, keeping that directory locked on Windows.
     await killChildTreeWin32(this.child);
     if (this.child.exitCode !== null || this.child.signalCode !== null) return;
-    this.child.kill("SIGTERM");
+    const groupId =
+      this.options.detached === true && process.platform !== "win32"
+        ? this.child.pid
+        : undefined;
+    // A descendant that calls its own detach (setsid) leaves its own process
+    // group and escapes this POSIX group-kill; Windows tree-kill above still
+    // reaches it. This is the documented full-trust limit, not a bug — a
+    // wrapper plugin that spawns a long-lived server (e.g. t3 code) must
+    // recover orphans itself on the next launch. See the plan doc's
+    // "wrapper-plugin" pattern.
+    const signal = (name: NodeJS.Signals): void => {
+      try {
+        if (groupId !== undefined) process.kill(-groupId, name);
+        else this.child.kill(name);
+      } catch {
+        // The process or its group may already be gone.
+      }
+    };
+    signal("SIGTERM");
     // The escalation timer self-guards on exit state and is unref'd, so it
     // never needs cancelling — clearing it could skip the SIGKILL in the
     // exotic case where "error" resolves the exit promise while the child
     // still lives.
     const forceKill = setTimeout(() => {
       if (this.child.exitCode === null && this.child.signalCode === null) {
-        this.child.kill("SIGKILL");
+        signal("SIGKILL");
       }
     }, 2000);
     forceKill.unref();
