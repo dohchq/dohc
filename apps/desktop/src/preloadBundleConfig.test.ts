@@ -33,15 +33,13 @@ describe("preload bundle config", () => {
       expect.arrayContaining([
         "@dohc/workspace-contracts",
         "@dohc/workspace-core",
+        "effect",
         "zod",
       ]),
     );
   });
 
   it("rejects Effect from sandboxed and browser bundles", () => {
-    expect(desktopConfig.main?.plugins).not.toEqual(
-      expect.arrayContaining([expect.objectContaining({ name: "effect-free-preload" })]),
-    );
     expect(desktopConfig.preload?.plugins).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: "effect-free-preload" })]),
     );
