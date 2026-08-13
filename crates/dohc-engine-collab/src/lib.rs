@@ -58,7 +58,7 @@ pub use scene::{
 };
 pub use scene_lifecycle::{
     freeze_scene_asset_delete_authority_in_tx, read_scene_asset_delete_authority,
-    scene_asset_delete_moment_id, SceneAssetDeleteAuthority,
+    scene_asset_delete_moment_id, SceneAssetDeleteAuthority, SceneDeleteReplicationCoordinate,
 };
 pub use ydoc::{
     merge_updates, ContentKind, OffsetMode, Projection, Ydoc, ROOT_BODY, ROOT_FRONTMATTER,

@@ -10912,6 +10912,7 @@ fn delete_owned_scene_assets_in_tx(
         tx,
         &key,
         &drawing_delete.moment.moment_id,
+        None,
     )?;
     let mut jobs = Vec::new();
     for candidate in candidates {
@@ -10984,13 +10985,19 @@ fn scene_asset_restore_moment_id(
     )
 }
 
+struct SceneAssetDeleteState {
+    authority: dohc_engine_collab::SceneAssetDeleteAuthority,
+    recorded_at_ms: i64,
+    arrived: bool,
+}
+
 fn scene_asset_delete_moments(
     conn: &rusqlite::Connection,
     workspace_id: &str,
     version_id: &str,
     drawing_delete_moment_id: &str,
     drawing_object_id: &str,
-) -> Result<Vec<(String, String, String, i64)>, DomainError> {
+) -> Result<Vec<SceneAssetDeleteState>, DomainError> {
     let key = DocKey::new(workspace_id, version_id, drawing_object_id)
         .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
     let authorities =
@@ -11014,13 +11021,42 @@ fn scene_asset_delete_moments(
                 ],
                 |row| row.get(0),
             )
+            .optional()
             .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
-        moments.push((
-            authority.asset_delete_moment_id,
-            authority.path,
-            authority.sha256,
-            recorded_at_ms,
-        ));
+        if recorded_at_ms.is_none() {
+            let collides: bool = conn
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM moments WHERE workspace_id=?1 \
+                     AND moment_id=?2)",
+                    params![workspace_id, authority.asset_delete_moment_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+            if collides {
+                return Err(DomainError::StateCorrupt {
+                    reason: "scene asset delete moment id belongs to different history",
+                });
+            }
+        }
+        let parent_recorded_at_ms = conn
+            .query_row(
+                "SELECT drawing_delete_recorded_at_ms FROM scene_asset_delete_authorities \
+                 WHERE workspace_id=?1 AND version_id=?2 AND drawing_delete_moment_id=?3 \
+                   AND drawing_object_id=?4",
+                params![
+                    workspace_id,
+                    version_id,
+                    drawing_delete_moment_id,
+                    drawing_object_id
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+        moments.push(SceneAssetDeleteState {
+            authority,
+            recorded_at_ms: recorded_at_ms.unwrap_or(parent_recorded_at_ms),
+            arrived: recorded_at_ms.is_some(),
+        });
     }
     Ok(moments)
 }
@@ -11064,7 +11100,14 @@ fn scene_asset_delete_jobs_in_tx(
         &drawing_delete.object.object_id,
     )?;
     let mut jobs = Vec::with_capacity(moments.len());
-    for (moment_id, path, sha256, recorded_at_ms) in moments {
+    for state in moments {
+        if !state.arrived {
+            continue;
+        }
+        let moment_id = state.authority.asset_delete_moment_id;
+        let path = state.authority.path;
+        let sha256 = state.authority.sha256;
+        let recorded_at_ms = state.recorded_at_ms;
         let job_id = binary_delete_job_id(&moment_id);
         let exists: bool = tx
             .query_row(
@@ -11522,17 +11565,38 @@ fn restore_deleted_scene_assets_in_tx(
         drawing_object_id,
     )?;
     let mut jobs = Vec::with_capacity(deleted_assets.len());
-    for (delete_moment_id, path, sha256, recorded_at_ms) in deleted_assets {
-        let occupied: bool = tx
+    let mut missing_delete_moments = false;
+    for state in deleted_assets {
+        let delete_moment_id = state.authority.asset_delete_moment_id;
+        let path = state.authority.path;
+        let sha256 = state.authority.sha256;
+        let recorded_at_ms = state.recorded_at_ms;
+        let occupant: Option<(String, String, String)> = tx
             .query_row(
-                "SELECT EXISTS (SELECT 1 FROM path_aliases \
-                 WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3)",
+                "SELECT s.object_id,s.binary_sha256,s.latest_moment_id FROM path_aliases a \
+                 JOIN snapshots s ON s.workspace_id=a.workspace_id \
+                   AND s.version_id=a.version_id AND s.object_id=a.object_id \
+                 WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3 \
+                   AND s.content_kind='binary'",
                 params![workspace_id, version_id, path],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
+            .optional()
             .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
-        if occupied {
-            return Err(DomainError::TargetPathExists);
+        if state.arrived {
+            if occupant.is_some() {
+                return Err(DomainError::TargetPathExists);
+            }
+        } else if occupant.as_ref()
+            != Some(&(
+                state.authority.object_id.clone(),
+                sha256.clone(),
+                state.authority.before_moment_id.clone(),
+            ))
+        {
+            return Err(DomainError::StateCorrupt {
+                reason: "pending scene asset delete no longer matches frozen authority",
+            });
         }
         let identity = scene_asset_restore_identity(
             workspace_id,
@@ -11592,14 +11656,44 @@ fn restore_deleted_scene_assets_in_tx(
         if materializes {
             jobs.push(restore_moment_id);
         }
+        missing_delete_moments |= !state.arrived;
     }
-    consume_scene_asset_delete_authority_in_tx(
-        tx,
-        workspace_id,
-        version_id,
-        drawing_delete_moment_id,
-        drawing_object_id,
-    )?;
+    if missing_delete_moments {
+        let updated = tx
+            .execute(
+                "UPDATE scene_asset_delete_authorities SET rollback_moment_id=?1 \
+             WHERE workspace_id=?2 AND version_id=?3 AND drawing_delete_moment_id=?4 \
+               AND drawing_object_id=?5 AND rollback_moment_id IS NULL",
+                params![
+                    drawing_rollback_moment_id,
+                    workspace_id,
+                    version_id,
+                    drawing_delete_moment_id,
+                    drawing_object_id
+                ],
+            )
+            .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
+        if updated != 1 {
+            return Err(DomainError::StateCorrupt {
+                reason: "scene asset delete authority was not marked rolled back exactly once",
+            });
+        }
+        tx.execute(
+            "DELETE FROM scene_asset_delete_authority_items WHERE workspace_id=?1 \
+             AND version_id=?2 AND drawing_delete_moment_id=?3 \
+             AND asset_delete_moment_id IN (SELECT moment_id FROM moments WHERE workspace_id=?1)",
+            params![workspace_id, version_id, drawing_delete_moment_id],
+        )
+        .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
+    } else {
+        consume_scene_asset_delete_authority_in_tx(
+            tx,
+            workspace_id,
+            version_id,
+            drawing_delete_moment_id,
+            drawing_object_id,
+        )?;
+    }
     Ok(jobs)
 }
 
@@ -11668,9 +11762,8 @@ fn restored_scene_asset_jobs_on_store(
     store.read_with(|conn| {
         let mut statement = conn
             .prepare(
-                "SELECT moment_id,object_id,path,after_binary_sha256 FROM moments WHERE workspace_id=?1 \
-                 AND version_id=?2 AND object_id LIKE 'scene-asset-rollback-object-%' \
-                 AND operation='write' AND after_content_kind='binary' \
+                "SELECT moment_id,path,after_binary_sha256 FROM moments WHERE workspace_id=?1 \
+                 AND version_id=?2 AND operation='write' AND after_content_kind='binary' \
                  AND metadata_origin='ydoc' AND metadata_correlation_id=?3 ORDER BY path",
             )
             .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
@@ -11682,7 +11775,6 @@ fn restored_scene_asset_jobs_on_store(
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
                     ))
                 },
             )
@@ -11691,7 +11783,7 @@ fn restored_scene_asset_jobs_on_store(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
         let mut jobs = Vec::with_capacity(restores.len());
-        for (actual_restore_moment_id, actual_restore_object_id, path, sha256) in restores {
+        for (actual_restore_moment_id, path, sha256) in restores {
             let delete_moment_id = dohc_engine_collab::scene_asset_delete_moment_id(
                 workspace_id,
                 version_id,
@@ -11704,19 +11796,7 @@ fn restored_scene_asset_jobs_on_store(
                 rollback_moment_id,
                 &delete_moment_id,
             );
-            let identity = scene_asset_restore_identity(
-                workspace_id,
-                version_id,
-                rollback_moment_id,
-                &delete_moment_id,
-            );
-            let restore_object_id = format!(
-                "scene-asset-rollback-object-{}",
-                hex_sha256(format!("{identity}\0{path}").as_bytes())
-            );
-            if actual_restore_moment_id != restore_moment_id
-                || actual_restore_object_id != restore_object_id
-            {
+            if actual_restore_moment_id != restore_moment_id {
                 continue;
             }
             let exists: bool = conn

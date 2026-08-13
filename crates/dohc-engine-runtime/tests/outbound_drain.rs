@@ -17,8 +17,8 @@ use dohc_engine_runtime::{
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_sync::{
-    ApplyOutcome, MAX_PAYLOAD_JSON_BYTES, ReplicationEnvelope, apply_moment_envelope_detailed,
-    apply_secret_envelope, apply_version_envelope,
+    ApplyOutcome, MAX_PAYLOAD_JSON_BYTES, ReplicationEnvelope, SyncError,
+    apply_moment_envelope_detailed, apply_secret_envelope, apply_version_envelope,
 };
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 use rusqlite::params;
@@ -1969,7 +1969,7 @@ async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
 }
 
 #[tokio::test]
-async fn replicated_scene_delete_carries_its_owned_asset_delete_to_a_clean_peer() {
+async fn rollback_before_replicated_scene_asset_delete_keeps_the_restored_asset() {
     let source = ScratchDir::new().expect("source scratch");
     let source_db = source.engine_db_path().expect("source db");
     let workspace_id = "ws-scene-delete-replicates";
@@ -2136,10 +2136,8 @@ async fn replicated_scene_delete_carries_its_owned_asset_delete_to_a_clean_peer(
         &sha256,
         7,
     );
-    for op in &ops[2..] {
-        copy_op_blobs(&source_store, &mut peer_store, op);
-        apply_logged_op(&mut peer_store, workspace_id, op);
-    }
+    copy_op_blobs(&source_store, &mut peer_store, &ops[2]);
+    apply_logged_op(&mut peer_store, workspace_id, &ops[2]);
     let remaining: i64 = peer_store
         .read_with(|conn| {
             conn.query_row(
@@ -2149,18 +2147,7 @@ async fn replicated_scene_delete_carries_its_owned_asset_delete_to_a_clean_peer(
             )
         })
         .expect("count peer snapshots");
-    assert_eq!(remaining, 0, "peer retained the drawing or its owned asset");
-    let replicated_delete_origin: String = peer_store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT metadata_origin FROM moments WHERE workspace_id = ?1 AND path = ?2 \
-                 AND operation = 'delete'",
-                params![workspace_id, asset_path],
-                |row| row.get(0),
-            )
-        })
-        .expect("read replicated asset delete origin");
-    assert_eq!(replicated_delete_origin, "local-file");
+    assert_eq!(remaining, 1, "the asset delete has not arrived yet");
     drop(peer_store);
 
     let deleted_image_revision = import_portable_scene(
@@ -2309,6 +2296,45 @@ async fn replicated_scene_delete_carries_its_owned_asset_delete_to_a_clean_peer(
         .close(&peer_db)
         .expect("close restarted peer actor");
 
+    let mut peer_store = EngineStore::open(&peer_db, 10).expect("open peer for late asset delete");
+    copy_op_blobs(&source_store, &mut peer_store, &ops[3]);
+    let mut forged_late_delete = ops[3].envelope(workspace_id);
+    forged_late_delete.payload["objectId"] = serde_json::json!("forged-asset-object");
+    assert!(matches!(
+        apply_moment_envelope_detailed(&mut peer_store, &forged_late_delete, &NoFaults),
+        Err(SyncError::CoordinateDiverged)
+    ));
+    let pending_receipt: i64 = peer_store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM scene_asset_delete_authority_items \
+                 WHERE workspace_id=?1 AND asset_delete_moment_id=?2",
+                params![
+                    workspace_id,
+                    ops[3].payload["momentId"].as_str().expect("child id")
+                ],
+                |row| row.get(0),
+            )
+        })
+        .expect("count receipt after forged late delete");
+    assert_eq!(pending_receipt, 1);
+    apply_logged_op(&mut peer_store, workspace_id, &ops[3]);
+    let replicated_delete: (String, i64) = peer_store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT metadata_origin,sync_record_only FROM moments WHERE workspace_id = ?1 \
+                 AND moment_id=?2",
+                params![
+                    workspace_id,
+                    ops[3].payload["momentId"].as_str().expect("child id")
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("read late replicated asset delete");
+    assert_eq!(replicated_delete, ("local-file".to_owned(), 1));
+    drop(peer_store);
+
     let peer_restore_ops = local_ops(&peer_db)
         .into_iter()
         .skip(peer_ops_before_rollback)
@@ -2343,7 +2369,7 @@ async fn replicated_scene_delete_carries_its_owned_asset_delete_to_a_clean_peer(
         std::fs::read(peer.path().join(&forged_path)).expect("forged delete stays pending"),
         forged_bytes
     );
-    let mut peer_store = EngineStore::open(&peer_db, 10).expect("inspect restored peer");
+    let mut peer_store = EngineStore::open(&peer_db, 11).expect("inspect restored peer");
     let retained_authority: i64 = peer_store
         .read_with(|conn| {
             conn.query_row(
