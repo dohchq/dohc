@@ -3522,7 +3522,13 @@ function DrawingView({
   });
   const blankFile = !engineMode && editor.getDraft().trim() === "";
   const [assetRefused, setAssetRefused] = useState(false);
-  useEffect(() => setAssetRefused(false), [path, engine.doc]);
+  const [assetHydrationFailures, setAssetHydrationFailures] = useState(0);
+  const [assetHydrationAttempt, setAssetHydrationAttempt] = useState(0);
+  useEffect(() => {
+    setAssetRefused(false);
+    setAssetHydrationFailures(0);
+    setAssetHydrationAttempt(0);
+  }, [path, engine.doc]);
   useEffect(() => {
     if (!blankFile || readOnly || truncated || engine.opening) return;
     editor.setDraft(EMPTY_EXCALIDRAW_DOCUMENT);
@@ -3636,6 +3642,10 @@ function DrawingView({
     if (!hydrationSession) return undefined;
     return async () => {
       const files: BinaryFileData[] = [];
+      let failures = 0;
+      if (activeHydrationSession.current === hydrationSession) {
+        setAssetHydrationFailures(0);
+      }
       for (const descriptor of hydrationSession.descriptors) {
         if (activeHydrationSession.current !== hydrationSession) return [];
         try {
@@ -3645,11 +3655,14 @@ function DrawingView({
           if (file) files.push(file);
         } catch {
           // One missing asset cannot stop the drawing or its other assets.
+          failures += 1;
         }
       }
-      return activeHydrationSession.current === hydrationSession ? files : [];
+      if (activeHydrationSession.current !== hydrationSession) return [];
+      setAssetHydrationFailures(failures);
+      return files;
     };
-  }, [hydrationSession]);
+  }, [assetHydrationAttempt, hydrationSession]);
   const drawingChipState =
     engineMode && engine.saveState === "deleted"
       ? "deleted"
@@ -3708,6 +3721,24 @@ function DrawingView({
         >
           This image was not added. Collaborative drawings cannot add images
           yet.
+        </div>
+      ) : null}
+      {assetHydrationFailures > 0 ? (
+        <div
+          className="flex items-center justify-between gap-3 border-b border-line bg-panel-2 px-4 py-2 text-xs text-warning"
+          data-testid="drawing-asset-hydration-error"
+        >
+          <span>
+            dohc could not load {assetHydrationFailures}{" "}
+            {assetHydrationFailures === 1 ? "image" : "images"}.
+          </span>
+          <button
+            type="button"
+            className="shrink-0 text-text underline underline-offset-2"
+            onClick={() => setAssetHydrationAttempt((attempt) => attempt + 1)}
+          >
+            Try again
+          </button>
         </div>
       ) : null}
       {engine.opening ? (
