@@ -252,7 +252,7 @@ function makeMockView(docSize = 8, coordsPos: number | null = 5) {
       doc: { content: { size: docSize } },
       tr: {
         insert(pos: number, node: MockNode) {
-          return { pos, node };
+          return { pos, node, docChanged: true };
         },
       },
     },
@@ -284,6 +284,56 @@ describe("insertImageAtPosition", () => {
     const { view, dispatched } = makeMockView(8);
     insertImageAtPosition(view as never, { src: "x", alt: "" }, 999);
     expect(dispatched[0]!.pos).toBe(8);
+  });
+
+  it("does not advance when the schema rejects the image", () => {
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: {
+          content: "inline*",
+          group: "block",
+          attrs: { kind: {} },
+        },
+        plain: { content: "text*", group: "block" },
+        code_block: { content: "text*", group: "block", code: true },
+        text: { group: "inline" },
+        image: {
+          inline: true,
+          group: "inline",
+          atom: true,
+          attrs: { src: {}, alt: { default: "" } },
+        },
+      },
+    });
+    let state = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [
+        schema.node("code_block", null, schema.text("x")),
+        schema.node("plain", null, schema.text("After")),
+      ]),
+    });
+    const dispatch = vi.fn(
+      (transaction: Parameters<typeof state.apply>[0]) => {
+        state = state.apply(transaction);
+      },
+    );
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch,
+    };
+
+    const next = insertImageAtPosition(
+      view as never,
+      { src: "assets/pic.png", alt: "" },
+      2,
+    );
+
+    expect(next).toBe(2);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(state.doc.child(1).textContent).toBe("After");
   });
 });
 
@@ -331,8 +381,7 @@ describe("placeImageFiles", () => {
       {
         workspaceId: "ws1",
         docPath: "notes/plan.md",
-        writeAsset: async () => undefined,
-        onBeforeInsert() {
+        writeAsset: async () => {
           state = EditorState.create({
             schema,
             doc: schema.node("doc", null, [
@@ -349,6 +398,86 @@ describe("placeImageFiles", () => {
     const target = state.doc.child(1);
     expect(target.textContent).toBe("Target");
     expect(target.lastChild?.type.name).toBe("image");
+  });
+
+  it("keeps a rejected two-image batch anchored after a peer replaces its paragraph", async () => {
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: {
+          content: "inline*",
+          group: "block",
+          attrs: { kind: {} },
+        },
+        plain: { content: "text*", group: "block" },
+        code_block: { content: "text*", group: "block", code: true },
+        text: { group: "inline" },
+        image: {
+          inline: true,
+          group: "inline",
+          atom: true,
+          attrs: { src: {}, alt: { default: "" } },
+        },
+      },
+    });
+    const paragraph = (text: string) =>
+      schema.node("paragraph", { kind: "anchor" }, schema.text(text));
+    let state = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [
+        paragraph("Target"),
+        schema.node("plain", null, schema.text("After")),
+      ]),
+    });
+    const startPos = 2;
+    const dispatch = vi.fn(
+      (transaction: Parameters<typeof state.apply>[0]) => {
+        state = state.apply(transaction);
+      },
+    );
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch,
+    };
+    let writes = 0;
+
+    await placeImageFiles(
+      view as never,
+      ["one.png", "two.png"].map((name) => ({
+        name,
+        mimeType: "image/png",
+        size: 1,
+        read: async () => new Uint8Array([1]),
+      })),
+      {
+        workspaceId: "ws1",
+        docPath: "notes/plan.md",
+        writeAsset: async () => {
+          writes += 1;
+          if (writes === 1) {
+            state = EditorState.create({
+              schema,
+              doc: schema.node("doc", null, [
+                schema.node("code_block", null, schema.text("x")),
+                schema.node("plain", null, schema.text("After")),
+              ]),
+            });
+          }
+        },
+      },
+      startPos,
+    );
+
+    expect(state.doc.child(0).type.name).toBe("code_block");
+    expect(state.doc.child(1).textContent).toBe("After");
+    let images = 0;
+    state.doc.descendants((node) => {
+      if (node.type.name === "image") images += 1;
+    });
+    expect(images).toBe(0);
+    expect(dispatch).not.toHaveBeenCalled();
   });
 });
 

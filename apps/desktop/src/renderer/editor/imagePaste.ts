@@ -283,7 +283,9 @@ export function insertImageAtPosition(
   if (!imageType) return pos;
   const node = imageType.create(attrs);
   const clamped = Math.max(0, Math.min(pos, view.state.doc.content.size));
-  view.dispatch(view.state.tr.insert(clamped, node));
+  const transaction = view.state.tr.insert(clamped, node);
+  if (!transaction.docChanged) return clamped;
+  view.dispatch(transaction);
   return clamped + node.nodeSize;
 }
 
@@ -321,6 +323,7 @@ export async function placeImageFiles(
   context: ImagePasteContext,
   startPos: number,
 ): Promise<void> {
+  let anchorDoc = view.state.doc;
   // One read for the whole batch: every image in a single paste/drop/pick lands
   // under the setting as it stands at that moment.
   const attachments = await resolveAttachmentSettings(context);
@@ -355,14 +358,14 @@ export async function placeImageFiles(
       console.warn(`[dohc] could not write image "${filename}":`, error);
       continue;
     }
-    const docBeforeInsert = view.state.doc;
     context.onBeforeInsert?.();
     pos = rebasePositionAfterDocumentChange(
       pos,
-      docBeforeInsert,
+      anchorDoc,
       view.state.doc,
     );
     pos = insertImageAtPosition(view, { src: relativeSrc, alt: "" }, pos);
+    anchorDoc = view.state.doc;
   }
 }
 
