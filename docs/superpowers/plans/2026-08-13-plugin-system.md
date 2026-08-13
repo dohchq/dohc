@@ -123,7 +123,11 @@ Constraints these choices create:
   therefore records the approved content hash of every enabled plugin
   in `.dohc/plugins.local.json` (device-local, never synced). A hash
   the device has not approved does not execute: the plugin is held
-  disabled until the local user approves the change. While a workspace
+  disabled until the local user approves the change. Approval and build
+  read the same bytes — the pipeline copies source to an engine-excluded
+  snapshot, hashes the snapshot, and builds from it, never from the live
+  mutable tree, so a sync arriving mid-build cannot slip unapproved
+  bytes under an approved hash. While a workspace
   has no sync peers — true for this whole milestone — local edits
   auto-approve, so solo hot reload stays frictionless — with one
   exception: writes arriving through the site SDK never auto-approve,
