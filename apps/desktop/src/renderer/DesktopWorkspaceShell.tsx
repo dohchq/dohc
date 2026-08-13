@@ -149,6 +149,7 @@ import {
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isPluginPanelTabPath,
   isSiteTabPath,
   isVirtualTabPath,
   moveTab,
@@ -156,6 +157,7 @@ import {
   resizeEditorGroups,
   moveTabToNewGroup,
   parseHistoryDiffTabPath,
+  parsePluginPanelTabPath,
   parseSiteTabPath,
   parseUiState,
   pruneMissingRestoredTabs,
@@ -556,6 +558,9 @@ const LazySitesView = lazy(() =>
 );
 const LazySitePreviewPage = lazy(() =>
   import("./SitePreviewPage").then((mod) => ({ default: mod.SitePreviewPage })),
+);
+const LazyPluginPanelPage = lazy(() =>
+  import("./PluginPanelPage").then((mod) => ({ default: mod.PluginPanelPage })),
 );
 const LazyLinkedChatsPanel = lazy(() =>
   import("./workbench/LinkedChats").then((mod) => ({
@@ -4276,6 +4281,7 @@ export function DesktopWorkspaceShell(props: {
                 : null;
               const groupDocumentPath = isVirtualTabPath(tabPath) ? null : tabPath;
               const groupSiteRoot = parseSiteTabPath(tabPath);
+              const groupPluginPanel = parsePluginPanelTabPath(tabPath);
               const groupScrollTarget =
                 searchScrollTarget?.path === tabPath ? searchScrollTarget : undefined;
               return {
@@ -4480,6 +4486,29 @@ export function DesktopWorkspaceShell(props: {
                   className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
                 >
                   {chatsOffCopy(syncStatus)}
+                </div>
+              )
+            ) : isPluginPanelTabPath(tabPath) ? (
+              groupPluginPanel ? (
+                <Suspense fallback={<PanelLoading label="plugin panel" />}>
+                  <LazyPluginPanelPage
+                    workspaceId={workspaceId}
+                    pluginId={groupPluginPanel.pluginId}
+                    panelId={groupPluginPanel.panelId}
+                  />
+                </Suspense>
+              ) : (
+                <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+                  <span className="text-sm text-ink">Could not open plugin panel</span>
+                  <button
+                    type="button"
+                    className="text-xs text-accent hover:underline"
+                    onClick={() => {
+                      if (tabPath) closeFileTab(editorGroup.id, tabPath);
+                    }}
+                  >
+                    Close tab
+                  </button>
                 </div>
               )
             ) : isSiteTabPath(tabPath) ? (

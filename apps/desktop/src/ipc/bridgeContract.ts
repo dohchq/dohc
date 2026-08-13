@@ -2185,6 +2185,45 @@ export type StopSitePreviewPayload = z.infer<typeof StopSitePreviewPayload>;
 export const StopSitePreviewResult = z.void();
 export type StopSitePreviewResult = z.infer<typeof StopSitePreviewResult>;
 
+const PLUGIN_ID = z.string().min(1).max(214);
+const PLUGIN_PANEL_ID = z.string().min(1).max(120);
+const PLUGIN_ROOT = z.string().min(1).max(4096).refine(
+  (value) => !value.includes("\0"),
+  "plugin root must not contain NUL bytes",
+);
+
+export const OpenPluginPanelPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginRoot: PLUGIN_ROOT,
+  pluginId: PLUGIN_ID,
+  panelId: PLUGIN_PANEL_ID,
+}).strict();
+export type OpenPluginPanelPayload = z.infer<typeof OpenPluginPanelPayload>;
+
+export const OpenPluginPanelResult = z.object({
+  pluginId: PLUGIN_ID,
+  panelId: PLUGIN_PANEL_ID,
+}).strict();
+export type OpenPluginPanelResult = z.infer<typeof OpenPluginPanelResult>;
+
+export const StartPluginPanelPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  panelId: PLUGIN_PANEL_ID,
+}).strict();
+export type StartPluginPanelPayload = z.infer<typeof StartPluginPanelPayload>;
+
+export const StartPluginPanelResult = z.object({
+  url: LoopbackPreviewUrl,
+  title: z.string().min(1).max(120),
+}).strict();
+export type StartPluginPanelResult = z.infer<typeof StartPluginPanelResult>;
+
+export const StopPluginPanelPayload = StartPluginPanelPayload;
+export type StopPluginPanelPayload = z.infer<typeof StopPluginPanelPayload>;
+export const StopPluginPanelResult = z.void();
+export type StopPluginPanelResult = z.infer<typeof StopPluginPanelResult>;
+
 // Sites never supply user or workspace identity. The containing renderer
 // identifies the open site and main re-derives its owned/share authority.
 // The preload applies this contract before ipcRenderer.invoke. The byte cap
@@ -2358,6 +2397,28 @@ export function parseInvokeSiteSdkPayloadForIpc(value: unknown): InvokeSiteSdkPa
 
 export const InvokeSiteSdkResult = z.object({ result: z.unknown() });
 export type InvokeSiteSdkResult = z.infer<typeof InvokeSiteSdkResult>;
+
+export const InvokePluginPanelSdkPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  panelId: PLUGIN_PANEL_ID,
+  method: z.string().min(1).max(200),
+  params: SiteSdkParams.optional(),
+}).strict();
+export type InvokePluginPanelSdkPayload = z.infer<
+  typeof InvokePluginPanelSdkPayload
+>;
+
+export function parseInvokePluginPanelSdkPayloadForIpc(
+  value: unknown,
+): InvokePluginPanelSdkPayload {
+  return InvokePluginPanelSdkPayload.parse(value);
+}
+
+export const InvokePluginPanelSdkResult = z.object({ result: z.unknown() }).strict();
+export type InvokePluginPanelSdkResult = z.infer<
+  typeof InvokePluginPanelSdkResult
+>;
 
 // dohc Cloud login (device-authorization flow): the desktop shows a short
 // code, the user approves in the system browser, the desktop polls. The
@@ -3443,6 +3504,12 @@ export interface DohcDesktopBridge {
   startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewResult>;
   stopSitePreview(payload: StopSitePreviewPayload): Promise<StopSitePreviewResult>;
   invokeSiteSdk(payload: InvokeSiteSdkPayload): Promise<InvokeSiteSdkResult>;
+  openPluginPanel(payload: OpenPluginPanelPayload): Promise<OpenPluginPanelResult>;
+  startPluginPanel(payload: StartPluginPanelPayload): Promise<StartPluginPanelResult>;
+  stopPluginPanel(payload: StopPluginPanelPayload): Promise<StopPluginPanelResult>;
+  invokePluginPanelSdk(
+    payload: InvokePluginPanelSdkPayload,
+  ): Promise<InvokePluginPanelSdkResult>;
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;
   cloudLoginPoll(): Promise<CloudLoginPollResult>;

@@ -269,6 +269,10 @@ export class PluginHost {
     return commands ? [...commands] : undefined;
   }
 
+  getSpawnId(pluginId: string): string | undefined {
+    return this.plugins.get(pluginId)?.current?.spawnId;
+  }
+
   bumpGeneration(): void {
     this.currentGeneration += 1;
   }

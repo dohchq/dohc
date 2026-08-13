@@ -227,6 +227,7 @@ describe("PluginHost", () => {
             pluginId,
             workspaceRoot: root,
             spawnId,
+            writable: true,
             writeAuthoredText: async (_workspaceRoot, path, text, options) => {
               writes.push({ path, text, author: options.author });
               return { path };

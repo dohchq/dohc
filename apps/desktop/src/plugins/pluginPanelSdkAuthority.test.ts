@@ -1,0 +1,93 @@
+import { describe, expect, it } from "vitest";
+import { createPluginPanelSdkAuthorityRegistry } from "./pluginPanelSdkAuthority";
+
+const owned = {
+  senderId: 1,
+  generation: 2,
+  workspaceId: "workspace-a",
+  pluginId: "hello-plugin",
+  panelId: "main",
+  workspaceRoot: "/workspace-a",
+  pluginRoot: "/workspace-a/plugins/hello-plugin",
+  spawnId: "spawn-a",
+  writable: true,
+};
+
+function authorize(
+  registry: ReturnType<typeof createPluginPanelSdkAuthorityRegistry>,
+  patch: Partial<Parameters<typeof registry.authorize>[0]> = {},
+) {
+  return registry.authorize({
+    senderId: 1,
+    generation: 2,
+    activeWorkspaceId: "workspace-a",
+    workspaceId: "workspace-a",
+    pluginId: "hello-plugin",
+    panelId: "main",
+    panelRunning: true,
+    ...patch,
+  });
+}
+
+describe("plugin panel SDK authority", () => {
+  it("registers host-derived context and replaces the prior panel grant", () => {
+    const registry = createPluginPanelSdkAuthorityRegistry();
+    const first = registry.register(owned);
+    registry.register({ ...owned, senderId: 2, spawnId: "spawn-b" });
+
+    expect(first.signal.aborted).toBe(true);
+    expect(() => authorize(registry)).toThrow(/active panel/i);
+    expect(
+      authorize(registry, { senderId: 2 }),
+    ).toMatchObject({
+      workspaceRoot: "/workspace-a",
+      pluginRoot: "/workspace-a/plugins/hello-plugin",
+      spawnId: "spawn-b",
+      writable: true,
+    });
+  });
+
+  it("rejects the wrong sender, workspace, plugin, and panel", () => {
+    const registry = createPluginPanelSdkAuthorityRegistry();
+    registry.register(owned);
+
+    expect(() => authorize(registry, { senderId: 99 })).toThrow(/active panel/i);
+    expect(() =>
+      authorize(registry, { activeWorkspaceId: "workspace-b" }),
+    ).toThrow(/active workspace/i);
+    expect(() => authorize(registry, { pluginId: "other-plugin" })).toThrow(
+      /active panel/i,
+    );
+    expect(() => authorize(registry, { panelId: "other-panel" })).toThrow(
+      /active panel/i,
+    );
+  });
+
+  it("revokes stale generations and inactive panels", () => {
+    const generations = createPluginPanelSdkAuthorityRegistry();
+    const staleGeneration = generations.register(owned);
+    expect(() => authorize(generations, { generation: 3 })).toThrow(/stale/i);
+    expect(staleGeneration.signal.aborted).toBe(true);
+
+    const panels = createPluginPanelSdkAuthorityRegistry();
+    const inactivePanel = panels.register(owned);
+    expect(() => authorize(panels, { panelRunning: false })).toThrow(/stale/i);
+    expect(inactivePanel.signal.aborted).toBe(true);
+  });
+
+  it("revokes a panel, a renderer, and all remaining grants with abort", () => {
+    const registry = createPluginPanelSdkAuthorityRegistry();
+    const panel = registry.register(owned);
+    registry.revokePanel("workspace-a", "hello-plugin", "main");
+    expect(panel.signal.aborted).toBe(true);
+    expect(() => authorize(registry)).toThrow(/active panel/i);
+
+    const sender = registry.register({ ...owned, panelId: "sender" });
+    registry.revokeSender(1);
+    expect(sender.signal.aborted).toBe(true);
+
+    const all = registry.register({ ...owned, panelId: "all" });
+    registry.revokeAll();
+    expect(all.signal.aborted).toBe(true);
+  });
+});

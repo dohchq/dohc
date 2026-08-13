@@ -3,18 +3,25 @@ import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
   InvokeSiteSdkPayload,
+  InvokePluginPanelSdkPayload,
   ListSitesPayload,
   MenuCommand,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
   SitePackagePayload,
   StartSitePreviewPayload,
+  OpenPluginPanelPayload,
+  StartPluginPanelPayload,
+  StopPluginPanelPayload,
   StopSitePreviewPayload,
   WorkspaceSettingsPayload,
   WorkspaceSummary,
   WriteClipboardTextPayload,
 } from "./ipc/bridgeContract";
-import { parseInvokeSiteSdkPayloadForIpc } from "./ipc/bridgeContract";
+import {
+  parseInvokePluginPanelSdkPayloadForIpc,
+  parseInvokeSiteSdkPayloadForIpc,
+} from "./ipc/bridgeContract";
 import {
   CHANNELS,
   isExplorerMenuCommand,
@@ -134,6 +141,17 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(
       CHANNELS.invokeSiteSdk,
       parseInvokeSiteSdkPayloadForIpc(payload),
+    ),
+  openPluginPanel: (payload: OpenPluginPanelPayload) =>
+    ipcRenderer.invoke(CHANNELS.openPluginPanel, payload),
+  startPluginPanel: (payload: StartPluginPanelPayload) =>
+    ipcRenderer.invoke(CHANNELS.startPluginPanel, payload),
+  stopPluginPanel: (payload: StopPluginPanelPayload) =>
+    ipcRenderer.invoke(CHANNELS.stopPluginPanel, payload),
+  invokePluginPanelSdk: (payload: InvokePluginPanelSdkPayload) =>
+    ipcRenderer.invoke(
+      CHANNELS.invokePluginPanelSdk,
+      parseInvokePluginPanelSdkPayloadForIpc(payload),
     ),
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),

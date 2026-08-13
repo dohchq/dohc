@@ -1,4 +1,4 @@
-import type { AgentAuthor } from "@dohc/workspace-engine-client";
+import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
 import {
   assertRawTextWritable,
   invokeSiteSdkHost,
@@ -12,24 +12,24 @@ export interface PluginSdkHostContext {
   workspaceRoot: string;
   /** The uuid PluginHost assigned this plugin at spawn time (agentRunId). */
   spawnId: string;
-  /**
-   * Performs the actual authored write. PR1a ships no production
-   * implementation of this. A later PR wires it to the versioned engine.
-   */
+  writable: boolean;
+  signal?: AbortSignal;
   writeAuthoredText: (
     workspaceRoot: string,
     path: string,
     text: string,
-    options: { overwrite: boolean; author: AgentAuthor },
+    options: { overwrite: boolean; author: MomentAuthor },
   ) => Promise<{ path: string }>;
 }
 
-const PLUGIN_CAPABILITIES = {
-  files: { read: true, list: true, write: true, watch: false },
-  workspace: { search: true },
-  collections: { read: false },
-  provenance: { record: false },
-};
+function pluginCapabilities(writable: boolean) {
+  return {
+    files: { read: true, list: true, write: writable, watch: false },
+    workspace: { search: true },
+    collections: { read: false },
+    provenance: { record: false },
+  };
+}
 
 export async function invokePluginSdkHost(
   context: PluginSdkHostContext,
@@ -39,17 +39,24 @@ export async function invokePluginSdkHost(
   const siteContext: SiteSdkHostContext = {
     workspaceRoot: context.workspaceRoot,
     scopeRoot: null,
-    writable: true,
+    writable: context.writable,
+    signal: context.signal,
   };
 
   switch (method) {
     case "capabilities":
-      return PLUGIN_CAPABILITIES;
+      return pluginCapabilities(context.writable);
     case "files.read":
     case "files.list":
     case "workspace.search":
       return invokeSiteSdkHost(siteContext, method, params);
     case "files.write": {
+      if (!context.writable) {
+        throw new Error("This plugin has read-only workspace authority.");
+      }
+      if (context.signal?.aborted) {
+        throw new Error("Plugin panel is no longer active.");
+      }
       const input = record(params);
       const path = siteSdkWorkspacePath(null, input.path, "write");
       assertRawTextWritable(path);
@@ -63,7 +70,7 @@ export async function invokePluginSdkHost(
         );
       }
 
-      const author: AgentAuthor = {
+      const author: MomentAuthor = {
         kind: "agent",
         agentId: `plugin:${context.pluginId}`,
         onBehalfOf: "local",

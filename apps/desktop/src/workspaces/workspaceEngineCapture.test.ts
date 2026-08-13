@@ -11,6 +11,7 @@ import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { createTestScratch } from "./testTemp";
 import { createWorkspaceActivity } from "./workspaceActivity";
+import { invokePluginSdkHost } from "../plugins/pluginSdkHost";
 import {
   EXPECTED_ENGINE_EVENT_EXPIRY_MS,
   DAEMON_CAPTURE_HEALTH_POLL_MS,
@@ -2564,6 +2565,47 @@ describe("createDefaultDiskWriter symlink containment", () => {
 // unchanged — an absent run means an absent author).
 describe("workspaceEngineCapture agent attribution", () => {
   const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" };
+
+  it("routes plugin files.write with an explicit plugin author, not the ambient run", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback, { activeAgentRun: () => run });
+    const spawnId = "plugin-spawn-123";
+
+    await invokePluginSdkHost(
+      {
+        pluginId: "hello-plugin",
+        workspaceRoot: root,
+        spawnId,
+        writable: true,
+        writeAuthoredText: async (workspaceRoot, path, text, options) => {
+          expect(workspaceRoot).toBe(root);
+          expect(options.overwrite).toBe(true);
+          await engine.writeAuthoredTextFile(
+            join(workspaceRoot, path),
+            text,
+            options.author,
+          );
+          return { path };
+        },
+      },
+      "files.write",
+      { path: "plugin-output.txt", text: "Written by plugin\n" },
+    );
+
+    expect(await readFile(join(root, "plugin-output.txt"), "utf8")).toBe(
+      "Written by plugin\n",
+    );
+    expect(await liveMomentAuthors(engine)).toEqual([
+      {
+        kind: "agent",
+        agentId: "plugin:hello-plugin",
+        onBehalfOf: "local",
+        agentRunId: spawnId,
+      },
+    ]);
+    await engine.stop();
+  });
 
   it("mutation proof: daemon author state is set before work and flushed before clear", async () => {
     const root = await tempRoot();

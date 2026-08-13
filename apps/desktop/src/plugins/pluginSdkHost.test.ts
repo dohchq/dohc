@@ -1,6 +1,6 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { AgentAuthor } from "@dohc/workspace-engine-client";
+import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
@@ -14,7 +14,7 @@ interface AuthoredWrite {
   workspaceRoot: string;
   path: string;
   text: string;
-  options: { overwrite: boolean; author: AgentAuthor };
+  options: { overwrite: boolean; author: MomentAuthor };
 }
 
 async function workspaceRoot(): Promise<string> {
@@ -28,6 +28,7 @@ function context(root: string, writes: AuthoredWrite[] = []): PluginSdkHostConte
     pluginId: "hello-plugin",
     workspaceRoot: root,
     spawnId: "spawn-123",
+    writable: true,
     writeAuthoredText: vi.fn<PluginSdkHostContext["writeAuthoredText"]>(
       async (workspaceRoot, path, text, options) => {
         writes.push({ workspaceRoot, path, text, options });
@@ -192,5 +193,29 @@ describe("invokePluginSdkHost", () => {
         path: "data/plugin.sqlite",
       }),
     ).rejects.toThrow("Unsupported dohc SDK method: databases.read");
+  });
+
+  it("refuses writes from a read-only or stopped panel authority", async () => {
+    const root = await workspaceRoot();
+    const readOnly = { ...context(root), writable: false };
+    await expect(
+      invokePluginSdkHost(readOnly, "files.write", {
+        path: "notes/x.txt",
+        text: "x",
+      }),
+    ).rejects.toThrow(/read-only workspace authority/);
+    await expect(invokePluginSdkHost(readOnly, "capabilities")).resolves.toMatchObject({
+      files: { write: false },
+    });
+
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      invokePluginSdkHost(
+        { ...context(root), signal: controller.signal },
+        "files.write",
+        { path: "notes/x.txt", text: "x" },
+      ),
+    ).rejects.toThrow(/no longer active/);
   });
 });
