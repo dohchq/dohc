@@ -125,7 +125,8 @@ export function reclaimStaleSlots({ root, slots, staleMs }) {
   const sweepLock = join(root, "reclaim.lock");
   try {
     mkdirSync(sweepLock);
-  } catch {
+  } catch (lockError) {
+    if (lockError.code !== "EEXIST") throw lockError; // A fault, not contention.
     // A live sweeper's lock defers to it. A dead sweeper's is taken over by
     // whichever waiter wins the exclusive create of a claim file named for
     // the OBSERVED heartbeat and the current five-minute bucket — that
@@ -140,20 +141,35 @@ export function reclaimStaleSlots({ root, slots, staleMs }) {
     // already-tombstoned slots, not corruption, and closing it entirely
     // needs a lock manager this gate does not. Claim files accumulate one
     // empty file per dead sweeper per bucket — rare debris, never a hazard.
+    let observedMtime;
     try {
-      const observedMtime = statSync(sweepLock).mtimeMs;
-      if (Date.now() - observedMtime < 5 * 60_000) return 0;
-      const bucket = Math.floor(Date.now() / (5 * 60_000));
+      observedMtime = statSync(sweepLock).mtimeMs;
+    } catch {
+      return 0; // The lock vanished: its sweeper just finished.
+    }
+    if (Date.now() - observedMtime < 5 * 60_000) return 0;
+    const bucket = Math.floor(Date.now() / (5 * 60_000));
+    try {
       writeFileSync(
         `${sweepLock}.claim-${Math.round(observedMtime)}-${bucket}`,
         "",
         { flag: "wx" },
       );
+    } catch (claimError) {
+      if (claimError.code === "EEXIST") return 0; // Lost the takeover.
+      throw claimError;
+    }
+    try {
       if (statSync(sweepLock).mtimeMs !== observedMtime) return 0;
-      rmSync(sweepLock, { recursive: true, force: true });
-      mkdirSync(sweepLock);
     } catch {
-      return 0; // Another waiter won the takeover; its sweep counts.
+      return 0; // Vanished after the claim: nothing left to take over.
+    }
+    rmSync(sweepLock, { recursive: true, force: true });
+    try {
+      mkdirSync(sweepLock);
+    } catch (retakeError) {
+      if (retakeError.code === "EEXIST") return 0; // Another sweeper owns it.
+      throw retakeError;
     }
   }
   try {
@@ -174,10 +190,16 @@ export function reclaimStaleSlots({ root, slots, staleMs }) {
         }
       }
       if (Date.now() - heartbeatAt <= staleMs) continue;
+      let inspectedOwner = null;
+      try {
+        inspectedOwner = readFileSync(ownerPath, "utf8");
+      } catch {
+        // A missing owner file is judged by `why` below.
+      }
       if (why === undefined) {
         let pid;
         try {
-          pid = JSON.parse(readFileSync(ownerPath, "utf8")).pid;
+          pid = JSON.parse(inspectedOwner).pid;
         } catch {
           pid = null;
         }
@@ -196,6 +218,30 @@ export function reclaimStaleSlots({ root, slots, staleMs }) {
         renameSync(dir, tomb);
       } catch {
         continue; // A racing owner touched it first; its slot, not ours.
+      }
+      // This sweep may have been suspended between its checks and that
+      // rename while the slot was reclaimed and RE-CLAIMED by a live lane —
+      // the rename moves whatever is at the path now. The tombstone still
+      // holds the owner it actually moved; if that is not the owner this
+      // sweep inspected, put it back.
+      let movedOwner = null;
+      try {
+        movedOwner = readFileSync(join(tomb, "owner.json"), "utf8");
+      } catch {
+        // Both null when neither had an owner file: identical claims.
+      }
+      if (movedOwner !== inspectedOwner) {
+        try {
+          renameSync(tomb, dir);
+        } catch {
+          logEvent(
+            root,
+            `RECLAIM FAULT: build-slot-${i} was renamed away from a new ` +
+              `owner and could not be restored; its lane runs unaccounted ` +
+              `(${tomb})`,
+          );
+        }
+        continue;
       }
       try {
         rmSync(tomb, { recursive: true, force: true });
