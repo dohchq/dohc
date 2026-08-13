@@ -76,6 +76,27 @@ pub struct SceneAsset {
     pub version: Option<u64>,
 }
 
+pub fn encode_scene_asset_record(asset: &SceneAsset) -> Result<String, SceneImportError> {
+    let mut record = Map::new();
+    record.insert("created".to_owned(), Value::from(asset.created));
+    record.insert("id".to_owned(), Value::String(asset.id.clone()));
+    if let Some(last_retrieved) = asset.last_retrieved {
+        record.insert("lastRetrieved".to_owned(), Value::from(last_retrieved));
+    }
+    record.insert(
+        "mimeType".to_owned(),
+        Value::String(asset.mime_type.clone()),
+    );
+    record.insert("ref".to_owned(), Value::String(asset.path.clone()));
+    record.insert("sha256".to_owned(), Value::String(asset.sha256.clone()));
+    if let Some(version) = asset.version {
+        record.insert("version".to_owned(), Value::from(version));
+    }
+    canonical_json_string(&Value::Object(record)).ok_or(SceneImportError::Invalid {
+        reason: "a scene asset record could not be encoded",
+    })
+}
+
 /// The deterministic scene fold before asset bytes are hydrated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FoldedScene {
@@ -551,22 +572,15 @@ pub(crate) fn seed_portable_scene(
             &sha256,
             &file.mime_type,
         )?;
-        let mut record = Map::new();
-        record.insert("created".to_owned(), Value::from(file.created));
-        record.insert("id".to_owned(), Value::String(id.clone()));
-        if let Some(last_retrieved) = file.last_retrieved {
-            record.insert("lastRetrieved".to_owned(), Value::from(last_retrieved));
-        }
-        record.insert("mimeType".to_owned(), Value::String(file.mime_type));
-        record.insert("ref".to_owned(), Value::String(path));
-        record.insert("sha256".to_owned(), Value::String(sha256));
-        if let Some(version) = file.version {
-            record.insert("version".to_owned(), Value::from(version));
-        }
-        let record =
-            canonical_json_string(&Value::Object(record)).ok_or(SceneImportError::Invalid {
-                reason: "a scene asset record could not be encoded",
-            })?;
+        let record = encode_scene_asset_record(&SceneAsset {
+            id: id.clone(),
+            mime_type: file.mime_type,
+            created: file.created,
+            path,
+            sha256,
+            last_retrieved: file.last_retrieved,
+            version: file.version,
+        })?;
         asset_records.insert(id.clone(), record);
         asset_bytes.insert(id, file.bytes);
     }

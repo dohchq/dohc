@@ -6,16 +6,17 @@ use dohc_engine_collab::{
 };
 use dohc_engine_domain::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictResolution, ConflictStatus,
-    ResolveConflictKind, ResolveTextConflict, ResolveTextConflictResult, TextConflict,
-    TextSnapshot, derive_capture_object_id, insert_text_conflict_if_absent,
-    select_snapshot_by_path_in_tx,
+    MAX_CAPTURE_BINARY_FILE_BYTES, ResolveConflictKind, ResolveTextConflict,
+    ResolveTextConflictResult, TextConflict, TextSnapshot, WriteBinaryFile,
+    derive_capture_object_id, insert_text_conflict_if_absent, select_snapshot_by_path_in_tx,
+    validate_plaintext_storable_path, write_binary_file_in_tx,
 };
 use dohc_engine_files::{
     MAX_CANONICAL_WORKSPACE_PATH_BYTES, PathClassification,
     canonical_workspace_path_meets_shared_bounds, classify_engine_file_path_normalized,
     search_policy::SearchPolicySnapshot,
 };
-use dohc_engine_storage::{MAX_IDENTIFIER_BYTES, StorageError};
+use dohc_engine_storage::{MAX_IDENTIFIER_BYTES, Preimage, StorageError, put_binary_blob};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::{Map, Value, json};
 
@@ -1840,6 +1841,121 @@ fn validate_scene_successor_with_store(
     Ok(())
 }
 
+fn install_scene_successor_assets(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    successor: &SuccessorBase,
+    scene_result: Option<&str>,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    if successor.content_kind != ContentKind::Scene {
+        return Ok(());
+    }
+    let scene_result = scene_result.ok_or(SyncError::InvalidInput {
+        reason: "scene conflict successor has no portable artifact",
+    })?;
+    let imported = dohc_engine_collab::import_portable_scene(scene_result).map_err(|error| {
+        let dohc_engine_collab::SceneImportError::Invalid { reason } = error;
+        SyncError::InvalidInput { reason }
+    })?;
+    let version_is_active: bool = tx
+        .query_row(
+            "SELECT ?2 = COALESCE( \
+                 (SELECT version_id FROM active_versions WHERE workspace_id = ?1), \
+                 (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id = ?1))",
+            params![key.workspace_id, key.version_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    for file in imported.files.into_values() {
+        if file.bytes.len() > MAX_CAPTURE_BINARY_FILE_BYTES {
+            return Err(SyncError::InputTooLarge {
+                constraint: "MAX_CAPTURE_BINARY_FILE_BYTES (scene conflict asset)",
+                limit_bytes: MAX_CAPTURE_BINARY_FILE_BYTES,
+                observed_bytes: file.bytes.len(),
+            });
+        }
+        let sha256 = dohc_engine_storage::hex_sha256(&file.bytes);
+        let path = dohc_engine_collab::scene_asset_ref(
+            &key.workspace_id,
+            &key.version_id,
+            &key.object_id,
+            &sha256,
+            &file.mime_type,
+        )
+        .map_err(|error| {
+            let dohc_engine_collab::SceneImportError::Invalid { reason } = error;
+            SyncError::InvalidInput { reason }
+        })?;
+        let path = validate_plaintext_storable_path(&path).map_err(map_local_domain_error)?;
+        let existing: Option<(String, Option<String>)> = tx
+            .query_row(
+                "SELECT COALESCE(s.content_kind, 'text'), s.binary_sha256 \
+                 FROM path_aliases a JOIN snapshots s \
+                   ON s.workspace_id = a.workspace_id \
+                  AND s.version_id = a.version_id AND s.object_id = a.object_id \
+                 WHERE a.workspace_id = ?1 AND a.version_id = ?2 AND a.path = ?3",
+                params![key.workspace_id, key.version_id, path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        if let Some((kind, stored_sha256)) = existing {
+            if kind == "binary" && stored_sha256.as_deref() == Some(sha256.as_str()) {
+                continue;
+            }
+            return Err(SyncError::InvalidInput {
+                reason: "scene conflict asset path is already bound to different content",
+            });
+        }
+        let stored_sha256 = put_binary_blob(tx, &file.bytes)?;
+        if stored_sha256 != sha256 {
+            return Err(corrupt_local(
+                "scene conflict asset content address changed while storing bytes",
+            ));
+        }
+        let object_id = format!(
+            "scene-asset-object-{}",
+            dohc_engine_storage::hex_sha256(
+                format!("{}\0{}\0{path}", key.workspace_id, key.version_id).as_bytes(),
+            )
+        );
+        let moment_id = format!(
+            "moment-scene-conflict-asset-{}",
+            dohc_engine_storage::hex_sha256(
+                format!(
+                    "{}\0{}\0{}\0{}\0{}",
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    successor.result_sha256,
+                    file.id,
+                )
+                .as_bytes(),
+            )
+        );
+        write_binary_file_in_tx(
+            tx,
+            &WriteBinaryFile {
+                workspace_id: key.workspace_id.clone(),
+                version_id: key.version_id.clone(),
+                object_id,
+                path,
+                binary_sha256: sha256,
+                moment_id,
+                metadata_origin: "sync".to_owned(),
+                metadata_summary: Some("Imported drawing asset".to_owned()),
+                metadata_correlation_id: Some(successor.lineage_claim_id.clone()),
+                author_json: None,
+                materialize: version_is_active.then_some(Preimage::Absent),
+                now_ms,
+            },
+        )
+        .map_err(map_local_domain_error)?;
+    }
+    Ok(())
+}
+
 fn commit_imported_lineage(
     tx: &Transaction<'_>,
     payload: &ConflictResolveV1,
@@ -1858,6 +1974,7 @@ fn commit_imported_lineage(
             reason: "conflict.resolve successor has no result",
         })?;
         let scene_result = scene_successor_result(tx, &successor_base)?;
+        install_scene_successor_assets(tx, key, &successor_base, scene_result.as_deref(), now_ms)?;
         validate_scene_successor_with_store(tx, key, &successor_base, scene_result.as_deref())?;
         dohc_engine_collab::replace_lineage_with_successor_in_tx(
             tx,
@@ -2659,6 +2776,13 @@ fn prepare_local_lineage_in_tx(
                         .ok_or_else(|| corrupt_local("text successor has no canonical body"))?,
                 )
                 .map_err(map_local_collab_error)?;
+                install_scene_successor_assets(
+                    tx,
+                    &key,
+                    &successor,
+                    result_text,
+                    payload.effect_context.recorded_at_ms,
+                )?;
                 validate_scene_successor_with_store(tx, &key, &successor, result_text)?;
                 Ok(LocalLineagePlan::ExactSuccessor {
                     key,
@@ -3017,6 +3141,7 @@ fn corrupt_local(reason: &'static str) -> SyncError {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::collections::BTreeMap;
 
     use serde_json::{Value, json};
 
@@ -3052,6 +3177,155 @@ mod tests {
         doc.project(ContentKind::Scene)
             .expect("project canonical scene")
             .content
+    }
+
+    fn canonical_image_scene(element_id: &str) -> String {
+        let source = serde_json::to_string(&json!({
+            "type": "excalidraw",
+            "version": 2,
+            "source": "https://excalidraw.com",
+            "elements": [{
+                "id": element_id,
+                "type": "image",
+                "version": 1,
+                "versionNonce": 1,
+                "isDeleted": false,
+                "index": "a0",
+                "fileId": "image-file"
+            }],
+            "appState": {},
+            "files": {
+                "image-file": {
+                    "id": "image-file",
+                    "mimeType": "image/png",
+                    "created": 10,
+                    "dataURL": "data:image/png;base64,AQID"
+                }
+            }
+        }))
+        .expect("scene source");
+        let imported = dohc_engine_collab::import_portable_scene(&source).expect("import scene");
+        let file = imported.files.get("image-file").expect("image file");
+        let sha256 = dohc_engine_storage::hex_sha256(&file.bytes);
+        let asset_ref = dohc_engine_collab::scene_asset_ref(
+            "ws",
+            "main",
+            "drawing-object",
+            &sha256,
+            &file.mime_type,
+        )
+        .expect("asset ref");
+        let record =
+            dohc_engine_collab::encode_scene_asset_record(&dohc_engine_collab::SceneAsset {
+                id: file.id.clone(),
+                mime_type: file.mime_type.clone(),
+                created: file.created,
+                path: asset_ref,
+                sha256,
+                last_retrieved: file.last_retrieved,
+                version: file.version,
+            })
+            .expect("asset record");
+        let asset_update = dohc_engine_collab::encode_scene_asset_records(&BTreeMap::from([(
+            "image-file".to_owned(),
+            record,
+        )]))
+        .expect("asset update");
+        let seed = dohc_engine_collab::merge_updates(&[imported.initial_update, asset_update])
+            .expect("scene seed");
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&seed).expect("apply scene seed");
+        doc.fold_scene()
+            .portable_json_with_asset_bytes(&BTreeMap::from([(
+                "image-file".to_owned(),
+                file.bytes.clone(),
+            )]))
+            .expect("project canonical scene")
+    }
+
+    fn scene_conflict_store(
+        current_text: &str,
+        incoming_text: &str,
+        predecessor_update: Option<&[u8]>,
+    ) -> (ScratchDir, EngineStore, DocKey) {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db path"), 1_000).expect("store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1_000, &NoFaults)
+            .expect("workspace");
+        let current = VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "drawing-object".to_owned(),
+                    path: "drawing.excalidraw".to_owned(),
+                    text: current_text.to_owned(),
+                    moment_id: "moment-current".to_owned(),
+                    metadata_origin: "sync".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("current scene");
+        let key = DocKey::new("ws", "main", "drawing-object").expect("scene key");
+        let imported_update = predecessor_update.is_none().then(|| {
+            dohc_engine_collab::import_portable_scene(current_text)
+                .expect("import current scene")
+                .initial_update
+        });
+        let initial_update = predecessor_update
+            .or(imported_update.as_deref())
+            .expect("one predecessor source");
+        dohc_engine_collab::claim_base(
+            &mut store,
+            &key,
+            ContentKind::Scene,
+            initial_update,
+            &NoFaults,
+            11,
+        )
+        .expect("claim scene base");
+        let incoming = TextSnapshot {
+            workspace_id: "ws".to_owned(),
+            version_id: "peer".to_owned(),
+            object_id: "peer-drawing-object".to_owned(),
+            path: "drawing.excalidraw".to_owned(),
+            text: incoming_text.to_owned(),
+            blob_sha256: dohc_engine_storage::hex_sha256(incoming_text.as_bytes()),
+            updated_at_ms: 12,
+            latest_moment_id: "moment-incoming".to_owned(),
+            metadata_origin: "sync".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+        };
+        let conflict = TextConflict {
+            conflict_id: "scene-conflict".to_owned(),
+            workspace_id: "ws".to_owned(),
+            path: "drawing.excalidraw".to_owned(),
+            target_version_id: "main".to_owned(),
+            source_version_id: "peer".to_owned(),
+            created_at_ms: 12,
+            updated_at_ms: 12,
+            status: ConflictStatus::Open,
+            chosen_from: ConflictChoice::Current,
+            resolution: None,
+            metadata: ConflictMetadata::origin("sync"),
+            base: ConflictFileState::text("drawing.excalidraw", None),
+            current: ConflictFileState::text("drawing.excalidraw", Some(current.snapshot)),
+            incoming: ConflictFileState::text("drawing.excalidraw", Some(incoming)),
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                insert_text_conflict_if_absent(tx, &conflict).map(|_| ())
+            })
+            .expect("open scene conflict");
+        (scratch, store, key)
     }
 
     fn sync_as_domain(error: SyncError) -> dohc_engine_domain::DomainError {
@@ -3494,79 +3768,17 @@ mod tests {
 
     #[test]
     fn same_path_scene_resolution_installs_an_exact_scene_successor() {
-        let scratch = ScratchDir::new().expect("scratch");
-        let mut store =
-            EngineStore::open(&scratch.engine_db_path().expect("db path"), 1_000).expect("store");
-        VersionedTextStore::new(&mut store)
-            .ensure_main_version("ws", "main", 1_000, &NoFaults)
-            .expect("workspace");
         let current_text = canonical_scene("current-box");
-        let incoming_text = canonical_scene("incoming-box");
-        let current = VersionedTextStore::new(&mut store)
-            .write_text(
-                &WriteText {
-                    workspace_id: "ws".to_owned(),
-                    version_id: "main".to_owned(),
-                    object_id: "drawing-object".to_owned(),
-                    path: "drawing.excalidraw".to_owned(),
-                    text: current_text.clone(),
-                    moment_id: "moment-current".to_owned(),
-                    metadata_origin: "sync".to_owned(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    author_json: None,
-                    now_ms: 10,
-                    request_id: None,
-                },
-                &NoFaults,
-            )
-            .expect("current scene");
-        let key = DocKey::new("ws", "main", "drawing-object").expect("scene key");
-        let imported =
-            dohc_engine_collab::import_portable_scene(&current_text).expect("import current scene");
-        dohc_engine_collab::claim_base(
-            &mut store,
-            &key,
-            ContentKind::Scene,
-            &imported.initial_update,
-            &NoFaults,
-            11,
-        )
-        .expect("claim scene base");
-        let incoming = TextSnapshot {
-            workspace_id: "ws".to_owned(),
-            version_id: "peer".to_owned(),
-            object_id: "peer-drawing-object".to_owned(),
-            path: "drawing.excalidraw".to_owned(),
-            text: incoming_text.clone(),
-            blob_sha256: dohc_engine_storage::hex_sha256(incoming_text.as_bytes()),
-            updated_at_ms: 12,
-            latest_moment_id: "moment-incoming".to_owned(),
-            metadata_origin: "sync".to_owned(),
-            metadata_summary: None,
-            metadata_correlation_id: None,
-        };
-        let conflict = TextConflict {
-            conflict_id: "scene-conflict".to_owned(),
-            workspace_id: "ws".to_owned(),
-            path: "drawing.excalidraw".to_owned(),
-            target_version_id: "main".to_owned(),
-            source_version_id: "peer".to_owned(),
-            created_at_ms: 12,
-            updated_at_ms: 12,
-            status: ConflictStatus::Open,
-            chosen_from: ConflictChoice::Current,
-            resolution: None,
-            metadata: ConflictMetadata::origin("sync"),
-            base: ConflictFileState::text("drawing.excalidraw", None),
-            current: ConflictFileState::text("drawing.excalidraw", Some(current.snapshot)),
-            incoming: ConflictFileState::text("drawing.excalidraw", Some(incoming)),
-        };
-        store
-            .write_with(&NoFaults, |tx| {
-                insert_text_conflict_if_absent(tx, &conflict).map(|_| ())
-            })
-            .expect("open scene conflict");
+        let incoming_text = canonical_image_scene("incoming-image");
+        let (_scratch, mut store, key) = scene_conflict_store(&current_text, &incoming_text, None);
+        let predecessor_claim = dohc_engine_collab::read_marker(&store, &key)
+            .expect("read predecessor marker")
+            .and_then(|marker| marker.lineage_claim_id)
+            .expect("predecessor claim");
+        let predecessor_update = store
+            .get_binary_blob(&predecessor_claim)
+            .expect("read predecessor update")
+            .expect("predecessor update");
         let input = ResolveTextConflict {
             workspace_id: "ws".to_owned(),
             conflict_id: "scene-conflict".to_owned(),
@@ -3624,13 +3836,61 @@ mod tests {
             .expect("load scene successor")
             .expect("active scene successor");
         assert_eq!(
-            loaded
-                .doc
-                .project(ContentKind::Scene)
+            store
+                .read_with(|tx| crate::project_ydoc_with_store(
+                    tx,
+                    &key,
+                    &loaded.doc,
+                    ContentKind::Scene,
+                ))
                 .expect("project resolved scene")
                 .content,
             incoming_text,
         );
+        assert!(incoming_text.contains("data:image/png;base64,AQID"));
+
+        let (_receiver_scratch, mut receiver, receiver_key) =
+            scene_conflict_store(&current_text, &incoming_text, Some(&predecessor_update));
+        for sha256 in &built.validated.text_blob_sha256s {
+            let text: String = store
+                .read_with(|tx| {
+                    tx.query_row("SELECT text FROM blobs WHERE sha256=?1", [sha256], |row| {
+                        row.get(0)
+                    })
+                    .map_err(StorageError::corrupt_public)
+                })
+                .expect("read replicated text root");
+            receiver
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                        params![sha256, i64::try_from(text.len()).unwrap(), text],
+                    )
+                    .map_err(StorageError::persist_public)?;
+                    Ok::<_, StorageError>(())
+                })
+                .expect("copy replicated text root");
+        }
+        for sha256 in built
+            .validated
+            .binary_blob_sha256s
+            .iter()
+            .chain(&built.validated.ydoc_blob_sha256s)
+        {
+            let bytes: Vec<u8> = store
+                .read_with(|tx| {
+                    tx.query_row(
+                        "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                        [sha256],
+                        |row| row.get(0),
+                    )
+                    .map_err(StorageError::corrupt_public)
+                })
+                .expect("read replicated binary root");
+            receiver
+                .write_with(&NoFaults, |tx| put_binary_blob(tx, &bytes).map(|_| ()))
+                .expect("copy replicated binary root");
+        }
         let replicated = ReplicationEnvelope {
             workspace_id: "ws".to_owned(),
             origin_id: "resolution-peer".to_owned(),
@@ -3639,21 +3899,37 @@ mod tests {
             payload: built.value,
             recorded_at_ms: 20,
         };
-        assert!(matches!(
-            crate::apply_replication_envelope(
-                &mut store,
-                &replicated,
-                &NoFaults,
-                &crate::NoLiveLeases,
-            ),
-            Ok(crate::ApplyOutcome::Applied(_))
-        ));
+        let applied = crate::apply_replication_envelope(
+            &mut receiver,
+            &replicated,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        );
+        assert!(
+            matches!(applied, Ok(crate::ApplyOutcome::Applied(_))),
+            "scene resolution replay failed: {applied:?}",
+        );
         assert_eq!(
-            dohc_engine_collab::read_marker(&store, &key)
+            dohc_engine_collab::read_marker(&receiver, &receiver_key)
                 .expect("read replayed scene marker")
                 .and_then(|marker| marker.lineage_claim_id),
             Some(loaded.marker.lineage_claim_id.expect("exact scene claim")),
-            "replicating the exact scene resolution is a no-op replay",
+            "replication installs the exact scene successor",
+        );
+        let replayed = dohc_engine_collab::load_persisted(&receiver, &receiver_key)
+            .expect("load replayed scene successor")
+            .expect("active replayed scene successor");
+        assert_eq!(
+            receiver
+                .read_with(|tx| crate::project_ydoc_with_store(
+                    tx,
+                    &receiver_key,
+                    &replayed.doc,
+                    ContentKind::Scene,
+                ))
+                .expect("project replayed scene")
+                .content,
+            incoming_text,
         );
     }
 

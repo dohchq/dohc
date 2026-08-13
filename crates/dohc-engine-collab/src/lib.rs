@@ -54,9 +54,10 @@ pub use replication::{
     UpdateOrigin,
 };
 pub use scene::{
-    encode_scene_asset_records, fold_scene, import_portable_scene, scene_asset_directory,
-    scene_asset_extension, scene_asset_ref, scene_asset_ref_is_owned, scene_data_url_len,
-    FoldedScene, ImportedScene, ImportedSceneFile, SceneAsset, SceneImportError,
+    encode_scene_asset_record, encode_scene_asset_records, fold_scene, import_portable_scene,
+    scene_asset_directory, scene_asset_extension, scene_asset_ref, scene_asset_ref_is_owned,
+    scene_data_url_len, FoldedScene, ImportedScene, ImportedSceneFile, SceneAsset,
+    SceneImportError,
 };
 pub use scene_lifecycle::{
     freeze_scene_asset_delete_authority_in_tx, read_scene_asset_delete_authority,

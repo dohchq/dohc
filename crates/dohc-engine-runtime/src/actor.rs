@@ -37,7 +37,7 @@ use crate::search::{
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
     AppendOutcome, CloseOutcome, CollabError, ContentKind, DocKey, LeaseRegistry,
-    LineageClaimStatus, Projection, Regime, Ydoc, canonical_json::canonical_json_string,
+    LineageClaimStatus, Projection, Regime, SceneAsset, Ydoc, encode_scene_asset_record,
     encode_scene_asset_records, import_portable_scene,
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
@@ -234,16 +234,7 @@ pub struct YdocOpenState {
     pub seed_materialization_jobs: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArtifactAssetDescriptor {
-    pub id: String,
-    pub mime_type: String,
-    pub created: u64,
-    pub path: String,
-    pub sha256: String,
-    pub last_retrieved: Option<u64>,
-    pub version: Option<u64>,
-}
+pub type ArtifactAssetDescriptor = SceneAsset;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct YdocSeedMaterialization {
@@ -9073,30 +9064,11 @@ fn scene_asset_records(
         .iter()
         .map(|asset| {
             let descriptor = &asset.descriptor;
-            let mut record = serde_json::Map::new();
-            record.insert("created".to_owned(), serde_json::json!(descriptor.created));
-            record.insert("id".to_owned(), serde_json::json!(descriptor.id));
-            if let Some(last_retrieved) = descriptor.last_retrieved {
-                record.insert(
-                    "lastRetrieved".to_owned(),
-                    serde_json::json!(last_retrieved),
-                );
-            }
-            record.insert(
-                "mimeType".to_owned(),
-                serde_json::json!(descriptor.mime_type),
-            );
-            record.insert("ref".to_owned(), serde_json::json!(descriptor.path));
-            record.insert("sha256".to_owned(), serde_json::json!(descriptor.sha256));
-            if let Some(version) = descriptor.version {
-                record.insert("version".to_owned(), serde_json::json!(version));
-            }
-            canonical_json_string(&serde_json::Value::Object(record))
+            encode_scene_asset_record(descriptor)
                 .map(|record| (descriptor.id.clone(), record))
-                .ok_or_else(|| {
-                    RuntimeError::Domain(DomainError::InvalidInput {
-                        reason: "an Excalidraw asset record could not be encoded",
-                    })
+                .map_err(|error| {
+                    let dohc_engine_collab::SceneImportError::Invalid { reason } = error;
+                    RuntimeError::Domain(DomainError::InvalidInput { reason })
                 })
         })
         .collect()
