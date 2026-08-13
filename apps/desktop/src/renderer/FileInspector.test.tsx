@@ -2703,11 +2703,12 @@ describe("markdown editor unmount flush", () => {
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
 
     await user.click(screen.getAllByTestId("property-add")[1]!);
-    await user.type(screen.getByLabelText("Property 1 name"), "status");
-    await user.type(
-      screen.getAllByLabelText("Property status value")[1]!,
-      "ready",
-    );
+    fireEvent.change(screen.getByLabelText("Property 1 name"), {
+      target: { value: "status" },
+    });
+    fireEvent.change(screen.getAllByLabelText("Property status value")[1]!, {
+      target: { value: "ready" },
+    });
     await act(async () => flushes[1]!());
 
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
@@ -3502,18 +3503,26 @@ describe("markdown editor unmount flush", () => {
     bridgeMock.writeWorkspaceText
       .mockImplementationOnce(() => heldFirst)
       .mockRejectedValueOnce(new Error("disk unavailable"));
+    let flush: DraftFlush | null = null;
     const user = userEvent.setup();
     const view = render(
-      <FileInspector workspaceId="ws-1" path="notes/plain.txt" />,
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        registerDraftFlush={(next) => {
+          flush = next;
+        }}
+      />,
     );
     const content = (await screen.findByTestId("view-text-editor")).querySelector(
       ".cm-content",
     ) as HTMLElement;
     await user.click(content);
     await user.keyboard("{End} One");
+    await waitFor(() => expect(flush).not.toBeNull());
+    const firstFlush = flush!().catch(() => undefined);
     await waitFor(
       () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
     );
     await user.keyboard(" Two");
     view.unmount();
@@ -3522,6 +3531,7 @@ describe("markdown editor unmount flush", () => {
     await act(async () => {
       resolveFirst();
       await heldFirst;
+      await firstFlush;
     });
     await waitFor(() =>
       expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
