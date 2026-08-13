@@ -3116,6 +3116,14 @@ export function DesktopWorkspaceShell(props: {
       const commitClose = () => {
         const current = wbRef.current;
         const next = closeRequestedTabs(current);
+        for (const group of current.editorGroups) {
+          const nextGroup = next.editorGroups.find(
+            (candidate) => candidate.id === group.id,
+          );
+          if (nextGroup?.activeTab !== group.activeTab) {
+            invalidateDeferredFileOpen(group.id);
+          }
+        }
         for (const groupId of groupsMountingNewDocument(current, next)) {
           rendererMarks.mark(fileOpenStartMark(groupId));
         }
@@ -3144,7 +3152,12 @@ export function DesktopWorkspaceShell(props: {
           );
         });
     },
-    [flushStableDrafts, mutateWb, reportShellError],
+    [
+      flushStableDrafts,
+      invalidateDeferredFileOpen,
+      mutateWb,
+      reportShellError,
+    ],
   );
 
   const closeFileTab = useCallback(
@@ -3270,21 +3283,14 @@ export function DesktopWorkspaceShell(props: {
           current.activeEditorGroup,
           targetGroupId,
         );
-        const currentTarget = current.editorGroups.find(
-          (group) => group.id === targetGroupId,
-        );
-        const nextTarget = next.editorGroups.find(
-          (group) => group.id === targetGroupId,
-        );
-        const nextActiveTab = nextTarget?.activeTab;
-        if (
-          nextActiveTab !== undefined &&
-          nextActiveTab !== null &&
-          nextActiveTab !== currentTarget?.activeTab
-        ) {
+        for (const groupId of groupsMountingNewDocument(current, next)) {
+          const nextActiveTab = next.editorGroups.find(
+            (group) => group.id === groupId,
+          )?.activeTab;
+          if (nextActiveTab === undefined || nextActiveTab === null) continue;
           const viewKind = classifyForView(nextActiveTab);
           if (viewKind === "markdown" || viewKind === "database") {
-            rendererMarks.mark(fileOpenStartMark(targetGroupId));
+            rendererMarks.mark(fileOpenStartMark(groupId));
           }
         }
         mutateWb(moveState);

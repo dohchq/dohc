@@ -21,7 +21,6 @@ import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
-import { StepMap } from "@tiptap/pm/transform";
 import type { EditorView } from "@tiptap/pm/view";
 import {
   Bold,
@@ -43,6 +42,7 @@ import {
 import { FenceWideningCodeBlock, getDohcYDocSelectionSeed } from "./import-export";
 import type { ImageSrcContext } from "./imageSrc";
 import {
+  documentReplacementMap,
   handleImageDrop,
   handleImagePaste,
   handlePaneImageDragOver,
@@ -362,29 +362,6 @@ function renderInlineText(editor: Editor, source: string): string {
   } catch {
     return source;
   }
-}
-
-function documentReplacementMap(
-  before: ProseMirrorNode,
-  after: ProseMirrorNode,
-): StepMap {
-  const start = before.content.findDiffStart(after.content);
-  if (start === null) return StepMap.empty;
-  const end = before.content.findDiffEnd(after.content);
-  if (end === null) {
-    return new StepMap([0, before.content.size, after.content.size]);
-  }
-  let { a: endBefore, b: endAfter } = end;
-  const overlap = start - Math.min(endBefore, endAfter);
-  if (overlap > 0) {
-    endBefore += overlap;
-    endAfter += overlap;
-  }
-  return new StepMap([
-    start,
-    endBefore - start,
-    endAfter - start,
-  ]);
 }
 
 const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInnerProps>(

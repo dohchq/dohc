@@ -201,6 +201,67 @@ describe("tabs", () => {
     expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual(["a.md"]);
   });
 
+  it("keeps a delayed move within the group cap when an empty group gained focus", () => {
+    const editorGroups = Array.from(
+      { length: MAX_OPEN_TABS },
+      (_, index) => ({
+        id: `group-${index}`,
+        tabs: [{ path: `file-${index}.md` }],
+        activeTab: `file-${index}.md`,
+        size: 1 / MAX_EDITOR_GROUPS,
+      }),
+    );
+    const state: WorkbenchState = {
+      ...defaultWorkbenchState(),
+      editorGroups: [
+        ...editorGroups,
+        {
+          id: "focused-empty",
+          tabs: [],
+          activeTab: null,
+          size: 1 / MAX_EDITOR_GROUPS,
+        },
+      ],
+      activeEditorGroup: "focused-empty",
+    };
+
+    const moved = moveTabToNewGroup(
+      state,
+      "group-0",
+      "file-0.md",
+      "delayed-split",
+      "preserve",
+    );
+
+    expect(moved.editorGroups).toHaveLength(MAX_EDITOR_GROUPS);
+    expect(moved.editorGroups.some((group) => group.id === "group-0")).toBe(
+      false,
+    );
+    expect(
+      moved.editorGroups.find((group) => group.id === "delayed-split"),
+    ).toMatchObject({
+      tabs: [{ path: "file-0.md" }],
+      activeTab: "file-0.md",
+    });
+    expect(allTabs(moved)).toHaveLength(MAX_OPEN_TABS);
+    expect(new Set(allTabs(moved).map((tab) => tab.path))).toEqual(
+      new Set(
+        Array.from(
+          { length: MAX_OPEN_TABS },
+          (_, index) => `file-${index}.md`,
+        ),
+      ),
+    );
+    expect(moved.activeEditorGroup).toBe("focused-empty");
+    expect(activeTabPath(moved)).toBeNull();
+    expect(
+      moved.editorGroups.reduce((sum, group) => sum + group.size, 0),
+    ).toBeCloseTo(1);
+    expect(serializeUiState(moved).editorGroups).toHaveLength(
+      MAX_EDITOR_GROUPS,
+    );
+  });
+
   it("keeps the destination tab focused when a delayed cross-group move completes", () => {
     const original: WorkbenchState = {
       ...defaultWorkbenchState(),

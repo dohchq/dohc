@@ -1,5 +1,6 @@
 import { validateUserWritePath } from "@dohc/workspace-core/paths";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { StepMap } from "@tiptap/pm/transform";
 import type { EditorView } from "@tiptap/pm/view";
 import { documentDir } from "./imageSrc";
 
@@ -294,24 +295,278 @@ export function insertImageAtPosition(
   return transaction.mapping.map(clamped, 1);
 }
 
+type DiffComponent = {
+  count: number;
+  added: boolean;
+  removed: boolean;
+  previous?: DiffComponent;
+};
+
+type DiffPath = {
+  oldPos: number;
+  last?: DiffComponent;
+};
+
+// Myers's sequence diff gives us every unchanged island, not only the common
+// prefix and suffix. Converting its changed runs to StepMap ranges lets both
+// cursors and async image anchors stay attached to unchanged content between
+// independent peer edits.
+function sequenceDiff<T>(
+  before: readonly T[],
+  after: readonly T[],
+  equal: (left: T, right: T) => boolean,
+): DiffComponent[] {
+  const addToPath = (
+    path: DiffPath,
+    added: boolean,
+    removed: boolean,
+    oldPosIncrement: number,
+  ): DiffPath => {
+    const last = path.last;
+    return {
+      oldPos: path.oldPos + oldPosIncrement,
+      last:
+        last && last.added === added && last.removed === removed
+          ? { ...last, count: last.count + 1 }
+          : { count: 1, added, removed, previous: last },
+    };
+  };
+  const extractCommon = (path: DiffPath, diagonal: number): number => {
+    let oldPos = path.oldPos;
+    let newPos = oldPos - diagonal;
+    let count = 0;
+    while (
+      oldPos + 1 < before.length &&
+      newPos + 1 < after.length &&
+      equal(before[oldPos + 1], after[newPos + 1])
+    ) {
+      oldPos += 1;
+      newPos += 1;
+      count += 1;
+    }
+    if (count > 0) {
+      path.last = {
+        count,
+        added: false,
+        removed: false,
+        previous: path.last,
+      };
+    }
+    path.oldPos = oldPos;
+    return newPos;
+  };
+  const components = (path: DiffPath): DiffComponent[] => {
+    const result: DiffComponent[] = [];
+    for (let component = path.last; component; component = component.previous) {
+      result.push(component);
+    }
+    return result.reverse();
+  };
+
+  const paths: Record<number, DiffPath | undefined> = {
+    0: { oldPos: -1 },
+  };
+  let newPos = extractCommon(paths[0]!, 0);
+  if (paths[0]!.oldPos + 1 >= before.length && newPos + 1 >= after.length) {
+    return components(paths[0]!);
+  }
+
+  let minDiagonal = -Infinity;
+  let maxDiagonal = Infinity;
+  for (
+    let editLength = 1;
+    editLength <= before.length + after.length;
+    editLength += 1
+  ) {
+    for (
+      let diagonal = Math.max(minDiagonal, -editLength);
+      diagonal <= Math.min(maxDiagonal, editLength);
+      diagonal += 2
+    ) {
+      const removePath = paths[diagonal - 1];
+      const insertPath = paths[diagonal + 1];
+      if (removePath) paths[diagonal - 1] = undefined;
+      const insertNewPos = insertPath
+        ? insertPath.oldPos - diagonal
+        : -1;
+      const canInsert =
+        insertPath !== undefined &&
+        insertNewPos >= 0 &&
+        insertNewPos < after.length;
+      const canRemove =
+        removePath !== undefined && removePath.oldPos + 1 < before.length;
+      if (!canInsert && !canRemove) {
+        paths[diagonal] = undefined;
+        continue;
+      }
+      const path =
+        !canRemove ||
+        (canInsert && removePath!.oldPos < insertPath!.oldPos)
+          ? addToPath(insertPath!, true, false, 0)
+          : addToPath(removePath!, false, true, 1);
+      newPos = extractCommon(path, diagonal);
+      if (path.oldPos + 1 >= before.length && newPos + 1 >= after.length) {
+        return components(path);
+      }
+      paths[diagonal] = path;
+      if (path.oldPos + 1 >= before.length) {
+        maxDiagonal = Math.min(maxDiagonal, diagonal - 1);
+      }
+      if (newPos + 1 >= after.length) {
+        minDiagonal = Math.max(minDiagonal, diagonal + 1);
+      }
+    }
+  }
+  return [
+    ...(before.length > 0
+      ? [{ count: before.length, added: false, removed: true }]
+      : []),
+    ...(after.length > 0
+      ? [{ count: after.length, added: true, removed: false }]
+      : []),
+  ];
+}
+
+function appendRange(
+  ranges: number[],
+  start: number,
+  oldSize: number,
+  newSize: number,
+): void {
+  if (oldSize !== 0 || newSize !== 0) ranges.push(start, oldSize, newSize);
+}
+
+function diffText(
+  before: string,
+  after: string,
+  start: number,
+  ranges: number[],
+): void {
+  let pos = start;
+  let oldSize = 0;
+  let newSize = 0;
+  const components = sequenceDiff(
+    before.split(""),
+    after.split(""),
+    (a, b) => a === b,
+  );
+  for (const component of components) {
+    if (!component.added && !component.removed) {
+      appendRange(ranges, pos, oldSize, newSize);
+      pos += oldSize + component.count;
+      oldSize = 0;
+      newSize = 0;
+    } else if (component.added) {
+      newSize += component.count;
+    } else {
+      oldSize += component.count;
+    }
+  }
+  appendRange(ranges, pos, oldSize, newSize);
+}
+
+function diffNode(
+  before: ProseMirrorNode,
+  after: ProseMirrorNode,
+  start: number,
+  ranges: number[],
+): void {
+  if (before.eq(after)) return;
+  if (!before.sameMarkup(after)) {
+    appendRange(ranges, start, before.nodeSize, after.nodeSize);
+    return;
+  }
+  if (before.isText && after.isText) {
+    diffText(before.text ?? "", after.text ?? "", start, ranges);
+    return;
+  }
+  if (before.isLeaf || after.isLeaf) {
+    appendRange(ranges, start, before.nodeSize, after.nodeSize);
+    return;
+  }
+  diffContent(before, after, start + 1, ranges);
+}
+
+function diffContent(
+  before: ProseMirrorNode,
+  after: ProseMirrorNode,
+  start: number,
+  ranges: number[],
+): void {
+  const oldChildren: ProseMirrorNode[] = [];
+  const newChildren: ProseMirrorNode[] = [];
+  before.forEach((node) => oldChildren.push(node));
+  after.forEach((node) => newChildren.push(node));
+  let oldIndex = 0;
+  let newIndex = 0;
+  let pos = start;
+  let changedOld: ProseMirrorNode[] = [];
+  let changedNew: ProseMirrorNode[] = [];
+
+  const flush = () => {
+    if (changedOld.length === 0 && changedNew.length === 0) return;
+    if (
+      changedOld.length === changedNew.length &&
+      changedOld.every((node, index) => node.sameMarkup(changedNew[index]!))
+    ) {
+      let nestedPos = pos;
+      for (let index = 0; index < changedOld.length; index += 1) {
+        diffNode(changedOld[index]!, changedNew[index]!, nestedPos, ranges);
+        nestedPos += changedOld[index]!.nodeSize;
+      }
+    } else {
+      appendRange(
+        ranges,
+        pos,
+        changedOld.reduce((size, node) => size + node.nodeSize, 0),
+        changedNew.reduce((size, node) => size + node.nodeSize, 0),
+      );
+    }
+    pos += changedOld.reduce((size, node) => size + node.nodeSize, 0);
+    changedOld = [];
+    changedNew = [];
+  };
+
+  const components = sequenceDiff(oldChildren, newChildren, (a, b) => a.eq(b));
+  for (const component of components) {
+    if (!component.added && !component.removed) {
+      flush();
+      for (let count = 0; count < component.count; count += 1) {
+        pos += oldChildren[oldIndex++]!.nodeSize;
+        newIndex += 1;
+      }
+    } else if (component.added) {
+      changedNew.push(...newChildren.slice(newIndex, newIndex + component.count));
+      newIndex += component.count;
+    } else {
+      changedOld.push(...oldChildren.slice(oldIndex, oldIndex + component.count));
+      oldIndex += component.count;
+    }
+  }
+  flush();
+}
+
+export function documentReplacementMap(
+  before: ProseMirrorNode,
+  after: ProseMirrorNode,
+): StepMap {
+  if (before.eq(after)) return StepMap.empty;
+  const ranges: number[] = [];
+  diffContent(before, after, 0, ranges);
+  return new StepMap(ranges);
+}
+
 function rebasePositionAfterDocumentChange(
   pos: number,
   before: ProseMirrorNode,
   after: ProseMirrorNode,
 ): number {
-  if (before === after) {
-    return Math.max(0, Math.min(pos, after.content.size));
-  }
-  const start = before.content.findDiffStart(after.content);
-  if (start === null) return Math.min(pos, after.content.size);
-  const end = before.content.findDiffEnd(after.content);
-  if (end === null) return Math.min(pos, after.content.size);
-  if (pos <= start) return pos;
-  const mapped =
-    pos >= end.a
-      ? pos + end.b - end.a
-      : start + Math.min(pos - start, Math.max(0, end.b - start));
-  return Math.max(0, Math.min(mapped, after.content.size));
+  if (before === after) return Math.max(0, Math.min(pos, after.content.size));
+  const mapped = documentReplacementMap(before, after).map(pos, 1);
+  return Math.max(
+    0,
+    Math.min(mapped, after.content.size),
+  );
 }
 
 // Writes each image to the workspace and inserts an image node for it. Images

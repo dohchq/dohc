@@ -1408,6 +1408,43 @@ describe("MarkdownEditor markdown export: code fence widening (#704)", () => {
     expect(onDirty).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps a cursor in unchanged content between disjoint peer edits", async () => {
+    const ref = createRef<MarkdownEditorHandle>();
+    const onDirty = vi.fn();
+    render(
+      createElement(MarkdownEditor, {
+        ref,
+        value: "Before\n\nTarget\n\nAfter",
+        onDirty,
+        workspaceId: "workspace-1",
+        path: "notes/shared.md",
+        knownFiles: [],
+      }),
+    );
+    const editor = await screen.findByTestId("markdown-editor");
+    const target = Array.from(editor.querySelectorAll("p")).find(
+      (paragraph) => paragraph.textContent === "Target",
+    );
+    const text = target?.firstChild;
+    if (!(text instanceof Text)) throw new Error("expected target paragraph text");
+    editor.focus();
+    const range = document.createRange();
+    range.setStart(text, 3);
+    range.collapse(true);
+    const selection = document.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    fireEvent(document, new Event("selectionchange"));
+    await waitFor(() => expect(selectionTextOffset(editor)).toBe(9));
+
+    act(() =>
+      ref.current?.replaceMarkdown("Peer\n\nBefore\n\nTarget\n\nAfter\n\nTail"),
+    );
+
+    expect(selectionTextOffset(editor)).toBe(13);
+    expect(onDirty).not.toHaveBeenCalled();
+  });
+
   it("widens a code fence in the live editor's getMarkdown when the block content contains a fence", async () => {
     const content = "before\n```\nafter";
     const value = ["````js", "before", "```", "after", "````"].join("\n");

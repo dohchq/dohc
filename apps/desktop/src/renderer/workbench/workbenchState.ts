@@ -500,6 +500,31 @@ export function moveTabToNewGroup(
   const source = baseGroups[sourceIndex];
   const detached = detachTabFromGroup(source, path);
   if (!detached) return state;
+  if (baseGroups.length >= MAX_EDITOR_GROUPS) {
+    // At the cap, the only valid extra group is the focused empty placeholder
+    // retained above. Moving the sole tab out of its source can replace that
+    // source in place, so the requested group is created without discarding
+    // the user's newer empty-group focus or exceeding the persisted contract.
+    if (
+      baseGroups.length !== MAX_EDITOR_GROUPS ||
+      detached.group.tabs.length > 0
+    ) {
+      return state;
+    }
+    const editorGroups = [...baseGroups];
+    editorGroups[sourceIndex] = {
+      id: newGroupId,
+      tabs: [detached.tab],
+      activeTab: path,
+      size: source.size,
+    };
+    return {
+      ...state,
+      editorGroups,
+      activeEditorGroup:
+        activation === "target" ? newGroupId : state.activeEditorGroup,
+    };
+  }
   const splitSize = source.size / 2;
   const editorGroups = [...baseGroups];
   editorGroups.splice(

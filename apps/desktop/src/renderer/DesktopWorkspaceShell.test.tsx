@@ -879,6 +879,83 @@ describe("editor groups", () => {
       .find((row) => row.dataset.path === path)!;
   }
 
+  it("keeps the close-selected neighbor when an older duplicate-file open finishes flushing", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          {
+            id: "left",
+            tabs: ["race-a.md"],
+            activeTab: "race-a.md",
+            size: 0.5,
+          },
+          {
+            id: "right",
+            tabs: ["b.md", "c.md"],
+            activeTab: "c.md",
+            size: 0.5,
+          },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["race-a.md", "b.md", "c.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.readWorkspaceText = vi.fn(async () => ({
+      text: "# Doc\n\n",
+      truncated: false as const,
+      contentHash: "a".repeat(64),
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), "Draft");
+    await waitFor(() =>
+      expect(within(left).getByTestId("tab-dirty")).toBeTruthy(),
+    );
+
+    fireEvent.pointerDown(right);
+    await waitFor(() => expect(right.dataset.active).toBe("true"));
+    await user.click(fileTreeRow("race-a.md"));
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1),
+    );
+
+    await user.click(
+      within(within(right).getByTestId("tab-c.md")).getByRole("button", {
+        name: "Close c.md",
+      }),
+    );
+    await waitFor(() =>
+      expect(within(right).queryByTestId("tab-c.md")).toBeNull(),
+    );
+    expect(within(right).getByTestId("tab-b.md").dataset.active).toBe("true");
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    await waitFor(() =>
+      expect(within(right).getByTestId("tab-b.md").dataset.active).toBe("true"),
+    );
+    expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
+  });
+
   it("does not offer Split Right for the singleton Chats tab", async () => {
     renderShell(
       makeBridge(
@@ -3924,17 +4001,29 @@ describe("workspace shell errors", () => {
 // active row used to mark anyway — no remount/measure follows, so the stale
 // mark corrupts the NEXT open's latency measure.
 describe("file-open-start marking", () => {
-  it("marks the target group before a cross-group Markdown move mounts it", async () => {
+  it("marks both Markdown mounts in an active cross-group move", async () => {
     const bridge = makeBridge(
       Promise.resolve({
         ...STORED_STATE,
         editorGroups: [
-          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          {
+            id: "left",
+            tabs: ["a.md", "fallback.md"],
+            activeTab: "a.md",
+            size: 0.5,
+          },
           { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
         ],
         activeEditorGroup: "left",
       }),
     );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["a.md", "fallback.md", "b.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
     Object.defineProperty(Element.prototype, "setPointerCapture", {
       configurable: true,
       value: vi.fn(),
@@ -3973,6 +4062,7 @@ describe("file-open-start marking", () => {
       expect(within(right).getByTestId("tab-a.md").dataset.active).toBe("true"),
     );
     expect(mark).toHaveBeenCalledWith("file-open-start:right");
+    expect(mark).toHaveBeenCalledWith("file-open-start:left");
     mark.mockRestore();
   });
 

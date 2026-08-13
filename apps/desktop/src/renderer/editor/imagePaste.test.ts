@@ -13,6 +13,7 @@ import {
   handlePaneImageDrop,
   imageExtension,
   insertImageAtPosition,
+  documentReplacementMap,
   placeImageFiles,
   pickAndInsertImages,
   sanitizeAttachmentFolderName,
@@ -403,6 +404,42 @@ describe("insertImageAtPosition", () => {
   });
 });
 
+describe("documentReplacementMap", () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: "block+" },
+      paragraph: { content: "inline*", group: "block" },
+      text: { group: "inline" },
+    },
+  });
+  const paragraph = (text: string) =>
+    schema.node("paragraph", null, schema.text(text));
+
+  it("maps through disjoint edits within one text node", () => {
+    const before = schema.node("doc", null, [paragraph("before Target after")]);
+    const after = schema.node("doc", null, [paragraph("peer before Target after tail")]);
+
+    expect(documentReplacementMap(before, after).map(11, 1)).toBe(16);
+  });
+
+  it("maps through disjoint block and inline edits", () => {
+    const before = schema.node("doc", null, [
+      paragraph("Before"),
+      paragraph("Target"),
+      paragraph("After"),
+    ]);
+    const after = schema.node("doc", null, [
+      paragraph("Peer"),
+      paragraph("Before"),
+      paragraph("Tar!get"),
+      paragraph("After"),
+      paragraph("Tail"),
+    ]);
+
+    expect(documentReplacementMap(before, after).map(12, 1)).toBe(19);
+  });
+});
+
 describe("placeImageFiles", () => {
   it("rebases the insertion position when peer content lands during the asset write", async () => {
     const schema = new Schema({
@@ -600,6 +637,75 @@ describe("placeImageFiles", () => {
 
     expect(state.doc.child(0).textContent).toBe("same");
     expect(state.doc.child(1).firstChild?.type.name).toBe("image");
+  });
+
+  it("keeps an async image anchor between disjoint peer edits", async () => {
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: { content: "inline*", group: "block" },
+        text: { group: "inline" },
+        image: {
+          inline: true,
+          group: "inline",
+          atom: true,
+          attrs: { src: {}, alt: { default: "" } },
+        },
+      },
+    });
+    const paragraph = (text: string) =>
+      schema.node("paragraph", null, schema.text(text));
+    let state = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [
+        paragraph("Before"),
+        paragraph("Target"),
+        paragraph("After"),
+      ]),
+    });
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch(transaction: Parameters<typeof state.apply>[0]) {
+        state = state.apply(transaction);
+      },
+    };
+
+    await placeImageFiles(
+      view as never,
+      [
+        {
+          name: "photo.png",
+          mimeType: "image/png",
+          size: 1,
+          read: async () => new Uint8Array([1]),
+        },
+      ],
+      {
+        workspaceId: "ws1",
+        docPath: "notes/plan.md",
+        writeAsset: async () => {
+          state = EditorState.create({
+            schema,
+            doc: schema.node("doc", null, [
+              paragraph("Peer"),
+              paragraph("Before"),
+              paragraph("Target"),
+              paragraph("After"),
+              paragraph("Tail"),
+            ]),
+          });
+        },
+      },
+      12,
+    );
+
+    const target = state.doc.child(2);
+    expect(target.childCount).toBe(3);
+    expect(target.child(0).textContent).toBe("Tar");
+    expect(target.child(1).type.name).toBe("image");
+    expect(target.child(2).textContent).toBe("get");
   });
 
   it("anchors before the asynchronous attachment-settings read", async () => {
