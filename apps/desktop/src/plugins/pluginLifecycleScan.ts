@@ -60,8 +60,9 @@ export class PluginInstallationIntegrityError extends Error {
   constructor(
     message: string,
     readonly path: string | null = null,
+    cause?: unknown,
   ) {
-    super(message);
+    super(message, cause === undefined ? undefined : { cause });
     this.name = "PluginInstallationIntegrityError";
   }
 }
@@ -149,6 +150,7 @@ async function pathStats(path: string): Promise<Awaited<ReturnType<typeof lstat>
     throw new PluginInstallationIntegrityError(
       `Installation entry at ${path} could not be inspected: ${errorMessage(error)}`,
       path,
+      error,
     );
   }
 }
@@ -218,7 +220,16 @@ function isEnoentAt(
   error: PluginInstallationIntegrityError,
   path: string,
 ): boolean {
-  return error.path === path && error.message.includes("ENOENT");
+  // Branches on the wrapped Node error's actual errno code, not a substring
+  // match against the composed message (CodeRabbit #779 R22) — the message
+  // happens to start with "ENOENT: ..." by Node convention, not by
+  // contract, so any future rewording of pathStats's own message would
+  // silently break the zero-dependency-install fast path below without
+  // this.
+  return (
+    error.path === path &&
+    (error.cause as NodeJS.ErrnoException | undefined)?.code === "ENOENT"
+  );
 }
 
 async function readContainedManifest(

@@ -1,4 +1,5 @@
 import {
+  lstat,
   mkdir,
   mkdtemp,
   rm,
@@ -7,17 +8,42 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DohcPluginManifest,
   type DohcPluginManifest as DohcPluginManifestShape,
 } from "./pluginManifestSchema";
-import {
+import type {
+  PluginInstallationIntegrityError as PluginInstallationIntegrityErrorType,
+  PluginLifecycleUnsupportedHooksError as PluginLifecycleUnsupportedHooksErrorType,
+  PluginLifecycleScanResult,
+} from "./pluginLifecycleScan";
+
+// A pure JS-level interception, so one test can make node_modules's own
+// lstat fail with a specific errno without touching real filesystem
+// permissions. Every other test's real lstat calls pass through unchanged.
+let poisonedPath: string | null = null;
+let poisonedError: NodeJS.ErrnoException | null = null;
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    lstat: (async (path: Parameters<typeof lstat>[0], options?: unknown) => {
+      if (poisonedPath !== null && String(path) === poisonedPath && poisonedError) {
+        throw poisonedError;
+      }
+      return actual.lstat(path as string, options as never);
+    }) as typeof lstat,
+  };
+});
+
+const {
   PluginInstallationIntegrityError,
   PluginLifecycleUnsupportedHooksError,
   scanPluginLifecycleScripts,
-  type PluginLifecycleScanResult,
-} from "./pluginLifecycleScan";
+} = await import("./pluginLifecycleScan");
+type PluginInstallationIntegrityError = PluginInstallationIntegrityErrorType;
+type PluginLifecycleUnsupportedHooksError = PluginLifecycleUnsupportedHooksErrorType;
 
 interface LifecycleFixture {
   root: string;
@@ -126,6 +152,8 @@ function scan(fixture: LifecycleFixture): Promise<PluginLifecycleScanResult> {
 }
 
 afterEach(async () => {
+  poisonedPath = null;
+  poisonedError = null;
   await Promise.all(roots.splice(0).map((root) =>
     rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
 });
@@ -155,6 +183,39 @@ describe("scanPluginLifecycleScripts", () => {
     const result = await scanPluginLifecycleScripts({ snapshotRoot, manifest });
 
     expect(result).toMatchObject({ ok: true, warnings: [], warningLines: [] });
+  });
+
+  it("fails closed on a real permission error whose message happens to mention ENOENT (CodeRabbit #779 R22)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-plugin-lifecycle-"));
+    roots.push(root);
+    const snapshotRoot = join(root, "snapshot");
+    await mkdir(snapshotRoot, { recursive: true });
+    await writeFile(
+      join(snapshotRoot, "package.json"),
+      `${JSON.stringify({ name: "root-plugin", version: "1.0.0" }, null, 2)}\n`,
+    );
+    const manifest = DohcPluginManifest.parse({
+      version: 1,
+      name: "root-plugin",
+      entry: "src/index.ts",
+    });
+
+    // A real EACCES, but its message text happens to contain "ENOENT" (a
+    // substring match would misclassify this as "node_modules is simply
+    // absent" and silently skip the scan instead of failing closed on a
+    // genuine permission problem).
+    poisonedPath = join(snapshotRoot, "node_modules");
+    poisonedError = Object.assign(
+      new Error("EACCES: permission denied (see also ENOENT for comparison)"),
+      { code: "EACCES" },
+    );
+
+    const result = await scanPluginLifecycleScripts({ snapshotRoot, manifest });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.error).toBeInstanceOf(PluginInstallationIntegrityError);
+    expect(result.error.message).toContain("EACCES");
   });
 
   it("reports a dependency postinstall hook without exposing its command in UI text", async () => {
