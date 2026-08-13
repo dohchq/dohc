@@ -1623,7 +1623,7 @@ async fn scene_seed_refuses_a_preexisting_different_asset_at_its_owned_ref() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scene_seed_names_the_existing_binary_ceiling_before_commit() {
-    // Pinned Excalidraw v0.18.0 commit 817d8c553c3389650f8b4503984a6d4a5d2f0c11
+    // Pinned Excalidraw v0.18.1 commit a2ec2889babf7d2295469c6d90ebe77fae57df84
     // defines MAX_ALLOWED_FILE_BYTES as 4 MiB (constants.ts:314) and refuses
     // larger inserted images (App.tsx:9763-9767). The engine's existing 5 MiB
     // binary ceiling is beyond that measured healthy native range.

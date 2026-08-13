@@ -230,7 +230,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     // three span about 48 ms. Excalidraw sends durable scene changes from each
     // onChange, so we do not take the extra frame. The two-frame window halves
     // transport calls and matches Excalidraw's 33 ms cursor-sync cadence.
-    // Source: https://github.com/excalidraw/excalidraw/tree/817d8c553c3389650f8b4503984a6d4a5d2f0c11
+    // Source: https://github.com/excalidraw/excalidraw/tree/a2ec2889babf7d2295469c6d90ebe77fae57df84
     const { seed, updates } = pointerDragUpdates(120);
     const mergedTwoFrames = chunks(updates, 2).map((batch) =>
       Y.mergeUpdates(batch),
