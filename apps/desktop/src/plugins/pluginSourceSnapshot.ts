@@ -25,8 +25,8 @@ export const PINNED_PLUGIN_PACKAGE_MANAGER =
   `pnpm@${PINNED_PLUGIN_PNPM_VERSION}`;
 
 // Measured on 2026-08-13. See
-// .agent-artifacts/references/pr2-run2-measurements.md and its 2026-08-13
-// correction: the original bundle measurement embedded a JSON string
+// docs/superpowers/plans/2026-08-13-plugin-timeout-measurements.md and its
+// 2026-08-13 correction: the original bundle measurement embedded a JSON string
 // constant rather than bundling real dependency code, so it under-measured
 // real work. A real bundle of react + react-dom + lucide-react + zod (98
 // input files, 4,601,978 input bytes) took 550.465 ms on first build after
