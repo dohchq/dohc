@@ -30,6 +30,7 @@ pub mod limits;
 pub mod replay_parity;
 pub mod replication;
 pub mod scene;
+mod scene_lifecycle;
 pub mod ydoc;
 
 pub use durable::{
@@ -54,6 +55,10 @@ pub use scene::{
     encode_scene_asset_records, fold_scene, import_portable_scene, scene_asset_directory,
     scene_asset_extension, scene_asset_ref, scene_asset_ref_is_owned, scene_data_url_len,
     FoldedScene, ImportedScene, ImportedSceneFile, SceneAsset, SceneImportError,
+};
+pub use scene_lifecycle::{
+    freeze_scene_asset_delete_authority_in_tx, read_scene_asset_delete_authority,
+    scene_asset_delete_moment_id, SceneAssetDeleteAuthority,
 };
 pub use ydoc::{
     merge_updates, ContentKind, OffsetMode, Projection, Ydoc, ROOT_BODY, ROOT_FRONTMATTER,

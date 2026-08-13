@@ -1,6 +1,7 @@
 use dohc_engine_collab::{
     ContentKind, DocKey, Regime, RemoteUpdate, ReplicationApplyOutcome, apply_remote_update,
-    encode_scene_asset_records, ensure_marker, scene_asset_ref,
+    encode_scene_asset_records, ensure_marker, import_portable_scene, record_local_update,
+    scene_asset_ref,
 };
 use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
@@ -119,7 +120,33 @@ fn apply_remote_scene_asset_authority(
         })
         .to_string(),
     );
-    let update = encode_scene_asset_records(&records).expect("encode scene asset authority");
+    let scene = import_portable_scene(
+        &serde_json::json!({
+            "type": "excalidraw",
+            "elements": [{
+                "id": "image-element",
+                "type": "image",
+                "version": 1,
+                "versionNonce": 1,
+                "isDeleted": false,
+                "index": "a0",
+                "fileId": "image-file"
+            }],
+            "files": {
+                "image-file": {
+                    "id": "image-file",
+                    "mimeType": "image/png",
+                    "created": now_ms,
+                    "dataURL": format!("data:image/png;base64,{ONE_PIXEL_PNG_BASE64}")
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("import live image scene");
+    let asset_update = encode_scene_asset_records(&records).expect("encode scene asset authority");
+    let update = dohc_engine_collab::merge_updates(&[scene.initial_update, asset_update])
+        .expect("merge scene authority update");
     assert!(matches!(
         apply_remote_update(
             store,
@@ -2065,9 +2092,13 @@ async fn replicated_scene_delete_carries_its_owned_asset_delete_to_a_clean_peer(
 
     let ops = local_ops(&source_db);
     assert_eq!(ops.len(), 4);
-    assert!(
-        ops.iter()
-            .any(|op| { op.payload["operation"] == "delete" && op.payload["path"] == asset_path })
+    assert_eq!(
+        ops[2].payload["path"], "drawings/board.excalidraw",
+        "the drawing delete must reach a peer before its asset delete"
+    );
+    assert_eq!(
+        ops[3].payload["path"], asset_path,
+        "the asset delete must follow the authority-bearing drawing delete"
     );
     let peer = ScratchDir::new().expect("peer scratch");
     let peer_db = peer.engine_db_path().expect("peer db");
@@ -2130,6 +2161,44 @@ async fn replicated_scene_delete_carries_its_owned_asset_delete_to_a_clean_peer(
         })
         .expect("read replicated asset delete origin");
     assert_eq!(replicated_delete_origin, "local-file");
+    drop(peer_store);
+
+    let deleted_image_revision = import_portable_scene(
+        &serde_json::json!({
+            "type": "excalidraw",
+            "elements": [{
+                "id": "image-element",
+                "type": "image",
+                "version": 2,
+                "versionNonce": 2,
+                "isDeleted": true,
+                "index": "a0",
+                "fileId": "image-file"
+            }]
+        })
+        .to_string(),
+    )
+    .expect("deleted image revision");
+    let mut peer_store = EngineStore::open(&peer_db, 8).expect("reopen peer lineage");
+    record_local_update(
+        &mut peer_store,
+        &DocKey::new(workspace_id, "main", "drawing-object").expect("peer scene key"),
+        &deleted_image_revision.initial_update,
+        &NoFaults,
+        8,
+    )
+    .expect("record post-delete scene edit");
+    let frozen_items: i64 = peer_store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM scene_asset_delete_authority_items \
+                 WHERE workspace_id=?1 AND drawing_delete_moment_id='drawing-delete'",
+                [workspace_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("count frozen delete authority");
+    assert_eq!(frozen_items, 1);
     drop(peer_store);
 
     let peer_supervisor = WorkspaceSupervisor::new();
@@ -2195,18 +2264,19 @@ async fn replicated_scene_delete_carries_its_owned_asset_delete_to_a_clean_peer(
         .await
         .expect("commit forged correlated delete");
     let peer_ops_before_rollback = local_ops(&peer_db).len();
+    let rollback_input = RollbackTextFileMutation {
+        workspace_id: workspace_id.to_owned(),
+        version_id: "main".to_owned(),
+        path: "drawings/board.excalidraw".to_owned(),
+        mutation_moment_id: "drawing-delete".to_owned(),
+        request_id: Some("peer-local-drawing-rollback".to_owned()),
+        legacy_before_text: None,
+        metadata_origin: "restore".to_owned(),
+        author_json: None,
+    };
     let rollback = peer_actor
         .versioned_text_rollback(
-            RollbackTextFileMutation {
-                workspace_id: workspace_id.to_owned(),
-                version_id: "main".to_owned(),
-                path: "drawings/board.excalidraw".to_owned(),
-                mutation_moment_id: "drawing-delete".to_owned(),
-                request_id: Some("peer-local-drawing-rollback".to_owned()),
-                legacy_before_text: None,
-                metadata_origin: "restore".to_owned(),
-                author_json: None,
-            },
+            rollback_input.clone(),
             peer.path().to_path_buf(),
             Arc::new(NoRecorder),
             Arc::new(NoFaults),
@@ -2215,7 +2285,29 @@ async fn replicated_scene_delete_carries_its_owned_asset_delete_to_a_clean_peer(
         .await
         .expect("rollback replicated drawing delete on peer");
     assert!(rollback.materialized);
-    peer_supervisor.close(&peer_db).expect("close peer actor");
+    peer_supervisor
+        .close(&peer_db)
+        .expect("close peer after lost rollback response");
+    let restarted_peer = WorkspaceSupervisor::new();
+    let restarted_actor = restarted_peer
+        .open(&peer_db, 10)
+        .expect("restart peer after lost rollback response")
+        .actor;
+    let retry = restarted_actor
+        .versioned_text_rollback(
+            rollback_input,
+            peer.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("retry committed peer rollback after a lost response");
+    assert!(retry.deduped);
+    assert!(retry.materialized);
+    restarted_peer
+        .close(&peer_db)
+        .expect("close restarted peer actor");
 
     let peer_restore_ops = local_ops(&peer_db)
         .into_iter()
@@ -2252,6 +2344,16 @@ async fn replicated_scene_delete_carries_its_owned_asset_delete_to_a_clean_peer(
         forged_bytes
     );
     let mut peer_store = EngineStore::open(&peer_db, 10).expect("inspect restored peer");
+    let retained_authority: i64 = peer_store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM scene_asset_delete_authorities WHERE workspace_id=?1",
+                [workspace_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("count consumed scene asset authority");
+    assert_eq!(retained_authority, 0);
     let restored_drawing = VersionedTextStore::new(&mut peer_store)
         .read_text(workspace_id, "main", "drawings/board.excalidraw")
         .expect("read restored peer drawing")

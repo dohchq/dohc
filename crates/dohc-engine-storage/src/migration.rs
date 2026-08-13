@@ -1904,6 +1904,54 @@ UPDATE versions SET name = 'Main'
 
 pub(crate) const MAIN_VERSION_NAME_MIGRATION_ID: &str = "v1-main-version-name";
 
+/// Immutable engine-owned authority for drawing asset lifecycle work.
+///
+/// The drawing delete moment is the durable parent. Asset delete moment ids are
+/// frozen while the scene lineage and binary heads still exist, so a later
+/// Y.Doc edit cannot change what rollback restores. Rollback consumes this row
+/// in the transaction that records the compensating asset moments, so the
+/// drawing moment id is a value key rather than a foreign key to moments.
+const V1_SCENE_ASSET_DELETE_AUTHORITY_DDL: &str = "\
+CREATE TABLE scene_asset_delete_authorities (
+    workspace_id             TEXT NOT NULL,
+    version_id               TEXT NOT NULL,
+    drawing_object_id        TEXT NOT NULL,
+    drawing_delete_moment_id TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, drawing_delete_moment_id),
+    FOREIGN KEY (workspace_id, version_id)
+        REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, drawing_object_id)
+        REFERENCES file_objects(workspace_id, object_id) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE scene_asset_delete_authority_items (
+    workspace_id             TEXT NOT NULL,
+    version_id               TEXT NOT NULL,
+    drawing_delete_moment_id TEXT NOT NULL,
+    asset_delete_moment_id   TEXT NOT NULL,
+    asset_path               TEXT NOT NULL,
+    asset_sha256             TEXT NOT NULL
+        CHECK (length(asset_sha256) = 64
+           AND asset_sha256 NOT GLOB '*[^0-9a-f]*'),
+    PRIMARY KEY (workspace_id, version_id, drawing_delete_moment_id, asset_path),
+    UNIQUE (workspace_id, asset_delete_moment_id),
+    FOREIGN KEY (workspace_id, version_id, drawing_delete_moment_id)
+        REFERENCES scene_asset_delete_authorities(
+            workspace_id, version_id, drawing_delete_moment_id
+        ) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX idx_scene_asset_delete_authority_parent
+    ON scene_asset_delete_authority_items (
+        workspace_id,
+        version_id,
+        drawing_delete_moment_id
+    );
+";
+
+pub(crate) const SCENE_ASSET_DELETE_AUTHORITY_MIGRATION_ID: &str =
+    "v1-scene-asset-delete-authority";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -2091,6 +2139,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: MAIN_VERSION_NAME_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_MAIN_VERSION_NAME_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 26,
+        id: SCENE_ASSET_DELETE_AUTHORITY_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SCENE_ASSET_DELETE_AUTHORITY_DDL,
         sets_user_version: None,
     },
 ];
@@ -2519,6 +2574,110 @@ mod tests {
             )
             .expect("collision count");
         assert_eq!(collide_main_count, 1);
+    }
+
+    #[test]
+    fn scene_asset_delete_authority_migration_is_strict_checked_and_version_scoped() {
+        let dir = tempdir();
+        let path = dir.join("scene-asset-delete-authority.db");
+        let ctx = MigrationContext::current(1_500);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        let migration_index = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == SCENE_ASSET_DELETE_AUTHORITY_MIGRATION_ID)
+            .expect("scene authority migration is registered");
+        run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("pre-authority migrations");
+        let absent: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' \
+                 AND name LIKE 'scene_asset_delete_authorit%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count pre-migration tables");
+        assert_eq!(absent, 0);
+
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+                .expect("apply authority migration"),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let (ordinal, checksum, integrity_ok): (i64, String, i64) = conn
+            .query_row(
+                "SELECT ordinal,checksum,integrity_ok FROM engine_migrations WHERE id=?1",
+                [SCENE_ASSET_DELETE_AUTHORITY_MIGRATION_ID],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("authority migration ledger row");
+        assert_eq!(ordinal, 26);
+        assert_eq!(
+            checksum,
+            migration_checksum(V1_SCENE_ASSET_DELETE_AUTHORITY_DDL)
+        );
+        assert_eq!(integrity_ok, 1);
+        for table in [
+            "scene_asset_delete_authorities",
+            "scene_asset_delete_authority_items",
+        ] {
+            let sql: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .expect("normalized table SQL");
+            assert!(sql.to_uppercase().contains("STRICT"));
+        }
+
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id,main_version_id) VALUES ('ws','main');
+             INSERT INTO versions (workspace_id,version_id,name,kind,created_at_ms)
+             VALUES ('ws','main','Main','main',1);
+             INSERT INTO file_objects (workspace_id,object_id,created_at_ms)
+             VALUES ('ws','drawing',1);
+             INSERT INTO scene_asset_delete_authorities
+             (workspace_id,version_id,drawing_object_id,drawing_delete_moment_id)
+             VALUES ('ws','main','drawing','drawing-delete');
+             INSERT INTO scene_asset_delete_authority_items
+             (workspace_id,version_id,drawing_delete_moment_id,asset_delete_moment_id,asset_path,asset_sha256)
+             VALUES ('ws','main','drawing-delete','asset-delete','assets/excalidraw/a/file.png',
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');",
+        )
+        .expect("valid authority rows");
+        assert!(
+            conn.execute(
+                "INSERT INTO scene_asset_delete_authority_items
+                 (workspace_id,version_id,drawing_delete_moment_id,asset_delete_moment_id,asset_path,asset_sha256)
+                 VALUES ('ws','main','drawing-delete','bad-delete','bad',?1)",
+                ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],
+            )
+            .is_err(),
+            "asset SHA must use canonical lowercase hex"
+        );
+        conn.execute(
+            "DELETE FROM versions WHERE workspace_id='ws' AND version_id='main'",
+            [],
+        )
+        .expect("delete version");
+        for table in [
+            "scene_asset_delete_authorities",
+            "scene_asset_delete_authority_items",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count cascaded authority rows");
+            assert_eq!(count, 0, "{table} must cascade with its version");
+        }
     }
 
     #[test]

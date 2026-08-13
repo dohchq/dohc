@@ -61,6 +61,8 @@ const COMPARED_TABLES: &[&str] = &[
     "snapshots",
     "fork_base_snapshots",
     "moments",
+    "scene_asset_delete_authorities",
+    "scene_asset_delete_authority_items",
     "materialization_jobs",
     // R08 secret-backed-file tables: their ciphertext tips / fork bases /
     // history moments are durable state, so a backup missing or truncating them

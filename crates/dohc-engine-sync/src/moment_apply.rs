@@ -436,6 +436,7 @@ fn apply_moment_append(
         ensure_file_object(tx, &envelope.workspace_id, payload)?;
         insert_moment(tx, &envelope.workspace_id, payload, &adopted_before, false)?;
         if payload.operation == "delete" {
+            freeze_incoming_scene_delete_authority(tx, envelope, payload)?;
             let alias_path = local
                 .as_ref()
                 .map_or(payload.path.as_str(), |snapshot| snapshot.path.as_str());
@@ -635,6 +636,33 @@ fn apply_moment_append(
         conflicts_opened: opened,
         materialization_changes: Vec::new(),
     })
+}
+
+fn freeze_incoming_scene_delete_authority(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    payload: &MomentAppendPayload,
+) -> Result<(), SyncError> {
+    if ContentKind::from_wire(payload.before_content_kind.as_deref()) != ContentKind::Text {
+        return Ok(());
+    }
+    let key = dohc_engine_collab::DocKey::new(
+        &envelope.workspace_id,
+        &payload.version_id,
+        &payload.object_id,
+    )
+    .map_err(|_| SyncError::InvalidInput {
+        reason: "moment.append scene delete identity is invalid",
+    })?;
+    dohc_engine_collab::freeze_scene_asset_delete_authority_in_tx(tx, &key, &payload.moment_id)
+        .map(|_| ())
+        .map_err(|error| match error {
+            dohc_engine_collab::CollabError::Storage(error) => SyncError::Storage(error),
+            dohc_engine_collab::CollabError::MissingDependencies => SyncError::RetryableState {
+                reason: "scene asset authority is waiting for the complete Y.Doc lineage",
+            },
+            _ => SyncError::CoordinateDiverged,
+        })
 }
 
 fn equivalent_ydoc_settlement_preimage(snapshot: &Snapshot, payload: &MomentAppendPayload) -> bool {
