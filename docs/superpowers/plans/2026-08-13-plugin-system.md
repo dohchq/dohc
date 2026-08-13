@@ -131,15 +131,20 @@ Constraints these choices create:
   mutable tree, so a sync arriving mid-build cannot slip unapproved
   bytes under an approved hash. Dependencies that point outside the
   snapshot (`file:`/`link:`) are refused at install time — code the hash
-  does not bind does not install. While a workspace
-  has no sync peers — true for this whole milestone — local edits
-  auto-approve, so solo hot reload stays frictionless — with one
-  exception: writes arriving through the site SDK never auto-approve,
-  and `siteSdkHost` refuses writes under `plugins/` outright (as it
-  already refuses database files and canonical Markdown). Otherwise a
-  sandboxed site could write plugin source and escalate to full-trust
-  execution. This gate is a hard precondition for shipping plugin sync,
-  not an optional hardening.
+  does not bind does not install — and source trees containing symlinks
+  or junctions that escape the snapshot are refused the same way. The
+  auto-approve predicate is **attribution, not topology**: an edit whose
+  moments carry dohc-mediated attribution (the user's editor, their
+  agent through the door, the SDK) auto-approves, so normal hot reload
+  stays frictionless; a disk-only out-of-band change — dohc sync later,
+  but equally a git pull or Dropbox delivery today — prompts before it
+  executes, because "no dohc sync peers" never meant "no way for remote
+  bytes to arrive." Writes arriving through the site SDK never
+  auto-approve, and `siteSdkHost` refuses writes under `plugins/`
+  outright (as it already refuses database files and canonical
+  Markdown) — otherwise a sandboxed site could write plugin source and
+  escalate to full-trust execution. This gate is a hard precondition
+  for shipping plugin sync, not an optional hardening.
 
 - The engine's capture floor excludes `node_modules` at any depth. The
   lockfile is therefore what makes a reverted plugin rebuildable. The
