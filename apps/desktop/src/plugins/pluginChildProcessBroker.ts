@@ -13,6 +13,16 @@ import { PLUGIN_PROCESS_LOG_LIMIT } from "./pluginHostProtocol";
 
 const CHILD_PROCESS_STOP_GRACE_MS = 2_000;
 const CHILD_PROCESS_EXIT_WAIT_MS = 5_000;
+// finishExit keeps an exited child's record around (its logs and exit
+// result stay readable by design — a plugin may call logs()/wait() after a
+// child exits), so nothing removes it until the whole spawn is disposed.
+// A plugin that spawns many short-lived children within one still-open
+// spawn would otherwise accumulate unbounded records (CodeRabbit #779 R9).
+// This caps that at the same order of magnitude as PLUGIN_PROCESS_LOG_LIMIT
+// (200): once a spawn's exited-and-still-retained children pass the cap,
+// the oldest are dropped — a plugin reading their logs immediately after
+// exit, as the API is meant to be used, never hits this.
+const EXITED_CHILD_RETENTION_LIMIT = 200;
 const MAX_CHILD_ARGS = 256;
 const MAX_CHILD_ARG_LENGTH = 16_384;
 const MAX_CHILD_ENV_ENTRIES = 512;
@@ -278,8 +288,15 @@ export class PluginChildProcessBroker {
   constructor(private readonly options: PluginChildProcessBrokerOptions) {
     this.forkProcess = options.forkProcess ?? forkElectronUtilityProcess;
     this.platform = options.platform ?? process.platform;
+    // Signals the pid directly, not the negated "-pid" process-group form
+    // (CodeRabbit #779 R10): utilityProcess.fork never makes the child its
+    // own group leader (no `detached` option exists on that API), so it
+    // inherits this process's group — `-pid` there is at best an ESRCH
+    // no-op and at worst signals an unrelated group. A caller whose own
+    // spawn setup does create a real process group may still override this
+    // option with its own group-targeting implementation.
     this.killProcessGroup = options.killProcessGroup ?? ((pid, signal) => {
-      process.kill(-pid, signal);
+      process.kill(pid, signal);
     });
     this.killWindowsTree = options.killWindowsTree ?? killWindowsTree;
     this.stopGraceMs = options.stopGraceMs ?? CHILD_PROCESS_STOP_GRACE_MS;
@@ -581,6 +598,19 @@ export class PluginChildProcessBroker {
       if (subscription.childId !== record.childId) continue;
       subscription.emitEvent(subscriptionId, "exit", record.exitResult);
       this.subscriptions.delete(subscriptionId);
+    }
+    this.evictOldExitedChildren(this.spawnKey(record.pluginId, record.spawnId));
+  }
+
+  private evictOldExitedChildren(key: string): void {
+    const owned = this.childrenBySpawn.get(key);
+    if (!owned) return;
+    const exitedIds = [...owned].filter((id) => this.children.get(id)?.exited === true);
+    const excess = exitedIds.length - EXITED_CHILD_RETENTION_LIMIT;
+    if (excess <= 0) return;
+    for (const childId of exitedIds.slice(0, excess)) {
+      const child = this.children.get(childId);
+      if (child) this.removeChild(child);
     }
   }
 

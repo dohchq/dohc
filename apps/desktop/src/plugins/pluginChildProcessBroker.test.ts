@@ -433,4 +433,61 @@ describe("PluginChildProcessBroker", () => {
       await host.stopAll();
     }
   });
+
+  it("evicts old exited-child records once a spawn's retained count passes the cap (CodeRabbit #779 R9)", async () => {
+    const fixture = await createFixture();
+    const brokerContext = context("plugin-a", "spawn-a");
+    const total = 205;
+    const childIds: string[] = [];
+
+    for (let index = 0; index < total; index += 1) {
+      const childId = await spawnChild(fixture, brokerContext);
+      fixture.children[index]?.emit("exit", 0);
+      childIds.push(childId);
+    }
+
+    // A plugin spawning many short-lived children within one still-open
+    // spawn must not retain every exited record forever — the oldest ones
+    // are evicted once the cap is passed.
+    const firstChildId = childIds[0];
+    if (!firstChildId) throw new Error("No child was spawned.");
+    await expect(
+      fixture.broker.invoke(brokerContext, PLUGIN_CHILD_PROCESS_METHODS.logs, {
+        childId: firstChildId,
+      }),
+    ).rejects.toThrow(`Child process "${firstChildId}" was not found.`);
+
+    const lastChildId = childIds[childIds.length - 1];
+    if (!lastChildId) throw new Error("No child was spawned.");
+    await expect(
+      fixture.broker.invoke(brokerContext, PLUGIN_CHILD_PROCESS_METHODS.logs, {
+        childId: lastChildId,
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  it("signals a POSIX child's own pid directly, never a negated process-group id (CodeRabbit #779 R10)", async () => {
+    const fixture = await createFixture({ platform: "linux" });
+    const brokerContext = context("plugin-a", "spawn-a");
+    const childId = await spawnChild(fixture, brokerContext);
+    const child = fixture.children[0];
+    if (!child) throw new Error("No child was spawned.");
+    const killCalls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(
+      ((pid: number, signal?: NodeJS.Signals) => {
+        killCalls.push({ pid, signal: signal ?? "SIGTERM" });
+        queueMicrotask(() => child.emit("exit", 0));
+        return true;
+      }) as typeof process.kill,
+    );
+
+    try {
+      await fixture.broker.invoke(brokerContext, PLUGIN_CHILD_PROCESS_METHODS.terminate, {
+        childId,
+      });
+      expect(killCalls).toEqual([{ pid: child.pid, signal: "SIGTERM" }]);
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
 });
