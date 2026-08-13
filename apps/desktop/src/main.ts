@@ -545,6 +545,10 @@ import { createSitePreviewSdkAuthorityRegistry } from "./workspaces/sitePreviewS
 import { PluginHost } from "./plugins/PluginHost";
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { stopPluginPanelPreview } from "./plugins/pluginPanelLifecycle";
+import {
+  startPluginPanelWithLock,
+  stopPluginPanelWithLock,
+} from "./plugins/pluginPanelStartLifecycle";
 import { invokePluginSdkHost } from "./plugins/pluginSdkHost";
 import { createPluginPanelSdkAuthorityRegistry } from "./plugins/pluginPanelSdkAuthority";
 import {
@@ -2559,7 +2563,6 @@ interface RunningPluginPanel {
   panelId: string;
   senderId: number;
   generation: number;
-  spawnId: string;
 }
 
 const pluginHosts = new Map<string, PluginHost>();
@@ -2612,6 +2615,15 @@ function invokeWorkspacePluginSdk(input: {
       workspaceRoot: workspace.rootPath,
       spawnId: input.spawnId,
       writable: input.writable,
+      writeAvailable: async () => {
+        try {
+          const workspaceForWrite = requireWorkspace(input.workspaceId);
+          await openWorkspaceActivity(workspaceForWrite);
+          return Boolean(activity.engineCaptureFor(input.workspaceId));
+        } catch {
+          return false;
+        }
+      },
       signal: input.signal,
       writeAuthoredText: async (
         path,
@@ -2625,6 +2637,7 @@ function invokeWorkspacePluginSdk(input: {
         }
         await capture.writeAuthoredTextFile(absolutePath, text, author, {
           createOnly: !overwrite,
+          signal: input.signal,
         });
         return { path };
       },
@@ -2748,11 +2761,17 @@ async function stopPluginPanel(
 ): Promise<void> {
   const key = pluginPanelKey(workspaceId, pluginId, panelId);
   pluginPanelSdkAuthorities.revokePanel(workspaceId, pluginId, panelId);
-  await withPluginPanelStartLock(key, async () => {
+  await stopPluginPanelWithLock(key, withPluginPanelStartLock, async () => {
     const panel = runningPluginPanels.get(key);
     runningPluginPanels.delete(key);
-    if (!panel) return;
-    await stopRunningPluginPanelPreview(panel);
+    if (panel) await stopRunningPluginPanelPreview(panel);
+    const hasAnotherPanel = [...runningPluginPanels.values()].some(
+      (candidate) =>
+        candidate.workspaceId === workspaceId && candidate.pluginId === pluginId,
+    );
+    if (!hasAnotherPanel) {
+      await pluginHosts.get(workspaceId)?.stop(pluginId);
+    }
   });
 }
 
@@ -6002,7 +6021,10 @@ function registerIpcHandlers(
       workspace.workspaceId,
       registration,
     );
-    await ensurePluginStarted(workspace, plugin);
+    await withPluginPanelStartLock(
+      pluginPanelKey(workspace.workspaceId, input.pluginId, input.panelId),
+      () => ensurePluginStarted(workspace, plugin),
+    );
     return OpenPluginPanelResult.parse({
       pluginId: input.pluginId,
       panelId: input.panelId,
@@ -6039,65 +6061,70 @@ function registerIpcHandlers(
         `Plugin "${input.pluginId}" does not declare panel "${input.panelId}".`,
       );
     }
-    const host = await ensurePluginStarted(workspace, plugin);
-    const spawnId = host.getSpawnId(input.pluginId);
-    if (!spawnId) {
-      throw new Error(`Plugin "${input.pluginId}" has no active process.`);
-    }
     const key = pluginPanelKey(
       workspace.workspaceId,
       input.pluginId,
       input.panelId,
     );
-    return withPluginPanelStartLock(key, async () => {
-      pluginPanelSdkAuthorities.revokePanel(
-        workspace.workspaceId,
-        input.pluginId,
-        input.panelId,
-      );
-      const previous = runningPluginPanels.get(key);
-      runningPluginPanels.delete(key);
-      if (previous) {
-        await stopRunningPluginPanelPreview(previous);
-      }
-
-      const entryPath = join(plugin.pluginRoot, panel.entry);
-      const handle = await startStaticDirectoryPreview(dirname(entryPath), {
-        containmentRoot: plugin.pluginRoot,
-        entry: basename(entryPath),
-        entryLabel: "plugin panel entry",
-      });
-      if (!isCurrent()) {
-        await stopRunningPluginPanelPreview({
-          handle,
-          releaseOrigin: () => undefined,
-        });
-        throw new Error(
-          "Plugin panel start was cancelled because the renderer changed.",
+    return startPluginPanelWithLock(
+      key,
+      withPluginPanelStartLock,
+      () => ensurePluginStarted(workspace, plugin),
+      async (host) => {
+        const spawnId = host.getSpawnId(input.pluginId);
+        if (!spawnId) {
+          throw new Error(`Plugin "${input.pluginId}" has no active process.`);
+        }
+        pluginPanelSdkAuthorities.revokePanel(
+          workspace.workspaceId,
+          input.pluginId,
+          input.panelId,
         );
-      }
-      const releaseOrigin = allowLoopbackFrameOrigin(handle.url);
-      runningPluginPanels.set(key, {
-        handle,
-        releaseOrigin,
-        workspaceId: workspace.workspaceId,
-        pluginId: input.pluginId,
-        panelId: input.panelId,
-        senderId: sender.id,
-        generation,
-        spawnId,
-      });
-      pluginPanelSdkAuthorities.register({
-        senderId: sender.id,
-        generation,
-        workspaceId: workspace.workspaceId,
-        pluginId: input.pluginId,
-        panelId: input.panelId,
-        spawnId,
-        writable: true,
-      });
-      return StartPluginPanelResult.parse({ url: handle.url, title: panel.title });
-    });
+        const previous = runningPluginPanels.get(key);
+        runningPluginPanels.delete(key);
+        if (previous) {
+          await stopRunningPluginPanelPreview(previous);
+        }
+
+        const entryPath = join(plugin.pluginRoot, panel.entry);
+        const handle = await startStaticDirectoryPreview(dirname(entryPath), {
+          containmentRoot: plugin.pluginRoot,
+          entry: basename(entryPath),
+          entryLabel: "plugin panel entry",
+        });
+        if (!isCurrent()) {
+          await stopRunningPluginPanelPreview({
+            handle,
+            releaseOrigin: () => undefined,
+          });
+          throw new Error(
+            "Plugin panel start was cancelled because the renderer changed.",
+          );
+        }
+        const releaseOrigin = allowLoopbackFrameOrigin(handle.url);
+        runningPluginPanels.set(key, {
+          handle,
+          releaseOrigin,
+          workspaceId: workspace.workspaceId,
+          pluginId: input.pluginId,
+          panelId: input.panelId,
+          senderId: sender.id,
+          generation,
+        });
+        pluginPanelSdkAuthorities.register({
+          senderId: sender.id,
+          generation,
+          workspaceId: workspace.workspaceId,
+          pluginId: input.pluginId,
+          panelId: input.panelId,
+          writable: true,
+        });
+        return StartPluginPanelResult.parse({
+          url: handle.url,
+          title: panel.title,
+        });
+      },
+    );
   });
 
   ipcMain.handle(CHANNELS.stopPluginPanel, async (event, payload) => {
@@ -6139,12 +6166,13 @@ function registerIpcHandlers(
     );
     const panel = runningPluginPanels.get(key);
     const host = pluginHosts.get(input.workspaceId);
+    const liveSpawnId = host?.getSpawnId(input.pluginId);
     const generation = rendererGeneration(sender.id);
     const panelRunning = Boolean(
       panel &&
         panel.senderId === sender.id &&
         panel.generation === generation &&
-        host?.getSpawnId(input.pluginId) === panel.spawnId,
+        Boolean(liveSpawnId),
     );
     const authority = pluginPanelSdkAuthorities.authorize({
       senderId: sender.id,
@@ -6154,6 +6182,7 @@ function registerIpcHandlers(
       pluginId: input.pluginId,
       panelId: input.panelId,
       panelRunning,
+      liveSpawnId,
     });
     const result = await invokeWorkspacePluginSdk({
       workspaceId: authority.workspaceId,

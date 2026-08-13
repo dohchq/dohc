@@ -377,7 +377,7 @@ export interface WorkspaceEngineCapture {
     absolutePath: string,
     text: string,
     author: MomentAuthor,
-    options?: { createOnly?: boolean },
+    options?: { createOnly?: boolean; signal?: AbortSignal },
   ): Promise<void>;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
   // file through this capture's Rust workspace sessions. The session journals
@@ -3340,11 +3340,24 @@ export function createWorkspaceEngineCapture(
 
     writeAuthoredTextFile(absolutePath, text, author, writeOptions = {}) {
       return enqueueResult("write authored text", async () => {
-        const resolvedAbsolute = resolve(absolutePath);
-        const path = relative(resolve(rootPath), resolvedAbsolute).replaceAll(
-          "\\",
-          "/",
-        );
+        if (writeOptions.signal?.aborted) {
+          throw new Error("Plugin panel is no longer active.");
+        }
+        const observedBytes = Buffer.byteLength(text, "utf8");
+        if (observedBytes > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
+          throw new Error(
+            `Authored text exceeds the capture limit: limit ${MAX_ENGINE_CAPTURE_TEXT_BYTES} bytes, observed ${observedBytes} bytes.`,
+          );
+        }
+        const { relative: resolvedRelative, resolvedAbsolute } =
+          await assertResolvedWorkspacePath({
+            rootPath,
+            absolutePath: resolve(absolutePath),
+            spelled: absolutePath,
+            label: "Authored text path",
+            access: "write",
+          });
+        const path = resolvedRelative.replaceAll("\\", "/");
         if (
           path.length === 0 ||
           isAbsolute(path) ||
@@ -3353,18 +3366,14 @@ export function createWorkspaceEngineCapture(
         ) {
           throw new Error(`Authored text path escapes the workspace: ${absolutePath}.`);
         }
-        await assertResolvedWorkspacePath({
-          rootPath,
-          absolutePath: resolvedAbsolute,
-          spelled: absolutePath,
-          label: "Authored text path",
-          access: "write",
-        });
         if (writeOptions.createOnly && existsSync(resolvedAbsolute)) {
           throw new Error(`File already exists: ${path}`);
         }
         const policy = await readPolicyForTask();
         assertEngineWritablePath(path, policy);
+        if (writeOptions.signal?.aborted) {
+          throw new Error("Plugin panel is no longer active.");
+        }
         const engine = await engineStore();
         const versionId = await activeVersionIdOf(engine);
         const metadata: ActorNeutralWriteMetadata = {

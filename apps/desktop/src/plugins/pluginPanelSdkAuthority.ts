@@ -9,11 +9,11 @@ export interface PluginPanelSdkGrantInput {
   workspaceId: string;
   pluginId: string;
   panelId: string;
-  spawnId: string;
   writable: boolean;
 }
 
 export interface PluginPanelSdkGrant extends PluginPanelSdkGrantInput {
+  spawnId: string;
   signal: AbortSignal;
 }
 
@@ -30,7 +30,10 @@ function subjectKey(input: PluginPanelSubject): string {
 export function createPluginPanelSdkAuthorityRegistry() {
   const registry = createSdkAuthorityRegistry<
     PluginPanelSdkGrantInput,
-    SdkAuthorityAuthorization<PluginPanelSubject> & { panelRunning: boolean }
+    SdkAuthorityAuthorization<PluginPanelSubject> & {
+      panelRunning: boolean;
+      liveSpawnId: string | undefined;
+    }
   >(
     {
       label: "Plugin panel SDK",
@@ -38,12 +41,20 @@ export function createPluginPanelSdkAuthorityRegistry() {
       stale: "Plugin panel SDK authority is stale.",
     },
     subjectKey,
-    (input) => input.panelRunning,
+    (input) => input.panelRunning && Boolean(input.liveSpawnId),
   );
 
   return {
     register: registry.register,
-    authorize: registry.authorize,
+    authorize(
+      input: Parameters<typeof registry.authorize>[0],
+    ): PluginPanelSdkGrant {
+      const grant = registry.authorize(input);
+      if (!input.liveSpawnId) {
+        throw new Error("Plugin panel SDK authority is stale.");
+      }
+      return { ...grant, spawnId: input.liveSpawnId };
+    },
     revokePanel: (workspaceId: string, pluginId: string, panelId: string) =>
       registry.revokeSubject(subjectKey({ workspaceId, pluginId, panelId })),
     revokeSender: registry.revokeSender,

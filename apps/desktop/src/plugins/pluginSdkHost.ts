@@ -13,6 +13,7 @@ export interface PluginSdkHostContext {
   /** The uuid PluginHost assigned this plugin at spawn time (agentRunId). */
   spawnId: string;
   writable: boolean;
+  writeAvailable: () => Promise<boolean>;
   signal?: AbortSignal;
   writeAuthoredText: (
     path: string,
@@ -44,7 +45,9 @@ export async function invokePluginSdkHost(
 
   switch (method) {
     case "capabilities":
-      return pluginCapabilities(context.writable);
+      return pluginCapabilities(
+        context.writable && (await context.writeAvailable()),
+      );
     case "files.read":
     case "files.list":
     case "workspace.search":
@@ -52,6 +55,9 @@ export async function invokePluginSdkHost(
     case "files.write": {
       if (!context.writable) {
         throw new Error("This plugin has read-only workspace authority.");
+      }
+      if (!(await context.writeAvailable())) {
+        throw new Error("Plugin file writes are unavailable in this workspace.");
       }
       if (context.signal?.aborted) {
         throw new Error("Plugin panel is no longer active.");

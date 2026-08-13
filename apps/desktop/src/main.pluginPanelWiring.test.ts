@@ -14,11 +14,13 @@ describe("plugin panel main-process wiring", () => {
     const open = handler("openPluginPanel");
     const loadAt = open.indexOf("loadPluginPanelRegistration({");
     const rememberAt = open.indexOf("rememberPluginRegistration(");
-    const startAt = open.indexOf("await ensurePluginStarted(workspace, plugin);");
+    const lockAt = open.indexOf("await withPluginPanelStartLock(");
+    const startAt = open.indexOf("() => ensurePluginStarted(workspace, plugin)");
 
     expect(loadAt).toBeGreaterThan(-1);
     expect(rememberAt).toBeGreaterThan(loadAt);
-    expect(startAt).toBeGreaterThan(rememberAt);
+    expect(lockAt).toBeGreaterThan(rememberAt);
+    expect(startAt).toBeGreaterThan(lockAt);
   });
 
   it("serves the manifest panel and grants only main-derived SDK context", () => {
@@ -32,8 +34,9 @@ describe("plugin panel main-process wiring", () => {
     expect(allowAt).toBeGreaterThan(serveAt);
     expect(rememberAt).toBeGreaterThan(allowAt);
     expect(grantAt).toBeGreaterThan(rememberAt);
-    expect(start).toContain("spawnId");
-    expect(start).toContain("previous.releaseOrigin();");
+    expect(start).toContain("startPluginPanelWithLock(");
+    expect(start).toContain("() => ensurePluginStarted(workspace, plugin)");
+    expect(start).toContain("await stopRunningPluginPanelPreview(previous);");
 
     const stopStart = mainSource.indexOf("async function stopPluginPanel(");
     const stopEnd = mainSource.indexOf(
@@ -42,7 +45,9 @@ describe("plugin panel main-process wiring", () => {
     );
     expect(stopEnd).toBeGreaterThan(-1);
     const stop = mainSource.slice(stopStart, stopEnd);
-    expect(stop).toContain("panel.releaseOrigin();");
+    expect(stop).toContain("stopPluginPanelWithLock(");
+    expect(stop).toContain("await stopRunningPluginPanelPreview(panel);");
+    expect(stop).toContain("await pluginHosts.get(workspaceId)?.stop(pluginId);");
   });
 
   it("authorizes panel SDK calls before routing them through the plugin host", () => {
@@ -59,9 +64,11 @@ describe("plugin panel main-process wiring", () => {
 
     expect(authorizeAt).toBeGreaterThan(-1);
     expect(routeAt).toBeGreaterThan(authorizeAt);
+    expect(invoke).toContain("const liveSpawnId = host?.getSpawnId(input.pluginId);");
+    expect(invoke).toContain("liveSpawnId,");
     expect(router).toContain("return invokePluginSdkHost(");
     expect(router).toContain(
-      "await capture.writeAuthoredTextFile(absolutePath, text, author);",
+      "await capture.writeAuthoredTextFile(absolutePath, text, author, {",
     );
   });
 

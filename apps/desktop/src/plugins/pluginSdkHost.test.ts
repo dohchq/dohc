@@ -28,6 +28,7 @@ function context(root: string, writes: AuthoredWrite[] = []): PluginSdkHostConte
     workspaceRoot: root,
     spawnId: "spawn-123",
     writable: true,
+    writeAvailable: async () => true,
     writeAuthoredText: vi.fn<PluginSdkHostContext["writeAuthoredText"]>(
       async (path, text, options) => {
         writes.push({ path, text, options });
@@ -53,6 +54,25 @@ describe("invokePluginSdkHost", () => {
       collections: { read: false },
       provenance: { record: false },
     });
+  });
+
+  it("reports unavailable engine capture honestly and still refuses direct writes", async () => {
+    const root = await workspaceRoot();
+    const unavailable = {
+      ...context(root),
+      writeAvailable: async () => false,
+    };
+
+    await expect(
+      invokePluginSdkHost(unavailable, "capabilities"),
+    ).resolves.toMatchObject({ files: { write: false } });
+    await expect(
+      invokePluginSdkHost(unavailable, "files.write", {
+        path: "notes/no-engine.txt",
+        text: "must not write",
+      }),
+    ).rejects.toThrow(/file writes are unavailable/i);
+    expect(unavailable.writeAuthoredText).not.toHaveBeenCalled();
   });
 
   it("routes file reads, file lists, and workspace searches through the site host", async () => {

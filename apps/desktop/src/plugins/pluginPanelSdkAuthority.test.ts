@@ -7,7 +7,6 @@ const owned = {
   workspaceId: "workspace-a",
   pluginId: "hello-plugin",
   panelId: "main",
-  spawnId: "spawn-a",
   writable: true,
 };
 
@@ -23,6 +22,7 @@ function authorize(
     pluginId: "hello-plugin",
     panelId: "main",
     panelRunning: true,
+    liveSpawnId: "spawn-live",
     ...patch,
   });
 }
@@ -31,14 +31,14 @@ describe("plugin panel SDK authority", () => {
   it("registers host-derived context and replaces the prior panel grant", () => {
     const registry = createPluginPanelSdkAuthorityRegistry();
     const first = registry.register(owned);
-    registry.register({ ...owned, senderId: 2, spawnId: "spawn-b" });
+    registry.register({ ...owned, senderId: 2 });
 
     expect(first.signal.aborted).toBe(true);
     expect(() => authorize(registry)).toThrow(/active panel/i);
     expect(
       authorize(registry, { senderId: 2 }),
     ).toMatchObject({
-      spawnId: "spawn-b",
+      spawnId: "spawn-live",
       writable: true,
     });
   });

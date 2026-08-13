@@ -13,6 +13,7 @@ import {
 } from "./pluginLocalState";
 import { readPluginManifestFile } from "./pluginManifest";
 import { invokePluginSdkHost } from "./pluginSdkHost";
+import { createPluginPanelSdkAuthorityRegistry } from "./pluginPanelSdkAuthority";
 import {
   PLUGIN_ACTIVATION_TIMEOUT_MS,
   PLUGIN_HOST_METHODS,
@@ -228,6 +229,7 @@ describe("PluginHost", () => {
             workspaceRoot: root,
             spawnId,
             writable: true,
+            writeAvailable: async () => true,
             writeAuthoredText: async (path, text, options) => {
               writes.push({ path, text, author: options.author });
               return { path };
@@ -774,6 +776,80 @@ describe("PluginHost", () => {
 
     expect(statuses.filter((status) => status === "ready")).toHaveLength(3);
     expect(spawnTransport).toHaveBeenCalledTimes(3);
+  });
+
+  it("uses the live respawn id for a surviving panel's authored write", async () => {
+    const root = await workspaceRoot();
+    const spawned: Array<
+      Parameters<PluginHostOptions["spawnTransport"]>[0]
+    > = [];
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: (callbacks) => {
+        spawned.push(callbacks);
+        return {
+          request: async <T,>(method: string) =>
+            (method === PLUGIN_HOST_METHODS.activate
+              ? { commands: [] }
+              : {}) as T,
+          dispose: async () => undefined,
+        };
+      },
+      routeSdkRequest: defaultRouter,
+    });
+    await host.start(helloPluginRoot, await fixtureManifest());
+    const originalSpawnId = host.getSpawnId("hello-plugin");
+    if (!originalSpawnId) throw new Error("Plugin did not expose its first spawn id.");
+
+    spawned[0]?.onExit({ code: 1, signal: null });
+    await waitFor(
+      () => {
+        const live = host.getSpawnId("hello-plugin");
+        return Boolean(live && live !== originalSpawnId && host.getStatus("hello-plugin") === "ready");
+      },
+      "Plugin did not become ready after its respawn.",
+    );
+    const liveSpawnId = host.getSpawnId("hello-plugin");
+    if (!liveSpawnId) throw new Error("Plugin did not expose its respawn id.");
+
+    const registry = createPluginPanelSdkAuthorityRegistry();
+    registry.register({
+      senderId: 1,
+      generation: 1,
+      workspaceId: "workspace-a",
+      pluginId: "hello-plugin",
+      panelId: "main",
+      writable: true,
+    });
+    const authority = registry.authorize({
+      senderId: 1,
+      generation: 1,
+      activeWorkspaceId: "workspace-a",
+      workspaceId: "workspace-a",
+      pluginId: "hello-plugin",
+      panelId: "main",
+      panelRunning: true,
+      liveSpawnId,
+    });
+    let authoredRunId: string | undefined;
+    await invokePluginSdkHost(
+      {
+        pluginId: "hello-plugin",
+        workspaceRoot: root,
+        spawnId: authority.spawnId,
+        writable: true,
+        writeAvailable: async () => true,
+        writeAuthoredText: async (path, _text, options) => {
+          authoredRunId = options.author.agentRunId;
+          return { path };
+        },
+      },
+      "files.write",
+      { path: "respawn.txt", text: "new process\n" },
+    );
+
+    expect(authoredRunId).toBe(liveSpawnId);
   });
 
   it("cleanly stops the respawned plugin when a status listener reacts to a crash", async () => {
