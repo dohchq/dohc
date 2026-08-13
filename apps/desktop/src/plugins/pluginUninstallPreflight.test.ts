@@ -2,19 +2,41 @@ import {
   mkdir,
   readFile,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
 import { MAX_HISTORY_TEXT_SNAPSHOT_BYTES } from "../workspaces/workspaceWatcher";
 import { hashPluginSourceFiles } from "./pluginSourceSnapshot";
-import {
+
+// A pure JS-level interception so one test can make a specific file vanish
+// out from under classifyHistoryRecovery right when it tries to stat it —
+// reproducing the exact TOCTOU window between hashPluginSourceFiles (which
+// already saw the file) and this read (CodeRabbit #779 R27).
+let poisonedPath: string | null = null;
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    stat: (async (path: Parameters<typeof stat>[0], options?: unknown) => {
+      if (poisonedPath !== null && String(path) === poisonedPath) {
+        throw Object.assign(new Error("ENOENT: no such file or directory"), {
+          code: "ENOENT",
+        });
+      }
+      return actual.stat(path as string, options as never);
+    }) as typeof stat,
+  };
+});
+
+const {
   pluginBaselineManifestPath,
   pluginUninstallPreflight,
   writePluginBaselineManifest,
-} from "./pluginUninstallPreflight";
+} = await import("./pluginUninstallPreflight");
 
 const roots: string[] = [];
 const pluginId = "hello-plugin";
@@ -72,6 +94,7 @@ async function runPreflight(
 }
 
 afterEach(async () => {
+  poisonedPath = null;
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
@@ -305,5 +328,26 @@ describe("plugin uninstall preflight", () => {
     expect(result.files.map((file) => file.relPath)).toEqual(["index.ts"]);
     expect(renderedResult).not.toContain("node_modules");
     expect(renderedResult).not.toContain("generated.txt");
+  });
+
+  it("degrades one file to not-recoverable instead of crashing the whole preflight when it vanishes mid-check (CodeRabbit #779 R27)", async () => {
+    const fixture = await createFixture();
+    await writeSourceFile(fixture, "index.txt", "baseline text\n");
+    const installedBaselineHash = await saveBaseline(fixture);
+    await writeSourceFile(fixture, "index.txt", "modified text\n");
+    poisonedPath = join(fixture.pluginRoot, "index.txt");
+
+    const result = await runPreflight(fixture, installedBaselineHash);
+
+    expect(result.files).toEqual([
+      expect.objectContaining({
+        relPath: "index.txt",
+        status: "modified",
+        byteLength: null,
+        contentKind: null,
+        historyRecovery: "not-recoverable-from-history",
+      }),
+    ]);
+    expect(result.notRecoverablePaths).toEqual(["index.txt"]);
   });
 });

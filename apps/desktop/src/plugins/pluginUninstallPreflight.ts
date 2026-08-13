@@ -4,6 +4,7 @@ import {
   mkdir,
   readFile,
   rename,
+  stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -254,6 +255,13 @@ async function readBaselineManifest(path: string): Promise<BaselineManifestRead>
   return { kind: "ok", manifest: parsed.data };
 }
 
+function unreadableClassification(): Pick<
+  PluginUninstallFileInventory,
+  "byteLength" | "contentKind" | "historyRecovery"
+> {
+  return { byteLength: null, contentKind: null, historyRecovery: "not-recoverable-from-history" };
+}
+
 async function classifyHistoryRecovery(
   pluginRoot: string,
   file: PluginSourceFileDigest,
@@ -262,23 +270,51 @@ async function classifyHistoryRecovery(
   PluginUninstallFileInventory,
   "byteLength" | "contentKind" | "historyRecovery"
 >> {
-  const bytes = await readFile(join(pluginRoot, ...file.relPath.split("/")));
-  const textMedia = isTextMediaType(
-    mediaTypeForPath(file.relPath),
-    file.relPath,
-  );
+  const path = join(pluginRoot, ...file.relPath.split("/"));
+  // A file the earlier hash pass saw can still disappear or change before
+  // this runs — this must degrade to "can't confirm, so not recoverable"
+  // rather than crash the whole preflight over one file (CodeRabbit #779
+  // R27).
+  let stats: Awaited<ReturnType<typeof stat>>;
+  try {
+    stats = await stat(path);
+  } catch {
+    return unreadableClassification();
+  }
+  const textMedia = isTextMediaType(mediaTypeForPath(file.relPath), file.relPath);
+  const limit = textMedia
+    ? MAX_HISTORY_TEXT_SNAPSHOT_BYTES
+    : MAX_VERSIONED_BINARY_FILE_BYTES;
+  // A file already over the larger of the two possible caps is not
+  // recoverable regardless of its exact content kind — skip reading it at
+  // all rather than loading a large, possibly multi-hundred-MB binary into
+  // memory just to confirm a foregone conclusion (CodeRabbit #779 R27).
+  if (stats.size > Math.max(MAX_HISTORY_TEXT_SNAPSHOT_BYTES, MAX_VERSIONED_BINARY_FILE_BYTES)) {
+    return {
+      byteLength: stats.size,
+      contentKind: textMedia ? "text" : "binary",
+      historyRecovery: "not-recoverable-from-history",
+    };
+  }
+
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(path);
+  } catch {
+    return unreadableClassification();
+  }
   const text = bytes.toString("utf8");
   const contentKind = textMedia && Buffer.from(text, "utf8").equals(bytes)
     ? "text"
     : "binary";
-  const limit = contentKind === "text"
+  const contentLimit = contentKind === "text"
     ? MAX_HISTORY_TEXT_SNAPSHOT_BYTES
     : MAX_VERSIONED_BINARY_FILE_BYTES;
   // Under the cap is necessary but not sufficient: capture also has to have
   // actually been running to record this file. When it wasn't, this can't
   // honestly promise recovery no matter how small the file is (CodeRabbit
   // #779 fixround Section B item 7).
-  const underCap = bytes.byteLength <= limit;
+  const underCap = bytes.byteLength <= contentLimit;
   return {
     byteLength: bytes.byteLength,
     contentKind,
