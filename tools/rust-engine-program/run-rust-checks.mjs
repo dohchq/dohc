@@ -225,8 +225,8 @@ let failed = false;
 // Each reading is a `git rev-parse`, a `git status --untracked-files=all`, and
 // two bounded reads of this checkout's HEAD reflog, all through a shell.
 // Measured on this repo on Windows, the slowest of the platforms the gate runs
-// on: ~1s per reading, ~10s for the ten a full run takes — under a percent of
-// a gate that spends twenty minutes in cargo.
+// on: ~1s per reading, ~11s for the eleven a full run takes — around a percent
+// of a gate that spends ten minutes in cargo.
 
 // Where this checkout keeps its HEAD log. `--git-path` names the log of the
 // worktree the run is in, not the main one, and answers relatively there and

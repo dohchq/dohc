@@ -51,7 +51,7 @@ It prints an `EVIDENCE (paste into EXECUTION_LOG.md)` line, e.g.:
 reported through cargo, and the run stops before any other step unless the two
 agree — see [Native target](#native-target).
 
-`head 1f47af31 clean, 10 reads` is the tree the run examined. The gate reads
+`head b056a36b clean, 11 reads` is the tree the run examined. The gate reads
 the tree before the first step and after each one, and reports how many
 readings agreed. It is not a claim that the tree was watched between them: a
 change made and undone inside one step is invisible to any number of readings.
