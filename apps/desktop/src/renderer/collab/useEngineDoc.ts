@@ -504,10 +504,9 @@ export function useEngineDoc(input: {
   const permanentFailureWhileEditing =
     settled?.kind === "bound" && permanentFailure?.token === settled.token;
   const recoveryAssets =
-    (deletedWhileEditing ||
-      readOnlyWhileEditing ||
-      permanentFailureWhileEditing) &&
-    sceneRecoveryAssets?.token === settled.token
+    sceneRecoveryAssets !== null &&
+    settled?.kind === "bound" &&
+    sceneRecoveryAssets.token === settled.token
       ? {
           state: sceneRecoveryAssets.state,
           count: sceneRecoveryAssets.count,
@@ -593,17 +592,20 @@ export function useEngineDoc(input: {
 
     const prepareSceneRecovery = (
       bytes: Uint8Array,
-      bound: EngineYDocBinding,
+      bound: EngineYDocBinding | null,
     ): SceneRecoveryWork => {
       const initial = portableSceneRecovery(bytes, {});
       const descriptors = new Map(
-        bound.artifactAssets.map((descriptor) => [descriptor.id, descriptor]),
+        (bound?.artifactAssets ?? []).map((descriptor) => [
+          descriptor.id,
+          descriptor,
+        ]),
       );
       const reads = initial.requiredAssetIds.map((assetId) => {
         let read = recoveryAssetReads.get(assetId);
         if (!read) {
           const descriptor = descriptors.get(assetId);
-          read = descriptor
+          read = descriptor && bound
             ? bound
                 .readArtifactAsset(assetId)
                 .then((loaded) =>
@@ -896,6 +898,62 @@ export function useEngineDoc(input: {
       let projectionQueue: Promise<void> = Promise.resolve();
       const persist = (): void => {
         const bytes = Y.encodeStateAsUpdate(retired);
+        if (documentKind === "scene") {
+          const revision = ++recoveryRevision;
+          const sceneRecovery = prepareSceneRecovery(bytes, binding);
+          if (draftId === null) {
+            draftId = captureOrphanedDraft(
+              workspaceId,
+              path,
+              sceneRecovery.immediateText,
+            );
+          } else {
+            replaceOrphanedDraft(
+              workspaceId,
+              path,
+              draftId,
+              sceneRecovery.immediateText,
+            );
+          }
+          setSceneRecoveryAssets(
+            sceneRecovery.requiredAssetCount === 0
+              ? null
+              : {
+                  token,
+                  state: "loading",
+                  count: sceneRecovery.requiredAssetCount,
+                },
+          );
+          const capturedDraftId = draftId;
+          void sceneRecovery.completed
+            .then((recovered) => {
+              if (revision !== recoveryRevision) return;
+              replaceOrphanedDraft(
+                workspaceId,
+                path,
+                capturedDraftId,
+                recovered.text,
+              );
+              if (token === openTokenRef.current) {
+                setSceneRecoveryAssets(
+                  recovered.missingAssetCount === 0
+                    ? null
+                    : {
+                        token,
+                        state: "missing",
+                        count: recovered.missingAssetCount,
+                      },
+                );
+              }
+            })
+            .catch((error: unknown) => {
+              console.error(
+                `[desktop] could not recover drawing assets for ${workspaceId}:${path} after lineage replacement:`,
+                error,
+              );
+            });
+          return;
+        }
         const crude = crudeMarkdownFromDoc(retired);
         if (draftId === null) {
           draftId = captureOrphanedDraft(workspaceId, path, crude);

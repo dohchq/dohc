@@ -165,8 +165,20 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   function emitLineageReplacement(text: string): void {
     if (openedSessionId === null) throw new Error("session not open yet");
     const replacement = new Y.Doc();
-    replacement.getMap("meta").set("contentKind", "plain-text");
-    replacement.getText("plainText").insert(0, text);
+    if (kind === "scene") {
+      declareSceneRoots(replacement);
+      insertElementRevision(replacement, {
+        id: "winning-shape",
+        type: "rectangle",
+        version: 1,
+        versionNonce: 1,
+        isDeleted: false,
+        index: "a0",
+      });
+    } else {
+      replacement.getMap("meta").set("contentKind", "plain-text");
+      replacement.getText("plainText").insert(0, text);
+    }
     const event = {
       sessionId: openedSessionId,
       update: Y.encodeStateAsUpdate(replacement),
@@ -439,6 +451,81 @@ it("persists a late edit on the losing mirror during replacement", async () => {
   await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
   expect(harness.applied).toHaveLength(0);
   expect(screen.getByTestId("available").textContent).toBe("true");
+});
+
+it("recovers a dirty replaced scene immediately and hydrates its image", async () => {
+  harness = harnessBridge("scene");
+  const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+  let resolveAsset!: (value: {
+    descriptor: typeof IMAGE_DESCRIPTOR;
+    bytes: Uint8Array;
+  }) => void;
+  const asset = new Promise<{
+    descriptor: typeof IMAGE_DESCRIPTOR;
+    bytes: Uint8Array;
+  }>((resolve) => {
+    resolveAsset = resolve;
+  });
+  const readAsset = vi.fn(() => asset);
+  harness.setArtifactReader([IMAGE_DESCRIPTOR], readAsset);
+  putSceneAsset(harness.sourceDoc, IMAGE_DESCRIPTOR);
+  insertElementRevision(harness.sourceDoc, {
+    id: "image-element",
+    type: "image",
+    fileId: IMAGE_DESCRIPTOR.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    index: "a1",
+  });
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  act(() => screen.getByTestId("type").click());
+  harness.emitLineageReplacement("unused");
+
+  expect(screen.getByTestId("draft-count").textContent).toBe("1");
+  const immediate = parseExcalidrawDocument(
+    screen.getByTestId("draft").textContent!,
+  );
+  expect(immediate.elements).toContainEqual(
+    expect.objectContaining({ id: "recovered-shape", x: 10 }),
+  );
+  expect(immediate.elements).toContainEqual(
+    expect.objectContaining({ id: "image-element", fileId: null }),
+  );
+  expect(immediate.files).toEqual({});
+  await waitFor(() =>
+    expect(screen.getByTestId("asset-recovery").textContent).toBe("loading:1"),
+  );
+  expect(readAsset).toHaveBeenCalledOnce();
+
+  await act(async () => {
+    resolveAsset({ descriptor: IMAGE_DESCRIPTOR, bytes });
+    await asset;
+  });
+
+  await waitFor(() => {
+    const recovered = parseExcalidrawDocument(
+      screen.getByTestId("draft").textContent!,
+    );
+    expect(recovered.elements).toContainEqual(
+      expect.objectContaining({
+        id: "image-element",
+        fileId: IMAGE_DESCRIPTOR.id,
+      }),
+    );
+    expect(recovered.files[IMAGE_DESCRIPTOR.id]).toMatchObject({
+      dataURL: "data:image/png;base64,iVBORw==",
+    });
+  });
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("none");
+  expect(screen.getByTestId("draft-count").textContent).toBe("1");
 });
 
 it("shows the failure when a settle fails, instead of reading Saved", async () => {
