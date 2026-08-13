@@ -851,6 +851,8 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     pnpmRunnerEntry: join(import.meta.dirname, "pnpm-runner.js"),
     onStatusChange: (event) =>
       notifyPluginStatusChanged(workspace.workspaceId, event),
+    isEngineCaptureAvailable: () =>
+      activity.engineCaptureFor(workspace.workspaceId) !== null,
   });
   return pipeline;
 }

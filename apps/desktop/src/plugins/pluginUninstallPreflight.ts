@@ -118,6 +118,15 @@ export interface PluginUninstallPreflightInput {
   pluginId: string;
   pluginRoot: string;
   installedBaselineHash: string | undefined;
+  /**
+   * Whether this workspace's engine capture is running right now. A file
+   * under the history capture size cap is only actually "captured-
+   * recoverable" if capture was there to record it — this preflight has no
+   * way to confirm any specific past write actually settled, but it can at
+   * least refuse to promise recovery for anything when capture is known to
+   * be unavailable, rather than a size-only guess (recovery honesty).
+   */
+  engineCaptureAvailable: boolean;
 }
 
 type BaselineManifestRead =
@@ -248,6 +257,7 @@ async function readBaselineManifest(path: string): Promise<BaselineManifestRead>
 async function classifyHistoryRecovery(
   pluginRoot: string,
   file: PluginSourceFileDigest,
+  engineCaptureAvailable: boolean,
 ): Promise<Pick<
   PluginUninstallFileInventory,
   "byteLength" | "contentKind" | "historyRecovery"
@@ -264,6 +274,11 @@ async function classifyHistoryRecovery(
   const limit = contentKind === "text"
     ? MAX_HISTORY_TEXT_SNAPSHOT_BYTES
     : MAX_VERSIONED_BINARY_FILE_BYTES;
+  // Under the cap is necessary but not sufficient: capture also has to have
+  // actually been running to record this file. When it wasn't, this can't
+  // honestly promise recovery no matter how small the file is (CodeRabbit
+  // #779 fixround Section B item 7).
+  const underCap = bytes.byteLength <= limit;
   return {
     byteLength: bytes.byteLength,
     contentKind,
@@ -271,9 +286,9 @@ async function classifyHistoryRecovery(
     // exactly (materialize.rs compares with `>`, not `>=`): only a file
     // strictly larger than the cap goes untracked. Match that boundary
     // here so this warning never calls a captured file unrecoverable.
-    historyRecovery: bytes.byteLength > limit
-      ? "not-recoverable-from-history"
-      : "captured-recoverable",
+    historyRecovery: underCap && engineCaptureAvailable
+      ? "captured-recoverable"
+      : "not-recoverable-from-history",
   };
 }
 
@@ -319,7 +334,11 @@ async function cannotVerifyResult(
   const files: PluginUninstallFileInventory[] = [];
   if (liveDigest) {
     for (const file of liveDigest.files) {
-      const recovery = await classifyHistoryRecovery(input.pluginRoot, file);
+      const recovery = await classifyHistoryRecovery(
+        input.pluginRoot,
+        file,
+        input.engineCaptureAvailable,
+      );
       files.push({
         relPath: file.relPath,
         status: "unknown-without-baseline",
@@ -335,6 +354,9 @@ async function cannotVerifyResult(
   const details = [
     `${counts.unknownWithoutBaseline} ${plural(counts.unknownWithoutBaseline, "source file")} cannot be compared with the installation baseline.`,
     captureLimitDetail(),
+    ...(input.engineCaptureAvailable
+      ? []
+      : ["History capture is not currently running, so no file's recovery can be confirmed."]),
   ];
   const warning: PluginUninstallWarning = {
     kind: "cannot-verify-baseline",
@@ -360,6 +382,7 @@ async function verifiedInventory(
   pluginRoot: string,
   liveDigest: PluginSourceDigest,
   baselineFiles: readonly PluginSourceFileDigest[],
+  engineCaptureAvailable: boolean,
 ): Promise<PluginUninstallFileInventory[]> {
   const files: PluginUninstallFileInventory[] = [];
   const baselineByPath = new Map(
@@ -376,7 +399,11 @@ async function verifiedInventory(
         historyRecovery: null,
       });
     } else {
-      const recovery = await classifyHistoryRecovery(pluginRoot, liveFile);
+      const recovery = await classifyHistoryRecovery(
+        pluginRoot,
+        liveFile,
+        engineCaptureAvailable,
+      );
       files.push({
         relPath: liveFile.relPath,
         status: baselineHash === undefined
@@ -458,6 +485,7 @@ export async function pluginUninstallPreflight(
     resolve(input.pluginRoot),
     liveDigest,
     baselineRead.manifest.files,
+    input.engineCaptureAvailable,
   );
   const counts = countInventory(files);
   const unrecoverable = notRecoverablePaths(files);
@@ -492,6 +520,11 @@ export async function pluginUninstallPreflight(
   if (counts.removedSinceBaseline > 0) {
     details.push(
       `${counts.removedSinceBaseline} removed baseline ${plural(counts.removedSinceBaseline, "file")} will not be an uninstall delete target.`,
+    );
+  }
+  if (!input.engineCaptureAvailable) {
+    details.push(
+      "History capture is not currently running, so no file's recovery can be confirmed.",
     );
   }
   const warning: PluginUninstallWarning = {

@@ -60,12 +60,14 @@ async function saveBaseline(fixture: PreflightFixture): Promise<string> {
 async function runPreflight(
   fixture: PreflightFixture,
   installedBaselineHash: string,
+  engineCaptureAvailable = true,
 ) {
   return pluginUninstallPreflight({
     dohcDir: fixture.dohcDir,
     pluginId,
     pluginRoot: fixture.pluginRoot,
     installedBaselineHash,
+    engineCaptureAvailable,
   });
 }
 
@@ -128,6 +130,35 @@ describe("plugin uninstall preflight", () => {
       }),
     ]);
     expect(result.warning?.notRecoverablePaths).toEqual([]);
+  });
+
+  it("refuses to promise recovery for any file when engine capture is unavailable (CodeRabbit #779 fixround Section B item 7)", async () => {
+    const fixture = await createFixture();
+    await writeSourceFile(fixture, "index.txt", "baseline text\n");
+    const installedBaselineHash = await saveBaseline(fixture);
+    await writeSourceFile(fixture, "index.txt", "modified text\n");
+
+    const result = await runPreflight(fixture, installedBaselineHash, false);
+
+    // Well under the capture size cap — the old, size-only classification
+    // would have called this "captured-recoverable" regardless of whether
+    // anything was actually there to record it.
+    expect(result.counts).toMatchObject({
+      modified: 1,
+      capturedRecoverable: 0,
+      notRecoverableFromHistory: 1,
+    });
+    expect(result.files).toEqual([
+      expect.objectContaining({
+        relPath: "index.txt",
+        status: "modified",
+        historyRecovery: "not-recoverable-from-history",
+      }),
+    ]);
+    expect(result.warning?.notRecoverablePaths).toEqual(["index.txt"]);
+    expect(result.warning?.details.join(" ")).toContain(
+      "History capture is not currently running",
+    );
   });
 
   it("classifies modified text exactly at the 128 KiB cap as recoverable", async () => {

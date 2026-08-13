@@ -116,6 +116,12 @@ export interface PluginPipelineOptions {
   /** See pluginInstallRunner's InstallPluginDependenciesInput.pnpmRunnerEntry. */
   pnpmRunnerEntry?: string;
   onStatusChange?: (event: PluginPipelineStatusEvent) => void;
+  /** Whether this workspace's engine capture is running right now — used
+   * only to keep uninstall preflight's recovery promises honest (a file
+   * under the capture size cap is not actually recoverable if capture
+   * wasn't running to record it). Defaults to true so existing callers and
+   * tests that don't care about this keep their current behavior. */
+  isEngineCaptureAvailable?: () => boolean;
   operations?: Partial<PluginPipelineOperations>;
 }
 
@@ -533,6 +539,7 @@ export class PluginPipeline {
           pluginId,
           pluginRoot: candidate.rootPath,
           installedBaselineHash: record?.installedBaselineHash,
+          engineCaptureAvailable: this.engineCaptureAvailable(),
         });
         const confirmationToken = randomUUID();
         this.uninstallConfirmations.set(pluginId, {
@@ -589,6 +596,7 @@ export class PluginPipeline {
         pluginId,
         pluginRoot: candidate.rootPath,
         installedBaselineHash: record?.installedBaselineHash,
+        engineCaptureAvailable: this.engineCaptureAvailable(),
       });
       if (currentPreflight.liveHash !== confirmation.liveHash) {
         return this.failure(
@@ -1161,6 +1169,10 @@ export class PluginPipeline {
       );
     }
     return candidate;
+  }
+
+  private engineCaptureAvailable(): boolean {
+    return this.options.isEngineCaptureAvailable?.() ?? true;
   }
 
   private liveRoot(pluginId: string): string {
