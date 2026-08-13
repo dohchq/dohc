@@ -67,10 +67,15 @@ Three pieces. The engine stays the core.
     workspace and a host generation; stale registrations arriving after a
     workspace switch or reload are rejected, per the repo's async-guard
     invariant.
-  - **Bounded activation.** Activation has a deadline; a hung or failed
-    activation is disposed and counts toward the crash-loop auto-disable
-    like a crash. App and workspace startup never await plugin
-    activation, so no plugin can wedge startup.
+  - **Bounded activation.** Activation has a 30-second deadline — set
+    beyond the spike's measured healthy range (t3's server start, the
+    heaviest activation observed, took 4.5–7.4 s warm; the deadline
+    leaves 4× headroom, and activation is documented as not the place
+    to await long-running service readiness). A hung or failed
+    activation is disposed and counts toward the crash-loop
+    auto-disable like a crash. App and workspace startup never await
+    plugin activation, so no plugin can wedge startup. Re-measure when
+    PR3's real activation lands.
   The host is a client of the daemon RPC, same as the desktop app.
 - **`@dohc/sdk`** — the existing package (`packages/sdk`), extended. Today
   it serves sandboxed site previews over a postMessage transport. Plugins
@@ -101,6 +106,19 @@ are TypeScript above it.
 | Open source | Entire codebase opens at MVP launch. Cloud layer licensed against commercial rehosting. Register the trademark first. | 2026-07-29 |
 
 Constraints these choices create:
+
+- **Executed code is device-approved, not just workspace-synced.** The
+  `plugins/` tree is workspace content, so once sync exists (#356), a
+  collaborator's edit to plugin source would otherwise execute
+  full-trust on every member's machine via hot reload. Each device
+  therefore records the approved content hash of every enabled plugin
+  in `.dohc/plugins.local.json` (device-local, never synced). A hash
+  the device has not approved does not execute: the plugin is held
+  disabled until the local user approves the change. While a workspace
+  has no sync peers — true for this whole milestone — local edits
+  auto-approve, so solo hot reload stays frictionless. This gate is a
+  hard precondition for shipping plugin sync, not an optional
+  hardening.
 
 - The engine's capture floor excludes `node_modules` at any depth. The
   lockfile is therefore what makes a reverted plugin rebuildable. The
@@ -137,10 +155,12 @@ Constraints these choices create:
 
 Spike first, then three stacked PRs, each independently green.
 
-- **Spike (no PR):** prove the published `t3` package can be spawned as a
-  child process, its served UI loads in a sandboxed iframe (the same
-  surface PR1 ships), and a session round-trips. Output: the bridge
-  contract for PR3, including the pinned package version.
+- **Spike (done 2026-08-13):** proved `t3@0.0.33` spawns, serves its UI
+  at a loopback origin, and completes a real Codex session through its
+  authenticated protocol — and determined that its SameSite session
+  cookie breaks in a third-party iframe, so PR3 embeds it in a guest
+  WebContents instead. The bridge contract (spawn, readiness, teardown,
+  redaction) is recorded in `.agent-artifacts/references/t3-spike/`.
 - **PR1a — host + manifest + SDK Node transport.** Host lifecycle (one
   `utilityProcess` per plugin, `disabled` flag, crash-loop auto-disable,
   descendant teardown, generation guard), `dohc-plugin.json` format, the
@@ -158,9 +178,14 @@ Spike first, then three stacked PRs, each independently green.
   (PR1a's host already honors a `disabled` flag and auto-disables a
   plugin that crash-loops, so a broken plugin can never wedge app
   startup.) Packaged installs have no system Node, so dependency
-  install runs pnpm's standalone script under a `utilityProcess`; this
-  path must be exercised in the fused packaged environment, not only in
-  dev.
+  install runs pnpm's standalone script under a `utilityProcess`, with
+  `--ignore-scripts` — lifecycle scripts would need a real `node` and
+  are also npm's main attack surface, so dependencies that require
+  install scripts are unsupported until a shipped-Node decision is made,
+  and the install error says exactly that. Plugin child processes (a
+  wrapper's server, like t3's) never spawn `node` themselves; the SDK
+  brokers them as host-spawned `utilityProcess` instances. Exercise all
+  of this in the fused packaged environment, not only in dev.
 - **PR3 — the t3 code plugin.** Manifest + glue over the spike's bridge
   contract.
 
