@@ -2152,6 +2152,31 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         )
         .await
         .expect("write asset");
+    let unrelated_path = "assets/unrelated-lifecycle.bin";
+    let unrelated_bytes = b"unrelated binary authority".to_vec();
+    actor
+        .versioned_binary_write(
+            WriteBinary {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "unrelated-binary-object".to_owned(),
+                path: unrelated_path.to_owned(),
+                bytes: unrelated_bytes.clone(),
+                moment_id: "unrelated-binary-write".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 5,
+                request_id: None,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("write unrelated binary");
     let aborted = actor
         .versioned_text_delete(
             DeleteTextFile {
@@ -2189,20 +2214,21 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         std::fs::read(scratch.path().join(&asset_path)).expect("asset survives rollback"),
         bytes
     );
+    let drawing_delete_input = DeleteTextFile {
+        workspace_id: workspace_id.to_owned(),
+        version_id: "main".to_owned(),
+        path: "drawings/rollback.excalidraw".to_owned(),
+        moment_id: "rollback-drawing-delete".to_owned(),
+        request_id: Some("rollback-drawing-delete-request".to_owned()),
+        metadata_origin: "api".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 6,
+    };
     let drawing_delete = actor
         .versioned_text_delete(
-            DeleteTextFile {
-                workspace_id: workspace_id.to_owned(),
-                version_id: "main".to_owned(),
-                path: "drawings/rollback.excalidraw".to_owned(),
-                moment_id: "rollback-drawing-delete".to_owned(),
-                request_id: None,
-                metadata_origin: "api".to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                author_json: None,
-                now_ms: 6,
-            },
+            drawing_delete_input.clone(),
             scratch.path().to_path_buf(),
             Arc::new(NoRecorder),
             ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
@@ -2213,6 +2239,75 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
     assert_eq!(
         std::fs::read(scratch.path().join(&asset_path)).expect("asset pending"),
         bytes
+    );
+    actor
+        .versioned_text_delete(
+            DeleteTextFile {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                path: unrelated_path.to_owned(),
+                moment_id: "foreign-binary-delete".to_owned(),
+                request_id: None,
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: Some("Deleted drawing asset".to_owned()),
+                metadata_correlation_id: Some(drawing_delete.moment.moment_id.clone()),
+                author_json: None,
+                now_ms: 7,
+            },
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("commit foreign correlated binary delete");
+    let mut inspection = EngineStore::open(&db, 7).expect("open summary drift store");
+    inspection
+        .write_with(&NoFaults, |tx| {
+            let changed = tx
+                .execute(
+                    "UPDATE moments SET metadata_summary = 'Drawing asset delete copy changed' \
+                 WHERE workspace_id = ?1 AND version_id = 'main' AND path = ?2 \
+                   AND metadata_correlation_id = ?3",
+                    params![workspace_id, asset_path, drawing_delete.moment.moment_id],
+                )
+                .map_err(StorageError::persist_public)?;
+            assert_eq!(changed, 1, "one owned asset delete changed copy");
+            Ok::<_, StorageError>(())
+        })
+        .expect("change owned delete provenance copy");
+    drop(inspection);
+    let retried_delete = actor
+        .versioned_text_delete(
+            drawing_delete_input,
+            scratch.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("retry committed drawing delete");
+    assert!(retried_delete.deduped);
+    assert!(
+        !scratch.path().join(&asset_path).exists(),
+        "retry must materialize its exact owned delete despite changed copy"
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join(unrelated_path))
+            .expect("foreign correlated delete remains pending"),
+        unrelated_bytes
+    );
+    assert_eq!(
+        EngineStore::open(&db, 7)
+            .expect("inspect foreign delete job")
+            .load_materialization_job(&dohc_engine_domain::binary_delete_job_id(
+                "foreign-binary-delete"
+            ))
+            .expect("load foreign delete job")
+            .expect("foreign delete job exists")
+            .status,
+        dohc_engine_storage::JobStatus::Pending,
+        "drawing retry must not run a metadata-shaped foreign delete"
     );
     let rollback = RollbackTextFileMutation {
         workspace_id: workspace_id.to_owned(),
@@ -2254,6 +2349,21 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
             )
         })
         .expect("original restore job exists");
+    let mut inspection = EngineStore::open(&db, 7).expect("open restore summary drift store");
+    inspection
+        .write_with(&NoFaults, |tx| {
+            let changed = tx
+                .execute(
+                    "UPDATE moments SET metadata_summary = 'Drawing asset restore copy changed' \
+                 WHERE workspace_id = ?1 AND moment_id = ?2",
+                    params![workspace_id, original_restore_job_id],
+                )
+                .map_err(StorageError::persist_public)?;
+            assert_eq!(changed, 1, "one owned asset restore changed copy");
+            Ok::<_, StorageError>(())
+        })
+        .expect("change owned restore provenance copy");
+    drop(inspection);
     assert_eq!(
         EngineStore::open(&db, 7)
             .expect("inspect pending original restore job")
@@ -2293,7 +2403,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
                 moment_id: "moment-scene-asset-rollback-later".to_owned(),
                 metadata_origin: "ydoc".to_owned(),
                 metadata_summary: Some("Restored drawing asset".to_owned()),
-                metadata_correlation_id: Some(later_rollback_moment_id),
+                metadata_correlation_id: Some(rollback_moment_id),
                 author_json: None,
                 now_ms: 9,
                 request_id: None,
@@ -2339,6 +2449,15 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         "retry must not run a different rollback's asset job"
     );
     assert!(!scratch.path().join(later_path).exists());
+    let mut inspection = EngineStore::open(&db, 9).expect("inspect unrelated binary head");
+    assert!(
+        VersionedTextStore::new(&mut inspection)
+            .read_binary(workspace_id, "main", unrelated_path)
+            .expect("read unrelated binary head after drawing rollback")
+            .is_none(),
+        "drawing rollback must not resurrect a metadata-shaped foreign delete"
+    );
+    drop(inspection);
     supervisor.close(&db).expect("close before replay");
     let restarted = WorkspaceSupervisor::new();
     let actor = restarted.open(&db, 10).expect("restart actor").actor;
@@ -2361,7 +2480,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         .read_with(|conn| {
             conn.query_row(
                 "SELECT COUNT(*) FROM moments WHERE workspace_id = ?1 AND path = ?2 \
-                 AND metadata_summary IN ('Deleted drawing asset','Restored drawing asset')",
+                 AND metadata_origin = 'ydoc' AND metadata_correlation_id IS NOT NULL",
                 params![workspace_id, asset_path],
                 |row| row.get(0),
             )

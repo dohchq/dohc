@@ -27,11 +27,7 @@ fn projection_too_large_reason(
     actual_bytes: usize,
     limit_bytes: usize,
 ) -> String {
-    let format = match content_kind {
-        dohc_engine_collab::ContentKind::Plaintext => "plaintext",
-        dohc_engine_collab::ContentKind::Richdoc => "richdoc",
-        dohc_engine_collab::ContentKind::Scene => "scene",
-    };
+    let format = content_kind.as_str();
     format!(
         "{format} projection exceeds {constraint}: limit {limit_bytes} bytes, observed at least {actual_bytes} bytes"
     )
