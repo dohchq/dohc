@@ -27,6 +27,18 @@ fn committed<T>(o: TxnOutcome<T>) -> T {
     }
 }
 
+#[test]
+fn base_coordinate_reports_the_origin_id_byte_limit() {
+    let origin_id = "x".repeat(dohc_engine_storage::MAX_IDENTIFIER_BYTES + 1);
+    let error = BaseRelayCoordinate::new(origin_id, 0, 0).expect_err("oversized origin id");
+
+    assert_eq!(error.code(), "invalid-identifier");
+    assert_eq!(
+        error.to_string(),
+        "invalid identifier: origin_id is 513 bytes; the limit is 512 bytes"
+    );
+}
+
 /// Mark a `settle()` call's OWN materialization job complete. Every test
 /// below that seeds an ADDITIONAL pending job to prove the close guard
 /// blocks on THAT job must call this first — the settle's own job (still

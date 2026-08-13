@@ -99,14 +99,18 @@ impl DocKey {
 
 fn check_identifier(value: &str, reason: &'static str) -> Result<(), CollabError> {
     if value.is_empty() || value.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES {
-        return Err(CollabError::InvalidIdentifier { reason });
+        return Err(CollabError::InvalidIdentifier {
+            reason: reason.to_owned(),
+        });
     }
     // Reject NUL and other control characters: the settle job id and payload
     // fingerprints are NUL-delimited (`"{ws}\0{ver}\0{obj}\0…"`), so a NUL (or
     // other control char) in a coordinate could forge a collision across
     // distinct keys. Identifiers are opaque handles, never control bytes.
     if value.bytes().any(|b| b.is_ascii_control()) {
-        return Err(CollabError::InvalidIdentifier { reason });
+        return Err(CollabError::InvalidIdentifier {
+            reason: reason.to_owned(),
+        });
     }
     Ok(())
 }

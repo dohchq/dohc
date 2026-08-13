@@ -43,7 +43,7 @@ pub enum CollabError {
     /// An identifier (`workspace_id`/`version_id`/`object_id`/`origin_id`) is
     /// empty or over the length bound.
     #[error("invalid identifier: {reason}")]
-    InvalidIdentifier { reason: &'static str },
+    InvalidIdentifier { reason: String },
 
     /// The caller tried to append through a projection kind different from the
     /// kind that already owns this durable lineage.

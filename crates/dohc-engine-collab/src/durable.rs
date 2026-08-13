@@ -202,17 +202,23 @@ impl BaseRelayCoordinate {
         relay_seq: i64,
     ) -> Result<Self, CollabError> {
         let origin_id = origin_id.into();
-        if origin_id.is_empty()
-            || origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
-            || origin_id.bytes().any(|byte| byte.is_ascii_control())
-        {
+        if origin_id.is_empty() || origin_id.bytes().any(|byte| byte.is_ascii_control()) {
             return Err(CollabError::InvalidIdentifier {
-                reason: "origin_id must be non-empty and bounded",
+                reason: "origin_id must be non-empty and contain no control bytes".to_owned(),
+            });
+        }
+        if origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES {
+            return Err(CollabError::InvalidIdentifier {
+                reason: format!(
+                    "origin_id is {} bytes; the limit is {} bytes",
+                    origin_id.len(),
+                    dohc_engine_storage::MAX_IDENTIFIER_BYTES
+                ),
             });
         }
         if origin_seq < 0 || relay_seq < 0 {
             return Err(CollabError::InvalidIdentifier {
-                reason: "base relay coordinates must be nonnegative",
+                reason: "base relay coordinates must be nonnegative".to_owned(),
             });
         }
         Ok(Self {
@@ -1254,7 +1260,7 @@ pub fn record_base_coordinate_in_tx(
         || relay_seq.is_some_and(|value| value < 0)
     {
         return Err(CollabError::InvalidIdentifier {
-            reason: "base relay coordinates must be bounded and nonnegative",
+            reason: "base relay coordinates must be bounded and nonnegative".to_owned(),
         });
     }
     let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
