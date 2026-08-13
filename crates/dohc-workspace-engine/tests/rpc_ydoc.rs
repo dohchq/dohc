@@ -562,7 +562,7 @@ async fn deleting_a_scene_retires_only_its_owned_assets_and_rollback_restores_th
         7,
         "versionedBinary.write",
         json!({ "versionId": "main", "path": adjacent_path,
-            "bytes": adjacent_bytes, "origin": "api" }),
+            "bytes": adjacent_bytes, "origin": "local-file" }),
     )
     .await;
 

@@ -1,4 +1,7 @@
-use dohc_engine_collab::{ContentKind, DocKey, Regime, ensure_marker, scene_asset_ref};
+use dohc_engine_collab::{
+    ContentKind, DocKey, Regime, RemoteUpdate, ReplicationApplyOutcome, apply_remote_update,
+    encode_scene_asset_records, ensure_marker, scene_asset_ref,
+};
 use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
     CaptureIngest, CaptureIngestBinary, CaptureRetire, CaptureSecret, CaptureSecretRetire,
@@ -11,13 +14,14 @@ use dohc_engine_domain::{
 use dohc_engine_runtime::{
     ActorHandle, CancellationToken, NoFaults, RuntimeError, SelfWriteRecorder, WorkspaceSupervisor,
 };
-use dohc_engine_storage::{EngineStore, FaultPoint, StorageError, hex_sha256};
+use dohc_engine_storage::{EngineStore, FaultPoint, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_sync::{
     ApplyOutcome, MAX_PAYLOAD_JSON_BYTES, ReplicationEnvelope, apply_moment_envelope_detailed,
     apply_secret_envelope, apply_version_envelope,
 };
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 use rusqlite::params;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -83,6 +87,54 @@ fn initialize_workspace(db: &Path, workspace_id: &str, relay_enabled: bool) {
             Ok::<_, StorageError>(())
         })
         .expect("seed sync state");
+}
+
+fn apply_remote_scene_asset_authority(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    drawing_object_id: &str,
+    asset_path: &str,
+    asset_sha256: &str,
+    now_ms: i64,
+) {
+    let key = DocKey::new(workspace_id, "main", drawing_object_id).expect("scene doc key");
+    ensure_marker(
+        store,
+        &key,
+        ContentKind::Scene,
+        Regime::Replicated,
+        &NoFaults,
+        now_ms,
+    )
+    .expect("ensure replicated scene marker");
+    let mut records = BTreeMap::new();
+    records.insert(
+        "image-file".to_owned(),
+        serde_json::json!({
+            "created": now_ms,
+            "id": "image-file",
+            "mimeType": "image/png",
+            "ref": asset_path,
+            "sha256": asset_sha256
+        })
+        .to_string(),
+    );
+    let update = encode_scene_asset_records(&records).expect("encode scene asset authority");
+    assert!(matches!(
+        apply_remote_update(
+            store,
+            &key,
+            &RemoteUpdate {
+                origin_id: "origin-scene-source".to_owned(),
+                origin_seq: 1,
+                bytes: update,
+            },
+            &NoFaults,
+            now_ms,
+        )
+        .expect("apply remote scene asset authority"),
+        TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. })
+    ));
 }
 
 fn local_ops(db: &Path) -> Vec<LoggedOp> {
@@ -2041,7 +2093,19 @@ async fn replicated_scene_delete_carries_its_owned_asset_delete_to_a_clean_peer(
         .expect("enable peer relay identity");
     let source_store = EngineStore::open(&source_db, 6).expect("source store");
     let mut peer_store = EngineStore::open(&peer_db, 7).expect("peer store");
-    for op in &ops {
+    for op in &ops[..2] {
+        copy_op_blobs(&source_store, &mut peer_store, op);
+        apply_logged_op(&mut peer_store, workspace_id, op);
+    }
+    apply_remote_scene_asset_authority(
+        &mut peer_store,
+        workspace_id,
+        "drawing-object",
+        &asset_path,
+        &sha256,
+        7,
+    );
+    for op in &ops[2..] {
         copy_op_blobs(&source_store, &mut peer_store, op);
         apply_logged_op(&mut peer_store, workspace_id, op);
     }
@@ -2073,12 +2137,15 @@ async fn replicated_scene_delete_carries_its_owned_asset_delete_to_a_clean_peer(
         .open(&peer_db, 8)
         .expect("open peer actor")
         .actor;
-    let owner_directory = asset_path
-        .rsplit_once('/')
-        .expect("asset owner directory")
-        .0;
-    let forged_path = format!("{owner_directory}/{}.png", "b".repeat(64));
     let forged_bytes = b"forged correlated binary".to_vec();
+    let forged_path = scene_asset_ref(
+        workspace_id,
+        "main",
+        "drawing-object",
+        &hex_sha256(&forged_bytes),
+        "image/png",
+    )
+    .expect("canonical forged asset path");
     let forged_delete_moment_id = format!(
         "moment-scene-asset-delete-{}",
         hex_sha256(format!("{workspace_id}\0main\0drawing-delete\0{forged_path}").as_bytes())
@@ -2407,6 +2474,14 @@ async fn peer_local_scene_delete_retires_a_live_synced_asset_and_rollback_restor
         copy_op_blobs(&source_store, &mut peer_store, op);
         apply_logged_op(&mut peer_store, workspace_id, op);
     }
+    apply_remote_scene_asset_authority(
+        &mut peer_store,
+        workspace_id,
+        "live-drawing-object",
+        &asset_path,
+        &hex_sha256(&asset_bytes),
+        7,
+    );
     let replicated_heads: Vec<(String, String)> = peer_store
         .read_with(|conn| {
             let mut statement = conn.prepare(

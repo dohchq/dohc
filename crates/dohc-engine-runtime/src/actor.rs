@@ -10912,19 +10912,26 @@ fn delete_owned_scene_assets_in_tx(
         &drawing_delete.before.version_id,
         &drawing_delete.object.object_id,
     )?;
+    let canonical_assets = scene_asset_authorities_on_connection(
+        tx,
+        &drawing_delete.before.workspace_id,
+        &drawing_delete.before.version_id,
+        &drawing_delete.object.object_id,
+    )?;
     let mut candidates: BTreeMap<String, String> = BTreeMap::new();
     for owner_directory in &owner_directories {
         let pattern = format!("{owner_directory}/*");
         let mut statement = tx
             .prepare(
-                "SELECT a.path, s.binary_sha256 FROM path_aliases a JOIN snapshots s \
+                "SELECT a.path, s.binary_sha256, s.metadata_origin \
+                 FROM path_aliases a JOIN snapshots s \
                  ON s.workspace_id = a.workspace_id AND s.version_id = a.version_id \
                  AND s.object_id = a.object_id LEFT JOIN moments producer \
                  ON producer.workspace_id = s.workspace_id \
                  AND producer.moment_id = s.latest_moment_id WHERE a.workspace_id = ?1 \
                  AND a.version_id = ?2 AND a.path GLOB ?3 \
                  AND COALESCE(s.content_kind, 'text') = 'binary' \
-                 AND (s.metadata_origin IN ('ydoc','local-file') \
+                 AND (s.metadata_origin = 'ydoc' \
                    OR (s.metadata_origin = 'sync' \
                      AND producer.version_id = s.version_id \
                      AND producer.object_id = s.object_id \
@@ -10946,16 +10953,26 @@ fn delete_owned_scene_assets_in_tx(
                     drawing_delete.before.version_id,
                     pattern
                 ],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .map_err(|error| {
                 RuntimeError::Domain(DomainError::Storage(StorageError::corrupt_public(error)))
             })?;
         for row in rows {
-            let (path, sha256) = row.map_err(|error| {
+            let (path, sha256, origin) = row.map_err(|error| {
                 RuntimeError::Domain(DomainError::Storage(StorageError::corrupt_public(error)))
             })?;
-            candidates.insert(path, sha256);
+            // `ydoc` is engine-only. A replicated snapshot must also exist in
+            // the drawing's canonical scene lineage; relay origin is not authority.
+            if origin == "ydoc" || canonical_assets.get(&path) == Some(&sha256) {
+                candidates.insert(path, sha256);
+            }
         }
     }
     let mut jobs = Vec::new();
@@ -11017,7 +11034,21 @@ fn scene_asset_owner_directories(
     version_id: &str,
     drawing_object_id: &str,
 ) -> Result<Vec<String>, DomainError> {
-    let mut owner_versions = Vec::new();
+    Ok(
+        scene_asset_owner_scopes(conn, workspace_id, version_id, drawing_object_id)?
+            .into_iter()
+            .map(|(_, directory)| directory)
+            .collect(),
+    )
+}
+
+fn scene_asset_owner_scopes(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    version_id: &str,
+    drawing_object_id: &str,
+) -> Result<Vec<(String, String)>, DomainError> {
+    let mut scopes = Vec::new();
     let mut seen_versions = HashSet::new();
     let mut version = Some(version_id.to_owned());
     while let Some(current) = version {
@@ -11026,7 +11057,15 @@ fn scene_asset_owner_directories(
                 reason: "version ancestry contains a cycle",
             });
         }
-        owner_versions.push(current.clone());
+        let directory =
+            scene_asset_directory(workspace_id, &current, drawing_object_id).map_err(|error| {
+                match error {
+                    dohc_engine_collab::SceneImportError::Invalid { reason } => {
+                        DomainError::StateCorrupt { reason }
+                    }
+                }
+            })?;
+        scopes.push((current.clone(), directory));
         version = conn
             .query_row(
                 "SELECT fork_version_id FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
@@ -11035,18 +11074,50 @@ fn scene_asset_owner_directories(
             )
             .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
     }
-    owner_versions
-        .into_iter()
-        .map(|version_id| {
-            scene_asset_directory(workspace_id, &version_id, drawing_object_id).map_err(|error| {
-                match error {
-                    dohc_engine_collab::SceneImportError::Invalid { reason } => {
-                        DomainError::StateCorrupt { reason }
-                    }
+    Ok(scopes)
+}
+
+fn scene_asset_authorities_on_connection(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    version_id: &str,
+    drawing_object_id: &str,
+) -> Result<BTreeMap<String, String>, DomainError> {
+    let scopes = scene_asset_owner_scopes(conn, workspace_id, version_id, drawing_object_id)?;
+    let mut authorities = BTreeMap::new();
+    for (current_version, directory) in scopes {
+        let key = DocKey::new(workspace_id, &current_version, drawing_object_id)
+            .map_err(scene_asset_authority_error)?;
+        if let Some(marker) = dohc_engine_collab::read_marker_from_connection(conn, &key)
+            .map_err(scene_asset_authority_error)?
+            && marker.content_kind == ContentKind::Scene
+            && ydoc_marker_has_durable_state(&marker)
+        {
+            let doc = dohc_engine_collab::load_doc_from_connection(conn, &key)
+                .map_err(scene_asset_authority_error)?;
+            if doc.has_pending_dependencies() {
+                return Err(scene_asset_authority_error(
+                    dohc_engine_collab::CollabError::MissingDependencies,
+                ));
+            }
+            for asset in doc.fold_scene().assets.into_values() {
+                if dohc_engine_collab::scene_asset_ref_is_owned(
+                    &directory,
+                    &asset.path,
+                    &asset.sha256,
+                ) {
+                    authorities.insert(asset.path, asset.sha256);
                 }
-            })
-        })
-        .collect()
+            }
+        }
+    }
+    Ok(authorities)
+}
+
+fn scene_asset_authority_error(error: impl std::fmt::Display) -> DomainError {
+    DomainError::Storage(StorageError::corrupt_public(std::io::Error::other(
+        format!("scene asset authority is invalid: {error}"),
+    )))
 }
 
 fn scene_asset_delete_moment_id(
@@ -11101,28 +11172,37 @@ fn scene_asset_delete_moments(
 ) -> Result<Vec<(String, String, String, i64)>, DomainError> {
     let owner_directories =
         scene_asset_owner_directories(conn, workspace_id, version_id, drawing_object_id)?;
+    let canonical_assets =
+        scene_asset_authorities_on_connection(conn, workspace_id, version_id, drawing_object_id)?;
     let mut statement = conn
         .prepare(
-            "SELECT moment_id,path,before_binary_sha256,recorded_at_ms \
-             FROM moments WHERE workspace_id = ?1 AND version_id = ?2 \
-               AND operation = 'delete' AND before_content_kind = 'binary' \
-               AND metadata_origin IN ('ydoc','local-file') \
-               AND metadata_correlation_id = ?3 \
-             ORDER BY moment_order",
+            "SELECT moment_id,path,before_binary_sha256,recorded_at_ms,metadata_origin \
+             FROM moments m WHERE m.workspace_id = ?1 AND m.version_id = ?2 \
+               AND m.operation = 'delete' AND m.before_content_kind = 'binary' \
+               AND m.metadata_origin IN ('ydoc','local-file') \
+               AND m.metadata_correlation_id = ?3 ORDER BY m.moment_order",
         )
         .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
     let rows = statement
         .query_map(
             params![workspace_id, version_id, drawing_delete_moment_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
     let candidates = rows
-        .collect::<Result<Vec<(String, String, String, i64)>, _>>()
+        .collect::<Result<Vec<(String, String, String, i64, String)>, _>>()
         .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
     Ok(candidates
         .into_iter()
-        .filter(|(moment_id, path, sha256, _)| {
+        .filter(|(moment_id, path, sha256, _, origin)| {
             *moment_id
                 == scene_asset_delete_moment_id(
                     workspace_id,
@@ -11133,6 +11213,12 @@ fn scene_asset_delete_moments(
                 && owner_directories.iter().any(|directory| {
                     dohc_engine_collab::scene_asset_ref_is_owned(directory, path, sha256)
                 })
+                // Replication rewrites provider deletes to `local-file`; only
+                // the canonical scene lineage can authorize those rows.
+                && (origin == "ydoc" || canonical_assets.get(path) == Some(sha256))
+        })
+        .map(|(moment_id, path, sha256, recorded_at_ms, _)| {
+            (moment_id, path, sha256, recorded_at_ms)
         })
         .collect())
 }

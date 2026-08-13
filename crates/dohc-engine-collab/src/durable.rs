@@ -851,14 +851,35 @@ pub fn read_marker_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
 ) -> Result<Option<Marker>, CollabError> {
-    query_marker(tx, key)
+    read_marker_from_connection(tx, key)
+}
+
+/// Read a doc's marker from the caller's SQLite connection.
+///
+/// This is the read-only counterpart to [`read_marker_in_tx`]. Callers that
+/// need a stable multi-query view must supply a connection inside their own
+/// transaction.
+pub fn read_marker_from_connection(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<Option<Marker>, CollabError> {
+    query_marker(conn, key)
 }
 
 /// Reconstruct the persisted doc inside the caller's transaction (marker
 /// required). The conflict-resolution fold reads, rewrites, and appends under
 /// ONE transaction so the folded update extends exactly the lineage it read.
 pub fn load_doc_in_tx(tx: &Transaction<'_>, key: &DocKey) -> Result<Ydoc, CollabError> {
-    load_for_replay_gate(tx, key)
+    load_doc_from_connection(tx, key)
+}
+
+/// Reconstruct a persisted doc from the caller's SQLite connection.
+///
+/// This is the read-only counterpart to [`load_doc_in_tx`]. Callers that need
+/// the marker and update rows to share one snapshot must supply a connection
+/// inside their own transaction.
+pub fn load_doc_from_connection(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError> {
+    load_for_replay_gate(conn, key)
 }
 
 /// Append one locally-produced update inside the caller's transaction — the
