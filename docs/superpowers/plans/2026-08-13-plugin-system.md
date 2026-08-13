@@ -41,15 +41,19 @@ many.
 
 Three pieces. The engine stays the core.
 
-- **Plugin host** — a Node `utilityProcess` in `apps/desktop`. Runs each
-  plugin's entry module. A plugin crash kills only that plugin. The host is
-  a client of the daemon RPC, same as the desktop app.
-- **`@dohc/sdk`** — a new workspace package: a typed wrapper over the daemon
-  RPC plus host-side contribution registration (panels, commands, agent
-  tools). One SDK for the app, plugins, and outside tools. A plugin is SDK
-  code plus a manifest.
-- **Panels** — sandboxed webviews in the renderer. Plugin UI never runs in
-  the app's own renderer context.
+- **Plugin host** — a Node child process spawned by `apps/desktop`, speaking
+  JSON-RPC over stdio like the agent drivers already do
+  (`apps/desktop/src/agents/JsonRpcTransport.ts` is the precedent). Runs
+  each plugin's entry module. A plugin crash kills only that plugin. The
+  host is a client of the daemon RPC, same as the desktop app.
+- **`@dohc/sdk`** — the existing package (`packages/sdk`), extended. Today
+  it serves sandboxed site previews over a postMessage transport. Plugins
+  reuse its API and add a Node transport for the host side, plus
+  contribution registration (panels, commands, agent tools). One SDK, one
+  API, two transports. A plugin is SDK code plus a manifest.
+- **Panels** — sandboxed iframes in the renderer, reusing the site-preview
+  surface (`SitePreviewPage.tsx` sandbox + `siteSdkHost` authority). Plugin
+  UI never runs in the app's own renderer context.
 
 Language split: anything that must be true (history, atomicity, replication,
 gates) is Rust below the daemon RPC. The host, SDK, pipeline, and plugins
@@ -76,7 +80,13 @@ Constraints these choices create:
   through the door get stamped (author, session, gate). Outside edits are
   captured as anonymous moments. Nothing is ever refused for lacking
   identity. Do not let any future change make attribution a write
-  precondition.
+  precondition. The engine already carries the slot: `MomentAuthor`
+  (`capture.setAuthor`) — plugin sessions extend it, they do not invent a
+  parallel scheme.
+- The install/build pipeline (PR2) has a working precedent: workspace
+  sites already detect, install, build, and preview user code
+  (`packages/workspace-core/src/sites.ts`). Reuse its shape before
+  inventing a new one.
 
 ## Build plan
 
@@ -85,11 +95,11 @@ Spike first, then three stacked PRs, each independently green.
 - **Spike (no PR):** prove the published `t3` package can be spawned as a
   child process, served UI embeds in a sandboxed webview, and a session
   round-trips. Output: the bridge contract for PR3.
-- **PR1 — host + manifest + minimal SDK.** `utilityProcess` host lifecycle,
-  `dohc-plugin.json` format, panel webview surface, skeletal `@dohc/sdk`
-  (panels + commands), and a hello-plugin test fixture that exercises the
-  host end to end. This PR sets the contracts; it gets the heavyweight
-  review.
+- **PR1 — host + manifest + minimal SDK.** Child-process host lifecycle,
+  `dohc-plugin.json` format, the panel surface on the site-preview sandbox,
+  a Node transport and contribution registration in `@dohc/sdk`, and a
+  hello-plugin test fixture that exercises the host end to end. This PR
+  sets the contracts; it gets the heavyweight review.
 - **PR2 — install/build pipeline.** `plugins/` source + lockfile → dep
   install + esbuild bundle → hot reload on change.
 - **PR3 — the t3 code plugin.** Manifest + glue over the spike's bridge
