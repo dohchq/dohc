@@ -105,7 +105,6 @@ function createCallbackHarness(): {
 
 function createProcessHarness(options: {
   modes?: Record<string, string>;
-  triggers?: Record<string, string>;
   waitForActivationBeforeDeactivate?: boolean;
 } = {}): ProcessHarness {
   const spawnedPluginIds: string[] = [];
@@ -118,8 +117,6 @@ function createProcessHarness(options: {
     const env: Record<string, string | undefined> = {
       DOHC_PLUGIN_FIXTURE_MODE: options.modes?.[params.pluginId] ?? "hello",
     };
-    const trigger = options.triggers?.[params.pluginId];
-    if (trigger) env.DOHC_PLUGIN_FIXTURE_TRIGGER_COMMAND = trigger;
 
     const transport = JsonRpcTransport.spawn({
       command: process.execPath,
@@ -206,7 +203,7 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
     });
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -218,9 +215,7 @@ describe("PluginHost", () => {
   it("routes a plugin's files.write through the real SDK host with host-derived attribution", async () => {
     const root = await workspaceRoot();
     const writes: Array<{ path: string; text: string; author: unknown }> = [];
-    const harness = createProcessHarness({
-      triggers: { "hello-plugin": "hello.write" },
-    });
+    const harness = createProcessHarness();
     const host = trackHost({
       stateDir: await stateDir(),
       workspaceRoot: root,
@@ -241,15 +236,13 @@ describe("PluginHost", () => {
         ),
     });
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
     );
-    await waitFor(
-      () => writes.length > 0,
-      "The plugin's files.write call did not reach the SDK host router.",
-    );
+
+    await host.invokeCommand("hello-plugin", "hello.write");
 
     expect(writes).toEqual([
       {
@@ -265,6 +258,41 @@ describe("PluginHost", () => {
     ]);
   });
 
+  it("rejects invokeCommand for an unregistered command by name", async () => {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness();
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    await expect(
+      host.invokeCommand("hello-plugin", "does-not-exist"),
+    ).rejects.toThrow('Command "does-not-exist" is not registered.');
+  });
+
+  it("rejects invokeCommand for a plugin that is not running", async () => {
+    const root = await workspaceRoot();
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: vi.fn<PluginHostOptions["spawnTransport"]>(),
+      routeSdkRequest: defaultRouter,
+    });
+
+    await expect(
+      host.invokeCommand("hello-plugin", "hello.write"),
+    ).rejects.toThrow('Plugin "hello-plugin" is not running.');
+  });
+
   it("rejects a second start while the first start continues", async () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness();
@@ -276,9 +304,9 @@ describe("PluginHost", () => {
     });
     const manifest = await fixtureManifest();
 
-    const firstStart = host.start("hello-plugin", helloPluginRoot, manifest);
+    const firstStart = host.start(helloPluginRoot, manifest);
     await expect(
-      host.start("hello-plugin", helloPluginRoot, manifest),
+      host.start(helloPluginRoot, manifest),
     ).rejects.toThrow('Plugin "hello-plugin" is already running.');
     await firstStart;
     await waitFor(
@@ -300,7 +328,6 @@ describe("PluginHost", () => {
     });
 
     const start = host.start(
-      "hello-plugin",
       helloPluginRoot,
       await fixtureManifest(),
     );
@@ -322,7 +349,6 @@ describe("PluginHost", () => {
     });
 
     const start = host.start(
-      "hello-plugin",
       helloPluginRoot,
       await fixtureManifest(),
     );
@@ -348,7 +374,7 @@ describe("PluginHost", () => {
     });
 
     await expect(
-      host.start("hello-plugin", helloPluginRoot, await fixtureManifest()),
+      host.start(helloPluginRoot, await fixtureManifest()),
     ).rejects.toThrow(
       'Plugin "hello-plugin" is disabled. Re-enabling it is not yet available in the app.',
     );
@@ -377,7 +403,10 @@ describe("PluginHost", () => {
     });
 
     await expect(
-      host.start("another-plugin", helloPluginRoot, await fixtureManifest()),
+      host.start(helloPluginRoot, {
+        ...(await fixtureManifest()),
+        name: "another-plugin",
+      }),
     ).rejects.toThrow(localState.warning);
     expect(spawnTransport).not.toHaveBeenCalled();
   });
@@ -396,7 +425,7 @@ describe("PluginHost", () => {
       onStatusChange: (_pluginId, status) => statuses.push(status),
     });
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
     await waitFor(
       () => statuses.includes("failed"),
       "Plugin did not report its activation failure.",
@@ -434,7 +463,7 @@ describe("PluginHost", () => {
 
     process.on("unhandledRejection", onUnhandledRejection);
     try {
-      await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+      await host.start(helloPluginRoot, await fixtureManifest());
       const reachedFailed = await waitFor(
         () => statuses.includes("failed"),
         "Malformed activation result did not fail the plugin.",
@@ -469,7 +498,7 @@ describe("PluginHost", () => {
       onStatusChange: (_pluginId, status) => statuses.push(status),
     });
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
     await waitFor(
       () => statuses.includes("ready"),
       "Plugin did not become ready before the asynchronous error.",
@@ -498,7 +527,7 @@ describe("PluginHost", () => {
       routeSdkRequest,
     });
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
     const callbacks = harness.getCallbacks();
 
     await expect(
@@ -521,7 +550,7 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
     });
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
     harness.getCallbacks().onNotification(PLUGIN_HOST_METHODS.log, {
       level: "debug",
       message: 42,
@@ -544,7 +573,7 @@ describe("PluginHost", () => {
     });
     const startedAt = Date.now();
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Healthy plugin missed the test activation deadline.",
@@ -569,7 +598,7 @@ describe("PluginHost", () => {
     });
     const startedAt = Date.now();
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
     await waitFor(
       () => statuses.includes("failed"),
       "Plugin activation did not fail at the deadline.",
@@ -593,7 +622,7 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
     });
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "disabled",
       "Crash loop did not disable the plugin.",
@@ -626,7 +655,7 @@ describe("PluginHost", () => {
       activationTimeoutMs: 150,
     });
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "disabled",
       "Timeout loop did not disable the plugin.",
@@ -669,7 +698,7 @@ describe("PluginHost", () => {
       onStatusChange: (_pluginId, status) => statuses.push(status),
     });
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "disabled",
       "Fast crashes after activation did not disable the plugin.",
@@ -716,7 +745,7 @@ describe("PluginHost", () => {
       },
     });
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -751,8 +780,8 @@ describe("PluginHost", () => {
     const manifest = await fixtureManifest();
 
     await Promise.all([
-      host.start("broken-plugin", helloPluginRoot, manifest),
-      host.start("healthy-plugin", helloPluginRoot, manifest),
+      host.start(helloPluginRoot, { ...manifest, name: "broken-plugin" }),
+      host.start(helloPluginRoot, { ...manifest, name: "healthy-plugin" }),
     ]);
     await waitFor(
       () => host.getStatus("healthy-plugin") === "ready",
@@ -794,7 +823,6 @@ describe("PluginHost", () => {
     });
 
     const start = host.start(
-      "hello-plugin",
       helloPluginRoot,
       await fixtureManifest(),
     );
@@ -825,7 +853,7 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
     });
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -851,7 +879,7 @@ describe("PluginHost", () => {
     });
     const heartbeatPath = join(root, "grandchild-heartbeat.txt");
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Heartbeat plugin did not become ready.",
@@ -883,7 +911,7 @@ describe("PluginHost", () => {
       activationTimeoutMs: 2_000,
     });
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
     host.bumpGeneration();
     await waitFor(
       () => harness.disposedPluginIds.includes("hello-plugin"),
@@ -908,7 +936,7 @@ describe("PluginHost", () => {
       onStatusChange: (_pluginId, status) => statuses.push(status),
     });
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
     host.bumpGeneration();
     await waitFor(
       () => harness.disposedPluginIds.includes("hello-plugin"),
@@ -923,7 +951,6 @@ describe("PluginHost", () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness({
       modes: { "hello-plugin": "crash-after-activate" },
-      triggers: { "hello-plugin": "hello.write" },
     });
     const routeSdkRequest = vi.fn(
       () => new Promise<never>(() => undefined),
@@ -938,7 +965,16 @@ describe("PluginHost", () => {
       },
     });
 
-    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    // Fires the command that sends the request and immediately exits the
+    // child — the child dies before it can answer this call, so it is left
+    // to settle on its own; the point of this test is what happens next.
+    void host.invokeCommand("hello-plugin", "hello.write").catch(() => undefined);
     await waitFor(
       () => routeSdkRequest.mock.calls.length > 0,
       "Fixture did not send its sdk.request.",

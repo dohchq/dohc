@@ -8,6 +8,7 @@ import {
   PLUGIN_HOST_METHODS,
   type PluginActivateParams,
   type PluginActivateResult,
+  type PluginInvokeCommandParams,
   type PluginLogParams,
   type PluginRuntimeStatus,
   type PluginTransport,
@@ -135,10 +136,12 @@ export class PluginHost {
   }
 
   async start(
-    pluginId: string,
     pluginRoot: string,
     manifest: DohcPluginManifest,
   ): Promise<void> {
+    // The manifest name is the plugin's identity — one identity, so state
+    // and attribution can never drift from what the manifest declares.
+    const pluginId = manifest.name;
     if (this.plugins.has(pluginId) || this.pendingStarts.has(pluginId)) {
       throw new Error(`Plugin "${pluginId}" is already running.`);
     }
@@ -201,6 +204,17 @@ export class PluginHost {
     const pendingPluginIds = [...this.pendingStarts];
     for (const pluginId of pendingPluginIds) this.abortedStarts.add(pluginId);
     await Promise.allSettled([...this.plugins.keys()].map((id) => this.stop(id)));
+  }
+
+  /** Runs a command the plugin registered during activation and returns its result. */
+  async invokeCommand(pluginId: string, commandId: string): Promise<unknown> {
+    const transport = this.plugins.get(pluginId)?.current?.transport;
+    if (!transport) {
+      throw new Error(`Plugin "${pluginId}" is not running.`);
+    }
+    return transport.request(PLUGIN_HOST_METHODS.invokeCommand, {
+      commandId,
+    } satisfies PluginInvokeCommandParams);
   }
 
   private async shutdown(

@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import {
   PLUGIN_HOST_METHODS,
   type PluginActivateParams,
+  type PluginInvokeCommandParams,
 } from "./pluginHostProtocol.ts";
 
 const transport = createProcessTransport();
@@ -58,26 +59,21 @@ transport.onRequest(PLUGIN_HOST_METHODS.activate, async (rawParams) => {
   await handler.activate(ctx);
   activeHandler = handler;
 
-  // PR1a has no remote command-invocation method. This fixture-only hook lets
-  // real-process tests run a registered command until that surface exists.
-  const triggerId = process.env.DOHC_PLUGIN_FIXTURE_TRIGGER_COMMAND;
-  if (triggerId && commandRuns.has(triggerId)) {
-    try {
-      await Promise.resolve(commandRuns.get(triggerId)!());
-    } catch (error) {
-      transport.notify(PLUGIN_HOST_METHODS.log, {
-        level: "error",
-        message: errorMessage(error),
-      });
-    }
-  }
-
   return { commands: registeredCommandIds };
 });
 
 transport.onRequest(PLUGIN_HOST_METHODS.deactivate, async () => {
   await activeHandler?.deactivate?.();
   return {};
+});
+
+transport.onRequest(PLUGIN_HOST_METHODS.invokeCommand, async (rawParams) => {
+  const params = rawParams as PluginInvokeCommandParams;
+  const run = commandRuns.get(params.commandId);
+  if (!run) {
+    throw new Error(`Command "${params.commandId}" is not registered.`);
+  }
+  return run();
 });
 
 process.on("uncaughtException", (error) => {

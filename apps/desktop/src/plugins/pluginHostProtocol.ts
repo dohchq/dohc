@@ -6,6 +6,7 @@ import type { DohcPluginManifest } from "@dohc/workspace-contracts/plugin-manife
 export const PLUGIN_HOST_METHODS = {
   activate: "plugin.activate",
   deactivate: "plugin.deactivate",
+  invokeCommand: "plugin.invokeCommand",
   sdkRequest: "sdk.request",
   log: "plugin.log",
 } as const;
@@ -19,6 +20,10 @@ export interface PluginActivateParams {
 
 export interface PluginActivateResult {
   commands: string[];
+}
+
+export interface PluginInvokeCommandParams {
+  commandId: string;
 }
 
 export interface SdkRequestParams {
