@@ -25,8 +25,12 @@ many.
    boundary.** The SDK's engine operations all go through the daemon RPC.
    A full-trust plugin can still import `node:fs` and write workspace
    files raw; we do not pretend otherwise. Such writes take the
-   outside-edit path: the capture watcher records them as moments without
-   plugin attribution, and settlement treats them like any external edit.
+   outside-edit path: the capture watcher records them as moments carrying
+   whatever ambient attribution the workspace currently has — anonymous
+   usually, but a running agent's identity if one is active, since the
+   watcher cannot distinguish write sources. That misattribution risk is
+   part of the stated full-trust trade; the SDK path is how a plugin's
+   writes are attributed correctly.
    The door is where attribution, gates, and future guardrails live —
    plugins that bypass it lose those benefits, not their ability to run.
 3. **Full trust, no permission sandbox.** Ice's explicit call (2026-07-28):
@@ -87,8 +91,10 @@ Three pieces. The engine stays the core.
   UI never runs in the app's own renderer context. Wrapper plugins whose
   embedded app needs its own cookie/storage context (the t3 spike proved
   its SameSite session cookie breaks in a third-party iframe) get a
-  hardened guest WebContents with a per-workspace session partition
-  instead — a PR3 surface, not part of PR1b's generic panel.
+  hardened guest WebContents with a per-workspace-per-plugin session
+  partition instead — per plugin because cookies scope by host, not
+  port, so two loopback-served plugins in one partition could read each
+  other's sessions. A PR3 surface, not part of PR1b's generic panel.
 
 Language split: anything that must be true (history, atomicity, replication,
 gates) is Rust below the daemon RPC. The host, SDK, pipeline, and plugins
@@ -159,8 +165,11 @@ Spike first, then three stacked PRs, each independently green.
   at a loopback origin, and completes a real Codex session through its
   authenticated protocol — and determined that its SameSite session
   cookie breaks in a third-party iframe, so PR3 embeds it in a guest
-  WebContents instead. The bridge contract (spawn, readiness, teardown,
-  redaction) is recorded in `.agent-artifacts/references/t3-spike/`.
+  WebContents instead. The durable bridge contract (spawn, readiness,
+  teardown, redaction) is tracked at
+  [`2026-08-13-t3-spike-report.md`](2026-08-13-t3-spike-report.md); raw
+  probe evidence stays in the untracked
+  `.agent-artifacts/references/t3-spike/`.
 - **PR1a — host + manifest + SDK Node transport.** Host lifecycle (one
   `utilityProcess` per plugin, `disabled` flag, crash-loop auto-disable,
   descendant teardown, generation guard), `dohc-plugin.json` format, the
@@ -179,7 +188,9 @@ Spike first, then three stacked PRs, each independently green.
   plugin that crash-loops, so a broken plugin can never wedge app
   startup.) Packaged installs have no system Node, so dependency
   install runs pnpm's standalone script under a `utilityProcess`, with
-  `--ignore-scripts` — lifecycle scripts would need a real `node` and
+  `--ignore-scripts` and `--ignore-workspace` (without the latter, a
+  dohc workspace that is itself a pnpm monorepo absorbs the plugin into
+  its own workspace instead of installing from the plugin's lockfile) — lifecycle scripts would need a real `node` and
   are also npm's main attack surface, so dependencies that require
   install scripts are unsupported until a shipped-Node decision is made,
   and the install error says exactly that. Plugin child processes (a
