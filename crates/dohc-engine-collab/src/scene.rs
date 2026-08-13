@@ -454,14 +454,6 @@ pub(crate) fn parse_portable_scene(content: &str) -> Result<ParsedPortableScene,
         if matches!(element_object.get("isDeleted"), None | Some(Value::Null)) {
             element_object.insert("isDeleted".to_owned(), Value::Bool(false));
         }
-        if element_object.get("type").and_then(Value::as_str) == Some("text")
-            && element_object.get("isDeleted").and_then(Value::as_bool) == Some(false)
-            && element_object.get("text").and_then(Value::as_str) == Some("")
-        {
-            return Err(SceneImportError::Invalid {
-                reason: "a live text element cannot have empty text",
-            });
-        }
         element_object.insert("version".to_owned(), Value::from(version));
         element_object.insert("versionNonce".to_owned(), Value::from(nonce));
         let key = RevisionKey { id, version, nonce };
@@ -1285,11 +1277,18 @@ fn valid_restorable_element(element: &Map<String, Value>) -> bool {
         return false;
     }
 
-    if element.get("type").and_then(Value::as_str) == Some("text")
-        && (!matches!(element.get("font"), None | Some(Value::String(_)))
-            || !matches!(element.get("text"), None | Some(Value::String(_))))
-    {
-        return false;
+    if element.get("type").and_then(Value::as_str) == Some("text") {
+        if !matches!(element.get("font"), None | Some(Value::String(_))) {
+            return false;
+        }
+        match (
+            element.get("isDeleted").and_then(Value::as_bool),
+            element.get("text"),
+        ) {
+            (Some(false), Some(Value::String(text))) if !text.is_empty() => {}
+            (Some(true), None | Some(Value::String(_))) => {}
+            _ => return false,
+        }
     }
 
     if !matches!(
@@ -2209,6 +2208,7 @@ mod tests {
             json!({"id":"text-font","type":"text","font":12}),
             json!({"id":"text-content","type":"text","text":{}}),
             json!({"id":"empty-live-text","type":"text","text":"","isDeleted":false}),
+            json!({"id":"missing-live-text","type":"text","isDeleted":false}),
             json!({"id":"link","type":"rectangle","link":{}}),
             json!({"id":"legacy-bindings","type":"rectangle","boundElementIds":{}}),
             json!({
@@ -2234,6 +2234,20 @@ mod tests {
                 ),
                 "unexpectedly imported {description}"
             );
+        }
+    }
+
+    #[test]
+    fn native_import_accepts_deleted_text_without_live_content() {
+        for element in [
+            json!({"id":"deleted-empty","type":"text","text":"","isDeleted":true}),
+            json!({"id":"deleted-missing","type":"text","isDeleted":true}),
+        ] {
+            import_portable_scene(&canonical(json!({
+                "type":"excalidraw",
+                "elements":[element]
+            })))
+            .expect("deleted text need not retain live content");
         }
     }
 

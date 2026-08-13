@@ -1858,15 +1858,6 @@ fn install_scene_successor_assets(
         let dohc_engine_collab::SceneImportError::Invalid { reason } = error;
         SyncError::InvalidInput { reason }
     })?;
-    let version_is_active: Option<bool> = tx
-        .query_row(
-            "SELECT ?2 = COALESCE( \
-                 (SELECT version_id FROM active_versions WHERE workspace_id = ?1), \
-                 (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id = ?1))",
-            params![key.workspace_id, key.version_id],
-            |row| row.get(0),
-        )
-        .map_err(SyncError::corrupt)?;
     for file in imported.files.into_values() {
         if file.bytes.len() > MAX_CAPTURE_BINARY_FILE_BYTES {
             return Err(SyncError::InputTooLarge {
@@ -1955,7 +1946,7 @@ fn install_scene_successor_assets(
                 metadata_summary: Some("Imported drawing asset".to_owned()),
                 metadata_correlation_id: Some(successor.lineage_claim_id.clone()),
                 author_json: None,
-                materialize: (version_is_active == Some(true)).then_some(Preimage::Absent),
+                materialize: Some(Preimage::Absent),
                 now_ms,
             },
         )

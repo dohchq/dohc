@@ -2804,10 +2804,22 @@ pub fn capture_manifest_seed(
                         OR (s.metadata_origin = 'ydoc' \
                             AND NOT EXISTS ( \
                                 SELECT 1 FROM materialization_jobs j \
-                                WHERE j.job_id = 'ydoc-mat_' || s.latest_moment_id \
-                                  AND j.status = 'pending' \
+                                JOIN moments producer \
+                                  ON producer.workspace_id = a.workspace_id \
+                                 AND producer.version_id = a.version_id \
+                                 AND producer.object_id = a.object_id \
+                                 AND producer.moment_id = s.latest_moment_id \
+                                 AND producer.moment_order = j.target_generation \
+                                 AND producer.operation = 'write' \
+                                WHERE j.status = 'pending' \
+                                  AND j.operation = 'write' \
                                   AND (j.workspace_id = ?1 \
-                                       OR j.workspace_id = '')))) \
+                                       OR j.workspace_id = '') \
+                                  AND j.target_path = a.path \
+                                  AND j.content_sha256 = \
+                                      CASE COALESCE(s.content_kind, 'text') \
+                                      WHEN 'binary' THEN s.binary_sha256 \
+                                      ELSE s.blob_sha256 END))) \
                    AND NOT EXISTS ( \
                        SELECT 1 FROM materialization_jobs j \
                         WHERE j.status = 'pending' AND j.operation = 'write' \
