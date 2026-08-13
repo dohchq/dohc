@@ -186,6 +186,23 @@ describe("discoverSites", () => {
     ).toEqual([]);
   });
 
+  it("does not discover sites under plugins folders", () => {
+    expect(
+      discoverSites(["plugins/some-plugin/index.html", "ordinary-site/index.html"]),
+    ).toEqual([
+      {
+        root: "ordinary-site",
+        title: "Ordinary Site",
+        kind: "static",
+        confidence: "high",
+        entry: "index.html",
+        scripts: {},
+        buildOutputs: [],
+        diagnostics: [],
+      },
+    ]);
+  });
+
   it("ignores site paths with Windows-aliased traversal segments", () => {
     expect(discoverSites(["evil/.. /index.html", "evil/... /index.html"])).toEqual([]);
   });

@@ -122,6 +122,38 @@ describe("site SDK host authority", () => {
     ).rejects.toThrow(/canonical Markdown/i);
   });
 
+  it("rejects site writes under the workspace-root plugins tree", async () => {
+    const root = await workspace();
+    const context = { workspaceRoot: root, scopeRoot: null, writable: true };
+
+    await expect(
+      invokeSiteSdkHost(context, "files.write", {
+        path: "plugins/example/index.txt",
+        text: "full-trust source\n",
+      }),
+    ).rejects.toThrow(/cannot write plugin source.*plugins\/.*full-trust/i);
+
+    await expect(
+      invokeSiteSdkHost(context, "files.write", {
+        path: "notes/todo.txt",
+        text: "ordinary text\n",
+      }),
+    ).resolves.toEqual({ path: "notes/todo.txt" });
+    await expect(readFile(join(root, "notes", "todo.txt"), "utf8")).resolves.toBe(
+      "ordinary text\n",
+    );
+
+    await expect(
+      invokeSiteSdkHost(context, "files.write", {
+        path: "src/plugins/readme.txt",
+        text: "nested folder\n",
+      }),
+    ).resolves.toEqual({ path: "src/plugins/readme.txt" });
+    await expect(readFile(join(root, "src", "plugins", "readme.txt"), "utf8")).resolves.toBe(
+      "nested folder\n",
+    );
+  });
+
   it("rejects raw database writes and requires structured databases.edit", async () => {
     const root = await workspace();
     const context = { workspaceRoot: root, scopeRoot: null, writable: true };

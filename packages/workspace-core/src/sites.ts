@@ -155,6 +155,7 @@ const IGNORED_SITE_SEGMENTS = new Set([
   ".turbo",
   ".yarn",
   "node_modules",
+  "plugins",
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {

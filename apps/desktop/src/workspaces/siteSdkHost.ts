@@ -103,7 +103,17 @@ function isCanonicalMarkdownPath(path: string): boolean {
   return /\.(?:md|markdown)$/i.test(path);
 }
 
-export function assertRawTextWritable(path: string): void {
+export function assertRawTextWritable(
+  path: string,
+  options: { protectPluginSource?: boolean } = {},
+): void {
+  // Plugins run with full-trust authority. A sandboxed site must not change
+  // plugin source and cross that authority boundary.
+  if (options.protectPluginSource && (path === "plugins" || path.startsWith("plugins/"))) {
+    throw new Error(
+      "files.write cannot write plugin source under the workspace-root plugins/ tree. Sandboxed sites cannot modify source that runs with full-trust authority.",
+    );
+  }
   // SQLite files are canonical structured artifacts. Replacing their raw
   // bytes/text would bypass the operation log, transactions, provenance,
   // and collaboration convergence used by databases.edit.
@@ -303,7 +313,7 @@ export async function invokeSiteSdkHost(
       }
       const input = record(params);
       const path = siteSdkWorkspacePath(null, input.path, "write");
-      assertRawTextWritable(path);
+      assertRawTextWritable(path, { protectPluginSource: true });
       const body = typeof input.text === "string" ? input.text : null;
       if (body === null) throw new Error("files.write text must be a string.");
       if (input.overwrite === false) {
