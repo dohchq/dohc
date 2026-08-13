@@ -166,13 +166,13 @@ export async function bindEngineYDoc(
       destroyed = true;
       doc.off("update", onUpdate);
       unsubscribe();
-      const finalSnapshot = Y.encodeStateAsUpdate(doc);
       destroyPromise = (async () => {
         let deliveryError: unknown = null;
         let recoveryError: unknown = null;
         try {
           await deliveryTail;
         } catch {
+          const finalSnapshot = Y.encodeStateAsUpdate(doc);
           try {
             // Full state, not the failed delta: this also covers every edit
             // made while the failed delivery was in flight.

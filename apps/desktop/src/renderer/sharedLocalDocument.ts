@@ -100,12 +100,6 @@ export class SharedLocalDocument {
     return true;
   }
 
-  initialize(body: string, contentHash: string | null): void {
-    if (this.initialized) return;
-    this.initialized = true;
-    this.replace({ body, contentHash }, null, false, "saved");
-  }
-
   reset(body: string, contentHash: string | null, source: object): void {
     this.initialized = true;
     this.replace({ body, contentHash }, source, false, "saved");
@@ -136,22 +130,9 @@ export class SharedLocalDocument {
     }
     if (this.snapshot.dirty || this.writers > 0) {
       const ownedByCaller = this.snapshot.source === source;
-      if (force && !ownedByCaller) {
-        this.replace(
-          {
-            body: this.snapshot.body,
-            contentHash: this.snapshot.contentHash,
-          },
-          this.snapshot.source,
-          this.snapshot.dirty,
-          "error",
-        );
-      }
-      if (force && ownedByCaller && this.writers === 0) {
-        // The caller already set aside its own conflicting draft. Accepting
-        // the reread is the existing single-pane recovery path. A peer-owned
-        // or queued draft must stay canonical until its own writer settles.
-      } else {
+      const canReplaceOwnDraft = force && ownedByCaller && this.writers === 0;
+      if (!canReplaceOwnDraft) {
+        if (force && !ownedByCaller) this.markError();
         return false;
       }
     }

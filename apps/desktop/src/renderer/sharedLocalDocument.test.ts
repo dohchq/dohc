@@ -10,7 +10,7 @@ describe("SharedLocalDocument", () => {
 
     const releaseFirst = first.retain();
     const releaseSecond = second.retain();
-    first.initialize("before", "hash-1");
+    first.initializeRead("before", "hash-1", first.beginRead());
     second.publishDraft("after", {});
 
     const writer = vi.fn().mockResolvedValue({
@@ -37,7 +37,7 @@ describe("SharedLocalDocument", () => {
       localDocumentKey("ws", "overlap.txt", 1),
     );
     const release = buffer.retain();
-    buffer.initialize("zero", "hash-0");
+    buffer.initializeRead("zero", "hash-0", buffer.beginRead());
     buffer.publishDraft("one", {});
 
     let finishFirst!: () => void;
@@ -76,7 +76,7 @@ describe("SharedLocalDocument", () => {
     const release = buffer.retain();
     const writerSource = {};
     const peerSource = {};
-    buffer.initialize("zero", "hash-0");
+    buffer.initializeRead("zero", "hash-0", buffer.beginRead());
     buffer.publishDraft("writer", writerSource);
     let finishWrite!: () => void;
     const pending = new Promise<void>((resolve) => {
@@ -105,7 +105,7 @@ describe("SharedLocalDocument", () => {
     const key = localDocumentKey("ws", "clean.txt", 1);
     const buffer = getSharedLocalDocument(key);
     const release = buffer.retain();
-    buffer.initialize("clean", "hash-1");
+    buffer.initializeRead("clean", "hash-1", buffer.beginRead());
     const listener = vi.fn();
     const unsubscribe = buffer.subscribe(listener);
     const writer = vi.fn();
@@ -155,7 +155,7 @@ describe("SharedLocalDocument", () => {
     const release = buffer.retain();
     const writerSource = {};
     const peer = {};
-    buffer.initialize("disk before", "hash-1");
+    buffer.initializeRead("disk before", "hash-1", buffer.beginRead());
     buffer.publishDraft("writer draft", writerSource);
     let finishWrite!: () => void;
     const writePending = new Promise<void>((resolve) => {
@@ -226,9 +226,13 @@ describe("SharedLocalDocument", () => {
     );
     const releases = [first.retain(), otherWorkspace.retain(), otherVersion.retain()];
 
-    first.initialize("first", "hash-a");
-    otherWorkspace.initialize("workspace", "hash-b");
-    otherVersion.initialize("version", "hash-c");
+    first.initializeRead("first", "hash-a", first.beginRead());
+    otherWorkspace.initializeRead(
+      "workspace",
+      "hash-b",
+      otherWorkspace.beginRead(),
+    );
+    otherVersion.initializeRead("version", "hash-c", otherVersion.beginRead());
 
     expect(first.getSnapshot().body).toBe("first");
     expect(otherWorkspace.getSnapshot().body).toBe("workspace");

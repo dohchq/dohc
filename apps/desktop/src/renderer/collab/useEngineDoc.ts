@@ -305,12 +305,7 @@ type EngineDocLease = Omit<EngineDocSession, "start"> & {
   retain: () => void;
   release: () => void;
   disposeIfReleased: () => boolean;
-  reopenForRetry: (
-    input: EngineDocInput,
-    requestKey: string,
-    consumer: object,
-    retryGeneration: number,
-  ) => void;
+  reopenForRetry: (input: EngineDocInput, requestKey: string) => void;
 };
 
 const engineDocLeases = new Map<string, EngineDocLease>();
@@ -427,11 +422,7 @@ function createEngineDocSession(
       })
       .catch((error: unknown) => {
         console.error(
-          "[desktop] could not write a recovery draft for " +
-            workspaceId +
-            ":" +
-            path +
-            " after deletion:",
+          `[desktop] could not write a recovery draft for ${workspaceId}:${path} after deletion:`,
           error,
         );
       });
@@ -472,11 +463,7 @@ function createEngineDocSession(
       })
       .catch((error: unknown) => {
         console.error(
-          "[desktop] could not refine the recovery draft for " +
-            workspaceId +
-            ":" +
-            path +
-            " after update delivery failed:",
+          `[desktop] could not refine the recovery draft for ${workspaceId}:${path} after update delivery failed:`,
           error,
         );
       });
@@ -635,15 +622,9 @@ function createEngineDocLease(
   input: EngineDocInput,
   requestKey: string,
   versionKey: string,
-  consumer: object,
-  retryGeneration: number,
 ): EngineDocLease {
   const documentKey = JSON.stringify([input.workspaceId, input.path]);
   const listeners = new Set<() => void>();
-  // retryKey is local to a pane. Register its current generation as a baseline;
-  // only a later generation from that same pane is a retry request.
-  const handledRetryGenerations = new WeakMap<object, number>();
-  handledRetryGenerations.set(consumer, retryGeneration);
   let snapshot: EngineDocLeaseSnapshot = {
     key: requestKey,
     outcome: null,
@@ -683,7 +664,7 @@ function createEngineDocLease(
       return false;
     }
     engineDocLeases.delete(versionKey);
-    void trackEngineDocDisposal(lease).catch(() => undefined);
+    void trackEngineDocDisposal(lease);
     return true;
   };
 
@@ -708,21 +689,8 @@ function createEngineDocLease(
       releaseToken += 1;
       return disposeReleasedLease();
     },
-    reopenForRetry(
-      nextInput,
-      nextRequestKey,
-      nextConsumer,
-      nextRetryGeneration,
-    ) {
+    reopenForRetry(nextInput, nextRequestKey) {
       if (disposed) return;
-      const handledGeneration = handledRetryGenerations.get(nextConsumer);
-      handledRetryGenerations.set(nextConsumer, nextRetryGeneration);
-      if (
-        handledGeneration === undefined ||
-        nextRetryGeneration <= handledGeneration
-      ) {
-        return;
-      }
       if (snapshot.key === nextRequestKey && snapshot.outcome === null) return;
 
       const generation = ++transitionGeneration;
@@ -739,7 +707,7 @@ function createEngineDocLease(
       });
 
       transition = settleEngineDocCleanup(
-        settleEngineDocCleanup(transition).then(async () => {
+        transition.then(async () => {
           await settleEngineDocCleanup(previous?.dispose());
           if (disposed || generation !== transitionGeneration) {
             await settleEngineDocCleanup(replacement.dispose());
@@ -811,8 +779,7 @@ export async function disposeEngineDocLeasesForTests(): Promise<void> {
 function retainEngineDocLease(
   input: EngineDocInput,
   requestKey: string,
-  consumer: object,
-  retryGeneration: number,
+  isRetry: boolean,
 ): EngineDocLease {
   const versionKey = JSON.stringify([
     input.workspaceId,
@@ -827,55 +794,51 @@ function retainEngineDocLease(
         candidate.disposeIfReleased();
       }
     }
-    lease = createEngineDocLease(
-      input,
-      requestKey,
-      versionKey,
-      consumer,
-      retryGeneration,
-    );
+    lease = createEngineDocLease(input, requestKey, versionKey);
     engineDocLeases.set(versionKey, lease);
     lease.startAfter(engineDocDisposalBarriers.get(documentKey));
-  } else {
-    lease.reopenForRetry(input, requestKey, consumer, retryGeneration);
+  } else if (isRetry) {
+    lease.reopenForRetry(input, requestKey);
   }
   lease.retain();
   return lease;
 }
 
-function useChangeGeneration<T>(value: T) {
-  const generation = useRef({ value, count: 0 });
-  if (!Object.is(generation.current.value, value)) {
-    generation.current = { value, count: generation.current.count + 1 };
-  }
-  return generation;
-}
-
 export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const requestKey = engineDocRequestKey(input);
-  const consumerRef = useRef<object>({});
   const retryKey = input.retryKey ?? 0;
-  const retryGenerationRef = useChangeGeneration(retryKey);
-  const retryGeneration = retryGenerationRef.current.count;
-  const requestGenerationRef = useChangeGeneration(requestKey);
-  const requestGeneration = requestGenerationRef.current.count;
+  const versionKey = JSON.stringify([
+    input.workspaceId,
+    input.path,
+    input.reopenKey ?? null,
+  ]);
+  const committedRequestRef = useRef<{
+    versionKey: string;
+    retryKey: number;
+    lease: EngineDocLease | null;
+  } | null>(null);
   const [leaseState, setLeaseState] = useState<{
-    generation: number;
+    requestKey: string;
     snapshot: EngineDocLeaseSnapshot;
   } | null>(null);
 
   useEffect(() => {
-    if (!input.enabled) return;
+    const previousRequest = committedRequestRef.current;
+    if (!input.enabled) {
+      previousRequest?.lease?.disposeIfReleased();
+      committedRequestRef.current = { versionKey, retryKey, lease: null };
+      setLeaseState(null);
+      return;
+    }
 
-    const lease = retainEngineDocLease(
-      input,
-      requestKey,
-      consumerRef.current,
-      retryGeneration,
-    );
+    const isRetry =
+      previousRequest?.versionKey === versionKey &&
+      previousRequest.retryKey !== retryKey;
+    const lease = retainEngineDocLease(input, requestKey, isRetry);
+    committedRequestRef.current = { versionKey, retryKey, lease };
     const update = () =>
       setLeaseState({
-        generation: requestGeneration,
+        requestKey,
         snapshot: lease.getSnapshot(),
       });
     const unsubscribe = lease.subscribe(update);
@@ -883,12 +846,6 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     return () => {
       unsubscribe();
       lease.release();
-      // A real request change must close before its replacement opens. React
-      // StrictMode replays the same request, so only that same-generation
-      // cleanup receives the cancellable deferred release.
-      if (requestGenerationRef.current.count !== requestGeneration) {
-        lease.disposeIfReleased();
-      }
     };
     // Re-open only when the workspace, path, gate, retry, or active version
     // changes. Other renders keep the same shared lease.
@@ -898,7 +855,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   // Derive this during render. A result for an earlier request never grants
   // one editable frame while a version, path, gate, or retry request changes.
   const settled =
-    leaseState?.generation === requestGeneration ? leaseState.snapshot : null;
+    leaseState?.requestKey === requestKey ? leaseState.snapshot : null;
   const outcome = settled?.outcome ?? null;
   const available = outcome?.kind === "bound";
   const doc = outcome?.kind === "bound" ? outcome.doc : null;

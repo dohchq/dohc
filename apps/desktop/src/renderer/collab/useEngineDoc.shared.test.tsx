@@ -7,7 +7,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { StrictMode } from "react";
+import { startTransition, StrictMode, Suspense } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
@@ -157,6 +157,32 @@ function Consumer(props: {
   );
 }
 
+function SuspendingConsumer(props: {
+  retryKey: number;
+  suspend: boolean;
+  onSuspend: () => void;
+}) {
+  const engine = useEngineDoc({
+    workspaceId: "ws-1",
+    path: "notes/a.md",
+    enabled: true,
+    reopenKey: 0,
+    retryKey: props.retryKey,
+  });
+  if (props.suspend) {
+    props.onSuspend();
+    throw new Promise<never>(() => undefined);
+  }
+  return (
+    <>
+      <span data-testid="available-suspending">
+        {String(engine.available)}
+      </span>
+      <span data-testid="opening-suspending">{String(engine.opening)}</span>
+    </>
+  );
+}
+
 function Pair(props: {
   showFirst?: boolean;
   reopenKey?: number;
@@ -247,6 +273,38 @@ it("keeps one lease through React StrictMode's effect replay", async () => {
   await waitFor(() =>
     expect(harness.api.closeEngineYDocSession).toHaveBeenCalledTimes(1),
   );
+});
+
+it("ignores retry identity from an abandoned render", async () => {
+  let suspended = false;
+  const renderConsumer = (retryKey: number, suspend: boolean) => (
+    <Suspense fallback={null}>
+      <SuspendingConsumer
+        retryKey={retryKey}
+        suspend={suspend}
+        onSuspend={() => {
+          suspended = true;
+        }}
+      />
+    </Suspense>
+  );
+  const view = render(renderConsumer(0, false));
+  await waitFor(() =>
+    expect(screen.getByTestId("available-suspending").textContent).toBe(
+      "true",
+    ),
+  );
+
+  await act(async () => {
+    startTransition(() => view.rerender(renderConsumer(1, true)));
+    await Promise.resolve();
+  });
+  expect(suspended).toBe(true);
+
+  view.rerender(renderConsumer(0, false));
+  expect(screen.getByTestId("available-suspending").textContent).toBe("true");
+  expect(screen.getByTestId("opening-suspending").textContent).toBe("false");
+  expect(harness.api.openEngineYDocSession).toHaveBeenCalledTimes(1);
 });
 
 it.each([

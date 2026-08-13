@@ -8696,7 +8696,11 @@ describe("markdown document opening state", () => {
     const peerBuffer = getSharedLocalDocument(
       localDocumentKey("ws-1", "a.md", 2),
     );
-    peerBuffer.initialize(oldBody, "c".repeat(64));
+    peerBuffer.initializeRead(
+      oldBody,
+      "c".repeat(64),
+      peerBuffer.beginRead(),
+    );
     peerBuffer.publishDraft(peerBody, {});
     expect(peerBuffer.getSnapshot().revision).toBe(2);
     view.rerender(
