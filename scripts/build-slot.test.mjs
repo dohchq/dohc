@@ -207,13 +207,35 @@ test("a live sweep lock defers reclamation to the sweeper that holds it", () => 
       reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000 }),
       0,
     );
-    // A dead sweeper's lock is removed after its own stale window.
+    // A dead sweeper's lock is taken over after its own stale window.
     const then = new Date(Date.now() - 6 * 60_000);
     utimesSync(join(root, "reclaim.lock"), then, then);
     assert.equal(
       reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000 }),
       1,
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a takeover already claimed by a racer is lost, not repeated", () => {
+  const root = slotRoot();
+  try {
+    plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 45 * 60_000 });
+    const lock = join(root, "reclaim.lock");
+    mkdirSync(lock, { recursive: true });
+    const then = new Date(Date.now() - 6 * 60_000);
+    utimesSync(lock, then, then);
+    // The racing winner's claim for this exact observed identity: our
+    // exclusive create must collide with it and defer instead of sweeping
+    // a second time.
+    writeFileSync(`${lock}.claim-${Math.round(statSync(lock).mtimeMs)}`, "");
+    assert.equal(
+      reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000 }),
+      0,
+    );
+    assert.equal(existsSync(join(root, "build-slot-1")), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

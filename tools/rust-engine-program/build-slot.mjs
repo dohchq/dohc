@@ -127,14 +127,21 @@ export function reclaimStaleSlots({ root, slots, staleMs }) {
     mkdirSync(sweepLock);
   } catch {
     // A live sweeper's lock defers to it. A dead sweeper's is taken over by
-    // whichever waiter wins the RENAME — remove-then-create would let two
-    // waiters both pass the staleness check and sweep together, the same
-    // race the lock exists to close.
+    // whichever waiter wins the exclusive create of a claim file named for
+    // the OBSERVED heartbeat — that single O_EXCL create is the whole
+    // takeover's atomicity, on every platform. Two waiters who statted the
+    // same dead lock derive the same claim name, so one create must throw;
+    // and a fresh replacement lock can never be removed by a stale
+    // observation, because the path only frees through a takeover whose
+    // claim file already exists. Claim files accumulate one empty file per
+    // dead sweeper — rare debris, never a hazard.
     try {
-      if (Date.now() - statSync(sweepLock).mtimeMs < 5 * 60_000) return 0;
-      const tomb = `${sweepLock}.tomb-${randomBytes(4).toString("hex")}`;
-      renameSync(sweepLock, tomb);
-      rmSync(tomb, { recursive: true, force: true });
+      const observedMtime = statSync(sweepLock).mtimeMs;
+      if (Date.now() - observedMtime < 5 * 60_000) return 0;
+      writeFileSync(`${sweepLock}.claim-${Math.round(observedMtime)}`, "", {
+        flag: "wx",
+      });
+      rmSync(sweepLock, { recursive: true, force: true });
       mkdirSync(sweepLock);
     } catch {
       return 0; // Another waiter won the takeover; its sweep counts.
