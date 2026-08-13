@@ -555,6 +555,7 @@ import {
 } from "./plugins/PluginPipeline";
 import { invokePluginSdkHost } from "./plugins/pluginSdkHost";
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
+import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
 import { createSitePreviewSdkAuthorityRegistry } from "./workspaces/sitePreviewSdkAuthority";
 import { stopPluginPanelPreview } from "./plugins/pluginPanelLifecycle";
 import {
@@ -786,6 +787,9 @@ function notifyPluginStatusChanged(
 
 function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
   let pipeline: PluginPipeline | null = null;
+  const childProcessBroker = new PluginChildProcessBroker({
+    workspaceRoot: workspace.rootPath,
+  });
   const pluginHost = new PluginHost({
     stateDir: stateDir(),
     workspaceRoot: workspace.rootPath,
@@ -803,16 +807,29 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     },
     // Shares invokeWorkspacePluginSdk with #777's panel SDK route
     // (invokePluginPanelSdk below) so both paths get the same isWritable /
-    // writeAvailable / MomentAuthor handling instead of a second copy.
-    routeSdkRequest: (pluginId, method, params, spawnId) =>
+    // writeAvailable / MomentAuthor handling instead of a second copy. Only
+    // this, the plugin's own request path (not the panel path), supplies
+    // invokeChildProcess — a panel is renderer-driven UI, not the plugin's
+    // own activated code, so it never brokers child processes.
+    routeSdkRequest: (pluginId, method, params, spawnId, signal, emitEvent) =>
       invokeWorkspacePluginSdk({
         workspaceId: workspace.workspaceId,
         pluginId,
         spawnId,
         isWritable: () => !sharedViewOf(workspace.workspaceId),
+        signal,
+        invokeChildProcess: (childMethod, childParams) =>
+          childProcessBroker.invoke(
+            { pluginId, spawnId, signal, emitEvent },
+            childMethod,
+            childParams,
+          ),
         method,
         params,
       }),
+    onSpawnEnd: (pluginId, spawnId) =>
+      childProcessBroker.disposeSpawn(pluginId, spawnId),
+    onDispose: () => childProcessBroker.dispose(),
     onStatusChange: (pluginId, status) => {
       pipeline?.noteRuntimeStatus(pluginId, status);
       revokePluginPanelAuthoritiesForStatus({
@@ -2741,6 +2758,7 @@ function invokeWorkspacePluginSdk(input: {
   spawnId: string;
   isWritable: () => boolean;
   signal?: AbortSignal;
+  invokeChildProcess?: (method: string, params?: unknown) => Promise<unknown>;
   method: string;
   params?: unknown;
 }): Promise<unknown> {
@@ -2761,6 +2779,7 @@ function invokeWorkspacePluginSdk(input: {
         }
       },
       signal: input.signal,
+      invokeChildProcess: input.invokeChildProcess,
       writeAuthoredText: async (
         path,
         text,

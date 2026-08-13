@@ -130,7 +130,13 @@ export function createPluginUtilityTransport(
         }
       });
     },
-
+    notify(method: string, params?: unknown): void {
+      send(
+        params === undefined
+          ? { jsonrpc: "2.0", method }
+          : { jsonrpc: "2.0", method, params },
+      );
+    },
     async dispose(): Promise<void> {
       close(new Error("Plugin utility transport disposed."));
       const pid = child.pid;

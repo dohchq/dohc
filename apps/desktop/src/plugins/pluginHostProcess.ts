@@ -1,5 +1,6 @@
 import {
   createDohcClient,
+  createPluginChildProcessClient,
   createProcessTransport,
   type PluginActivateContext,
   type PluginHandler,
@@ -14,6 +15,7 @@ import {
 
 const transport = createProcessTransport();
 const client = createDohcClient({ transport });
+const childProcesses = createPluginChildProcessClient(transport);
 const commandRuns = new Map<string, (...args: unknown[]) => unknown>();
 let activeHandler: PluginHandler | null = null;
 
@@ -48,6 +50,7 @@ transport.onRequest(PLUGIN_HOST_METHODS.activate, async (rawParams) => {
     workspaceRoot: params.workspaceRoot,
     pluginRoot: params.pluginRoot,
     client,
+    childProcesses,
     commands: {
       register(id, run) {
         registeredCommandIds.push(id);

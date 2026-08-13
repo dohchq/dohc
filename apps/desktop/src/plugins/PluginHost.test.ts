@@ -291,7 +291,7 @@ describe("PluginHost", () => {
       stateDir: await stateDir(),
       workspaceRoot: root,
       spawnTransport: harness.spawnTransport,
-      routeSdkRequest: (pluginId, method, params, spawnId) =>
+      routeSdkRequest: (pluginId, method, params, spawnId, signal) =>
         invokePluginSdkHost(
           {
             pluginId,
@@ -299,6 +299,8 @@ describe("PluginHost", () => {
             spawnId,
             isWritable: () => true,
             writeAvailable: async () => true,
+            signal,
+            invokeChildProcess: async () => ({}),
             writeAuthoredText: async (path, text, options) => {
               writes.push({ path, text, author: options.author });
               return { path };
@@ -677,6 +679,252 @@ describe("PluginHost", () => {
       "Malformed sdk.request params: method must be a non-empty string.",
     );
     expect(routeSdkRequest).not.toHaveBeenCalled();
+  });
+
+  it("forwards spawn-scoped SDK subscription events to the plugin transport", async () => {
+    const root = await workspaceRoot();
+    let callbacks: SpawnTransportParams | undefined;
+    const notifications: Array<{ method: string; params: unknown }> = [];
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: (params) => {
+        callbacks = params;
+        return {
+          request<T = unknown>(method: string): Promise<T> {
+            const result = method === PLUGIN_HOST_METHODS.activate
+              ? { commands: [] }
+              : {};
+            return Promise.resolve(result as T);
+          },
+          notify: (method, notificationParams) => {
+            notifications.push({ method, params: notificationParams });
+          },
+          dispose: () => Promise.resolve(),
+        };
+      },
+      routeSdkRequest: async (
+        _pluginId,
+        _method,
+        _params,
+        _spawnId,
+        _signal,
+        emitEvent,
+      ) => {
+        emitEvent("subscription-1", "stdout", {
+          sequence: 1,
+          stream: "stdout",
+          text: "ready\n",
+        });
+        return { subscriptionId: "subscription-1" };
+      },
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    if (!callbacks) throw new Error("Plugin transport did not spawn.");
+    await callbacks.onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
+      method: "childProcesses.output.subscribe",
+      params: { childId: "child-1" },
+    });
+
+    expect(notifications).toEqual([
+      {
+        method: PLUGIN_HOST_METHODS.sdkEvent,
+        params: {
+          subscriptionId: "subscription-1",
+          event: "stdout",
+          data: {
+            sequence: 1,
+            stream: "stdout",
+            text: "ready\n",
+          },
+        },
+      },
+    ]);
+  });
+
+  it("aborts an in-flight SDK request when stop begins", async () => {
+    const root = await workspaceRoot();
+    const harness = createCallbackHarness();
+    let requestSignal: AbortSignal | undefined;
+    let observedAbort = false;
+    const routeSdkRequest = vi.fn<PluginHostOptions["routeSdkRequest"]>(
+      async (_pluginId, _method, _params, _spawnId, signal) => {
+        requestSignal = signal;
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => {
+            observedAbort = true;
+            resolve();
+          }, { once: true });
+        });
+        throw new Error("request aborted");
+      },
+    );
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest,
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    const request = Promise.resolve(
+      harness.getCallbacks().onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
+        method: "files.read",
+        params: { path: "notes/today.md" },
+      }),
+    );
+    await waitFor(() => requestSignal !== undefined, "SDK request was not routed.");
+
+    await host.stop("hello-plugin");
+
+    expect(requestSignal?.aborted).toBe(true);
+    expect(observedAbort).toBe(true);
+    await expect(request).rejects.toThrow("request aborted");
+  });
+
+  it("does not abort an SDK request that completes before stop", async () => {
+    const root = await workspaceRoot();
+    const harness = createCallbackHarness();
+    let signalAtCompletion: AbortSignal | undefined;
+    const routeSdkRequest = vi.fn<PluginHostOptions["routeSdkRequest"]>(
+      async (_pluginId, _method, _params, _spawnId, signal) => {
+        signalAtCompletion = signal;
+        return { text: "done" };
+      },
+    );
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest,
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await expect(
+      harness.getCallbacks().onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
+        method: "files.read",
+        params: { path: "notes/today.md" },
+      }),
+    ).resolves.toEqual({ text: "done" });
+    expect(signalAtCompletion?.aborted).toBe(false);
+
+    await host.stop("hello-plugin");
+  });
+
+  it("finishes spawn resource teardown before disposing the plugin transport", async () => {
+    const root = await workspaceRoot();
+    const order: string[] = [];
+    let disposed = false;
+    let finishResourceTeardown: (() => void) | undefined;
+    let routedSignal: AbortSignal | undefined;
+    let callbacks: SpawnTransportParams | undefined;
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: (params) => {
+        callbacks = params;
+        return {
+          request<T = unknown>(method: string): Promise<T> {
+            const result = method === PLUGIN_HOST_METHODS.activate
+              ? { commands: [] }
+              : {};
+            return Promise.resolve(result as T);
+          },
+          dispose: async () => {
+            if (disposed) return;
+            disposed = true;
+            order.push("transport");
+          },
+        };
+      },
+      routeSdkRequest: async (
+        _pluginId,
+        _method,
+        _params,
+        _spawnId,
+        signal,
+      ) => {
+        routedSignal = signal;
+        return {};
+      },
+      onSpawnEnd: () => new Promise<void>((resolve) => {
+        finishResourceTeardown = () => {
+          order.push("resources");
+          resolve();
+        };
+      }),
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    if (!callbacks) throw new Error("Plugin transport did not spawn.");
+    await callbacks.onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
+      method: "capabilities",
+    });
+    const stop = host.stop("hello-plugin");
+    await waitFor(
+      () => routedSignal?.aborted === true && finishResourceTeardown !== undefined,
+      "Spawn teardown did not begin.",
+    );
+    expect(order).toEqual([]);
+
+    finishResourceTeardown?.();
+    await stop;
+
+    expect(order).toEqual(["resources", "transport"]);
+  });
+
+  it("gives a respawn a fresh signal and never reuses the crashed spawn signal", async () => {
+    const root = await workspaceRoot();
+    const callbacks: SpawnTransportParams[] = [];
+    const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>((params) => {
+      callbacks.push(params);
+      return {
+        request<T = unknown>(method: string): Promise<T> {
+          const result = method === PLUGIN_HOST_METHODS.activate
+            ? { commands: [] }
+            : {};
+          return Promise.resolve(result as T);
+        },
+        dispose: () => Promise.resolve(),
+      };
+    });
+    const signals: AbortSignal[] = [];
+    const routeSdkRequest = vi.fn<PluginHostOptions["routeSdkRequest"]>(
+      async (_pluginId, _method, _params, _spawnId, signal) => {
+        signals.push(signal);
+        return {};
+      },
+    );
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport,
+      routeSdkRequest,
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await callbacks[0]?.onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
+      method: "capabilities",
+    });
+    const oldSignal = signals[0];
+    expect(oldSignal?.aborted).toBe(false);
+
+    callbacks[0]?.onExit({ code: 1, signal: null });
+    await waitFor(() => callbacks.length === 2, "Plugin did not respawn.");
+    expect(oldSignal?.aborted).toBe(true);
+
+    await callbacks[1]?.onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
+      method: "capabilities",
+    });
+    const newSignal = signals[1];
+    expect(newSignal).not.toBe(oldSignal);
+    expect(newSignal?.aborted).toBe(false);
+    expect(oldSignal?.aborted).toBe(true);
+
+    await host.stop("hello-plugin");
+    expect(newSignal?.aborted).toBe(true);
+    expect(oldSignal?.aborted).toBe(true);
   });
 
   it("records a malformed plugin.log notification as a diagnostic", async () => {
