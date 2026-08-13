@@ -15,7 +15,6 @@ export interface PluginSdkHostContext {
   writable: boolean;
   signal?: AbortSignal;
   writeAuthoredText: (
-    workspaceRoot: string,
     path: string,
     text: string,
     options: { overwrite: boolean; author: MomentAuthor },
@@ -77,7 +76,6 @@ export async function invokePluginSdkHost(
         agentRunId: context.spawnId,
       };
       return context.writeAuthoredText(
-        context.workspaceRoot,
         path,
         input.text,
         { overwrite: overwrite === undefined ? true : overwrite, author },

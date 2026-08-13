@@ -148,13 +148,15 @@ function mimeType(pathname: string): string {
   return MIME_TYPES[extname(pathname).toLowerCase()] ?? "application/octet-stream";
 }
 
-async function listen(server: Server, failureMessage: string): Promise<string> {
+async function listen(server: Server): Promise<string> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => resolve());
   });
   const address = server.address();
-  if (!address || typeof address === "string") throw new Error(failureMessage);
+  if (!address || typeof address === "string") {
+    throw new Error("Static server did not start.");
+  }
   return `http://127.0.0.1:${address.port}`;
 }
 
@@ -176,23 +178,19 @@ export async function startStaticSitePreview(
     containmentRoot: workspaceRoot,
     entry: options.entry ?? "index.html",
     entryLabel: "site entry",
-    requestLabel: "Site request path",
-    startFailureMessage: "Site server did not start.",
   });
 }
 
 export async function startStaticDirectoryPreview(
   rootPath: string,
   options: {
-    containmentRoot?: string;
-    entry?: string;
+    containmentRoot: string;
+    entry: string;
     entryLabel?: string;
-    requestLabel?: string;
-    startFailureMessage?: string;
-  } = {},
+  },
 ): Promise<StaticSitePreview> {
   const root = await realpath(rootPath);
-  const containmentRoot = await realpath(options.containmentRoot ?? rootPath);
+  const containmentRoot = await realpath(options.containmentRoot);
   if (!isInside(containmentRoot, root)) {
     throw new Error(`Static root escapes its containment root: ${rootPath}`);
   }
@@ -200,9 +198,8 @@ export async function startStaticDirectoryPreview(
   if (rootRelative && hasIgnoredSegment(rootRelative)) {
     throw new Error(`Static root uses a reserved metadata path: ${rootRelative}`);
   }
-  const entry = options.entry ?? "index.html";
+  const entry = options.entry;
   const entryLabel = options.entryLabel ?? "static entry";
-  const requestLabel = options.requestLabel ?? "Static request path";
   assertContainedFilePath(entry, entryLabel);
   await access(join(root, entry), constants.R_OK);
 
@@ -240,7 +237,7 @@ export async function startStaticDirectoryPreview(
             rootPath: containmentRoot,
             absolutePath: target,
             spelled: relativePath,
-            label: requestLabel,
+            label: "Static request path",
             access: "read",
           })
         ).resolvedAbsolute;
@@ -300,10 +297,7 @@ export async function startStaticDirectoryPreview(
     }
   });
   server.unref();
-  const origin = await listen(
-    server,
-    options.startFailureMessage ?? "Static server did not start.",
-  );
+  const origin = await listen(server);
   return {
     root,
     url: `${origin}/`,

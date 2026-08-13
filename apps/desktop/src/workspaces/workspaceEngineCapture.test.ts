@@ -2578,11 +2578,10 @@ describe("workspaceEngineCapture agent attribution", () => {
         workspaceRoot: root,
         spawnId,
         writable: true,
-        writeAuthoredText: async (workspaceRoot, path, text, options) => {
-          expect(workspaceRoot).toBe(root);
+        writeAuthoredText: async (path, text, options) => {
           expect(options.overwrite).toBe(true);
           await engine.writeAuthoredTextFile(
-            join(workspaceRoot, path),
+            join(root, path),
             text,
             options.author,
           );

@@ -786,28 +786,30 @@ function sitePreviewKey(workspaceId: string, siteRoot: string): string {
   return `${workspaceId}\0${siteRoot}`;
 }
 
-async function withSitePreviewStartLock<T>(
+async function withKeyedStartLock<T>(
+  locks: Map<string, Promise<void>>,
   key: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const previous = sitePreviewStartLocks.get(key) ?? Promise.resolve();
+  const previous = locks.get(key) ?? Promise.resolve();
   let release: () => void = () => undefined;
   const current = new Promise<void>((resolve) => {
     release = resolve;
   });
   const queued = previous.catch(() => undefined).then(() => current);
-  sitePreviewStartLocks.set(key, queued);
+  locks.set(key, queued);
 
   await previous.catch(() => undefined);
   try {
     return await operation();
   } finally {
     release();
-    if (sitePreviewStartLocks.get(key) === queued) {
-      sitePreviewStartLocks.delete(key);
-    }
+    if (locks.get(key) === queued) locks.delete(key);
   }
 }
+
+const withSitePreviewStartLock = <T>(key: string, operation: () => Promise<T>) =>
+  withKeyedStartLock(sitePreviewStartLocks, key, operation);
 
 function stopSitePreviewsForQuit(): void {
   // Called once, from the will-quit teardown — the first moment a quit can no
@@ -2573,27 +2575,8 @@ function pluginPanelKey(
   return `${workspaceId}\0${pluginId}\0${panelId}`;
 }
 
-async function withPluginPanelStartLock<T>(
-  key: string,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const previous = pluginPanelStartLocks.get(key) ?? Promise.resolve();
-  let release: () => void = () => undefined;
-  const current = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const queued = previous.catch(() => undefined).then(() => current);
-  pluginPanelStartLocks.set(key, queued);
-  await previous.catch(() => undefined);
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (pluginPanelStartLocks.get(key) === queued) {
-      pluginPanelStartLocks.delete(key);
-    }
-  }
-}
+const withPluginPanelStartLock = <T>(key: string, operation: () => Promise<T>) =>
+  withKeyedStartLock(pluginPanelStartLocks, key, operation);
 
 async function requirePluginEngineCapture(workspaceId: string) {
   const workspace = requireWorkspace(workspaceId);
@@ -2629,17 +2612,10 @@ function invokeWorkspacePluginSdk(input: {
       writable: input.writable,
       signal: input.signal,
       writeAuthoredText: async (
-        workspaceRoot,
         path,
         text,
         { overwrite, author },
       ) => {
-        if (resolve(workspaceRoot) !== resolve(workspace.rootPath)) {
-          throw new Error("Plugin write workspace authority is stale.");
-        }
-        if (input.signal?.aborted) {
-          throw new Error("Plugin panel is no longer active.");
-        }
         const absolutePath = join(workspace.rootPath, path);
         if (!overwrite && existsSync(absolutePath)) {
           throw new Error(`File already exists: ${path}`);
@@ -6077,8 +6053,6 @@ function registerIpcHandlers(
         containmentRoot: plugin.pluginRoot,
         entry: basename(entryPath),
         entryLabel: "plugin panel entry",
-        requestLabel: "Plugin panel request path",
-        startFailureMessage: "Plugin panel server did not start.",
       });
       if (!isCurrent()) {
         await handle.stop();
@@ -6103,8 +6077,6 @@ function registerIpcHandlers(
         workspaceId: workspace.workspaceId,
         pluginId: input.pluginId,
         panelId: input.panelId,
-        workspaceRoot: workspace.rootPath,
-        pluginRoot: plugin.pluginRoot,
         spawnId,
         writable: true,
       });

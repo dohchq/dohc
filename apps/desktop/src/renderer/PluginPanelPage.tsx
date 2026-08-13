@@ -1,76 +1,23 @@
 import {
   DOHC_SDK_PROTOCOL,
-  type DohcSdkRequestMessage,
   type DohcSdkResponseMessage,
 } from "@dohc/sdk";
 import { AlertTriangle, Plug } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { StartPluginPanelResult } from "../ipc/bridgeContract";
-import { isLoopbackHostname } from "../security/loopback";
 import { bridge } from "./bridge";
+import {
+  frameUrlWithHostOrigin,
+  isActiveFrameOrigin,
+  isDohcSdkRequest,
+  isLoopbackOrigin,
+  sdkErrorResponse,
+} from "./sdkFrame";
 
 type LoadState =
   | { status: "loading" }
   | { status: "ready"; panel: StartPluginPanelResult }
   | { status: "error"; message: string };
-
-function isLoopbackOrigin(origin: string): boolean {
-  try {
-    const url = new URL(origin);
-    return (
-      url.protocol === "http:" &&
-      isLoopbackHostname(url.hostname) &&
-      !url.username &&
-      !url.password
-    );
-  } catch {
-    return false;
-  }
-}
-
-function isActivePanelOrigin(origin: string, panelUrl: string): boolean {
-  if (!isLoopbackOrigin(origin)) return false;
-  try {
-    return new URL(origin).origin === new URL(panelUrl).origin;
-  } catch {
-    return false;
-  }
-}
-
-function isDohcSdkRequest(value: unknown): value is DohcSdkRequestMessage {
-  if (!value || typeof value !== "object") return false;
-  const request = value as Partial<DohcSdkRequestMessage>;
-  return (
-    request.protocol === DOHC_SDK_PROTOCOL &&
-    typeof request.id === "string" &&
-    request.id.length > 0 &&
-    typeof request.method === "string" &&
-    request.method.length > 0
-  );
-}
-
-function sdkErrorResponse(
-  id: string,
-  code: string,
-  message: string,
-): DohcSdkResponseMessage {
-  return {
-    protocol: DOHC_SDK_PROTOCOL,
-    id,
-    ok: false,
-    error: { code, message },
-  };
-}
-
-function panelFrameUrl(url: string): string {
-  try {
-    const framed = new URL(url);
-    framed.searchParams.set("dohcHostOrigin", window.location.origin);
-    return framed.href;
-  } catch {
-    return url;
-  }
-}
 
 export function PluginPanelPage(props: {
   workspaceId: string;
@@ -152,7 +99,7 @@ export function PluginPanelPage(props: {
       if (!activePanel) return;
       const frameWindow = iframeRef.current?.contentWindow;
       if (!frameWindow || event.source !== frameWindow) return;
-      if (!isActivePanelOrigin(event.origin, activePanel.url)) return;
+      if (!isActiveFrameOrigin(event.origin, activePanel.url)) return;
       if (!isDohcSdkRequest(event.data)) return;
 
       const request = event.data;
@@ -188,7 +135,7 @@ export function PluginPanelPage(props: {
         !stoppingRef.current &&
         currentPanel &&
         iframeRef.current?.contentWindow === frameWindow &&
-        isActivePanelOrigin(event.origin, currentPanel.url)
+        isActiveFrameOrigin(event.origin, currentPanel.url)
       ) {
         frameWindow.postMessage(response, event.origin);
       }
@@ -233,7 +180,7 @@ export function PluginPanelPage(props: {
           key={panel.url}
           data-testid="plugin-panel-frame"
           title={panel.title}
-          src={panelFrameUrl(panel.url)}
+          src={frameUrlWithHostOrigin(panel.url)}
           sandbox="allow-forms allow-same-origin allow-scripts"
           referrerPolicy="no-referrer"
           className="min-h-0 flex-1 border-0 bg-bg"

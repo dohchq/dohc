@@ -11,7 +11,6 @@ import {
 const roots: string[] = [];
 
 interface AuthoredWrite {
-  workspaceRoot: string;
   path: string;
   text: string;
   options: { overwrite: boolean; author: MomentAuthor };
@@ -30,8 +29,8 @@ function context(root: string, writes: AuthoredWrite[] = []): PluginSdkHostConte
     spawnId: "spawn-123",
     writable: true,
     writeAuthoredText: vi.fn<PluginSdkHostContext["writeAuthoredText"]>(
-      async (workspaceRoot, path, text, options) => {
-        writes.push({ workspaceRoot, path, text, options });
+      async (path, text, options) => {
+        writes.push({ path, text, options });
         return { path };
       },
     ),
@@ -94,7 +93,6 @@ describe("invokePluginSdkHost", () => {
 
     expect(writes).toEqual([
       {
-        workspaceRoot: root,
         path: "notes/from-plugin.txt",
         text: "hello\n",
         options: {

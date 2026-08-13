@@ -32,16 +32,16 @@ describe("plugin panel main-process wiring", () => {
     expect(allowAt).toBeGreaterThan(serveAt);
     expect(rememberAt).toBeGreaterThan(allowAt);
     expect(grantAt).toBeGreaterThan(rememberAt);
-    expect(start).toContain("workspaceRoot: workspace.rootPath");
-    expect(start).toContain("pluginRoot: plugin.pluginRoot");
     expect(start).toContain("spawnId");
     expect(start).toContain("previous.releaseOrigin();");
 
     const stopStart = mainSource.indexOf("async function stopPluginPanel(");
-    const stop = mainSource.slice(
+    const stopEnd = mainSource.indexOf(
+      "\n}\n\nasync function stopPluginPanelsForWorkspace",
       stopStart,
-      mainSource.indexOf("\n}\n\nasync function stopPluginPanelsForWorkspace", stopStart),
     );
+    expect(stopEnd).toBeGreaterThan(-1);
+    const stop = mainSource.slice(stopStart, stopEnd);
     expect(stop).toContain("panel.releaseOrigin();");
   });
 
@@ -50,10 +50,12 @@ describe("plugin panel main-process wiring", () => {
     const authorizeAt = invoke.indexOf("pluginPanelSdkAuthorities.authorize({");
     const routeAt = invoke.indexOf("invokeWorkspacePluginSdk({");
     const routerStart = mainSource.indexOf("function invokeWorkspacePluginSdk");
-    const router = mainSource.slice(
+    const routerEnd = mainSource.indexOf(
+      "\n}\n\nfunction pluginHostFor",
       routerStart,
-      mainSource.indexOf("\n}\n\nfunction pluginHostFor", routerStart),
     );
+    expect(routerEnd).toBeGreaterThan(-1);
+    const router = mainSource.slice(routerStart, routerEnd);
 
     expect(authorizeAt).toBeGreaterThan(-1);
     expect(routeAt).toBeGreaterThan(authorizeAt);
@@ -65,10 +67,12 @@ describe("plugin panel main-process wiring", () => {
 
   it("uses utilityProcess and tears plugin hosts down with their owners", () => {
     const hostStart = mainSource.indexOf("function pluginHostFor");
-    const host = mainSource.slice(
+    const hostEnd = mainSource.indexOf(
+      "\n}\n\nfunction registeredPlugin",
       hostStart,
-      mainSource.indexOf("\n}\n\nfunction registeredPlugin", hostStart),
     );
+    expect(hostEnd).toBeGreaterThan(-1);
+    const host = mainSource.slice(hostStart, hostEnd);
     const workspaceOpen = handler("openWorkspace");
     const willQuitAt = mainSource.indexOf('app.on("will-quit"');
     const willQuit = mainSource.slice(

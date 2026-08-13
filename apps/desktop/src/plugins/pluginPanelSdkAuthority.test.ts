@@ -7,8 +7,6 @@ const owned = {
   workspaceId: "workspace-a",
   pluginId: "hello-plugin",
   panelId: "main",
-  workspaceRoot: "/workspace-a",
-  pluginRoot: "/workspace-a/plugins/hello-plugin",
   spawnId: "spawn-a",
   writable: true,
 };
@@ -40,8 +38,6 @@ describe("plugin panel SDK authority", () => {
     expect(
       authorize(registry, { senderId: 2 }),
     ).toMatchObject({
-      workspaceRoot: "/workspace-a",
-      pluginRoot: "/workspace-a/plugins/hello-plugin",
       spawnId: "spawn-b",
       writable: true,
     });

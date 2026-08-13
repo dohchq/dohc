@@ -1,6 +1,5 @@
 import {
   DOHC_SDK_PROTOCOL,
-  type DohcSdkRequestMessage,
   type DohcSdkResponseMessage,
 } from "@dohc/sdk";
 import {
@@ -22,8 +21,14 @@ import type {
   SitePreviewMode,
   StartSitePreviewResult,
 } from "../ipc/bridgeContract";
-import { isLoopbackHostname } from "../security/loopback";
 import { bridge } from "./bridge";
+import {
+  frameUrlWithHostOrigin,
+  isActiveFrameOrigin,
+  isDohcSdkRequest,
+  isLoopbackOrigin,
+  sdkErrorResponse,
+} from "./sdkFrame";
 
 type LoadState =
   | { status: "loading" }
@@ -139,62 +144,6 @@ export function shareTargetForSite(site: SitePackageInfo): SiteShareTarget | nul
   return { paths, label: site.title };
 }
 
-function isLoopbackOrigin(origin: string): boolean {
-  try {
-    const url = new URL(origin);
-    if (url.username || url.password) return false;
-    return url.protocol === "http:" && isLoopbackHostname(url.hostname);
-  } catch {
-    return false;
-  }
-}
-
-function isActivePreviewOrigin(origin: string, previewUrl: string): boolean {
-  if (!isLoopbackOrigin(origin)) return false;
-  try {
-    return new URL(origin).origin === new URL(previewUrl).origin;
-  } catch {
-    return false;
-  }
-}
-
-function isDohcSdkRequest(value: unknown): value is DohcSdkRequestMessage {
-  if (!value || typeof value !== "object") return false;
-  const request = value as Partial<DohcSdkRequestMessage>;
-  return (
-    request.protocol === DOHC_SDK_PROTOCOL &&
-    typeof request.id === "string" &&
-    request.id.length > 0 &&
-    typeof request.method === "string" &&
-    request.method.length > 0
-  );
-}
-
-function sdkErrorResponse(
-  id: string,
-  code: string,
-  message: string,
-): DohcSdkResponseMessage {
-  return {
-    protocol: DOHC_SDK_PROTOCOL,
-    id,
-    ok: false,
-    error: { code, message },
-  };
-}
-
-function siteFrameUrl(url: string): string {
-  // Called during render: a malformed preview URL must degrade to a frame
-  // that fails to load, never a `new URL` throw that takes the render down.
-  try {
-    const framed = new URL(url);
-    framed.searchParams.set("dohcHostOrigin", window.location.origin);
-    return framed.href;
-  } catch {
-    return url;
-  }
-}
-
 export function SitePreviewPage(props: {
   workspaceId: string;
   siteRoot: string;
@@ -272,7 +221,7 @@ export function SitePreviewPage(props: {
       if (!activePreview) return;
       const frameWindow = iframeRef.current?.contentWindow;
       if (!frameWindow || event.source !== frameWindow) return;
-      if (!isActivePreviewOrigin(event.origin, activePreview.url)) return;
+      if (!isActiveFrameOrigin(event.origin, activePreview.url)) return;
       if (!isDohcSdkRequest(event.data)) return;
 
       const request = event.data;
@@ -312,7 +261,7 @@ export function SitePreviewPage(props: {
         !stoppingRef.current &&
         currentPreview &&
         iframeRef.current?.contentWindow === frameWindow &&
-        isActivePreviewOrigin(event.origin, currentPreview.url)
+        isActiveFrameOrigin(event.origin, currentPreview.url)
       ) {
         if (openedTarget) props.onOpenPath?.(openedTarget);
         frameWindow.postMessage(response, event.origin);
@@ -619,7 +568,7 @@ export function SitePreviewPage(props: {
                   key={preview.url}
                   data-testid="site-preview-frame"
                   title={site.title}
-                  src={siteFrameUrl(preview.url)}
+                  src={frameUrlWithHostOrigin(preview.url)}
                   sandbox="allow-forms allow-same-origin allow-scripts"
                   referrerPolicy="no-referrer"
                   className="min-h-0 flex-1 border-0 bg-bg"
