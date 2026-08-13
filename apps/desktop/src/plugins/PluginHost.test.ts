@@ -68,6 +68,7 @@ interface ProcessHarness {
   spawnTransport: PluginHostOptions["spawnTransport"];
   spawnedPluginIds: string[];
   activationResolvedPluginIds: string[];
+  readonly deactivateRequestCount: number;
   disposedPluginIds: string[];
   exitedPluginIds: string[];
 }
@@ -111,6 +112,7 @@ function createProcessHarness(options: {
   const activationResolvedPluginIds: string[] = [];
   const disposedPluginIds: string[] = [];
   const exitedPluginIds: string[] = [];
+  let deactivateRequestCount = 0;
   const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>((params) => {
     spawnedPluginIds.push(params.pluginId);
     const env: Record<string, string | undefined> = {
@@ -138,6 +140,9 @@ function createProcessHarness(options: {
 
     return {
       async request<T = unknown>(method: string, rpcParams?: unknown): Promise<T> {
+        if (method === PLUGIN_HOST_METHODS.deactivate) {
+          deactivateRequestCount += 1;
+        }
         if (
           method === PLUGIN_HOST_METHODS.deactivate &&
           options.waitForActivationBeforeDeactivate
@@ -165,6 +170,9 @@ function createProcessHarness(options: {
     spawnTransport,
     spawnedPluginIds,
     activationResolvedPluginIds,
+    get deactivateRequestCount() {
+      return deactivateRequestCount;
+    },
     disposedPluginIds,
     exitedPluginIds,
   };
@@ -303,6 +311,28 @@ describe("PluginHost", () => {
     expect(host.getStatus("hello-plugin")).toBeUndefined();
   });
 
+  it("does not spawn when stopAll races a pending start", async () => {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness();
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+
+    const start = host.start(
+      "hello-plugin",
+      helloPluginRoot,
+      await fixtureManifest(),
+    );
+    const stopAll = host.stopAll();
+    await Promise.all([start, stopAll]);
+
+    expect(harness.spawnedPluginIds).toEqual([]);
+    expect(host.getStatus("hello-plugin")).toBeUndefined();
+  });
+
   it("does not spawn a durably disabled plugin", async () => {
     const root = await workspaceRoot();
     const localStateDir = await stateDir();
@@ -379,6 +409,50 @@ describe("PluginHost", () => {
       () => harness.exitedPluginIds.includes("hello-plugin"),
       "Disposed plugin process did not exit.",
     );
+  });
+
+  it("handles a malformed activation result as an activation failure", async () => {
+    const root = await workspaceRoot();
+    const statuses: PluginRuntimeStatus[] = [];
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => {
+      unhandledRejections.push(reason);
+    };
+    const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
+      request<T = unknown>(): Promise<T> {
+        return Promise.resolve({} as T);
+      },
+      dispose: () => Promise.resolve(),
+    }));
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport,
+      routeSdkRequest: defaultRouter,
+      onStatusChange: (_pluginId, status) => statuses.push(status),
+    });
+
+    process.on("unhandledRejection", onUnhandledRejection);
+    try {
+      await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+      const reachedFailed = await waitFor(
+        () => statuses.includes("failed"),
+        "Malformed activation result did not fail the plugin.",
+        500,
+      ).then(
+        () => true,
+        () => false,
+      );
+      await delay(25);
+
+      expect.soft(reachedFailed).toBe(true);
+      expect(unhandledRejections).toEqual([]);
+      expect(host.getStderrLog("hello-plugin")).toContain(
+        'Activation failed: Plugin activation returned an invalid result: "commands" must be an array of non-empty strings.',
+      );
+    } finally {
+      process.off("unhandledRejection", onUnhandledRejection);
+    }
   });
 
   it("reports a post-activation asynchronous crash", async () => {
@@ -686,6 +760,29 @@ describe("PluginHost", () => {
 
     expect(statuses).not.toContain("ready");
     expect(host.getStatus("hello-plugin")).toBeUndefined();
+  });
+
+  it("shares one shutdown between concurrent stop calls", async () => {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness();
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+
+    await host.start("hello-plugin", helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    const firstStop = host.stop("hello-plugin");
+    const secondStop = host.stop("hello-plugin");
+    await Promise.all([firstStop, secondStop]);
+
+    expect(harness.deactivateRequestCount).toBe(1);
   });
 
   it("stops the plugin process and its heartbeat descendant", async () => {

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -46,7 +47,15 @@ function unreadableState(path: string, problem: string): PluginLocalStateResult 
 }
 
 export function pluginStateFileName(workspaceRoot: string): string {
-  const key = createHash("sha256").update(resolve(workspaceRoot)).digest("hex");
+  const resolvedRoot = resolve(workspaceRoot);
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = realpathSync(resolvedRoot);
+  } catch {
+    canonicalRoot = resolvedRoot;
+  }
+  if (process.platform === "win32") canonicalRoot = canonicalRoot.toLowerCase();
+  const key = createHash("sha256").update(canonicalRoot).digest("hex");
   return `${key}.json`;
 }
 

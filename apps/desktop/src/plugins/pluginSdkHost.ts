@@ -56,6 +56,12 @@ export async function invokePluginSdkHost(
       if (typeof input.text !== "string") {
         throw new Error("files.write text must be a string.");
       }
+      const overwrite = input.overwrite;
+      if (overwrite !== undefined && typeof overwrite !== "boolean") {
+        throw new Error(
+          `files.write overwrite must be a boolean; received a value of type "${typeof overwrite}".`,
+        );
+      }
 
       const author: AgentAuthor = {
         kind: "agent",
@@ -67,7 +73,7 @@ export async function invokePluginSdkHost(
         context.workspaceRoot,
         path,
         input.text,
-        { overwrite: input.overwrite !== false, author },
+        { overwrite: overwrite === undefined ? true : overwrite, author },
       );
     }
     default:

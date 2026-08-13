@@ -51,6 +51,38 @@ describe("plugin local state", () => {
     expect(fileName).toMatch(/^[0-9a-f]{64}\.json$/);
   });
 
+  it.runIf(process.platform === "win32")(
+    "uses one state file for Windows path casing",
+    async () => {
+      const root = await workspaceRoot();
+      const differentlySpelledRoot = root.toUpperCase();
+      const localStateDir = await stateDir();
+      const [rootStats, differentlySpelledStats] = await Promise.all([
+        stat(root),
+        stat(differentlySpelledRoot),
+      ]);
+
+      expect(differentlySpelledRoot).not.toBe(root);
+      expect([differentlySpelledStats.dev, differentlySpelledStats.ino]).toEqual([
+        rootStats.dev,
+        rootStats.ino,
+      ]);
+      expect(pluginStateFileName(differentlySpelledRoot)).toBe(
+        pluginStateFileName(root),
+      );
+
+      await setPluginDisabled(localStateDir, root, "hello-plugin", true);
+
+      expect(await readPluginLocalState(localStateDir, differentlySpelledRoot)).toEqual({
+        ok: true,
+        state: {
+          version: 1,
+          plugins: { "hello-plugin": { disabled: true } },
+        },
+      });
+    },
+  );
+
   it("returns defaults when the file and state directory are missing", async () => {
     const root = await workspaceRoot();
     const localStateDir = await stateDir();

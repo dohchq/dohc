@@ -59,6 +59,7 @@ interface PluginSpawn {
   stopping: boolean;
   failureHandled: boolean;
   transport?: PluginTransport;
+  shutdown?: Promise<void>;
 }
 
 interface PluginRecord {
@@ -105,6 +106,18 @@ function isPluginLogParams(params: unknown): params is PluginLogParams {
       params.level === "error") &&
     "message" in params &&
     typeof params.message === "string"
+  );
+}
+
+function isPluginActivateResult(value: unknown): value is PluginActivateResult {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "commands" in value &&
+    Array.isArray(value.commands) &&
+    value.commands.every(
+      (command) => typeof command === "string" && command.length > 0,
+    )
   );
 }
 
@@ -175,25 +188,40 @@ export class PluginHost {
       this.plugins.delete(pluginId);
       return;
     }
-
-    spawn.stopping = true;
-    await raceWithTimeout(
-      spawn.transport.request(PLUGIN_HOST_METHODS.deactivate, {}),
-      DEACTIVATION_TIMEOUT_MS,
-      `Plugin "${pluginId}" did not deactivate within ${DEACTIVATION_TIMEOUT_MS} ms.`,
-    ).catch(() => undefined);
-
-    try {
-      await spawn.transport.dispose();
-    } finally {
-      if (this.plugins.get(pluginId) === record) {
-        this.plugins.delete(pluginId);
-      }
+    if (spawn.shutdown) {
+      await spawn.shutdown;
+      return;
     }
+
+    spawn.shutdown = this.shutdown(record, spawn, spawn.transport);
+    await spawn.shutdown;
   }
 
   async stopAll(): Promise<void> {
+    const pendingPluginIds = [...this.pendingStarts];
+    for (const pluginId of pendingPluginIds) this.abortedStarts.add(pluginId);
     await Promise.allSettled([...this.plugins.keys()].map((id) => this.stop(id)));
+  }
+
+  private async shutdown(
+    record: PluginRecord,
+    spawn: PluginSpawn,
+    transport: PluginTransport,
+  ): Promise<void> {
+    spawn.stopping = true;
+    await raceWithTimeout(
+      transport.request(PLUGIN_HOST_METHODS.deactivate, {}),
+      DEACTIVATION_TIMEOUT_MS,
+      `Plugin "${record.pluginId}" did not deactivate within ${DEACTIVATION_TIMEOUT_MS} ms.`,
+    ).catch(() => undefined);
+
+    try {
+      await transport.dispose();
+    } finally {
+      if (this.plugins.get(record.pluginId) === record) {
+        this.plugins.delete(record.pluginId);
+      }
+    }
   }
 
   getStatus(pluginId: string): PluginRuntimeStatus | undefined {
@@ -237,7 +265,7 @@ export class PluginHost {
         onExit: () => this.handleExit(record, spawn),
       });
 
-      const activation = spawn.transport.request<PluginActivateResult>(
+      const activation = spawn.transport.request<unknown>(
         PLUGIN_HOST_METHODS.activate,
         {
           pluginId: record.pluginId,
@@ -262,10 +290,20 @@ export class PluginHost {
   private handleActivationSuccess(
     record: PluginRecord,
     spawn: PluginSpawn,
-    result: PluginActivateResult,
+    result: unknown,
   ): void {
     if (!this.isLive(record, spawn)) {
       void spawn.transport?.dispose().catch(() => undefined);
+      return;
+    }
+    if (!isPluginActivateResult(result)) {
+      void this.handleActivationFailure(
+        record,
+        spawn,
+        new Error(
+          'Plugin activation returned an invalid result: "commands" must be an array of non-empty strings.',
+        ),
+      );
       return;
     }
     record.commands = [...result.commands];

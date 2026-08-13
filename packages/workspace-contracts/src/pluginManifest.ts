@@ -53,8 +53,15 @@ export const DohcPluginManifest = z.object({
     ),
   displayName: z.string().min(1).max(120).optional(),
   entry: PluginPath,
-  panels: z.array(PluginPanel).optional(),
-  commands: z.array(PluginCommand).optional(),
+  // A contribution is <300 bytes at maximum field lengths: 100 × 300 = 30,000 bytes
+  // and 200 × 300 = 60,000 bytes, both far below the 256 KiB reader cap.
+  // Real hello-plugin and planned t3-code manifests are each <1 KiB total.
+  panels: z.array(PluginPanel)
+    .max(100, "panels: at most 100 entries allowed")
+    .optional(),
+  commands: z.array(PluginCommand)
+    .max(200, "commands: at most 200 entries allowed")
+    .optional(),
 }).strict().superRefine((manifest, ctx) => {
   const panelIds = new Set<string>();
   manifest.panels?.forEach((panel, index) => {

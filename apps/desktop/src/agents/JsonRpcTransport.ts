@@ -154,6 +154,12 @@ export class JsonRpcTransport {
       this.options.detached === true && process.platform !== "win32"
         ? this.child.pid
         : undefined;
+    // A descendant that calls its own detach (setsid) leaves its own process
+    // group and escapes this POSIX group-kill; Windows tree-kill above still
+    // reaches it. This is the documented full-trust limit, not a bug — a
+    // wrapper plugin that spawns a long-lived server (e.g. t3 code) must
+    // recover orphans itself on the next launch. See the plan doc's
+    // "wrapper-plugin" pattern.
     const signal = (name: NodeJS.Signals): void => {
       try {
         if (groupId !== undefined) process.kill(-groupId, name);

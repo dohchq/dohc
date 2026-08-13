@@ -84,6 +84,22 @@ describe("DohcPluginManifest", () => {
     }).success).toBe(false);
   });
 
+  it("rejects more than 100 panels", () => {
+    const result = DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      panels: Array.from({ length: 101 }, (_, index) => ({
+        id: `p${index}`,
+        title: `P${index}`,
+        entry: `p${index}.html`,
+      })),
+    });
+
+    if (result.success) throw new Error("expected the panel limit to reject the manifest");
+    expect(result.error.issues).toContainEqual(expect.objectContaining({
+      message: "panels: at most 100 entries allowed",
+    }));
+  });
+
   it("rejects duplicate command ids", () => {
     expect(DohcPluginManifest.safeParse({
       ...minimalManifest,

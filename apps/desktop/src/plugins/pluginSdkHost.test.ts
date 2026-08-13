@@ -109,6 +109,36 @@ describe("invokePluginSdkHost", () => {
     ]);
   });
 
+  it("rejects a non-boolean overwrite before writing", async () => {
+    const root = await workspaceRoot();
+    const writes: AuthoredWrite[] = [];
+
+    await expect(
+      invokePluginSdkHost(context(root, writes), "files.write", {
+        path: "notes/x.txt",
+        text: "y",
+        overwrite: "false",
+      }),
+    ).rejects.toThrow(
+      'files.write overwrite must be a boolean; received a value of type "string".',
+    );
+    expect(writes).toEqual([]);
+  });
+
+  it("accepts overwrite false", async () => {
+    const root = await workspaceRoot();
+    const writes: AuthoredWrite[] = [];
+
+    await expect(
+      invokePluginSdkHost(context(root, writes), "files.write", {
+        path: "notes/x.txt",
+        text: "y",
+        overwrite: false,
+      }),
+    ).resolves.toEqual({ path: "notes/x.txt" });
+    expect(writes[0]?.options.overwrite).toBe(false);
+  });
+
   it("ignores plugin-supplied write attribution", async () => {
     const root = await workspaceRoot();
     const writes: AuthoredWrite[] = [];

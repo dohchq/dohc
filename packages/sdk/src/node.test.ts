@@ -63,7 +63,10 @@ describe("@dohc/sdk/node", () => {
     const timeoutHarness = createStdioHarness();
     await expect(
       timeoutHarness.transport.request("slow.method", undefined, { timeoutMs: 5 }),
-    ).rejects.toMatchObject({ code: DohcSdkErrorCodes.hostTimeout });
+    ).rejects.toMatchObject({
+      code: DohcSdkErrorCodes.hostTimeout,
+      message: "dohc host did not answer slow.method within 5ms.",
+    });
 
     const abortHarness = createStdioHarness();
     const controller = new AbortController();
@@ -153,5 +156,27 @@ describe("@dohc/sdk/node", () => {
     expect(createProcessTransport({ input, output })).toBe(
       createProcessTransport({ input, output }),
     );
+  });
+
+  it("creates a transport for the same input and a different output", () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const differentOutput = new PassThrough();
+    const transport = createProcessTransport({ input, output });
+    const differentTransport = createProcessTransport({
+      input,
+      output: differentOutput,
+    });
+
+    expect(differentTransport).not.toBe(transport);
+
+    differentTransport.notify("plugin.log", { output: "different" });
+
+    expect(differentOutput.read()).toEqual(
+      Buffer.from(
+        '{"jsonrpc":"2.0","method":"plugin.log","params":{"output":"different"}}\n',
+      ),
+    );
+    expect(output.read()).toBeNull();
   });
 });
