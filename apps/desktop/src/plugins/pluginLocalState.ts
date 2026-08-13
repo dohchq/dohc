@@ -16,14 +16,32 @@ export const MAX_PLUGIN_LOCAL_STATE_FILE_BYTES = 256 * 1024;
 
 export const PluginLocalState = z.object({
   version: z.literal(1),
+  // For ordinary UTF-8 plugin ids, indented JSON at these bounds is
+  // 26 + 500 × 316 + 499 + 13,513 (the writer's indentation/newlines) =
+  // 172,038 bytes, 90,106 below MAX_PLUGIN_LOCAL_STATE_FILE_BYTES (262,144).
+  // A plugin id built almost entirely from characters JSON must escape can
+  // inflate past that on paper; the read/write byte-size gate — not this
+  // schema — is the actual backstop against an oversize file either way.
   plugins: z.record(
-    z.string(),
+    // Plugin ids are manifest names, whose schema allows at most 214 characters.
+    z.string().min(1).max(214, "plugin id must be 214 characters or fewer"),
     z.object({
       disabled: z.boolean().optional(),
-      approvedHash: z.string().optional(),
+      approvedHash: z.string().regex(
+        /^[0-9a-f]{64}$/,
+        "must be a 64-character lowercase hex sha256 digest",
+      ).optional(),
     }).strict(),
   ),
-}).strict();
+}).strict().superRefine((state, ctx) => {
+  if (Object.keys(state.plugins).length > 500) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["plugins"],
+      message: "plugins: at most 500 entries allowed",
+    });
+  }
+});
 export type PluginLocalState = z.infer<typeof PluginLocalState>;
 
 export const DEFAULT_PLUGIN_LOCAL_STATE: PluginLocalState = {

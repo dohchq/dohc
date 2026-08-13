@@ -4,6 +4,7 @@ import {
   readdir,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -82,6 +83,40 @@ describe("plugin local state", () => {
       });
     },
   );
+
+  it("uses one state file for a workspace root alias", async () => {
+    const root = await workspaceRoot();
+    const aliasContainer = await createTestScratch("dohc-plugin-alias-");
+    roots.push(aliasContainer);
+    const aliasPath = join(aliasContainer, "workspace-alias");
+    const markerPath = join(root, "marker.txt");
+    const localStateDir = await stateDir();
+    await writeFile(markerPath, "workspace content");
+
+    try {
+      await symlink(
+        root,
+        aliasPath,
+        process.platform === "win32" ? "junction" : undefined,
+      );
+      expect(pluginStateFileName(aliasPath)).toBe(pluginStateFileName(root));
+
+      await setPluginDisabled(localStateDir, root, "hello-plugin", true);
+
+      expect(await readPluginLocalState(localStateDir, aliasPath)).toEqual({
+        ok: true,
+        state: {
+          version: 1,
+          plugins: { "hello-plugin": { disabled: true } },
+        },
+      });
+    } finally {
+      await rm(aliasPath, { force: true });
+    }
+
+    expect((await stat(root)).isDirectory()).toBe(true);
+    expect(await readFile(markerPath, "utf8")).toBe("workspace content");
+  });
 
   it("returns defaults when the file and state directory are missing", async () => {
     const root = await workspaceRoot();
@@ -229,6 +264,38 @@ describe("plugin local state", () => {
     expect(thrown).toBeInstanceOf(Error);
     if (!(thrown instanceof Error)) throw new Error("expected an Error");
     expect(thrown.message).toBe(readResult.warning);
+    expect(await readFile(path)).toEqual(before);
+  });
+
+  it("does not write a 501st plugin entry", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const path = statePath(localStateDir, root);
+    const plugins = Object.fromEntries(
+      Array.from({ length: 500 }, (_, index) => [
+        `plugin-${index}`,
+        { disabled: false },
+      ]),
+    );
+    const body = JSON.stringify({ version: 1, plugins });
+    await mkdir(dirname(path));
+    await writeFile(path, body);
+
+    const readResult = await readPluginLocalState(localStateDir, root);
+    expect(readResult.ok).toBe(true);
+    if (!readResult.ok) throw new Error("expected 500 plugin entries to be valid");
+    expect(Object.keys(readResult.state.plugins)).toHaveLength(500);
+    const before = await readFile(path);
+    let thrown: unknown;
+    try {
+      await setPluginDisabled(localStateDir, root, "one-more-plugin", true);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    if (!(thrown instanceof Error)) throw new Error("expected an Error");
+    expect(thrown.message).toContain("plugins: at most 500 entries allowed");
     expect(await readFile(path)).toEqual(before);
   });
 

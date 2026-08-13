@@ -48,6 +48,18 @@ describe("DohcPluginManifest", () => {
     expect(DohcPluginManifest.safeParse({ ...minimalManifest, entry }).success).toBe(false);
   });
 
+  it("rejects an entry over 1024 characters", () => {
+    const result = DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      entry: "a".repeat(1025),
+    });
+
+    if (result.success) throw new Error("expected the entry limit to reject the manifest");
+    expect(result.error.issues).toContainEqual(expect.objectContaining({
+      message: "must be 1024 characters or fewer",
+    }));
+  });
+
   it("rejects unknown top-level fields", () => {
     expect(DohcPluginManifest.safeParse({
       ...minimalManifest,
@@ -108,5 +120,20 @@ describe("DohcPluginManifest", () => {
         { id: "open", title: "Open another" },
       ],
     }).success).toBe(false);
+  });
+
+  it("rejects more than 200 commands", () => {
+    const result = DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      commands: Array.from({ length: 201 }, (_, index) => ({
+        id: `c${index}`,
+        title: `C${index}`,
+      })),
+    });
+
+    if (result.success) throw new Error("expected the command limit to reject the manifest");
+    expect(result.error.issues).toContainEqual(expect.objectContaining({
+      message: "commands: at most 200 entries allowed",
+    }));
   });
 });

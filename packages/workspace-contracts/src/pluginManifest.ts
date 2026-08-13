@@ -20,16 +20,18 @@ function normalizePluginPath(path: string): string | null {
   return normalized === "" ? null : normalized;
 }
 
-const PluginPath = z.string().transform((path, ctx) => {
-  const normalized = normalizePluginPath(path);
-  if (normalized !== null) return normalized;
-  ctx.addIssue({
-    code: z.ZodIssueCode.custom,
-    message:
-      "must be a non-empty plugin-root-relative path without NUL bytes, absolute prefixes, or '..' segments",
+const PluginPath = z.string()
+  .max(1024, "must be 1024 characters or fewer")
+  .transform((path, ctx) => {
+    const normalized = normalizePluginPath(path);
+    if (normalized !== null) return normalized;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "must be a non-empty plugin-root-relative path without NUL bytes, absolute prefixes, or '..' segments",
+    });
+    return z.NEVER;
   });
-  return z.NEVER;
-});
 
 const PluginPanel = z.object({
   id: z.string().min(1).max(120),
@@ -53,9 +55,12 @@ export const DohcPluginManifest = z.object({
     ),
   displayName: z.string().min(1).max(120).optional(),
   entry: PluginPath,
-  // A contribution is <300 bytes at maximum field lengths: 100 × 300 = 30,000 bytes
-  // and 200 × 300 = 60,000 bytes, both far below the 256 KiB reader cap.
-  // Real hello-plugin and planned t3-code manifests are each <1 KiB total.
+  // For ordinary UTF-8 content, compact JSON at these bounds is 77 + 214 +
+  // 120 + 1,024 + (100 × 1,295 + 99) + (200 × 260 + 199) = 183,233 bytes,
+  // 78,911 below the reader's 262,144-byte cap. A string built almost
+  // entirely from characters JSON must escape (e.g. `"`, `\`) can inflate
+  // past that on paper; the reader's byte-size gate — not this schema — is
+  // what safely rejects an oversize file before parsing either way.
   panels: z.array(PluginPanel)
     .max(100, "panels: at most 100 entries allowed")
     .optional(),
