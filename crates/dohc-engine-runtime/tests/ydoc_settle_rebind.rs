@@ -285,6 +285,7 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
                 request_id: Some("rebind-rival".to_owned()),
                 claim_foreign_head: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -412,6 +413,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
                 request_id: Some("prune-external".to_owned()),
                 claim_foreign_head: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -549,6 +551,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
                 only_if_capture_origin: true,
                 allow_ydoc_origin: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )

@@ -46,6 +46,15 @@ pub fn journal_moment_append_in_tx(
     workspace_id: &str,
     moment_id: &str,
 ) -> Result<(), SyncError> {
+    let (payload, recorded_at_ms) = moment_append_payload_in_tx(tx, workspace_id, moment_id)?;
+    journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms).map(|_| ())
+}
+
+pub(crate) fn moment_append_payload_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+) -> Result<(serde_json::Value, i64), SyncError> {
     let row = tx
         .query_row(
             "SELECT m.moment_id, m.version_id, m.object_id, o.created_at_ms, m.path, \
@@ -161,14 +170,7 @@ pub fn journal_moment_append_in_tx(
     if measured_json_len(&payload)? > PAYLOAD_PACKING_TARGET_BYTES {
         payload["beforeMetadata"] = serde_json::Value::Null;
     }
-    journal_local_op_in_tx(
-        tx,
-        workspace_id,
-        "moment.append",
-        &payload,
-        row.recorded_at_ms,
-    )
-    .map(|_| ())
+    Ok((payload, row.recorded_at_ms))
 }
 
 /// Project one committed named-version fork into the relay-visible log.
@@ -182,7 +184,7 @@ pub fn journal_version_create_in_tx(
                     CASE s.content_kind WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END, \
                     s.updated_at_ms, s.latest_moment_id, s.metadata_origin, \
                     s.metadata_summary, s.metadata_correlation_id \
-             FROM snapshots s JOIN file_objects o \
+             FROM fork_base_snapshots s JOIN file_objects o \
                ON o.workspace_id=s.workspace_id AND o.object_id=s.object_id \
              WHERE s.workspace_id=?1 AND s.version_id=?2 ORDER BY s.path",
         )
@@ -254,7 +256,26 @@ pub fn journal_secret_put_in_tx(
             },
         )
         .map_err(SyncError::corrupt)?;
-    let ciphertext = decode_stored_ciphertext(&ciphertext_base64)?;
+    journal_secret_put_from_moment_in_tx(
+        tx,
+        moment,
+        &iv_base64,
+        &auth_tag_base64,
+        &ciphertext_base64,
+        byte_length,
+    )
+}
+
+/// Project one retained secret moment into the relay-visible log.
+pub fn journal_secret_put_from_moment_in_tx(
+    tx: &Transaction<'_>,
+    moment: &SecretMomentRecord,
+    iv_base64: &str,
+    auth_tag_base64: &str,
+    ciphertext_base64: &str,
+    byte_length: i64,
+) -> Result<(), SyncError> {
+    let ciphertext = decode_stored_ciphertext(ciphertext_base64)?;
     let payload = serde_json::json!({
         "versionId": moment.version_id,
         "path": moment.path,
@@ -305,7 +326,8 @@ pub fn journal_secret_version_fork_in_tx(
     let mut statement = tx
         .prepare(
             "SELECT path, iv_base64, auth_tag_base64, ciphertext_base64, byte_length, \
-                    updated_at_ms FROM secret_files \
+                    updated_at_ms \
+                    FROM secret_fork_bases \
              WHERE workspace_id=?1 AND version_id=?2 ORDER BY path",
         )
         .map_err(SyncError::corrupt)?;

@@ -73,6 +73,13 @@ const REQUIRED_TABLES: &[&str] = &[
     "ydoc_docs",
     "ydoc_updates",
     "ydoc_snapshots",
+    "ydoc_deferred_updates",
+    "ydoc_inactive_lineages",
+    "replication_pending_conflict_bundles",
+    "replication_pending_conflict_ops",
+    "replication_pending_conflict_moments",
+    "replication_pending_conflict_text_blobs",
+    "replication_pending_conflict_binary_blobs",
     // R09 chats-domain tables (migration ordinal 3). Unlike the TS engine's
     // lazy-additive chat tables (missing = "no chats yet"), the Rust migration
     // ledger always creates these on open, so their presence is a hard v2
@@ -109,11 +116,9 @@ const REQUIRED_TABLES: &[&str] = &[
     "engine_search_chat_messages_fts",
     "engine_search_index_state",
     // R10 replication, relay, and share cursors (migration ordinal 5);
-    // replication_pending_resolves arrived with migration ordinal 16 and
-    // replication_pending_refusals with ordinal 22.
+    // replication_pending_refusals arrived with ordinal 22.
     "sync_identity",
     "replication_log",
-    "replication_pending_resolves",
     "replication_pending_refusals",
     "replication_peers",
     "sync_relay_cursors",
@@ -364,5 +369,26 @@ fn integrity_check(conn: &Connection) -> Result<(), StorageError> {
         Ok(())
     } else {
         Err(StorageError::StateCorrupt { source: None })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::REQUIRED_TABLES;
+
+    #[test]
+    fn current_schema_requires_pending_conflict_bundle_tables() {
+        for table in [
+            "replication_pending_conflict_bundles",
+            "replication_pending_conflict_ops",
+            "replication_pending_conflict_moments",
+            "replication_pending_conflict_text_blobs",
+            "replication_pending_conflict_binary_blobs",
+        ] {
+            assert!(
+                REQUIRED_TABLES.contains(&table),
+                "open must reject a store missing {table}"
+            );
+        }
     }
 }

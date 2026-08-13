@@ -8,10 +8,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_BLOB_BYTES,
   MAX_KEY_ENVELOPE_BYTES,
+  MAX_PAYLOAD_JSON_BYTES,
   createSyncRelayHandler,
   type SyncRelayHandler,
 } from "./server";
-import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
+import {
+  openSyncRelayStorage,
+  referencedBlobShas,
+  type SyncRelayStorage,
+} from "./storage";
 
 interface InspectionStatement {
   get(...params: unknown[]): Record<string, unknown> | undefined;
@@ -96,6 +101,408 @@ function jsonBody(value: unknown): RequestInit {
 
 function sha256(bytes: Uint8Array | string): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+interface ConflictResolveFixture {
+  payload: Record<string, unknown>;
+  blobs: Map<string, string>;
+}
+
+interface CompactConflictResolveFixture extends ConflictResolveFixture {
+  shadows: Record<string, unknown>[];
+}
+
+function stableJsonStringifyForTest(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJsonStringifyForTest).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object)
+      .sort()
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${stableJsonStringifyForTest(object[key])}`,
+      )
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function conflictResolveFixture(workspaceId = "workspace-a"): ConflictResolveFixture {
+  const contents = {
+    current: "current text",
+    incoming: "incoming text",
+    result: "resolved text",
+    successor: "successor ydoc state",
+    stateVector: "successor state vector",
+  };
+  const shas = Object.fromEntries(
+    Object.entries(contents).map(([name, content]) => [name, sha256(content)]),
+  ) as Record<keyof typeof contents, string>;
+  const metadata = {
+    origin: "sync",
+    summary: null,
+    correlationId: "resolve-request-1",
+  };
+  const current = {
+    present: true,
+    versionId: "main",
+    objectId: "object-a",
+    path: "docs/a.md",
+    contentKind: "text",
+    blobSha256: shas.current,
+    byteLength: Buffer.byteLength(contents.current),
+    updatedAtMs: 10,
+    latestMomentId: "moment-current",
+    metadata,
+  };
+  const incoming = {
+    present: true,
+    versionId: "main",
+    objectId: "object-a",
+    path: "docs/b.md",
+    contentKind: "text",
+    blobSha256: shas.incoming,
+    byteLength: Buffer.byteLength(contents.incoming),
+    updatedAtMs: 11,
+    latestMomentId: "moment-incoming",
+    metadata,
+  };
+  const moment = (
+    momentId: string,
+    operation: "delete" | "write",
+    path: string,
+    beforeSha: string | null,
+    afterSha: string,
+    beforePresent: "null" | "present",
+  ): Record<string, unknown> => ({
+    momentId,
+    versionId: "main",
+    objectId: "object-a",
+    objectCreatedAtMs: 1,
+    path,
+    recordedAtMs: operation === "delete" ? 20 : 21,
+    operation,
+    payloadBeforeBlobSha256: beforeSha,
+    payloadBeforePath: beforeSha === null ? null : "docs/a.md",
+    payloadAfterBlobSha256: afterSha,
+    payloadAfterPath: path,
+    payloadBeforeContentKind: beforeSha === null ? null : "text",
+    payloadBeforeByteLength: beforeSha === null ? null : Buffer.byteLength(contents.current),
+    payloadAfterContentKind: "text",
+    payloadAfterByteLength:
+      afterSha === shas.result
+        ? Buffer.byteLength(contents.result)
+        : Buffer.byteLength(contents.current),
+    metadata,
+    author: null,
+    beforePresent,
+    beforeObjectId: beforePresent === "present" ? "object-a" : null,
+    beforeVersionId: beforePresent === "present" ? "main" : null,
+    beforePath: beforePresent === "present" ? "docs/a.md" : null,
+    beforeBlobSha256: beforeSha,
+    beforeContentKind: beforeSha === null ? null : "text",
+    beforeByteLength: beforeSha === null ? null : Buffer.byteLength(contents.current),
+    beforeUpdatedAtMs: beforePresent === "present" ? 10 : null,
+    beforeLatestMomentId: beforePresent === "present" ? "moment-current" : null,
+    beforeMetadata: beforePresent === "present" ? metadata : null,
+  });
+  const deleteMoment = moment(
+    "moment-delete",
+    "delete",
+    "docs/a.md",
+    shas.current,
+    shas.current,
+    "present",
+  );
+  const writeMoment = moment(
+    "moment-write",
+    "write",
+    "docs/b.md",
+    null,
+    shas.result,
+    "null",
+  );
+  const payload = {
+    formatVersion: 1,
+    workspaceId,
+    conflictId: "conflict-1",
+    status: "resolved",
+    chosenFrom: "incoming",
+    resolution: "applied-incoming",
+    updatedAtMs: 21,
+    targetVersionId: "main",
+    sourceVersionId: "main",
+    path: "docs/a.md",
+    current,
+    incoming,
+    result: {
+      ...incoming,
+      blobSha256: shas.result,
+      byteLength: Buffer.byteLength(contents.result),
+      updatedAtMs: 21,
+      latestMomentId: "moment-write",
+    },
+    effects: [
+      { opKind: "moment.append", payload: deleteMoment },
+      { opKind: "moment.append", payload: writeMoment },
+    ],
+    lineageTransition: {
+      versionId: "main",
+      objectId: "object-a",
+      predecessorClaimId: "a".repeat(64),
+      predecessorStateVectorSha256: "b".repeat(64),
+      artifactPreimageSha256: "c".repeat(64),
+      successor: {
+        lineageClaimId: shas.successor,
+        epochTag: "epoch-2",
+        contentKind: "plaintext",
+        resultSha256: shas.result,
+        updateBlobSha256: shas.successor,
+        stateVectorBlobSha256: shas.stateVector,
+      },
+    },
+  };
+  return {
+    payload,
+    blobs: new Map(
+      Object.values(contents).map((content) => [sha256(content), content]),
+    ),
+  };
+}
+
+function compactConflictResolveFixture(
+  workspaceId = "workspace-a",
+): CompactConflictResolveFixture {
+  const contents = {
+    current: "current text",
+    result: "resolved text",
+    successor: "successor ydoc state",
+    stateVector: "successor state vector",
+  };
+  const shas = Object.fromEntries(
+    Object.entries(contents).map(([name, content]) => [name, sha256(content)]),
+  ) as Record<keyof typeof contents, string>;
+  const metadata = {
+    origin: "sync",
+    summary: null,
+    correlationId: "resolve-request-1",
+  };
+  const current = {
+    present: true,
+    pathRef: 0,
+    objectId: "object-a",
+    latestMomentId: "moment-current",
+    contentKind: "text",
+    blobSha256: shas.current,
+    byteLength: Buffer.byteLength(contents.current),
+    updatedAtMs: 10,
+  };
+  const incoming = {
+    present: true,
+    pathRef: 1,
+    objectId: "object-peer",
+    latestMomentId: "moment-incoming",
+    contentKind: "text",
+    blobSha256: shas.result,
+    byteLength: Buffer.byteLength(contents.result),
+    updatedAtMs: 11,
+  };
+  const result = {
+    present: true,
+    pathRef: 1,
+    objectId: "object-a",
+    latestMomentId: "moment-write",
+    contentKind: "text",
+    blobSha256: shas.result,
+    byteLength: Buffer.byteLength(contents.result),
+    updatedAtMs: 21,
+  };
+  const canonicalAuthor = {
+    kind: "agent",
+    agentId: "agent-1",
+    onBehalfOf: "user-1",
+  };
+  const deleteShadow = {
+    conflictId: "conflict-1",
+    conflictEffectIndex: 0,
+    momentId: "moment-delete",
+    versionId: "main",
+    objectId: current.objectId,
+    objectCreatedAtMs: 1,
+    path: "docs/a.md",
+    recordedAtMs: 21,
+    operation: "delete",
+    payloadBeforeBlobSha256: current.blobSha256,
+    payloadBeforePath: "docs/a.md",
+    payloadAfterBlobSha256: current.blobSha256,
+    payloadAfterPath: "docs/a.md",
+    payloadBeforeContentKind: current.contentKind,
+    payloadBeforeByteLength: current.byteLength,
+    payloadAfterContentKind: current.contentKind,
+    payloadAfterByteLength: current.byteLength,
+    metadata,
+    author: canonicalAuthor,
+    beforePresent: "present",
+    beforeObjectId: current.objectId,
+    beforeVersionId: "main",
+    beforePath: "docs/a.md",
+    beforeBlobSha256: current.blobSha256,
+    beforeContentKind: current.contentKind,
+    beforeByteLength: current.byteLength,
+    beforeUpdatedAtMs: current.updatedAtMs,
+    beforeLatestMomentId: current.latestMomentId,
+    beforeMetadata: null,
+  };
+  const writeShadow = {
+    conflictId: "conflict-1",
+    conflictEffectIndex: 1,
+    momentId: "moment-write",
+    versionId: "main",
+    objectId: result.objectId,
+    objectCreatedAtMs: 1,
+    path: "docs/b.md",
+    recordedAtMs: 21,
+    operation: "write",
+    payloadBeforeBlobSha256: null,
+    payloadBeforePath: null,
+    payloadAfterBlobSha256: result.blobSha256,
+    payloadAfterPath: "docs/b.md",
+    payloadBeforeContentKind: null,
+    payloadBeforeByteLength: null,
+    payloadAfterContentKind: result.contentKind,
+    payloadAfterByteLength: result.byteLength,
+    metadata,
+    author: canonicalAuthor,
+    beforePresent: "null",
+    beforeObjectId: null,
+    beforeVersionId: null,
+    beforePath: null,
+    beforeBlobSha256: null,
+    beforeContentKind: null,
+    beforeByteLength: null,
+    beforeUpdatedAtMs: null,
+    beforeLatestMomentId: null,
+    beforeMetadata: null,
+  };
+  const shadows = [deleteShadow, writeShadow];
+  const payload = {
+    formatVersion: 1,
+    workspaceId,
+    conflictId: "conflict-1",
+    status: "resolved",
+    chosenFrom: "incoming",
+    resolution: "applied-incoming",
+    targetVersionId: "main",
+    sourceVersionId: "peer",
+    paths: ["docs/a.md", "docs/b.md"],
+    transition: { current, incoming, result },
+    effectContext: {
+      recordedAtMs: 21,
+      metadata,
+      author: {
+        ...canonicalAuthor,
+        agentRunId: null,
+      },
+      currentObjectCreatedAtMs: 1,
+      resultObjectCreatedAtMs: 1,
+    },
+    effects: [
+      {
+        kind: "delete",
+        momentId: "moment-delete",
+        payloadSha256: sha256(stableJsonStringifyForTest(deleteShadow)),
+      },
+      {
+        kind: "write",
+        momentId: "moment-write",
+        payloadSha256: sha256(stableJsonStringifyForTest(writeShadow)),
+      },
+    ],
+    lineageTransition: {
+      predecessorClaimId: "a".repeat(64),
+      predecessorStateVectorSha256: "b".repeat(64),
+      artifactPreimageSha256: shas.current,
+      successor: {
+        lineageClaimId: shas.successor,
+        epochTag: "d".repeat(64),
+        contentKind: "plaintext",
+        resultSha256: shas.result,
+        updateBlobSha256: shas.successor,
+        stateVectorBlobSha256: shas.stateVector,
+      },
+    },
+  };
+  return {
+    payload,
+    shadows,
+    blobs: new Map(
+      Object.values(contents).map((content) => [sha256(content), content]),
+    ),
+  };
+}
+
+function compactNoEffectResolvePayload(): Record<string, unknown> {
+  const payload = structuredClone(
+    compactConflictResolveFixture().payload,
+  ) as Record<string, unknown>;
+  const transition = payload.transition as Record<string, unknown>;
+  transition.result = structuredClone(transition.current);
+  payload.chosenFrom = "current";
+  payload.resolution = "kept-current";
+  payload.effects = [];
+  payload.lineageTransition = null;
+  const context = payload.effectContext as Record<string, unknown>;
+  context.resultObjectCreatedAtMs = context.currentObjectCreatedAtMs;
+  return payload;
+}
+
+function worstValidCanonicalMoment(momentId: string): Record<string, unknown> {
+  const identifier = '"'.repeat(512);
+  const path = `${'"'.repeat(509)}.md`;
+  const blobSha256 = "f".repeat(64);
+  const metadataField = "\0".repeat(16_384);
+  const authorField = "\0".repeat(512);
+  const metadata = {
+    origin: "api",
+    summary: metadataField,
+    correlationId: metadataField,
+  };
+  return {
+    momentId,
+    versionId: identifier,
+    objectId: identifier,
+    objectCreatedAtMs: 1,
+    path,
+    recordedAtMs: 2,
+    operation: "write",
+    payloadBeforeBlobSha256: blobSha256,
+    payloadBeforePath: path,
+    payloadAfterBlobSha256: blobSha256,
+    payloadAfterPath: path,
+    payloadBeforeContentKind: "text",
+    payloadBeforeByteLength: 1,
+    payloadAfterContentKind: "text",
+    payloadAfterByteLength: 1,
+    metadata,
+    author: {
+      kind: "agent",
+      agentId: authorField,
+      onBehalfOf: authorField,
+      agentRunId: authorField,
+    },
+    beforePresent: "present",
+    beforeObjectId: identifier,
+    beforeVersionId: identifier,
+    beforePath: path,
+    beforeBlobSha256: blobSha256,
+    beforeContentKind: "text",
+    beforeByteLength: 1,
+    beforeUpdatedAtMs: 1,
+    beforeLatestMomentId: identifier,
+    beforeMetadata: null,
+  };
 }
 
 async function createWorkspace(h: SyncRelayHandler, userId = "a", workspaceId = "workspace-a") {
@@ -920,6 +1327,351 @@ describe("sync relay handler", () => {
     // to a blob the relay cannot serve.
     const log = await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })));
     expect(log.ops).toEqual([]);
+  });
+
+  it("extracts every compact conflict.resolve v1 side and successor blob root", () => {
+    const fixture = compactConflictResolveFixture();
+    const refs = referencedBlobShas(
+      "conflict.resolve",
+      JSON.stringify(fixture.payload),
+      { workspaceId: "workspace-a", recordedAtMs: 21 },
+    );
+    expect(new Set(refs)).toEqual(new Set(fixture.blobs.keys()));
+  });
+
+  it("accepts an absent-result lineage retirement without a successor", () => {
+    const fixture = compactConflictResolveFixture();
+    const payload = structuredClone(fixture.payload);
+    payload.paths = ["docs/a.md"];
+    const transition = payload.transition as Record<string, unknown>;
+    transition.incoming = { present: false, pathRef: 0 };
+    transition.result = { present: false, pathRef: 0 };
+    const context = payload.effectContext as Record<string, unknown>;
+    context.resultObjectCreatedAtMs = null;
+    payload.effects = [(payload.effects as unknown[])[0]];
+    const lineage = payload.lineageTransition as Record<string, unknown>;
+    lineage.successor = null;
+
+    const refs = referencedBlobShas(
+      "conflict.resolve",
+      JSON.stringify(payload),
+      { workspaceId: "workspace-a", recordedAtMs: 21 },
+    );
+    const current = transition.current as { blobSha256: string };
+    expect(refs).toEqual([current.blobSha256]);
+  });
+
+  it("accepts a text move to a new object while retiring the current lineage", () => {
+    const fixture = compactConflictResolveFixture();
+    const payload = structuredClone(fixture.payload);
+    const transition = payload.transition as {
+      current: { blobSha256: string };
+      result: { objectId: string; blobSha256: string };
+    };
+    transition.result.objectId = "object-new";
+    const context = payload.effectContext as { resultObjectCreatedAtMs: number };
+    context.resultObjectCreatedAtMs = 2;
+    const lineage = payload.lineageTransition as Record<string, unknown>;
+    lineage.successor = null;
+    const writeShadow = structuredClone(fixture.shadows[1]);
+    writeShadow.objectId = "object-new";
+    writeShadow.objectCreatedAtMs = 2;
+    const effects = payload.effects as Array<{ payloadSha256: string }>;
+    effects[1].payloadSha256 = sha256(stableJsonStringifyForTest(writeShadow));
+
+    const refs = referencedBlobShas(
+      "conflict.resolve",
+      JSON.stringify(payload),
+      { workspaceId: "workspace-a", recordedAtMs: 21 },
+    );
+    expect(new Set(refs)).toEqual(
+      new Set([transition.current.blobSha256, transition.result.blobSha256]),
+    );
+  });
+
+  it("rejects a non-digest successor epoch tag", () => {
+    const fixture = compactConflictResolveFixture();
+    const payload = structuredClone(fixture.payload);
+    const lineage = payload.lineageTransition as {
+      successor: { epochTag: string };
+    };
+    lineage.successor.epochTag = "epoch-2";
+    expect(() =>
+      referencedBlobShas("conflict.resolve", JSON.stringify(payload), {
+        workspaceId: "workspace-a",
+        recordedAtMs: 21,
+      }),
+    ).toThrow(/epochTag/u);
+  });
+
+  it("rejects lineage evidence for a different current artifact", () => {
+    const fixture = compactConflictResolveFixture();
+    const payload = structuredClone(fixture.payload);
+    const lineage = payload.lineageTransition as {
+      artifactPreimageSha256: string;
+    };
+    lineage.artifactPreimageSha256 = "c".repeat(64);
+    expect(() =>
+      referencedBlobShas(
+        "conflict.resolve",
+        JSON.stringify(payload),
+        { workspaceId: "workspace-a", recordedAtMs: 21 },
+      ),
+    ).toThrow(/artifactPreimageSha256/u);
+  });
+
+  it("rejects a successor from a binary current artifact", () => {
+    const fixture = compactConflictResolveFixture();
+    const payload = structuredClone(fixture.payload);
+    const transition = payload.transition as {
+      current: { contentKind: string };
+    };
+    transition.current.contentKind = "binary";
+    const deleteShadow = structuredClone(fixture.shadows[0]);
+    deleteShadow.payloadBeforeContentKind = "binary";
+    deleteShadow.payloadAfterContentKind = "binary";
+    deleteShadow.beforeContentKind = "binary";
+    const effects = payload.effects as Array<{ payloadSha256: string }>;
+    effects[0].payloadSha256 = sha256(stableJsonStringifyForTest(deleteShadow));
+
+    expect(() =>
+      referencedBlobShas("conflict.resolve", JSON.stringify(payload), {
+        workspaceId: "workspace-a",
+        recordedAtMs: 21,
+      }),
+    ).toThrow(/same-object text/u);
+  });
+
+  it("rejects malformed UTF-16 in a conflict identifier", () => {
+    const payload = compactNoEffectResolvePayload();
+    payload.conflictId = "conflict-\ud800";
+    expect(() =>
+      referencedBlobShas("conflict.resolve", JSON.stringify(payload), {
+        workspaceId: "workspace-a",
+        recordedAtMs: 21,
+      }),
+    ).toThrow(/well-formed Unicode/u);
+  });
+
+  it("rejects malformed UTF-16 in a path", () => {
+    const payload = compactNoEffectResolvePayload();
+    (payload.paths as string[])[0] = "docs/\udc00.md";
+    expect(() =>
+      referencedBlobShas("conflict.resolve", JSON.stringify(payload), {
+        workspaceId: "workspace-a",
+        recordedAtMs: 21,
+      }),
+    ).toThrow(/well-formed Unicode/u);
+  });
+
+  it("rejects malformed UTF-16 in metadata", () => {
+    const payload = compactNoEffectResolvePayload();
+    const context = payload.effectContext as {
+      metadata: { summary: string | null };
+    };
+    context.metadata.summary = "summary-\ud800";
+    expect(() =>
+      referencedBlobShas("conflict.resolve", JSON.stringify(payload), {
+        workspaceId: "workspace-a",
+        recordedAtMs: 21,
+      }),
+    ).toThrow(/well-formed Unicode/u);
+  });
+
+  it("rejects malformed UTF-16 in an author field", () => {
+    const payload = compactNoEffectResolvePayload();
+    const context = payload.effectContext as {
+      author: { agentId: string };
+    };
+    context.author.agentId = "agent-\udc00";
+    expect(() =>
+      referencedBlobShas("conflict.resolve", JSON.stringify(payload), {
+        workspaceId: "workspace-a",
+        recordedAtMs: 21,
+      }),
+    ).toThrow(/well-formed Unicode/u);
+  });
+
+  it("pins the canonical JSON hashes for compact conflict moment shadows", () => {
+    const fixture = compactConflictResolveFixture();
+    expect(
+      (fixture.payload.effects as Array<{ payloadSha256: string }>).map(
+        (effect) => effect.payloadSha256,
+      ),
+    ).toEqual([
+      "8b196309f6d6a69295119febd37fa5d090b09df28d4faff97a238735729ddcd8",
+      "a605f5800e5591dd9700a75790bebf15de053df6158ec2433258e479ac034ab0",
+    ]);
+  });
+
+  it("proves that two worst-valid canonical moment effects cannot fit the relay payload cap", () => {
+    const first = worstValidCanonicalMoment('"'.repeat(512));
+    const second = worstValidCanonicalMoment(`\\${'"'.repeat(511)}`);
+    expect(Buffer.byteLength(JSON.stringify(first), "utf8")).toBe(216_935);
+    expect(Buffer.byteLength(JSON.stringify(second), "utf8")).toBe(216_935);
+    const payload = structuredClone(conflictResolveFixture().payload);
+    payload.effects = [
+      { opKind: "moment.append", payload: first },
+      { opKind: "moment.append", payload: second },
+    ];
+    const observedBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+    expect(observedBytes).toBe(435_942);
+    expect(observedBytes).toBeGreaterThan(MAX_PAYLOAD_JSON_BYTES);
+  });
+
+  it("rejects malformed conflict.resolve v1 bundles without advancing the origin", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const fixture = compactConflictResolveFixture();
+    const changed = (mutate: (payload: Record<string, unknown>) => void) => {
+      const payload = structuredClone(fixture.payload);
+      mutate(payload);
+      return payload;
+    };
+    const invalidPayloads = [
+      changed((payload) => {
+        payload.formatVersion = 2;
+      }),
+      changed((payload) => {
+        (payload.effects as unknown[]).reverse();
+      }),
+      changed((payload) => {
+        const lineage = payload.lineageTransition as {
+          successor: { lineageClaimId: string };
+        };
+        lineage.successor.lineageClaimId = "d".repeat(64);
+      }),
+      changed((payload) => {
+        const transition = payload.transition as {
+          result: { blobSha256: string };
+        };
+        transition.result.blobSha256 = "not-a-sha";
+      }),
+      changed((payload) => {
+        (payload.paths as string[])[1] = "docs/../private.md";
+      }),
+      changed((payload) => {
+        const effects = payload.effects as Array<{ payloadSha256: string }>;
+        effects[1].payloadSha256 = "e".repeat(64);
+      }),
+      changed((payload) => {
+        payload.workspaceId = "another-workspace";
+      }),
+    ];
+
+    for (const payload of invalidPayloads) {
+      const response = await h(
+        request(
+          "a",
+          "/sync/workspace-a/log",
+          jsonBody({
+            originId: "conflict-origin",
+            ops: [
+              {
+                originSeq: 0,
+                opKind: "conflict.resolve",
+                payload,
+                recordedAtMs: 21,
+              },
+            ],
+          }),
+        ),
+      );
+      expect(response.status).toBe(400);
+      expect(await json(response)).toMatchObject({ ok: false, code: "bad_request" });
+    }
+
+    const log = await json(
+      await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })),
+    );
+    expect(log.ops).toEqual([]);
+  });
+
+  it("requires nested conflict.resolve blobs atomically and preserves effect order and payload", async () => {
+    const storage = await testStorage({ blobGraceMs: 0 });
+    const h = handler(storage);
+    await createWorkspace(h);
+    const fixture = compactConflictResolveFixture();
+    const missingSha = sha256("successor state vector");
+    const orphan = "unreferenced conflict bundle blob";
+    const orphanSha = sha256(orphan);
+    for (const [sha, content] of fixture.blobs) {
+      if (sha === missingSha) continue;
+      const put = await h(
+        request("a", `/sync/workspace-a/blobs/${sha}`, { method: "PUT", body: content }),
+      );
+      expect(put.status).toBe(200);
+    }
+    expect(
+      (
+        await h(
+          request("a", `/sync/workspace-a/blobs/${orphanSha}`, {
+            method: "PUT",
+            body: orphan,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    const append = () =>
+      h(
+        request(
+          "a",
+          "/sync/workspace-a/log",
+          jsonBody({
+            originId: "conflict-origin",
+            ops: [
+              {
+                originSeq: 0,
+                opKind: "conflict.resolve",
+                payload: fixture.payload,
+                recordedAtMs: 21,
+              },
+            ],
+          }),
+        ),
+      );
+
+    const rejected = await append();
+    expect(rejected.status).toBe(422);
+    expect(await json(rejected)).toMatchObject({ ok: false, code: "blob_missing" });
+    const empty = await json(
+      await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })),
+    );
+    expect(empty.ops).toEqual([]);
+
+    const missingContent = fixture.blobs.get(missingSha);
+    expect(missingContent).toBeDefined();
+    const putMissing = await h(
+      request("a", `/sync/workspace-a/blobs/${missingSha}`, {
+        method: "PUT",
+        body: missingContent,
+      }),
+    );
+    expect(putMissing.status).toBe(200);
+    expect((await append()).status).toBe(200);
+
+    const page = await json(
+      await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })),
+    );
+    const ops = page.ops as Array<{ payload: Record<string, unknown> }>;
+    expect(ops).toHaveLength(1);
+    expect(ops[0].payload).toEqual(fixture.payload);
+    expect(
+      (ops[0].payload.effects as Array<{ momentId: string }>).map(
+        (effect) => effect.momentId,
+      ),
+    ).toEqual(["moment-delete", "moment-write"]);
+
+    const gc = await json(
+      await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })),
+    );
+    expect(gc).toEqual({ ok: true, removed: 1, removedSha256s: [orphanSha] });
+    for (const sha of fixture.blobs.keys()) {
+      expect(
+        (await h(request("a", `/sync/workspace-a/blobs/${sha}`, { method: "GET" }))).status,
+      ).toBe(200);
+    }
   });
 
   it("rejects an append for a blob GC'd after upload, then accepts it once re-uploaded (closes the grace-window hole)", async () => {

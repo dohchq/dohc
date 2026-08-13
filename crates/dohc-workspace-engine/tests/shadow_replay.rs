@@ -107,24 +107,38 @@ async fn clone_marked_shadow_replay_composes_real_domains_end_to_end() {
 
     let doc = Ydoc::wire();
     let update = doc.plaintext_insert(0, "benign");
-    transport
+    let opened = transport
         .call(
             RequestContext::unbounded(),
             request(
                 4,
-                "ydoc.apply",
+                "ydoc.open",
                 Some(handle.clone()),
                 json!({
                     "versionId": "main",
-                    "objectId": "object-1",
-                    "contentKind": "plaintext",
-                    "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
-                    "nowMs": 101
+                    "path": "notes/hello.md",
+                    "contentKind": "plaintext"
                 }),
             ),
         )
         .await
-        .expect("ydoc apply");
+        .expect("ydoc open");
+    let session_id = opened.result["sessionId"].as_str().expect("session id");
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                40,
+                "ydoc.recordUpdate",
+                Some(handle.clone()),
+                json!({
+                    "sessionId": session_id,
+                    "updateBase64": base64::engine::general_purpose::STANDARD.encode(update)
+                }),
+            ),
+        )
+        .await
+        .expect("record Y.Doc update");
 
     let conflicts = transport
         .call(
@@ -290,136 +304,6 @@ async fn local_conflict_open_rejects_snapshot_hash_mismatch_without_persistence(
         })
         .expect("row counts");
     assert_eq!(counts, (0, 0));
-}
-
-#[tokio::test]
-async fn first_parity_rejected_ydoc_apply_is_atomic_and_valid_retry_creates_lineage() {
-    let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let handle = open_shadow(&transport, &scratch, 1).await;
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                2,
-                "versionedText.write",
-                Some(handle.clone()),
-                json!({
-                    "versionId": "main",
-                    "objectId": "object-parity",
-                    "path": "parity.md",
-                    "text": "seed",
-                    "momentId": "moment-parity",
-                    "metadataOrigin": "api",
-                    "nowMs": 100
-                }),
-            ),
-        )
-        .await
-        .expect("seed parent object");
-    let base = base64::engine::general_purpose::STANDARD
-        .decode("AQH07uzvDQAEAQlwbGFpblRleHQE8J+YgAA=")
-        .expect("surrogate base");
-    let bypass = base64::engine::general_purpose::STANDARD
-        .decode("AQH07uzvDQLE9O7s7w0A9O7s7w0BAVgA")
-        .expect("surrogate bypass");
-    let parity_rejected =
-        yrs::merge_updates_v1([base.as_slice(), bypass.as_slice()]).expect("merge parity probe");
-    let error = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                3,
-                "ydoc.apply",
-                Some(handle.clone()),
-                json!({
-                    "versionId": "main",
-                    "objectId": "object-parity",
-                    "contentKind": "plaintext",
-                    "updateBase64": base64::engine::general_purpose::STANDARD.encode(parity_rejected),
-                    "nowMs": 101
-                }),
-            ),
-        )
-        .await
-        .expect_err("parity probe must fail");
-    assert_eq!(error.code, ErrorCode::InvalidParams);
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(4, "workspace.close", Some(handle), json!({})),
-        )
-        .await
-        .expect("close after rejected apply");
-
-    let db_path = scratch.engine_db_path().expect("db path");
-    {
-        let store = EngineStore::open(&db_path, 102).expect("inspect rejected apply");
-        let counts = store
-            .read_with(|conn| {
-                Ok::<_, rusqlite::Error>((
-                    conn.query_row("SELECT COUNT(*) FROM ydoc_docs", [], |row| {
-                        row.get::<_, i64>(0)
-                    })?,
-                    conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| {
-                        row.get::<_, i64>(0)
-                    })?,
-                    conn.query_row("SELECT COUNT(*) FROM binary_blobs", [], |row| {
-                        row.get::<_, i64>(0)
-                    })?,
-                ))
-            })
-            .expect("rejected row counts");
-        assert_eq!(counts, (0, 0, 0));
-    }
-
-    let retried_handle = open_shadow(&transport, &scratch, 5).await;
-    let valid_doc = Ydoc::wire();
-    let valid_update = valid_doc.plaintext_insert(0, "valid");
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                6,
-                "ydoc.apply",
-                Some(retried_handle.clone()),
-                json!({
-                    "versionId": "main",
-                    "objectId": "object-parity",
-                    "contentKind": "plaintext",
-                    "updateBase64": base64::engine::general_purpose::STANDARD.encode(valid_update),
-                    "nowMs": 103
-                }),
-            ),
-        )
-        .await
-        .expect("valid apply after rejected first apply");
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(7, "workspace.close", Some(retried_handle), json!({})),
-        )
-        .await
-        .expect("close after valid apply");
-
-    let store = EngineStore::open(&db_path, 104).expect("inspect valid apply");
-    let counts = store
-        .read_with(|conn| {
-            Ok::<_, rusqlite::Error>((
-                conn.query_row("SELECT COUNT(*) FROM ydoc_docs", [], |row| {
-                    row.get::<_, i64>(0)
-                })?,
-                conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| {
-                    row.get::<_, i64>(0)
-                })?,
-                conn.query_row("SELECT COUNT(*) FROM binary_blobs", [], |row| {
-                    row.get::<_, i64>(0)
-                })?,
-            ))
-        })
-        .expect("valid row counts");
-    assert_eq!(counts, (1, 1, 1));
 }
 
 #[tokio::test]

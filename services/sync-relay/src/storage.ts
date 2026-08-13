@@ -3,6 +3,10 @@ import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import {
+  conflictResolveBlobShas,
+  type ConflictResolveEnvelopeContext,
+} from "./conflictResolve";
 import { RELAY_ERRORS } from "./errorCodes";
 
 export interface SyncRelayLogInput {
@@ -1219,7 +1223,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       // client resolves by re-uploading and re-posting.
       const referencedShas = new Set<string>();
       for (const op of newOps) {
-        for (const sha of referencedBlobShas(op.opKind, op.payloadJson)) {
+        for (const sha of referencedBlobShas(op.opKind, op.payloadJson, {
+          workspaceId: input.workspaceId,
+          recordedAtMs: op.recordedAtMs,
+        })) {
           referencedShas.add(sha);
         }
       }
@@ -1589,12 +1596,23 @@ function asObject(value: unknown): Record<string, unknown> | null {
 //   - version.create:     every forkSnapshot blob sha (both content kinds).
 //   - secret.file.put:    the ciphertext blob sha.
 //   - secret.version.fork: every row's ciphertext blob sha.
+// conflict.resolve formatVersion 1 is the narrow exception to opaque payload
+// handling: its compact state transition is parsed strictly so every required
+// side and successor blob is pinned before the atomic append. A malformed
+// compound payload throws a classified 400 instead of yielding no roots.
 // All other kinds (workspace.init, secret.file.delete, chat.*, reserved
 // version.rename/chat.thread.update, and any unknown/opaque kind) reference no
 // uploaded blobs. Fully defensive: a malformed payload shape yields no refs
 // for that branch rather than throwing (the store's apply-time validation is
 // the fail-closed backstop for shape).
-export function referencedBlobShas(opKind: string, payloadJson: string): string[] {
+export function referencedBlobShas(
+  opKind: string,
+  payloadJson: string,
+  context: ConflictResolveEnvelopeContext,
+): string[] {
+  if (opKind === "conflict.resolve") {
+    return conflictResolveBlobShas(payloadJson, context);
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(payloadJson);

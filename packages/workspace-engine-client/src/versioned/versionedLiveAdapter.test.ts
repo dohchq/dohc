@@ -454,8 +454,7 @@ describe("VersionedLiveAdapter", () => {
   });
 
   it("reads no bodies for a metadata-only conflict listing", async () => {
-    // `listOpenConflictIds` drains every page to collect ids. Hydrating for it
-    // fetches every body of every open conflict and keeps none of them.
+    // A metadata-only conflict listing must not fetch bodies it will not use.
     // MUTATION: drop the `bodies: "withheld"` early return and this listing
     // issues a blob read.
     const withheld: ConflictRecord = {

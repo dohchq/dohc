@@ -75,12 +75,12 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 ///
 /// The window: a freshly enrolled workspace answers `false` until its first
 /// push or pull commits, so an edit inside that window does not originate.
-/// Nothing here retries, and #548 owns the retrigger. It costs at most one
-/// edit — origination is asked again on the next append, the base is a full
-/// state that carries everything typed inside the window, and a local-only
-/// close refuses until the markdown artifact is durable (`close_session` raises
-/// `UnsettledClose`), so a reopened document seeds from that markdown and
-/// originates then.
+/// The deferred drain, non-leased apply path, and enrolment backfill now retry
+/// the origination (#548). Before that retrigger, the window cost at most one
+/// edit: the next append asked again, the base carried the complete state, and
+/// a local-only close refused until the Markdown artifact was durable
+/// (`close_session` raises `UnsettledClose`), so reopening seeded from that
+/// Markdown and originated then.
 ///
 /// The latch: nothing deletes a position row, so this keeps answering `true`
 /// after the user signs out or unbinds the workspace. #558 owns that. Both come
@@ -103,8 +103,8 @@ pub fn workspace_replicates_with_relay_in_tx(
 /// Transaction-composable local journal append for callers that must commit
 /// an op in the SAME transaction as a domain mutation (the live-session
 /// `ydoc.update` delta: blob-before-log holds because the CRDT append stored
-/// the blob earlier in this transaction). Requires an EXISTING sync identity —
-/// a replicated, base-claimed lineage cannot exist without one.
+/// the blob earlier in this transaction). This requires an existing sync
+/// identity. An exact replicated lineage cannot exist without one.
 pub fn journal_local_op_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -112,20 +112,24 @@ pub fn journal_local_op_in_tx(
     payload: &serde_json::Value,
     now_ms: i64,
 ) -> Result<i64, SyncError> {
-    bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
-    if op_kind.is_empty() || op_kind.len() > crate::model::MAX_OP_KIND_BYTES {
-        return Err(SyncError::InvalidInput {
-            reason: "op_kind must be non-empty and bounded",
-        });
-    }
     let payload_json = serde_json::to_string(payload).map_err(|_| SyncError::InvalidInput {
         reason: "payload is not valid JSON",
     })?;
-    if payload_json.len() > crate::MAX_PAYLOAD_JSON_BYTES {
-        return Err(SyncError::InvalidInput {
-            reason: "payload exceeds the relay limit",
-        });
-    }
+    journal_local_payload_json_in_tx(tx, workspace_id, op_kind, &payload_json, now_ms)
+}
+
+/// Append an already serialized payload without changing its bytes.
+///
+/// Pending conflict bundles use this path because their canonical shadow
+/// payloads must match the later top-level envelopes exactly.
+pub(crate) fn journal_local_payload_json_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    op_kind: &str,
+    payload_json: &str,
+    now_ms: i64,
+) -> Result<i64, SyncError> {
+    validate_local_payload_json(workspace_id, op_kind, payload_json)?;
     let origin_id: String = tx
         .query_row(
             "SELECT origin_id FROM sync_identity WHERE workspace_id = ?1",
@@ -156,6 +160,35 @@ pub fn journal_local_op_in_tx(
     )
     .map_err(SyncError::persist)?;
     Ok(origin_seq)
+}
+
+pub(crate) fn validate_local_payload_json(
+    workspace_id: &str,
+    op_kind: &str,
+    payload_json: &str,
+) -> Result<(), SyncError> {
+    bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
+    if op_kind.is_empty() || op_kind.len() > crate::model::MAX_OP_KIND_BYTES {
+        return Err(SyncError::InvalidInput {
+            reason: "op_kind must be non-empty and bounded",
+        });
+    }
+    let payload = serde_json::from_str::<serde_json::Value>(payload_json).map_err(|_| {
+        SyncError::InvalidInput {
+            reason: "payload is not valid JSON",
+        }
+    })?;
+    if !payload.is_object() {
+        return Err(SyncError::InvalidInput {
+            reason: "payload must be a JSON object",
+        });
+    }
+    if payload_json.len() > crate::MAX_PAYLOAD_JSON_BYTES {
+        return Err(SyncError::InvalidInput {
+            reason: "payload exceeds the relay limit",
+        });
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -326,6 +359,8 @@ pub fn adopt_join_identity(
                    EXISTS(SELECT 1 FROM shared_channel_push_state WHERE workspace_id = ?1) OR \
                    EXISTS(SELECT 1 FROM share_view_cursors WHERE workspace_id = ?1) OR \
                    EXISTS(SELECT 1 FROM chat_pending_replication WHERE workspace_id = ?1) OR \
+                   EXISTS(SELECT 1 FROM replication_pending_conflict_bundles \
+                     WHERE workspace_id = ?1) OR \
                    EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id = ?1)",
                 [workspace_id],
                 |row| row.get(0),

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
+import { stableJsonStringify } from "./canonicalJson";
 import {
   PresenceCapacityError,
   PresenceHub,
@@ -27,6 +28,9 @@ import {
   type SyncRelayStorage,
 } from "./storage";
 import { RELAY_ERRORS, type RelayErrorCode, type RelayErrorDefinition } from "./errorCodes";
+import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
+
+export { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
 export type SyncRelayHandler = (request: Request) => Promise<Response>;
 
@@ -82,7 +86,6 @@ type SyncRelayRoute =
 export const MAX_BLOB_BYTES = 20 * 1024 * 1024;
 export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 export const MAX_OPS_PER_REQUEST = 500;
-export const MAX_PAYLOAD_JSON_BYTES = 256 * 1024;
 export const DEFAULT_LOG_PAGE_SIZE = 100;
 export const MAX_LOG_PAGE_SIZE = 500;
 // Presence (ephemeral awareness) transport limits.
@@ -1212,18 +1215,6 @@ export function assertChatAuthorship(
       throw authorshipMismatch();
     }
   }
-}
-
-function stableJsonStringify(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJsonStringify).join(",")}]`;
-  if (value && typeof value === "object") {
-    const object = value as Record<string, unknown>;
-    return `{${Object.keys(object)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableJsonStringify(object[key])}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value);
 }
 
 function parseCursor(value: string | null): number {

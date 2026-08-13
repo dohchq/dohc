@@ -1,22 +1,62 @@
 import { z } from "zod";
+import type { WorkspaceSettings as ContractWorkspaceSettings } from "@dohc/workspace-contracts/workspace-settings";
 import {
   ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
-  DEFAULT_WORKSPACE_SETTINGS,
-  WorkspaceSettings,
-} from "@dohc/workspace-contracts/workspace-settings";
+  ATTACHMENT_LOCATIONS,
+  DEFAULT_DRIVER_ID_MAX_LENGTH,
+  DEFAULT_MODEL_MAX_LENGTH,
+  WORKSPACE_PREVIEW_MODES,
+  WORKSPACE_SETTINGS_DEFAULTS,
+} from "@dohc/workspace-contracts/workspace-settings-values";
 import {
   SETTINGS_READ_SOURCES,
   settingsDeepEqual,
 } from "../settings/userSettings";
 
-// The settings-file schema is a two-process contract (desktop + MCP), so it
-// lives in @dohc/workspace-contracts. Re-exported here because every desktop
-// reader already imports it from this module.
+// Preload and renderer keep zod at their existing IPC boundary. The main-only
+// settings file reader validates the on-disk contract with Effect Schema.
 export {
   ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
-  DEFAULT_WORKSPACE_SETTINGS,
-  WorkspaceSettings,
 };
+
+export const DEFAULT_WORKSPACE_SETTINGS: ContractWorkspaceSettings = WORKSPACE_SETTINGS_DEFAULTS;
+
+export const WorkspaceSettings = z
+  .object({
+    version: z.literal(1),
+    agents: z
+      .object({
+        mcpAutoStart: z.boolean(),
+        defaultDriverId: z.string().min(1).max(DEFAULT_DRIVER_ID_MAX_LENGTH).nullable(),
+        defaultModel: z.string().min(1).max(DEFAULT_MODEL_MAX_LENGTH).nullable(),
+      })
+      .strict(),
+    sites: z
+      .object({
+        defaultPreviewMode: z.enum(WORKSPACE_PREVIEW_MODES),
+      })
+      .strict(),
+    privacy: z
+      .object({
+        confirmExternalLinks: z.boolean(),
+      })
+      .strict(),
+    experimental: z
+      .object({
+        workspaceEngineAlpha: z.boolean(),
+      })
+      .strict()
+      .default(WORKSPACE_SETTINGS_DEFAULTS.experimental),
+    files: z
+      .object({
+        attachmentLocation: z.enum(ATTACHMENT_LOCATIONS),
+        attachmentFolderName: z.string().max(ATTACHMENT_FOLDER_NAME_MAX_LENGTH),
+      })
+      .strict()
+      .default(WORKSPACE_SETTINGS_DEFAULTS.files),
+  })
+  .strict() satisfies z.ZodType<ContractWorkspaceSettings>;
+export type WorkspaceSettings = z.infer<typeof WorkspaceSettings>;
 
 export const WorkspaceSettingsResult = z.object({
   settings: WorkspaceSettings,

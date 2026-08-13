@@ -90,9 +90,6 @@ export function NoticeCenter(props: {
   // Opens the conflict review dialog (0P-C): the notice's "Review" action
   // lands the user directly on the side-by-side choices.
   onOpenConflicts: () => void;
-  // Dismisses the sync-review notice (0P-C gate fix): clears the engine's
-  // pending remote-resolve set after the user has taken their look.
-  onDismissSyncReview?: () => void;
   // Agent -> user notifications (finished / needs-input / asked / error).
   // Informational ledger entries: the History rail shows what the run did,
   // and a blocked run raises its own permission card. Dismiss acknowledges.
@@ -246,21 +243,12 @@ export function NoticeCenter(props: {
       });
     }
 
-    // 0P-C honest minimum for cross-machine conflict resolution: another
-    // machine resolved a conflict that no longer matches this workspace's
-    // state (the file moved on here first). Nothing was changed silently —
-    // point the user at History for the affected files.
-    if ((props.syncStatus?.unmatchedRemoteResolves ?? 0) > 0) {
+    for (const declined of props.syncStatus?.sharingDeclined ?? []) {
       next.push({
-        id: "sync-review",
+        id: `sharing-declined-${declined.path}`,
         tone: "warning",
-        title: "A choice made on another machine needs a look",
-        body: "Another machine chose what to keep for a file that has changed here since. Your local copy stays as it is — check History if something looks off.",
-        action: { label: "Open History", onClick: props.onOpenHistory },
-        // Live state, not a forever-notice: it clears by itself when the
-        // affected conflict resolves, and the X lets the user acknowledge a
-        // resolve that matched nothing local.
-        ...(props.onDismissSyncReview ? { onDismiss: props.onDismissSyncReview } : {}),
+        title: "File is too large to sync",
+        body: `Your edit is saved on this machine. "${declined.path}" uses ${declined.observedBytes.toLocaleString("en-US")} bytes after encoding. Sync allows ${declined.limitBytes.toLocaleString("en-US")} bytes. Reduce the file to sync it.`,
         Icon: AlertTriangle,
       });
     }
@@ -379,7 +367,6 @@ export function NoticeCenter(props: {
     props.onOpenConflicts,
     props.onOpenHistory,
     props.onOpenSettings,
-    props.onDismissSyncReview,
     props.syncStatus,
     installPending,
     installUpdate,

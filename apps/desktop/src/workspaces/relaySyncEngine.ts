@@ -1,10 +1,10 @@
 import {
   RelayOriginDivergedError,
   RelayUnauthorizedError,
-  type PendingConflictResolve,
   type PullWorkspaceFromRelayResult,
   type PushWorkspaceToRelayResult,
   type RecoverRelayOriginResult,
+  type SharingDeclined,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
@@ -32,14 +32,6 @@ export interface CloudSyncEngineOptions {
   // user resolved everything. Absent (tests/legacy), conflictsOpened
   // accumulates as before.
   countOpenConflicts?: () => Promise<number>;
-  // The ids of the conflicts currently OPEN in the engine store, re-read
-  // after each successful pass. Preferred over countOpenConflicts when both
-  // are provided: beyond the count, the ids drive the pending remote-resolve
-  // lifecycle — a peer resolution that matched a local conflict but could
-  // not be applied clears from the "needs a look" set the moment that
-  // conflict is no longer open (resolved locally or converged by a later
-  // pull).
-  listOpenConflictIds?: () => Promise<string[]>;
   // Join bootstrap (0P-C gate fix): this engine belongs to a freshly JOINED
   // workspace, so it must never append ops to the relay before its first
   // successful pull — pushing first could seed local boilerplate into the
@@ -75,12 +67,8 @@ export interface CloudSyncSnapshot {
   lastSyncedAtMs: number | null;
   pendingChangeCount: number;
   conflictCount: number;
-  // Conflict resolutions replicated from another machine that matched no
-  // local conflict (neither by id nor by mirrored heads — the file moved on
-  // here before the resolution arrived). Honest minimum for 0P-C: counted
-  // and surfaced so the user knows to review, never silently swallowed.
-  unmatchedRemoteResolves: number;
   authExpired: boolean;
+  sharingDeclined: SharingDeclined[];
   syncFailing?: boolean;
 }
 
@@ -88,10 +76,6 @@ export interface CloudSyncEngine {
   start(): Promise<void>;
   queueSync(): void;
   snapshot(): CloudSyncSnapshot;
-  // Explicit user dismissal of the "a choice made on another machine needs
-  // a look" notice: clears the pending remote-resolve set (the only release
-  // valve for resolves that matched no local conflict at all).
-  dismissUnmatchedResolves(): void;
   stop(): Promise<void>;
 }
 
@@ -107,15 +91,11 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let lastSyncedAtMs: number | null = null;
   let pendingChangeCount = 0;
   let conflictCount = 0;
-  // Pending peer resolutions keyed by the PEER's conflict id: a live set,
-  // not a monotone counter. Entries dedupe re-reported ops across passes and
-  // clear on (a) local resolution of the matched conflict, (b) explicit
-  // notice dismissal, (c) a later pass converging the matched conflict.
-  const pendingRemoteResolves = new Map<string, PendingConflictResolve>();
   // True until the first successful pull of a join-bootstrap engine.
   let bootstrapPullPending = options.joinBootstrap === true;
   let authExpired = false;
   let syncFailing = false;
+  let sharingDeclined: SharingDeclined[] = [];
   let stopped = false;
   let consecutiveFailures = 0;
   let nextBackoffMs = initialBackoffMs;
@@ -171,12 +151,13 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   async function doPass(): Promise<void> {
     const beforePending = pendingChangeCount;
     const bootstrapPass = bootstrapPullPending;
+    const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
     const pullResult = await options.capture.runRelaySync(async () => {
       // A join-bootstrap engine is pull-only until its first pull succeeds:
       // a fresh join must never append ops before it has the remote state.
       if (!bootstrapPass) {
         try {
-          await operations.push();
+          passSharingDeclined.push(...(await operations.push()).sharingDeclined);
         } catch (error) {
           if (!(error instanceof RelayOriginDivergedError)) throw error;
           // The local engine.db was restored-from-older or cloned, so its
@@ -184,7 +165,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
           // onto a fresh origin — preserving local-only work as conflicts where
           // it clashes, never dropping it — then push under the fresh origin.
           await operations.recoverOrigin();
-          await operations.push();
+          passSharingDeclined.push(...(await operations.push()).sharingDeclined);
         }
       }
       try {
@@ -195,7 +176,9 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         // own relay echo. Re-baseline that origin, preserve its local suffix,
         // and retry the pass instead of backing off against the same page.
         await operations.recoverOrigin();
-        if (!bootstrapPass) await operations.push();
+        if (!bootstrapPass) {
+          passSharingDeclined.push(...(await operations.push()).sharingDeclined);
+        }
         return operations.pull();
       }
     });
@@ -230,27 +213,18 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         console.error(`[desktop] shared channel sync failed for ${options.rootDir}:`, error);
       }
     }
-    for (const pending of pullResult.pendingResolves ?? []) {
-      pendingRemoteResolves.set(pending.remoteConflictId, pending);
+    passSharingDeclined.push(...(pullResult.sharingDeclined ?? []));
+    const declinedByPath = new Map<string, SharingDeclined>();
+    for (const declined of passSharingDeclined) {
+      declinedByPath.set(declined.path, declined);
     }
-    // Prefer the engine's open-conflict truth over accumulation: a pass that
-    // pulled a peer's resolution (or ran after a local one) must DROP the
-    // count, not only ever raise it. The same truth lifecycles the pending
-    // remote-resolve set: once a matched conflict is no longer open, the
-    // peer's resolution no longer "needs a look".
-    if (options.listOpenConflictIds) {
-      const openIds = new Set(await options.listOpenConflictIds());
-      for (const [key, pending] of pendingRemoteResolves) {
-        if (pending.localConflictId !== null && !openIds.has(pending.localConflictId)) {
-          pendingRemoteResolves.delete(key);
-        }
-      }
-      conflictCount = openIds.size;
-    } else {
-      conflictCount = options.countOpenConflicts
-        ? await options.countOpenConflicts()
-        : conflictCount + pullResult.conflictsOpened;
-    }
+    const nextSharingDeclined = [...declinedByPath.values()].sort((a, b) =>
+      a.path.localeCompare(b.path),
+    );
+    conflictCount = options.countOpenConflicts
+      ? await options.countOpenConflicts()
+      : conflictCount + pullResult.conflictsOpened;
+    sharingDeclined = nextSharingDeclined;
     pendingChangeCount = Math.max(0, pendingChangeCount - beforePending);
     lastSyncedAtMs = nowMs();
     consecutiveFailures = 0;
@@ -311,16 +285,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         lastSyncedAtMs,
         pendingChangeCount,
         conflictCount,
-        unmatchedRemoteResolves: pendingRemoteResolves.size,
         authExpired,
+        sharingDeclined: sharingDeclined.map((declined) => ({ ...declined })),
         ...(syncFailing ? { syncFailing: true } : {}),
       };
-    },
-
-    dismissUnmatchedResolves() {
-      if (pendingRemoteResolves.size === 0) return;
-      pendingRemoteResolves.clear();
-      options.onChange();
     },
 
     async stop() {

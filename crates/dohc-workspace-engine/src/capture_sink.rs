@@ -1,5 +1,6 @@
 //! Dormant files-reconcile adapter for the actor-owned capture primitives.
 
+use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_crypto::{SecretDataKey, create_key_file, load_key_file};
 use dohc_engine_domain::DomainError;
 use dohc_engine_files::media::is_text_media_type;
@@ -207,6 +208,7 @@ impl dohc_engine_runtime::SelfWriteRecorder for SelfWriteSuppression {
 /// the one-policy-snapshot-per-task rule in the TS capture path.
 pub struct StoreCaptureSink {
     actor: ActorHandle,
+    leases: LeaseRegistry,
     workspace_id: String,
     version_id: String,
     shadow_root: PathBuf,
@@ -244,7 +246,8 @@ enum PolicyState {
 }
 
 impl StoreCaptureSink {
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         actor: ActorHandle,
         workspace_id: impl Into<String>,
         version_id: impl Into<String>,
@@ -259,6 +262,7 @@ impl StoreCaptureSink {
             shadow_root,
             now_ms,
             author_json,
+            LeaseRegistry::new(),
             SelfWriteSuppression::default(),
             CaptureProvenance::default(),
         )
@@ -272,6 +276,7 @@ impl StoreCaptureSink {
         shadow_root: impl Into<PathBuf>,
         now_ms: i64,
         author_json: Option<String>,
+        leases: LeaseRegistry,
         self_writes: SelfWriteSuppression,
         provenance: CaptureProvenance,
     ) -> Self {
@@ -292,6 +297,7 @@ impl StoreCaptureSink {
         };
         StoreCaptureSink {
             actor,
+            leases,
             workspace_id: workspace_id.into(),
             version_id: version_id.into(),
             shadow_root,
@@ -458,6 +464,7 @@ impl StoreCaptureSink {
                 claim_foreign_head,
             },
             self.shadow_root.clone(),
+            self.leases.clone(),
             Arc::new(NoFaults),
         ) {
             Ok(_) => Ok(DomainIngest::Persisted),
@@ -498,6 +505,7 @@ impl StoreCaptureSink {
                 request_id: None,
                 claim_foreign_head,
             },
+            self.leases.clone(),
             Arc::new(NoFaults),
         ) {
             Ok(_) => Ok(DomainIngest::Persisted),
@@ -674,6 +682,7 @@ impl StoreCaptureSink {
                 only_if_capture_origin: true,
                 allow_ydoc_origin,
             },
+            self.leases.clone(),
             Arc::new(NoFaults),
         ) {
             Ok(_) => Ok(()),
@@ -1282,6 +1291,7 @@ mod tests {
             scratch.path(),
             10,
             None,
+            LeaseRegistry::new(),
             SelfWriteSuppression::default(),
             CaptureProvenance {
                 summary: Some("Reconciled offline edits".to_owned()),
@@ -2052,6 +2062,7 @@ mod tests {
             scratch.path(),
             4,
             None,
+            LeaseRegistry::new(),
             self_writes,
             CaptureProvenance::default(),
         );

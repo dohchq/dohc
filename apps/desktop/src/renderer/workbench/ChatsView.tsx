@@ -58,7 +58,7 @@ import {
 import { MentionComposer } from "./MentionComposer";
 import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
-import { agentDisplayLabel } from "@dohc/workspace-contracts/chat-identity";
+import { agentDisplayLabel } from "@dohc/workspace-contracts/chat-identity-values";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
 import type {
