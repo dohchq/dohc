@@ -229,11 +229,81 @@ export function stableJson(value: unknown): string {
   throw new SceneCodecError("Scene data must contain only JSON values.");
 }
 
+// Keep both portable files and collaborative revisions within the input
+// assumptions of the pinned Excalidraw restore implementation.
+export function assertRestorableElement(
+  input: unknown,
+): asserts input is JsonObject {
+  if (
+    !isObject(input) ||
+    typeof input.type !== "string" ||
+    input.type.length === 0
+  ) {
+    throw new SceneCodecError("The drawing has an invalid element.");
+  }
+  if (!validFractionalIndex(input.index)) {
+    throw new SceneCodecError("The drawing has an invalid element order.");
+  }
+  if (
+    input.link !== undefined &&
+    input.link !== null &&
+    typeof input.link !== "string"
+  ) {
+    throw new SceneCodecError("The drawing has an invalid element link.");
+  }
+  if (input.type === "text") {
+    if ("font" in input && typeof input.font !== "string") {
+      throw new SceneCodecError("The drawing has an invalid text font.");
+    }
+    if (input.text !== undefined && typeof input.text !== "string") {
+      throw new SceneCodecError("The drawing has invalid text content.");
+    }
+  }
+  if (
+    input.boundElementIds !== undefined &&
+    input.boundElementIds !== null &&
+    !Array.isArray(input.boundElementIds)
+  ) {
+    throw new SceneCodecError(
+      "The drawing has invalid legacy element bindings.",
+    );
+  }
+  if (input.boundElements !== undefined && input.boundElements !== null) {
+    if (
+      !Array.isArray(input.boundElements) ||
+      input.boundElements.some(
+        (binding) => !isObject(binding) || typeof binding.id !== "string",
+      )
+    ) {
+      throw new SceneCodecError("The drawing has invalid element bindings.");
+    }
+  }
+  const requiresPoints =
+    input.type === "line" || input.type === "arrow" || input.type === "freedraw";
+  if (!Array.isArray(input.points)) {
+    if (requiresPoints || input.points !== undefined) {
+      throw new SceneCodecError("The drawing has invalid element points.");
+    }
+  } else if (input.points.some((point) => !validPoint(point))) {
+    throw new SceneCodecError("The drawing has invalid element points.");
+  }
+  for (const key of ["startBinding", "endBinding"] as const) {
+    const binding = input[key];
+    if (binding === undefined || binding === null) continue;
+    if (
+      !isObject(binding) ||
+      (binding.fixedPoint !== undefined &&
+        binding.fixedPoint !== null &&
+        !validPoint(binding.fixedPoint))
+    ) {
+      throw new SceneCodecError("The drawing has an invalid point binding.");
+    }
+  }
+}
+
 function validateElement(input: unknown): ElementSnapshot {
-  if (!isObject(input)) throw new SceneCodecError("The element revision must be a JSON object.");
+  assertRestorableElement(input);
   validateIdentity(input.id, input.version, input.versionNonce);
-  if (typeof input.type !== "string" || input.type.length === 0)
-    throw new SceneCodecError("The element type must not be empty.");
   if (input.type === "selection")
     throw new SceneCodecError("A selection cannot be stored as a drawing element.");
   if (typeof input.isDeleted !== "boolean")
@@ -242,6 +312,37 @@ function validateElement(input: unknown): ElementSnapshot {
     throw new SceneCodecError("The element index must be a string, null, or missing.");
   stableJson(input);
   return input as ElementSnapshot;
+}
+
+function validPoint(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length >= 2 &&
+    typeof value[0] === "number" &&
+    Number.isFinite(value[0]) &&
+    typeof value[1] === "number" &&
+    Number.isFinite(value[1])
+  );
+}
+
+function validFractionalIndex(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (typeof value !== "string" || !/^[0-9A-Za-z]+$/.test(value)) return false;
+
+  const head = value[0];
+  let integerLength = 0;
+  if (head >= "a" && head <= "z") {
+    integerLength = head.charCodeAt(0) - "a".charCodeAt(0) + 2;
+  } else if (head >= "A" && head <= "Z") {
+    integerLength = "Z".charCodeAt(0) - head.charCodeAt(0) + 2;
+  }
+  const fractionalPart = value.slice(integerLength);
+  return (
+    integerLength > 0 &&
+    value.length >= integerLength &&
+    value !== `A${"0".repeat(26)}` &&
+    !fractionalPart.endsWith("0")
+  );
 }
 
 function validateIdentity(id: unknown, version: unknown, nonce: unknown): asserts id is string {

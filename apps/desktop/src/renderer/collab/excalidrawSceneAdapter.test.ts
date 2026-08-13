@@ -4,6 +4,7 @@ import {
   foldScene,
   insertElementRevision,
   putSceneAsset,
+  revisionKey,
   stableJson,
 } from "@dohc/excalidraw-scene";
 import * as Y from "yjs";
@@ -163,6 +164,44 @@ describe("Excalidraw scene adapter", () => {
       }),
     ).toEqual({ changed: true, assetsRefused: false });
     expect(foldScene(doc).elements).toEqual([localEdit]);
+  });
+
+  it("keeps restore-unsafe remote revisions away from the canvas", () => {
+    const doc = new Y.Doc();
+    insertElementRevision(doc, rectangle(1, 1, 10));
+    const revisions = declareSceneRoots(doc).revisions;
+    for (const invalid of [
+      {
+        id: "bad-line",
+        type: "line",
+        version: 1,
+        versionNonce: 2,
+        isDeleted: false,
+      },
+      {
+        id: "bad-text",
+        type: "text",
+        version: 1,
+        versionNonce: 3,
+        isDeleted: false,
+        font: null,
+      },
+      {
+        id: "bad-link",
+        type: "rectangle",
+        version: 1,
+        versionNonce: 4,
+        isDeleted: false,
+        link: {},
+      },
+    ]) {
+      revisions.set(
+        revisionKey(invalid.id, invalid.version, invalid.versionNonce),
+        stableJson(invalid),
+      );
+    }
+
+    expect(sceneForCanvas(doc).elements).toEqual([rectangle(1, 1, 10)]);
   });
 
   it("converges after two mirrors edit offline", () => {

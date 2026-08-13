@@ -1,3 +1,5 @@
+import { assertRestorableElement } from "@dohc/excalidraw-scene";
+
 export type ExcalidrawDocument = {
   type: "excalidraw";
   version?: number;
@@ -32,118 +34,6 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function validPoint(value: unknown): boolean {
-  return (
-    Array.isArray(value) &&
-    value.length >= 2 &&
-    typeof value[0] === "number" &&
-    Number.isFinite(value[0]) &&
-    typeof value[1] === "number" &&
-    Number.isFinite(value[1])
-  );
-}
-
-function validFractionalIndex(value: unknown): boolean {
-  if (value === undefined || value === null) return true;
-  if (typeof value !== "string" || !/^[0-9A-Za-z]+$/.test(value)) return false;
-
-  const head = value[0];
-  let integerLength = 0;
-  if (head >= "a" && head <= "z") {
-    integerLength = head.charCodeAt(0) - "a".charCodeAt(0) + 2;
-  } else if (head >= "A" && head <= "Z") {
-    integerLength = "Z".charCodeAt(0) - head.charCodeAt(0) + 2;
-  }
-  const fractionalPart = value.slice(integerLength);
-  return (
-    integerLength > 0 &&
-    value.length >= integerLength &&
-    value !== `A${"0".repeat(26)}` &&
-    !fractionalPart.endsWith("0")
-  );
-}
-
-function validateRestorableElement(value: unknown): void {
-  const element = objectRecord(value);
-  if (!element || typeof element.type !== "string" || element.type.length === 0) {
-    throw new Error("The drawing has an invalid element.");
-  }
-
-  if (!validFractionalIndex(element.index)) {
-    throw new Error("The drawing has an invalid element order.");
-  }
-
-  if (
-    element.link !== undefined &&
-    element.link !== null &&
-    typeof element.link !== "string"
-  ) {
-    // Common-element restore normalizes a truthy link with `link.trim()`.
-    throw new Error("The drawing has an invalid element link.");
-  }
-
-  if (element.type === "text") {
-    // Legacy text restore calls `font.split(...)`. Height-based line-height
-    // recovery also normalizes the original text before applying defaults.
-    if ("font" in element && typeof element.font !== "string") {
-      throw new Error("The drawing has an invalid text font.");
-    }
-    if (element.text !== undefined && typeof element.text !== "string") {
-      throw new Error("The drawing has invalid text content.");
-    }
-  }
-
-  if (
-    element.boundElementIds !== undefined &&
-    element.boundElementIds !== null &&
-    !Array.isArray(element.boundElementIds)
-  ) {
-    // Legacy binding migration calls `boundElementIds.map(...)`.
-    throw new Error("The drawing has invalid legacy element bindings.");
-  }
-
-  // Binding repair calls `.slice()` and then reads every binding's ID.
-  if (element.boundElements !== undefined && element.boundElements !== null) {
-    if (
-      !Array.isArray(element.boundElements) ||
-      element.boundElements.some((binding) => {
-        const record = objectRecord(binding);
-        return !record || typeof record.id !== "string";
-      })
-    ) {
-      throw new Error("The drawing has invalid element bindings.");
-    }
-  }
-
-  const requiresPoints =
-    element.type === "line" ||
-    element.type === "arrow" ||
-    element.type === "freedraw";
-  // Visibility checks read `.length` for linear and freedraw elements. Linear
-  // restore also indexes the first two coordinate tuples directly.
-  if (!Array.isArray(element.points)) {
-    if (requiresPoints || element.points !== undefined) {
-      throw new Error("The drawing has invalid element points.");
-    }
-  } else if (element.points.some((point) => !validPoint(point))) {
-    throw new Error("The drawing has invalid element points.");
-  }
-
-  for (const key of ["startBinding", "endBinding"] as const) {
-    const bindingValue = element[key];
-    if (bindingValue === undefined || bindingValue === null) continue;
-    const binding = objectRecord(bindingValue);
-    if (
-      !binding ||
-      (binding.fixedPoint !== undefined &&
-        binding.fixedPoint !== null &&
-        !validPoint(binding.fixedPoint))
-    ) {
-      throw new Error("The drawing has an invalid point binding.");
-    }
-  }
-}
-
 function validateEmbeddedFiles(files: Record<string, unknown>): void {
   for (const value of Object.values(files)) {
     const file = objectRecord(value);
@@ -173,7 +63,7 @@ export function parseExcalidrawDocument(text: string): ExcalidrawDocument {
     throw new Error("The drawing has an invalid elements list.");
   }
   const elements = document.elements ?? [];
-  elements.forEach(validateRestorableElement);
+  elements.forEach(assertRestorableElement);
   const appState =
     document.appState === undefined ? {} : objectRecord(document.appState);
   if (!appState) {
