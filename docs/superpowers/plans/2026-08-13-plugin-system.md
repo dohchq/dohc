@@ -21,10 +21,14 @@ many.
 
 1. **Plugins are code, not prompts.** TypeScript against one SDK. Skills and
    templates remain content a plugin may carry, never the mechanism.
-2. **One door to the engine.** Plugins never touch storage, sync, Y.Docs, or
-   review gates directly. Every engine interaction goes through the daemon
-   RPC via `@dohc/sdk`. This is the seam where guardrails could land later
-   without breaking plugins.
+2. **One door to the engine — as the supported path, not an enforced
+   boundary.** The SDK's engine operations all go through the daemon RPC.
+   A full-trust plugin can still import `node:fs` and write workspace
+   files raw; we do not pretend otherwise. Such writes take the
+   outside-edit path: the capture watcher records them as moments without
+   plugin attribution, and settlement treats them like any external edit.
+   The door is where attribution, gates, and future guardrails live —
+   plugins that bypass it lose those benefits, not their ability to run.
 3. **Full trust, no permission sandbox.** Ice's explicit call (2026-07-28):
    like VS Code and Obsidian, plugins run with full power. No permission
    prompts. The engine's own review gates and locks still apply to
@@ -41,11 +45,12 @@ many.
 
 Three pieces. The engine stays the core.
 
-- **Plugin host** — a Node child process spawned by `apps/desktop`, speaking
-  JSON-RPC over stdio like the agent drivers already do
-  (`apps/desktop/src/agents/JsonRpcTransport.ts` is the precedent). Runs
-  each plugin's entry module. A plugin crash kills only that plugin. The
-  host is a client of the daemon RPC, same as the desktop app.
+- **Plugin host** — one Node child process **per plugin**, spawned by
+  `apps/desktop`, speaking JSON-RPC over stdio like the agent drivers
+  already do (`apps/desktop/src/agents/JsonRpcTransport.ts` is the
+  precedent). Per-plugin processes are what make "a crash kills only that
+  plugin" true; a shared host cannot deliver it. The host is a client of
+  the daemon RPC, same as the desktop app.
 - **`@dohc/sdk`** — the existing package (`packages/sdk`), extended. Today
   it serves sandboxed site previews over a postMessage transport. Plugins
   reuse its API and add a Node transport for the host side, plus
@@ -65,7 +70,7 @@ are TypeScript above it.
 | --- | --- | --- |
 | Plugin location | Per-workspace, in `plugins/` | 2026-07-29 |
 | Distribution format | Readable source + lockfile; dohc installs deps and bundles on install | 2026-07-29 |
-| First plugin | t3 code (wraps the published `t3` npm package; MIT) | 2026-07-29 |
+| First plugin | t3 code (wraps the published `t3` npm package; MIT). Surveyed source: https://github.com/pingdotgg/t3code at `6bc6cb6be4ebecd5bd7a3b7b88f07cb61815ded5` (cloned in `.agent-sources/pingdotgg/t3code`). The spike pins the exact npm package version. | 2026-07-29 |
 | Publishing | Registry publish requires a free dohc cloud account (namespaced, signed releases). Install and sideload need no account, ever. | 2026-08-05 |
 | Wrapper-plugin updates | Author's agent watches upstream, bumps the pinned dependency, tests, republishes. Pristine installs auto-update; forks pause. | 2026-08-05 |
 | Open source | Entire codebase opens at MVP launch. Cloud layer licensed against commercial rehosting. Register the trademark first. | 2026-07-29 |
@@ -75,14 +80,23 @@ Constraints these choices create:
 - The engine's capture floor excludes `node_modules` at any depth. The
   lockfile is therefore what makes a reverted plugin rebuildable. The
   install pipeline must treat "restore source, reinstall, rebuild" as the
-  recovery path.
+  recovery path. **Open risk:** text files over the 128 KiB capture cap
+  are not versioned, and real lockfiles can exceed it. PR2 must measure
+  representative plugin lockfiles; if healthy ones exceed the cap, the
+  cap fix moves into this milestone instead of waiting for versioning
+  stage 2.
 - **Attribution is recorded, never required.** Plugin and agent writes
   through the door get stamped (author, session, gate). Outside edits are
   captured as anonymous moments. Nothing is ever refused for lacking
   identity. Do not let any future change make attribution a write
-  precondition. The engine already carries the slot: `MomentAuthor`
-  (`capture.setAuthor`) — plugin sessions extend it, they do not invent a
-  parallel scheme.
+  precondition. The engine already carries the shape: `MomentAuthor`.
+  But the `capture.setAuthor` slot is workspace-ambient — the capture
+  driver holds one mutable author sampled at capture time
+  (`crates/dohc-workspace-engine/src/lib.rs:3560`), so concurrent plugin
+  sessions cannot share it. Plugin writes must carry `MomentAuthor` on
+  each operation (the per-operation `author` params that
+  `moment.append`-family calls already accept), never through the ambient
+  slot.
 - The install/build pipeline (PR2) has a working precedent: workspace
   sites already detect, install, build, and preview user code
   (`packages/workspace-core/src/sites.ts`). Reuse its shape before
@@ -93,15 +107,20 @@ Constraints these choices create:
 Spike first, then three stacked PRs, each independently green.
 
 - **Spike (no PR):** prove the published `t3` package can be spawned as a
-  child process, served UI embeds in a sandboxed webview, and a session
-  round-trips. Output: the bridge contract for PR3.
-- **PR1 — host + manifest + minimal SDK.** Child-process host lifecycle,
-  `dohc-plugin.json` format, the panel surface on the site-preview sandbox,
-  a Node transport and contribution registration in `@dohc/sdk`, and a
-  hello-plugin test fixture that exercises the host end to end. This PR
-  sets the contracts; it gets the heavyweight review.
+  child process, its served UI loads in a sandboxed iframe (the same
+  surface PR1 ships), and a session round-trips. Output: the bridge
+  contract for PR3, including the pinned package version.
+- **PR1 — host + manifest + minimal SDK.** Child-process host lifecycle
+  (one process per plugin, `disabled` flag, crash-loop auto-disable),
+  `dohc-plugin.json` format, the panel surface on the site-preview
+  sandbox, a Node transport and contribution registration in `@dohc/sdk`,
+  and a hello-plugin test fixture that exercises the host end to end.
+  This PR sets the contracts; it gets the heavyweight review.
 - **PR2 — install/build pipeline.** `plugins/` source + lockfile → dep
-  install + esbuild bundle → hot reload on change.
+  install + esbuild bundle → hot reload on change. Ships the visible
+  reverse path: disable and uninstall for any installed plugin. (PR1's
+  host already honors a `disabled` flag and auto-disables a plugin that
+  crash-loops, so a broken plugin can never wedge app startup.)
 - **PR3 — the t3 code plugin.** Manifest + glue over the spike's bridge
   contract.
 
