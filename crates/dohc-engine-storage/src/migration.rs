@@ -2649,6 +2649,71 @@ CREATE INDEX ydoc_inactive_lineages_by_open_conflict
 
 pub(crate) const YDOC_SCENE_CONTENT_KIND_MIGRATION_ID: &str = "v1-ydoc-scene-content-kind";
 
+/// Ordinal 35. Recovery decisions are durable relay-arbitration records, so a
+/// scene base must survive the same crash/retry path as plaintext and richdoc.
+/// Ordinal 32 is already shipped on main; widen its content-kind constraint in
+/// an appended rebuild instead of changing that migration's recorded checksum.
+const V1_YDOC_SCENE_RECOVERY_KIND_DDL: &str = "\
+CREATE TABLE ydoc_recovery_decisions_v35 (
+    workspace_id                    TEXT    NOT NULL,
+    origin_id                       TEXT    NOT NULL CHECK (length(origin_id) > 0),
+    origin_seq                      INTEGER NOT NULL CHECK (origin_seq >= 0),
+    version_id                      TEXT    NOT NULL CHECK (length(version_id) > 0),
+    object_id                       TEXT    NOT NULL CHECK (length(object_id) > 0),
+    original_path                   TEXT    NOT NULL CHECK (length(original_path) > 0),
+    incoming_content_kind           TEXT    NOT NULL
+      CHECK (incoming_content_kind IN ('plaintext', 'richdoc', 'scene')),
+    incoming_update_blob_sha256     TEXT    NOT NULL
+      CHECK (length(incoming_update_blob_sha256) = 64
+             AND incoming_update_blob_sha256 NOT GLOB '*[^0-9a-f]*'),
+    incoming_lineage_claim_id       TEXT    NOT NULL
+      CHECK (length(incoming_lineage_claim_id) = 64
+             AND incoming_lineage_claim_id NOT GLOB '*[^0-9a-f]*'),
+    incoming_is_base_state          INTEGER NOT NULL
+      CHECK (incoming_is_base_state = 1),
+    losing_claim_id                 TEXT    NOT NULL
+      CHECK (length(losing_claim_id) = 64
+             AND losing_claim_id NOT GLOB '*[^0-9a-f]*'),
+    recovered_path                  TEXT    NOT NULL CHECK (length(recovered_path) > 0),
+    recovery_collision_ordinal      TEXT    NOT NULL
+      CHECK (length(recovery_collision_ordinal) > 0
+             AND recovery_collision_ordinal NOT GLOB '*[^0-9]*'),
+    recovery_object_id              TEXT    NOT NULL CHECK (length(recovery_object_id) > 0),
+    recovery_moment_id              TEXT    NOT NULL CHECK (length(recovery_moment_id) > 0),
+    recorded_at_ms                  INTEGER NOT NULL CHECK (recorded_at_ms >= 0),
+    PRIMARY KEY (workspace_id, origin_id, origin_seq),
+    UNIQUE (workspace_id, recovery_object_id),
+    UNIQUE (workspace_id, recovery_moment_id),
+    FOREIGN KEY (workspace_id)
+      REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (incoming_update_blob_sha256)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (incoming_lineage_claim_id)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (losing_claim_id)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+
+INSERT INTO ydoc_recovery_decisions_v35 (
+    workspace_id, origin_id, origin_seq, version_id, object_id, original_path,
+    incoming_content_kind, incoming_update_blob_sha256,
+    incoming_lineage_claim_id, incoming_is_base_state, losing_claim_id,
+    recovered_path, recovery_collision_ordinal, recovery_object_id,
+    recovery_moment_id, recorded_at_ms
+)
+SELECT workspace_id, origin_id, origin_seq, version_id, object_id, original_path,
+       incoming_content_kind, incoming_update_blob_sha256,
+       incoming_lineage_claim_id, incoming_is_base_state, losing_claim_id,
+       recovered_path, recovery_collision_ordinal, recovery_object_id,
+       recovery_moment_id, recorded_at_ms
+  FROM ydoc_recovery_decisions;
+
+DROP TABLE ydoc_recovery_decisions;
+ALTER TABLE ydoc_recovery_decisions_v35 RENAME TO ydoc_recovery_decisions;
+";
+
+pub(crate) const YDOC_SCENE_RECOVERY_KIND_MIGRATION_ID: &str = "v1-ydoc-scene-recovery-kind";
+
 /// Ordinal 32. Persist the relay arbitration coordinate for Y.Doc bases.
 /// Candidate coordinates are only hints recovered from the local append-only
 /// log; sync must authenticate each exact
@@ -3010,6 +3075,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: YDOC_SCENE_CONTENT_KIND_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_YDOC_SCENE_CONTENT_KIND_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 35,
+        id: YDOC_SCENE_RECOVERY_KIND_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_YDOC_SCENE_RECOVERY_KIND_DDL,
         sets_user_version: None,
     },
 ];
@@ -3573,6 +3645,22 @@ mod tests {
              ) VALUES (
                  'ws', 'main', 'inactive', 'peer', 17, 15,
                  'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+             );
+             INSERT INTO ydoc_recovery_decisions (
+                 workspace_id, origin_id, origin_seq, version_id, object_id,
+                 original_path, incoming_content_kind,
+                 incoming_update_blob_sha256, incoming_lineage_claim_id,
+                 incoming_is_base_state, losing_claim_id, recovered_path,
+                 recovery_collision_ordinal, recovery_object_id,
+                 recovery_moment_id, recorded_at_ms
+             ) VALUES (
+                 'ws', 'peer', 18, 'main', 'live', 'live.md', 'richdoc',
+                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 1,
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                 'live (recovered).md', '1', 'recovered-object',
+                 'recovered-moment', 16
              );",
         )
         .expect("seed a completed pre-scene store");
@@ -3581,6 +3669,7 @@ mod tests {
         let snapshots_before = dump_table_rows(&conn, "ydoc_snapshots");
         let inactive_before = dump_table_rows(&conn, "ydoc_inactive_lineages");
         let deferred_before = dump_table_rows(&conn, "ydoc_deferred_updates");
+        let recovery_before = dump_table_rows(&conn, "ydoc_recovery_decisions");
 
         drop(conn);
         let store =
@@ -3598,6 +3687,14 @@ mod tests {
             )
             .expect("scene migration ledger row");
         assert_eq!(scene_migration, 1);
+        let scene_recovery_migration: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM engine_migrations WHERE id=?1 AND completed_at IS NOT NULL",
+                [YDOC_SCENE_RECOVERY_KIND_MIGRATION_ID],
+                |row| row.get(0),
+            )
+            .expect("scene recovery migration ledger row");
+        assert_eq!(scene_recovery_migration, 1);
         assert_eq!(dump_table_rows(&conn, "ydoc_docs"), docs_before);
         assert_eq!(dump_table_rows(&conn, "ydoc_updates"), updates_before);
         assert_eq!(dump_table_rows(&conn, "ydoc_snapshots"), snapshots_before);
@@ -3608,6 +3705,10 @@ mod tests {
         assert_eq!(
             dump_table_rows(&conn, "ydoc_deferred_updates"),
             deferred_before
+        );
+        assert_eq!(
+            dump_table_rows(&conn, "ydoc_recovery_decisions"),
+            recovery_before
         );
 
         let index_columns = |name: &str| -> Vec<String> {
@@ -3699,6 +3800,46 @@ mod tests {
             [],
         )
         .expect_err("unknown document kinds stay constrained");
+        conn.execute(
+            "INSERT INTO ydoc_recovery_decisions (
+                 workspace_id, origin_id, origin_seq, version_id, object_id,
+                 original_path, incoming_content_kind,
+                 incoming_update_blob_sha256, incoming_lineage_claim_id,
+                 incoming_is_base_state, losing_claim_id, recovered_path,
+                 recovery_collision_ordinal, recovery_object_id,
+                 recovery_moment_id, recorded_at_ms
+             ) VALUES (
+                 'ws', 'peer', 19, 'main', 'scene', 'scene.excalidraw', 'scene',
+                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 1,
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                 'scene (recovered).excalidraw', '1', 'scene-recovered-object',
+                 'scene-recovered-moment', 24
+             )",
+            [],
+        )
+        .expect("scene recovery decision");
+        conn.execute(
+            "INSERT INTO ydoc_recovery_decisions (
+                 workspace_id, origin_id, origin_seq, version_id, object_id,
+                 original_path, incoming_content_kind,
+                 incoming_update_blob_sha256, incoming_lineage_claim_id,
+                 incoming_is_base_state, losing_claim_id, recovered_path,
+                 recovery_collision_ordinal, recovery_object_id,
+                 recovery_moment_id, recorded_at_ms
+             ) VALUES (
+                 'ws', 'peer', 20, 'main', 'invalid', 'invalid.bin', 'unknown',
+                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 1,
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                 'invalid (recovered).bin', '1', 'invalid-recovered-object',
+                 'invalid-recovered-moment', 25
+             )",
+            [],
+        )
+        .expect_err("unknown recovery document kinds stay constrained");
     }
 
     #[test]
@@ -4700,7 +4841,7 @@ mod tests {
 
         let disposition = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("apply the later replication-log disposition migration");
-        assert_eq!(disposition, MigrationOutcome::Applied { newly_applied: 4 });
+        assert_eq!(disposition, MigrationOutcome::Applied { newly_applied: 5 });
         let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("rerun current migrations");
         assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 0 });
@@ -4758,7 +4899,7 @@ mod tests {
         .expect_err("unknown apply dispositions must fail closed");
         let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("rerun current migrations");
-        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 3 });
+        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 4 });
     }
 
     #[test]
@@ -4910,7 +5051,7 @@ mod tests {
         );
         let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("rerun current migrations");
-        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 2 });
+        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 3 });
     }
 
     fn seed_hex_binary_blobs(conn: &Connection) {
