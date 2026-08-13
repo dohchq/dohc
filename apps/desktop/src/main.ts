@@ -13,7 +13,6 @@ import {
   WorkspaceDaemonRequester,
   decodeGranularChatMessageSearchResponse,
   decodeUnreadFileThreads,
-  isYdocArtifactAssetsPendingRefusal,
   isYdocArtifactAssetsInvalidRefusal,
 } from "@dohc/workspace-engine-client";
 import {
@@ -8442,8 +8441,7 @@ function registerIpcHandlers(
           ...(isYdocArtifactAssetsInvalidRefusal(error)
             ? { artifactAssetsInvalid: true }
             : isEngineWorkspaceOpenRefusedError(error) ||
-                isYDocSessionUnreleasedError(error) ||
-                isYdocArtifactAssetsPendingRefusal(error)
+                isYDocSessionUnreleasedError(error)
               ? { engineMayHoldDocument: true }
               : {}),
         });

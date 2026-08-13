@@ -235,6 +235,9 @@ function Harness(props: {
       <span data-testid="artifact-assets-invalid">
         {String(engine.artifactAssetsInvalid)}
       </span>
+      <span data-testid="engine-may-hold-document">
+        {String(engine.engineMayHoldDocument)}
+      </span>
       <span data-testid="deleted">{String(engine.deletedWhileEditing)}</span>
       <span data-testid="read-only-transition">
         {String(engine.readOnlyWhileEditing)}
@@ -760,7 +763,10 @@ it("keeps invalid scene asset authority as a distinct unavailable outcome", asyn
     ),
   );
   expect(screen.getByTestId("available").textContent).toBe("false");
-  expect(harness.applied).toHaveLength(0);
+  expect(screen.getByTestId("engine-may-hold-document").textContent).toBe(
+    "false",
+  );
+  expect(screen.getByTestId("removal-operation").textContent).toBe("none");
 });
 
 it("passes a file-locked report through, and a real settle clears it", async () => {

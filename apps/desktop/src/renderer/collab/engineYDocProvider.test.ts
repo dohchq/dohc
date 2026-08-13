@@ -582,7 +582,8 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
-  it("keeps invalid scene asset authority terminal and non-retryable", async () => {
+  it("keeps invalid scene asset authority terminal and closes the transport", async () => {
+    let closes = 0;
     const transport: EngineYDocTransport = {
       async open() {
         return { available: false, artifactAssetsInvalid: true };
@@ -594,7 +595,9 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       onRemoteUpdate() {
         return () => undefined;
       },
-      async close() {},
+      async close() {
+        closes += 1;
+      },
     };
     const binding = await bindEngineYDoc(transport);
     expect(binding).toMatchObject({
@@ -604,6 +607,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       engineMayHoldDocument: false,
     });
     await binding.destroy();
+    expect(closes).toBe(1);
   });
 
   it("destroy closes the engine session and stops shipping edits (idempotent)", async () => {

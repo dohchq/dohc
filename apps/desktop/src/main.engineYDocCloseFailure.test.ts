@@ -73,7 +73,9 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
 
   it("keeps a committed scene read-only while its artifact assets are pending", () => {
     const handler = handlerSource("engineYDocOpen");
-    const predicateAt = handler.indexOf("isYdocArtifactAssetsPendingRefusal(error)");
+    // The workspace-session predicate owns pending-refusal classification;
+    // this handler owns mapping that retryable class to a read-only result.
+    const predicateAt = handler.indexOf("isEngineWorkspaceOpenRefusedError(error)");
     expect(predicateAt).toBeGreaterThan(-1);
     expect(
       handler.slice(predicateAt, handler.indexOf("const entry:", predicateAt)),
