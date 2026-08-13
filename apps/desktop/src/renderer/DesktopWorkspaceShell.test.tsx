@@ -970,6 +970,100 @@ describe("editor groups", () => {
     ).toBe(true);
   });
 
+  it("explains the 100 open-tab limit when Split Right cannot create a group", async () => {
+    const editorGroups = Array.from({ length: 100 }, (_, index) => ({
+      id: `group-${index}`,
+      tabs: [`file-${index}.md`],
+      activeTab: `file-${index}.md`,
+      size: 0.01,
+    }));
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups,
+        activeEditorGroup: "group-0",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: editorGroups.map((group) => ({
+        path: group.activeTab,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-file-0.md");
+    fireEvent.keyDown(window, { key: "\\", ctrlKey: true });
+
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain(
+      "This workspace has 100 open tabs; the limit is 100. Close a tab to create an editor group.",
+    );
+    expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(100);
+    expect(screen.getByRole("region", { name: "Editor group 1" }).dataset.active).toBe(
+      "true",
+    );
+    fireEvent(window, new Event("beforeunload"));
+    const [persisted] = bridge.setWorkspaceUiState.mock.calls.at(-1)!;
+    expect(persisted.state.editorGroups).toHaveLength(100);
+
+    await userEvent.click(
+      within(screen.getByRole("region", { name: "Editor group 100" })).getByRole(
+        "button",
+        { name: "Close file-99.md" },
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(99),
+    );
+    fireEvent.keyDown(window, { key: "\\", ctrlKey: true });
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(100),
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("does not report the open-tab limit when Chats refuses Split Right", async () => {
+    const fileGroups = Array.from({ length: 99 }, (_, index) => ({
+      id: `group-${index}`,
+      tabs: [`file-${index}.md`],
+      activeTab: `file-${index}.md`,
+      size: 0.01,
+    }));
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          ...fileGroups,
+          {
+            id: "chats",
+            tabs: [CHATS_TAB_PATH],
+            activeTab: CHATS_TAB_PATH,
+            size: 0.01,
+          },
+        ],
+        activeEditorGroup: "chats",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: fileGroups.map((group) => ({
+        path: group.activeTab,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    renderShell(bridge);
+
+    await screen.findByTestId(`tab-${CHATS_TAB_PATH}`);
+    fireEvent.keyDown(window, { key: "\\", ctrlKey: true });
+    await act(async () => Promise.resolve());
+
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(100);
+  });
+
   it("copies the active tab right with Ctrl+\\ and collapses the group after its last tab closes", async () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
@@ -7364,6 +7458,9 @@ describe("history page", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
+    const treeRows = await screen.findAllByTestId("tree-row");
+    await user.click(treeRows.find((row) => row.textContent?.includes("a.md"))!);
+    await screen.findByTestId("tab-a.md");
     await user.click(screen.getByTestId("activity-history"));
     expect(await screen.findByText("Wrote the plan")).toBeTruthy();
 
@@ -7379,6 +7476,15 @@ describe("history page", () => {
     expect(banner.textContent).toContain("dohc could not refresh sync status.");
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
     expect(screen.getByText("Wrote the plan")).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "\\", ctrlKey: true });
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(2),
+    );
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+      "dohc could not refresh sync status.",
+    );
+    expect(screen.getByTestId("workspace-shell-error-retry")).toBeTruthy();
 
     // The workspace moved on while the lane was stale.
     nextStatus = syncingStatus;

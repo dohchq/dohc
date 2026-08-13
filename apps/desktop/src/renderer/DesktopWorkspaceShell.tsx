@@ -154,6 +154,7 @@ import {
   isHistoryTabPath,
   isSiteTabPath,
   isVirtualTabPath,
+  MAX_OPEN_TABS,
   moveTab,
   moveTabToGroup,
   openTab,
@@ -1315,6 +1316,7 @@ export function DesktopWorkspaceShell(props: {
   const [shellError, setShellError] = useState<{
     message: string;
     retry: (() => void) | null;
+    kind?: "split-tab-limit";
   } | null>(null);
   // Inline-create requests routed INTO the explorer (palette/menu/header).
   const [createRequest, setCreateRequest] = useState<{
@@ -3653,7 +3655,21 @@ export function DesktopWorkspaceShell(props: {
             newGroupId,
             hasEditorFocus(state, focus) ? "target" : "preserve",
           );
-        if (splitState(current) === current) return;
+        const next = splitState(current);
+        if (next === current) {
+          const openTabCount = allTabs(current).length;
+          if (
+            !isChatsTabPath(tab.path) &&
+            openTabCount >= MAX_OPEN_TABS
+          ) {
+            setShellError({
+              message: `This workspace has ${openTabCount} open tabs; the limit is ${MAX_OPEN_TABS}. Close a tab to create an editor group.`,
+              retry: null,
+              kind: "split-tab-limit",
+            });
+          }
+          return;
+        }
         invalidateDeferredFileOpenForGroupChange(
           current.activeEditorGroup,
           newGroupId,
@@ -3662,6 +3678,9 @@ export function DesktopWorkspaceShell(props: {
         if (viewKind === "markdown" || viewKind === "database") {
           rendererMarks.mark(fileOpenStartMark(newGroupId));
         }
+        setShellError((currentError) =>
+          currentError?.kind === "split-tab-limit" ? null : currentError,
+        );
         mutateWb(splitState);
       };
       commitAfterTabFlush(
