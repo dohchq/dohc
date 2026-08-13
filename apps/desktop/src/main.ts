@@ -2617,14 +2617,13 @@ function invokeWorkspacePluginSdk(input: {
         { overwrite, author },
       ) => {
         const absolutePath = join(workspace.rootPath, path);
-        if (!overwrite && existsSync(absolutePath)) {
-          throw new Error(`File already exists: ${path}`);
-        }
         const { capture } = await requirePluginEngineCapture(input.workspaceId);
         if (input.signal?.aborted) {
           throw new Error("Plugin panel is no longer active.");
         }
-        await capture.writeAuthoredTextFile(absolutePath, text, author);
+        await capture.writeAuthoredTextFile(absolutePath, text, author, {
+          createOnly: !overwrite,
+        });
         return { path };
       },
     },

@@ -2606,6 +2606,31 @@ describe("workspaceEngineCapture agent attribution", () => {
     await engine.stop();
   });
 
+  it("serializes concurrent create-only authored writes so exactly one wins", async () => {
+    const root = await tempRoot();
+    const engine = liveCapture(root, new VersionedLoopbackEngine());
+    const target = join(root, "exclusive.txt");
+    const author = {
+      kind: "agent" as const,
+      agentId: "plugin:test",
+      onBehalfOf: "local",
+      agentRunId: "spawn",
+    };
+
+    const attempts = await Promise.allSettled([
+      engine.writeAuthoredTextFile(target, "first", author, { createOnly: true }),
+      engine.writeAuthoredTextFile(target, "second", author, { createOnly: true }),
+    ]);
+
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+    expect(String(attempts.find((attempt) => attempt.status === "rejected")?.reason)).toContain(
+      "File already exists: exclusive.txt",
+    );
+    await expect(readFile(target, "utf8")).resolves.toMatch(/^(?:first|second)$/);
+    await engine.stop();
+  });
+
   it("mutation proof: daemon author state is set before work and flushed before clear", async () => {
     const root = await tempRoot();
     const requests: Request[] = [];

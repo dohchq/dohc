@@ -49,7 +49,7 @@ import {
   scanWorkspaceFilesTolerant,
 } from "@dohc/workspace-fs";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
@@ -377,6 +377,7 @@ export interface WorkspaceEngineCapture {
     absolutePath: string,
     text: string,
     author: MomentAuthor,
+    options?: { createOnly?: boolean },
   ): Promise<void>;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
   // file through this capture's Rust workspace sessions. The session journals
@@ -3337,7 +3338,7 @@ export function createWorkspaceEngineCapture(
 
     registerExpectedEngineEvents,
 
-    writeAuthoredTextFile(absolutePath, text, author) {
+    writeAuthoredTextFile(absolutePath, text, author, writeOptions = {}) {
       return enqueueResult("write authored text", async () => {
         const resolvedAbsolute = resolve(absolutePath);
         const path = relative(resolve(rootPath), resolvedAbsolute).replaceAll(
@@ -3359,6 +3360,9 @@ export function createWorkspaceEngineCapture(
           label: "Authored text path",
           access: "write",
         });
+        if (writeOptions.createOnly && existsSync(resolvedAbsolute)) {
+          throw new Error(`File already exists: ${path}`);
+        }
         const policy = await readPolicyForTask();
         assertEngineWritablePath(path, policy);
         const engine = await engineStore();
