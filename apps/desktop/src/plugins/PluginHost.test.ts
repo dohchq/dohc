@@ -14,6 +14,7 @@ import {
 import { readPluginManifestFile } from "./pluginManifest";
 import { invokePluginSdkHost } from "./pluginSdkHost";
 import {
+  PLUGIN_ACTIVATION_TIMEOUT_MS,
   PLUGIN_HOST_METHODS,
   type PluginRuntimeStatus,
 } from "./pluginHostProtocol";
@@ -708,7 +709,13 @@ describe("PluginHost", () => {
     expect(spawnTransport).toHaveBeenCalledTimes(3);
   });
 
-  it("does not respawn a plugin a status listener stopped synchronously on crash", async () => {
+  it("cleanly stops the respawned plugin when a status listener reacts to a crash", async () => {
+    // onStatusChange is always deferred (queueMicrotask), so a listener can
+    // no longer preempt the crash-loop's own immediate-respawn decision —
+    // that decision finishes synchronously before any listener even learns
+    // the plugin crashed. What a listener CAN still do is call stop()
+    // afterward, and that must land cleanly on whatever is current then
+    // (the respawned instance), not on stale state and not orphan anything.
     const root = await workspaceRoot();
     const deactivateRequests: string[] = [];
     let disposeCount = 0;
@@ -716,6 +723,11 @@ describe("PluginHost", () => {
     const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(
       (params) => {
         triggerExit = () => params.onExit({ code: 1, signal: null });
+        // Idempotent, like the real JsonRpcTransport.dispose() — this spawn's
+        // in-flight activation and its own shutdown() can each independently
+        // decide to dispose once the plugin is stopping; only one of those
+        // calls should count as the transport actually being torn down.
+        let disposed = false;
         return {
           request<T = unknown>(method: string): Promise<T> {
             if (method === PLUGIN_HOST_METHODS.deactivate) {
@@ -727,7 +739,10 @@ describe("PluginHost", () => {
             return Promise.resolve(result as T);
           },
           dispose: () => {
-            disposeCount += 1;
+            if (!disposed) {
+              disposed = true;
+              disposeCount += 1;
+            }
             return Promise.resolve();
           },
         };
@@ -738,8 +753,6 @@ describe("PluginHost", () => {
       workspaceRoot: root,
       spawnTransport,
       routeSdkRequest: defaultRouter,
-      // Reacts to the crash synchronously, inside setStatus's own call —
-      // the exact reentrancy handleExit's "crashed" transition must survive.
       onStatusChange: (pluginId, status) => {
         if (status === "crashed") void host.stop(pluginId);
       },
@@ -753,12 +766,87 @@ describe("PluginHost", () => {
     expect(spawnTransport).toHaveBeenCalledTimes(1);
 
     triggerExit?.();
+    await waitFor(
+      () => spawnTransport.mock.calls.length >= 2,
+      "The crash's own immediate respawn did not happen.",
+    );
     await delay(50);
 
-    expect(spawnTransport).toHaveBeenCalledTimes(1);
+    expect(spawnTransport).toHaveBeenCalledTimes(2);
     expect(deactivateRequests).toEqual(["hello-plugin"]);
     expect(disposeCount).toBe(1);
     expect(host.getStatus("hello-plugin")).toBeUndefined();
+  });
+
+  it("does not orphan a transport when a status listener stops on \"starting\"", async () => {
+    // Same structural guarantee from the other side: by the time any
+    // listener's deferred callback sees "starting", spawn() has already
+    // finished creating the transport and sending plugin.activate — so
+    // stop() (called from the listener) always has a real transport to
+    // dispose through the normal shutdown path. Nothing is left to the
+    // 30s activation deadline to eventually clean up.
+    const root = await workspaceRoot();
+    const harness = createProcessHarness();
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+      activationTimeoutMs: PLUGIN_ACTIVATION_TIMEOUT_MS,
+      onStatusChange: (pluginId, status) => {
+        if (status === "starting") void host.stop(pluginId);
+      },
+    });
+    const startedAt = Date.now();
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    // disposedPluginIds only proves shutdown() STARTED disposing — the real
+    // process kill it awaits can still be in flight. Wait for the record to
+    // actually be gone, which only happens once shutdown() fully completes.
+    await waitFor(
+      () => host.getStatus("hello-plugin") === undefined,
+      "Plugin was not fully stopped after a listener stopped it on \"starting\".",
+    );
+
+    expect(harness.disposedPluginIds).toContain("hello-plugin");
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(harness.spawnedPluginIds).toEqual(["hello-plugin"]);
+    expect(host.getStatus("hello-plugin")).toBeUndefined();
+  });
+
+  it("rejects invokeCommand while the plugin is stopping and sends nothing", async () => {
+    const root = await workspaceRoot();
+    let invokeCommandCalls = 0;
+    const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
+      request<T = unknown>(method: string): Promise<T> {
+        if (method === PLUGIN_HOST_METHODS.invokeCommand) invokeCommandCalls += 1;
+        const result = method === PLUGIN_HOST_METHODS.activate
+          ? { commands: [] }
+          : {};
+        return Promise.resolve(result as T);
+      },
+      dispose: () => Promise.resolve(),
+    }));
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    const stop = host.stop("hello-plugin");
+    await expect(
+      host.invokeCommand("hello-plugin", "hello.write"),
+    ).rejects.toThrow('Plugin "hello-plugin" is stopping.');
+    await stop;
+
+    expect(invokeCommandCalls).toBe(0);
   });
 
   it("keeps one plugin ready while another plugin crash-loops", async () => {
@@ -948,6 +1036,12 @@ describe("PluginHost", () => {
   });
 
   it("does not hang when a child exits during an sdk.request", async () => {
+    // No generation bump here: onStatusChange is deferred, so a listener can
+    // no longer race ahead of accountForFailure's own respawn decision the
+    // way bumping the generation synchronously used to rely on. The crash's
+    // own immediate respawn is now free to happen — correct policy for one
+    // fast failure — and stop() must still not hang, on whichever spawn
+    // (the crashed one or its respawn) happens to be current when it runs.
     const root = await workspaceRoot();
     const harness = createProcessHarness({
       modes: { "hello-plugin": "crash-after-activate" },
@@ -960,9 +1054,6 @@ describe("PluginHost", () => {
       workspaceRoot: root,
       spawnTransport: harness.spawnTransport,
       routeSdkRequest,
-      onStatusChange: (_pluginId, status) => {
-        if (status === "crashed") host.bumpGeneration();
-      },
     });
 
     await host.start(helloPluginRoot, await fixtureManifest());
@@ -979,8 +1070,11 @@ describe("PluginHost", () => {
       () => routeSdkRequest.mock.calls.length > 0,
       "Fixture did not send its sdk.request.",
     );
+    // "crashed" can be transient (the immediate respawn moves the status on
+    // in the same synchronous chain) — wait on the real process exit event
+    // instead of a status value that may never be observed by a poll.
     await waitFor(
-      () => host.getStatus("hello-plugin") === "crashed",
+      () => harness.exitedPluginIds.includes("hello-plugin"),
       "Plugin host did not report the child exit.",
     );
 

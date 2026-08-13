@@ -208,11 +208,14 @@ export class PluginHost {
 
   /** Runs a command the plugin registered during activation and returns its result. */
   async invokeCommand(pluginId: string, commandId: string): Promise<unknown> {
-    const transport = this.plugins.get(pluginId)?.current?.transport;
-    if (!transport) {
+    const spawn = this.plugins.get(pluginId)?.current;
+    if (!spawn?.transport) {
       throw new Error(`Plugin "${pluginId}" is not running.`);
     }
-    return transport.request(PLUGIN_HOST_METHODS.invokeCommand, {
+    if (spawn.stopping) {
+      throw new Error(`Plugin "${pluginId}" is stopping.`);
+    }
+    return spawn.transport.request(PLUGIN_HOST_METHODS.invokeCommand, {
       commandId,
     } satisfies PluginInvokeCommandParams);
   }
@@ -464,7 +467,15 @@ export class PluginHost {
 
   private setStatus(record: PluginRecord, status: PluginRuntimeStatus): void {
     record.status = status;
-    this.options.onStatusChange?.(record.pluginId, status);
+    const onStatusChange = this.options.onStatusChange;
+    if (!onStatusChange) return;
+    const pluginId = record.pluginId;
+    // Deferred, always — never synchronous. A listener that reacts to a
+    // status change by calling back into this host (stop, invokeCommand,
+    // another start) must never be able to reenter mid-operation, the way a
+    // synchronous callback could. This is what makes that whole class of
+    // race impossible, not a fix for one more instance of it.
+    queueMicrotask(() => onStatusChange(pluginId, status));
   }
 
   private now(): number {
