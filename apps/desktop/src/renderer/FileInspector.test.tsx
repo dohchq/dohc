@@ -3118,15 +3118,28 @@ describe("markdown editor unmount flush", () => {
       status: "conflict",
       currentContentHash: externalHash,
     });
+    let flush: DraftFlush | null = null;
     const user = userEvent.setup();
-    render(<FileInspector workspaceId="ws-1" path="notes/plain.txt" />);
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        registerDraftFlush={(next) => {
+          flush = next;
+        }}
+      />,
+    );
     const content = (await screen.findByTestId("view-text-editor")).querySelector(
       ".cm-content",
     ) as HTMLElement;
+    await waitFor(() => expect(flush).not.toBeNull());
 
     await user.click(content);
     await user.keyboard("{End} Draft");
-    await screen.findByTestId("orphaned-draft-notice", {}, { timeout: 5_000 });
+    await expect(flush!()).rejects.toThrow(
+      "The file changed on disk while dohc saved it.",
+    );
+    await screen.findByTestId("orphaned-draft-notice");
     await user.click(screen.getByTestId("recovery-dismiss"));
     await user.click(screen.getByTestId("recovery-dismiss-confirm"));
     await waitFor(() =>
@@ -3136,10 +3149,10 @@ describe("markdown editor unmount flush", () => {
 
     await user.click(content);
     await user.keyboard("{End} Draft");
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
-      { timeout: 5_000 },
+    await expect(flush!()).rejects.toThrow(
+      "The file changed on disk while dohc saved it.",
     );
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2);
     await screen.findByTestId("orphaned-draft-notice");
     fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
     await waitFor(async () =>
@@ -3447,55 +3460,63 @@ describe("markdown editor unmount flush", () => {
   });
 
   it("holds a plain-text shell flush until the in-flight autosave lands", async () => {
-    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
-      text: "",
-      truncated: false,
-      contentHash: TEST_CONTENT_HASH,
-    });
-    let releaseWrite!: () => void;
-    const heldWrite = new Promise<{ status: "written"; contentHash: string }>(
-      (resolve) => {
-        releaseWrite = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
-      },
-    );
-    bridgeMock.writeWorkspaceText.mockImplementation(() => heldWrite);
-    let flush: (() => Promise<void>) | null = null;
-    const user = userEvent.setup();
-    const view = render(
-      <FileInspector
-        workspaceId="ws-1"
-        path="notes/plain.txt"
-        registerDraftFlush={(next) => {
-          flush = next;
-        }}
-      />,
-    );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
-    await user.click(content);
-    await user.keyboard("Draft");
-    await waitFor(
-      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      { timeout: 5_000 },
-    );
-    await waitFor(() => expect(flush).not.toBeNull());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+        text: "",
+        truncated: false,
+        contentHash: TEST_CONTENT_HASH,
+      });
+      let releaseWrite!: () => void;
+      const heldWrite = new Promise<{
+        status: "written";
+        contentHash: string;
+      }>((resolve) => {
+        releaseWrite = () =>
+          resolve({
+            status: "written" as const,
+            contentHash: TEST_CONTENT_HASH,
+          });
+      });
+      bridgeMock.writeWorkspaceText.mockImplementation(() => heldWrite);
+      let flush: (() => Promise<void>) | null = null;
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const view = render(
+        <FileInspector
+          workspaceId="ws-1"
+          path="notes/plain.txt"
+          registerDraftFlush={(next) => {
+            flush = next;
+          }}
+        />,
+      );
+      const content = (
+        await screen.findByTestId("view-text-editor")
+      ).querySelector(".cm-content") as HTMLElement;
+      await user.click(content);
+      await user.keyboard("Draft");
+      await act(async () => vi.advanceTimersByTimeAsync(800));
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(flush).not.toBeNull());
 
-    let flushSettled = false;
-    const flushPromise = flush!().then(() => {
-      flushSettled = true;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(flushSettled).toBe(false);
+      let flushSettled = false;
+      const flushPromise = flush!().then(() => {
+        flushSettled = true;
+      });
+      await act(async () => vi.advanceTimersByTimeAsync(50));
+      expect(flushSettled).toBe(false);
 
-    await act(async () => {
-      releaseWrite();
-      await heldWrite;
-      await flushPromise;
-    });
-    expect(flushSettled).toBe(true);
-    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
-    view.unmount();
+      await act(async () => {
+        releaseWrite();
+        await heldWrite;
+        await flushPromise;
+      });
+      expect(flushSettled).toBe(true);
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+      view.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rearms autosave when a debounce expires behind a shell flush", async () => {
