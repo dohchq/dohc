@@ -3,10 +3,6 @@ import {
   utf8ByteLength,
 } from "../../workspaces/workspaceTextLimits";
 
-// Keep the established conflict-pane API while the shared workspace helper
-// owns the UTF-8 algorithm.
-export { exceedsUtf8Bytes, utf8ByteLength };
-
 // What one conflict side is allowed to paint, and what a combined copy is
 // allowed to hold (#536).
 //

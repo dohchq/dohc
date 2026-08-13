@@ -3,8 +3,6 @@ import {
   CONFLICT_PREVIEW_MAX_CHARS,
   CONFLICT_PREVIEW_MAX_LINES,
   conflictPreview,
-  exceedsUtf8Bytes,
-  utf8ByteLength,
 } from "./conflictPane";
 
 function lines(count: number, lineChars: number): string {
@@ -164,58 +162,5 @@ describe("conflictPreview", () => {
   it("enough windows always reach the end of the side", () => {
     const text = lines(CONFLICT_PREVIEW_MAX_LINES * 5, 10);
     expect(conflictPreview(text, 5)).toEqual({ text, hiddenChars: 0 });
-  });
-});
-
-describe("utf8ByteLength", () => {
-  const encoder = new TextEncoder();
-  const samples = [
-    "",
-    "plain ascii\n",
-    "café", // two bytes
-    "日本語の文書", // three bytes
-    "🌱 seedling", // surrogate pair, four bytes
-    "\ud83c", // lone high surrogate
-    "\udfe1", // lone low surrogate
-    "\ud83c abc", // high surrogate not followed by a low one
-  ];
-
-  it("matches TextEncoder on every shape", () => {
-    for (const sample of samples) {
-      expect(utf8ByteLength(sample)).toBe(encoder.encode(sample).length);
-    }
-  });
-});
-
-describe("exceedsUtf8Bytes", () => {
-  const encoder = new TextEncoder();
-
-  it("agrees with an exact encode across the boundary", () => {
-    // "é" is one code unit and two UTF-8 bytes, so the cheap code-unit
-    // comparisons cannot settle these — the exact walk has to.
-    for (let count = 1; count <= 40; count += 1) {
-      const text = "é".repeat(count);
-      const bytes = encoder.encode(text).length;
-      expect(exceedsUtf8Bytes(text, bytes)).toBe(false);
-      expect(exceedsUtf8Bytes(text, bytes - 1)).toBe(true);
-    }
-  });
-
-  it("is exact at the cap for a body of astral characters", () => {
-    // 4 bytes across 2 code units: the shape the cheap bounds get wrong in
-    // both directions if the walk is skipped.
-    const text = "🌱".repeat(50_000);
-    expect(encoder.encode(text).length).toBe(200_000);
-    expect(exceedsUtf8Bytes(text, 200_000)).toBe(false);
-    expect(exceedsUtf8Bytes(text, 199_999)).toBe(true);
-  });
-
-  it("settles a 10 MiB body from its code-unit count alone", () => {
-    const text = "x".repeat(10 * 1024 * 1024);
-    expect(exceedsUtf8Bytes(text, 128 * 1024)).toBe(true);
-  });
-
-  it("never reports an empty body as over any cap", () => {
-    expect(exceedsUtf8Bytes("", 0)).toBe(false);
   });
 });

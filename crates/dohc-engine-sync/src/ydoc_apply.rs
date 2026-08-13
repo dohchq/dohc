@@ -968,7 +968,9 @@ pub fn project_ydoc_with_store(
     content_kind: dohc_engine_collab::ContentKind,
 ) -> Result<dohc_engine_collab::Projection, SyncError> {
     if content_kind != dohc_engine_collab::ContentKind::Scene {
-        return doc.project(content_kind).map_err(map_projection_error);
+        return doc
+            .project(content_kind)
+            .map_err(|error| map_projection_error(error, "ydoc projection is invalid"));
     }
     let folded = doc.fold_scene();
     // The unhydrated portable form bounds the scene-owned JSON before any
@@ -977,7 +979,7 @@ pub fn project_ydoc_with_store(
     // to be refused by the serializer afterward.
     let mut projected_bytes = folded
         .portable_json()
-        .map_err(map_scene_projection_error)?
+        .map_err(|error| map_projection_error(error, "scene projection is invalid"))?
         .len();
     let referenced: std::collections::BTreeSet<&str> = folded
         .elements
@@ -1044,7 +1046,7 @@ pub fn project_ydoc_with_store(
             reason: "scene asset authority is invalid",
         })?;
         let data_url_len = dohc_engine_collab::scene_data_url_len(&asset.mime_type, byte_length)
-            .map_err(map_scene_projection_error)?;
+            .map_err(|error| map_projection_error(error, "scene projection is invalid"))?;
         projected_bytes =
             projected_bytes
                 .checked_add(data_url_len)
@@ -1072,7 +1074,7 @@ pub fn project_ydoc_with_store(
     }
     let content = folded
         .portable_json_with_asset_bytes(&bytes_by_id)
-        .map_err(map_scene_projection_error)?;
+        .map_err(|error| map_projection_error(error, "scene projection is invalid"))?;
     Ok(dohc_engine_collab::Projection {
         content,
         content_kind,
@@ -1122,7 +1124,10 @@ fn retired_scene_asset_byte_length(
     .map_err(SyncError::corrupt)
 }
 
-fn map_scene_projection_error(error: dohc_engine_collab::CollabError) -> SyncError {
+fn map_projection_error(
+    error: dohc_engine_collab::CollabError,
+    invalid_reason: &'static str,
+) -> SyncError {
     match error {
         dohc_engine_collab::CollabError::ProjectionTooLarge { actual, max } => {
             SyncError::ProjectionTooLarge {
@@ -1132,22 +1137,7 @@ fn map_scene_projection_error(error: dohc_engine_collab::CollabError) -> SyncErr
             }
         }
         _ => SyncError::InvalidInput {
-            reason: "scene projection is invalid",
-        },
-    }
-}
-
-fn map_projection_error(error: dohc_engine_collab::CollabError) -> SyncError {
-    match error {
-        dohc_engine_collab::CollabError::ProjectionTooLarge { actual, max } => {
-            SyncError::ProjectionTooLarge {
-                constraint: "MAX_PROJECTION_BYTES",
-                actual_bytes: actual,
-                limit_bytes: max,
-            }
-        }
-        _ => SyncError::InvalidInput {
-            reason: "ydoc projection is invalid",
+            reason: invalid_reason,
         },
     }
 }

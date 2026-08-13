@@ -63,11 +63,6 @@ import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 // for read/preview by local sites. Publishing or re-sharing those files remains
 // gated by the explicit publish/share flow, not by local file preview.
 const IGNORED_DIRS = new Set([".dohc", "node_modules", ".git"]);
-const EXCALIDRAW_ASSET_OWNER_DIR_RE = /^[0-9a-f]{64}$/;
-
-function isManagedExcalidrawAssetDirectory(parent: string, name: string): boolean {
-  return parent === "assets/excalidraw" && EXCALIDRAW_ASSET_OWNER_DIR_RE.test(name);
-}
 
 // True iff `child` is the same as or nested under `parent` (both real paths).
 // On Windows, relative() across drives returns an absolute path (e.g.
@@ -201,10 +196,7 @@ export async function listFiles(
       // workspace and leak names or recurse into foreign trees.
       if (dirent.isSymbolicLink()) continue;
       if (dirent.isDirectory()) {
-        if (
-          !IGNORED_DIRS.has(dirent.name) &&
-          !isManagedExcalidrawAssetDirectory(prefix, dirent.name)
-        ) {
+        if (!IGNORED_DIRS.has(dirent.name)) {
           folders.push(rel);
           await walk(join(dir, dirent.name), rel);
         }
@@ -996,9 +988,9 @@ const MAX_ZIP_TOTAL_BYTES = 256 * 1024 * 1024;
 
 // Gathers the zip entries for a workspace export: the whole workspace, one
 // folder, or one file. Ignored segments (.dohc, .git, node_modules) and
-// symlinks never export — the same walk rules as listFiles — and
-// secret-classified files (the .env family) never leave in an archive: the
-// walk skips them, and an explicitly targeted secret refuses loudly (zips
+// symlinks never export. Secret-classified files (the .env family) never
+// leave in an archive: the walk skips them, and an explicitly targeted secret
+// refuses loudly (zips
 // get shared onward; the effective-policy posture is that secrets stay out
 // of everything that leaves the workspace). Bounded: more than
 // MAX_ZIP_ENTRIES files or MAX_ZIP_TOTAL_BYTES refuses (loudly, before

@@ -29,12 +29,12 @@ function utf8Bytes(value: string, stopAbove: number): number {
   return bytes;
 }
 
-/// Whether `value` is more than `limitBytes` of UTF-8, without encoding it.
-///
-/// `new TextEncoder().encode(value).length` copies the whole body to count it.
-/// UTF-8 spends at least one byte and at most three per UTF-16 code unit, so
-/// the cheap comparisons settle most calls. The exact walk stops as soon as it
-/// passes the limit.
+// Whether `value` is more than `limitBytes` of UTF-8, without encoding it.
+//
+// `new TextEncoder().encode(value).length` copies the whole body to count it.
+// UTF-8 spends at least one byte and at most three per UTF-16 code unit, so
+// the cheap comparisons settle most calls. The exact walk stops as soon as it
+// passes the limit.
 export function exceedsUtf8Bytes(value: string, limitBytes: number): boolean {
   if (value.length > limitBytes) return true;
   if (value.length * 3 <= limitBytes) return false;

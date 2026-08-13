@@ -155,7 +155,7 @@ describe("listFiles", () => {
     expect(result.folders).toEqual([SHARED_WITH_ME_FOLDER, `${SHARED_WITH_ME_FOLDER}/alex`]);
   });
 
-  it("hides generated Excalidraw asset owners without hiding adjacent user assets", async () => {
+  it("does not treat a hash-shaped Excalidraw folder name as ownership proof", async () => {
     const owner = "a".repeat(64);
     await mkdir(join(root, "assets", "excalidraw", owner), { recursive: true });
     await writeFile(join(root, "assets", "excalidraw", owner, `${"b".repeat(64)}.png`), "managed");
@@ -164,11 +164,16 @@ describe("listFiles", () => {
 
     const result = await listFiles(root);
     expect(result.files).toEqual([
+      {
+        path: `assets/excalidraw/${owner}/${"b".repeat(64)}.png`,
+        kind: "file",
+      },
       { path: "assets/excalidraw/user/keep.png", kind: "file" },
     ]);
     expect(result.folders).toEqual([
       "assets",
       "assets/excalidraw",
+      `assets/excalidraw/${owner}`,
       "assets/excalidraw/user",
     ]);
   });

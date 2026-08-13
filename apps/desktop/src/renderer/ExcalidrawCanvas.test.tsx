@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const excalidraw = vi.hoisted(() => ({
   restore: vi.fn(
@@ -17,6 +17,11 @@ const excalidraw = vi.hoisted(() => ({
       files: Record<string, unknown>,
     ) => JSON.stringify({ type: "excalidraw", elements, appState, files }),
   ),
+}));
+
+const drawingLink = vi.hoisted(() => ({
+  href: "https://example.com/drawing",
+  preventDefault: vi.fn(),
 }));
 
 vi.mock("@excalidraw/excalidraw", () => ({
@@ -62,8 +67,8 @@ vi.mock("@excalidraw/excalidraw", () => ({
         data-testid="mock-drawing-link"
         onClick={() =>
           props.onLinkOpen?.(
-            { id: "linked", link: "https://example.com/drawing" },
-            { preventDefault: vi.fn() },
+            { id: "linked", link: drawingLink.href },
+            { preventDefault: drawingLink.preventDefault },
           )
         }
       >
@@ -74,6 +79,10 @@ vi.mock("@excalidraw/excalidraw", () => ({
 }));
 
 import ExcalidrawCanvas from "./ExcalidrawCanvas";
+
+beforeEach(() => {
+  drawingLink.href = "https://example.com/drawing";
+});
 
 afterEach(() => {
   cleanup();
@@ -137,5 +146,18 @@ describe("ExcalidrawCanvas", () => {
     expect(openExternalUrl).toHaveBeenCalledWith({
       url: "https://example.com/drawing",
     });
+    expect(drawingLink.preventDefault).toHaveBeenCalledOnce();
+  });
+
+  it("leaves internal element links to Excalidraw", () => {
+    const openExternalUrl = vi.fn(async () => undefined);
+    vi.stubGlobal("dohcDesktop", { openExternalUrl });
+    drawingLink.href = "#element=target&group=group";
+    render(<ExcalidrawCanvas document={document} readOnly={false} />);
+
+    fireEvent.click(screen.getByTestId("mock-drawing-link"));
+
+    expect(drawingLink.preventDefault).not.toHaveBeenCalled();
+    expect(openExternalUrl).not.toHaveBeenCalled();
   });
 });

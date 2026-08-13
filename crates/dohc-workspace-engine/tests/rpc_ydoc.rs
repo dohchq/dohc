@@ -352,11 +352,11 @@ async fn scene_open_seeds_large_embedded_assets_in_the_engine_and_rehydrates_on_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn scene_open_claims_an_empty_artifact_after_capture_wins() {
+async fn scene_open_claims_a_whitespace_only_artifact_after_capture_wins() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     const PATH: &str = "drawings/untitled.excalidraw";
-    write_file(scratch.path(), PATH, b"");
+    write_file(scratch.path(), PATH, b" \n\t");
 
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
@@ -369,7 +369,11 @@ async fn scene_open_claims_an_empty_artifact_after_capture_wins() {
         json!({ "versionId": "main", "path": PATH }),
     )
     .await;
-    assert_eq!(captured["text"], json!(""), "capture must win before open");
+    assert_eq!(
+        captured["text"],
+        json!(" \n\t"),
+        "capture must win before open"
+    );
 
     let opened = call(
         &transport,

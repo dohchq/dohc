@@ -9191,7 +9191,7 @@ fn seed_scene_from_artifact_on_store(
     faults: &dyn FaultInjector,
 ) -> Result<Vec<String>, RuntimeError> {
     const EMPTY_SCENE: &str = r#"{"type":"excalidraw","version":2,"source":"https://excalidraw.com","elements":[],"appState":{},"files":{}}"#;
-    let imported = import_portable_scene(if artifact.is_empty() {
+    let imported = import_portable_scene(if artifact.trim().is_empty() {
         EMPTY_SCENE
     } else {
         artifact

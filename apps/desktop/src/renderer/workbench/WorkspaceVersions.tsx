@@ -12,6 +12,10 @@ import type {
   WorkspaceVersionFileChange,
   WorkspaceVersionRecord,
 } from "../../ipc/bridgeContract";
+import {
+  exceedsUtf8Bytes,
+  utf8ByteLength,
+} from "../../workspaces/workspaceTextLimits";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { SectionLabel } from "../ui/controls";
@@ -19,8 +23,6 @@ import {
   CONFLICT_COMBINED_EDIT_MAX_BYTES,
   applyCombinedChange,
   conflictPreview,
-  exceedsUtf8Bytes,
-  utf8ByteLength,
 } from "./conflictPane";
 import { UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "./unifiedDiff";
 

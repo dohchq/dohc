@@ -203,10 +203,10 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
         aiEnabled={false}
         validateEmbeddable={false}
         onLinkOpen={(element, event) => {
+          if (!element.link || !/^https?:\/\//iu.test(element.link)) return;
           // Excalidraw otherwise calls window.open, which the desktop shell
           // denies. Keep navigation inside dohc's audited URL bridge.
           event.preventDefault();
-          if (!element.link) return;
           void bridge()
             .openExternalUrl({ url: element.link })
             .catch(() => undefined);
