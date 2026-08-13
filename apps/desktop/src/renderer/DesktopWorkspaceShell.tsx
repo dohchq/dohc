@@ -2943,15 +2943,35 @@ export function DesktopWorkspaceShell(props: {
   // Engine history diff (flagged workspaces): one tab per moment.
   const openMomentDiffTab = useCallback(
     (momentId: string) => {
+      const targetGroupId = wbRef.current.activeEditorGroup;
+      const requestSequence = invalidateDeferredFileOpen(targetGroupId);
+      const isCurrentRequest = () =>
+        fileOpenRequests.current.workspaceId === workspaceId &&
+        fileOpenRequests.current.sequenceByGroup.get(targetGroupId) ===
+          requestSequence;
       void flushActiveDraft()
         .then(() => {
-          mutateWb((state) => openTab(state, momentDiffTabPath(momentId)));
+          if (!isCurrentRequest()) return;
+          const current = wbRef.current;
+          if (!current.editorGroups.some((group) => group.id === targetGroupId)) {
+            return;
+          }
+          mutateWb((state) =>
+            openTab(state, momentDiffTabPath(momentId), targetGroupId),
+          );
         })
         .catch((error) => {
+          if (!isCurrentRequest()) return;
           reportShellError("Could not save the active draft before opening history.", error);
         });
     },
-    [flushActiveDraft, mutateWb, reportShellError],
+    [
+      flushActiveDraft,
+      invalidateDeferredFileOpen,
+      mutateWb,
+      reportShellError,
+      workspaceId,
+    ],
   );
   const refreshAfterHistoryRestore = useCallback(
     () => {

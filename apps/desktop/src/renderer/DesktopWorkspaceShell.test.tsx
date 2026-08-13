@@ -5662,6 +5662,118 @@ describe("history page", () => {
     };
   }
 
+  it("keeps a moment diff selected when an older duplicate-file open finishes flushing", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+          {
+            id: "right",
+            tabs: ["race-a.txt"],
+            activeTab: "race-a.txt",
+            size: 0.5,
+          },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["race-a.txt", "b.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.listEngineMoments = vi.fn(async () =>
+      historyPage([historyMoment("m-1", "Wrote the plan")]),
+    );
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await settleEngineOnRead(bridge);
+
+    const left = await screen.findByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    const content = (await within(right).findByTestId("view-text-editor"))
+      .querySelector(".cm-content") as HTMLElement;
+    await user.click(content);
+    await user.keyboard("{End} changed");
+    await waitFor(() => expect(within(right).getByTestId("tab-dirty")).toBeTruthy());
+
+    fireEvent.pointerDown(left);
+    await waitFor(() => expect(left.dataset.active).toBe("true"));
+    await user.click(
+      screen
+        .getAllByTestId("tree-row")
+        .find((row) => row.dataset.path === "race-a.txt")!,
+    );
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    const momentPath = momentDiffTabPath("m-1");
+    await waitFor(() =>
+      expect(within(left).getByTestId(`tab-${momentPath}`).dataset.active).toBe(
+        "true",
+      ),
+    );
+  });
+
+  it("keeps a newer file selected when an older moment-diff flush finishes", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeEngineBridge(
+      Promise.resolve(storedStateWithTabs(["race-a.txt", "b.md"], "race-a.txt")),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["race-a.txt", "b.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.listEngineMoments = vi.fn(async () =>
+      historyPage([historyMoment("m-1", "Wrote the plan")]),
+    );
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await settleEngineOnRead(bridge);
+
+    const group = await screen.findByRole("region", { name: "Editor group 1" });
+    const content = (await within(group).findByTestId("view-text-editor"))
+      .querySelector(".cm-content") as HTMLElement;
+    await user.click(content);
+    await user.keyboard("{End} changed");
+    await waitFor(() => expect(within(group).getByTestId("tab-dirty")).toBeTruthy());
+
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1));
+
+    await user.click(within(group).getByTestId("tab-b.md"));
+    expect(within(group).getByTestId("tab-b.md").dataset.active).toBe("true");
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    await waitFor(() =>
+      expect(within(group).getByTestId("tab-b.md").dataset.active).toBe("true"),
+    );
+    expect(
+      within(group).queryByTestId(`tab-${momentDiffTabPath("m-1")}`),
+    ).toBeNull();
+  });
+
   // The listing loaders' rule, on the timeline: a request that is merely in
   // flight has answered nothing, and one that FAILS never will. Superseding on
   // ISSUE threw away the only answer there was, and the panel stayed empty
