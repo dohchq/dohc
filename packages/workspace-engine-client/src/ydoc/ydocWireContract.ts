@@ -80,6 +80,7 @@ export type YdocResyncResult = JsonObject & {
   initialUpdateBase64: string;
   lineageClaimId: string | null;
   recoveredPaths: string[];
+  artifactAssets: ArtifactAssetDescriptor[];
 };
 
 export type YdocSettleParams = JsonObject & {
@@ -201,6 +202,7 @@ const ResyncResultSchema = mutableStruct({
   initialUpdateBase64: Schema.String,
   lineageClaimId: Schema.NullOr(Schema.String),
   recoveredPaths: Schema.mutable(Schema.Array(Schema.String)),
+  artifactAssets: Schema.mutable(Schema.Array(ArtifactAssetDescriptorSchema)),
 });
 const ProjectionProvenanceSchema = mutableStruct({
   contentKind: YdocContentKindSchema,

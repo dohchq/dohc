@@ -3494,6 +3494,7 @@ export const EngineYDocLineageReplacementEventSchema = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
   update: ENGINE_YDOC_UPDATE,
   recoveredPaths: z.array(PATH_STRING),
+  artifactAssets: z.array(ARTIFACT_ASSET_DESCRIPTOR),
   lineageGeneration: z.number().int().positive(),
 });
 

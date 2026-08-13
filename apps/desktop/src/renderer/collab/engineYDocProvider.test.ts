@@ -26,6 +26,7 @@ function mockTransport(
   replaceLineage: (input: {
     update: Uint8Array;
     recoveredPaths: string[];
+    artifactAssets: readonly import("@dohc/workspace-engine-client").ArtifactAssetDescriptor[];
     lineageGeneration: number;
   }) => Promise<void>;
   releaseReplacement: () => void;
@@ -58,6 +59,7 @@ function mockTransport(
     | ((input: {
         update: Uint8Array;
         recoveredPaths: string[];
+        artifactAssets: readonly import("@dohc/workspace-engine-client").ArtifactAssetDescriptor[];
         lineageGeneration: number;
       }) => void | Promise<void>)
     | null = null;
@@ -220,6 +222,49 @@ function chunks<T>(values: T[], size: number): T[][] {
 }
 
 describe("engine Y.Doc provider — renderer bridge", () => {
+  it("replaces artifact asset authority before notifying replacement listeners", async () => {
+    const loser = {
+      id: "loser",
+      mimeType: "image/png",
+      created: 1,
+      ref: "assets/loser.png",
+      sha256: "a".repeat(64),
+    };
+    const winner = {
+      ...loser,
+      id: "winner",
+      ref: "assets/winner.png",
+      sha256: "b".repeat(64),
+    };
+    const mock = mockTransport();
+    const originalOpen = mock.transport.open;
+    mock.transport.open = async () => ({
+      ...(await originalOpen()),
+      artifactAssets: [loser],
+    });
+    const binding = await bindEngineYDoc(mock.transport);
+    const observed: string[][] = [];
+    binding.onDocumentReplaced(() => {
+      observed.push(binding.artifactAssets.map((asset) => asset.id));
+    });
+    const replacement = new Y.Doc();
+    typeIntoBody(replacement, "winner");
+
+    const replacing = mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(replacement),
+      recoveredPaths: [],
+      artifactAssets: [winner],
+      lineageGeneration: 2,
+    });
+    mock.releaseReplacement();
+    await replacing;
+
+    expect(binding.artifactAssets).toEqual([winner]);
+    expect(observed).toEqual([[winner.id]]);
+    expect(binding.artifactAssets).not.toContainEqual(loser);
+    await binding.destroy();
+  });
+
   it("declares scene maps before applying initial and remote updates", async () => {
     const seed = new Y.Doc();
     seed.getMap(EXCALIDRAW_SCENE_ROOTS.revisions).set("initial", "one");
@@ -383,6 +428,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       | ((input: {
           update: Uint8Array;
           recoveredPaths: string[];
+          artifactAssets: readonly import("@dohc/workspace-engine-client").ArtifactAssetDescriptor[];
           lineageGeneration: number;
         }) => void | Promise<void>)
       | null = null;
@@ -392,6 +438,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
         void replacementListener?.({
           update: Y.encodeStateAsUpdate(winner),
           recoveredPaths: [],
+          artifactAssets: [],
           lineageGeneration: 2,
         });
         return {
@@ -797,6 +844,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     const replacing = mock.replaceLineage({
       update: Y.encodeStateAsUpdate(winner),
       recoveredPaths: ["notes/live (recovered).md"],
+      artifactAssets: [],
       lineageGeneration: 2,
     });
 
@@ -848,11 +896,13 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     const first = mock.replaceLineage({
       update: Y.encodeStateAsUpdate(firstWinner),
       recoveredPaths: [],
+      artifactAssets: [],
       lineageGeneration: 2,
     });
     const second = mock.replaceLineage({
       update: Y.encodeStateAsUpdate(finalWinner),
       recoveredPaths: [],
+      artifactAssets: [],
       lineageGeneration: 3,
     });
     expect(mock.acknowledgedGenerations).toEqual([2]);

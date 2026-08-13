@@ -193,6 +193,24 @@ describe("engine Y.Doc save-state reporting in main", () => {
     expect(acknowledge).toContain("handoff.acknowledge()");
   });
 
+  it("atomically replaces artifact asset authority when the handoff is acknowledged", () => {
+    const open = handlerSource("engineYDocOpen");
+    const acknowledgeAt = open.indexOf("acknowledge: ()");
+    const replaceAssetsAt = open.indexOf(
+      "registeredEntry.artifactAssetsById = new Map(",
+      acknowledgeAt,
+    );
+    const deleteHandoffAt = open.indexOf(
+      "pendingEngineYDocLineageHandoffs.delete(sessionKey)",
+      acknowledgeAt,
+    );
+    expect(replaceAssetsAt).toBeGreaterThan(acknowledgeAt);
+    expect(replaceAssetsAt).toBeLessThan(deleteHandoffAt);
+    expect(open.slice(replaceAssetsAt, deleteHandoffAt)).toContain(
+      "handoff.artifactAssets.map",
+    );
+  });
+
   it("makes updates inert after a successful delete and repeats the deleted state", () => {
     const handler = handlerSource("engineYDocApplyUpdate");
     const deletedAt = handler.indexOf("if (entry.deleted)");

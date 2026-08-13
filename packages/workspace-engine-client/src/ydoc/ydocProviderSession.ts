@@ -358,7 +358,9 @@ export async function openEngineYdocProviderSession(
       return session.lineageClaimId;
     },
     contentKind: session.contentKind,
-    artifactAssets: session.artifactAssets,
+    get artifactAssets() {
+      return session.artifactAssets;
+    },
     path: session.path,
     head: session.head,
     lineage: session.lineage,

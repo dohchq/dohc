@@ -4862,6 +4862,7 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
     .await;
     assert_eq!(resynced["lineageClaimId"], json!(replacement_claim.clone()));
     assert_eq!(resynced["recoveredPaths"], json!([]));
+    assert_eq!(resynced["artifactAssets"], json!([]));
     assert_eq!(
         deferred_count(),
         1,

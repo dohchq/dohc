@@ -565,7 +565,10 @@ export class YdocAdapterSession {
   readonly objectId: string;
   readonly path: string;
   readonly contentKind: YdocContentKind;
-  readonly artifactAssets: readonly ArtifactAssetDescriptor[];
+  private activeArtifactAssets: readonly ArtifactAssetDescriptor[];
+  get artifactAssets(): readonly ArtifactAssetDescriptor[] {
+    return this.activeArtifactAssets;
+  }
   readonly workspace: WorkspaceHandle;
   readonly sessionId: string;
   // Whether the ENTERED VERSION has a committed snapshot for this path.
@@ -628,7 +631,7 @@ export class YdocAdapterSession {
     this.objectId = input.objectId;
     this.path = input.path;
     this.contentKind = input.contentKind;
-    this.artifactAssets = input.artifactAssets ?? [];
+    this.activeArtifactAssets = input.artifactAssets ?? [];
     this.initialUpdate = input.initialUpdate;
     this.lineageClaimId = input.lineageClaimId;
     this.activeDoc = new Y.Doc();
@@ -1076,6 +1079,7 @@ export class YdocAdapterSession {
       this.activeDoc = replacement;
       this.lineageClaimId = result.lineageClaimId;
       this.initialUpdate = update;
+      this.activeArtifactAssets = result.artifactAssets;
       for (const listener of this.lineageReplacementListeners) {
         listener(replacement, result.recoveredPaths);
       }
@@ -1106,6 +1110,7 @@ export class YdocAdapterSession {
     update: Uint8Array;
     lineageClaimId: string | null;
     recoveredPaths: string[];
+    artifactAssets: readonly ArtifactAssetDescriptor[];
   }> {
     const raw = await this.adapter.request(this.workspace, YDOC_METHOD.resync, {
       sessionId: this.sessionId,
@@ -1115,6 +1120,7 @@ export class YdocAdapterSession {
       update: base64ToBytes(result.initialUpdateBase64),
       lineageClaimId: result.lineageClaimId,
       recoveredPaths: result.recoveredPaths,
+      artifactAssets: result.artifactAssets,
     };
   }
 

@@ -772,6 +772,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       initialUpdateBase64: encodeBase64(Y.encodeStateAsUpdate(session.doc)),
       lineageClaimId: null,
       recoveredPaths: [],
+      artifactAssets: [],
     };
   }
 

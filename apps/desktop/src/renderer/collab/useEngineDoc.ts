@@ -395,6 +395,7 @@ function makeTransport(
         void listener({
           update: event.update,
           recoveredPaths: event.recoveredPaths,
+          artifactAssets: event.artifactAssets,
           lineageGeneration: event.lineageGeneration,
         });
       });

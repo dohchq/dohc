@@ -870,6 +870,7 @@ describe("YdocLiveAdapter", () => {
               ),
               lineageClaimId: "winning-claim",
               recoveredPaths: ["notes/live (recovered).txt"],
+              artifactAssets: [],
             },
           };
         }
@@ -939,6 +940,7 @@ describe("YdocLiveAdapter", () => {
               initialUpdateBase64: btoa(String.fromCharCode(...winnerUpdate)),
               lineageClaimId: "winning-claim",
               recoveredPaths: ["notes/live (recovered).txt"],
+              artifactAssets: [],
             },
           };
         }
@@ -1036,6 +1038,7 @@ describe("YdocLiveAdapter", () => {
               initialUpdateBase64: btoa(String.fromCharCode(...winnerUpdate)),
               lineageClaimId: "winning-claim",
               recoveredPaths: [],
+              artifactAssets: [],
             },
           };
         }

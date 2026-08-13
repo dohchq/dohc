@@ -43,6 +43,7 @@ type LineageReplacementListener = (event: {
   sessionId: string;
   update: Uint8Array;
   recoveredPaths: string[];
+  artifactAssets: readonly typeof IMAGE_DESCRIPTOR[];
   lineageGeneration: number;
 }) => void;
 
@@ -58,6 +59,7 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   let rejectedApplyAttempts = 0;
   const acknowledgedGenerations: number[] = [];
   let openedSessionId: string | null = null;
+  let openCount = 0;
   const doc = new Y.Doc();
   if (kind === "scene") {
     declareSceneRoots(doc);
@@ -89,6 +91,7 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
 
   const api = {
     async openEngineYDocSession(payload: { sessionId: string }) {
+      openCount += 1;
       openedSessionId = payload.sessionId;
       if (emitDeletedDuringOpen) {
         for (const listener of [...saveStateListeners]) {
@@ -162,7 +165,10 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     });
   }
 
-  function emitLineageReplacement(text: string): void {
+  function emitLineageReplacement(
+    text: string,
+    replacementAssets: readonly typeof IMAGE_DESCRIPTOR[] = [],
+  ): void {
     if (openedSessionId === null) throw new Error("session not open yet");
     const replacement = new Y.Doc();
     if (kind === "scene") {
@@ -175,6 +181,18 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
         isDeleted: false,
         index: "a0",
       });
+      for (const descriptor of replacementAssets) {
+        putSceneAsset(replacement, descriptor);
+        insertElementRevision(replacement, {
+          id: `image-${descriptor.id}`,
+          type: "image",
+          fileId: descriptor.id,
+          version: 1,
+          versionNonce: 1,
+          isDeleted: false,
+          index: "a1",
+        });
+      }
     } else {
       replacement.getMap("meta").set("contentKind", "plain-text");
       replacement.getText("plainText").insert(0, text);
@@ -183,6 +201,7 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       sessionId: openedSessionId,
       update: Y.encodeStateAsUpdate(replacement),
       recoveredPaths: [],
+      artifactAssets: replacementAssets,
       lineageGeneration: 2,
     };
     act(() => {
@@ -237,6 +256,7 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     sourceDoc: doc,
     acknowledgedGenerations,
     sessionId: () => openedSessionId,
+    openCount: () => openCount,
     rejectNextApplyAttempts(count: number) {
       rejectedApplyAttempts = count;
     },
@@ -270,6 +290,7 @@ function Harness(props: {
 }) {
   const sceneVersion = useRef(1);
   const [retryKey, setRetryKey] = useState(0);
+  const [hydratedAssets, setHydratedAssets] = useState("none");
   const engine = useEngineDoc({
     workspaceId: props.workspaceId,
     path: props.path,
@@ -313,6 +334,23 @@ function Harness(props: {
           ? `${engine.recoveryAssets.state}:${engine.recoveryAssets.count}`
           : "none"}
       </span>
+      <span data-testid="artifact-asset-ids">
+        {engine.artifactAssets.map((asset) => asset.id).join(",") || "none"}
+      </span>
+      <span data-testid="hydrated-assets">{hydratedAssets}</span>
+      <button
+        type="button"
+        data-testid="hydrate-assets"
+        onClick={() => {
+          void Promise.all(
+            engine.artifactAssets.map((asset) =>
+              engine.readArtifactAsset(asset.id),
+            ),
+          ).then((loaded) => setHydratedAssets(loaded.map(({ descriptor }) => descriptor.id).join(",")));
+        }}
+      >
+        hydrate assets
+      </button>
       <span data-testid="removal-operation">
         {engine.removalInProgress?.operation ?? "none"}
       </span>
@@ -526,6 +564,54 @@ it("recovers a dirty replaced scene immediately and hydrates its image", async (
   });
   expect(screen.getByTestId("asset-recovery").textContent).toBe("none");
   expect(screen.getByTestId("draft-count").textContent).toBe("1");
+});
+
+it("hydrates winner-only scene assets after lineage replacement without reopening", async () => {
+  harness = harnessBridge("scene");
+  const loser = { ...IMAGE_DESCRIPTOR, id: "loser-image", ref: "assets/loser.png" };
+  const winner = {
+    ...IMAGE_DESCRIPTOR,
+    id: "winner-image",
+    ref: "assets/winner.png",
+    sha256: "b".repeat(64),
+  };
+  const readAsset = vi.fn(async (assetId: string) => {
+    if (assetId !== winner.id) throw new Error("stale asset authority");
+    return { descriptor: winner, bytes: new Uint8Array([1, 2, 3]) };
+  });
+  harness.setArtifactReader([loser], readAsset);
+  putSceneAsset(harness.sourceDoc, loser);
+  insertElementRevision(harness.sourceDoc, {
+    id: "loser-image-element",
+    type: "image",
+    fileId: loser.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    index: "a1",
+  });
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("artifact-asset-ids").textContent).toBe(loser.id),
+  );
+
+  harness.emitLineageReplacement("unused", [winner]);
+
+  await waitFor(() =>
+    expect(screen.getByTestId("artifact-asset-ids").textContent).toBe(winner.id),
+  );
+  expect(harness.openCount()).toBe(1);
+  expect(screen.getByTestId("artifact-asset-ids").textContent).not.toContain(
+    loser.id,
+  );
+  act(() => screen.getByTestId("hydrate-assets").click());
+  await waitFor(() =>
+    expect(screen.getByTestId("hydrated-assets").textContent).toBe(winner.id),
+  );
+  expect(readAsset).toHaveBeenCalledExactlyOnceWith(winner.id);
 });
 
 it("shows the failure when a settle fails, instead of reading Saved", async () => {

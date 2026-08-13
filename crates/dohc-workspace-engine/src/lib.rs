@@ -7707,6 +7707,19 @@ impl EngineService {
             initial_update_base64: encode_ydoc_state_base64(&state.initial_update)?,
             lineage_claim_id: state.lineage_claim_id,
             recovered_paths: state.recovered_paths,
+            artifact_assets: state
+                .artifact_assets
+                .into_iter()
+                .map(|asset| ArtifactAssetDescriptorResult {
+                    id: asset.id,
+                    mime_type: asset.mime_type,
+                    created: asset.created,
+                    r#ref: asset.path,
+                    sha256: asset.sha256,
+                    last_retrieved: asset.last_retrieved,
+                    version: asset.version,
+                })
+                .collect(),
         })
         .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
     }
@@ -9375,6 +9388,7 @@ struct YdocResyncResult {
     initial_update_base64: String,
     lineage_claim_id: Option<String>,
     recovered_paths: Vec<String>,
+    artifact_assets: Vec<ArtifactAssetDescriptorResult>,
 }
 
 #[derive(Deserialize)]

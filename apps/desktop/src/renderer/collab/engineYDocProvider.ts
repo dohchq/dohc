@@ -87,6 +87,7 @@ export interface EngineYDocTransport {
     listener: (input: {
       update: Uint8Array;
       recoveredPaths: string[];
+      artifactAssets: readonly ArtifactAssetDescriptor[];
       lineageGeneration: number;
     }) => void | Promise<void>,
   ): () => void;
@@ -227,6 +228,7 @@ export async function bindEngineYDoc(
   type LineageReplacement = {
     update: Uint8Array;
     recoveredPaths: string[];
+    artifactAssets: readonly ArtifactAssetDescriptor[];
     lineageGeneration: number;
   };
   const replacementsBeforeOpen: LineageReplacement[] = [];
@@ -411,6 +413,7 @@ export async function bindEngineYDoc(
   >();
   const retiredDocs = new Set<Y.Doc>();
   let replacementHandoff: Promise<void> | null = null;
+  let artifactAssets = opened.artifactAssets ?? [];
   const queueReplacement = (input: LineageReplacement): Promise<void> => {
     const replace = async (): Promise<void> => {
       if (destroyed || input.lineageGeneration <= lineageGeneration) return;
@@ -444,6 +447,7 @@ export async function bindEngineYDoc(
       retiredDocs.add(retired);
       doc = replacement;
       lineageGeneration = input.lineageGeneration;
+      artifactAssets = input.artifactAssets;
       replacementInProgress = false;
       for (const listener of replacementListeners) {
         listener(replacement, input.recoveredPaths);
@@ -481,7 +485,9 @@ export async function bindEngineYDoc(
     engineMayHoldDocument: false,
     artifactAssetsInvalid: false,
     removalInProgress: null,
-    artifactAssets: opened.artifactAssets ?? [],
+    get artifactAssets() {
+      return artifactAssets;
+    },
     readArtifactAsset(assetId) {
       if (!transport.readArtifactAsset) {
         return Promise.reject(

@@ -3085,6 +3085,9 @@ const engineYDocSessions = new Map<string, EngineYDocSessionEntry>();
 type EngineYDocLineageHandoff = {
   lineageGeneration: number;
   remoteUpdates: Uint8Array[];
+  artifactAssets: readonly NonNullable<
+    WorkspaceEngineYDocProviderSession["artifactAssets"]
+  >[number][];
   acknowledge: () => AcknowledgeEngineYDocLineageReplacementResult;
 };
 const pendingEngineYDocLineageHandoffs = new Map<
@@ -8940,11 +8943,17 @@ function registerIpcHandlers(
         update: Uint8Array;
         recoveredPaths: string[];
         remoteUpdates: Uint8Array[];
+        artifactAssets: readonly NonNullable<
+          WorkspaceEngineYDocProviderSession["artifactAssets"]
+        >[number][];
       } | null = null;
       const announceLineageReplacement = (replacement: {
         update: Uint8Array;
         recoveredPaths: string[];
         remoteUpdates: Uint8Array[];
+        artifactAssets: readonly NonNullable<
+          WorkspaceEngineYDocProviderSession["artifactAssets"]
+        >[number][];
       }): void => {
         if (
           refused ||
@@ -8957,6 +8966,7 @@ function registerIpcHandlers(
         const handoff: EngineYDocLineageHandoff = {
           lineageGeneration: nextLineageGeneration,
           remoteUpdates: replacement.remoteUpdates,
+          artifactAssets: replacement.artifactAssets,
           acknowledge: () => {
             if (pendingEngineYDocLineageHandoffs.get(sessionKey) !== handoff) {
               return { updates: [] };
@@ -8964,6 +8974,9 @@ function registerIpcHandlers(
             lineageGeneration = nextLineageGeneration;
             if (registeredEntry !== null) {
               registeredEntry.lineageGeneration = nextLineageGeneration;
+              registeredEntry.artifactAssetsById = new Map(
+                handoff.artifactAssets.map((asset) => [asset.id, asset]),
+              );
             }
             pendingEngineYDocLineageHandoffs.delete(sessionKey);
             const queued = queuedLineageReplacement;
@@ -8990,6 +9003,7 @@ function registerIpcHandlers(
               sessionId: input.sessionId,
               update: replacement.update,
               recoveredPaths: replacement.recoveredPaths,
+              artifactAssets: replacement.artifactAssets,
               lineageGeneration: nextLineageGeneration,
             }),
           );
@@ -9070,7 +9084,12 @@ function registerIpcHandlers(
             ) {
               return;
             }
-            const replacement = { update, recoveredPaths, remoteUpdates: [] };
+            const replacement = {
+              update,
+              recoveredPaths,
+              remoteUpdates: [],
+              artifactAssets: session.artifactAssets ?? [],
+            };
             if (pendingEngineYDocLineageHandoffs.has(sessionKey)) {
               // Keep only the newest full snapshot. It contains every earlier
               // lineage; deltas observed after it are buffered on this object.

@@ -250,6 +250,7 @@ pub struct YdocResyncState {
     pub initial_update: Vec<u8>,
     pub lineage_claim_id: Option<String>,
     pub recovered_paths: Vec<String>,
+    pub artifact_assets: Vec<ArtifactAssetDescriptor>,
 }
 
 /// Result of the single moment+snapshot+materialization settlement path.
@@ -10506,6 +10507,16 @@ fn ydoc_resync_on_store(
     let lineage_claim_id = persisted
         .as_ref()
         .and_then(|persisted| persisted.marker.lineage_claim_id.clone());
+    let artifact_assets = persisted
+        .as_ref()
+        .filter(|persisted| persisted.marker.content_kind == ContentKind::Scene)
+        .map(|persisted| scene_asset_descriptors_for_open(&persisted.doc))
+        .unwrap_or_default();
+    if let Some(persisted) = persisted.as_ref()
+        && persisted.marker.content_kind == ContentKind::Scene
+    {
+        validate_scene_artifact_assets_on_store(store, key, &persisted.doc, &artifact_assets)?;
+    }
     let initial_update = persisted.map_or_else(
         || Ydoc::wire().encode_full_state(),
         |persisted| persisted.doc.encode_full_state(),
@@ -10519,6 +10530,7 @@ fn ydoc_resync_on_store(
         initial_update,
         lineage_claim_id,
         recovered_paths,
+        artifact_assets,
     })
 }
 
