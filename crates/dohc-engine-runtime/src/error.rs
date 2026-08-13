@@ -59,6 +59,13 @@ pub enum RuntimeError {
     #[error("a linked artifact asset is invalid")]
     YdocArtifactAssetsInvalid,
 
+    /// Sync delivered a drawing delete before one of its owned asset deletes.
+    /// The rollback must wait so its normal compensation can converge on peers.
+    #[error(
+        "Sync has not delivered every drawing asset delete. Retry the rollback after sync completes."
+    )]
+    SceneAssetDeletePending,
+
     /// The actor's worker thread could not be spawned.
     #[error("could not spawn actor worker thread")]
     ThreadSpawn(#[source] std::io::Error),
@@ -109,6 +116,7 @@ impl RuntimeError {
             RuntimeError::ActiveVersionMaterializationIncomplete { .. } => "materialize-failed",
             RuntimeError::YdocArtifactAssetsPending => "ydoc-artifact-assets-pending",
             RuntimeError::YdocArtifactAssetsInvalid => "ydoc-artifact-assets-invalid",
+            RuntimeError::SceneAssetDeletePending => "scene-asset-delete-pending",
             RuntimeError::ThreadSpawn(_) => "thread-spawn-failed",
             RuntimeError::ActorUnavailable => "actor-unavailable",
             RuntimeError::Overloaded => "overloaded",

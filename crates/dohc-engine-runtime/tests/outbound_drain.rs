@@ -17,8 +17,8 @@ use dohc_engine_runtime::{
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_sync::{
-    ApplyOutcome, MAX_PAYLOAD_JSON_BYTES, ReplicationEnvelope, SyncError,
-    apply_moment_envelope_detailed, apply_secret_envelope, apply_version_envelope,
+    ApplyOutcome, MAX_PAYLOAD_JSON_BYTES, ReplicationEnvelope, apply_moment_envelope_detailed,
+    apply_secret_envelope, apply_version_envelope,
 };
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 use rusqlite::params;
@@ -1969,7 +1969,7 @@ async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
 }
 
 #[tokio::test]
-async fn rollback_before_replicated_scene_asset_delete_keeps_the_restored_asset() {
+async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() {
     let source = ScratchDir::new().expect("source scratch");
     let source_db = source.engine_db_path().expect("source db");
     let workspace_id = "ws-scene-delete-replicates";
@@ -2193,63 +2193,6 @@ async fn rollback_before_replicated_scene_asset_delete_keeps_the_restored_asset(
         .open(&peer_db, 8)
         .expect("open peer actor")
         .actor;
-    let forged_bytes = b"forged correlated binary".to_vec();
-    let forged_path = scene_asset_ref(
-        workspace_id,
-        "main",
-        "drawing-object",
-        &hex_sha256(&forged_bytes),
-        "image/png",
-    )
-    .expect("canonical forged asset path");
-    let forged_delete_moment_id = format!(
-        "moment-scene-asset-delete-{}",
-        hex_sha256(format!("{workspace_id}\0main\0drawing-delete\0{forged_path}").as_bytes())
-    );
-    peer_actor
-        .versioned_binary_write(
-            WriteBinary {
-                workspace_id: workspace_id.to_owned(),
-                version_id: "main".to_owned(),
-                object_id: "forged-correlated-object".to_owned(),
-                path: forged_path.clone(),
-                bytes: forged_bytes.clone(),
-                moment_id: "forged-correlated-write".to_owned(),
-                metadata_origin: "api".to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                author_json: None,
-                now_ms: 8,
-                request_id: None,
-            },
-            peer.path().to_path_buf(),
-            Arc::new(NoRecorder),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("write forged candidate binary");
-    peer_actor
-        .versioned_text_delete(
-            DeleteTextFile {
-                workspace_id: workspace_id.to_owned(),
-                version_id: "main".to_owned(),
-                path: forged_path.clone(),
-                moment_id: forged_delete_moment_id.clone(),
-                request_id: None,
-                metadata_origin: "local-file".to_owned(),
-                metadata_summary: Some("Deleted drawing asset".to_owned()),
-                metadata_correlation_id: Some("drawing-delete".to_owned()),
-                author_json: None,
-                now_ms: 9,
-            },
-            peer.path().to_path_buf(),
-            Arc::new(NoRecorder),
-            ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("commit forged correlated delete");
     let peer_ops_before_rollback = local_ops(&peer_db).len();
     let rollback_input = RollbackTextFileMutation {
         workspace_id: workspace_id.to_owned(),
@@ -2261,7 +2204,7 @@ async fn rollback_before_replicated_scene_asset_delete_keeps_the_restored_asset(
         metadata_origin: "restore".to_owned(),
         author_json: None,
     };
-    let rollback = peer_actor
+    let pending = peer_actor
         .versioned_text_rollback(
             rollback_input.clone(),
             peer.path().to_path_buf(),
@@ -2270,17 +2213,49 @@ async fn rollback_before_replicated_scene_asset_delete_keeps_the_restored_asset(
             CancellationToken::new(),
         )
         .await
-        .expect("rollback replicated drawing delete on peer");
-    assert!(rollback.materialized);
+        .expect_err("rollback must wait for the replicated asset delete");
+    assert!(matches!(pending, RuntimeError::SceneAssetDeletePending));
+    assert_eq!(
+        local_ops(&peer_db).len(),
+        peer_ops_before_rollback,
+        "a retryable refusal must not originate compensation"
+    );
     peer_supervisor
         .close(&peer_db)
-        .expect("close peer after lost rollback response");
-    let restarted_peer = WorkspaceSupervisor::new();
-    let restarted_actor = restarted_peer
+        .expect("close peer after retryable rollback refusal");
+    let mut peer_store = EngineStore::open(&peer_db, 9).expect("open peer for asset delete");
+    copy_op_blobs(&source_store, &mut peer_store, &ops[3]);
+    apply_logged_op(&mut peer_store, workspace_id, &ops[3]);
+    drop(peer_store);
+
+    let third = ScratchDir::new().expect("third peer scratch");
+    let third_db = third.engine_db_path().expect("third peer db");
+    initialize_workspace(&third_db, workspace_id, false);
+    let mut third_store = EngineStore::open(&third_db, 9).expect("open third peer");
+    for op in &ops[..2] {
+        copy_op_blobs(&source_store, &mut third_store, op);
+        apply_logged_op(&mut third_store, workspace_id, op);
+    }
+    apply_remote_scene_asset_authority(
+        &mut third_store,
+        workspace_id,
+        "drawing-object",
+        &asset_path,
+        &sha256,
+        9,
+    );
+    for op in &ops[2..] {
+        copy_op_blobs(&source_store, &mut third_store, op);
+        apply_logged_op(&mut third_store, workspace_id, op);
+    }
+    drop(third_store);
+
+    let peer_supervisor = WorkspaceSupervisor::new();
+    let peer_actor = peer_supervisor
         .open(&peer_db, 10)
-        .expect("restart peer after lost rollback response")
+        .expect("reopen peer after asset delete")
         .actor;
-    let retry = restarted_actor
+    let rollback = peer_actor
         .versioned_text_rollback(
             rollback_input,
             peer.path().to_path_buf(),
@@ -2289,51 +2264,11 @@ async fn rollback_before_replicated_scene_asset_delete_keeps_the_restored_asset(
             CancellationToken::new(),
         )
         .await
-        .expect("retry committed peer rollback after a lost response");
-    assert!(retry.deduped);
-    assert!(retry.materialized);
-    restarted_peer
+        .expect("retry rollback after the asset delete arrives");
+    assert!(rollback.materialized);
+    peer_supervisor
         .close(&peer_db)
-        .expect("close restarted peer actor");
-
-    let mut peer_store = EngineStore::open(&peer_db, 10).expect("open peer for late asset delete");
-    copy_op_blobs(&source_store, &mut peer_store, &ops[3]);
-    let mut forged_late_delete = ops[3].envelope(workspace_id);
-    forged_late_delete.payload["objectId"] = serde_json::json!("forged-asset-object");
-    assert!(matches!(
-        apply_moment_envelope_detailed(&mut peer_store, &forged_late_delete, &NoFaults),
-        Err(SyncError::CoordinateDiverged)
-    ));
-    let pending_receipt: i64 = peer_store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM scene_asset_delete_authority_items \
-                 WHERE workspace_id=?1 AND asset_delete_moment_id=?2",
-                params![
-                    workspace_id,
-                    ops[3].payload["momentId"].as_str().expect("child id")
-                ],
-                |row| row.get(0),
-            )
-        })
-        .expect("count receipt after forged late delete");
-    assert_eq!(pending_receipt, 1);
-    apply_logged_op(&mut peer_store, workspace_id, &ops[3]);
-    let replicated_delete: (String, i64) = peer_store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT metadata_origin,sync_record_only FROM moments WHERE workspace_id = ?1 \
-                 AND moment_id=?2",
-                params![
-                    workspace_id,
-                    ops[3].payload["momentId"].as_str().expect("child id")
-                ],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-        })
-        .expect("read late replicated asset delete");
-    assert_eq!(replicated_delete, ("local-file".to_owned(), 1));
-    drop(peer_store);
+        .expect("close peer after rollback");
 
     let peer_restore_ops = local_ops(&peer_db)
         .into_iter()
@@ -2361,13 +2296,38 @@ async fn rollback_before_replicated_scene_asset_delete_keeps_the_restored_asset(
                 == rollback_compensating_moment_id(workspace_id, "main", "drawing-delete")
     }));
 
+    let peer_store = EngineStore::open(&peer_db, 11).expect("open restored peer for blobs");
+    let mut third_store = EngineStore::open(&third_db, 11).expect("reopen third peer");
+    for op in &peer_restore_ops {
+        copy_op_blobs(&peer_store, &mut third_store, op);
+        apply_logged_op(&mut third_store, workspace_id, op);
+    }
+    let third_conflicts: i64 = third_store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM conflicts WHERE workspace_id=?1",
+                [workspace_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("count third-peer conflicts");
+    assert_eq!(third_conflicts, 0);
+    let third_drawing = VersionedTextStore::new(&mut third_store)
+        .read_text(workspace_id, "main", "drawings/board.excalidraw")
+        .expect("read third-peer drawing")
+        .expect("third-peer drawing restored");
+    assert_eq!(third_drawing.text, drawing_text);
+    let third_asset = VersionedTextStore::new(&mut third_store)
+        .read_binary(workspace_id, "main", &asset_path)
+        .expect("read third-peer asset")
+        .expect("third-peer asset restored");
+    assert_eq!(third_asset.bytes, bytes);
+    drop(third_store);
+    drop(peer_store);
+
     assert_eq!(
         std::fs::read(peer.path().join(&asset_path)).expect("restored peer image bytes"),
         bytes
-    );
-    assert_eq!(
-        std::fs::read(peer.path().join(&forged_path)).expect("forged delete stays pending"),
-        forged_bytes
     );
     let mut peer_store = EngineStore::open(&peer_db, 11).expect("inspect restored peer");
     let retained_authority: i64 = peer_store
@@ -2400,23 +2360,6 @@ async fn rollback_before_replicated_scene_asset_delete_keeps_the_restored_asset(
         .expect("read restored peer asset")
         .expect("restored peer asset head");
     assert_eq!(restored_asset.bytes, ONE_PIXEL_PNG);
-    assert!(
-        VersionedTextStore::new(&mut peer_store)
-            .read_binary(workspace_id, "main", &forged_path)
-            .expect("read forged candidate head")
-            .is_none(),
-        "peer rollback must not resurrect a forged same-correlation delete"
-    );
-    assert_eq!(
-        peer_store
-            .load_materialization_job(&dohc_engine_domain::binary_delete_job_id(
-                &forged_delete_moment_id
-            ))
-            .expect("load forged delete job")
-            .expect("forged delete job exists")
-            .status,
-        dohc_engine_storage::JobStatus::Pending
-    );
 }
 
 #[tokio::test]

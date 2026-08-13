@@ -347,13 +347,6 @@ fn apply_moment_append(
     validate_payload(payload)?;
     require_version(tx, &envelope.workspace_id, &payload.version_id)?;
 
-    if apply_late_rolled_back_scene_asset_delete(tx, envelope, payload)? {
-        return Ok(MomentApplyResult {
-            conflicts_opened: 0,
-            materialization_changes: Vec::new(),
-        });
-    }
-
     let duplicate: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND moment_id=?2) \
@@ -645,101 +638,6 @@ fn apply_moment_append(
     })
 }
 
-fn apply_late_rolled_back_scene_asset_delete(
-    tx: &Transaction<'_>,
-    envelope: &ReplicationEnvelope,
-    payload: &MomentAppendPayload,
-) -> Result<bool, SyncError> {
-    let authority = tx
-        .query_row(
-            "SELECT i.drawing_delete_moment_id,i.asset_path,i.asset_sha256, \
-                    i.asset_object_id,i.asset_before_moment_id, \
-                    a.drawing_delete_recorded_at_ms,i.expected_origin_id,i.expected_origin_seq \
-             FROM scene_asset_delete_authority_items i \
-             JOIN scene_asset_delete_authorities a ON a.workspace_id=i.workspace_id \
-               AND a.version_id=i.version_id \
-               AND a.drawing_delete_moment_id=i.drawing_delete_moment_id \
-             JOIN moments rollback ON rollback.workspace_id=a.workspace_id \
-               AND rollback.version_id=a.version_id \
-               AND rollback.object_id=a.drawing_object_id \
-               AND rollback.moment_id=a.rollback_moment_id \
-               AND rollback.operation='write' AND rollback.after_content_kind='text' \
-             WHERE i.workspace_id=?1 AND i.version_id=?2 AND i.asset_delete_moment_id=?3 \
-               AND a.rollback_moment_id IS NOT NULL",
-            params![envelope.workspace_id, payload.version_id, payload.moment_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<i64>>(7)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?;
-    let Some((
-        drawing_delete_id,
-        path,
-        sha256,
-        object_id,
-        before_moment_id,
-        drawing_delete_recorded_at_ms,
-        expected_origin_id,
-        expected_origin_seq,
-    )) = authority
-    else {
-        return Ok(false);
-    };
-    let exact = payload.operation == "delete"
-        && payload.path == path
-        && payload.object_id == object_id
-        && payload.before_present == "present"
-        && payload.before_object_id.as_deref() == Some(object_id.as_str())
-        && payload.before_version_id.as_deref() == Some(payload.version_id.as_str())
-        && payload.before_path.as_deref() == Some(path.as_str())
-        && payload.payload_before_path.as_deref() == Some(path.as_str())
-        && payload.before_blob_sha256.as_deref() == Some(sha256.as_str())
-        && payload.payload_before_blob_sha256.as_deref() == Some(sha256.as_str())
-        && ContentKind::from_wire(payload.before_content_kind.as_deref()) == ContentKind::Binary
-        && ContentKind::from_wire(payload.payload_before_content_kind.as_deref())
-            == ContentKind::Binary
-        && payload.before_latest_moment_id.as_deref() == Some(before_moment_id.as_str())
-        && payload.metadata.origin == "local-file"
-        && payload.metadata.summary.as_deref() == Some("Deleted drawing asset")
-        && payload.metadata.correlation_id.as_deref() == Some(drawing_delete_id.as_str())
-        && payload.recorded_at_ms == drawing_delete_recorded_at_ms
-        && expected_origin_id.as_deref() == Some(envelope.origin_id.as_str())
-        && expected_origin_seq == Some(envelope.origin_seq);
-    if !exact {
-        return Err(SyncError::CoordinateDiverged);
-    }
-    validate_payload_sides(tx, payload)?;
-    let remote_before = moment_before_from_payload(tx, payload)?;
-    ensure_file_object(tx, &envelope.workspace_id, payload)?;
-    insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
-    tx.execute(
-        "DELETE FROM scene_asset_delete_authority_items WHERE workspace_id=?1 \
-         AND version_id=?2 AND asset_delete_moment_id=?3",
-        params![envelope.workspace_id, payload.version_id, payload.moment_id],
-    )
-    .map_err(SyncError::persist)?;
-    tx.execute(
-        "DELETE FROM scene_asset_delete_authorities WHERE workspace_id=?1 AND version_id=?2 \
-         AND drawing_delete_moment_id=?3 AND rollback_moment_id IS NOT NULL \
-         AND NOT EXISTS (SELECT 1 FROM scene_asset_delete_authority_items i \
-           WHERE i.workspace_id=?1 AND i.version_id=?2 \
-             AND i.drawing_delete_moment_id=?3)",
-        params![envelope.workspace_id, payload.version_id, drawing_delete_id],
-    )
-    .map_err(SyncError::persist)?;
-    Ok(true)
-}
-
 fn freeze_incoming_scene_delete_authority(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
@@ -756,23 +654,15 @@ fn freeze_incoming_scene_delete_authority(
     .map_err(|_| SyncError::InvalidInput {
         reason: "moment.append scene delete identity is invalid",
     })?;
-    dohc_engine_collab::freeze_scene_asset_delete_authority_in_tx(
-        tx,
-        &key,
-        &payload.moment_id,
-        Some(dohc_engine_collab::SceneDeleteReplicationCoordinate {
-            origin_id: &envelope.origin_id,
-            parent_seq: envelope.origin_seq,
-        }),
-    )
-    .map(|_| ())
-    .map_err(|error| match error {
-        dohc_engine_collab::CollabError::Storage(error) => SyncError::Storage(error),
-        dohc_engine_collab::CollabError::MissingDependencies => SyncError::RetryableState {
-            reason: "scene asset authority is waiting for the complete Y.Doc lineage",
-        },
-        _ => SyncError::CoordinateDiverged,
-    })
+    dohc_engine_collab::freeze_scene_asset_delete_authority_in_tx(tx, &key, &payload.moment_id)
+        .map(|_| ())
+        .map_err(|error| match error {
+            dohc_engine_collab::CollabError::Storage(error) => SyncError::Storage(error),
+            dohc_engine_collab::CollabError::MissingDependencies => SyncError::RetryableState {
+                reason: "scene asset authority is waiting for the complete Y.Doc lineage",
+            },
+            _ => SyncError::CoordinateDiverged,
+        })
 }
 
 fn equivalent_ydoc_settlement_preimage(snapshot: &Snapshot, payload: &MomentAppendPayload) -> bool {

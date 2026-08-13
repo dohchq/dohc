@@ -11481,6 +11481,12 @@ fn map_runtime(error: RuntimeError) -> WireError {
     if matches!(&error, RuntimeError::Relay(RelayError::ShareReadOnly)) {
         return wire(ErrorCode::InvalidParams, "share-read-only");
     }
+    if matches!(&error, RuntimeError::SceneAssetDeletePending) {
+        return wire(
+            ErrorCode::Overloaded,
+            "Sync has not delivered every drawing asset delete. Retry the rollback after sync completes.",
+        );
+    }
     // The rejections whose message carries numbers. `wire` takes a static
     // string, so the generic tail below would replace them with a placeholder —
     // and a size refusal that drops its limit and usage is the one an agent
@@ -12568,6 +12574,16 @@ mod tests {
         assert_eq!(
             pending.message,
             "ydoc-artifact-assets-pending: invalid_jobs=0, incomplete_jobs=4"
+        );
+    }
+
+    #[test]
+    fn pending_scene_asset_delete_makes_rollback_retryable() {
+        let pending = map_runtime(RuntimeError::SceneAssetDeletePending);
+        assert_eq!(pending.code, ErrorCode::Overloaded);
+        assert_eq!(
+            pending.message,
+            "Sync has not delivered every drawing asset delete. Retry the rollback after sync completes."
         );
     }
 

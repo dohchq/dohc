@@ -1917,8 +1917,6 @@ CREATE TABLE scene_asset_delete_authorities (
     version_id               TEXT NOT NULL,
     drawing_object_id        TEXT NOT NULL,
     drawing_delete_moment_id TEXT NOT NULL,
-    drawing_delete_recorded_at_ms INTEGER NOT NULL,
-    rollback_moment_id       TEXT,
     PRIMARY KEY (workspace_id, version_id, drawing_delete_moment_id),
     FOREIGN KEY (workspace_id, version_id)
         REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
@@ -1935,13 +1933,6 @@ CREATE TABLE scene_asset_delete_authority_items (
     asset_sha256             TEXT NOT NULL
         CHECK (length(asset_sha256) = 64
            AND asset_sha256 NOT GLOB '*[^0-9a-f]*'),
-    asset_object_id          TEXT NOT NULL,
-    asset_before_moment_id   TEXT NOT NULL,
-    expected_origin_id       TEXT,
-    expected_origin_seq      INTEGER,
-    CHECK ((expected_origin_id IS NULL) = (expected_origin_seq IS NULL)),
-    CHECK (expected_origin_id IS NULL OR length(expected_origin_id) > 0),
-    CHECK (expected_origin_seq IS NULL OR expected_origin_seq >= 0),
     PRIMARY KEY (workspace_id, version_id, drawing_delete_moment_id, asset_path),
     UNIQUE (workspace_id, asset_delete_moment_id),
     FOREIGN KEY (workspace_id, version_id, drawing_delete_moment_id)
@@ -2653,23 +2644,19 @@ mod tests {
              INSERT INTO file_objects (workspace_id,object_id,created_at_ms)
              VALUES ('ws','drawing',1);
              INSERT INTO scene_asset_delete_authorities
-             (workspace_id,version_id,drawing_object_id,drawing_delete_moment_id,
-              drawing_delete_recorded_at_ms)
-             VALUES ('ws','main','drawing','drawing-delete',2);
+             (workspace_id,version_id,drawing_object_id,drawing_delete_moment_id)
+             VALUES ('ws','main','drawing','drawing-delete');
              INSERT INTO scene_asset_delete_authority_items
-             (workspace_id,version_id,drawing_delete_moment_id,asset_delete_moment_id,
-              asset_path,asset_sha256,asset_object_id,asset_before_moment_id)
+             (workspace_id,version_id,drawing_delete_moment_id,asset_delete_moment_id,asset_path,asset_sha256)
              VALUES ('ws','main','drawing-delete','asset-delete','assets/excalidraw/a/file.png',
-                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                     'asset-object','asset-write');",
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');",
         )
         .expect("valid authority rows");
         assert!(
             conn.execute(
                 "INSERT INTO scene_asset_delete_authority_items
-                 (workspace_id,version_id,drawing_delete_moment_id,asset_delete_moment_id,
-                  asset_path,asset_sha256,asset_object_id,asset_before_moment_id)
-                 VALUES ('ws','main','drawing-delete','bad-delete','bad',?1,'bad-object','bad-write')",
+                 (workspace_id,version_id,drawing_delete_moment_id,asset_delete_moment_id,asset_path,asset_sha256)
+                 VALUES ('ws','main','drawing-delete','bad-delete','bad',?1)",
                 ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],
             )
             .is_err(),

@@ -11,14 +11,6 @@ pub struct SceneAssetDeleteAuthority {
     pub asset_delete_moment_id: String,
     pub path: String,
     pub sha256: String,
-    pub object_id: String,
-    pub before_moment_id: String,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct SceneDeleteReplicationCoordinate<'a> {
-    pub origin_id: &'a str,
-    pub parent_seq: i64,
 }
 
 pub fn scene_asset_delete_moment_id(
@@ -39,11 +31,10 @@ pub fn freeze_scene_asset_delete_authority_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
     drawing_delete_moment_id: &str,
-    replication: Option<SceneDeleteReplicationCoordinate<'_>>,
 ) -> Result<Vec<SceneAssetDeleteAuthority>, CollabError> {
     let parent = tx
         .query_row(
-            "SELECT operation,before_content_kind,recorded_at_ms FROM moments \
+            "SELECT operation,before_content_kind FROM moments \
              WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND moment_id=?4",
             params![
                 key.workspace_id,
@@ -51,26 +42,19 @@ pub fn freeze_scene_asset_delete_authority_in_tx(
                 key.object_id,
                 drawing_delete_moment_id
             ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()
         .map_err(corrupt)?;
     if parent
         .as_ref()
-        .is_none_or(|(operation, kind, _)| operation != "delete" || kind != "text")
+        .is_none_or(|(operation, kind)| operation != "delete" || kind != "text")
     {
         return Err(CollabError::Corrupt {
             reason: "scene asset authority parent is not the exact drawing delete".to_owned(),
         });
     }
 
-    let drawing_delete_recorded_at_ms = parent.expect("validated parent").2;
     let scopes = scene_asset_owner_scopes(tx, key)?;
     let is_scene = scopes.iter().try_fold(false, |found, (version_id, _)| {
         let scoped_key = DocKey::new(&key.workspace_id, version_id, &key.object_id)?;
@@ -87,14 +71,13 @@ pub fn freeze_scene_asset_delete_authority_in_tx(
     let inserted = tx
         .execute(
             "INSERT OR IGNORE INTO scene_asset_delete_authorities \
-             (workspace_id,version_id,drawing_object_id,drawing_delete_moment_id, \
-              drawing_delete_recorded_at_ms) VALUES (?1,?2,?3,?4,?5)",
+             (workspace_id,version_id,drawing_object_id,drawing_delete_moment_id) \
+             VALUES (?1,?2,?3,?4)",
             params![
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
-                drawing_delete_moment_id,
-                drawing_delete_recorded_at_ms
+                drawing_delete_moment_id
             ],
         )
         .map_err(persist)?;
@@ -108,8 +91,7 @@ pub fn freeze_scene_asset_delete_authority_in_tx(
         let pattern = format!("{owner_directory}/*");
         let mut statement = tx
             .prepare(
-                "SELECT a.path,s.binary_sha256,s.metadata_origin,s.object_id,s.latest_moment_id \
-                 FROM path_aliases a \
+                "SELECT a.path,s.binary_sha256,s.metadata_origin FROM path_aliases a \
                  JOIN snapshots s ON s.workspace_id=a.workspace_id \
                    AND s.version_id=a.version_id AND s.object_id=a.object_id \
                  LEFT JOIN moments producer ON producer.workspace_id=s.workspace_id \
@@ -133,22 +115,18 @@ pub fn freeze_scene_asset_delete_authority_in_tx(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
                 ))
             })
             .map_err(corrupt)?;
         for row in rows {
-            let (path, sha256, origin, object_id, before_moment_id) = row.map_err(corrupt)?;
+            let (path, sha256, origin) = row.map_err(corrupt)?;
             if origin == "ydoc" || canonical_assets.get(&path) == Some(&sha256) {
-                candidates.insert(path, (sha256, object_id, before_moment_id));
+                candidates.insert(path, sha256);
             }
         }
     }
 
-    for (offset, (path, (sha256, object_id, before_moment_id))) in
-        candidates.into_iter().enumerate()
-    {
+    for (path, sha256) in candidates {
         if !scopes
             .iter()
             .any(|(_, directory)| scene_asset_ref_is_owned(directory, &path, &sha256))
@@ -161,34 +139,17 @@ pub fn freeze_scene_asset_delete_authority_in_tx(
             drawing_delete_moment_id,
             &path,
         );
-        let expected_origin = replication.map(|coordinate| coordinate.origin_id);
-        let expected_seq = replication
-            .map(|coordinate| {
-                i64::try_from(offset)
-                    .ok()
-                    .and_then(|offset| coordinate.parent_seq.checked_add(1 + offset))
-                    .ok_or_else(|| CollabError::Corrupt {
-                        reason: "scene asset delete replication sequence overflowed".to_owned(),
-                    })
-            })
-            .transpose()?;
         tx.execute(
             "INSERT INTO scene_asset_delete_authority_items \
-             (workspace_id,version_id,drawing_delete_moment_id,asset_delete_moment_id, \
-              asset_path,asset_sha256,asset_object_id,asset_before_moment_id, \
-              expected_origin_id,expected_origin_seq) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+             (workspace_id,version_id,drawing_delete_moment_id,asset_delete_moment_id,asset_path,asset_sha256) \
+             VALUES (?1,?2,?3,?4,?5,?6)",
             params![
                 key.workspace_id,
                 key.version_id,
                 drawing_delete_moment_id,
                 asset_delete_moment_id,
                 path,
-                sha256,
-                object_id,
-                before_moment_id,
-                expected_origin,
-                expected_seq
+                sha256
             ],
         )
         .map_err(persist)?;
@@ -220,8 +181,7 @@ pub fn read_scene_asset_delete_authority(
     }
     let mut statement = conn
         .prepare(
-            "SELECT asset_delete_moment_id,asset_path,asset_sha256,asset_object_id, \
-                    asset_before_moment_id \
+            "SELECT asset_delete_moment_id,asset_path,asset_sha256 \
              FROM scene_asset_delete_authority_items \
              WHERE workspace_id=?1 AND version_id=?2 AND drawing_delete_moment_id=?3 \
              ORDER BY asset_path",
@@ -235,8 +195,6 @@ pub fn read_scene_asset_delete_authority(
                     asset_delete_moment_id: row.get(0)?,
                     path: row.get(1)?,
                     sha256: row.get(2)?,
-                    object_id: row.get(3)?,
-                    before_moment_id: row.get(4)?,
                 })
             },
         )
