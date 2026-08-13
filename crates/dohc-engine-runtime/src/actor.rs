@@ -10906,42 +10906,12 @@ fn delete_owned_scene_assets_in_tx(
     if !is_scene {
         return Ok(Vec::new());
     }
-    let mut owner_versions = Vec::new();
-    let mut seen_versions = HashSet::new();
-    let mut version = Some(drawing_delete.before.version_id.clone());
-    while let Some(current) = version {
-        if !seen_versions.insert(current.clone()) {
-            return Err(DomainError::StateCorrupt {
-                reason: "version ancestry contains a cycle",
-            }
-            .into());
-        }
-        owner_versions.push(current.clone());
-        version = tx
-            .query_row(
-                "SELECT fork_version_id FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
-                params![drawing_delete.before.workspace_id, current],
-                |row| row.get(0),
-            )
-            .map_err(|error| {
-                RuntimeError::Domain(DomainError::Storage(StorageError::corrupt_public(error)))
-            })?;
-    }
-    let owner_directories = owner_versions
-        .into_iter()
-        .map(|version_id| {
-            scene_asset_directory(
-                &drawing_delete.before.workspace_id,
-                &version_id,
-                &drawing_delete.object.object_id,
-            )
-            .map_err(|error| match error {
-                dohc_engine_collab::SceneImportError::Invalid { reason } => {
-                    RuntimeError::Domain(DomainError::StateCorrupt { reason })
-                }
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let owner_directories = scene_asset_owner_directories(
+        tx,
+        &drawing_delete.before.workspace_id,
+        &drawing_delete.before.version_id,
+        &drawing_delete.object.object_id,
+    )?;
     let mut candidates: BTreeMap<String, String> = BTreeMap::new();
     for owner_directory in &owner_directories {
         let pattern = format!("{owner_directory}/*");
@@ -10952,7 +10922,7 @@ fn delete_owned_scene_assets_in_tx(
                  AND s.object_id = a.object_id WHERE a.workspace_id = ?1 \
                  AND a.version_id = ?2 AND a.path GLOB ?3 \
                  AND COALESCE(s.content_kind, 'text') = 'binary' \
-                 AND s.metadata_origin = 'ydoc' ORDER BY a.path",
+                 AND s.metadata_origin IN ('ydoc','local-file') ORDER BY a.path",
             )
             .map_err(|error| {
                 RuntimeError::Domain(DomainError::Storage(StorageError::corrupt_public(error)))
@@ -11029,6 +10999,44 @@ fn delete_owned_scene_assets_in_tx(
     Ok(jobs)
 }
 
+fn scene_asset_owner_directories(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    version_id: &str,
+    drawing_object_id: &str,
+) -> Result<Vec<String>, DomainError> {
+    let mut owner_versions = Vec::new();
+    let mut seen_versions = HashSet::new();
+    let mut version = Some(version_id.to_owned());
+    while let Some(current) = version {
+        if !seen_versions.insert(current.clone()) {
+            return Err(DomainError::StateCorrupt {
+                reason: "version ancestry contains a cycle",
+            });
+        }
+        owner_versions.push(current.clone());
+        version = conn
+            .query_row(
+                "SELECT fork_version_id FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+                params![workspace_id, current],
+                |row| row.get(0),
+            )
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+    }
+    owner_versions
+        .into_iter()
+        .map(|version_id| {
+            scene_asset_directory(workspace_id, &version_id, drawing_object_id).map_err(|error| {
+                match error {
+                    dohc_engine_collab::SceneImportError::Invalid { reason } => {
+                        DomainError::StateCorrupt { reason }
+                    }
+                }
+            })
+        })
+        .collect()
+}
+
 fn scene_asset_delete_moment_id(
     workspace_id: &str,
     version_id: &str,
@@ -11077,13 +11085,17 @@ fn scene_asset_delete_moments(
     workspace_id: &str,
     version_id: &str,
     drawing_delete_moment_id: &str,
+    drawing_object_id: &str,
 ) -> Result<Vec<(String, String, String, i64)>, DomainError> {
+    let owner_directories =
+        scene_asset_owner_directories(conn, workspace_id, version_id, drawing_object_id)?;
     let mut statement = conn
         .prepare(
             "SELECT moment_id,path,before_binary_sha256,recorded_at_ms \
              FROM moments WHERE workspace_id = ?1 AND version_id = ?2 \
                AND operation = 'delete' AND before_content_kind = 'binary' \
-               AND metadata_origin = 'ydoc' AND metadata_correlation_id = ?3 \
+               AND metadata_origin IN ('ydoc','local-file') \
+               AND metadata_correlation_id = ?3 \
              ORDER BY moment_order",
         )
         .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
@@ -11098,7 +11110,7 @@ fn scene_asset_delete_moments(
         .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
     Ok(candidates
         .into_iter()
-        .filter(|(moment_id, path, _, _)| {
+        .filter(|(moment_id, path, sha256, _)| {
             *moment_id
                 == scene_asset_delete_moment_id(
                     workspace_id,
@@ -11106,6 +11118,9 @@ fn scene_asset_delete_moments(
                     drawing_delete_moment_id,
                     path,
                 )
+                && owner_directories.iter().any(|directory| {
+                    dohc_engine_collab::scene_asset_ref_is_owned(directory, path, sha256)
+                })
         })
         .collect())
 }
@@ -11119,15 +11134,17 @@ fn scene_asset_delete_jobs_in_tx(
         &drawing_delete.before.workspace_id,
         &drawing_delete.before.version_id,
         &drawing_delete.moment.moment_id,
+        &drawing_delete.object.object_id,
     )?;
     let mut jobs = Vec::with_capacity(moments.len());
-    for (moment_id, _, _, recorded_at_ms) in moments {
+    for (moment_id, path, sha256, recorded_at_ms) in moments {
         let job_id = binary_delete_job_id(&moment_id);
         let exists: bool = tx
             .query_row(
                 "SELECT EXISTS (SELECT 1 FROM materialization_jobs \
-                 WHERE workspace_id = ?1 AND job_id = ?2 AND operation = 'delete')",
-                params![drawing_delete.before.workspace_id, job_id],
+                 WHERE workspace_id = ?1 AND job_id = ?2 AND operation = 'delete' \
+                   AND target_path = ?3 AND content_sha256 = ?4)",
+                params![drawing_delete.before.workspace_id, job_id, path, sha256],
                 |row| row.get(0),
             )
             .map_err(|error| {
@@ -11218,6 +11235,7 @@ fn versioned_text_rollback_on_store(
                 &input.workspace_id,
                 &input.version_id,
                 &input.mutation_moment_id,
+                object_id,
                 compensating_moment_id,
                 input.author_json.as_deref(),
             )?;
@@ -11548,11 +11566,17 @@ fn restore_deleted_scene_assets_in_tx(
     workspace_id: &str,
     version_id: &str,
     drawing_delete_moment_id: &str,
+    drawing_object_id: &str,
     drawing_rollback_moment_id: &str,
     author_json: Option<&str>,
 ) -> Result<Vec<String>, DomainError> {
-    let deleted_assets =
-        scene_asset_delete_moments(tx, workspace_id, version_id, drawing_delete_moment_id)?;
+    let deleted_assets = scene_asset_delete_moments(
+        tx,
+        workspace_id,
+        version_id,
+        drawing_delete_moment_id,
+        drawing_object_id,
+    )?;
     let mut jobs = Vec::with_capacity(deleted_assets.len());
     for (delete_moment_id, path, sha256, recorded_at_ms) in deleted_assets {
         let occupied: bool = tx
@@ -11691,10 +11715,23 @@ fn restored_scene_asset_jobs_on_store(
     rollback_moment_id: &str,
 ) -> Result<Vec<String>, DomainError> {
     store.read_with(|conn| {
-        let deleted_assets =
-            scene_asset_delete_moments(conn, workspace_id, version_id, drawing_delete_moment_id)?;
+        let drawing_object_id: String = conn
+            .query_row(
+                "SELECT object_id FROM moments WHERE workspace_id = ?1 AND version_id = ?2 \
+                 AND moment_id = ?3",
+                params![workspace_id, version_id, rollback_moment_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+        let deleted_assets = scene_asset_delete_moments(
+            conn,
+            workspace_id,
+            version_id,
+            drawing_delete_moment_id,
+            &drawing_object_id,
+        )?;
         let mut jobs = Vec::with_capacity(deleted_assets.len());
-        for (delete_moment_id, _, _, _) in deleted_assets {
+        for (delete_moment_id, path, sha256, _) in deleted_assets {
             let restore_moment_id = scene_asset_restore_moment_id(
                 workspace_id,
                 version_id,
@@ -11709,12 +11746,16 @@ fn restored_scene_asset_jobs_on_store(
                      WHERE m.workspace_id = ?1 AND m.version_id = ?2 \
                        AND m.moment_id = ?3 AND m.metadata_correlation_id = ?4 \
                        AND m.operation = 'write' AND m.after_content_kind = 'binary' \
-                       AND m.metadata_origin = 'ydoc' AND j.operation = 'write')",
+                       AND m.metadata_origin = 'ydoc' AND m.path = ?5 \
+                       AND m.after_binary_sha256 = ?6 AND j.operation = 'write' \
+                       AND j.target_path = ?5 AND j.content_sha256 = ?6)",
                     params![
                         workspace_id,
                         version_id,
                         restore_moment_id,
-                        rollback_moment_id
+                        rollback_moment_id,
+                        path,
+                        sha256
                     ],
                     |row| row.get(0),
                 )
