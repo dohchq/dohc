@@ -7,7 +7,7 @@
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "pnpm --filter @dohc/sdk build && node scripts/ensure-electron-installed.mjs && node scripts/build-cli-bin.mjs && electron-vite build",
+    "build": "pnpm --filter @dohc/sdk build && node scripts/ensure-electron-installed.mjs && node scripts/stage-plugin-tools.mjs && node scripts/build-cli-bin.mjs && electron-vite build",
     "build:cli": "node scripts/build-cli-bin.mjs",
     "build:engine": "node scripts/build-workspace-engine.mjs",
     "package": "pnpm --filter @dohc/sdk build && node scripts/ensure-electron-installed.mjs && pnpm run build:engine && node scripts/stage-plugin-tools.mjs && node scripts/build-cli-bin.mjs && electron-vite build && electron-builder --publish never",

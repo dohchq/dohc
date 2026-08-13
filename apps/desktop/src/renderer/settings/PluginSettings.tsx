@@ -149,6 +149,19 @@ function canInstall(plugin: PluginStatusRecord): boolean {
   return plugin.valid && plugin.status === "discovered" && plugin.approvedHash === null;
 }
 
+// A fresh install that never succeeded lands here with no approvedHash —
+// none of the other action predicates match that combination, so without
+// this the row has no control at all (CodeRabbit #779 R30). Retrying is the
+// same installPlugin call as a first install; PluginPipeline's install()
+// always runs a full fresh build regardless of prior state.
+function canRetryInstall(plugin: PluginStatusRecord): boolean {
+  return (
+    plugin.valid &&
+    plugin.status === "disabled-pending-repair" &&
+    plugin.approvedHash === null
+  );
+}
+
 function canEnable(plugin: PluginStatusRecord): boolean {
   return (
     plugin.status === "disabled" &&
@@ -206,7 +219,7 @@ export function PluginSettings(props: { workspaceId: string }) {
       if (!result.ok) {
         setLoad({
           status: "error",
-          message: "Plugins could not load. Open this section again.",
+          message: `Plugins could not load. ${result.error.message}`,
         });
         return;
       }
@@ -217,16 +230,17 @@ export function PluginSettings(props: { workspaceId: string }) {
         status: "ready",
         plugins: applyStatusEvents(result.plugins, newerEvents),
       });
-    } catch {
+    } catch (error) {
       if (
         requestToken !== listRequestToken.current ||
         epoch !== workspaceEpoch.current
       ) {
         return;
       }
+      const reason = error instanceof Error ? error.message : "Try again.";
       setLoad({
         status: "error",
-        message: "Plugins could not load. Open this section again.",
+        message: `Plugins could not load. ${reason}`,
       });
     }
   }
@@ -465,6 +479,17 @@ export function PluginSettings(props: { workspaceId: string }) {
                       className={secondaryButton}
                     >
                       {actionLabel("install", busyAction === "install")}
+                    </button>
+                  ) : null}
+                  {canRetryInstall(plugin) ? (
+                    <button
+                      type="button"
+                      data-testid="plugin-retry-install"
+                      disabled={disabled}
+                      onClick={() => void runAction(plugin, "install")}
+                      className={secondaryButton}
+                    >
+                      {busyAction === "install" ? "Retrying install" : "Retry install"}
                     </button>
                   ) : null}
                   {canDisable(plugin) ? (

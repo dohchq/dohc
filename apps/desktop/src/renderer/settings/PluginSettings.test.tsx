@@ -366,4 +366,97 @@ describe("PluginSettings", () => {
       expect((disableButton as HTMLButtonElement).disabled).toBe(false),
     );
   });
+
+  it("offers a retry action for a plugin whose fresh install failed (CodeRabbit #779 R30)", async () => {
+    const stuck = plugin("stuck-plugin", {
+      status: "disabled-pending-repair",
+      disabledReason: "repair",
+      runtimeStatus: null,
+      sourceHash: HASH_A,
+      approvedHash: null,
+      installedBaselineHash: null,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [stuck] });
+    bridgeMock.installPlugin.mockResolvedValue({
+      ok: true,
+      plugin: plugin("stuck-plugin"),
+    });
+
+    render(<PluginSettings workspaceId="ws-1" />);
+
+    // None of the other actions render for this exact combination — a
+    // retry affordance is the row's only control.
+    expect(screen.queryByTestId("plugin-install")).toBeNull();
+    expect(screen.queryByTestId("plugin-enable")).toBeNull();
+    expect(screen.queryByTestId("plugin-approve")).toBeNull();
+    expect(screen.queryByTestId("plugin-disable")).toBeNull();
+    const retryButton = await screen.findByTestId("plugin-retry-install");
+    expect(retryButton.textContent).toBe("Retry install");
+
+    await userEvent.click(retryButton);
+
+    expect(bridgeMock.installPlugin).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      pluginId: "stuck-plugin",
+    });
+  });
+
+  it("surfaces the real reason and offers a retry when the plugin list fails to load (CodeRabbit #779 R29, R31)", async () => {
+    bridgeMock.listPlugins.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        stage: "discovery",
+        code: "discovery-failed",
+        message: "The plugin pipeline could not start.",
+      },
+    });
+
+    render(<PluginSettings workspaceId="ws-1" />);
+
+    const alert = await screen.findByTestId("plugins-load-error");
+    expect(alert.textContent).toContain("The plugin pipeline could not start.");
+    // The old copy told the user to do the exact thing the Retry button
+    // right next to it already does — that redundant instruction is gone.
+    expect(alert.textContent).not.toContain("Open this section again");
+
+    bridgeMock.listPlugins.mockResolvedValueOnce({
+      ok: true,
+      plugins: [plugin("recovered-plugin")],
+    });
+    await userEvent.click(screen.getByText("Retry"));
+
+    expect(await screen.findByText("recovered-plugin")).toBeTruthy();
+    expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(2);
+  });
+
+  it("merges a status event newer than the in-flight list response (CodeRabbit #779 R29)", async () => {
+    const list = deferred<{ ok: true; plugins: PluginStatusRecord[] }>();
+    bridgeMock.listPlugins.mockReturnValue(list.promise);
+
+    render(<PluginSettings workspaceId="ws-1" />);
+    await waitFor(() => expect(statusListener).not.toBeNull());
+
+    // A status event for a plugin the about-to-resolve list also contains
+    // arrives while the list request is still in flight — the newer event
+    // must win over the stale value the list carries for that same plugin.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("live-plugin", { status: "starting", runtimeStatus: "starting" }),
+      });
+    });
+
+    await act(async () => {
+      list.resolve({
+        ok: true,
+        plugins: [plugin("live-plugin", { status: "ready", runtimeStatus: "ready" })],
+      });
+      await list.promise;
+    });
+
+    expect(
+      (await screen.findByTestId("plugin-status")).getAttribute("data-status"),
+    ).toBe("starting");
+  });
 });
