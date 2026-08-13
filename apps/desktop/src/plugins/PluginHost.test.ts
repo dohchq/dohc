@@ -1915,4 +1915,42 @@ describe("PluginHost", () => {
       ]),
     ).resolves.toBeUndefined();
   });
+
+  it("logs, instead of leaving unhandled, a spawn teardown rejection (CodeRabbit #779 R13)", async () => {
+    // Calling bumpGeneration() immediately, ahead of the harness's own
+    // async activation callback, exercises both of R13's discarded-promise
+    // call sites in one pass: bumpGeneration's own endSpawn call, and
+    // handleActivationSuccess's not-live branch once that generation bump
+    // makes the in-flight activation stale. Vitest reports an unhandled
+    // rejection separately from any expect() failure, so this only stays
+    // clean when both sites attach their own .catch().
+    const root = await workspaceRoot();
+    const harness = createCallbackHarness();
+    const teardownError = new Error("synthetic teardown failure (R13 PoC)");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+      onSpawnEnd: async () => {
+        throw teardownError;
+      },
+    });
+
+    try {
+      await host.start(helloPluginRoot, await fixtureManifest());
+      harness.getCallbacks();
+
+      host.bumpGeneration();
+      await delay(20);
+
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining("spawn teardown failed"),
+        teardownError,
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
 });

@@ -300,7 +300,19 @@ export class PluginHost {
   bumpGeneration(): void {
     this.currentGeneration += 1;
     for (const record of this.plugins.values()) {
-      if (record.current) void this.endSpawn(record, record.current);
+      if (record.current) {
+        // endSpawn's promise is wired to the broker's disposeSpawn, which
+        // can reject (CodeRabbit #779 R13) — this call is fire-and-forget
+        // by design (bumpGeneration itself is synchronous), so an unhandled
+        // teardown failure must be logged, not left to surface as an
+        // unhandled rejection in the main process.
+        void this.endSpawn(record, record.current).catch((error: unknown) => {
+          console.error(
+            `[desktop] plugin "${record.pluginId}" spawn teardown failed:`,
+            error,
+          );
+        });
+      }
     }
   }
 
@@ -361,9 +373,16 @@ export class PluginHost {
     result: unknown,
   ): void {
     if (!this.isLive(record, spawn)) {
-      void this.endSpawn(record, spawn).finally(() =>
-        spawn.transport?.dispose().catch(() => undefined),
-      );
+      // .finally() re-throws the original rejection, so this needs its own
+      // .catch() too (CodeRabbit #779 R13) — see bumpGeneration's comment.
+      void this.endSpawn(record, spawn)
+        .finally(() => spawn.transport?.dispose().catch(() => undefined))
+        .catch((error: unknown) => {
+          console.error(
+            `[desktop] plugin "${record.pluginId}" spawn teardown failed:`,
+            error,
+          );
+        });
       return;
     }
     if (!isPluginActivateResult(result)) {
