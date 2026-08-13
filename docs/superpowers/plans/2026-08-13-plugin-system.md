@@ -91,8 +91,10 @@ Three pieces. The engine stays the core.
   UI never runs in the app's own renderer context. Wrapper plugins whose
   embedded app needs its own cookie/storage context (the t3 spike proved
   its SameSite session cookie breaks in a third-party iframe) get a
-  hardened guest WebContents with a per-workspace-per-plugin session
-  partition instead — per plugin because cookies scope by host, not
+  hardened, main-process-owned `WebContentsView` (never a renderer
+  `webview` tag, whose embedder API would hand a compromised renderer
+  `executeJavaScript` on the authenticated guest) with a
+  per-workspace-per-plugin session partition instead — per plugin because cookies scope by host, not
   port, so two loopback-served plugins in one partition could read each
   other's sessions. A PR3 surface, not part of PR1b's generic panel.
   Site discovery must also exclude `plugins/` roots
@@ -127,7 +129,9 @@ Constraints these choices create:
   read the same bytes — the pipeline copies source to an engine-excluded
   snapshot, hashes the snapshot, and builds from it, never from the live
   mutable tree, so a sync arriving mid-build cannot slip unapproved
-  bytes under an approved hash. While a workspace
+  bytes under an approved hash. Dependencies that point outside the
+  snapshot (`file:`/`link:`) are refused at install time — code the hash
+  does not bind does not install. While a workspace
   has no sync peers — true for this whole milestone — local edits
   auto-approve, so solo hot reload stays frictionless — with one
   exception: writes arriving through the site SDK never auto-approve,
@@ -213,10 +217,10 @@ Spike first, then three stacked PRs, each independently green.
   lifecycle scripts would need a real `node` and are also npm's main
   attack surface, so dependencies that require install scripts are
   unsupported until a shipped-Node decision is made. `--ignore-scripts`
-  skips silently, so after install the pipeline scans installed
-  packages for any declared lifecycle hook pnpm would have run
-  (preinstall, install, postinstall, prepare) and fails the plugin
-  build naming each one — an error an author's agent can act on.
+  skips silently, so after install the pipeline scans for any lifecycle
+  script pnpm skipped — in every installed package and in the plugin
+  root itself, whatever the hook's name — and fails the plugin build
+  naming each one, an error an author's agent can act on.
   Plugins distribute `pnpm-lock.yaml` (the lockfile pnpm actually
   reads); a plugin authored with npm runs `pnpm import` before
   publishing. Plugin child processes (a
