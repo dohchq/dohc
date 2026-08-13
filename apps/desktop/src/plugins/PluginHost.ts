@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { DohcPluginManifest } from "@dohc/workspace-contracts/plugin-manifest";
+import type { DohcPluginManifest } from "./pluginManifestSchema";
 import { readPluginLocalState, setPluginDisabled } from "./pluginLocalState";
 import {
   PLUGIN_ACTIVATION_TIMEOUT_MS,

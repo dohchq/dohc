@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DohcPluginManifest } from "./pluginManifest";
+import { DohcPluginManifest } from "./pluginManifestSchema";
 
 const minimalManifest = {
   version: 1,
