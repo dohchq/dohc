@@ -5075,7 +5075,7 @@ fn imported_attachment_rejects_invalid_heading_and_bounds() {
         // MUTATION: remove this hostile-peer heading/path guard -> the named malformed case applies.
         assert!(
             matches!(
-                result,
+                &result,
                 Ok(ApplyOutcome::Refused(ReplicationRefusal {
                     reason: RefusalReason::InvalidInput { .. },
                     ..
@@ -12755,6 +12755,65 @@ fn later_secret_version_fork_chunk_preserves_a_local_write_to_its_pending_path()
 }
 
 #[test]
+fn secret_version_fork_refuses_divergent_chunk_assembly() {
+    for (label, chunk_index, total_rows, path) in [
+        ("duplicate path", 1, 2, "app/.env"),
+        ("skipped chunk", 2, 2, "config/prod.env"),
+        ("changed total", 1, 3, "config/prod.env"),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        let ciphertext = b"fork assembly bytes";
+        let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
+        let chunk = |seq, chunk_index, total_rows, path: &str| {
+            envelope(
+                "divergent-secret-fork-peer",
+                seq,
+                "secret.version.fork",
+                json!({
+                    "fromVersionId": "main",
+                    "toVersionId": "feature",
+                    "chunkIndex": chunk_index,
+                    "totalRows": total_rows,
+                    "rows": [{
+                        "path": path,
+                        "ivBase64": iv,
+                        "authTagBase64": tag,
+                        "ciphertextSha256": sha,
+                        "byteLength": ciphertext.len(),
+                        "updatedAtMs": 100 + chunk_index
+                    }]
+                }),
+            )
+        };
+        assert!(matches!(
+            apply_replication_envelope(
+                &mut engine,
+                &chunk(0, 0, 2, "app/.env"),
+                &NoFaults,
+                &NoLiveLeases
+            ),
+            Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        ));
+        let result = apply_replication_envelope(
+            &mut engine,
+            &chunk(1, chunk_index, total_rows, path),
+            &NoFaults,
+            &NoLiveLeases,
+        );
+        assert!(
+            matches!(
+                result,
+                Ok(ApplyOutcome::Refused(ReplicationRefusal {
+                    reason: RefusalReason::InvalidInput { .. },
+                    ..
+                }))
+            ),
+            "{label} was not refused: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn secret_version_fork_applies_the_shipped_snapshot_after_a_peer_source_edit() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
@@ -13809,7 +13868,7 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
             Ok::<_, rusqlite::Error>(())
         })
         .expect("activate fork destination");
-    let operation = envelope(
+    let first = envelope(
         "active-fork-peer",
         0,
         "secret.version.fork",
@@ -13817,7 +13876,7 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
             "fromVersionId": "main",
             "toVersionId": "feature",
             "chunkIndex": 0,
-            "totalRows": 1,
+            "totalRows": 2,
             "rows": [{
                 "path": "app/.env",
                 "ivBase64": iv,
@@ -13825,6 +13884,64 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
                 "ciphertextSha256": sha,
                 "byteLength": ciphertext.len(),
                 "updatedAtMs": 100
+            }]
+        }),
+    );
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &first, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(RoutedApply {
+            materialization_changes,
+            conflict: None,
+            ..
+        })) if materialization_changes.is_empty()
+    ));
+    assert!(
+        crate::router::redelivered_materialization_changes(&engine, &first)
+            .expect("partial fork redelivery")
+            .is_empty()
+    );
+    let partial_paths: (Vec<String>, Vec<String>) = engine
+        .read_with(|conn| {
+            let files = conn
+                .prepare(
+                    "SELECT path FROM secret_files \
+                     WHERE workspace_id='ws' AND version_id='feature' ORDER BY path",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let bases = conn
+                .prepare(
+                    "SELECT path FROM secret_fork_bases \
+                     WHERE workspace_id='ws' AND version_id='feature' ORDER BY path",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, rusqlite::Error>((files, bases))
+        })
+        .expect("partial fork destination paths");
+    assert_eq!(
+        partial_paths,
+        (vec!["stale.env".into()], vec!["stale.env".into()])
+    );
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 2_500).expect("reopen between fork chunks");
+
+    let operation = envelope(
+        "active-fork-peer",
+        1,
+        "secret.version.fork",
+        json!({
+            "fromVersionId": "main",
+            "toVersionId": "feature",
+            "chunkIndex": 1,
+            "totalRows": 2,
+            "rows": [{
+                "path": "config/prod.env",
+                "ivBase64": iv,
+                "authTagBase64": tag,
+                "ciphertextSha256": sha,
+                "byteLength": ciphertext.len(),
+                "updatedAtMs": 101
             }]
         }),
     );
@@ -13840,6 +13957,12 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
         MomentMaterializationChange {
             version_id: "feature".to_owned(),
             path: "app/.env".to_owned(),
+            operation: "write",
+            content_kind: "secret",
+        },
+        MomentMaterializationChange {
+            version_id: "feature".to_owned(),
+            path: "config/prod.env".to_owned(),
             operation: "write",
             content_kind: "secret",
         },
@@ -13888,17 +14011,26 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
         } if changed_paths == expected
     ));
 
-    let stored_paths: Vec<String> = reopened
+    let (stored_paths, pending_assemblies): (Vec<String>, i64) = reopened
         .read_with(|conn| {
-            conn.prepare(
-                "SELECT path FROM secret_files \
-                 WHERE workspace_id='ws' AND version_id='feature' ORDER BY path",
-            )?
-            .query_map([], |row| row.get(0))?
-            .collect()
+            let paths = conn
+                .prepare(
+                    "SELECT path FROM secret_files \
+                     WHERE workspace_id='ws' AND version_id='feature' ORDER BY path",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let assemblies = conn.query_row(
+                "SELECT COUNT(*) FROM engine_requests \
+                 WHERE kind='sync-secret-fork-assembly'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((paths, assemblies))
         })
         .expect("fork destination paths");
-    assert_eq!(stored_paths, ["app/.env"]);
+    assert_eq!(stored_paths, ["app/.env", "config/prod.env"]);
+    assert_eq!(pending_assemblies, 0);
 }
 
 #[test]

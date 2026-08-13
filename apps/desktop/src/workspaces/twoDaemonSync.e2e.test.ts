@@ -152,7 +152,9 @@ async function pullAndExpect(
   contents: string | Buffer,
   contentKind?: "text" | "binary",
 ): Promise<void> {
-  const pull = await daemon.capture.runRelaySync(() => daemon.relay.pull());
+  const pull = await daemon.capture.runRelaySync((materializePage) =>
+    daemon.relay.pull(materializePage),
+  );
   expect(pull.applied).toBeGreaterThan(0);
   if (contentKind !== undefined) {
     expect(pull.fastForwardedPaths).toContainEqual({
@@ -379,8 +381,12 @@ it.skipIf(engine.missing)(
 
       // Both editors remain live. Each pull may persist the foreign base, but
       // it must not arbitrate behind the editor or change either projection.
-      await daemonA.capture.runRelaySync(() => daemonA!.relay.pull());
-      await daemonB.capture.runRelaySync(() => daemonB!.relay.pull());
+      await daemonA.capture.runRelaySync((materializePage) =>
+        daemonA!.relay.pull(materializePage),
+      );
+      await daemonB.capture.runRelaySync((materializePage) =>
+        daemonB!.relay.pull(materializePage),
+      );
       expect(await readFile(join(rootA, path), "utf8")).toBe("winner from A\n");
       expect(await readFile(join(rootB, path), "utf8")).toBe("recovered from B\n");
 
@@ -414,7 +420,9 @@ it.skipIf(engine.missing)(
         rootPath: rootC,
         relay: { baseUrl: relay.baseUrl, token },
       });
-      await daemonC.capture.runRelaySync(() => daemonC!.relay.pull());
+      await daemonC.capture.runRelaySync((materializePage) =>
+        daemonC!.relay.pull(materializePage),
+      );
       expect(await readFile(join(rootC, path), "utf8")).toBe("winner from A\n");
       expect(await readFile(join(rootC, recoveredPath), "utf8")).toBe(
         "recovered from B\n",
@@ -465,7 +473,9 @@ it.skipIf(engine.missing)(
       expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
       expect((await daemonB.relay.push()).pushed).toBeGreaterThan(0);
 
-      await daemonA.capture.runRelaySync(() => daemonA!.relay.pull());
+      await daemonA.capture.runRelaySync((materializePage) =>
+        daemonA!.relay.pull(materializePage),
+      );
       const conflictPage = await daemonA.capture.listOpenConflictsPage();
       const conflict = conflictPage.conflicts.find((entry) => entry.path === path);
       expect(conflict).toBeDefined();
@@ -480,7 +490,9 @@ it.skipIf(engine.missing)(
       expect(await daemonA.capture.countOpenConflicts()).toBe(0);
       expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
 
-      await daemonB.capture.runRelaySync(() => daemonB!.relay.pull());
+      await daemonB.capture.runRelaySync((materializePage) =>
+        daemonB!.relay.pull(materializePage),
+      );
       expect(await readFile(join(rootB, path), "utf8")).toBe("edit from B\n");
       expect(await daemonB.capture.countOpenConflicts()).toBe(0);
 

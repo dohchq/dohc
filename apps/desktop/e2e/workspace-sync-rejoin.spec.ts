@@ -249,7 +249,9 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     await expect
       .poll(
         async () => {
-          await capture.runRelaySync(() => sourceRelay.pull());
+          await capture.runRelaySync((materializePage) =>
+            sourceRelay.pull(materializePage),
+          );
           return await capture.countOpenConflicts();
         },
         { timeout: 90_000, intervals: [500] },
@@ -268,7 +270,9 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     await expect
       .poll(
         async () => {
-          await capture.runRelaySync(() => sourceRelay.pull());
+          await capture.runRelaySync((materializePage) =>
+            sourceRelay.pull(materializePage),
+          );
           return await capture.countOpenConflicts();
         },
         { timeout: 90_000, intervals: [500] },

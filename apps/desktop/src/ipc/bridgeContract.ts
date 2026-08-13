@@ -3397,6 +3397,20 @@ export const ApplyEngineYDocUpdatePayload = z.object({
 });
 export type ApplyEngineYDocUpdatePayload = z.infer<typeof ApplyEngineYDocUpdatePayload>;
 
+export const AcknowledgeEngineYDocLineageReplacementPayload = z.object({
+  sessionId: ENGINE_YDOC_SESSION_ID,
+  lineageGeneration: z.number().int().positive(),
+});
+export type AcknowledgeEngineYDocLineageReplacementPayload = z.infer<
+  typeof AcknowledgeEngineYDocLineageReplacementPayload
+>;
+export const AcknowledgeEngineYDocLineageReplacementResult = z.object({
+  updates: z.array(ENGINE_YDOC_UPDATE),
+});
+export type AcknowledgeEngineYDocLineageReplacementResult = z.infer<
+  typeof AcknowledgeEngineYDocLineageReplacementResult
+>;
+
 export const CloseEngineYDocSessionPayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
 });
@@ -3790,6 +3804,11 @@ export interface DohcDesktopBridge {
   // Ship a local editor CRDT update to main (journaled via recordUpdate +
   // debounced settle). A no-op if the session is unknown/closed.
   applyEngineYDocUpdate(payload: ApplyEngineYDocUpdatePayload): Promise<void>;
+  // Completes the replacement handoff only after the renderer detached the
+  // losing mirror and durably preserved any edit that did not reach main.
+  acknowledgeEngineYDocLineageReplacement(
+    payload: AcknowledgeEngineYDocLineageReplacementPayload,
+  ): Promise<AcknowledgeEngineYDocLineageReplacementResult>;
   // Settle + close the session in main (releases the single-canonical
   // reservation so the same object can reopen on a version/file switch).
   closeEngineYDocSession(payload: CloseEngineYDocSessionPayload): Promise<void>;

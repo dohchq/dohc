@@ -682,6 +682,8 @@ export const CHANNELS = {
   searchResults: "desktop:search-results",
   engineYDocOpen: "desktop:engine-ydoc-open",
   engineYDocApplyUpdate: "desktop:engine-ydoc-apply-update",
+  engineYDocAcknowledgeLineageReplacement:
+    "desktop:engine-ydoc-acknowledge-lineage-replacement",
   engineYDocClose: "desktop:engine-ydoc-close",
   engineYDocRemoteUpdate: "desktop:engine-ydoc-remote-update",
   engineYDocLineageReplacement: "desktop:engine-ydoc-lineage-replacement",

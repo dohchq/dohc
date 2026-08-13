@@ -64,8 +64,9 @@ export interface EngineYDocTransport {
       update: Uint8Array;
       recoveredPaths: string[];
       lineageGeneration: number;
-    }) => void,
+    }) => void | Promise<void>,
   ): () => void;
+  acknowledgeLineageReplacement(lineageGeneration: number): Promise<Uint8Array[]>;
   // Settle + close the engine session in main (releases the reservation).
   close(): Promise<void>;
 }
@@ -93,13 +94,49 @@ export interface EngineYDocBinding {
   destroy(): Promise<void>;
 }
 
+export interface EngineYDocBindingOptions {
+  // Runs after the losing mirror stops shipping updates and before main
+  // accepts the winner generation. The desktop uses this boundary to persist
+  // text that existed only in the losing renderer mirror.
+  onDocumentReplacing?: (
+    retired: Y.Doc,
+    recoveredPaths: string[],
+  ) => void | Promise<void>;
+}
+
 // Bind a mirror Y.Doc to an engine session over `transport`. On success the
 // returned binding's `doc` is ready for the Collaboration extension.
 export async function bindEngineYDoc(
   transport: EngineYDocTransport,
+  options: EngineYDocBindingOptions = {},
 ): Promise<EngineYDocBinding> {
-  const opened = await transport.open();
+  type LineageReplacement = {
+    update: Uint8Array;
+    recoveredPaths: string[];
+    lineageGeneration: number;
+  };
+  const replacementsBeforeOpen: LineageReplacement[] = [];
+  let acceptReplacement: ((input: LineageReplacement) => Promise<void>) | null =
+    null;
+  // Main can announce a winner after it creates the session but before the
+  // open invoke resolves in the renderer. Subscribe first so that event is
+  // held until the initial mirror and generation are installed.
+  const unsubscribeReplacement = transport.onLineageReplacement((input) => {
+    if (acceptReplacement === null) {
+      replacementsBeforeOpen.push(input);
+      return;
+    }
+    return acceptReplacement(input);
+  });
+  let opened: Awaited<ReturnType<EngineYDocTransport["open"]>>;
+  try {
+    opened = await transport.open();
+  } catch (error) {
+    unsubscribeReplacement();
+    throw error;
+  }
   if (!opened.available || !opened.initialUpdate) {
+    unsubscribeReplacement();
     return {
       doc: null,
       available: false,
@@ -123,6 +160,7 @@ export async function bindEngineYDoc(
     !Number.isSafeInteger(opened.lineageGeneration) ||
     opened.lineageGeneration < 1
   ) {
+    unsubscribeReplacement();
     throw new Error("The engine Y.Doc open result has no valid lineage generation.");
   }
   let lineageGeneration = opened.lineageGeneration;
@@ -155,19 +193,57 @@ export async function bindEngineYDoc(
     (replacement: Y.Doc, recoveredPaths: string[]) => void
   >();
   const retiredDocs = new Set<Y.Doc>();
-  const unsubscribeReplacement = transport.onLineageReplacement((input) => {
-    if (destroyed || input.lineageGeneration <= lineageGeneration) return;
-    const replacement = new Y.Doc();
-    Y.applyUpdate(replacement, input.update, ENGINE_SOURCED_ORIGIN);
-    replacement.on("update", onUpdate);
-    doc.off("update", onUpdate);
-    retiredDocs.add(doc);
-    doc = replacement;
-    lineageGeneration = input.lineageGeneration;
-    for (const listener of replacementListeners) {
-      listener(replacement, input.recoveredPaths);
-    }
-  });
+  let replacementHandoff: Promise<void> | null = null;
+  const queueReplacement = (input: LineageReplacement): Promise<void> => {
+    const replace = async (): Promise<void> => {
+      if (destroyed || input.lineageGeneration <= lineageGeneration) return;
+      const replacement = new Y.Doc();
+      Y.applyUpdate(replacement, input.update, ENGINE_SOURCED_ORIGIN);
+      const retired = doc;
+      // First close the only path that can ship a losing transaction to main.
+      // It stays closed for the whole acknowledgement handoff.
+      retired.off("update", onUpdate);
+      if (options.onDocumentReplacing) {
+        await options.onDocumentReplacing(retired, input.recoveredPaths);
+      }
+      const bufferedUpdates = await transport.acknowledgeLineageReplacement(
+        input.lineageGeneration,
+      );
+      if (destroyed) {
+        replacement.destroy();
+        return;
+      }
+      for (const update of bufferedUpdates) {
+        Y.applyUpdate(replacement, update, ENGINE_SOURCED_ORIGIN);
+      }
+      replacement.on("update", onUpdate);
+      retiredDocs.add(retired);
+      doc = replacement;
+      lineageGeneration = input.lineageGeneration;
+      for (const listener of replacementListeners) {
+        listener(replacement, input.recoveredPaths);
+      }
+    };
+    const handoff = replacementHandoff
+      ? replacementHandoff.then(replace)
+      : replace();
+    replacementHandoff = handoff;
+    void handoff.catch((error: unknown) => {
+      // Stay frozen on a failed handoff. Reattaching the losing observer would
+      // make the editor look writable while main correctly refuses its
+      // generation, recreating the silent-loss window this protocol closes.
+      console.error("[desktop] engine Y.Doc lineage handoff failed:", error);
+    });
+    const clearHandoff = (): void => {
+      if (replacementHandoff === handoff) replacementHandoff = null;
+    };
+    void handoff.then(clearHandoff, clearHandoff);
+    return handoff;
+  };
+  acceptReplacement = queueReplacement;
+  for (const replacement of replacementsBeforeOpen.splice(0)) {
+    void queueReplacement(replacement);
+  }
 
   return {
     get doc() {

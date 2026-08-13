@@ -7,6 +7,7 @@ import {
   ShareUnavailableError,
   SharedChannelReadOnlyError,
   type CommitRelayCursorResult,
+  type MaterializeRelayPullPage,
   type ProbeRelayWorkspaceResult,
   type RelayWorkspaceBootstrapResult,
   type RelayWorkspaceIdentity,
@@ -523,7 +524,9 @@ function translateRelayError(method: string, error: unknown): never {
 
 export interface EngineRelayWorkspaceClient {
   push(): Promise<PushWorkspaceToRelayResult>;
-  pull(): Promise<PullWorkspaceFromRelayResult>;
+  pull(
+    materializePage: MaterializeRelayPullPage,
+  ): Promise<PullWorkspaceFromRelayResult>;
   commitCursor(
     cursor: Record<string, JsonValue | undefined>,
   ): Promise<CommitRelayCursorResult>;
@@ -730,14 +733,13 @@ export class EngineRelayClient {
           ),
         };
       },
-      pull: async () => {
+      pull: async (materializePage) => {
         let fetched = 0;
         let applied = 0;
         let skipped = 0;
         let conflictsOpened = 0;
         let nextCursor = 0;
         let previousCursor: number | null = null;
-        let finalCursor: Record<string, JsonValue | undefined> | null = null;
         const declines: SharingDeclined[] = [];
         const changed = new Map<
           string,
@@ -776,17 +778,17 @@ export class EngineRelayClient {
             declines,
             sharingDeclined(result.sharingDeclined, "sync.pull"),
           );
-          for (const path of changedPaths(result.changedPaths, "sync.pull", true)) {
+          const pageChangedPaths = changedPaths(
+            result.changedPaths,
+            "sync.pull",
+            true,
+          );
+          for (const path of pageChangedPaths) {
             changed.set(`${path.versionId}\0${path.path}`, path);
           }
-          if (!hasMore) {
-            finalCursor = cursor;
-            break;
-          }
+          await materializePage(pageChangedPaths);
           appendDeclines(declines, (await commitCursor(cursor)).sharingDeclined);
-        }
-        if (!finalCursor) {
-          throw new Error("Rust engine sync.pull returned no final cursor.");
+          if (!hasMore) break;
         }
         return {
           fetched,
@@ -796,12 +798,6 @@ export class EngineRelayClient {
           sharingDeclined: declines,
           fastForwardedPaths: [...changed.values()],
           nextCursor,
-          commitFetchCursor: async () => {
-            appendDeclines(
-              declines,
-              (await commitCursor(finalCursor)).sharingDeclined,
-            );
-          },
         };
       },
       commitCursor,

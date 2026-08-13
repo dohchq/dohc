@@ -467,6 +467,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.engineYDocOpen, payload),
   applyEngineYDocUpdate: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocApplyUpdate, payload),
+  acknowledgeEngineYDocLineageReplacement: (payload) =>
+    ipcRenderer.invoke(CHANNELS.engineYDocAcknowledgeLineageReplacement, payload),
   closeEngineYDocSession: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocClose, payload),
   // Same boundary rule as onSearchResults: every event is validated by the

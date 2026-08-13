@@ -26,7 +26,10 @@ import {
   type VersionedTextMomentSummary,
   type VersionedTextStore,
 } from "@dohc/workspace-contracts/engine";
-import type { RelayMaterializedPath } from "@dohc/workspace-contracts/relay";
+import type {
+  MaterializeRelayPullPage,
+  RelayMaterializedPath,
+} from "@dohc/workspace-contracts/relay";
 import {
   openEngineYdocProviderSession,
   DaemonRefusalError,
@@ -553,17 +556,12 @@ export interface WorkspaceEngineCapture {
   // version operations. The task owns engine push/pull; returned
   // active-version paths are materialized with expected-event suppression so
   // watcher observations of sync writes never become new local moments.
-  // Data-safety contract: the pull's relay fetch cursor commits ONLY after
-  // materialization succeeds — runRelaySync invokes the result's
-  // commitFetchCursor once every fast-forwarded path is safely on disk, so a
-  // failed materialization leaves the cursor behind and the next pass
-  // retries the same ops instead of permanently skipping them.
-  runRelaySync<
-    T extends {
-      fastForwardedPaths: readonly RelayMaterializedPath[];
-      commitFetchCursor?: () => Promise<void>;
-    },
-  >(task: () => Promise<T>): Promise<T>;
+  // Data-safety contract: the task must give every pull page to the supplied
+  // materializer before it commits that page's relay cursor. A failed page
+  // remains available to the next pass instead of being skipped forever.
+  runRelaySync<T>(
+    task: (materializePage: MaterializeRelayPullPage) => Promise<T>,
+  ): Promise<T>;
   // Resolves when everything enqueued so far has been captured (tests).
   flush(): Promise<void>;
   // Stops accepting work and resolves once in-flight capture is durably
@@ -6309,9 +6307,8 @@ export function createWorkspaceEngineCapture(
         // versioned store. The incoming moments target `main`, so create that
         // version before the relay applies them.
         const engine = await engineStore();
-        const result = await task();
-        const changed = result.fastForwardedPaths;
-        if (changed.length > 0) {
+        const materializePage: MaterializeRelayPullPage = async (changed) => {
+          if (changed.length === 0) return;
           // Policy and active-version reads only when there is disk work: a
           // quiescent relay tick does not need either one.
           const policy = await readPolicyForTask();
@@ -6366,12 +6363,8 @@ export function createWorkspaceEngineCapture(
           if (options.daemonOwnsCapture) {
             await engine.reconcileCapture?.();
           }
-        }
-        // Only NOW is the pulled state durable on disk — commit the relay
-        // fetch cursor. A throw above leaves the cursor behind so the next
-        // pass re-fetches and retries the materialization.
-        await result.commitFetchCursor?.();
-        return result;
+        };
+        return await task(materializePage);
       });
     },
 

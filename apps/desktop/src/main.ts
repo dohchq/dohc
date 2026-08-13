@@ -247,6 +247,8 @@ import {
   OpenEngineYDocSessionPayload,
   OpenEngineYDocSessionResult,
   ApplyEngineYDocUpdatePayload,
+  AcknowledgeEngineYDocLineageReplacementPayload,
+  AcknowledgeEngineYDocLineageReplacementResult,
   CloseEngineYDocSessionPayload,
   EngineYDocRemoteUpdateEventSchema,
   EngineYDocLineageReplacementEventSchema,
@@ -1823,7 +1825,7 @@ function engineForWorkspace(
     relay,
     operations: {
       push: () => daemonRelay.push(),
-      pull: () => daemonRelay.pull(),
+      pull: (materializePage) => daemonRelay.pull(materializePage),
       recoverOrigin: () => daemonRelay.recoverOrigin(),
     },
     capture,
@@ -3083,6 +3085,15 @@ interface EngineYDocSessionEntry {
   deleted?: boolean;
 }
 const engineYDocSessions = new Map<string, EngineYDocSessionEntry>();
+type EngineYDocLineageHandoff = {
+  lineageGeneration: number;
+  remoteUpdates: Uint8Array[];
+  acknowledge: () => AcknowledgeEngineYDocLineageReplacementResult;
+};
+const pendingEngineYDocLineageHandoffs = new Map<
+  string,
+  EngineYDocLineageHandoff
+>();
 
 // Every NON-QUIT teardown of an engine Y.Doc session goes through here: a
 // discarded open, the close IPC, the renderer teardown. What a failed close
@@ -3093,6 +3104,7 @@ function releaseEngineYDocSessionEntry(
   entry: EngineYDocSessionEntry,
   reason: string,
 ): Promise<boolean> {
+  pendingEngineYDocLineageHandoffs.delete(sessionKey);
   return releaseEngineYDocSession({
     sessions: engineYDocSessions,
     sessionKey,
@@ -8910,6 +8922,68 @@ function registerIpcHandlers(
       let refused = false;
       let lineageGeneration = 1;
       let registeredEntry: EngineYDocSessionEntry | null = null;
+      let queuedLineageReplacement: {
+        update: Uint8Array;
+        recoveredPaths: string[];
+        remoteUpdates: Uint8Array[];
+      } | null = null;
+      const announceLineageReplacement = (replacement: {
+        update: Uint8Array;
+        recoveredPaths: string[];
+        remoteUpdates: Uint8Array[];
+      }): void => {
+        if (
+          refused ||
+          sender.isDestroyed() ||
+          rendererGeneration(sender.id) !== generation
+        ) {
+          return;
+        }
+        const nextLineageGeneration = lineageGeneration + 1;
+        const handoff: EngineYDocLineageHandoff = {
+          lineageGeneration: nextLineageGeneration,
+          remoteUpdates: replacement.remoteUpdates,
+          acknowledge: () => {
+            if (pendingEngineYDocLineageHandoffs.get(sessionKey) !== handoff) {
+              return { updates: [] };
+            }
+            lineageGeneration = nextLineageGeneration;
+            if (registeredEntry !== null) {
+              registeredEntry.lineageGeneration = nextLineageGeneration;
+            }
+            pendingEngineYDocLineageHandoffs.delete(sessionKey);
+            const queued = queuedLineageReplacement;
+            queuedLineageReplacement = null;
+            if (queued !== null) {
+              announceLineageReplacement(queued);
+              // The queued full snapshot supersedes every delta from the
+              // intermediate lineage. Its own later deltas travel with its
+              // acknowledgement instead.
+              return { updates: [] };
+            }
+            return { updates: handoff.remoteUpdates };
+          },
+        };
+        // From this point until acknowledgement, neither lineage may accept
+        // renderer updates. The losing CRDT cannot merge into the independent
+        // winner, and the winner is not editable until its mirror has replaced
+        // the losing document.
+        pendingEngineYDocLineageHandoffs.set(sessionKey, handoff);
+        try {
+          sender.send(
+            CHANNELS.engineYDocLineageReplacement,
+            EngineYDocLineageReplacementEventSchema.parse({
+              sessionId: input.sessionId,
+              update: replacement.update,
+              recoveredPaths: replacement.recoveredPaths,
+              lineageGeneration: nextLineageGeneration,
+            }),
+          );
+        } catch {
+          // The provider already installed the winner. A malformed event must
+          // not re-enter its observer or restore the retired lineage.
+        }
+      };
       let session: WorkspaceEngineYDocProviderSession;
       try {
         session = await capture.openYDocSession({
@@ -8955,6 +9029,13 @@ function registerIpcHandlers(
             ) {
               return;
             }
+            const handoff = pendingEngineYDocLineageHandoffs.get(sessionKey);
+            if (handoff) {
+              (queuedLineageReplacement?.remoteUpdates ?? handoff.remoteUpdates).push(
+                update,
+              );
+              return;
+            }
             try {
               sender.send(
                 CHANNELS.engineYDocRemoteUpdate,
@@ -8977,24 +9058,14 @@ function registerIpcHandlers(
             ) {
               return;
             }
-            lineageGeneration += 1;
-            if (registeredEntry !== null) {
-              registeredEntry.lineageGeneration = lineageGeneration;
+            const replacement = { update, recoveredPaths, remoteUpdates: [] };
+            if (pendingEngineYDocLineageHandoffs.has(sessionKey)) {
+              // Keep only the newest full snapshot. It contains every earlier
+              // lineage; deltas observed after it are buffered on this object.
+              queuedLineageReplacement = replacement;
+              return;
             }
-            try {
-              sender.send(
-                CHANNELS.engineYDocLineageReplacement,
-                EngineYDocLineageReplacementEventSchema.parse({
-                  sessionId: input.sessionId,
-                  update,
-                  recoveredPaths,
-                  lineageGeneration,
-                }),
-              );
-            } catch {
-              // The provider already installed the winner. A malformed event
-              // must not re-enter its observer or restore the retired lineage.
-            }
+            announceLineageReplacement(replacement);
           },
         });
       } catch (error) {
@@ -9120,10 +9191,14 @@ function registerIpcHandlers(
     // Owner-scoped BY THE KEY: the sender comes from the event, so a renderer
     // can only ever reach a session it opened. A no-op for an unknown, closed,
     // or foreign session (this boundary never throws to the caller).
-    const entry = engineYDocSessions.get(
-      engineYDocSessionKey(event.sender.id, input.sessionId),
-    );
+    const sessionKey = engineYDocSessionKey(event.sender.id, input.sessionId);
+    const entry = engineYDocSessions.get(sessionKey);
     if (!entry) return;
+    // Main has installed an independent winner, but the renderer may still be
+    // inside a transaction on the losing mirror. Never merge that update into
+    // the winner and never accept winner edits before the renderer has exposed
+    // it. The renderer persists the losing mirror before acknowledging.
+    if (pendingEngineYDocLineageHandoffs.has(sessionKey)) return;
     if (input.lineageGeneration !== entry.lineageGeneration) return;
     if (entry.deleted) {
       sendEngineYDocSaveState(
@@ -9159,6 +9234,22 @@ function registerIpcHandlers(
       noteLocalEdit(entry.saveSeq, input.seq),
     );
   });
+
+  ipcMain.handle(
+    CHANNELS.engineYDocAcknowledgeLineageReplacement,
+    (event, payload) => {
+      assertTrustedSender(event);
+      const input = AcknowledgeEngineYDocLineageReplacementPayload.parse(payload);
+      const sessionKey = engineYDocSessionKey(event.sender.id, input.sessionId);
+      const handoff = pendingEngineYDocLineageHandoffs.get(sessionKey);
+      if (!handoff || handoff.lineageGeneration !== input.lineageGeneration) {
+        return AcknowledgeEngineYDocLineageReplacementResult.parse({ updates: [] });
+      }
+      return AcknowledgeEngineYDocLineageReplacementResult.parse(
+        handoff.acknowledge(),
+      );
+    },
+  );
 
   ipcMain.handle(CHANNELS.engineYDocClose, async (event, payload) => {
     assertTrustedSender(event);

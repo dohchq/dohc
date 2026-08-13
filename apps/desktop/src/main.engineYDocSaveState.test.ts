@@ -168,6 +168,31 @@ describe("engine Y.Doc save-state reporting in main", () => {
     );
   });
 
+  it("blocks updates until the renderer acknowledges a lineage replacement", () => {
+    const open = handlerSource("engineYDocOpen");
+    expect(open).toContain("pendingEngineYDocLineageHandoffs.set(");
+    const acknowledgeAt = open.indexOf("acknowledge: ()");
+    const advanceAt = open.indexOf(
+      "registeredEntry.lineageGeneration = nextLineageGeneration",
+    );
+    expect(acknowledgeAt).toBeGreaterThan(-1);
+    expect(acknowledgeAt).toBeLessThan(advanceAt);
+    expect(open).toContain("queuedLineageReplacement = replacement");
+
+    const apply = handlerSource("engineYDocApplyUpdate");
+    const handoffAt = apply.indexOf("pendingEngineYDocLineageHandoffs.has(sessionKey)");
+    const generationAt = apply.indexOf(
+      "input.lineageGeneration !== entry.lineageGeneration",
+    );
+    const applyAt = apply.indexOf("entry.session.applyLocalUpdate(");
+    expect(handoffAt).toBeGreaterThan(-1);
+    expect(handoffAt).toBeLessThan(generationAt);
+    expect(generationAt).toBeLessThan(applyAt);
+
+    const acknowledge = handlerSource("engineYDocAcknowledgeLineageReplacement");
+    expect(acknowledge).toContain("handoff.acknowledge()");
+  });
+
   it("makes updates inert after a successful delete and repeats the deleted state", () => {
     const handler = handlerSource("engineYDocApplyUpdate");
     const deletedAt = handler.indexOf("if (entry.deleted)");

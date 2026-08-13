@@ -1,4 +1,8 @@
 import type { MomentAuthor } from "@dohc/workspace-contracts";
+import type {
+  MaterializeRelayPullPage,
+  RelayMaterializedPath,
+} from "@dohc/workspace-contracts/relay";
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
@@ -1615,6 +1619,18 @@ describe("workspaceEngineCapture expected engine events", () => {
 });
 
 describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
+  async function deliverRelayPage<T extends {
+    fastForwardedPaths: readonly RelayMaterializedPath[];
+  }>(
+    materializePage: MaterializeRelayPullPage,
+    result: T,
+    commit: () => Promise<void> = async () => undefined,
+  ): Promise<T> {
+    await materializePage(result.fastForwardedPaths);
+    await commit();
+    return result;
+  }
+
   async function protectedVersionFixture(mainText: string) {
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
@@ -1648,11 +1664,13 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     });
 
     let initializedWhenTaskRan = false;
-    await engine.runRelaySync(async () => {
+    await engine.runRelaySync(async (materializePage) => {
       initializedWhenTaskRan = requests.some(
         (request) => request.method === VERSIONED_METHOD.versionsEnsureMain,
       );
-      return { fastForwardedPaths: [] };
+      return await deliverRelayPage(materializePage, {
+        fastForwardedPaths: [],
+      });
     });
 
     expect(initializedWhenTaskRan).toBe(true);
@@ -1681,21 +1699,26 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     });
     let flushedWhenCommitted = false;
 
-    await engine.runRelaySync(async () => ({
-      fastForwardedPaths: [
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(
+        materializePage,
         {
-          versionId: "main",
-          path: "notes/remote.md",
-          operation: "write" as const,
-          contentKind: "text" as const,
+          fastForwardedPaths: [
+            {
+              versionId: "main",
+              path: "notes/remote.md",
+              operation: "write" as const,
+              contentKind: "text" as const,
+            },
+          ],
         },
-      ],
-      commitFetchCursor: async () => {
+        async () => {
         flushedWhenCommitted = requests.some(
           (request) => request.method === "capture.reconcile",
         );
-      },
-    }));
+        },
+      ),
+    );
 
     expect(flushedWhenCommitted).toBe(true);
 
@@ -1709,17 +1732,22 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     });
     const commitWhileUnsettled = vi.fn(async () => {});
     await expect(
-      engine.runRelaySync(async () => ({
-        fastForwardedPaths: [
+      engine.runRelaySync(async (materializePage) =>
+        await deliverRelayPage(
+          materializePage,
           {
-            versionId: "main",
-            path: "notes/remote.md",
-            operation: "write" as const,
-            contentKind: "text" as const,
+            fastForwardedPaths: [
+              {
+                versionId: "main",
+                path: "notes/remote.md",
+                operation: "write" as const,
+                contentKind: "text" as const,
+              },
+            ],
           },
-        ],
-        commitFetchCursor: commitWhileUnsettled,
-      })),
+          commitWhileUnsettled,
+        ),
+      ),
     ).rejects.toThrow("did not settle");
     expect(commitWhileUnsettled).not.toHaveBeenCalled();
 
@@ -1743,16 +1771,18 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     });
     const momentsBefore = (await liveMoments(engine)).length;
 
-    const result = await engine.runRelaySync(async () => ({
-      fastForwardedPaths: [
-        {
-          versionId: "main",
-          path: "notes/remote.md",
-          operation: "write" as const,
-          contentKind: "text" as const,
-        },
-      ],
-    }));
+    const result = await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(materializePage, {
+        fastForwardedPaths: [
+          {
+            versionId: "main",
+            path: "notes/remote.md",
+            operation: "write" as const,
+            contentKind: "text" as const,
+          },
+        ],
+      }),
+    );
     expect(result.fastForwardedPaths).toHaveLength(1);
     expect(await readFile(join(root, "notes/remote.md"), "utf8")).toBe(
       "remote machine wrote this\n",
@@ -1797,23 +1827,27 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     });
     const momentsBefore = (await liveMoments(engine)).length;
 
-    await engine.runRelaySync(async () => ({
-      fastForwardedPaths: [
-        {
-          versionId: "main",
-          path: "doomed.md",
-          operation: "delete" as const,
-          contentKind: "text" as const,
-        },
-      ],
-    }));
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(materializePage, {
+        fastForwardedPaths: [
+          {
+            versionId: "main",
+            path: "doomed.md",
+            operation: "delete" as const,
+            contentKind: "text" as const,
+          },
+        ],
+      }),
+    );
     expect(existsSync(join(root, "doomed.md"))).toBe(false);
     engine.captureBatch([{ path: "doomed.md", operation: "delete" }]);
     await engine.flush();
     expect(await liveMoments(engine)).toHaveLength(momentsBefore);
 
     // A quiescent pass (no fast-forwarded paths) touches nothing.
-    await engine.runRelaySync(async () => ({ fastForwardedPaths: [] }));
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(materializePage, { fastForwardedPaths: [] }),
+    );
     await engine.flush();
     expect(await liveMoments(engine)).toHaveLength(momentsBefore);
     await engine.stop();
@@ -1832,22 +1866,27 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     });
     const commitOrder: string[] = [];
 
-    await engine.runRelaySync(async () => ({
-      fastForwardedPaths: [
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(
+        materializePage,
         {
-          versionId: "main",
-          path: ".env",
-          operation: "write" as const,
-          contentKind: "secret" as const,
+          fastForwardedPaths: [
+            {
+              versionId: "main",
+              path: ".env",
+              operation: "write" as const,
+              contentKind: "secret" as const,
+            },
+          ],
         },
-      ],
-      commitFetchCursor: async () => {
+        async () => {
         expect(await readFile(join(root, ".env"), "utf8")).toBe(
           "ACCESS_TOKEN=protected\r\n",
         );
         commitOrder.push("write");
-      },
-    }));
+        },
+      ),
+    );
 
     await loopback.sendRequest({
       id: -3,
@@ -1861,20 +1900,25 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
         momentId: "remote-secret-delete",
       },
     });
-    await engine.runRelaySync(async () => ({
-      fastForwardedPaths: [
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(
+        materializePage,
         {
-          versionId: "main",
-          path: ".env",
-          operation: "delete" as const,
-          contentKind: "secret" as const,
+          fastForwardedPaths: [
+            {
+              versionId: "main",
+              path: ".env",
+              operation: "delete" as const,
+              contentKind: "secret" as const,
+            },
+          ],
         },
-      ],
-      commitFetchCursor: async () => {
+        async () => {
         expect(existsSync(join(root, ".env"))).toBe(false);
         commitOrder.push("delete");
-      },
-    }));
+        },
+      ),
+    );
 
     expect(commitOrder).toEqual(["write", "delete"]);
     await engine.stop();
@@ -1897,18 +1941,21 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
           contentKind: "secret" as const,
         },
       ],
-      commitFetchCursor: commit,
     });
-    await expect(engine.runRelaySync(async () => replay())).rejects.toThrow(
-      /Could not update \.env/u,
-    );
+    await expect(
+      engine.runRelaySync(async (materializePage) =>
+        await deliverRelayPage(materializePage, replay(), commit),
+      ),
+    ).rejects.toThrow(/Could not update \.env/u);
     expect(commit).not.toHaveBeenCalled();
 
     await rm(join(root, ".env"), { recursive: true, force: true });
     await write(root, ".env", "VALUE=main remote\n");
     await engine.switchVersion(draftId);
     await write(root, ".env", "VALUE=draft local drift\n");
-    await engine.runRelaySync(async () => replay());
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(materializePage, replay(), commit),
+    );
 
     expect(await readFile(join(root, ".env"), "utf8")).toBe(
       "VALUE=draft local drift\n",
@@ -1946,17 +1993,20 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
           contentKind: "secret" as const,
         },
       ],
-      commitFetchCursor: commit,
     });
-    await expect(engine.runRelaySync(async () => replay())).rejects.toThrow(
-      /Could not update \.env/u,
-    );
+    await expect(
+      engine.runRelaySync(async (materializePage) =>
+        await deliverRelayPage(materializePage, replay(), commit),
+      ),
+    ).rejects.toThrow(/Could not update \.env/u);
     expect(commit).not.toHaveBeenCalled();
 
     await rm(join(root, ".env"), { recursive: true, force: true });
     await engine.switchVersion(draftId);
     await write(root, ".env", "VALUE=draft local drift\n");
-    await engine.runRelaySync(async () => replay());
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(materializePage, replay(), commit),
+    );
 
     expect(await readFile(join(root, ".env"), "utf8")).toBe(
       "VALUE=draft local drift\n",
@@ -1992,16 +2042,19 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
           contentKind: "text" as const,
         },
       ],
-      commitFetchCursor: commit,
     });
-    await expect(engine.runRelaySync(async () => pullResult())).rejects.toThrow(
-      /Could not update notes\/remote\.md/u,
-    );
+    await expect(
+      engine.runRelaySync(async (materializePage) =>
+        await deliverRelayPage(materializePage, pullResult(), commit),
+      ),
+    ).rejects.toThrow(/Could not update notes\/remote\.md/u);
     expect(commit).not.toHaveBeenCalled();
 
     // Unblock the path: the retry pass materializes and THEN commits.
     await rm(join(root, "notes/remote.md"), { recursive: true, force: true });
-    await engine.runRelaySync(async () => pullResult());
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(materializePage, pullResult(), commit),
+    );
     expect(commit).toHaveBeenCalledTimes(1);
     expect(await readFile(join(root, "notes/remote.md"), "utf8")).toBe(
       "remote machine wrote this\n",
@@ -2010,10 +2063,13 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     // A quiescent pass (chat-only or own-origin ops) still commits: cursor
     // progress must not depend on file materialization work existing.
     const quiescentCommit = vi.fn(async () => {});
-    await engine.runRelaySync(async () => ({
-      fastForwardedPaths: [],
-      commitFetchCursor: quiescentCommit,
-    }));
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(
+        materializePage,
+        { fastForwardedPaths: [] },
+        quiescentCommit,
+      ),
+    );
     await engine.stop();
     expect(quiescentCommit).toHaveBeenCalledTimes(1);
   });

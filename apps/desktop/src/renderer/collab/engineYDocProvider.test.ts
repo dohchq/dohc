@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
   bindEngineYDoc,
@@ -18,7 +18,10 @@ function mockTransport(seedMarkdownLines: string[] = ["Start."]): {
     update: Uint8Array;
     recoveredPaths: string[];
     lineageGeneration: number;
-  }) => void;
+  }) => Promise<void>;
+  releaseReplacement: () => void;
+  bufferDuringReplacement: (update: Uint8Array) => void;
+  acknowledgedGenerations: number[];
   closed: () => boolean;
   mainDoc: Y.Doc;
 } {
@@ -43,8 +46,14 @@ function mockTransport(seedMarkdownLines: string[] = ["Start."]): {
         update: Uint8Array;
         recoveredPaths: string[];
         lineageGeneration: number;
-      }) => void)
+      }) => void | Promise<void>)
     | null = null;
+  let releaseReplacement!: () => void;
+  const replacementReleased = new Promise<void>((resolve) => {
+    releaseReplacement = resolve;
+  });
+  const acknowledgedGenerations: number[] = [];
+  const bufferedReplacementUpdates: Uint8Array[] = [];
   let closed = false;
   const transport: EngineYDocTransport = {
     async open() {
@@ -73,6 +82,11 @@ function mockTransport(seedMarkdownLines: string[] = ["Start."]): {
         replacementListener = null;
       };
     },
+    async acknowledgeLineageReplacement(lineageGeneration) {
+      acknowledgedGenerations.push(lineageGeneration);
+      await replacementReleased;
+      return bufferedReplacementUpdates.splice(0);
+    },
     async close() {
       closed = true;
     },
@@ -83,7 +97,12 @@ function mockTransport(seedMarkdownLines: string[] = ["Start."]): {
     shippedGenerations,
     pushRemote: (update, lineageGeneration = 1) =>
       remoteListener?.(update, lineageGeneration),
-    replaceLineage: (input) => replacementListener?.(input),
+    replaceLineage: async (input) => {
+      await replacementListener?.(input);
+    },
+    releaseReplacement,
+    bufferDuringReplacement: (update) => bufferedReplacementUpdates.push(update),
+    acknowledgedGenerations,
     closed: () => closed,
     mainDoc,
   };
@@ -105,6 +124,57 @@ function bodyText(doc: Y.Doc): string {
 }
 
 describe("engine Y.Doc provider — renderer bridge", () => {
+  it("does not lose a lineage replacement announced while open is in flight", async () => {
+    const initial = new Y.Doc();
+    typeIntoBody(initial, "Losing root.");
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+    let replacementListener:
+      | ((input: {
+          update: Uint8Array;
+          recoveredPaths: string[];
+          lineageGeneration: number;
+        }) => void | Promise<void>)
+      | null = null;
+    const acknowledged: number[] = [];
+    const transport: EngineYDocTransport = {
+      async open() {
+        void replacementListener?.({
+          update: Y.encodeStateAsUpdate(winner),
+          recoveredPaths: [],
+          lineageGeneration: 2,
+        });
+        return {
+          available: true,
+          initialUpdate: Y.encodeStateAsUpdate(initial),
+          lineageGeneration: 1,
+        };
+      },
+      applyLocalUpdate() {},
+      onRemoteUpdate() {
+        return () => undefined;
+      },
+      onLineageReplacement(listener) {
+        replacementListener = listener;
+        return () => {
+          replacementListener = null;
+        };
+      },
+      async acknowledgeLineageReplacement(lineageGeneration) {
+        acknowledged.push(lineageGeneration);
+        return [];
+      },
+      async close() {},
+    };
+
+    const binding = await bindEngineYDoc(transport);
+    await vi.waitFor(() => expect(acknowledged).toEqual([2]));
+
+    expect(bodyText(binding.doc!)).toContain("Winning root.");
+    expect(bodyText(binding.doc!)).not.toContain("Losing root.");
+    await binding.destroy();
+  });
+
   it("seeds the mirror doc from the engine's initial state before binding", async () => {
     const mock = mockTransport(["Seeded from engine."]);
     const binding = await bindEngineYDoc(mock.transport);
@@ -151,6 +221,9 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       onLineageReplacement() {
         return () => undefined;
       },
+      async acknowledgeLineageReplacement() {
+        return [];
+      },
       async close() {},
     };
     const binding = await bindEngineYDoc(transport);
@@ -185,14 +258,32 @@ describe("engine Y.Doc provider — renderer bridge", () => {
 
     const winner = new Y.Doc();
     typeIntoBody(winner, "Winning root.");
-    mock.replaceLineage({
+    const replacing = mock.replaceLineage({
       update: Y.encodeStateAsUpdate(winner),
       recoveredPaths: ["notes/live (recovered).md"],
       lineageGeneration: 2,
     });
 
+    // Main has announced the winner but has not accepted its generation yet.
+    // The losing editor must be inert throughout that handoff: a transaction
+    // already queued against it cannot be silently shipped under generation 1.
+    const shippedBeforeHandoff = mock.shipped.length;
+    typeIntoBody(losingDoc, "Late losing edit.");
+    expect(mock.shipped).toHaveLength(shippedBeforeHandoff);
+    expect(binding.doc).toBe(losingDoc);
+    expect(mock.acknowledgedGenerations).toEqual([2]);
+
+    const winnerBeforeRemote = Y.encodeStateVector(winner);
+    typeIntoBody(winner, "Remote during handoff.");
+    mock.bufferDuringReplacement(
+      Y.encodeStateAsUpdate(winner, winnerBeforeRemote),
+    );
+    mock.releaseReplacement();
+    await replacing;
+
     expect(binding.doc).not.toBe(losingDoc);
     expect(bodyText(binding.doc!)).toContain("Winning root.");
+    expect(bodyText(binding.doc!)).toContain("Remote during handoff.");
     expect(bodyText(binding.doc!)).not.toContain("Losing root.");
     expect(replacements).toEqual([binding.doc]);
 
@@ -207,6 +298,35 @@ describe("engine Y.Doc provider — renderer bridge", () => {
 
     typeIntoBody(binding.doc!, "Fresh local.");
     expect(mock.shippedGenerations.at(-1)).toBe(2);
+    await binding.destroy();
+  });
+
+  it("serializes consecutive lineage replacements", async () => {
+    const mock = mockTransport(["Losing root."]);
+    const binding = await bindEngineYDoc(mock.transport);
+    const firstWinner = new Y.Doc();
+    typeIntoBody(firstWinner, "First winner.");
+    const finalWinner = new Y.Doc();
+    typeIntoBody(finalWinner, "Final winner.");
+
+    const first = mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(firstWinner),
+      recoveredPaths: [],
+      lineageGeneration: 2,
+    });
+    const second = mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(finalWinner),
+      recoveredPaths: [],
+      lineageGeneration: 3,
+    });
+    expect(mock.acknowledgedGenerations).toEqual([2]);
+
+    mock.releaseReplacement();
+    await Promise.all([first, second]);
+
+    expect(mock.acknowledgedGenerations).toEqual([2, 3]);
+    expect(bodyText(binding.doc!)).toContain("Final winner.");
+    expect(bodyText(binding.doc!)).not.toContain("First winner.");
     await binding.destroy();
   });
 });
