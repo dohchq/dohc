@@ -514,4 +514,64 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.dispose();
     }
   });
+
+  it("restores the running status after a watcher reconcile that finds no real change (fixround Section B item 12)", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceId: "workspace-1",
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      // Rewriting the exact same bytes touches mtime but never the source
+      // hash — a real no-op from the pipeline's own point of view, exactly
+      // what a watcher can observe from an editor's save-with-no-changes
+      // or a sync tool settling.
+      const originalSource = await readFile(fixture.entryPath, "utf8");
+      await writeFile(fixture.entryPath, originalSource);
+      pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin/src/index.ts",
+        operation: "update",
+      }]);
+
+      // The reconcile briefly visits "snapshotting" — wait past that window,
+      // then assert it settled back to "ready" rather than staying stuck.
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        `No-op reconcile left status at "${pipeline.list()[0]?.status}" instead of restoring "ready".`,
+      );
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
 });

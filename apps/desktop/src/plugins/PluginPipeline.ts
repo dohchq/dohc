@@ -829,7 +829,20 @@ export class PluginPipeline {
       });
       return;
     }
-    if (!startRuntime || this.options.pluginHost.getStatus(pluginId)) return;
+    if (!startRuntime || this.options.pluginHost.getStatus(pluginId)) {
+      // A no-op reconcile (nothing to rebuild, nothing to start) must
+      // restore the status this function's own snapshotOrThrow set to
+      // "snapshotting" at the top — otherwise a watcher event for an
+      // already-running, unchanged plugin left it permanently stuck
+      // reading "Checking source" (fixround Section B item 12).
+      const runtimeStatus = this.options.pluginHost.getStatus(pluginId);
+      this.setStatus(candidate, {
+        status: runtimeStatus ?? "queued",
+        runtimeStatus: runtimeStatus ?? null,
+        error: null,
+      });
+      return;
+    }
     await this.runFullBuild({
       candidate,
       startRuntime: true,
