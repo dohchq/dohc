@@ -510,13 +510,20 @@ function useTextContent(
       mounted.current = false;
     };
   }, []);
-  const initializedReadTicket = useRef(0);
+  const initializedRead = useRef<{
+    buffer: SharedLocalDocument;
+    ticket: number;
+  } | null>(null);
   const markReadInitialized = useCallback((readTicket: number) => {
-    initializedReadTicket.current = Math.max(
-      initializedReadTicket.current,
-      readTicket,
-    );
-  }, []);
+    const marked = initializedRead.current;
+    initializedRead.current = {
+      buffer: localBuffer,
+      ticket:
+        marked?.buffer === localBuffer
+          ? Math.max(marked.ticket, readTicket)
+          : readTicket,
+    };
+  }, [localBuffer]);
   const lastLocationRef = useRef<{
     workspaceId: string;
     path: string;
@@ -566,11 +573,17 @@ function useTextContent(
       if (
         !mounted.current &&
         answered &&
-        initializedReadTicket.current < readTicket
+        (initializedRead.current?.buffer !== localBuffer ||
+          initializedRead.current.ticket < readTicket)
       ) {
         const completed = answered;
         queueMicrotask(() => {
-          if (initializedReadTicket.current >= readTicket) return;
+          if (
+            initializedRead.current?.buffer === localBuffer &&
+            initializedRead.current.ticket >= readTicket
+          ) {
+            return;
+          }
           localBuffer.initializeRead(
             completed.text,
             completed.contentHash,

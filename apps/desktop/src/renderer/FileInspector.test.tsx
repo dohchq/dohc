@@ -2327,6 +2327,93 @@ describe("markdown editor unmount flush", () => {
     });
   });
 
+  it("rescues an answered read after switching version buffers before unmount", async () => {
+    type ReadResult = {
+      text: string;
+      truncated: false;
+      contentHash: string;
+    };
+    const initialHash = "6".repeat(64);
+    const switchedHash = "7".repeat(64);
+    let resolveSwitched!: (value: ReadResult) => void;
+    let resolvePeer!: (value: ReadResult) => void;
+    const switched = new Promise<ReadResult>((resolve) => {
+      resolveSwitched = resolve;
+    });
+    const peer = new Promise<ReadResult>((resolve) => {
+      resolvePeer = resolve;
+    });
+    bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: "# Initial\n\nInitial body.\n",
+        truncated: false,
+        contentHash: initialHash,
+      })
+      .mockImplementationOnce(() => switched)
+      .mockImplementationOnce(() => peer);
+    const subject = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/versioned.md"
+        engineVersionKey={1}
+      />,
+    );
+    await screen.findByText("Initial body.");
+
+    subject.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/versioned.md"
+        engineVersionKey={2}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+    const survivingPeer = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/versioned.md"
+        engineVersionKey={2}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(3),
+    );
+    const switchedBuffer = getSharedLocalDocument(
+      documentVersionKey("ws-1", "notes/versioned.md", 2),
+    );
+
+    await act(async () => {
+      resolveSwitched({
+        text: "# Switched\n\nSwitched body.\n",
+        truncated: false,
+        contentHash: switchedHash,
+      });
+      await switched;
+      await Promise.resolve();
+      subject.unmount();
+    });
+
+    await waitFor(() =>
+      expect(switchedBuffer.getSnapshot()).toMatchObject({
+        initialized: true,
+        body: "# Switched\n\nSwitched body.\n",
+        contentHash: switchedHash,
+      }),
+    );
+
+    await act(async () => {
+      resolvePeer({
+        text: "# Peer\n\nPeer body.\n",
+        truncated: false,
+        contentHash: "8".repeat(64),
+      });
+      await peer;
+    });
+    survivingPeer.unmount();
+  });
+
   it("uses an older duplicate read when the later request fails", async () => {
     type ReadResult = {
       text: string;

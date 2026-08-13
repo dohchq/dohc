@@ -879,6 +879,20 @@ describe("editor groups", () => {
       .find((row) => row.dataset.path === path)!;
   }
 
+  it("does not offer Split Right for the singleton Chats tab", async () => {
+    renderShell(
+      makeBridge(
+        Promise.resolve(storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH)),
+      ),
+    );
+
+    await screen.findByTestId(`tab-${CHATS_TAB_PATH}`);
+    expect(
+      (screen.getByTestId("create-editor-group-right") as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
   it("copies the active tab right with Ctrl+\\ and collapses the group after its last tab closes", async () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),

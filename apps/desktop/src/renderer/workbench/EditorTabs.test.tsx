@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorTabs } from "./EditorTabs";
+import { CHATS_TAB_PATH } from "./workbenchState";
 
 beforeEach(() => {
   // jsdom doesn't implement scrollIntoView; the strip reveals the active
@@ -403,5 +404,32 @@ describe("EditorTabs overlay scrollbar", () => {
     expect(onCreateGroupRight).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "Close editor group" }));
     expect(onCloseGroup).toHaveBeenCalledOnce();
+  });
+
+  it("disables Split Right when Chats is the active tab", () => {
+    const onCreateGroupRight = vi.fn();
+    render(
+      <EditorTabs
+        groupId="left"
+        groupNumber={1}
+        tabs={[{ path: CHATS_TAB_PATH }, { path: "a.md" }]}
+        activeTab={CHATS_TAB_PATH}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={onCreateGroupRight}
+      />,
+    );
+
+    const split = screen.getByRole("button", {
+      name: "New editor group right",
+    });
+    expect((split as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(split);
+    expect(onCreateGroupRight).not.toHaveBeenCalled();
   });
 });
