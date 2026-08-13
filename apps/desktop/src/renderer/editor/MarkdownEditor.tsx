@@ -45,7 +45,6 @@ import {
   handleImagePaste,
   handlePaneImageDragOver,
   handlePaneImageDrop,
-  IMAGE_INSERT_TRANSACTION_META,
   pickAndInsertImages,
   type ImagePasteContext,
 } from "./imagePaste";
@@ -722,11 +721,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           if (collabActive) return;
           if (applyingPendingUndoRef.current) return;
           if (!dirtyTrackingReadyRef.current) return;
-          if (
-            !editor.isFocused &&
-            !transaction.getMeta(IMAGE_INSERT_TRANSACTION_META)
-          )
-            return;
+          if (!transaction.docChanged) return;
           const document = editor.state.doc;
           onDirty(() =>
             serializeRichdocBody(escapeHighlightMarkdown(document.toJSON())),

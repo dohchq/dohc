@@ -93,8 +93,6 @@ export function computeAttachmentPaths(
 // and images that large are almost never a paste the user meant.
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
-export const IMAGE_INSERT_TRANSACTION_META = "dohc:image-insert";
-
 // Extension by mime type, for clipboard images that arrive without a filename.
 const MIME_EXTENSIONS: Record<string, string> = {
   "image/png": "png",
@@ -281,11 +279,7 @@ export function insertImageAtPosition(
   if (!imageType) return pos;
   const node = imageType.create(attrs);
   const clamped = Math.max(0, Math.min(pos, view.state.doc.content.size));
-  view.dispatch(
-    view.state.tr
-      .insert(clamped, node)
-      .setMeta(IMAGE_INSERT_TRANSACTION_META, true),
-  );
+  view.dispatch(view.state.tr.insert(clamped, node));
   return clamped + node.nodeSize;
 }
 

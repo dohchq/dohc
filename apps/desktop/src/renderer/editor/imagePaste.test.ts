@@ -9,7 +9,6 @@ import {
   handleImagePaste,
   handlePaneImageDragOver,
   handlePaneImageDrop,
-  IMAGE_INSERT_TRANSACTION_META,
   imageExtension,
   insertImageAtPosition,
   pickAndInsertImages,
@@ -234,15 +233,9 @@ describe("extractImageFiles", () => {
 // A minimal EditorView stand-in exercising the schema/tr/dispatch surface the
 // insert path touches — real ProseMirror views are too heavy for a unit test.
 type MockNode = { nodeSize: number; attrs: Record<string, unknown> };
-type MockTransaction = {
-  pos: number;
-  node: MockNode;
-  meta: Record<string, unknown>;
-  setMeta(key: string, value: unknown): MockTransaction;
-};
 
 function makeMockView(docSize = 8, coordsPos: number | null = 5) {
-  const dispatched: MockTransaction[] = [];
+  const dispatched: Array<{ pos: number; node: MockNode }> = [];
   const imageType = {
     create: (attrs: Record<string, unknown>): MockNode => ({
       nodeSize: 1,
@@ -256,20 +249,11 @@ function makeMockView(docSize = 8, coordsPos: number | null = 5) {
       doc: { content: { size: docSize } },
       tr: {
         insert(pos: number, node: MockNode) {
-          const transaction: MockTransaction = {
-            pos,
-            node,
-            meta: {},
-            setMeta(key, value) {
-              transaction.meta[key] = value;
-              return transaction;
-            },
-          };
-          return transaction;
+          return { pos, node };
         },
       },
     },
-    dispatch(tr: MockTransaction) {
+    dispatch(tr: { pos: number; node: MockNode }) {
       dispatched.push(tr);
     },
     // Drops resolve their insert position from the cursor coordinates.
@@ -290,7 +274,6 @@ describe("insertImageAtPosition", () => {
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0]!.pos).toBe(3);
     expect(dispatched[0]!.node.attrs).toEqual({ src: "assets/pic.png", alt: "" });
-    expect(dispatched[0]!.meta[IMAGE_INSERT_TRANSACTION_META]).toBe(true);
     expect(next).toBe(4);
   });
 

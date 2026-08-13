@@ -47,6 +47,11 @@ import {
   type SlashCommandState,
 } from "./slashCommands";
 
+const scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(
+  Element.prototype,
+  "scrollIntoView",
+);
+
 beforeEach(() => {
   vi.stubGlobal(
     "ResizeObserver",
@@ -82,6 +87,15 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  if (scrollIntoViewDescriptor) {
+    Object.defineProperty(
+      Element.prototype,
+      "scrollIntoView",
+      scrollIntoViewDescriptor,
+    );
+  } else {
+    Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+  }
   vi.unstubAllGlobals();
 });
 
@@ -1170,6 +1184,43 @@ describe("MarkdownEditor remote carets", () => {
 // content held a ``` line closed its fence early and truncated on
 // re-import (#704).
 describe("MarkdownEditor markdown export: code fence widening (#704)", () => {
+  it("reports Replace all while the find input owns focus", async () => {
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const user = userEvent.setup();
+    const onDirty = vi.fn();
+    render(
+      createElement(MarkdownEditor, {
+        value: "alpha alpha",
+        onDirty,
+        workspaceId: "workspace-1",
+        path: "notes/shared.md",
+        knownFiles: [],
+      }),
+    );
+    const editor = await screen.findByTestId("markdown-editor");
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    editor.focus();
+    await user.keyboard("{Control>}h{/Control}");
+    const find = await screen.findByPlaceholderText("Find");
+    const replacement = screen.getByPlaceholderText("Replace");
+    await user.type(find, "alpha");
+    await user.type(replacement, "beta");
+    onDirty.mockClear();
+
+    await user.click(screen.getByRole("button", { name: "Replace all" }));
+
+    expect(editor.textContent).toContain("beta beta");
+    expect(document.activeElement).not.toBe(editor);
+    expect(
+      onDirty.mock.calls.some(([materialize]) =>
+        (materialize as () => string)().includes("beta beta"),
+      ),
+    ).toBe(true);
+  });
+
   it("reports an asynchronous image insert after the editor loses focus", async () => {
     let resolveSettings!: (value: unknown) => void;
     const settings = new Promise((resolve) => {
