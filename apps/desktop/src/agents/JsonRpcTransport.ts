@@ -150,34 +150,26 @@ export class JsonRpcTransport {
     // as its cwd, keeping that directory locked on Windows.
     await killChildTreeWin32(this.child);
     if (this.child.exitCode !== null || this.child.signalCode !== null) return;
-    const processGroupId =
+    const groupId =
       this.options.detached === true && process.platform !== "win32"
         ? this.child.pid
         : undefined;
-    if (processGroupId !== undefined) {
+    const signal = (name: NodeJS.Signals): void => {
       try {
-        process.kill(-processGroupId, "SIGTERM");
+        if (groupId !== undefined) process.kill(-groupId, name);
+        else this.child.kill(name);
       } catch {
-        // The process group may already be gone.
+        // The process or its group may already be gone.
       }
-    } else {
-      this.child.kill("SIGTERM");
-    }
+    };
+    signal("SIGTERM");
     // The escalation timer self-guards on exit state and is unref'd, so it
     // never needs cancelling — clearing it could skip the SIGKILL in the
     // exotic case where "error" resolves the exit promise while the child
     // still lives.
     const forceKill = setTimeout(() => {
       if (this.child.exitCode === null && this.child.signalCode === null) {
-        if (processGroupId !== undefined) {
-          try {
-            process.kill(-processGroupId, "SIGKILL");
-          } catch {
-            // The process group may already be gone.
-          }
-        } else {
-          this.child.kill("SIGKILL");
-        }
+        signal("SIGKILL");
       }
     }, 2000);
     forceKill.unref();

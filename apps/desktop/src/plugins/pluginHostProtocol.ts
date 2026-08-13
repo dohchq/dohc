@@ -15,7 +15,6 @@ export interface PluginActivateParams {
   pluginRoot: string;
   workspaceRoot: string;
   manifest: DohcPluginManifest;
-  hostGeneration: number;
 }
 
 export interface PluginActivateResult {
@@ -50,6 +49,5 @@ export const PLUGIN_FAST_FAILURE_WINDOW_MS = 60_000;
 
 export interface PluginTransport {
   request<T = unknown>(method: string, params?: unknown): Promise<T>;
-  notify(method: string, params?: unknown): void;
   dispose(): Promise<void>;
 }

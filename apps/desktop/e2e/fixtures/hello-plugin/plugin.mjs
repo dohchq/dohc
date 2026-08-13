@@ -1,58 +1,68 @@
-import { activatePlugin } from "@dohc/sdk/node";
-
 const mode = process.env.DOHC_PLUGIN_FIXTURE_MODE ?? "hello";
 
 if (mode === "crash-immediately") process.exit(1);
 
 function registerHelloCommand(ctx) {
   ctx.commands.register("hello.write", async () => {
-    const { writeFile } = await import("node:fs/promises");
-    const { join } = await import("node:path");
-    await writeFile(
-      join(ctx.workspaceRoot, "hello-plugin-output.txt"),
+    await ctx.client.files.write(
+      "hello-plugin-output.txt",
       `Hello from ${ctx.pluginId}\n`,
     );
   });
 }
 
+let handler;
+
 switch (mode) {
   case "hello":
-    activatePlugin({
+    handler = {
       activate(ctx) {
         registerHelloCommand(ctx);
       },
-    });
+    };
     break;
   case "slow-hello":
-    activatePlugin({
+    handler = {
       async activate(ctx) {
         await new Promise((resolve) => setTimeout(resolve, 150));
         registerHelloCommand(ctx);
       },
-    });
+    };
     break;
   case "never-resolves":
-    activatePlugin({ activate: () => new Promise(() => {}) });
+    handler = { activate: () => new Promise(() => {}) };
     break;
   case "throws":
-    activatePlugin({
+    handler = {
       activate() {
         throw new Error("fixture activation failed");
       },
-    });
+    };
+    break;
+  case "async-throw-after-activate":
+    handler = {
+      activate(ctx) {
+        ctx.commands.register("noop", () => {});
+        setImmediate(() => {
+          queueMicrotask(() => {
+            throw new Error("fixture: uncaught error after activation");
+          });
+        });
+      },
+    };
     break;
   case "crash-after-activate":
-    activatePlugin({
+    handler = {
       activate(ctx) {
         ctx.commands.register("hello.write", () => {
           void ctx.client.request("noop");
           process.exit(1);
         });
       },
-    });
+    };
     break;
   case "grandchild-heartbeat":
-    activatePlugin({
+    handler = {
       async activate(ctx) {
         const { spawn } = await import("node:child_process");
         const { join } = await import("node:path");
@@ -69,8 +79,10 @@ switch (mode) {
         });
         child.unref();
       },
-    });
+    };
     break;
   default:
     throw new Error(`Unknown hello-plugin fixture mode: ${mode}`);
 }
+
+export default handler;

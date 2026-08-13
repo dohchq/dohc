@@ -5,8 +5,10 @@ window.
 
 ## Node plugin runtime
 
-The `@dohc/sdk/node` entry provides the process transport and plugin lifecycle
-registry.
+The `@dohc/sdk/node` entry provides the process transport and plugin authoring
+types.
+
+The trusted plugin host uses the process transport:
 
 ```ts
 import {
@@ -18,22 +20,35 @@ const transport = createProcessTransport();
 const client = createDohcClient({ transport });
 ```
 
-A plugin entry module registers its lifecycle at module load time:
+A plugin entry module default-exports its lifecycle handler:
 
 ```ts
-import { activatePlugin } from "@dohc/sdk/node";
+import type {
+  PluginActivateContext,
+  PluginHandler,
+} from "@dohc/sdk/node";
 
-activatePlugin({
-  activate(ctx) {
-    ctx.commands.register("example.run", () => ctx.client.capabilities());
+const activate = (ctx: PluginActivateContext) => {
+  ctx.commands.register("example.run", () => ctx.client.capabilities());
+};
+
+const handler: PluginHandler = {
+  activate,
+  deactivate() {
+    // Release plugin resources here.
   },
-});
+};
+
+export default handler;
 ```
+
+The type-only import adds no runtime dependency on `@dohc/sdk`.
+
+This contract never requires the plugin and host to share a loaded SDK module
+instance, so it remains safe when the plugin carries its own dependencies.
 
 `createProcessTransport()` detects an Electron utility-process message channel
 or plain stdio. Plugin authors do not select the binding.
-
-`activatePlugin()` registers one lifecycle handler in the current process.
 
 Sites can use the typed APIs for common dohc operations:
 

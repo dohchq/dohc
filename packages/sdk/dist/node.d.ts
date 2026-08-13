@@ -28,7 +28,3 @@ export interface PluginHandler {
     deactivate?(): Promise<void> | void;
 }
 export declare function createProcessTransport(options?: CreateProcessTransportOptions): ProcessTransport;
-/** Called by a plugin's entry module (typically at module top level) to register its lifecycle. */
-export declare function activatePlugin(handler: PluginHandler): void;
-/** Used by the plugin-host loader to retrieve the lifecycle registered by the imported entry module. */
-export declare function getActivatedPluginHandler(): PluginHandler | null;

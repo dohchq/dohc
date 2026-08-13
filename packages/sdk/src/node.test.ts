@@ -2,12 +2,7 @@ import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { DohcSdkError, DohcSdkErrorCodes } from ".";
-import {
-  activatePlugin,
-  createProcessTransport,
-  getActivatedPluginHandler,
-  type PluginHandler,
-} from "./node";
+import { createProcessTransport } from "./node";
 
 function createStdioHarness() {
   const input = new PassThrough();
@@ -158,15 +153,5 @@ describe("@dohc/sdk/node", () => {
     expect(createProcessTransport({ input, output })).toBe(
       createProcessTransport({ input, output }),
     );
-  });
-
-  it("registers and replaces the activated plugin handler", () => {
-    const first: PluginHandler = { activate() {} };
-    const second: PluginHandler = { activate() {} };
-
-    activatePlugin(first);
-    expect(getActivatedPluginHandler()).toBe(first);
-    activatePlugin(second);
-    expect(getActivatedPluginHandler()).toBe(second);
   });
 });

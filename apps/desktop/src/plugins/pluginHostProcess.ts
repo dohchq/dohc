@@ -1,8 +1,6 @@
 import {
-  activatePlugin,
   createDohcClient,
   createProcessTransport,
-  getActivatedPluginHandler,
   type PluginActivateContext,
   type PluginHandler,
 } from "@dohc/sdk/node";
@@ -22,15 +20,24 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isPluginHandler(value: unknown): value is PluginHandler {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "activate" in value &&
+    typeof value.activate === "function"
+  );
+}
+
 transport.onRequest(PLUGIN_HOST_METHODS.activate, async (rawParams) => {
   const params = rawParams as PluginActivateParams;
-  await import(
+  const pluginModule = await import(
     pathToFileURL(join(params.pluginRoot, params.manifest.entry)).href
-  );
-  const handler = getActivatedPluginHandler();
-  if (!handler) {
+  ) as { default?: unknown };
+  const handler = pluginModule.default;
+  if (!isPluginHandler(handler)) {
     throw new Error(
-      `Plugin entry "${params.manifest.entry}" did not call activatePlugin().`,
+      `Plugin entry "${params.manifest.entry}" must export a default object with an activate(ctx) function.`,
     );
   }
 
@@ -78,6 +85,7 @@ process.on("uncaughtException", (error) => {
     level: "error",
     message: error.message,
   });
+  process.exit(1);
 });
 
 process.on("unhandledRejection", (reason) => {
@@ -85,4 +93,5 @@ process.on("unhandledRejection", (reason) => {
     level: "error",
     message: errorMessage(reason),
   });
+  process.exit(1);
 });

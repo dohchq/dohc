@@ -1,15 +1,11 @@
-import {
-  isDatabaseFile,
-  isDatabaseSidecar,
-} from "@dohc/workspace-core";
 import type { AgentAuthor } from "@dohc/workspace-engine-client";
 import {
+  assertRawTextWritable,
   invokeSiteSdkHost,
+  record,
   siteSdkWorkspacePath,
   type SiteSdkHostContext,
 } from "../workspaces/siteSdkHost";
-
-type RecordValue = Record<string, unknown>;
 
 export interface PluginSdkHostContext {
   pluginId: string;
@@ -35,21 +31,6 @@ const PLUGIN_CAPABILITIES = {
   provenance: { record: false },
 };
 
-const AUTHOR_FIELDS = [
-  "author",
-  "agentId",
-  "onBehalfOf",
-  "agentRunId",
-  "kind",
-] as const;
-
-function record(value: unknown): RecordValue {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("parameters must be an object.");
-  }
-  return value as RecordValue;
-}
-
 export async function invokePluginSdkHost(
   context: PluginSdkHostContext,
   method: string,
@@ -70,21 +51,9 @@ export async function invokePluginSdkHost(
       return invokeSiteSdkHost(siteContext, method, params);
     case "files.write": {
       const input = record(params);
-      const writeParams = { ...input };
-      for (const field of AUTHOR_FIELDS) delete writeParams[field];
-
-      const path = siteSdkWorkspacePath(null, writeParams.path, "write");
-      if (isDatabaseFile(path) || isDatabaseSidecar(path)) {
-        throw new Error(
-          "files.write cannot overwrite database files. Use databases.edit so structured transactions, history, and collaboration are preserved.",
-        );
-      }
-      if (/\.(?:md|markdown)$/i.test(path)) {
-        throw new Error(
-          "files.write cannot overwrite canonical Markdown documents. Use a dohc document editing capability so locks, history, and collaboration are preserved.",
-        );
-      }
-      if (typeof writeParams.text !== "string") {
+      const path = siteSdkWorkspacePath(null, input.path, "write");
+      assertRawTextWritable(path);
+      if (typeof input.text !== "string") {
         throw new Error("files.write text must be a string.");
       }
 
@@ -97,8 +66,8 @@ export async function invokePluginSdkHost(
       return context.writeAuthoredText(
         context.workspaceRoot,
         path,
-        writeParams.text,
-        { overwrite: writeParams.overwrite !== false, author },
+        input.text,
+        { overwrite: input.overwrite !== false, author },
       );
     }
     default:

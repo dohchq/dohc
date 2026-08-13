@@ -1,10 +1,16 @@
-import { randomUUID } from "node:crypto";
-import { lstat, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
-import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
+import { formatZodIssues } from "./zodDiagnostics";
 
-export const PLUGIN_LOCAL_STATE_FILE = "plugins.local.json";
 export const MAX_PLUGIN_LOCAL_STATE_FILE_BYTES = 256 * 1024;
 
 export const PluginLocalState = z.object({
@@ -24,10 +30,9 @@ export const DEFAULT_PLUGIN_LOCAL_STATE: PluginLocalState = {
   plugins: {},
 };
 
-export interface PluginLocalStateResult {
-  state: PluginLocalState;
-  warning?: string;
-}
+export type PluginLocalStateResult =
+  | { ok: true; state: PluginLocalState }
+  | { ok: false; warning: string };
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -35,37 +40,32 @@ function errorMessage(error: unknown): string {
 
 function unreadableState(path: string, problem: string): PluginLocalStateResult {
   return {
-    state: DEFAULT_PLUGIN_LOCAL_STATE,
-    warning: `${PLUGIN_LOCAL_STATE_FILE} at ${path} ${problem}`,
+    ok: false,
+    warning: `Plugin local state file at ${path} ${problem}`,
   };
 }
 
-async function pluginLocalStatePath(workspaceRoot: string): Promise<string> {
-  return join(
-    await resolveWorkspaceMetadataDir(workspaceRoot),
-    PLUGIN_LOCAL_STATE_FILE,
-  );
+export function pluginStateFileName(workspaceRoot: string): string {
+  const key = createHash("sha256").update(resolve(workspaceRoot)).digest("hex");
+  return `${key}.json`;
+}
+
+function pluginLocalStatePath(stateDir: string, workspaceRoot: string): string {
+  return join(stateDir, "plugin-state", pluginStateFileName(workspaceRoot));
 }
 
 export async function readPluginLocalState(
+  stateDir: string,
   workspaceRoot: string,
 ): Promise<PluginLocalStateResult> {
-  let path: string;
-  try {
-    path = await pluginLocalStatePath(workspaceRoot);
-  } catch (error) {
-    return unreadableState(
-      join(workspaceRoot, ".dohc", PLUGIN_LOCAL_STATE_FILE),
-      `could not be resolved: ${errorMessage(error)}`,
-    );
-  }
+  const path = pluginLocalStatePath(stateDir, workspaceRoot);
 
   let fileStats: Awaited<ReturnType<typeof lstat>>;
   try {
     fileStats = await lstat(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { state: DEFAULT_PLUGIN_LOCAL_STATE };
+      return { ok: true, state: DEFAULT_PLUGIN_LOCAL_STATE };
     }
     return unreadableState(path, `could not be inspected: ${errorMessage(error)}`);
   }
@@ -96,21 +96,20 @@ export async function readPluginLocalState(
 
   const parsed = PluginLocalState.safeParse(value);
   if (!parsed.success) {
-    const problems = parsed.error.issues.map((issue) => {
-      const issuePath = issue.path.length === 0 ? "(root)" : issue.path.join(".");
-      return `${issuePath}: ${issue.message}`;
-    });
+    const problems = formatZodIssues(parsed.error);
     return unreadableState(path, `does not match its schema: ${problems.join("; ")}`);
   }
-  return { state: parsed.data };
+  return { ok: true, state: parsed.data };
 }
 
 async function writePluginLocalState(
+  stateDir: string,
   workspaceRoot: string,
   state: PluginLocalState,
 ): Promise<void> {
-  const path = await pluginLocalStatePath(workspaceRoot);
+  const path = pluginLocalStatePath(stateDir, workspaceRoot);
   const temporaryPath = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  await mkdir(dirname(path), { recursive: true });
   try {
     await writeFile(
       temporaryPath,
@@ -125,32 +124,38 @@ async function writePluginLocalState(
 const stateWriteQueues = new Map<string, Promise<unknown>>();
 
 function queuePluginLocalStateWrite<T>(
-  workspaceRoot: string,
+  path: string,
   run: () => Promise<T>,
 ): Promise<T> {
-  const queue = stateWriteQueues.get(workspaceRoot) ?? Promise.resolve();
+  const queue = stateWriteQueues.get(path) ?? Promise.resolve();
   const result = queue.then(run, run);
   const settled = result.then(
     () => undefined,
     () => undefined,
   );
-  stateWriteQueues.set(workspaceRoot, settled);
+  stateWriteQueues.set(path, settled);
   void settled.then(() => {
-    if (stateWriteQueues.get(workspaceRoot) === settled) {
-      stateWriteQueues.delete(workspaceRoot);
+    if (stateWriteQueues.get(path) === settled) {
+      stateWriteQueues.delete(path);
     }
   });
   return result;
 }
 
 export function setPluginDisabled(
+  stateDir: string,
   workspaceRoot: string,
   pluginId: string,
   disabled: boolean,
 ): Promise<void> {
-  return queuePluginLocalStateWrite(workspaceRoot, async () => {
-    const { state } = await readPluginLocalState(workspaceRoot);
-    await writePluginLocalState(workspaceRoot, {
+  const path = pluginLocalStatePath(stateDir, workspaceRoot);
+  return queuePluginLocalStateWrite(path, async () => {
+    const result = await readPluginLocalState(stateDir, workspaceRoot);
+    if (!result.ok) {
+      throw new Error(result.warning);
+    }
+    const { state } = result;
+    await writePluginLocalState(stateDir, workspaceRoot, {
       ...state,
       plugins: {
         ...state.plugins,

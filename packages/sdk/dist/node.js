@@ -1,24 +1,15 @@
 import { createInterface } from "node:readline";
 import { DohcSdkError, DohcSdkErrorCodes, createDohcClient, } from "./index.js";
+import { abortedError, assertRequestOptions } from "./requestOptions.js";
 export { createDohcClient };
 const DEFAULT_TIMEOUT_MS = 10_000;
-const streamBindings = [];
+const streamBindings = new WeakMap();
 let parentPortBinding = null;
-let activatedPluginHandler = null;
 function isRecord(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function isRpcId(value) {
     return typeof value === "string" || typeof value === "number";
-}
-function abortedError(method) {
-    return new DohcSdkError(DohcSdkErrorCodes.aborted, `dohc request ${method} was aborted.`);
-}
-function assertRequestOptions(options) {
-    if (options?.timeoutMs !== undefined &&
-        (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)) {
-        throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Request timeoutMs must be a positive finite number.");
-    }
 }
 function createTransport(sendMessage, receiveMessages) {
     const handlers = new Map();
@@ -99,7 +90,7 @@ function createTransport(sendMessage, receiveMessages) {
             return new Promise((resolve, reject) => {
                 let settled = false;
                 const timer = globalThis.setTimeout(() => {
-                    finish(undefined, new DohcSdkError(DohcSdkErrorCodes.hostTimeout, `dohc host did not answer ${method}.`));
+                    finish(undefined, new DohcSdkError(DohcSdkErrorCodes.hostTimeout, `dohc host did not answer ${method} within ${timeoutMs}ms.`));
                 }, timeoutMs);
                 function cleanup() {
                     globalThis.clearTimeout(timer);
@@ -187,18 +178,10 @@ export function createProcessTransport(options = {}) {
     }
     const input = options.input ?? process.stdin;
     const output = options.output ?? process.stdout;
-    const existing = streamBindings.find((binding) => binding.input === input && binding.output === output);
-    if (existing)
+    const existing = streamBindings.get(input);
+    if (existing && existing.output === output)
         return existing.transport;
     const transport = createStdioTransport(input, output);
-    streamBindings.push({ input, output, transport });
+    streamBindings.set(input, { output, transport });
     return transport;
-}
-/** Called by a plugin's entry module (typically at module top level) to register its lifecycle. */
-export function activatePlugin(handler) {
-    activatedPluginHandler = handler;
-}
-/** Used by the plugin-host loader to retrieve the lifecycle registered by the imported entry module. */
-export function getActivatedPluginHandler() {
-    return activatedPluginHandler;
 }

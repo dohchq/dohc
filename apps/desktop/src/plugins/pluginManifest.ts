@@ -1,6 +1,7 @@
 import { lstat, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { DohcPluginManifest } from "@dohc/workspace-contracts/plugin-manifest";
+import { formatZodIssues } from "./zodDiagnostics";
 
 export const MAX_PLUGIN_MANIFEST_FILE_BYTES = 256 * 1024;
 export const PLUGIN_MANIFEST_FILE_NAME = "dohc-plugin.json";
@@ -66,10 +67,7 @@ export async function readPluginManifestFile(
   if (!parsed.success) {
     return {
       ok: false,
-      diagnostics: parsed.error.issues.map((issue) => {
-        const issuePath = issue.path.length === 0 ? "(root)" : issue.path.join(".");
-        return `${issuePath}: ${issue.message}`;
-      }),
+      diagnostics: formatZodIssues(parsed.error),
     };
   }
   return { ok: true, manifest: parsed.data };

@@ -1,3 +1,5 @@
+import { abortedError, assertRequestOptions } from "./requestOptions.js";
+
 export const DOHC_SDK_PROTOCOL = "dohc:sdk:v1";
 export const DohcSdkErrorCodes = {
   hostUnavailable: "DOHC_HOST_UNAVAILABLE",
@@ -267,25 +269,6 @@ function isDohcSdkEvent(value: unknown): value is DohcSdkEventMessage {
     typeof candidate.event === "string" &&
     candidate.event.length > 0 &&
     "data" in candidate
-  );
-}
-
-function assertRequestOptions(options: DohcRequestOptions | undefined): void {
-  if (
-    options?.timeoutMs !== undefined &&
-    (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)
-  ) {
-    throw new DohcSdkError(
-      DohcSdkErrorCodes.invalidInput,
-      "Request timeoutMs must be a positive finite number.",
-    );
-  }
-}
-
-function abortedError(method: string): DohcSdkError {
-  return new DohcSdkError(
-    DohcSdkErrorCodes.aborted,
-    `dohc request ${method} was aborted.`,
   );
 }
 

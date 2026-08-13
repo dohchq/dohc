@@ -18,7 +18,7 @@ const STDERR_LOG_LIMIT = 200;
 const DEACTIVATION_TIMEOUT_MS = 5_000;
 
 export interface PluginHostOptions {
-  workspaceId: string;
+  stateDir: string;
   workspaceRoot: string;
   spawnTransport: (params: {
     pluginId: string;
@@ -47,7 +47,6 @@ export interface PluginHostOptions {
 }
 
 interface PluginSpawn {
-  sequence: number;
   /**
    * One UUID per spawn attempt, not per plugin. It is the agentRunId a
    * later PR's production SDK router attaches to every write attribution
@@ -86,13 +85,36 @@ function raceWithTimeout<T>(
   });
 }
 
+function isSdkRequestParams(params: unknown): params is SdkRequestParams {
+  return (
+    typeof params === "object" &&
+    params !== null &&
+    "method" in params &&
+    typeof params.method === "string" &&
+    params.method.length > 0
+  );
+}
+
+function isPluginLogParams(params: unknown): params is PluginLogParams {
+  return (
+    typeof params === "object" &&
+    params !== null &&
+    "level" in params &&
+    (params.level === "info" ||
+      params.level === "warn" ||
+      params.level === "error") &&
+    "message" in params &&
+    typeof params.message === "string"
+  );
+}
+
 export class PluginHost {
   private readonly plugins = new Map<string, PluginRecord>();
   private readonly pendingStarts = new Set<string>();
+  private readonly abortedStarts = new Set<string>();
   private readonly consecutiveFastFailures = new Map<string, number>();
   private readonly activationTimeoutMs: number;
   private currentGeneration = 0;
-  private nextSpawnSequence = 1;
 
   constructor(private readonly options: PluginHostOptions) {
     this.activationTimeoutMs =
@@ -110,8 +132,17 @@ export class PluginHost {
 
     this.pendingStarts.add(pluginId);
     try {
-      const { state } = await readPluginLocalState(this.options.workspaceRoot);
-      if (state.plugins[pluginId]?.disabled === true) {
+      const localState = await readPluginLocalState(
+        this.options.stateDir,
+        this.options.workspaceRoot,
+      );
+      if (this.abortedStarts.delete(pluginId)) return;
+      if (!localState.ok) {
+        throw new Error(
+          `Plugin "${pluginId}" was not started. ${localState.warning}`,
+        );
+      }
+      if (localState.state.plugins[pluginId]?.disabled === true) {
         throw new Error(
           `Plugin "${pluginId}" is disabled. Re-enable it in plugin settings.`,
         );
@@ -128,10 +159,15 @@ export class PluginHost {
       this.spawn(record);
     } finally {
       this.pendingStarts.delete(pluginId);
+      this.abortedStarts.delete(pluginId);
     }
   }
 
   async stop(pluginId: string): Promise<void> {
+    if (this.pendingStarts.has(pluginId)) {
+      this.abortedStarts.add(pluginId);
+      return;
+    }
     const record = this.plugins.get(pluginId);
     if (!record) return;
     const spawn = record.current;
@@ -173,18 +209,12 @@ export class PluginHost {
     return commands ? [...commands] : undefined;
   }
 
-  /** The current spawn's run id, for a production SDK router to stamp as agentRunId. */
-  getSpawnId(pluginId: string): string | undefined {
-    return this.plugins.get(pluginId)?.current?.spawnId;
-  }
-
   bumpGeneration(): void {
     this.currentGeneration += 1;
   }
 
   private spawn(record: PluginRecord): void {
     const spawn: PluginSpawn = {
-      sequence: this.nextSpawnSequence++,
       spawnId: randomUUID(),
       generation: this.currentGeneration,
       spawnedAt: this.now(),
@@ -214,7 +244,6 @@ export class PluginHost {
           pluginRoot: record.pluginRoot,
           workspaceRoot: this.options.workspaceRoot,
           manifest: record.manifest,
-          hostGeneration: spawn.generation,
         } satisfies PluginActivateParams,
       );
       void raceWithTimeout(
@@ -235,10 +264,10 @@ export class PluginHost {
     spawn: PluginSpawn,
     result: PluginActivateResult,
   ): void {
-    if (!this.isCurrent(record, spawn) || spawn.stopping || spawn.failureHandled) {
+    if (!this.isLive(record, spawn)) {
+      void spawn.transport?.dispose().catch(() => undefined);
       return;
     }
-    this.consecutiveFastFailures.set(record.pluginId, 0);
     record.commands = [...result.commands];
     this.setStatus(record, "ready");
   }
@@ -248,7 +277,8 @@ export class PluginHost {
     spawn: PluginSpawn,
     error: unknown,
   ): Promise<void> {
-    if (!this.isCurrent(record, spawn) || spawn.stopping || spawn.failureHandled) {
+    if (!this.isLive(record, spawn)) {
+      void spawn.transport?.dispose().catch(() => undefined);
       return;
     }
     spawn.failureHandled = true;
@@ -261,11 +291,7 @@ export class PluginHost {
   }
 
   private handleExit(record: PluginRecord, spawn: PluginSpawn): void {
-    if (
-      spawn.stopping ||
-      spawn.failureHandled ||
-      !this.isCurrent(record, spawn)
-    ) {
+    if (!this.isLive(record, spawn)) {
       return;
     }
     spawn.failureHandled = true;
@@ -284,13 +310,14 @@ export class PluginHost {
     if (age <= PLUGIN_FAST_FAILURE_WINDOW_MS) {
       failures = (this.consecutiveFastFailures.get(record.pluginId) ?? 0) + 1;
     }
-    // A slow crash means the plugin ran successfully for a while. It starts a
-    // new failure sequence instead of feeding the previous crash loop.
+    // Reaching ready does not clear this counter. Only a failure from a spawn
+    // older than the fast-failure window starts a new failure sequence.
     this.consecutiveFastFailures.set(record.pluginId, failures);
 
     if (failures >= PLUGIN_CRASH_LOOP_THRESHOLD) {
       try {
         await setPluginDisabled(
+          this.options.stateDir,
           this.options.workspaceRoot,
           record.pluginId,
           true,
@@ -316,7 +343,15 @@ export class PluginHost {
     return (
       this.currentGeneration === spawn.generation &&
       this.plugins.get(record.pluginId) === record &&
-      record.current?.sequence === spawn.sequence
+      record.current === spawn
+    );
+  }
+
+  private isLive(record: PluginRecord, spawn: PluginSpawn): boolean {
+    return (
+      this.isCurrent(record, spawn) &&
+      !spawn.stopping &&
+      !spawn.failureHandled
     );
   }
 
@@ -329,7 +364,12 @@ export class PluginHost {
     if (method !== PLUGIN_HOST_METHODS.sdkRequest) {
       throw new Error(`Method not found: ${method}`);
     }
-    const request = params as SdkRequestParams;
+    if (!isSdkRequestParams(params)) {
+      throw new Error(
+        "Malformed sdk.request params: method must be a non-empty string.",
+      );
+    }
+    const request = params;
     return this.options.routeSdkRequest(
       pluginId,
       request.method,
@@ -344,7 +384,20 @@ export class PluginHost {
     params: unknown,
   ): void {
     if (method !== PLUGIN_HOST_METHODS.log) return;
-    const log = params as PluginLogParams;
+    if (!isPluginLogParams(params)) {
+      let renderedParams = "[unserializable params]";
+      try {
+        renderedParams = JSON.stringify(params) ?? String(params);
+      } catch {
+        // Keep the fallback diagnostic.
+      }
+      this.appendLog(
+        record,
+        `Malformed plugin.log notification: ${renderedParams}`,
+      );
+      return;
+    }
+    const log = params;
     this.appendLog(record, `[${log.level}] ${log.message}`);
   }
 

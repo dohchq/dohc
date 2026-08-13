@@ -4,9 +4,9 @@ import {
   DohcSdkErrorCodes,
   createDohcClient,
   type DohcClient,
-  type DohcRequestOptions,
   type DohcTransport,
 } from "./index.js";
+import { abortedError, assertRequestOptions } from "./requestOptions.js";
 
 export { createDohcClient };
 export type { DohcClient };
@@ -23,12 +23,6 @@ type RequestHandler = (params: unknown) => Promise<unknown> | unknown;
 interface PendingRequest {
   resolve(value: unknown): void;
   reject(error: DohcSdkError): void;
-}
-
-interface StreamBinding {
-  input: NodeJS.ReadableStream;
-  output: NodeJS.WritableStream;
-  transport: ProcessTransport;
 }
 
 export interface ProcessTransport extends DohcTransport {
@@ -61,9 +55,11 @@ export interface PluginHandler {
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
-const streamBindings: StreamBinding[] = [];
+const streamBindings = new WeakMap<
+  NodeJS.ReadableStream,
+  { output: NodeJS.WritableStream; transport: ProcessTransport }
+>();
 let parentPortBinding: { port: ElectronParentPort; transport: ProcessTransport } | null = null;
-let activatedPluginHandler: PluginHandler | null = null;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -71,25 +67,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isRpcId(value: unknown): value is RpcId {
   return typeof value === "string" || typeof value === "number";
-}
-
-function abortedError(method: string): DohcSdkError {
-  return new DohcSdkError(
-    DohcSdkErrorCodes.aborted,
-    `dohc request ${method} was aborted.`,
-  );
-}
-
-function assertRequestOptions(options: DohcRequestOptions | undefined): void {
-  if (
-    options?.timeoutMs !== undefined &&
-    (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)
-  ) {
-    throw new DohcSdkError(
-      DohcSdkErrorCodes.invalidInput,
-      "Request timeoutMs must be a positive finite number.",
-    );
-  }
 }
 
 function createTransport(
@@ -180,7 +157,7 @@ function createTransport(
             undefined,
             new DohcSdkError(
               DohcSdkErrorCodes.hostTimeout,
-              `dohc host did not answer ${method}.`,
+              `dohc host did not answer ${method} within ${timeoutMs}ms.`,
             ),
           );
         }, timeoutMs);
@@ -292,22 +269,10 @@ export function createProcessTransport(
 
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
-  const existing = streamBindings.find(
-    (binding) => binding.input === input && binding.output === output,
-  );
-  if (existing) return existing.transport;
+  const existing = streamBindings.get(input);
+  if (existing && existing.output === output) return existing.transport;
 
   const transport = createStdioTransport(input, output);
-  streamBindings.push({ input, output, transport });
+  streamBindings.set(input, { output, transport });
   return transport;
-}
-
-/** Called by a plugin's entry module (typically at module top level) to register its lifecycle. */
-export function activatePlugin(handler: PluginHandler): void {
-  activatedPluginHandler = handler;
-}
-
-/** Used by the plugin-host loader to retrieve the lifecycle registered by the imported entry module. */
-export function getActivatedPluginHandler(): PluginHandler | null {
-  return activatedPluginHandler;
 }
