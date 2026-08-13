@@ -1,0 +1,368 @@
+import { randomUUID } from "node:crypto";
+import type { DohcPluginManifest } from "@dohc/workspace-contracts/plugin-manifest";
+import { readPluginLocalState, setPluginDisabled } from "./pluginLocalState";
+import {
+  PLUGIN_ACTIVATION_TIMEOUT_MS,
+  PLUGIN_CRASH_LOOP_THRESHOLD,
+  PLUGIN_FAST_FAILURE_WINDOW_MS,
+  PLUGIN_HOST_METHODS,
+  type PluginActivateParams,
+  type PluginActivateResult,
+  type PluginLogParams,
+  type PluginRuntimeStatus,
+  type PluginTransport,
+  type SdkRequestParams,
+} from "./pluginHostProtocol";
+
+const STDERR_LOG_LIMIT = 200;
+const DEACTIVATION_TIMEOUT_MS = 5_000;
+
+export interface PluginHostOptions {
+  workspaceId: string;
+  workspaceRoot: string;
+  spawnTransport: (params: {
+    pluginId: string;
+    pluginRoot: string;
+    onStderr: (line: string) => void;
+    onRequest: (
+      method: string,
+      params: unknown,
+    ) => Promise<unknown> | unknown;
+    onNotification: (method: string, params: unknown) => void;
+    onExit: (info: {
+      code: number | null;
+      signal: NodeJS.Signals | null;
+    }) => void;
+  }) => PluginTransport;
+  routeSdkRequest: (
+    pluginId: string,
+    method: string,
+    params: unknown,
+    /** The requesting spawn's run id (PluginSpawn.spawnId) at request time — avoids a race against a respawn between issuing and routing the request. */
+    spawnId: string,
+  ) => Promise<unknown>;
+  onStatusChange?: (pluginId: string, status: PluginRuntimeStatus) => void;
+  now?: () => number;
+  activationTimeoutMs?: number;
+}
+
+interface PluginSpawn {
+  sequence: number;
+  /**
+   * One UUID per spawn attempt, not per plugin. It is the agentRunId a
+   * later PR's production SDK router attaches to every write attribution
+   * for this run — a respawn after a crash is a new run, so it gets a new
+   * id, the same way AgentSessionManager mints a fresh run id per session.
+   */
+  spawnId: string;
+  generation: number;
+  spawnedAt: number;
+  stopping: boolean;
+  failureHandled: boolean;
+  transport?: PluginTransport;
+}
+
+interface PluginRecord {
+  pluginId: string;
+  pluginRoot: string;
+  manifest: DohcPluginManifest;
+  status: PluginRuntimeStatus;
+  stderr: string[];
+  commands?: string[];
+  current?: PluginSpawn;
+}
+
+function raceWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+export class PluginHost {
+  private readonly plugins = new Map<string, PluginRecord>();
+  private readonly pendingStarts = new Set<string>();
+  private readonly consecutiveFastFailures = new Map<string, number>();
+  private readonly activationTimeoutMs: number;
+  private currentGeneration = 0;
+  private nextSpawnSequence = 1;
+
+  constructor(private readonly options: PluginHostOptions) {
+    this.activationTimeoutMs =
+      options.activationTimeoutMs ?? PLUGIN_ACTIVATION_TIMEOUT_MS;
+  }
+
+  async start(
+    pluginId: string,
+    pluginRoot: string,
+    manifest: DohcPluginManifest,
+  ): Promise<void> {
+    if (this.plugins.has(pluginId) || this.pendingStarts.has(pluginId)) {
+      throw new Error(`Plugin "${pluginId}" is already running.`);
+    }
+
+    this.pendingStarts.add(pluginId);
+    try {
+      const { state } = await readPluginLocalState(this.options.workspaceRoot);
+      if (state.plugins[pluginId]?.disabled === true) {
+        throw new Error(
+          `Plugin "${pluginId}" is disabled. Re-enable it in plugin settings.`,
+        );
+      }
+
+      const record: PluginRecord = {
+        pluginId,
+        pluginRoot,
+        manifest,
+        status: "starting",
+        stderr: [],
+      };
+      this.plugins.set(pluginId, record);
+      this.spawn(record);
+    } finally {
+      this.pendingStarts.delete(pluginId);
+    }
+  }
+
+  async stop(pluginId: string): Promise<void> {
+    const record = this.plugins.get(pluginId);
+    if (!record) return;
+    const spawn = record.current;
+    if (!spawn?.transport) {
+      this.plugins.delete(pluginId);
+      return;
+    }
+
+    spawn.stopping = true;
+    await raceWithTimeout(
+      spawn.transport.request(PLUGIN_HOST_METHODS.deactivate, {}),
+      DEACTIVATION_TIMEOUT_MS,
+      `Plugin "${pluginId}" did not deactivate within ${DEACTIVATION_TIMEOUT_MS} ms.`,
+    ).catch(() => undefined);
+
+    try {
+      await spawn.transport.dispose();
+    } finally {
+      if (this.plugins.get(pluginId) === record) {
+        this.plugins.delete(pluginId);
+      }
+    }
+  }
+
+  async stopAll(): Promise<void> {
+    await Promise.allSettled([...this.plugins.keys()].map((id) => this.stop(id)));
+  }
+
+  getStatus(pluginId: string): PluginRuntimeStatus | undefined {
+    return this.plugins.get(pluginId)?.status;
+  }
+
+  getStderrLog(pluginId: string): string[] {
+    return [...(this.plugins.get(pluginId)?.stderr ?? [])];
+  }
+
+  getRegisteredCommands(pluginId: string): string[] | undefined {
+    const commands = this.plugins.get(pluginId)?.commands;
+    return commands ? [...commands] : undefined;
+  }
+
+  /** The current spawn's run id, for a production SDK router to stamp as agentRunId. */
+  getSpawnId(pluginId: string): string | undefined {
+    return this.plugins.get(pluginId)?.current?.spawnId;
+  }
+
+  bumpGeneration(): void {
+    this.currentGeneration += 1;
+  }
+
+  private spawn(record: PluginRecord): void {
+    const spawn: PluginSpawn = {
+      sequence: this.nextSpawnSequence++,
+      spawnId: randomUUID(),
+      generation: this.currentGeneration,
+      spawnedAt: this.now(),
+      stopping: false,
+      failureHandled: false,
+    };
+    record.current = spawn;
+    record.commands = undefined;
+    this.setStatus(record, "starting");
+
+    try {
+      spawn.transport = this.options.spawnTransport({
+        pluginId: record.pluginId,
+        pluginRoot: record.pluginRoot,
+        onStderr: (line) => this.appendLog(record, line),
+        onRequest: (method, params) =>
+          this.handleRequest(record.pluginId, spawn.spawnId, method, params),
+        onNotification: (method, params) =>
+          this.handleNotification(record, method, params),
+        onExit: () => this.handleExit(record, spawn),
+      });
+
+      const activation = spawn.transport.request<PluginActivateResult>(
+        PLUGIN_HOST_METHODS.activate,
+        {
+          pluginId: record.pluginId,
+          pluginRoot: record.pluginRoot,
+          workspaceRoot: this.options.workspaceRoot,
+          manifest: record.manifest,
+          hostGeneration: spawn.generation,
+        } satisfies PluginActivateParams,
+      );
+      void raceWithTimeout(
+        activation,
+        this.activationTimeoutMs,
+        `Plugin "${record.pluginId}" activation exceeded ${this.activationTimeoutMs} ms.`,
+      ).then(
+        (result) => this.handleActivationSuccess(record, spawn, result),
+        (error: unknown) => this.handleActivationFailure(record, spawn, error),
+      );
+    } catch (error) {
+      void this.handleActivationFailure(record, spawn, error);
+    }
+  }
+
+  private handleActivationSuccess(
+    record: PluginRecord,
+    spawn: PluginSpawn,
+    result: PluginActivateResult,
+  ): void {
+    if (!this.isCurrent(record, spawn) || spawn.stopping || spawn.failureHandled) {
+      return;
+    }
+    this.consecutiveFastFailures.set(record.pluginId, 0);
+    record.commands = [...result.commands];
+    this.setStatus(record, "ready");
+  }
+
+  private async handleActivationFailure(
+    record: PluginRecord,
+    spawn: PluginSpawn,
+    error: unknown,
+  ): Promise<void> {
+    if (!this.isCurrent(record, spawn) || spawn.stopping || spawn.failureHandled) {
+      return;
+    }
+    spawn.failureHandled = true;
+    this.appendLog(record, `Activation failed: ${this.errorMessage(error)}`);
+    this.setStatus(record, "failed");
+    await spawn.transport?.dispose().catch((disposeError: unknown) => {
+      this.appendLog(record, `Dispose failed: ${this.errorMessage(disposeError)}`);
+    });
+    await this.accountForFailure(record, spawn);
+  }
+
+  private handleExit(record: PluginRecord, spawn: PluginSpawn): void {
+    if (
+      spawn.stopping ||
+      spawn.failureHandled ||
+      !this.isCurrent(record, spawn)
+    ) {
+      return;
+    }
+    spawn.failureHandled = true;
+    this.setStatus(record, "crashed");
+    void this.accountForFailure(record, spawn);
+  }
+
+  private async accountForFailure(
+    record: PluginRecord,
+    spawn: PluginSpawn,
+  ): Promise<void> {
+    if (!this.isCurrent(record, spawn)) return;
+
+    const age = this.now() - spawn.spawnedAt;
+    let failures = 0;
+    if (age <= PLUGIN_FAST_FAILURE_WINDOW_MS) {
+      failures = (this.consecutiveFastFailures.get(record.pluginId) ?? 0) + 1;
+    }
+    // A slow crash means the plugin ran successfully for a while. It starts a
+    // new failure sequence instead of feeding the previous crash loop.
+    this.consecutiveFastFailures.set(record.pluginId, failures);
+
+    if (failures >= PLUGIN_CRASH_LOOP_THRESHOLD) {
+      try {
+        await setPluginDisabled(
+          this.options.workspaceRoot,
+          record.pluginId,
+          true,
+        );
+      } catch (error) {
+        this.appendLog(
+          record,
+          `Could not save disabled state: ${this.errorMessage(error)}`,
+        );
+        return;
+      }
+      if (!this.isCurrent(record, spawn)) return;
+      record.current = undefined;
+      record.commands = undefined;
+      this.setStatus(record, "disabled");
+      return;
+    }
+
+    if (this.isCurrent(record, spawn)) this.spawn(record);
+  }
+
+  private isCurrent(record: PluginRecord, spawn: PluginSpawn): boolean {
+    return (
+      this.currentGeneration === spawn.generation &&
+      this.plugins.get(record.pluginId) === record &&
+      record.current?.sequence === spawn.sequence
+    );
+  }
+
+  private handleRequest(
+    pluginId: string,
+    spawnId: string,
+    method: string,
+    params: unknown,
+  ): Promise<unknown> {
+    if (method !== PLUGIN_HOST_METHODS.sdkRequest) {
+      throw new Error(`Method not found: ${method}`);
+    }
+    const request = params as SdkRequestParams;
+    return this.options.routeSdkRequest(
+      pluginId,
+      request.method,
+      request.params,
+      spawnId,
+    );
+  }
+
+  private handleNotification(
+    record: PluginRecord,
+    method: string,
+    params: unknown,
+  ): void {
+    if (method !== PLUGIN_HOST_METHODS.log) return;
+    const log = params as PluginLogParams;
+    this.appendLog(record, `[${log.level}] ${log.message}`);
+  }
+
+  private appendLog(record: PluginRecord, line: string): void {
+    record.stderr.push(line);
+    if (record.stderr.length > STDERR_LOG_LIMIT) record.stderr.shift();
+  }
+
+  private setStatus(record: PluginRecord, status: PluginRuntimeStatus): void {
+    record.status = status;
+    this.options.onStatusChange?.(record.pluginId, status);
+  }
+
+  private now(): number {
+    return this.options.now?.() ?? Date.now();
+  }
+
+  private errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+}

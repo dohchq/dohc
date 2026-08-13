@@ -1,8 +1,39 @@
 # @dohc/sdk
 
-The default `dohc` export assumes a browser preview context with a dohc host
-window. In SSR or Node.js, import `createDohcClient` and provide an explicit
-transport instead.
+The default `dohc` export uses a browser preview context with a dohc host
+window.
+
+## Node plugin runtime
+
+The `@dohc/sdk/node` entry provides the process transport and plugin lifecycle
+registry.
+
+```ts
+import {
+  createDohcClient,
+  createProcessTransport,
+} from "@dohc/sdk/node";
+
+const transport = createProcessTransport();
+const client = createDohcClient({ transport });
+```
+
+A plugin entry module registers its lifecycle at module load time:
+
+```ts
+import { activatePlugin } from "@dohc/sdk/node";
+
+activatePlugin({
+  activate(ctx) {
+    ctx.commands.register("example.run", () => ctx.client.capabilities());
+  },
+});
+```
+
+`createProcessTransport()` detects an Electron utility-process message channel
+or plain stdio. Plugin authors do not select the binding.
+
+`activatePlugin()` registers one lifecycle handler in the current process.
 
 Sites can use the typed APIs for common dohc operations:
 
