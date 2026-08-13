@@ -175,17 +175,29 @@ const withPath = (dir) => ({
 });
 
 function runGate(stubDir) {
-  const res = spawnSync(process.execPath, [gate], {
-    cwd: repoRoot,
-    encoding: "utf8",
-    env: withPath(stubDir),
-  });
-  const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
-  return {
-    code: res.status,
-    summary: out.slice(out.indexOf("== summary ==")),
-    evidence: (out.match(/^- .*\| run-rust-checks \|.*$/m) ?? [""])[0],
-  };
+  // The gate takes a build slot before its first step (build-slot.mjs). A
+  // private root keeps a suite run from holding a real lane's slot, and a
+  // zero disk floor keeps the suite runnable on a low-disk machine.
+  const slotRoot = mkdtempSync(join(tmpdir(), "dohc-gate-slots-"));
+  try {
+    const res = spawnSync(process.execPath, [gate], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: {
+        ...withPath(stubDir),
+        DOHC_BUILD_SLOT_ROOT: slotRoot,
+        DOHC_GATE_DISK_FLOOR_GB: "0",
+      },
+    });
+    const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+    return {
+      code: res.status,
+      summary: out.slice(out.indexOf("== summary ==")),
+      evidence: (out.match(/^- .*\| run-rust-checks \|.*$/m) ?? [""])[0],
+    };
+  } finally {
+    rmSync(slotRoot, { recursive: true, force: true });
+  }
 }
 
 test("the gate stamps the tree it read, at every step boundary", () => {

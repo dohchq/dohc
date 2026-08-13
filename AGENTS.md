@@ -273,6 +273,10 @@ edits or approves an agent-written draft.
 
 ### Select local gates
 
+Run the Rust gate through the [`rust-gate` skill](skills/rust-gate/SKILL.md).
+It runs the canonical script, which enforces the machine's build budget:
+disk preflight, build-slot queueing, and capped cargo parallelism.
+
 Read the Rust gate's `== summary ==` block, never its exit code. It can exit 0
 while its own summary says FAIL.
 

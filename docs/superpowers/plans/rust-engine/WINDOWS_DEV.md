@@ -15,22 +15,31 @@ running cargo locally follows these rules.
 ## Build economics
 
 - **Local concurrency budget: max 4 lanes running cargo at once**, enforced
-  mechanically, not by convention: a lane acquires a slot by creating one of
-  `C:\w\_locks\build-slot-{1..4}` (directory-create is atomic) before any
-  cargo invocation and removes it after. Each slot dir contains an
-  `owner.json` (lane/shard id, pid, start time) whose mtime the owner
-  touches as a heartbeat at least every 5 minutes while building.
-  Reclamation is owner-safe, not age-guessed: a slot is reclaimable only
-  when its heartbeat is >30 minutes stale AND the owner pid (and its child
-  process tree — cargo spawns rustc children) is dead; reclamation renames
-  the slot dir to a tombstone (atomic — a racing owner's next heartbeat
-  fails loudly instead of silently sharing a slot) before deleting it.
-  Denied acquisitions and reclaims are appended to `EXECUTION_LOG.md`.
-- Free-space preflight with hysteresis: before acquiring a slot, check free
-  space on the worktree volume — **pause new builds below 40 GB, resume at
-  60 GB**; while paused, the orchestrator prunes the oldest stale target
-  dirs and logs each deletion. (Bun hit disk exhaustion even with cgroup
-  isolation; target dirs run 5–10 GB each.)
+  mechanically by `tools/rust-engine-program/build-slot.mjs`: a lane acquires
+  a slot by creating one of `C:\w\_locks\build-slot-{1..4}` (directory-create
+  is atomic) before any cargo invocation and removes it after. The gate
+  (`run-rust-checks.mjs`) acquires and releases its slot itself; concurrent
+  gate runs queue on the slots. Each slot dir contains an `owner.json` (pid,
+  start time) whose mtime the owner touches as a heartbeat every minute while
+  building. Reclamation is owner-safe, not age-guessed: a slot is reclaimable
+  only when its heartbeat is >30 minutes stale AND the owner pid is dead;
+  reclamation renames the slot dir to a tombstone (atomic — a racing owner's
+  next heartbeat fails loudly instead of silently sharing a slot) before
+  deleting it. Denied acquisitions and reclaims are appended to
+  `C:\w\_locks\events.log`, not to a tracked file — a mid-run write to the
+  repo would fail the gate's own tree-provenance row.
+- **A slot is a share of the cores, not just admission.** A slot holder caps
+  its compiler and test parallelism to `cores / 4` (`CARGO_BUILD_JOBS` and
+  `RUST_TEST_THREADS`; the gate sets both). The OOM crash that created this
+  budget came from lanes at default jobs — each cargo asking for every
+  logical core — not from the lane count.
+- Free-space preflight: before acquiring a slot, check free space on the
+  worktree volume — **refuse new builds below 40 GB** (a cold workspace
+  build runs ~20 GB). The gate enforces this floor itself
+  (`DOHC_GATE_DISK_FLOOR_GB` overrides it); when a build is refused, prune
+  the oldest stale target dirs under `C:\w\_targets` and stale worktree
+  `target/` dirs, and log each deletion. (Bun hit disk exhaustion even with
+  cgroup isolation; target dirs run 5–20 GB each.)
 - sccache is shared across worktrees (`RUSTC_WRAPPER=sccache`).
 - Windows Defender exclusions cover **build/cache directories only**:
   `C:\w\_targets\` and the sccache cache dir (real-time scanning there

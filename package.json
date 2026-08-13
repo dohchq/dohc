@@ -25,7 +25,7 @@
     "migrate": "node scripts/migrate-postgres.mjs",
     "reset:postgres": "node scripts/reset-postgres-dev-data.mjs",
     "typecheck": "pnpm -r --if-present typecheck",
-    "test": "node tools/sync-skill-adapters.mjs --check && node scripts/check-brand.mjs && node --test scripts/pr-checks-workflow.test.mjs scripts/rust-gate-artifact.test.mjs scripts/native-target-guard.test.mjs scripts/rust-engine-decisions.test.mjs scripts/scratch-leak-report.test.mjs scripts/vitest-single-major.test.mjs && pnpm -r --if-present test",
+    "test": "node tools/sync-skill-adapters.mjs --check && node scripts/check-brand.mjs && node --test scripts/pr-checks-workflow.test.mjs scripts/rust-gate-artifact.test.mjs scripts/build-slot.test.mjs scripts/native-target-guard.test.mjs scripts/rust-engine-decisions.test.mjs scripts/scratch-leak-report.test.mjs scripts/vitest-single-major.test.mjs && pnpm -r --if-present test",
     "skills:sync": "node tools/sync-skill-adapters.mjs",
     "test:phase0-agent-cli": "node scripts/phase0-agent-cli-smoke.mjs",
     "test:desktop:e2e": "pnpm --filter @dohc/desktop run test:e2e",

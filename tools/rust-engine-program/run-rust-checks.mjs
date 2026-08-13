@@ -19,6 +19,12 @@
 // row is how the fault-injection tests went unrun for a month. Optional tools
 // may still skip.
 //
+// BUDGET: on the shared dev machine the run holds one of four build slots and
+// caps cargo jobs and test threads to its share (build-slot.mjs, per
+// WINDOWS_DEV.md "Build economics"); concurrent gate runs queue on the slots
+// instead of oversubscribing the machine. The evidence line records the caps
+// it ran under.
+//
 // PROVENANCE: the run reads the tree at every step boundary and stamps the
 // commit into both the summary block and the evidence line. A verdict that
 // cannot name the tree it examined is not evidence — two concurrent runs
@@ -45,6 +51,11 @@ import { arch, platform, release, tmpdir } from "node:os";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { verifyNativeTarget } from "./native-target.mjs";
 import {
+  acquireBuildSlot,
+  freeDiskGb,
+  resolveBuildBudget,
+} from "./build-slot.mjs";
+import {
   classifyTreeProvenance,
   formatTreeState,
   readTreeState,
@@ -53,6 +64,40 @@ import { SCRATCH_SENTINEL, inspectScratchRun } from "./scratch-leak-report.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
+
+// The machine's build budget (WINDOWS_DEV.md, "Build economics"). On the
+// shared dev box the gate refuses to start under the free-space floor, takes
+// one of the four build slots before any cargo runs, and caps its compiler
+// and test parallelism to its share of the cores. A single-tenant host (CI)
+// has no slot root and runs uncapped. Incremental compilation is off on both:
+// a full-workspace gate never reuses incremental caches, it only pays their
+// disk — the dev loop keeps its own setting.
+const budget = resolveBuildBudget();
+if (budget) {
+  const free = freeDiskGb(repoRoot);
+  if (free !== null && free < budget.diskFloorGb) {
+    console.error(
+      `refusing to run the gate: ${free.toFixed(1)} GB free on the worktree ` +
+        `volume is below the ${budget.diskFloorGb} GB floor (WINDOWS_DEV.md ` +
+        `build economics; a cold workspace build needs ~20 GB). Prune stale ` +
+        `target dirs (C:\\w\\_targets, worktree target/) and rerun, or ` +
+        `override the floor with DOHC_GATE_DISK_FLOOR_GB.`,
+    );
+    process.exit(1);
+  }
+}
+const slot = budget ? await acquireBuildSlot(budget) : null;
+const stepEnv = {
+  ...process.env,
+  CARGO_INCREMENTAL: process.env.CARGO_INCREMENTAL ?? "0",
+  ...(budget
+    ? {
+        CARGO_BUILD_JOBS: process.env.CARGO_BUILD_JOBS ?? String(budget.jobs),
+        RUST_TEST_THREADS:
+          process.env.RUST_TEST_THREADS ?? String(budget.jobs),
+      }
+    : {}),
+};
 // Hand the tests the absolute root instead of a name they would re-derive.
 // `os.tmpdir()` and Rust's `std::env::temp_dir()` read different variables and
 // agree only by luck: under WSL the inherited TEMP/TMP point at /mnt/c, which
@@ -74,6 +119,7 @@ function run(cmd) {
     cwd: repoRoot,
     shell: true,
     stdio: "inherit",
+    env: stepEnv,
   });
   if (res.error) return { ok: false, code: null, error: res.error };
   return { ok: res.status === 0, code: res.status };
@@ -103,19 +149,23 @@ const required = [
     skipReason: "yjs/tsx unavailable; fixture drift not checked",
   },
   { name: "fmt --check", cmd: "cargo fmt --all --check" },
+  // `--locked` on every step that resolves dependencies: a CI substitute must
+  // not rewrite Cargo.lock mid-run. Without it, `cargo build` over a stale
+  // lock rewrites the file and the tree-provenance row fails — correctly, but
+  // the reader gets a provenance refusal where a lockfile error was the fact.
   {
     name: "clippy -D warnings",
-    cmd: "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    cmd: "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
   },
-  { name: "build --workspace", cmd: "cargo build --workspace" },
-  { name: "test --workspace", cmd: "cargo test --workspace" },
+  { name: "build --workspace", cmd: "cargo build --locked --workspace" },
+  { name: "test --workspace", cmd: "cargo test --locked --workspace" },
   {
     // The crash-recovery / exactly-once tests in dohc-engine-collab are behind
     // its `fault-injection` feature, which nothing in the workspace graph
     // enables — `cargo test --workspace` compiles them out. The workspace root
     // is virtual, so the feature must be enabled through an explicit `-p` run.
     name: "test collab crash tier",
-    cmd: "cargo test -p dohc-engine-collab --features fault-injection",
+    cmd: "cargo test --locked -p dohc-engine-collab --features fault-injection",
   },
 ];
 
@@ -163,10 +213,18 @@ const readTreeAfter = (step) => readings.push({ step, state: readTree() });
 console.log(`\n== dohc Rust engine local checks ==`);
 console.log(`host: ${platform()} ${arch()} (${release()})`);
 console.log(`repo: ${repoRoot}`);
+console.log(
+  `budget: ${slot ? `${slot.name} of ${budget.slots}` : "uncapped (no slot root; single-tenant host)"}, ` +
+    `jobs ${stepEnv.CARGO_BUILD_JOBS ?? "default"}, ` +
+    `test-threads ${stepEnv.RUST_TEST_THREADS ?? "default"}, ` +
+    `incremental ${stepEnv.CARGO_INCREMENTAL === "0" ? "off" : "on"}`,
+);
 console.log(`tree at start: ${formatTreeState(readings[0].state)}\n`);
 
 console.log(`\n--- native target ---`);
+const nativeStartedAt = Date.now();
 const native = verifyNativeTarget();
+const nativeMs = Date.now() - nativeStartedAt;
 if (native.ok) {
   console.log(`  rust cfg ${native.cfg} — matches the host.`);
 } else {
@@ -179,6 +237,7 @@ results.push({
   name: "native target",
   status: native.ok ? "PASS" : "FAIL",
   reason: native.ok ? undefined : native.reason,
+  durationMs: nativeMs,
 });
 readTreeAfter("native target");
 
@@ -186,7 +245,9 @@ readTreeAfter("native target");
 // runs — and the expensive steps are the ones worth skipping.
 for (const step of native.ok ? required : []) {
   console.log(`\n--- ${step.name} ---`);
+  const startedAt = Date.now();
   const r = run(step.cmd);
+  const durationMs = Date.now() - startedAt;
   // Read as soon as the command returns, before anything else can touch the
   // tree, so the interval this reading closes is the step's own.
   readTreeAfter(step.name);
@@ -201,6 +262,7 @@ for (const step of native.ok ? required : []) {
       name: step.name,
       status: "SKIP",
       reason: `${step.skipReason}; required step skipped → verdict FAIL`,
+      durationMs,
     });
     continue;
   }
@@ -208,6 +270,7 @@ for (const step of native.ok ? required : []) {
   results.push({
     name: step.name,
     status: r.ok ? "PASS" : "FAIL",
+    durationMs,
   });
   if (r.error) console.error(`  (spawn error: ${r.error.message})`);
 }
@@ -224,10 +287,12 @@ for (const step of native.ok ? optional : []) {
     results.push({ name: step.name, status: "SKIP" });
     continue;
   }
+  const startedAt = Date.now();
   const r = run(step.cmd);
+  const durationMs = Date.now() - startedAt;
   readTreeAfter(step.name);
   if (!r.ok) failed = true;
-  results.push({ name: step.name, status: r.ok ? "PASS" : "FAIL" });
+  results.push({ name: step.name, status: r.ok ? "PASS" : "FAIL", durationMs });
 }
 
 console.log(`\n--- scratch leak ---`);
@@ -281,18 +346,25 @@ const summary = results
   .map((r) => `${r.name}=${r.status}${r.reason ? `[${r.reason}]` : ""}`)
   .join(" ");
 
+// Per-step wall clock, in the human summary only: the evidence line's step
+// rows are a parsed contract (`require-ci-pass-verdict.mjs`) that a PASS row
+// may not decorate. The judgement rows (tree provenance, scratch leak) carry
+// no duration because nothing timed ran for them.
+const stepSeconds = (ms) =>
+  ms === undefined ? "" : ` (${(ms / 1000).toFixed(1)}s)`;
+
 console.log(`\n== summary ==`);
 console.log(`  tree ${treeStamp}`);
 for (const r of results) {
   console.log(
-    `  ${r.status.padEnd(4)} ${r.name}${r.reason ? ` — ${r.reason}` : ""}`,
+    `  ${r.status.padEnd(4)} ${r.name}${stepSeconds(r.durationMs)}${r.reason ? ` — ${r.reason}` : ""}`,
   );
 }
 
 const verdict = failed ? "FAIL" : "PASS";
 console.log(`\nEVIDENCE (paste into EXECUTION_LOG.md):`);
 console.log(
-  `- ${stamp} | run-rust-checks | ${platform()}/${arch()} (rust cfg ${native.ok ? native.cfg : "UNVERIFIED"}, head ${treeStamp}) | ${verdict} | ${summary}`,
+  `- ${stamp} | run-rust-checks | ${platform()}/${arch()} (rust cfg ${native.ok ? native.cfg : "UNVERIFIED"}, jobs ${stepEnv.CARGO_BUILD_JOBS ?? "default"}, test-threads ${stepEnv.RUST_TEST_THREADS ?? "default"}, head ${treeStamp}) | ${verdict} | ${summary}`,
 );
 
 process.exit(failed ? 1 : 0);
