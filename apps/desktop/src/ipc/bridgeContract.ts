@@ -2226,10 +2226,14 @@ export const StartPluginPanelPayload = z.object({
 }).strict();
 export type StartPluginPanelPayload = z.infer<typeof StartPluginPanelPayload>;
 
-export const StartPluginPanelResult = z.object({
-  url: LoopbackPreviewUrl,
-  title: z.string().min(1).max(120),
-}).strict();
+export const StartPluginPanelResult = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("ok"),
+    url: LoopbackPreviewUrl,
+    title: z.string().min(1).max(120),
+  }).strict(),
+  z.object({ status: z.literal("not-registered") }).strict(),
+]);
 export type StartPluginPanelResult = z.infer<typeof StartPluginPanelResult>;
 
 export const StopPluginPanelPayload = StartPluginPanelPayload;

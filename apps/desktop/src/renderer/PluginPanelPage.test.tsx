@@ -10,6 +10,7 @@ import { PluginPanelPage } from "./PluginPanelPage";
 
 const bridgeMock = {
   startPluginPanel: vi.fn(async (): Promise<StartPluginPanelResult> => ({
+    status: "ok",
     url: "http://127.0.0.1:49160/",
     title: "Hello",
   })),
@@ -168,6 +169,7 @@ describe("PluginPanelPage", () => {
     );
 
     bridgeMock.startPluginPanel.mockResolvedValueOnce({
+      status: "ok",
       url: "http://127.0.0.1:49161/",
       title: "Other",
     });
@@ -191,6 +193,7 @@ describe("PluginPanelPage", () => {
     bridgeMock.startPluginPanel
       .mockReturnValueOnce(pending.promise)
       .mockResolvedValueOnce({
+        status: "ok",
         url: "http://127.0.0.1:49162/",
         title: "Other",
       });
@@ -215,6 +218,7 @@ describe("PluginPanelPage", () => {
     await screen.findByTitle("Other");
     await act(async () => {
       pending.resolve({
+        status: "ok",
         url: "http://127.0.0.1:49163/",
         title: "Stale",
       });
@@ -226,10 +230,8 @@ describe("PluginPanelPage", () => {
   });
 
   it("shows a stable placeholder when a restored panel has no registration", async () => {
-    bridgeMock.startPluginPanel.mockRejectedValueOnce(
-      new Error(
-        'Plugin "hello-plugin" is not registered. Open the panel from its plugin root first.',
-      ),
+    bridgeMock.startPluginPanel.mockResolvedValueOnce(
+      { status: "not-registered" },
     );
 
     render(
@@ -247,6 +249,26 @@ describe("PluginPanelPage", () => {
     expect(bridgeMock.startPluginPanel).toHaveBeenCalledTimes(1);
   });
 
+  it("announces an unavailable restored panel", async () => {
+    bridgeMock.startPluginPanel.mockResolvedValueOnce(
+      { status: "not-registered" },
+    );
+
+    render(
+      <PluginPanelPage
+        workspaceId="ws-plugins"
+        pluginId="hello-plugin"
+        panelId="main"
+      />,
+    );
+
+    expect(
+      await screen.findByRole("alert", {
+        name: "This plugin is not running yet.",
+      }),
+    ).toBeTruthy();
+  });
+
   it("shows start failures and refuses non-loopback panel URLs", async () => {
     bridgeMock.startPluginPanel.mockRejectedValueOnce(
       new Error("Plugin panel entry was not found."),
@@ -262,10 +284,12 @@ describe("PluginPanelPage", () => {
     expect(
       screen.getByRole("alert", { name: /Could not open plugin panel/i }),
     ).toBeTruthy();
+    expect(screen.queryByTestId("plugin-panel-unavailable")).toBeNull();
     expect(screen.getByText("Close this tab and try again.")).toBeTruthy();
     first.unmount();
 
     bridgeMock.startPluginPanel.mockResolvedValueOnce({
+      status: "ok",
       url: "https://example.com/",
       title: "Remote",
     });

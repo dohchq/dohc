@@ -16,16 +16,12 @@ import {
 
 type LoadState =
   | { status: "loading" }
-  | { status: "ready"; panel: StartPluginPanelResult }
+  | {
+      status: "ready";
+      panel: Extract<StartPluginPanelResult, { status: "ok" }>;
+    }
   | { status: "unavailable" }
   | { status: "error"; message: string };
-
-function isMissingPluginRegistration(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    /^Plugin ".+" is not registered\./.test(error.message)
-  );
-}
 
 export function PluginPanelPage(props: {
   workspaceId: string;
@@ -34,7 +30,9 @@ export function PluginPanelPage(props: {
 }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
-  const panelRef = useRef<StartPluginPanelResult | null>(null);
+  const panelRef = useRef<
+    Extract<StartPluginPanelResult, { status: "ok" }> | null
+  >(null);
   const startRequestRef = useRef(0);
   const sdkGenerationRef = useRef(0);
   const sdkContextRef = useRef("");
@@ -56,7 +54,7 @@ export function PluginPanelPage(props: {
         pluginId: props.pluginId,
         panelId: props.panelId,
       })
-      .then((panel) => {
+      .then((result) => {
         if (
           request !== startRequestRef.current ||
           requestContext !== sdkContextRef.current ||
@@ -64,9 +62,13 @@ export function PluginPanelPage(props: {
         ) {
           return;
         }
+        if (result.status === "not-registered") {
+          setLoad({ status: "unavailable" });
+          return;
+        }
         sdkGenerationRef.current += 1;
-        panelRef.current = panel;
-        setLoad({ status: "ready", panel });
+        panelRef.current = result;
+        setLoad({ status: "ready", panel: result });
       })
       .catch((error: unknown) => {
         if (
@@ -74,10 +76,6 @@ export function PluginPanelPage(props: {
           requestContext !== sdkContextRef.current ||
           stoppingRef.current
         ) {
-          return;
-        }
-        if (isMissingPluginRegistration(error)) {
-          setLoad({ status: "unavailable" });
           return;
         }
         setLoad({
@@ -225,6 +223,8 @@ function EmptyState(props: { body: string }) {
 function PluginUnavailable() {
   return (
     <div
+      role="alert"
+      aria-label="This plugin is not running yet."
       data-testid="plugin-panel-unavailable"
       className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
     >

@@ -21,6 +21,7 @@ import type {
 } from "./ipc/bridgeContract";
 import {
   OpenPluginPanelResult,
+  StartPluginPanelResult,
   parseInvokePluginPanelSdkPayloadForIpc,
   parseInvokeSiteSdkPayloadForIpc,
 } from "./ipc/bridgeContract";
@@ -163,8 +164,10 @@ const bridge: DohcDesktopBridge = {
     pluginPanelOpenedListeners.add(listener);
     return () => pluginPanelOpenedListeners.delete(listener);
   },
-  startPluginPanel: (payload: StartPluginPanelPayload) =>
-    ipcRenderer.invoke(CHANNELS.startPluginPanel, payload),
+  startPluginPanel: async (payload: StartPluginPanelPayload) =>
+    StartPluginPanelResult.parse(
+      await ipcRenderer.invoke(CHANNELS.startPluginPanel, payload),
+    ),
   stopPluginPanel: (payload: StopPluginPanelPayload) =>
     ipcRenderer.invoke(CHANNELS.stopPluginPanel, payload),
   invokePluginPanelSdk: (payload: InvokePluginPanelSdkPayload) =>

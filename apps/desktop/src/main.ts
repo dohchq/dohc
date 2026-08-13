@@ -6094,9 +6094,7 @@ function registerIpcHandlers(
     assertWritableWorkspace(workspace);
     const plugin = registeredPlugin(workspace.workspaceId, input.pluginId);
     if (!plugin) {
-      throw new Error(
-        `Plugin "${input.pluginId}" is not registered. Open the panel from its plugin root first.`,
-      );
+      return StartPluginPanelResult.parse({ status: "not-registered" });
     }
     const panel = plugin.manifest.panels?.find(
       (candidate) => candidate.id === input.panelId,
@@ -6166,6 +6164,7 @@ function registerIpcHandlers(
           panelId: input.panelId,
         });
         return StartPluginPanelResult.parse({
+          status: "ok",
           url: handle.url,
           title: panel.title,
         });

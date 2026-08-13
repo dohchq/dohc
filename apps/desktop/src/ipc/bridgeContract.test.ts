@@ -1177,10 +1177,18 @@ describe("site IPC contract", () => {
     expect(StopPluginPanelPayload.parse(identity)).toEqual(identity);
     expect(
       StartPluginPanelResult.parse({
+        status: "ok",
         url: "http://127.0.0.1:43123/",
         title: "Reports",
       }),
-    ).toEqual({ url: "http://127.0.0.1:43123/", title: "Reports" });
+    ).toEqual({
+      status: "ok",
+      url: "http://127.0.0.1:43123/",
+      title: "Reports",
+    });
+    expect(
+      StartPluginPanelResult.parse({ status: "not-registered" }),
+    ).toEqual({ status: "not-registered" });
 
     expect(
       StartPluginPanelPayload.safeParse({ ...identity, extra: true }).success,
@@ -1216,6 +1224,7 @@ describe("site IPC contract", () => {
     }
     expect(
       StartPluginPanelResult.safeParse({
+        status: "ok",
         url: "https://127.0.0.1:43123/",
         title: "Reports",
       }).success,
