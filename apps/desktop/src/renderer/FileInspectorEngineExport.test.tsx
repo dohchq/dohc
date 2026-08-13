@@ -18,6 +18,7 @@ vi.mock("./editor/MarkdownEditor", () => new Promise(() => {}));
 import { markdownToYDoc } from "./editor/import-export";
 import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
+import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
 
 configure({ asyncUtilTimeout: 5_000 });
 vi.setConfig({ testTimeout: 15_000 });
@@ -77,8 +78,9 @@ function stubEditorGlobals() {
 
 beforeEach(stubEditorGlobals);
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await disposeEngineDocLeasesForTests();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -207,7 +209,10 @@ describe("engine-mode export with no mounted serializer", () => {
       {},
       { timeout: 5_000 },
     );
-    await vi.waitFor(() => expect(toggle.hasAttribute("disabled")).toBe(false));
+    await vi.waitFor(
+      () => expect(toggle.hasAttribute("disabled")).toBe(false),
+      { timeout: 5_000 },
+    );
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
 
