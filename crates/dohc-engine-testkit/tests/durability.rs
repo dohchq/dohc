@@ -357,9 +357,9 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // pending-resolution sidecar (ordinal 30), the durable replication-log
     // apply disposition used by compound-shadow replay (ordinal 31), the
     // Y.Doc relay-arbitration coordinate (ordinal 32), scene asset delete
-    // authority (ordinal 33), and the scene Y.Doc content-kind migration
-    // (ordinal 34).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 35);
+    // authority (ordinal 33), the scene Y.Doc content-kind migration
+    // (ordinal 34), and scene support in Y.Doc recovery decisions (ordinal 35).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 36);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(
