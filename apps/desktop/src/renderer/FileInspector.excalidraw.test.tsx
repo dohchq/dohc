@@ -177,6 +177,7 @@ function bridgeFor(
             available: true,
             initialUpdate: Y.encodeStateAsUpdate(engineScene),
             artifactAssets: [...artifactAssets],
+            lineageGeneration: 1,
           }
         : { available: false };
     }),
@@ -188,6 +189,10 @@ function bridgeFor(
       throw new Error("The scene has no artifact assets.");
     }),
     onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+    onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+    acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+      updates: [],
+    })),
     onEngineYDocSaveState: vi.fn(
       (listener: (event: EngineYDocSaveStateEvent) => void) => {
         saveStateListeners.add(listener);
@@ -359,6 +364,7 @@ describe("FileInspector Excalidraw view", () => {
     bridge.openEngineYDocSession = vi.fn(async () => ({
       available: true,
       initialUpdate: Y.encodeStateAsUpdate(scene),
+      lineageGeneration: 1,
     }));
     vi.stubGlobal("dohcDesktop", bridge);
     render(<FileInspector workspaceId="ws-1" path="large.excalidraw" />);
@@ -532,6 +538,7 @@ describe("FileInspector Excalidraw view", () => {
       available: true,
       initialUpdate: Y.encodeStateAsUpdate(scene),
       artifactAssets: [descriptor],
+      lineageGeneration: 1,
     }));
     bridge.readEngineYDocArtifactAsset = vi.fn(async () => ({
       descriptor,
@@ -557,6 +564,7 @@ describe("FileInspector Excalidraw view", () => {
       available: true,
       initialUpdate: Y.encodeStateAsUpdate(scene),
       artifactAssets: [ARTIFACT_DESCRIPTOR],
+      lineageGeneration: 1,
     }));
     bridge.readEngineYDocArtifactAsset = vi
       .fn()
@@ -645,6 +653,7 @@ describe("FileInspector Excalidraw view", () => {
       initialUpdate: Y.encodeStateAsUpdate(
         payload.path === "first.excalidraw" ? firstScene : secondScene,
       ),
+      lineageGeneration: 1,
       artifactAssets:
         payload.path === "first.excalidraw"
           ? [ARTIFACT_DESCRIPTOR, secondDescriptor]
@@ -684,6 +693,7 @@ describe("FileInspector Excalidraw view", () => {
       initialUpdate: Y.encodeStateAsUpdate(scene),
       objectId: "object-1",
       versionId: "main",
+      lineageGeneration: 1,
     }));
     const transport = {
       publish: vi.fn(),
@@ -723,6 +733,7 @@ describe("FileInspector Excalidraw view", () => {
       initialUpdate: Y.encodeStateAsUpdate(scene),
       objectId: "object-1",
       versionId: "main",
+      lineageGeneration: 1,
     }));
     vi.stubGlobal("dohcDesktop", bridge);
     render(<FileInspector workspaceId="ws-1" path="architecture.excalidraw" />);
@@ -740,6 +751,7 @@ describe("FileInspector Excalidraw view", () => {
       initialUpdate: Y.encodeStateAsUpdate(scene),
       objectId: "object-1",
       versionId: "main",
+      lineageGeneration: 1,
     }));
     vi.stubGlobal("dohcDesktop", bridge);
     render(
@@ -944,6 +956,7 @@ describe("FileInspector Excalidraw view", () => {
       .mockResolvedValueOnce({
         available: true,
         initialUpdate: Y.encodeStateAsUpdate(scene),
+        lineageGeneration: 1,
       });
     vi.stubGlobal("dohcDesktop", bridge);
     render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
