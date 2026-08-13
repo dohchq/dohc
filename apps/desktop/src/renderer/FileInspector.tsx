@@ -794,8 +794,6 @@ function useAutosavedTextDraft(props: {
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [writerSettledEpoch, setWriterSettledEpoch] = useState(0);
   const localSource = useRef<object>({});
-  const localBufferRef = useRef(props.localBuffer);
-  localBufferRef.current = props.localBuffer;
   const sharedSnapshot = useSyncExternalStore(
     props.localBuffer.subscribe,
     props.localBuffer.getSnapshot,
@@ -1253,7 +1251,7 @@ function useAutosavedTextDraft(props: {
     saveTimer.current = setTimeout(() => void saveNow(), 800);
   }
 
-  const { workspaceId, path, registerDraftFlush } = props;
+  const { workspaceId, path, registerDraftFlush, localBuffer } = props;
   useEffect(() => {
     unmounted.current = false;
     return () => {
@@ -1265,8 +1263,16 @@ function useAutosavedTextDraft(props: {
             if (!unsavedDraft.current) return;
             unsavedDraft.current = false;
             captureOrphanedDraft(workspaceId, path, latestDraft.current);
-            props.localBuffer.releaseUnusedDraft();
+            localBuffer.retireCapturedDraft(localSource.current);
+            localBuffer.releaseUnusedDraft();
           });
+        } else {
+          // A version-switch render can move the draft into recovery before
+          // this buffer-scoped cleanup runs. Retire only this pane's work on
+          // the buffer the effect captured; the replacement version may
+          // already contain a peer draft.
+          localBuffer.retireCapturedDraft(localSource.current);
+          localBuffer.releaseUnusedDraft();
         }
         return;
       }
@@ -1278,7 +1284,6 @@ function useAutosavedTextDraft(props: {
       if (writesBlocked()) {
         unsavedDraft.current = false;
         captureOrphanedDraft(workspaceId, path, latestDraft.current);
-        const localBuffer = localBufferRef.current;
         localBuffer.retireCapturedDraft(localSource.current);
         localBuffer.releaseUnusedDraft();
         return;
@@ -1296,7 +1301,7 @@ function useAutosavedTextDraft(props: {
     // the same trap waiting here). The ref carries the current value to a real
     // unmount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId, path]);
+  }, [workspaceId, path, localBuffer]);
 
   useEffect(() => {
     if (!registerDraftFlush) return;
@@ -1490,8 +1495,6 @@ function MarkdownView(props: {
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
   const [writerSettledEpoch, setWriterSettledEpoch] = useState(0);
   const localSource = useRef<object>({});
-  const localBufferRef = useRef(props.localBuffer);
-  localBufferRef.current = props.localBuffer;
   const sharedSnapshot = useSyncExternalStore(
     props.localBuffer.subscribe,
     props.localBuffer.getSnapshot,
@@ -2778,7 +2781,7 @@ function MarkdownView(props: {
   // dependency it made every read-only transition run this cleanup with the
   // PREVIOUS render's value captured, so turning the document read-only was
   // itself a write (#534). The ref carries the current value to a real unmount.
-  const { workspaceId, path } = props;
+  const { workspaceId, path, localBuffer } = props;
   useEffect(() => {
     unmounted.current = false;
     return () => {
@@ -2793,14 +2796,21 @@ function MarkdownView(props: {
             if (!unsavedDraft.current) return;
             unsavedDraft.current = false;
             captureOrphanedDraft(workspaceId, path, latestDraft.current);
-            props.localBuffer.releaseUnusedDraft();
+            localBuffer.retireCapturedDraft(localSource.current);
+            localBuffer.releaseUnusedDraft();
           });
+        } else {
+          // A reopen can capture and clear the local pending flag during
+          // render. Finish that same captured buffer's retirement here; never
+          // reach through to the replacement version's shared document.
+          localBuffer.retireCapturedDraft(localSource.current);
+          localBuffer.releaseUnusedDraft();
         }
         return;
       }
       unsavedDraft.current = false;
       const text =
-        props.localBuffer.materializePendingDraft() ??
+        localBuffer.materializePendingDraft() ??
         serializeDraftRef.current();
       // Same invariant as the plain-text hook (#579 adversarial review, F3):
       // a draft this unmount may not write is set aside rather than dropped.
@@ -2818,7 +2828,6 @@ function MarkdownView(props: {
       // to observe the refusal. Kept as a backstop, not as covered code.
       if (writesBlocked() || openingRef.current) {
         captureOrphanedDraft(workspaceId, path, text);
-        const localBuffer = localBufferRef.current;
         localBuffer.retireCapturedDraft(localSource.current);
         localBuffer.releaseUnusedDraft();
         return;
@@ -2833,7 +2842,7 @@ function MarkdownView(props: {
         releaseUnusedDraft: true,
       });
     };
-  }, [workspaceId, path]);
+  }, [workspaceId, path, localBuffer]);
 
   // Imperative flush seam: the shell awaits this BEFORE an explorer op that
   // moves/deletes paths. A rename of the open file remounts the keyed

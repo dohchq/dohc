@@ -1379,6 +1379,35 @@ describe("MarkdownEditor markdown export: code fence widening (#704)", () => {
     expect(editor.textContent).toMatch(/Tail!$/);
   });
 
+  it("keeps an end cursor before peer content appended by replacement", async () => {
+    const ref = createRef<MarkdownEditorHandle>();
+    const onDirty = vi.fn();
+    const user = userEvent.setup();
+    render(
+      createElement(MarkdownEditor, {
+        ref,
+        value: "# Target\n\nTail",
+        onDirty,
+        workspaceId: "workspace-1",
+        path: "notes/shared.md",
+        knownFiles: [],
+      }),
+    );
+    const editor = await screen.findByTestId("markdown-editor");
+    act(() => ref.current?.focus("end"));
+    await waitFor(() => expect(document.activeElement).toBe(editor));
+
+    act(() =>
+      ref.current?.replaceMarkdown("# Target\n\nTail\n\nPeer"),
+    );
+    expect(onDirty).not.toHaveBeenCalled();
+    await user.keyboard("!");
+
+    expect(editor.textContent).toContain("Tail!");
+    expect(editor.textContent).not.toContain("Peer!");
+    expect(onDirty).toHaveBeenCalledTimes(1);
+  });
+
   it("widens a code fence in the live editor's getMarkdown when the block content contains a fence", async () => {
     const content = "before\n```\nafter";
     const value = ["````js", "before", "```", "after", "````"].join("\n");

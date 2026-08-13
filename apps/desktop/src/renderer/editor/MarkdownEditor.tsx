@@ -374,11 +374,16 @@ function documentReplacementMap(
   if (end === null) {
     return new StepMap([0, before.content.size, after.content.size]);
   }
-  const mapStart = Math.min(start, end.a, end.b);
+  let { a: endBefore, b: endAfter } = end;
+  const overlap = start - Math.min(endBefore, endAfter);
+  if (overlap > 0) {
+    endBefore += overlap;
+    endAfter += overlap;
+  }
   return new StepMap([
-    mapStart,
-    end.a - mapStart,
-    end.b - mapStart,
+    start,
+    endBefore - start,
+    endAfter - start,
   ]);
 }
 

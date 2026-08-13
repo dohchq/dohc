@@ -4595,6 +4595,125 @@ describe("markdown editor unmount flush", () => {
     remount.unmount();
   });
 
+  it("releases the captured plain-text version buffer after a failed switch reread", async () => {
+    let rejectReread!: (reason: Error) => void;
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 1) {
+        return {
+          text: "Old version",
+          truncated: false,
+          contentHash: TEST_CONTENT_HASH,
+        };
+      }
+      return await new Promise<never>((_resolve, reject) => {
+        rejectReread = reject;
+      });
+    });
+    const oldKey = documentVersionKey("ws-1", "notes/plain.txt", 1);
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        engineVersionKey={1}
+        refreshKey={1}
+      />,
+    );
+    const editor = await screen.findByTestId("view-text-editor");
+    const content = editor.querySelector(".cm-content") as HTMLElement;
+    await user.click(content);
+    await user.keyboard("{End} captured");
+    const oldBuffer = getSharedLocalDocument(oldKey);
+    expect(oldBuffer.getSnapshot().dirty).toBe(true);
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        engineVersionKey={2}
+        refreshKey={2}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    await act(async () => {
+      rejectReread(new Error("reread failed"));
+      await Promise.resolve();
+    });
+    await screen.findByTestId("orphaned-draft-notice");
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("Old version captured"),
+    );
+    view.unmount();
+
+    const reacquired = getSharedLocalDocument(oldKey);
+    expect(reacquired).not.toBe(oldBuffer);
+    expect(reacquired.getSnapshot()).toMatchObject({
+      initialized: false,
+      dirty: false,
+    });
+  });
+
+  it("releases the captured Markdown version buffer after capturing a pending draft", async () => {
+    let rejectReread!: (reason: Error) => void;
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 1) {
+        return {
+          text: "# Old version\n",
+          truncated: false,
+          contentHash: TEST_CONTENT_HASH,
+        };
+      }
+      return await new Promise<never>((_resolve, reject) => {
+        rejectReread = reject;
+      });
+    });
+    const oldKey = documentVersionKey("ws-1", "notes/versioned.md", 1);
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/versioned.md"
+        engineVersionKey={1}
+        refreshKey={1}
+      />,
+    );
+    await user.type(await screen.findByTestId("markdown-editor"), " captured");
+    const oldBuffer = getSharedLocalDocument(oldKey);
+    expect(oldBuffer.getPendingDraftSource()).not.toBeNull();
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/versioned.md"
+        engineVersionKey={2}
+        refreshKey={2}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    await act(async () => {
+      rejectReread(new Error("reread failed"));
+      await Promise.resolve();
+    });
+    await screen.findByTestId("orphaned-draft-notice");
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toContain("captured"),
+    );
+    view.unmount();
+
+    const reacquired = getSharedLocalDocument(oldKey);
+    expect(reacquired).not.toBe(oldBuffer);
+    expect(reacquired.getSnapshot()).toMatchObject({
+      initialized: false,
+      dirty: false,
+    });
+  });
+
   it("can start editing an empty CSV as a table", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "",
