@@ -109,7 +109,8 @@ export function assertRawTextWritable(
 ): void {
   // Plugins run with full-trust authority. A sandboxed site must not change
   // plugin source and cross that authority boundary.
-  if (options.protectPluginSource && (path === "plugins" || path.startsWith("plugins/"))) {
+  const [topLevel] = path.replaceAll("\\", "/").split("/");
+  if (options.protectPluginSource && topLevel?.toLowerCase() === "plugins") {
     throw new Error(
       "files.write cannot write plugin source under the workspace-root plugins/ tree. Sandboxed sites cannot modify source that runs with full-trust authority.",
     );
@@ -320,6 +321,8 @@ export async function invokeSiteSdkHost(
         try {
           await createWorkspaceTextExclusive(context.workspaceRoot, path, body, {
             signal: context.signal,
+            resolvedPathPolicy: (resolvedPath) =>
+              assertRawTextWritable(resolvedPath, { protectPluginSource: true }),
           });
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === "EEXIST") {
@@ -331,6 +334,8 @@ export async function invokeSiteSdkHost(
       }
       await restoreWorkspaceText(context.workspaceRoot, path, body, {
         signal: context.signal,
+        resolvedPathPolicy: (resolvedPath) =>
+          assertRawTextWritable(resolvedPath, { protectPluginSource: true }),
       });
       return { path };
     }

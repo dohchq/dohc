@@ -1,5 +1,5 @@
 import { databaseOpLogPath } from "@dohc/workspace-core";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -153,6 +153,43 @@ describe("site SDK host authority", () => {
       "nested folder\n",
     );
   });
+
+  it("rejects site writes through a real directory alias into the plugin tree", async () => {
+    const root = await workspace();
+    const context = { workspaceRoot: root, scopeRoot: null, writable: true };
+    await mkdir(join(root, "plugins", "example"), { recursive: true });
+    await symlink(
+      join(root, "plugins"),
+      join(root, "plugin-alias"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    await expect(
+      invokeSiteSdkHost(context, "files.write", {
+        path: "plugin-alias/example/index.txt",
+        text: "full-trust source\n",
+      }),
+    ).rejects.toThrow(/cannot write plugin source.*plugins\//i);
+    await expect(
+      readFile(join(root, "plugins", "example", "index.txt"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.runIf(process.platform === "win32")(
+    "rejects a Windows case alias for the workspace plugin tree",
+    async () => {
+      const root = await workspace();
+      const context = { workspaceRoot: root, scopeRoot: null, writable: true };
+      await mkdir(join(root, "plugins", "example"), { recursive: true });
+
+      await expect(
+        invokeSiteSdkHost(context, "files.write", {
+          path: "Plugins/example/index.txt",
+          text: "full-trust source\n",
+        }),
+      ).rejects.toThrow(/cannot write plugin source.*plugins\//i);
+    },
+  );
 
   it("rejects raw database writes and requires structured databases.edit", async () => {
     const root = await workspace();
