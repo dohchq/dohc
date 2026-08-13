@@ -19,6 +19,8 @@
 // row is how the fault-injection tests went unrun for a month. Optional tools
 // may still skip.
 //
+// BUDGET: see the `budget` block below and WINDOWS_DEV.md "Build economics".
+//
 // PROVENANCE: the run reads the tree at every step boundary and stamps the
 // commit into both the summary block and the evidence line. A verdict that
 // cannot name the tree it examined is not evidence — two concurrent runs
@@ -45,6 +47,11 @@ import { arch, platform, release, tmpdir } from "node:os";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { verifyNativeTarget } from "./native-target.mjs";
 import {
+  acquireBuildSlot,
+  freeDiskGb,
+  resolveBuildBudget,
+} from "./build-slot.mjs";
+import {
   classifyTreeProvenance,
   formatTreeState,
   readTreeState,
@@ -53,6 +60,50 @@ import { SCRATCH_SENTINEL, inspectScratchRun } from "./scratch-leak-report.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
+
+// The machine's build budget (WINDOWS_DEV.md, "Build economics"). On the
+// shared dev box the gate refuses to start under the free-space floor, takes
+// one of the four build slots before any cargo runs, and caps its compiler
+// and test parallelism to its share of the cores. A single-tenant host (CI)
+// has no slot root and runs uncapped. Incremental compilation is off on both:
+// a full-workspace gate never reuses incremental caches, it only pays their
+// disk — the dev loop keeps its own setting.
+const budget = resolveBuildBudget();
+if (budget) {
+  const free = freeDiskGb(repoRoot);
+  if (free === null) {
+    // Not fail-closed on purpose: the floor guards a failure cargo reports
+    // loudly itself (ENOSPC fails the gate), so an unreadable measurement
+    // is worth a warning, not an outage of the canonical gate.
+    console.warn(
+      `disk preflight skipped: free space on ${repoRoot}'s volume could not be read; the ${budget.diskFloorGb} GB floor is unverified for this run`,
+    );
+  }
+  if (free !== null && free < budget.diskFloorGb) {
+    console.error(
+      `refusing to run the gate: ${free.toFixed(1)} GB free on the worktree ` +
+        `volume is below the ${budget.diskFloorGb} GB floor (WINDOWS_DEV.md ` +
+        `build economics; a cold workspace build needs ~20 GB). Prune stale ` +
+        `target dirs (C:\\w\\_targets, worktree target/) and rerun, or ` +
+        `override the floor with DOHC_GATE_DISK_FLOOR_GB.`,
+    );
+    process.exit(1);
+  }
+}
+const slot = budget ? await acquireBuildSlot(budget) : null;
+// The caps ride process.env so every child sees them — including the
+// native-target probe, which spawns its own cargo. A snapshot handed to
+// spawnSync would REPLACE the child environment and silently drop whatever
+// this file exports after the snapshot; that defect shipped once and made
+// the scratch-leak row vacuous. Jobs and test threads honor an explicitly
+// set value; incremental is always off in the gate — a full-workspace run
+// never reuses incremental caches, it only pays their disk.
+process.env.CARGO_INCREMENTAL = "0";
+if (budget) {
+  process.env.CARGO_BUILD_JOBS ??= String(budget.jobs);
+  process.env.RUST_TEST_THREADS ??= String(budget.jobs);
+}
+const capsField = `jobs ${process.env.CARGO_BUILD_JOBS ?? "default"}, test-threads ${process.env.RUST_TEST_THREADS ?? "default"}`;
 // Hand the tests the absolute root instead of a name they would re-derive.
 // `os.tmpdir()` and Rust's `std::env::temp_dir()` read different variables and
 // agree only by luck: under WSL the inherited TEMP/TMP point at /mnt/c, which
@@ -70,13 +121,15 @@ writeFileSync(join(scratchRunRoot, SCRATCH_SENTINEL), scratchRunId);
 function run(cmd) {
   // shell:true so `cargo`/`cargo.exe` resolve identically under PowerShell,
   // Git Bash, and a Linux/WSL shell. stdio inherited so output streams live.
+  const startedAt = Date.now();
   const res = spawnSync(cmd, {
     cwd: repoRoot,
     shell: true,
     stdio: "inherit",
   });
-  if (res.error) return { ok: false, code: null, error: res.error };
-  return { ok: res.status === 0, code: res.status };
+  const durationMs = Date.now() - startedAt;
+  if (res.error) return { ok: false, code: null, error: res.error, durationMs };
+  return { ok: res.status === 0, code: res.status, durationMs };
 }
 
 // The steps' own shell, so the provenance is read exactly where they ran.
@@ -103,19 +156,23 @@ const required = [
     skipReason: "yjs/tsx unavailable; fixture drift not checked",
   },
   { name: "fmt --check", cmd: "cargo fmt --all --check" },
+  // `--locked` on every step that resolves dependencies: a CI substitute must
+  // not rewrite Cargo.lock mid-run. Without it, `cargo build` over a stale
+  // lock rewrites the file and the tree-provenance row fails — correctly, but
+  // the reader gets a provenance refusal where a lockfile error was the fact.
   {
     name: "clippy -D warnings",
-    cmd: "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    cmd: "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
   },
-  { name: "build --workspace", cmd: "cargo build --workspace" },
-  { name: "test --workspace", cmd: "cargo test --workspace" },
+  { name: "build --workspace", cmd: "cargo build --locked --workspace" },
+  { name: "test --workspace", cmd: "cargo test --locked --workspace" },
   {
     // The crash-recovery / exactly-once tests in dohc-engine-collab are behind
     // its `fault-injection` feature, which nothing in the workspace graph
     // enables — `cargo test --workspace` compiles them out. The workspace root
     // is virtual, so the feature must be enabled through an explicit `-p` run.
     name: "test collab crash tier",
-    cmd: "cargo test -p dohc-engine-collab --features fault-injection",
+    cmd: "cargo test --locked -p dohc-engine-collab --features fault-injection",
   },
 ];
 
@@ -163,10 +220,16 @@ const readTreeAfter = (step) => readings.push({ step, state: readTree() });
 console.log(`\n== dohc Rust engine local checks ==`);
 console.log(`host: ${platform()} ${arch()} (${release()})`);
 console.log(`repo: ${repoRoot}`);
+console.log(
+  `budget: ${slot ? `${slot.name} of ${budget.slots}` : "uncapped (no slot root; single-tenant host)"}, ` +
+    `${capsField}, incremental off`,
+);
 console.log(`tree at start: ${formatTreeState(readings[0].state)}\n`);
 
 console.log(`\n--- native target ---`);
+const nativeStartedAt = Date.now();
 const native = verifyNativeTarget();
+const nativeMs = Date.now() - nativeStartedAt;
 if (native.ok) {
   console.log(`  rust cfg ${native.cfg} — matches the host.`);
 } else {
@@ -179,6 +242,7 @@ results.push({
   name: "native target",
   status: native.ok ? "PASS" : "FAIL",
   reason: native.ok ? undefined : native.reason,
+  durationMs: nativeMs,
 });
 readTreeAfter("native target");
 
@@ -201,6 +265,7 @@ for (const step of native.ok ? required : []) {
       name: step.name,
       status: "SKIP",
       reason: `${step.skipReason}; required step skipped → verdict FAIL`,
+      durationMs: r.durationMs,
     });
     continue;
   }
@@ -208,6 +273,7 @@ for (const step of native.ok ? required : []) {
   results.push({
     name: step.name,
     status: r.ok ? "PASS" : "FAIL",
+    durationMs: r.durationMs,
   });
   if (r.error) console.error(`  (spawn error: ${r.error.message})`);
 }
@@ -227,7 +293,11 @@ for (const step of native.ok ? optional : []) {
   const r = run(step.cmd);
   readTreeAfter(step.name);
   if (!r.ok) failed = true;
-  results.push({ name: step.name, status: r.ok ? "PASS" : "FAIL" });
+  results.push({
+    name: step.name,
+    status: r.ok ? "PASS" : "FAIL",
+    durationMs: r.durationMs,
+  });
 }
 
 console.log(`\n--- scratch leak ---`);
@@ -281,18 +351,25 @@ const summary = results
   .map((r) => `${r.name}=${r.status}${r.reason ? `[${r.reason}]` : ""}`)
   .join(" ");
 
+// Per-step wall clock, in the human summary only: the evidence line's step
+// rows are a parsed contract (`require-ci-pass-verdict.mjs`) that a PASS row
+// may not decorate. The judgement rows (tree provenance, scratch leak) carry
+// no duration because nothing timed ran for them.
+const stepSeconds = (ms) =>
+  ms === undefined ? "" : ` (${(ms / 1000).toFixed(1)}s)`;
+
 console.log(`\n== summary ==`);
 console.log(`  tree ${treeStamp}`);
 for (const r of results) {
   console.log(
-    `  ${r.status.padEnd(4)} ${r.name}${r.reason ? ` — ${r.reason}` : ""}`,
+    `  ${r.status.padEnd(4)} ${r.name}${stepSeconds(r.durationMs)}${r.reason ? ` — ${r.reason}` : ""}`,
   );
 }
 
 const verdict = failed ? "FAIL" : "PASS";
 console.log(`\nEVIDENCE (paste into EXECUTION_LOG.md):`);
 console.log(
-  `- ${stamp} | run-rust-checks | ${platform()}/${arch()} (rust cfg ${native.ok ? native.cfg : "UNVERIFIED"}, head ${treeStamp}) | ${verdict} | ${summary}`,
+  `- ${stamp} | run-rust-checks | ${platform()}/${arch()} (rust cfg ${native.ok ? native.cfg : "UNVERIFIED"}, ${capsField}, head ${treeStamp}) | ${verdict} | ${summary}`,
 );
 
 process.exit(failed ? 1 : 0);
