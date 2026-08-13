@@ -1269,13 +1269,31 @@ fn validate_successor_base(
                 observed: error.to_string(),
             }
         })?;
+        let folded = doc.fold_scene();
+        for (id, file) in &parsed.files {
+            let asset = folded
+                .assets
+                .get(id)
+                .ok_or_else(|| CollabError::InvalidSuccessorBase {
+                    constraint: "scene successor asset digest",
+                    expected: "a durable asset record".to_owned(),
+                    observed: "missing".to_owned(),
+                })?;
+            let observed = crate::hex_sha256(&file.bytes);
+            if observed != asset.sha256 {
+                return Err(CollabError::InvalidSuccessorBase {
+                    constraint: "scene successor asset digest",
+                    expected: asset.sha256.clone(),
+                    observed,
+                });
+            }
+        }
         let asset_bytes = parsed
             .files
             .into_iter()
             .map(|(id, file)| (id, file.bytes))
             .collect();
-        doc.fold_scene()
-            .portable_json_with_asset_bytes(&asset_bytes)?
+        folded.portable_json_with_asset_bytes(&asset_bytes)?
     } else {
         doc.project(successor.content_kind)?.content
     };
@@ -1954,5 +1972,119 @@ fn updates_after(
 fn map_sql(e: rusqlite::Error) -> CollabError {
     CollabError::Corrupt {
         reason: e.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod successor_validation_tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::{
+        encode_scene_asset_record, import_portable_scene, scene_asset_ref, SceneAsset,
+        SuccessorIdentity, SuccessorIdentityInput,
+    };
+
+    fn canonical_image_scene(key: &DocKey) -> String {
+        let source = serde_json::to_string(&json!({
+            "type": "excalidraw",
+            "elements": [{
+                "id": "image-element",
+                "type": "image",
+                "version": 1,
+                "versionNonce": 1,
+                "isDeleted": false,
+                "index": "a0",
+                "fileId": "image-file"
+            }],
+            "files": {
+                "image-file": {
+                    "id": "image-file",
+                    "mimeType": "image/png",
+                    "created": 4,
+                    "dataURL": "data:image/png;base64,AQID"
+                }
+            }
+        }))
+        .expect("scene source");
+        let imported = import_portable_scene(&source).expect("import scene");
+        let file = imported.files.get("image-file").expect("image file");
+        let sha256 = crate::hex_sha256(&file.bytes);
+        let record = encode_scene_asset_record(&SceneAsset {
+            id: file.id.clone(),
+            mime_type: file.mime_type.clone(),
+            created: file.created,
+            path: scene_asset_ref(
+                &key.workspace_id,
+                &key.version_id,
+                &key.object_id,
+                &sha256,
+                &file.mime_type,
+            )
+            .expect("asset ref"),
+            sha256,
+            last_retrieved: file.last_retrieved,
+            version: file.version,
+        })
+        .expect("asset record");
+        let doc = Ydoc::wire();
+        doc.apply(&imported.initial_update).expect("scene seed");
+        doc.seed_scene_maps(
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::from([("image-file".to_owned(), record)]),
+        );
+        doc.fold_scene()
+            .portable_json_with_asset_bytes(&BTreeMap::from([(
+                "image-file".to_owned(),
+                file.bytes.clone(),
+            )]))
+            .expect("canonical scene")
+    }
+
+    #[test]
+    fn scene_successor_rejects_asset_bytes_that_miss_the_declared_digest() {
+        let key = DocKey::new("ws", "main", "drawing-object").expect("key");
+        let artifact = canonical_image_scene(&key);
+        let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &"a".repeat(64),
+            predecessor_state_vector_sha256: &"b".repeat(64),
+            artifact_op_kind: "conflict.resolve",
+            artifact_id: "conflict",
+            artifact_preimage_sha256: &"c".repeat(64),
+            content_kind: ContentKind::Scene,
+            result_sha256: &crate::hex_sha256(artifact.as_bytes()),
+        });
+        let valid = crate::fresh_successor_base(&identity, &artifact).expect("valid successor");
+        let doc = Ydoc::wire();
+        doc.apply(&valid.update).expect("successor update");
+        let mut asset = doc.fold_scene().assets["image-file"].clone();
+        asset.sha256 = "f".repeat(64);
+        let record = encode_scene_asset_record(&asset).expect("tampered asset record");
+        doc.seed_scene_maps(
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::from([("image-file".to_owned(), record)]),
+        );
+        let update = doc.encode_full_state();
+        let tampered = SuccessorBase {
+            lineage_claim_id: crate::hex_sha256(&update),
+            state_vector: doc.encode_state_vector(),
+            update,
+            ..valid
+        };
+
+        let error = validate_successor_base(&tampered, Some(&artifact))
+            .expect_err("asset bytes must match the durable digest");
+        assert!(matches!(
+            error,
+            CollabError::InvalidSuccessorBase {
+                constraint: "scene successor asset digest",
+                ..
+            }
+        ));
     }
 }

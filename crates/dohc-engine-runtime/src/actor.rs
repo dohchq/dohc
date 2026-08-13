@@ -9074,6 +9074,16 @@ fn scene_asset_records(
         .collect()
 }
 
+fn map_scene_asset_validation_error(error: dohc_engine_sync::SyncError) -> RuntimeError {
+    match error {
+        dohc_engine_sync::SyncError::RetryableState { .. } => {
+            RuntimeError::YdocArtifactAssetsPending
+        }
+        error @ dohc_engine_sync::SyncError::ProjectionTooLarge { .. } => RuntimeError::Sync(error),
+        _ => RuntimeError::YdocArtifactAssetsInvalid,
+    }
+}
+
 fn validate_scene_artifact_assets_on_store(
     store: &EngineStore,
     key: &DocKey,
@@ -9081,14 +9091,8 @@ fn validate_scene_artifact_assets_on_store(
     assets: &[ArtifactAssetDescriptor],
 ) -> Result<Vec<String>, RuntimeError> {
     store.read_with(|conn| {
-        dohc_engine_sync::project_ydoc_with_store(conn, key, doc, ContentKind::Scene).map_err(
-            |error| match error {
-                dohc_engine_sync::SyncError::RetryableState { .. } => {
-                    RuntimeError::YdocArtifactAssetsPending
-                }
-                _ => RuntimeError::YdocArtifactAssetsInvalid,
-            },
-        )?;
+        dohc_engine_sync::project_ydoc_with_store(conn, key, doc, ContentKind::Scene)
+            .map_err(map_scene_asset_validation_error)?;
         let folded = doc.fold_scene();
         let live_asset_ids: HashSet<&str> = folded
             .elements
@@ -9106,14 +9110,8 @@ fn validate_scene_artifact_assets_on_store(
                 .assets
                 .get(&asset.id)
                 .ok_or(RuntimeError::YdocArtifactAssetsInvalid)?;
-            dohc_engine_sync::validate_scene_asset_with_store(conn, key, folded_asset).map_err(
-                |error| match error {
-                    dohc_engine_sync::SyncError::RetryableState { .. } => {
-                        RuntimeError::YdocArtifactAssetsPending
-                    }
-                    _ => RuntimeError::YdocArtifactAssetsInvalid,
-                },
-            )?;
+            dohc_engine_sync::validate_scene_asset_with_store(conn, key, folded_asset)
+                .map_err(map_scene_asset_validation_error)?;
         }
         let mut pending_jobs = Vec::new();
         for asset in assets {
@@ -12460,6 +12458,25 @@ mod scene_seed_transaction_tests {
             )
         );
         encode_scene_asset_records(&records).expect("canonical record remains codec-valid");
+    }
+
+    #[test]
+    fn scene_asset_validation_keeps_projection_limit_measurements() {
+        let error =
+            map_scene_asset_validation_error(dohc_engine_sync::SyncError::ProjectionTooLarge {
+                constraint: "MAX_PROJECTION_BYTES",
+                actual_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES + 1,
+                limit_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES,
+            });
+
+        assert!(matches!(
+            error,
+            RuntimeError::Sync(dohc_engine_sync::SyncError::ProjectionTooLarge {
+                constraint: "MAX_PROJECTION_BYTES",
+                actual_bytes,
+                limit_bytes,
+            }) if actual_bytes == limit_bytes + 1
+        ));
     }
 
     #[test]
