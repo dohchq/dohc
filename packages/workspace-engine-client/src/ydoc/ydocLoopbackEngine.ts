@@ -671,6 +671,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     // projector. A direct settle still refuses, but close must finish the
     // teardown so the adapter does not retain a session it can never release.
     if (session.contentKind === "scene") {
+      if (settleFlag === true) project(session);
       if (this.lineages.get(key)?.regime === "local-only") {
         this.lineages.delete(key);
       }

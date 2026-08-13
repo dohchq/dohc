@@ -297,6 +297,11 @@ describe("YdocLiveAdapter", () => {
       }),
     ).toBe(false);
 
+    await expect(session.close({ settle: true })).rejects.toThrow(
+      "The Y.Doc loopback cannot project scene documents. Use the workspace engine to settle scenes.",
+    );
+    expect(engine.activeSessionIds()).toHaveLength(1);
+
     await expect(session.close()).resolves.toBeUndefined();
     expect(engine.activeSessionIds()).toHaveLength(0);
 
