@@ -627,6 +627,52 @@ describe("SharedLocalDocument", () => {
     release();
   });
 
+  it("replaces an earlier clean initialization with a later successful read", () => {
+    const buffer = getSharedLocalDocument(
+      documentVersionKey("ws", "newer-initialization.md", 1),
+    );
+    const release = buffer.retain();
+    const older = buffer.beginRead();
+    const newer = buffer.beginRead();
+
+    expect(buffer.initializeRead("older", "hash-1", older)).toBe(true);
+    expect(buffer.initializeRead("newer", "hash-2", newer)).toBe(true);
+    expect(buffer.initializeRead("stale", "hash-0", older)).toBe(false);
+    expect(buffer.getSnapshot()).toMatchObject({
+      body: "newer",
+      contentHash: "hash-2",
+      dirty: false,
+      saveState: "saved",
+    });
+    release();
+  });
+
+  it("refuses a newer initialization while local work is busy and blocks older responses", async () => {
+    const buffer = getSharedLocalDocument(
+      documentVersionKey("ws", "busy-initialization.md", 1),
+    );
+    const release = buffer.retain();
+    const source = {};
+    buffer.initializeRead("before", "hash-0", buffer.beginRead());
+    const older = buffer.beginRead();
+    const newer = buffer.beginRead();
+    buffer.publishDraft("local draft", source);
+
+    expect(buffer.initializeRead("newer", "hash-2", newer)).toBe(false);
+    await buffer.write(source, async () => ({
+      status: "written",
+      contentHash: "hash-written",
+    }));
+    expect(buffer.initializeRead("older", "hash-1", older)).toBe(false);
+    expect(buffer.getSnapshot()).toMatchObject({
+      body: "local draft",
+      contentHash: "hash-written",
+      dirty: false,
+      saveState: "saved",
+    });
+    release();
+  });
+
   it("rejects an older read after a newer response was refused while dirty", async () => {
     const buffer = getSharedLocalDocument(
       documentVersionKey("ws", "refused-newer-read.txt", 1),

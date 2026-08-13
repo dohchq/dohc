@@ -2234,6 +2234,99 @@ describe("markdown editor unmount flush", () => {
     );
   });
 
+  it("adopts a later duplicate Markdown read after an earlier clean initialization", async () => {
+    type ReadResult = {
+      text: string;
+      truncated: false;
+      contentHash: string;
+    };
+    const olderHash = "3".repeat(64);
+    const newerHash = "4".repeat(64);
+    const writtenHash = "5".repeat(64);
+    let resolveOlder!: (value: ReadResult) => void;
+    let resolveNewer!: (value: ReadResult) => void;
+    const older = new Promise<ReadResult>((resolve) => {
+      resolveOlder = resolve;
+    });
+    const newer = new Promise<ReadResult>((resolve) => {
+      resolveNewer = resolve;
+    });
+    bridgeMock.readWorkspaceText
+      .mockImplementationOnce(() => older)
+      .mockImplementationOnce(() => newer);
+    bridgeMock.writeWorkspaceText.mockResolvedValue({
+      status: "written",
+      contentHash: writtenHash,
+    });
+    let flush: DraftFlush | null = null;
+    const user = userEvent.setup();
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/ordered.md"
+        registerDraftFlush={(next) => {
+          flush = next;
+        }}
+      />,
+    );
+    const newerView = render(
+      <FileInspector workspaceId="ws-1" path="notes/ordered.md" />,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+
+    await act(async () => {
+      resolveOlder({
+        text: "# Older\n\nOld body.\n",
+        truncated: false,
+        contentHash: olderHash,
+      });
+      await older;
+    });
+    await screen.findByText("Old body.");
+
+    await act(async () => {
+      resolveNewer({
+        text: "# Newer\n\nNew body.\n",
+        truncated: false,
+        contentHash: newerHash,
+      });
+      await newer;
+      await Promise.resolve();
+      newerView.unmount();
+    });
+    const editor = await waitFor(() => {
+      const next = screen.getByTestId("markdown-editor");
+      expect(next.textContent).toContain("New body.");
+      return next;
+    });
+
+    await user.type(editor, " saved");
+    await waitFor(() => expect(flush).not.toBeNull());
+    await flush!();
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.writeWorkspaceText.mock.calls[0]?.[0]).toMatchObject({
+      expectedContentHash: newerHash,
+    });
+    expect(bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text).toContain(
+      "New body.",
+    );
+    expect(bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text).toContain(
+      "saved",
+    );
+    expect(
+      getSharedLocalDocument(
+        documentVersionKey("ws-1", "notes/ordered.md", undefined),
+      ).getSnapshot(),
+    ).toMatchObject({
+      contentHash: writtenHash,
+      dirty: false,
+      saveState: "saved",
+    });
+  });
+
   it("uses an older duplicate read when the later request fails", async () => {
     type ReadResult = {
       text: string;

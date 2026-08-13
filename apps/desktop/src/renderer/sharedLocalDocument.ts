@@ -163,10 +163,20 @@ export class SharedLocalDocument {
     contentHash: string | null,
     readTicket: number,
   ): boolean {
-    if (readTicket < this.latestAcceptedReadTicket || this.initialized) {
+    if (
+      readTicket < this.latestAcceptedReadTicket ||
+      (this.initialized && readTicket === this.latestAcceptedReadTicket)
+    ) {
       return false;
     }
     this.latestAcceptedReadTicket = readTicket;
+    if (
+      this.snapshot.dirty ||
+      this.writers > 0 ||
+      this.pendingDraft !== null
+    ) {
+      return false;
+    }
     this.initialized = true;
     this.replace({ body, contentHash }, null, false, "saved");
     return true;

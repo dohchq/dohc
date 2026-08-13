@@ -503,6 +503,20 @@ function useTextContent(
   // on screen" — the window the plain-text autosave used to write into
   // (#579 adversarial review, F1).
   const [readSeq, setReadSeq] = useState(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const initializedReadTicket = useRef(0);
+  const markReadInitialized = useCallback((readTicket: number) => {
+    initializedReadTicket.current = Math.max(
+      initializedReadTicket.current,
+      readTicket,
+    );
+  }, []);
   const lastLocationRef = useRef<{
     workspaceId: string;
     path: string;
@@ -510,6 +524,7 @@ function useTextContent(
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
+    let answered: { text: string; contentHash: string | null } | null = null;
     const readTicket = localBuffer.beginRead();
     // Blank when switching workspaces or files. An activity refresh at the
     // same location swaps content in place instead of flashing it away.
@@ -525,6 +540,7 @@ function useTextContent(
       .readWorkspaceText({ workspaceId, relativePath: path })
       .then((r) => {
         if (cancelled) return;
+        answered = r;
         setContent({
           text: r.text,
           loadedWorkspaceId: workspaceId,
@@ -547,6 +563,21 @@ function useTextContent(
       });
     return () => {
       cancelled = true;
+      if (
+        !mounted.current &&
+        answered &&
+        initializedReadTicket.current < readTicket
+      ) {
+        const completed = answered;
+        queueMicrotask(() => {
+          if (initializedReadTicket.current >= readTicket) return;
+          localBuffer.initializeRead(
+            completed.text,
+            completed.contentHash,
+            readTicket,
+          );
+        });
+      }
     };
     // refreshKey bumps on workspace activity so an open file re-reads when it
     // changes on disk (e.g. an agent edits it).
@@ -574,6 +605,7 @@ function useTextContent(
     error,
     readSeq,
     refreshAfterConflict,
+    markReadInitialized,
   };
 }
 
@@ -1718,9 +1750,13 @@ function MarkdownView(props: {
       revision: sharedSnapshot.revision,
     };
     const bodyChanged = latestDraft.current !== sharedSnapshot.body;
+    const baselineChanged =
+      baseContentHash.current !== sharedSnapshot.contentHash;
     baseContentHash.current = sharedSnapshot.contentHash;
     latestDraft.current = sharedSnapshot.body;
     setSaveState(sharedSnapshot.saveState);
+    const newerInitialization =
+      sharedSnapshot.source === null && baselineChanged;
     if (
       sharedSnapshot.saveState === "saved" &&
       !sharedSnapshot.dirty &&
@@ -1733,7 +1769,7 @@ function MarkdownView(props: {
       unsavedDraft.current = false;
     }
     if (
-      sharedSnapshot.source === null ||
+      (sharedSnapshot.source === null && !newerInitialization) ||
       sharedSnapshot.source === localSource.current ||
       !bodyChanged
     ) {
@@ -4289,6 +4325,7 @@ export function FileInspector(props: FileInspectorProps) {
     error,
     readSeq,
     refreshAfterConflict,
+    markReadInitialized,
   } = useTextContent(
     props.workspaceId,
     props.path,
@@ -4338,11 +4375,13 @@ export function FileInspector(props: FileInspectorProps) {
       return;
     }
     localBuffer.initializeRead(text, contentHash, contentReadTicket);
+    markReadInitialized(contentReadTicket);
   }, [
     contentHash,
     contentReadTicket,
     loadedPath,
     localBuffer,
+    markReadInitialized,
     props.path,
     readSeq,
     text,
