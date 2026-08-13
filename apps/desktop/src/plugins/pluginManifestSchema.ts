@@ -2,6 +2,18 @@ import { z } from "zod";
 
 export const NPM_PACKAGE_NAME = /^(?:@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*$/;
 
+// Run 2's largest representative lockfile contained 209 package entries.
+// The array form leaves measured headroom for 300 named overrides. Authors
+// with a larger reviewed set can use `true` instead of a rejection-prone list.
+const MAX_SKIPPED_SCRIPT_OVERRIDES = 300;
+
+const NpmPackageName = z.string()
+  .max(214)
+  .regex(
+    NPM_PACKAGE_NAME,
+    "must use lowercase npm package name syntax, with optional @scope/ prefix",
+  );
+
 function normalizePluginPath(path: string): string | null {
   if (
     path.includes("\0") ||
@@ -49,18 +61,13 @@ const PluginCommand = z.object({
 
 export const DohcPluginManifest = z.object({
   version: z.literal(1),
-  name: z.string()
-    .min(1)
-    .max(214)
-    .regex(
-      NPM_PACKAGE_NAME,
-      "must use lowercase npm package name syntax, with optional @scope/ prefix",
-    ),
+  name: NpmPackageName,
   displayName: z.string().min(1).max(120).optional(),
   entry: PluginPath,
   // For ordinary UTF-8 content, compact JSON at these bounds is 77 + 214 +
   // 120 + 1,024 + (100 × 1,295 + 99) + (200 × 260 + 199) = 183,233 bytes,
-  // 78,911 below the reader's 262,144-byte cap. A string built almost
+  // 78,911 below the reader's 262,144-byte cap. The optional skipped-script
+  // override adds at most 300 package names. A string built almost
   // entirely from characters JSON must escape (e.g. `"`, `\`) can inflate
   // past that on paper; the reader's byte-size gate — not this schema — is
   // what safely rejects an oversize file before parsing either way.
@@ -70,6 +77,13 @@ export const DohcPluginManifest = z.object({
   commands: z.array(PluginCommand)
     .max(200, "commands: at most 200 entries allowed")
     .optional(),
+  allowSkippedScripts: z.union([
+    z.literal(true),
+    z.array(NpmPackageName).max(
+      MAX_SKIPPED_SCRIPT_OVERRIDES,
+      `allowSkippedScripts: at most ${MAX_SKIPPED_SCRIPT_OVERRIDES} package names allowed`,
+    ),
+  ]).optional(),
 }).strict().superRefine((manifest, ctx) => {
   const panelIds = new Set<string>();
   manifest.panels?.forEach((panel, index) => {
