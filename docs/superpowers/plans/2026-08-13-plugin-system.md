@@ -36,7 +36,9 @@ many.
 4. **Forkable in place.** Plugins install as readable source in the
    workspace. A user's agent edits them directly. A modified plugin is
    marked as the user's and stops auto-updating; the agent merges upstream
-   releases on request.
+   releases on request. When the update mechanism ships (post-milestone),
+   it must include the reverse transitions: reset-to-upstream and
+   resume-updates, so forking is never a one-way door.
 5. **Engine powers are incentives, not requirements.** A plugin may use
    zero dohc features. When it wants storage, search, sync, or documents,
    it asks the engine and inherits capture, history, and gates.
@@ -46,8 +48,12 @@ many.
 Three pieces. The engine stays the core.
 
 - **Plugin host** — one Electron `utilityProcess` **per plugin**, spawned
-  by `apps/desktop`, speaking the agent drivers' line JSON-RPC over stdio
-  (`apps/desktop/src/agents/JsonRpcTransport.ts` is the wire precedent).
+  by `apps/desktop`, speaking JSON-RPC 2.0 message objects over the
+  `utilityProcess` MessagePort (`postMessage`/`parentPort`; a
+  `UtilityProcess` has no writable stdin, so stdio framing cannot work —
+  its piped stdout/stderr serve only the plugin log buffer). The agent
+  drivers' `JsonRpcTransport` supplies the request/response semantics
+  behind a process seam; tests bind the same seam to a plain Node child.
   A plain Node child is unshippable: packaged builds fuse `runAsNode` off
   and end users have no system Node; `utilityProcess` ships Node inside
   the app. Per-plugin processes are what make "a crash kills only that
@@ -61,6 +67,10 @@ Three pieces. The engine stays the core.
     workspace and a host generation; stale registrations arriving after a
     workspace switch or reload are rejected, per the repo's async-guard
     invariant.
+  - **Bounded activation.** Activation has a deadline; a hung or failed
+    activation is disposed and counts toward the crash-loop auto-disable
+    like a crash. App and workspace startup never await plugin
+    activation, so no plugin can wedge startup.
   The host is a client of the daemon RPC, same as the desktop app.
 - **`@dohc/sdk`** — the existing package (`packages/sdk`), extended. Today
   it serves sandboxed site previews over a postMessage transport. Plugins
@@ -69,7 +79,11 @@ Three pieces. The engine stays the core.
   API, two transports. A plugin is SDK code plus a manifest.
 - **Panels** — sandboxed iframes in the renderer, reusing the site-preview
   surface (`SitePreviewPage.tsx` sandbox + `siteSdkHost` authority). Plugin
-  UI never runs in the app's own renderer context.
+  UI never runs in the app's own renderer context. Wrapper plugins whose
+  embedded app needs its own cookie/storage context (the t3 spike proved
+  its SameSite session cookie breaks in a third-party iframe) get a
+  hardened guest WebContents with a per-workspace session partition
+  instead — a PR3 surface, not part of PR1b's generic panel.
 
 Language split: anything that must be true (history, atomicity, replication,
 gates) is Rust below the daemon RPC. The host, SDK, pipeline, and plugins
@@ -143,7 +157,10 @@ Spike first, then three stacked PRs, each independently green.
   plugin — re-enable is the reverse of auto-disable; uninstall is not.
   (PR1a's host already honors a `disabled` flag and auto-disables a
   plugin that crash-loops, so a broken plugin can never wedge app
-  startup.)
+  startup.) Packaged installs have no system Node, so dependency
+  install runs pnpm's standalone script under a `utilityProcess`; this
+  path must be exercised in the fused packaged environment, not only in
+  dev.
 - **PR3 — the t3 code plugin.** Manifest + glue over the spike's bridge
   contract.
 
