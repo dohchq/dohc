@@ -114,6 +114,7 @@ function createCallbackHarness(): {
           : {};
         return Promise.resolve(result as T);
       },
+      notify: () => undefined,
       dispose: () => Promise.resolve(),
     };
   });
@@ -179,6 +180,9 @@ function createProcessHarness(options: {
         }
         return request;
       },
+      notify(method: string, notifyParams?: unknown) {
+        transport.notify(method, notifyParams);
+      },
       async dispose() {
         disposedPluginIds.push(params.pluginId);
         await transport.dispose();
@@ -219,6 +223,7 @@ function createCrashAccountingHarness(): {
           }
           return Promise.resolve(result as T);
         },
+        notify: () => undefined,
         dispose: () => Promise.resolve(),
       };
     },
@@ -385,6 +390,7 @@ describe("PluginHost", () => {
         if (method === PLUGIN_HOST_METHODS.invokeCommand) invokeCommandCalls += 1;
         return Promise.resolve({} as T);
       },
+      notify: () => undefined,
       dispose: () => Promise.resolve(),
     }));
     const host = trackHost({
@@ -565,6 +571,7 @@ describe("PluginHost", () => {
       request<T = unknown>(): Promise<T> {
         return Promise.resolve({} as T);
       },
+      notify: () => undefined,
       dispose: () => Promise.resolve(),
     }));
     const host = trackHost({
@@ -831,6 +838,7 @@ describe("PluginHost", () => {
               : {};
             return Promise.resolve(result as T);
           },
+          notify: () => undefined,
           dispose: async () => {
             if (disposed) return;
             disposed = true;
@@ -886,6 +894,7 @@ describe("PluginHost", () => {
             : {};
           return Promise.resolve(result as T);
         },
+        notify: () => undefined,
         dispose: () => Promise.resolve(),
       };
     });
@@ -1147,6 +1156,7 @@ describe("PluginHost", () => {
             return value;
           });
         },
+        notify: () => undefined,
         dispose: () => Promise.resolve(),
       }),
     );
@@ -1183,6 +1193,7 @@ describe("PluginHost", () => {
             (method === PLUGIN_HOST_METHODS.activate
               ? { commands: [] }
               : {}) as T,
+          notify: () => undefined,
           dispose: async () => undefined,
         };
       },
@@ -1291,6 +1302,7 @@ describe("PluginHost", () => {
             (method === PLUGIN_HOST_METHODS.activate
               ? { commands: [] }
               : {}) as T,
+          notify: () => undefined,
           dispose: async () => undefined,
         };
       },
@@ -1364,6 +1376,7 @@ describe("PluginHost", () => {
       spawnTransport: () => ({
         request: async <T,>(method: string) =>
           (method === PLUGIN_HOST_METHODS.activate ? { commands: [] } : {}) as T,
+        notify: () => undefined,
         dispose: async () => undefined,
       }),
       routeSdkRequest: defaultRouter,
@@ -1424,6 +1437,7 @@ describe("PluginHost", () => {
               ? { commands: [] }
               : {}) as T;
           },
+          notify: () => undefined,
           dispose: async () => undefined,
         };
       },
@@ -1525,6 +1539,7 @@ describe("PluginHost", () => {
               : {};
             return Promise.resolve(result as T);
           },
+          notify: () => undefined,
           dispose: () => {
             if (!disposed) {
               disposed = true;
@@ -1612,6 +1627,7 @@ describe("PluginHost", () => {
           : {};
         return Promise.resolve(result as T);
       },
+      notify: () => undefined,
       dispose: () => Promise.resolve(),
     }));
     const host = trackHost({

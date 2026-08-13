@@ -181,6 +181,7 @@ function fakeSpawnTransport(): PluginHostOptions["spawnTransport"] {
     request: async <T = unknown>(method: string): Promise<T> => (
       method === "plugin.activate" ? { commands: [] } : {}
     ) as T,
+    notify: () => undefined,
     dispose: async () => undefined,
   }));
 }

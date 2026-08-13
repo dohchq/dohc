@@ -392,6 +392,7 @@ describe("PluginChildProcessBroker", () => {
               : {};
             return Promise.resolve(result as T);
           },
+          notify: () => undefined,
           dispose: () => Promise.resolve(),
         };
       },

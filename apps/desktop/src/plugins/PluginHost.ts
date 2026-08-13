@@ -536,7 +536,7 @@ export class PluginHost {
       spawn.abortController.signal,
       (subscriptionId, event, data) => {
         if (!this.isLive(record, spawn)) return;
-        spawn.transport?.notify?.(
+        spawn.transport?.notify(
           PLUGIN_HOST_METHODS.sdkEvent,
           { subscriptionId, event, data } satisfies SdkEventParams,
         );
