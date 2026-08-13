@@ -590,6 +590,7 @@ struct YdocSession {
     path: String,
     content_kind: ContentKind,
     regime: Regime,
+    lineage_claim_id: Option<String>,
     lineage_absent: bool,
     first_update_pending: bool,
     last_settled_sha: Option<String>,
@@ -605,6 +606,7 @@ struct YdocSessionView {
     path: String,
     content_kind: ContentKind,
     regime: Regime,
+    lineage_claim_id: Option<String>,
     lineage_absent: bool,
     first_update_pending: bool,
     last_settled_sha: Option<String>,
@@ -1022,6 +1024,7 @@ impl EngineService {
             }
             "watcher.status" => self.watcher_status(request.workspace)?,
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
+            "capture.reconcile" => self.capture_reconcile(&ctx, request.workspace).await?,
             "capture.setAuthor" => {
                 self.capture_set_author(&ctx, request.workspace, request.params)
                     .await?
@@ -3559,6 +3562,22 @@ impl EngineService {
                 Err(_) => Ok(unavailable),
             }
         }
+    }
+
+    /// Force the live capture manifest to rebuild, then answer after the first
+    /// driver pass. The caller follows an unsettled answer with ordinary
+    /// `capture.flush` polling; unlike ordinary flush, this RPC always starts
+    /// one full baseline scan even when the OS watcher has not fired yet.
+    async fn capture_reconcile(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        if let Some(driver) = lock(&open.capture).as_ref() {
+            driver.request_manifest_refresh();
+        }
+        self.capture_flush(ctx, handle).await
     }
 
     async fn capture_set_author(
@@ -7218,6 +7237,7 @@ impl EngineService {
             } else {
                 "absent"
             },
+            lineage_claim_id: state.lineage_claim_id.clone(),
             head: if state.head_blob_sha256.is_some() {
                 "present"
             } else {
@@ -7263,6 +7283,7 @@ impl EngineService {
                 path: params.path,
                 content_kind: state.content_kind,
                 regime: state.regime,
+                lineage_claim_id: state.lineage_claim_id,
                 lineage_absent: !state.lineage_existing,
                 first_update_pending: !state.lineage_existing,
                 last_settled_sha: None,
@@ -7325,6 +7346,7 @@ impl EngineService {
                         session.regime,
                         update,
                         params.actor_origin_id,
+                        session.lineage_claim_id,
                         require_empty,
                         idempotency_key,
                         now,
@@ -7332,10 +7354,11 @@ impl EngineService {
                         token,
                     )
                     .await;
-                if outcome.is_ok()
+                if let Ok(append) = &outcome
                     && let Some(session) = lock(&sessions).get_mut(&session_id)
                 {
                     session.first_update_pending = false;
+                    session.lineage_claim_id = append.lineage_claim_id.clone();
                 }
                 outcome
             });
@@ -7363,10 +7386,12 @@ impl EngineService {
         if let Some(declined) = &outcome.sharing_declined {
             eprintln!("engine: {declined}");
         }
+        let lineage_claim_id = outcome.lineage_claim_id;
         let outcome = outcome.outcome;
         serde_json::to_value(YdocRecordUpdateResult {
             seq: outcome.seq,
             deduped: outcome.deduped,
+            lineage_claim_id,
         })
         .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
     }
@@ -7411,6 +7436,7 @@ impl EngineService {
                 session.key,
                 session.path.clone(),
                 session.content_kind,
+                session.lineage_claim_id.clone(),
                 session.open_head_sha.clone(),
                 session_id.to_owned(),
                 Arc::new(self.self_writes.scoped(&open.root)),
@@ -7576,6 +7602,8 @@ impl EngineService {
         let actor = open.actor.clone();
         let session_id = params.session_id.clone();
         let session_key = session.key.clone();
+        let close_root = open.root.clone();
+        let close_self_writes = Arc::new(self.self_writes.scoped(&open.root));
         // The TAKE happens synchronously BEFORE the spawn: if this future is
         // dropped right after spawning, `session_ops` releases while the task
         // has not yet run — a concurrent recordUpdate/settle must NOT be able
@@ -7583,8 +7611,10 @@ impl EngineService {
         let taken = lock(&self.sessions).remove(&params.session_id);
         let close_task = tokio::spawn(async move {
             let close_result = actor
-                .ydoc_close_session(
+                .ydoc_close_session_materialized(
+                    close_root,
                     session_key,
+                    close_self_writes,
                     now,
                     Arc::new(NoFaults),
                     CancellationToken::new(),
@@ -7665,13 +7695,18 @@ impl EngineService {
             serial = open.session_ops.lock() => serial,
         };
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
-        let full_state = open
+        let state = open
             .actor
-            .ydoc_resync(session.key, cancellation.token())
+            .ydoc_resync(session.key, session.lineage_claim_id, cancellation.token())
             .await
             .map_err(map_runtime)?;
+        if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
+            session.lineage_claim_id = state.lineage_claim_id.clone();
+        }
         serde_json::to_value(YdocResyncResult {
-            initial_update_base64: encode_ydoc_state_base64(&full_state)?,
+            initial_update_base64: encode_ydoc_state_base64(&state.initial_update)?,
+            lineage_claim_id: state.lineage_claim_id,
+            recovered_paths: state.recovered_paths,
         })
         .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
     }
@@ -7695,6 +7730,7 @@ impl EngineService {
                 path: session.path.clone(),
                 content_kind: session.content_kind,
                 regime: session.regime,
+                lineage_claim_id: session.lineage_claim_id.clone(),
                 lineage_absent: session.lineage_absent,
                 first_update_pending: session.first_update_pending,
                 last_settled_sha: session.last_settled_sha.clone(),
@@ -8384,8 +8420,10 @@ async fn close_ydoc_session_for_version_fence(
     let taken = lock(sessions).remove(session_id);
     let close = open
         .actor
-        .ydoc_close_session(
+        .ydoc_close_session_materialized(
+            open.root.clone(),
             session.key,
+            Arc::new(self_writes.scoped(&open.root)),
             now,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -8417,6 +8455,7 @@ fn version_fence_session_view(
         path: session.path.clone(),
         content_kind: session.content_kind,
         regime: session.regime,
+        lineage_claim_id: session.lineage_claim_id.clone(),
         lineage_absent: session.lineage_absent,
         first_update_pending: session.first_update_pending,
         last_settled_sha: session.last_settled_sha.clone(),
@@ -8439,6 +8478,7 @@ async fn settle_ydoc_session_for_version_fence(
             session.key.clone(),
             session.path.clone(),
             session.content_kind,
+            session.lineage_claim_id.clone(),
             settle_preimage(&session.last_settled_sha, &session.open_head_sha),
             session_id.to_owned(),
             Arc::new(self_writes.scoped(&open.root)),
@@ -9197,6 +9237,7 @@ struct YdocOpenResult {
     content_kind: &'static str,
     initial_update_base64: String,
     lineage: &'static str,
+    lineage_claim_id: Option<String>,
     /// Whether the ENTERED VERSION has a committed snapshot for this path.
     /// "absent" means the daemon bound an empty doc over a path the version
     /// does not contain — legitimate only while the caller is creating the
@@ -9239,6 +9280,7 @@ struct YdocRecordUpdateResult {
     /// Durable per-lineage head sequence (not a session-local counter).
     seq: i64,
     deduped: bool,
+    lineage_claim_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -9331,6 +9373,8 @@ struct YdocResyncParams {
 #[serde(rename_all = "camelCase")]
 struct YdocResyncResult {
     initial_update_base64: String,
+    lineage_claim_id: Option<String>,
+    recovered_paths: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -11104,6 +11148,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             "nextCursor": pending_cursor.as_ref().map(|cursor| cursor.cursor),
             "pendingCursor": pending_cursor.as_ref().map(relay_cursor_json),
             "changedPaths": changed_paths.iter().map(|change| json!({
+                "versionId": change.version_id,
                 "path": change.path,
                 "operation": change.operation,
                 "contentKind": change.content_kind,
@@ -11139,6 +11184,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             "nextCursor": pending_cursor.cursor,
             "pendingCursor": relay_cursor_json(&pending_cursor),
             "changedPaths": changed_paths.iter().map(|change| json!({
+                "versionId": change.version_id,
                 "path": change.path,
                 "operation": change.operation,
                 "contentKind": change.content_kind,
@@ -11440,6 +11486,12 @@ fn map_runtime(error: RuntimeError) -> WireError {
     }
     if matches!(
         &error,
+        RuntimeError::Collab(CollabError::LineageWriteStale { .. })
+    ) {
+        return wire(ErrorCode::InvalidParams, "ydoc-lineage-stale");
+    }
+    if matches!(
+        &error,
         RuntimeError::Collab(CollabError::ObjectAliasCollision)
     ) {
         return wire(ErrorCode::InvalidParams, "ydoc-object-alias-collision");
@@ -11671,6 +11723,9 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::MarkdownRewriteUnsupported { .. }
         | CollabError::BaseAlreadyClaimed
         | CollabError::BaseStateDiverged
+        | CollabError::BaseRelaySequencePending
+        | CollabError::BaseRelaySequenceCollision { .. }
+        | CollabError::LineageWriteStale { .. }
         | CollabError::SuccessorProjectionMismatch { .. }
         | CollabError::SuccessorResultMismatch { .. }
         | CollabError::LineageEpochChanged { .. }
@@ -12954,7 +13009,8 @@ mod tests {
         let baseline = supervisor.actor_count();
         let open_params = json!({
             "rootDir": scratch.path().to_string_lossy(),
-            "workspaceId": "cancelled-close"
+            "workspaceId": "cancelled-close",
+            "captureMode": "none"
         });
         let opened = service
             .workspace_open(&RequestContext::unbounded(), open_params.clone())

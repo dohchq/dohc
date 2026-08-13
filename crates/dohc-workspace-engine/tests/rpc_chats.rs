@@ -1002,6 +1002,7 @@ async fn synced_negative_agent_read_cursor_round_trips_over_the_wire() {
         workspace_id: "rpc-negative-agent-read".to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 0,
+        relay_seq: Some(0),
         op_kind: "chat.message.append".to_owned(),
         payload: json!({
             "messageId": "negative-message",

@@ -48,6 +48,7 @@ fn replicated_envelope(
         workspace_id: WS.to_owned(),
         origin_id: origin_id.to_owned(),
         origin_seq,
+        relay_seq: Some(origin_seq),
         op_kind: op_kind.to_owned(),
         payload,
         recorded_at_ms: 1_000 + origin_seq,

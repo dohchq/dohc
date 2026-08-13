@@ -9,11 +9,11 @@ use dohc_engine_sync::{
     BlobDownloadRequest, BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse,
     BlobUploadRequest, ClaimRequest, ClaimResponse, EpochRequest, EpochResponse,
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
-    KeyEnvelopeResponse, MAX_INGEST_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS,
-    ObservedBytes, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
-    PushResponse, RelayError, RelayTransport, ReplicationEnvelope, ShareBlobRequest,
-    ShareReplicationEnvelope, ShareViewRequest, ShareViewResponse, SharedChannelRequest,
-    SharedChannelResponse,
+    KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_INGEST_BLOB_BYTES,
+    MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, ObservedBytes, ProbeRequest, ProbeResponse, PullRequest,
+    PullResponse, PushRequest, PushResponse, RelayError, RelayTransport, ReplicationEnvelope,
+    ShareBlobRequest, ShareReplicationEnvelope, ShareViewRequest, ShareViewResponse,
+    SharedChannelRequest, SharedChannelResponse,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::http::{Response, Uri};
@@ -285,12 +285,66 @@ impl RelayTransport for HttpRelayTransport {
             if workspace_id != req.workspace_id {
                 return Err(RelayError::InvalidResponse);
             }
-            ops.push(row.into_workspace_envelope(workspace_id));
+            let envelope = row.into_workspace_envelope(workspace_id);
+            if envelope.relay_seq.is_none_or(|relay_seq| {
+                !(0..=dohc_engine_sync::MAX_WIRE_INTEGER).contains(&relay_seq)
+            }) {
+                return Err(RelayError::InvalidResponse);
+            }
+            ops.push(envelope);
         }
         Ok(PullResponse {
             ops,
             next_cursor: wire.next_cursor,
             has_more: wire.has_more,
+        })
+    }
+
+    fn lookup_log_coordinate(
+        &self,
+        req: LogCoordinateRequest,
+    ) -> Result<LogCoordinateResponse, RelayError> {
+        if req.origin_seq < 0 || req.origin_seq > dohc_engine_sync::MAX_WIRE_INTEGER {
+            return Err(RelayError::InvalidResponse);
+        }
+        let suffix = format!("/log/{}/{}", encode_segment(&req.origin_id), req.origin_seq);
+        let url = self.workspace_url(
+            &req.workspace_id,
+            &suffix,
+            &req.replication_epoch,
+            &req.stream_identity,
+            &[],
+        );
+        let wire: WireLogCoordinateResponse = self.json(
+            self.agent
+                .get(&url)
+                .header("authorization", &self.authorization())
+                .call(),
+            RequestContext::Workspace,
+        )?;
+        let (mut op, below_epoch_floor) = match wire {
+            WireLogCoordinateResponse::Absent => return Ok(LogCoordinateResponse::Absent),
+            WireLogCoordinateResponse::Present { op } => (op, false),
+            WireLogCoordinateResponse::PresentBelowEpochFloor { op } => (op, true),
+        };
+        let workspace_id = op.workspace_id.take().ok_or(RelayError::InvalidResponse)?;
+        if workspace_id != req.workspace_id
+            || op.origin_id != req.origin_id
+            || op.origin_seq != req.origin_seq
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        let envelope = op.into_workspace_envelope(workspace_id);
+        if envelope
+            .relay_seq
+            .is_none_or(|relay_seq| !(0..=dohc_engine_sync::MAX_WIRE_INTEGER).contains(&relay_seq))
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        Ok(if below_epoch_floor {
+            LogCoordinateResponse::PresentBelowEpochFloor(envelope)
+        } else {
+            LogCoordinateResponse::Present(envelope)
         })
     }
 
@@ -878,10 +932,18 @@ struct WireLogPage {
 }
 
 #[derive(Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+enum WireLogCoordinateResponse {
+    Present { op: WireLogRow },
+    PresentBelowEpochFloor { op: WireLogRow },
+    Absent,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireLogRow {
     #[serde(rename = "relaySeq", default)]
-    _relay_seq: Option<i64>,
+    relay_seq: Option<i64>,
     workspace_id: Option<String>,
     origin_id: String,
     origin_seq: i64,
@@ -896,6 +958,7 @@ impl WireLogRow {
             workspace_id,
             origin_id: self.origin_id,
             origin_seq: self.origin_seq,
+            relay_seq: self.relay_seq,
             op_kind: self.op_kind,
             payload: self.payload,
             recorded_at_ms: self.recorded_at_ms,

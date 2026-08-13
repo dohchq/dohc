@@ -348,12 +348,11 @@ describe("RelayFilePeer receiver contract", () => {
         });
 
         await receiver.bootstrapJoinIdentity(identity);
-        const pulled = await receiver.pull();
+        const pulled = await receiver.pull(async () => undefined);
         expect(
           pulled.conflictsOpened,
           "MUTATION: accepting a false beforeLatestMomentId would silently overwrite the receiver head",
         ).toBe(1);
-        await pulled.commitFetchCursor();
       } finally {
         await sessions?.closeAll().catch(() => undefined);
         await lifecycle?.stop().catch(() => undefined);

@@ -816,6 +816,15 @@ fn same_projected_content(left: &HeadV1, right: &HeadV1) -> bool {
     }
 }
 
+fn same_object_and_projected_content(left: &HeadV1, right: &HeadV1) -> bool {
+    same_projected_content(left, right)
+        && match (left.present(), right.present()) {
+            (None, None) => true,
+            (Some(left), Some(right)) => left.object_id == right.object_id,
+            _ => false,
+        }
+}
+
 fn validate_bindings(payload: &ConflictResolveV1) -> Result<(), SyncError> {
     let pair_matches = matches!(
         (payload.chosen_from, payload.resolution),
@@ -1609,7 +1618,9 @@ fn classify_imported_head(
     let result_path_ref = payload.result.path_ref();
     if result_path_ref == current_path_ref {
         return Ok((
-            if current_live == payload.result {
+            if current_live == payload.result
+                || same_object_and_projected_content(&current_live, &payload.result)
+            {
                 ImportedHeadDisposition::AlreadyResult
             } else {
                 ImportedHeadDisposition::Diverged
@@ -1622,7 +1633,9 @@ fn classify_imported_head(
     }
     let result_live = imported_live_head(tx, payload, result_path_ref)?;
     Ok((
-        if result_live == payload.result {
+        if result_live == payload.result
+            || same_object_and_projected_content(&result_live, &payload.result)
+        {
             ImportedHeadDisposition::AlreadyResult
         } else {
             ImportedHeadDisposition::Diverged
@@ -3860,6 +3873,7 @@ mod tests {
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: seq,
+            relay_seq: None,
             op_kind: kind.to_owned(),
             payload,
             recorded_at_ms: 21,
@@ -3994,6 +4008,7 @@ mod tests {
             workspace_id: "ws".to_owned(),
             origin_id: "resolution-peer".to_owned(),
             origin_seq: 0,
+            relay_seq: None,
             op_kind: "conflict.resolve".to_owned(),
             payload: built.value,
             recorded_at_ms: 20,
@@ -4057,6 +4072,7 @@ mod tests {
             workspace_id: "ws".to_owned(),
             origin_id: "resolution-peer".to_owned(),
             origin_seq: 1,
+            relay_seq: None,
             op_kind: "conflict.resolve".to_owned(),
             payload: reinstall.value,
             recorded_at_ms: 32,
@@ -4574,10 +4590,16 @@ mod tests {
         let _predecessor = dependent_doc.plaintext_insert(0, "dependency");
         let dependent = dependent_doc.plaintext_insert(0, "more ");
         let dependent_sha = store.put_binary_blob(&dependent).expect("dependent update");
+        let lineage_claim_id = dohc_engine_collab::read_marker(&store, &key)
+            .expect("read active marker")
+            .expect("active marker")
+            .lineage_claim_id
+            .expect("active lineage claim");
         let update = ReplicationEnvelope {
             workspace_id: "ws".to_owned(),
             origin_id: "dependency-peer".to_owned(),
             origin_seq: 0,
+            relay_seq: Some(10),
             op_kind: "ydoc.update".to_owned(),
             payload: json!({
                 "versionId": "main",
@@ -4585,6 +4607,7 @@ mod tests {
                 "path": "doc.md",
                 "contentKind": "plaintext",
                 "updateBlobSha256": dependent_sha,
+                "lineageClaimId": lineage_claim_id,
                 "isBaseState": false,
             }),
             recorded_at_ms: 20,
@@ -5171,6 +5194,104 @@ mod tests {
             })
             .expect("after replay");
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn independently_captured_result_closes_the_mirror_without_replacing_its_head() {
+        let (_scratch, mut store, key, built) = receiver_fixture();
+        let mut payload = built.validated.payload;
+        payload.lineage_transition = None;
+        let built = build_conflict_resolve_v1(payload.clone()).expect("unbound carrier");
+
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::retire_ydoc_lineage_in_tx(
+                    tx,
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
+                )
+            })
+            .expect("retire fixture lineage");
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-a".to_owned(),
+                    path: "doc.md".to_owned(),
+                    text: "resolved text".to_owned(),
+                    moment_id: "moment-local-equivalent".to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 20,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("capture equivalent result");
+        store
+            .write_with(&NoFaults, |tx| {
+                let conflict = TextConflict {
+                    conflict_id: payload.conflict_id.clone(),
+                    workspace_id: payload.workspace_id.clone(),
+                    path: payload.paths[0].clone(),
+                    target_version_id: payload.target_version_id.clone(),
+                    source_version_id: payload.source_version_id.clone(),
+                    created_at_ms: 19,
+                    updated_at_ms: 19,
+                    status: ConflictStatus::Open,
+                    chosen_from: ConflictChoice::Current,
+                    resolution: None,
+                    metadata: ConflictMetadata::origin("sync"),
+                    base: conflict_state_from_head(tx, &payload, &payload.current)?,
+                    current: conflict_state_from_head(tx, &payload, &payload.current)?,
+                    incoming: conflict_state_from_head(tx, &payload, &payload.incoming)?,
+                };
+                insert_text_conflict_if_absent(tx, &conflict).map_err(map_local_domain_error)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("open receiver mirror");
+
+        let parent = imported_envelope(0, "conflict.resolve", built.value);
+        crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases)
+            .expect("apply equivalent result");
+
+        let (text, latest, open, shadow): (String, String, i64, i64) = store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row(
+                        "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+                         WHERE s.workspace_id='ws' AND s.version_id='main' AND s.object_id='object-a'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT latest_moment_id FROM snapshots WHERE workspace_id='ws' \
+                         AND version_id='main' AND object_id='object-a'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM conflicts WHERE workspace_id='ws' AND status='open'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM moments WHERE workspace_id='ws' AND moment_id='moment-result'",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .expect("equivalent result state");
+        assert_eq!(
+            (text.as_str(), latest.as_str()),
+            ("resolved text", "moment-local-equivalent")
+        );
+        assert_eq!((open, shadow), (0, 1));
     }
 
     #[test]

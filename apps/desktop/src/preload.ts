@@ -31,6 +31,7 @@ import {
   isMenuCommand,
   isWorkbenchMenuCommand,
   parseEngineYDocRemoteUpdateEvent,
+  parseEngineYDocLineageReplacementEvent,
   parseEngineYDocSaveStateEvent,
   parseSearchResultsEvent,
   parseUpdateStateEvent,
@@ -468,6 +469,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.engineYDocReadArtifactAsset, payload),
   applyEngineYDocUpdate: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocApplyUpdate, payload),
+  acknowledgeEngineYDocLineageReplacement: (payload) =>
+    ipcRenderer.invoke(CHANNELS.engineYDocAcknowledgeLineageReplacement, payload),
   closeEngineYDocSession: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocClose, payload),
   // Same boundary rule as onSearchResults: every event is validated by the
@@ -481,6 +484,15 @@ const bridge: DohcDesktopBridge = {
     };
     ipcRenderer.on(CHANNELS.engineYDocRemoteUpdate, handler);
     return () => ipcRenderer.removeListener(CHANNELS.engineYDocRemoteUpdate, handler);
+  },
+  onEngineYDocLineageReplacement: (listener) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      const parsed = parseEngineYDocLineageReplacementEvent(raw);
+      if (parsed) listener(parsed);
+    };
+    ipcRenderer.on(CHANNELS.engineYDocLineageReplacement, handler);
+    return () =>
+      ipcRenderer.removeListener(CHANNELS.engineYDocLineageReplacement, handler);
   },
   onEngineYDocSaveState: (listener) => {
     const handler = (_event: unknown, raw: unknown) => {

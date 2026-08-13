@@ -508,8 +508,7 @@ every other file beside them.
 inventory above records the pre-S5 implementation; it is not the current wire
 contract. Product callers use `ydoc.open` and `ydoc.recordUpdate`. S5 also
 retries origination after a dependency resolves and after the first relay
-position commits. The two-peer acceptance gate remains part of #356, and
-relay-wide independent-base arbitration remains #547.
+position commits. The 2026-08-13 status below records the later two-peer work.
 
 Conflict settlement has one wire contract: `conflict.resolve` with
 `formatVersion: 1`. The origin prepares and validates the complete transition
@@ -519,78 +518,23 @@ malformed payload before it records or acknowledges the operation. Each peer
 commits the accepted compound change and its replication bookkeeping in one
 SQLite transaction.
 
-**There is currently no acceptance gate for base origination, and the obvious
-candidate is not one.** `apps/desktop/e2e/workspace-sync-rejoin.spec.ts` is
-active, but it uses a simulated second peer and removed the offline-conflict
-scenario. It remains a gate for the journal-drain gap only. It bootstraps
-`notes/plan.md` as an ordinary captured file and makes its second-machine edit
-through `createVersionedTextStore().writeTextFile`; it never opens a Y.Doc
-session and never asserts a base or delta operation. Its single mention of ydoc
-is a comment.
+**Status, 2026-08-13.** The acceptance gate now uses two real daemons and a
+real relay. It covers both edit directions, restart and rejoin, independent
+live Y.Doc bases, an ordinary recovered sibling, offline conflict settlement,
+binary bytes, protected files, and restored-origin recovery. A separate public
+join gate covers passphrase rollback, key-envelope installation before the
+first pull, exact protected and binary bytes, and restart.
 
-So that spec can go green and report **both** gaps closed while base origination
-remains broken — a green check that checks nothing, which is this program's
-dominant defect class arriving by the most plausible-looking route available.
+The Rust acceptance suite also keeps the lower-level origination proofs. It
+covers fresh creation, crash-shaped promotion of a local-only lineage, retained
+pending dependencies, base-once ordering, and reconstruction by a clean peer.
+These tests inspect the replicated Y.Doc state instead of trusting the origin's
+private rows or only checking that an operation exists.
 
-Closing #378 therefore needs a **new** assertion: two peers, a rich document, and
-a check that the base operation is emitted exactly once and that a delta follows
-it. Write that gate before writing the implementation.
+## What origination does not settle by itself
 
-**And that gate needs two scenarios, not one.** Starting from a fresh rich document
-proves base-once and delta-follows — but it passes even if the promotion
-requirement (2b) is entirely broken, because a fresh document never has a
-`base_claimed = 0` marker carrying durable updates. So add the promotion case
-explicitly:
-
-1. Open a document **local-only** and leave updates durable.
-2. **Terminate the owning process without running Y.Doc close, then reopen the same
-   database.** This step is the whole scenario and it is easy to get wrong in both
-   directions: merely leaving the session open keeps its lease, so the promotion
-   attempt is refused as `ydoc-session-busy` (`CollabError::LeaseHeld`, mapped in
-   `crates/dohc-workspace-engine/src/lib.rs`); closing it *normally* prunes the
-   local-only rows and destroys the precondition. Only a crash-shaped exit leaves
-   the state the case is about.
-3. Promote the lineage to replicated.
-4. Assert a **clean peer** reconstructs both the pre-promotion content *and* later
-   edits.
-
-Without step 4 against a clean peer, the origin reconstructs from its own private
-rows and the gate goes green on precisely the silent divergence 2b warns about.
-This is the same trap as the disabled rejoin spec above, one level deeper: a gate
-written to cover a fixed bug that never exercises the bug's precondition.
-
-**A third scenario is needed for the unresolved-update branch.** Both scenarios
-above can be satisfied using only *integrated* local updates — so an
-implementation that always full-state-encodes, silently dropping pending rows,
-passes them both. That is exactly the branch constraint 2b's second condition
-exists to force. So:
-
-1. Persist a **dependent** update before its predecessor arrives, leaving
-   `has_missing_updates()` true.
-2. Crash-exit and promote the lineage.
-3. Deliver the predecessor.
-4. Assert the clean peer converges on the full content.
-
-Without step 4 following step 3, a promotion that discarded the pending row looks
-identical to one that preserved it — the origin resolves the dependency from rows
-the peer never received.
-
-**And the fresh-creation scenario needs a clean peer too.** Base-once plus
-delta-follows is satisfied by a base that is empty, stale, or from the wrong
-document — nothing in that pair inspects what the base *contains*. So the fresh
-scenario must also replicate into a clean peer and assert both the initial content
-and a later edit, preferably including the persisted state vector, since the Y.Doc
-is canonical and the markdown projection is downstream of it. The promotion
-scenario cannot cover this: it validates the promotion path, not the fresh-creation
-encoder.
-
-Before claiming any sync behaviour works, check which table the write landed in.
-
-## What origination still does not settle
-
-#535 makes one daemon start a lineage. It does not make two daemons converge.
-Three behaviours stay unbuilt, and all three are dormant only because two
-daemons cannot share a relay workspace yet (#356).
+#535 makes one daemon start a lineage. The later sync work below supplies the
+multi-peer rules that origination cannot decide by itself.
 
 - **#546 — the first inbound base overwrites a divergent local head. Built.**
   The base branch of `ydoc_apply.rs` now compares the receiver's snapshot
@@ -601,10 +545,12 @@ daemons cannot share a relay workspace yet (#356).
   coalesce the conflict's incoming side instead of writing the head. A lineage
   that already holds durable rows still takes the union path — the CRDT is the
   merge there.
-- **#547 — two peers can originate the same lineage.** Object ids derive from
-  the path, so both peers claim a base for one coordinate and
-  `BaseStateDiverged` wedges it. Base-once needs relay-wide arbitration, or
-  object ids need to stop deriving from the path.
+- **#547 — two peers can originate the same coordinate. Built.** Each Y.Doc
+  operation carries an immutable lineage claim and each pulled operation
+  carries its relay position. The lower relay base wins. The losing peer
+  records its exact projection as an ordinary recovered file before it installs
+  the winner. A live session uses the lineage claim as a server-side write
+  fence and replaces its Y.Doc after arbitration.
 - **#548 — origination retry. Built in S5.** Dependency drain and the first
   committed relay position both retry a previously ineligible lineage. The
   retry keeps pending rows and publishes the full base only after it is safe.

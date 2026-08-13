@@ -342,6 +342,7 @@ mod tests {
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,
+            relay_seq: None,
             op_kind: kind.to_owned(),
             payload,
             recorded_at_ms: 2_000,

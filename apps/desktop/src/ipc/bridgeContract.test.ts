@@ -82,6 +82,7 @@ import {
   WriteWorkspaceTextResult,
   parseInvokeSiteSdkPayloadForIpc,
   parseInvokePluginPanelSdkPayloadForIpc,
+  CloudJoinWorkspacePayload,
 } from "./bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import {
@@ -1872,19 +1873,19 @@ describe("engine Y.Doc update IPC contract", () => {
     ).toBe(false);
   });
 
-  // AUDIT-SILENTSAVE round 2 (D1). The engine Y.Doc apply-update handler is a
-  // hardened boundary: for an unknown, foreign, or read-only-shared session it
-  // must be an INERT NO-OP that never throws. Zod runs before the session
-  // lookup, so a REQUIRED seq would reject a hostile/legacy caller with an
-  // exception and convert that silent refusal into a throwing one. The
-  // e2e that pins the refusal (workspace-shares.spec.ts) cannot run without
-  // share infrastructure, so the contract is pinned here instead.
-  it("accepts a payload with no seq, defaulting it, so the boundary cannot throw", () => {
+  it("defaults the save sequence but requires the lineage generation", () => {
     const parsed = ApplyEngineYDocUpdatePayload.parse({
       sessionId: "shared-view-bypass",
       update: new Uint8Array([1, 2, 3]),
+      lineageGeneration: 1,
     });
     expect(parsed.seq).toBe(0);
+    expect(() =>
+      ApplyEngineYDocUpdatePayload.parse({
+        sessionId: "shared-view-bypass",
+        update: new Uint8Array([1, 2, 3]),
+      }),
+    ).toThrow();
   });
 
   it("keeps a supplied seq and still rejects a nonsense one", () => {
@@ -1893,6 +1894,7 @@ describe("engine Y.Doc update IPC contract", () => {
         sessionId: "s",
         update: new Uint8Array([1]),
         seq: 7,
+        lineageGeneration: 2,
       }).seq,
     ).toBe(7);
     expect(() =>
@@ -1900,6 +1902,14 @@ describe("engine Y.Doc update IPC contract", () => {
         sessionId: "s",
         update: new Uint8Array([1]),
         seq: -1,
+        lineageGeneration: 2,
+      }),
+    ).toThrow();
+    expect(() =>
+      ApplyEngineYDocUpdatePayload.parse({
+        sessionId: "s",
+        update: new Uint8Array([1]),
+        lineageGeneration: 0,
       }),
     ).toThrow();
   });
@@ -2025,5 +2035,24 @@ describe("live document artifact asset IPC", () => {
     });
     expect(parsed.bytes.byteLength).toBe(49 * 1024);
     expect(parsed.descriptor.id).toBe("image-file");
+  });
+});
+
+describe("joined workspace passphrase boundary", () => {
+  it("accepts the optional local passphrase and bounds its IPC size", () => {
+    expect(
+      CloudJoinWorkspacePayload.parse({
+        syncCode: "dohc-sync:workspace:http://relay.test",
+        rootPath: "/workspace",
+        passphrase: "protected-files passphrase",
+      }).passphrase,
+    ).toBe("protected-files passphrase");
+    expect(() =>
+      CloudJoinWorkspacePayload.parse({
+        syncCode: "dohc-sync:workspace:http://relay.test",
+        rootPath: "/workspace",
+        passphrase: "x".repeat(4097),
+      }),
+    ).toThrow();
   });
 });

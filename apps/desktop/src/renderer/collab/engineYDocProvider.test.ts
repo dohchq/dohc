@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
@@ -21,7 +21,16 @@ function mockTransport(
   shipped: Uint8Array[];
   shippedSequences: number[];
   staged: () => number;
-  pushRemote: (update: Uint8Array) => void;
+  shippedGenerations: number[];
+  pushRemote: (update: Uint8Array, lineageGeneration?: number) => void;
+  replaceLineage: (input: {
+    update: Uint8Array;
+    recoveredPaths: string[];
+    lineageGeneration: number;
+  }) => Promise<void>;
+  releaseReplacement: () => void;
+  bufferDuringReplacement: (update: Uint8Array) => void;
+  acknowledgedGenerations: number[];
   closed: () => boolean;
   events: string[];
   mainDoc: Y.Doc;
@@ -41,7 +50,23 @@ function mockTransport(
   const shippedSequences: number[] = [];
   const events: string[] = [];
   let staged = 0;
-  let remoteListener: ((u: Uint8Array) => void) | null = null;
+  const shippedGenerations: number[] = [];
+  let remoteListener:
+    | ((update: Uint8Array, lineageGeneration: number) => void)
+    | null = null;
+  let replacementListener:
+    | ((input: {
+        update: Uint8Array;
+        recoveredPaths: string[];
+        lineageGeneration: number;
+      }) => void | Promise<void>)
+    | null = null;
+  let releaseReplacement!: () => void;
+  const replacementReleased = new Promise<void>((resolve) => {
+    releaseReplacement = resolve;
+  });
+  const acknowledgedGenerations: number[] = [];
+  const bufferedReplacementUpdates: Uint8Array[] = [];
   let closed = false;
   const transport: EngineYDocTransport = {
     async open() {
@@ -50,15 +75,17 @@ function mockTransport(
         initialUpdate: Y.encodeStateAsUpdate(mainDoc),
         objectId: "object-1",
         versionId: "main",
+        lineageGeneration: 1,
       };
     },
     stageLocalUpdate() {
       staged += 1;
       return staged;
     },
-    async applyLocalUpdate(update, sequence) {
+    async applyLocalUpdate(update, sequence, lineageGeneration) {
       shipped.push(update);
       shippedSequences.push(sequence);
+      shippedGenerations.push(lineageGeneration);
       events.push(`apply:${sequence}`);
       // Reflect the shipped edit into the "main" doc, like recordUpdate +
       // apply would, so a subsequent remote diff is computed against it.
@@ -71,6 +98,17 @@ function mockTransport(
         remoteListener = null;
       };
     },
+    onLineageReplacement(listener) {
+      replacementListener = listener;
+      return () => {
+        replacementListener = null;
+      };
+    },
+    async acknowledgeLineageReplacement(lineageGeneration) {
+      acknowledgedGenerations.push(lineageGeneration);
+      await replacementReleased;
+      return bufferedReplacementUpdates.splice(0);
+    },
     async close() {
       closed = true;
       events.push("close");
@@ -81,7 +119,15 @@ function mockTransport(
     shipped,
     shippedSequences,
     staged: () => staged,
-    pushRemote: (update) => remoteListener?.(update),
+    shippedGenerations,
+    pushRemote: (update, lineageGeneration = 1) =>
+      remoteListener?.(update, lineageGeneration),
+    replaceLineage: async (input) => {
+      await replacementListener?.(input);
+    },
+    releaseReplacement,
+    bufferDuringReplacement: (update) => bufferedReplacementUpdates.push(update),
+    acknowledgedGenerations,
     closed: () => closed,
     events,
     mainDoc,
@@ -177,7 +223,10 @@ describe("engine Y.Doc provider — renderer bridge", () => {
   it("declares scene maps before applying initial and remote updates", async () => {
     const seed = new Y.Doc();
     seed.getMap(EXCALIDRAW_SCENE_ROOTS.revisions).set("initial", "one");
-    let remoteListener: (update: Uint8Array) => void = () => {
+    let remoteListener: (
+      update: Uint8Array,
+      lineageGeneration: number,
+    ) => void = () => {
       throw new Error("Remote listener was not registered.");
     };
     let initialized = false;
@@ -192,6 +241,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
         return {
           available: true,
           initialUpdate: Y.encodeStateAsUpdate(seed),
+          lineageGeneration: 1,
         };
       },
       stageLocalUpdate: () => 1,
@@ -199,6 +249,12 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       onRemoteUpdate(listener) {
         remoteListener = listener;
         return () => undefined;
+      },
+      onLineageReplacement() {
+        return () => undefined;
+      },
+      async acknowledgeLineageReplacement() {
+        return [];
       },
       close: async () => undefined,
     });
@@ -213,7 +269,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
 
     const remote = new Y.Doc();
     remote.getMap(EXCALIDRAW_SCENE_ROOTS.assets).set("remote", "two");
-    remoteListener(Y.encodeStateAsUpdate(remote));
+    remoteListener(Y.encodeStateAsUpdate(remote), 1);
     expect(binding.doc?.share.get(EXCALIDRAW_SCENE_ROOTS.assets)).toBeInstanceOf(
       Y.Map,
     );
@@ -318,6 +374,57 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     batchedReceiver.destroy();
   });
 
+  it("does not lose a lineage replacement announced while open is in flight", async () => {
+    const initial = new Y.Doc();
+    typeIntoBody(initial, "Losing root.");
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+    let replacementListener:
+      | ((input: {
+          update: Uint8Array;
+          recoveredPaths: string[];
+          lineageGeneration: number;
+        }) => void | Promise<void>)
+      | null = null;
+    const acknowledged: number[] = [];
+    const transport: EngineYDocTransport = {
+      async open() {
+        void replacementListener?.({
+          update: Y.encodeStateAsUpdate(winner),
+          recoveredPaths: [],
+          lineageGeneration: 2,
+        });
+        return {
+          available: true,
+          initialUpdate: Y.encodeStateAsUpdate(initial),
+          lineageGeneration: 1,
+        };
+      },
+      stageLocalUpdate: () => 1,
+      applyLocalUpdate() {},
+      onRemoteUpdate() {
+        return () => undefined;
+      },
+      onLineageReplacement(listener) {
+        replacementListener = listener;
+        return () => {
+          replacementListener = null;
+        };
+      },
+      async acknowledgeLineageReplacement(lineageGeneration) {
+        acknowledged.push(lineageGeneration);
+        return [];
+      },
+      async close() {},
+    };
+
+    const binding = await bindEngineYDoc(transport);
+    await vi.waitFor(() => expect(acknowledged).toEqual([2]));
+
+    expect(bodyText(binding.doc!)).toContain("Winning root.");
+    expect(bodyText(binding.doc!)).not.toContain("Losing root.");
+    await binding.destroy();
+  });
   it("seeds the mirror doc from the engine's initial state before binding", async () => {
     const mock = mockTransport(["Seeded from engine."]);
     const batches = manualBatchScheduler();
@@ -400,6 +507,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
         return {
           available: true,
           initialUpdate: Y.encodeStateAsUpdate(mainDoc),
+          lineageGeneration: 1,
         };
       },
       stageLocalUpdate() {
@@ -417,6 +525,12 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       },
       onRemoteUpdate() {
         return () => undefined;
+      },
+      onLineageReplacement() {
+        return () => undefined;
+      },
+      async acknowledgeLineageReplacement() {
+        return [];
       },
       async close() {},
     };
@@ -460,7 +574,11 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     let closed = false;
     const transport: EngineYDocTransport = {
       async open() {
-        return { available: true, initialUpdate: Y.encodeStateAsUpdate(seed) };
+        return {
+          available: true,
+          initialUpdate: Y.encodeStateAsUpdate(seed),
+          lineageGeneration: 1,
+        };
       },
       stageLocalUpdate: () => 1,
       applyLocalUpdate() {
@@ -468,6 +586,12 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       },
       onRemoteUpdate() {
         return () => undefined;
+      },
+      onLineageReplacement() {
+        return () => undefined;
+      },
+      async acknowledgeLineageReplacement() {
+        return [];
       },
       async close() {
         closed = true;
@@ -517,6 +641,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
         return {
           available: true,
           initialUpdate: Y.encodeStateAsUpdate(seed),
+          lineageGeneration: 1,
         };
       },
       stageLocalUpdate: () => 1,
@@ -527,6 +652,12 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       },
       onRemoteUpdate() {
         return () => undefined;
+      },
+      onLineageReplacement() {
+        return () => undefined;
+      },
+      async acknowledgeLineageReplacement() {
+        return [];
       },
       async close() {
         closed = true;
@@ -572,6 +703,12 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       onRemoteUpdate() {
         return () => undefined;
       },
+      onLineageReplacement() {
+        return () => undefined;
+      },
+      async acknowledgeLineageReplacement() {
+        return [];
+      },
       async close() {},
     };
     const binding = await bindEngineYDoc(transport);
@@ -594,6 +731,12 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       applyLocalUpdate() {},
       onRemoteUpdate() {
         return () => undefined;
+      },
+      onLineageReplacement() {
+        return () => undefined;
+      },
+      async acknowledgeLineageReplacement() {
+        return [];
       },
       async close() {
         closes += 1;
@@ -640,5 +783,86 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     // Idempotent.
     await binding.destroy();
     expect(mock.events).toEqual(["apply:1", "close"]);
+  });
+
+  it("replaces an independent lineage instead of merging it and rejects stale updates", async () => {
+    const mock = mockTransport(["Losing root."]);
+    const binding = await bindEngineYDoc(mock.transport);
+    const losingDoc = binding.doc!;
+    const replacements: Y.Doc[] = [];
+    binding.onDocumentReplaced((doc) => replacements.push(doc));
+
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+    const replacing = mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(winner),
+      recoveredPaths: ["notes/live (recovered).md"],
+      lineageGeneration: 2,
+    });
+
+    // Main has announced the winner but has not accepted its generation yet.
+    // The losing editor must be inert throughout that handoff: a transaction
+    // already queued against it cannot be silently shipped under generation 1.
+    const shippedBeforeHandoff = mock.shipped.length;
+    typeIntoBody(losingDoc, "Late losing edit.");
+    expect(mock.shipped).toHaveLength(shippedBeforeHandoff);
+    expect(binding.doc).toBe(losingDoc);
+    expect(mock.acknowledgedGenerations).toEqual([2]);
+
+    const winnerBeforeRemote = Y.encodeStateVector(winner);
+    typeIntoBody(winner, "Remote during handoff.");
+    mock.bufferDuringReplacement(
+      Y.encodeStateAsUpdate(winner, winnerBeforeRemote),
+    );
+    mock.releaseReplacement();
+    await replacing;
+
+    expect(binding.doc).not.toBe(losingDoc);
+    expect(bodyText(binding.doc!)).toContain("Winning root.");
+    expect(bodyText(binding.doc!)).toContain("Remote during handoff.");
+    expect(bodyText(binding.doc!)).not.toContain("Losing root.");
+    expect(replacements).toEqual([binding.doc]);
+
+    const staleRemote = new Y.Doc();
+    typeIntoBody(staleRemote, "Stale remote.");
+    mock.pushRemote(Y.encodeStateAsUpdate(staleRemote), 1);
+    expect(bodyText(binding.doc!)).not.toContain("Stale remote.");
+
+    const shippedBefore = mock.shipped.length;
+    typeIntoBody(losingDoc, "Queued stale local.");
+    expect(mock.shipped).toHaveLength(shippedBefore);
+
+    typeIntoBody(binding.doc!, "Fresh local.");
+    await vi.waitFor(() => expect(mock.shippedGenerations.at(-1)).toBe(2));
+    await binding.destroy();
+  });
+
+  it("serializes consecutive lineage replacements", async () => {
+    const mock = mockTransport(["Losing root."]);
+    const binding = await bindEngineYDoc(mock.transport);
+    const firstWinner = new Y.Doc();
+    typeIntoBody(firstWinner, "First winner.");
+    const finalWinner = new Y.Doc();
+    typeIntoBody(finalWinner, "Final winner.");
+
+    const first = mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(firstWinner),
+      recoveredPaths: [],
+      lineageGeneration: 2,
+    });
+    const second = mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(finalWinner),
+      recoveredPaths: [],
+      lineageGeneration: 3,
+    });
+    expect(mock.acknowledgedGenerations).toEqual([2]);
+
+    mock.releaseReplacement();
+    await Promise.all([first, second]);
+
+    expect(mock.acknowledgedGenerations).toEqual([2, 3]);
+    expect(bodyText(binding.doc!)).toContain("Final winner.");
+    expect(bodyText(binding.doc!)).not.toContain("First winner.");
+    await binding.destroy();
   });
 });

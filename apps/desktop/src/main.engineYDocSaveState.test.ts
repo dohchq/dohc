@@ -21,6 +21,17 @@ function handlerSource(channel: string): string {
 }
 
 describe("engine Y.Doc save-state reporting in main", () => {
+  it("pairs the open generation with the live document state at hand-over", () => {
+    const handler = handlerSource("engineYDocOpen");
+    const answerAt = handler.lastIndexOf(
+      "return OpenEngineYDocSessionResult.parse({",
+    );
+    const answer = handler.slice(answerAt, handler.indexOf("});", answerAt) + 3);
+    expect(answer).toContain("initialUpdate: Y.encodeStateAsUpdate(session.doc)");
+    expect(answer).toContain("lineageGeneration");
+    expect(answer).not.toContain("initialUpdate: session.initialUpdate");
+  });
+
   it("keeps each move and delete capture lifecycle inside one exclusive workspace operation", () => {
     for (const channel of ["moveWorkspacePath", "deleteWorkspacePath"]) {
       const handler = handlerSource(channel);
@@ -155,6 +166,31 @@ describe("engine Y.Doc save-state reporting in main", () => {
     expect(handler).toMatch(
       /entry\.session\.applyLocalUpdate\(\s*input\.update,\s*\(\)\s*=>\s*noteLocalEdit\(/,
     );
+  });
+
+  it("blocks updates until the renderer acknowledges a lineage replacement", () => {
+    const open = handlerSource("engineYDocOpen");
+    expect(open).toContain("pendingEngineYDocLineageHandoffs.set(");
+    const acknowledgeAt = open.indexOf("acknowledge: ()");
+    const advanceAt = open.indexOf(
+      "registeredEntry.lineageGeneration = nextLineageGeneration",
+    );
+    expect(acknowledgeAt).toBeGreaterThan(-1);
+    expect(acknowledgeAt).toBeLessThan(advanceAt);
+    expect(open).toContain("queuedLineageReplacement = replacement");
+
+    const apply = handlerSource("engineYDocApplyUpdate");
+    const handoffAt = apply.indexOf("pendingEngineYDocLineageHandoffs.has(sessionKey)");
+    const generationAt = apply.indexOf(
+      "input.lineageGeneration !== entry.lineageGeneration",
+    );
+    const applyAt = apply.indexOf("entry.session.applyLocalUpdate(");
+    expect(handoffAt).toBeGreaterThan(-1);
+    expect(handoffAt).toBeLessThan(generationAt);
+    expect(generationAt).toBeLessThan(applyAt);
+
+    const acknowledge = handlerSource("engineYDocAcknowledgeLineageReplacement");
+    expect(acknowledge).toContain("handoff.acknowledge()");
   });
 
   it("makes updates inert after a successful delete and repeats the deleted state", () => {

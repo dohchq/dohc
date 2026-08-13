@@ -111,6 +111,7 @@ function openResult(overrides: Record<string, unknown> = {}) {
     initialUpdateBase64: "AAA=",
     head: "present",
     lineage: "existing",
+    lineageClaimId: null,
     ...overrides,
   };
 }

@@ -2,15 +2,17 @@
 //! transport, with real domain writes, materialization, capture, and leases.
 
 use base64::Engine as _;
-use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc, ensure_marker};
+use dohc_engine_collab::{
+    BaseRelayCoordinate, ClaimOutcome, ContentKind, DocKey, Regime, Ydoc, ensure_marker,
+};
 use dohc_engine_files::MAX_CAPTURE_TEXT_BYTES;
 use dohc_engine_protocol::{
     error::ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::{Request, WorkspaceHandle},
 };
-use dohc_engine_runtime::NoFaults;
-use dohc_engine_storage::EngineStore;
+use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
+use dohc_engine_sync::{LeaseProbe, ReplicationEnvelope, apply_ydoc_envelope};
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
 use serde_json::{Value, json};
@@ -2400,7 +2402,9 @@ fn settle_fingerprint(scratch: &ScratchDir, workspace_id: &str) -> SettleFingerp
             ("ydoc_updates", true),
             ("ydoc_snapshots", true),
             ("ydoc_deferred_updates", true),
+            ("ydoc_base_relay_candidates", true),
             ("ydoc_inactive_lineages", true),
+            ("ydoc_recovery_decisions", true),
         ]
         .into_iter()
         .map(|(table, scoped)| rows(table, scoped))
@@ -4691,4 +4695,358 @@ async fn an_uncoverable_dirty_session_evicts_and_the_reopen_resurrects_it() {
     )
     .await;
     call(&transport, &handle, 11, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_session_claim() {
+    const WORKSPACE_ID: &str = "ws-rpc-ydoc-lineage-claim";
+    const PATH: &str = "notes/lineage.md";
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, WORKSPACE_ID, 1).await;
+    let db_path = scratch.engine_db_path().expect("engine database path");
+    let connection = rusqlite::Connection::open(&db_path).expect("open engine database");
+    connection
+        .execute(
+            "INSERT INTO sync_identity \
+             (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+             VALUES (?1, 'local-origin', 'epoch', 'stream', 1)",
+            [WORKSPACE_ID],
+        )
+        .expect("seed sync identity");
+    connection
+        .execute(
+            "INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq) \
+             VALUES (?1, 'local-origin', 0)",
+            [WORKSPACE_ID],
+        )
+        .expect("enable sync");
+
+    // Create durable Y.Doc state, then release only the session and retain the
+    // lineage. This gives the next open an existing marker to bind.
+    let created = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "plaintext" }),
+    )
+    .await;
+    let created_session = created["sessionId"].as_str().expect("created session");
+    let originated = call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": created_session,
+            "updateBase64": plaintext_update("base"),
+        }),
+    )
+    .await;
+    let first_claim = originated["lineageClaimId"]
+        .as_str()
+        .expect("the first local record returns its server-observed claim")
+        .to_owned();
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.evict",
+        json!({ "sessionId": created_session }),
+    )
+    .await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "plaintext" }),
+    )
+    .await;
+    assert_eq!(opened["lineageClaimId"], json!(first_claim.clone()));
+    let session_id = opened["sessionId"].as_str().expect("session id");
+
+    #[derive(Debug, Clone, Copy)]
+    struct AlwaysLive;
+
+    impl LeaseProbe for AlwaysLive {
+        fn is_live(&self, _key: &DocKey) -> bool {
+            true
+        }
+    }
+
+    let object_id = opened["objectId"].as_str().expect("object id");
+    let foreign_doc = Ydoc::wire();
+    foreign_doc.plaintext_insert(0, "foreign base");
+    let foreign_base = foreign_doc.encode_full_state();
+    let store = EngineStore::open(&db_path, 2).expect("open fixture store");
+    let replacement_claim = store
+        .put_binary_blob(&foreign_base)
+        .expect("store foreign base");
+    drop(store);
+    connection
+        .execute(
+            "UPDATE ydoc_docs SET lineage_claim_id=?4 \
+             WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
+            rusqlite::params![WORKSPACE_ID, "main", PATH, &replacement_claim],
+        )
+        .expect("replace durable lineage claim");
+    let foreign = ReplicationEnvelope {
+        workspace_id: WORKSPACE_ID.to_owned(),
+        origin_id: "foreign-origin".to_owned(),
+        origin_seq: 0,
+        relay_seq: Some(1),
+        op_kind: "ydoc.update".to_owned(),
+        payload: json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": PATH,
+            "contentKind": "plaintext",
+            "updateBlobSha256": replacement_claim.clone(),
+            "lineageClaimId": replacement_claim.clone(),
+            "isBaseState": true,
+        }),
+        recorded_at_ms: 2,
+    };
+    let mut store = EngineStore::open(&db_path, 3).expect("reopen fixture store");
+    apply_ydoc_envelope(&mut store, &foreign, &NoFaults, &AlwaysLive)
+        .expect("queue foreign base behind live session");
+    drop(store);
+    let deferred_count = || {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE workspace_id=?1",
+                [WORKSPACE_ID],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count deferred Y.Doc updates")
+    };
+    assert_eq!(deferred_count(), 1, "the foreign base starts queued");
+    let before_stale_record = settle_fingerprint(&scratch, WORKSPACE_ID);
+
+    let stale = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                6,
+                "ydoc.recordUpdate",
+                Some(handle.clone()),
+                json!({
+                    "sessionId": session_id,
+                    "updateBase64": plaintext_update(" stale"),
+                }),
+            ),
+        )
+        .await
+        .expect_err("a stale session claim must refuse before mutation");
+    assert_eq!(stale.code, ErrorCode::InvalidParams);
+    assert_eq!(stale.message, "ydoc-lineage-stale");
+    assert_eq!(
+        settle_fingerprint(&scratch, WORKSPACE_ID),
+        before_stale_record,
+        "the stale record refusal must not mutate durable state"
+    );
+
+    let resynced = call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.resync",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    assert_eq!(resynced["lineageClaimId"], json!(replacement_claim.clone()));
+    assert_eq!(resynced["recoveredPaths"], json!([]));
+    assert_eq!(
+        deferred_count(),
+        1,
+        "mismatch resync must not consume the queued foreign base"
+    );
+
+    let recorded = call(
+        &transport,
+        &handle,
+        8,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": session_id,
+            "updateBase64": plaintext_update(" fresh"),
+        }),
+    )
+    .await;
+    assert_eq!(recorded["lineageClaimId"], json!(replacement_claim.clone()));
+
+    let client_claim = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                9,
+                "ydoc.recordUpdate",
+                Some(handle.clone()),
+                json!({
+                    "sessionId": session_id,
+                    "updateBase64": plaintext_update(" forged"),
+                    "lineageClaimId": first_claim,
+                }),
+            ),
+        )
+        .await
+        .expect_err("recordUpdate must not accept a client lineage claim");
+    assert_eq!(client_claim.code, ErrorCode::InvalidParams);
+
+    call(
+        &transport,
+        &handle,
+        10,
+        "ydoc.evict",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    call(&transport, &handle, 11, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn close_materializes_a_deferred_winning_lineage_before_returning() {
+    const WORKSPACE_ID: &str = "ws-rpc-ydoc-close-winner";
+    const PATH: &str = "notes/shared.md";
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, WORKSPACE_ID, 1).await;
+    let db_path = scratch.engine_db_path().expect("engine database path");
+    let connection = rusqlite::Connection::open(&db_path).expect("open engine database");
+    connection
+        .execute(
+            "INSERT INTO sync_identity \
+             (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+             VALUES (?1, 'local-origin', 'epoch', 'stream', 1)",
+            [WORKSPACE_ID],
+        )
+        .expect("seed sync identity");
+    connection
+        .execute(
+            "INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq) \
+             VALUES (?1, 'local-origin', 0)",
+            [WORKSPACE_ID],
+        )
+        .expect("enable sync");
+
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "plaintext" }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id");
+    let object_id = opened["objectId"].as_str().expect("object id");
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": session_id,
+            "updateBase64": plaintext_update("loser from B"),
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.settle",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("loser on disk"),
+        "loser from B"
+    );
+
+    #[derive(Debug, Clone, Copy)]
+    struct AlwaysLive;
+
+    impl LeaseProbe for AlwaysLive {
+        fn is_live(&self, _key: &DocKey) -> bool {
+            true
+        }
+    }
+
+    let key = DocKey::new(WORKSPACE_ID, "main", object_id).expect("document key");
+    let mut store = EngineStore::open(&db_path, 2).expect("open fixture store");
+    let persisted = dohc_engine_collab::load_persisted(&store, &key)
+        .expect("load losing lineage")
+        .expect("losing lineage exists");
+    let loser_base = persisted.doc.encode_full_state();
+    let loser_origin = persisted.marker.base_origin_id.expect("local base origin");
+    let loser_seq = persisted
+        .marker
+        .base_origin_seq
+        .expect("local base sequence");
+    assert!(matches!(
+        dohc_engine_collab::claim_base_at_relay(
+            &mut store,
+            &key,
+            ContentKind::Plaintext,
+            &loser_base,
+            &BaseRelayCoordinate::new(loser_origin, loser_seq, 20).expect("loser coordinate"),
+            &NoFaults,
+            20,
+        ),
+        Ok(TxnOutcome::Committed(ClaimOutcome::Resumed))
+    ));
+
+    let winner = Ydoc::wire();
+    winner.plaintext_insert(0, "winner from A");
+    let winner_base = winner.encode_full_state();
+    let winner_claim = store.put_binary_blob(&winner_base).expect("winner blob");
+    let foreign = ReplicationEnvelope {
+        workspace_id: WORKSPACE_ID.to_owned(),
+        origin_id: "winner-origin".to_owned(),
+        origin_seq: 0,
+        relay_seq: Some(10),
+        op_kind: "ydoc.update".to_owned(),
+        payload: json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": PATH,
+            "contentKind": "plaintext",
+            "updateBlobSha256": winner_claim.clone(),
+            "lineageClaimId": winner_claim,
+            "isBaseState": true,
+        }),
+        recorded_at_ms: 30,
+    };
+    let applied = apply_ydoc_envelope(&mut store, &foreign, &NoFaults, &AlwaysLive)
+        .expect("queue winning base behind live session");
+    assert!(
+        matches!(applied, dohc_engine_sync::ApplyOutcome::Applied(result) if result.deferred),
+        "the winning base must start deferred behind the live session"
+    );
+    drop(store);
+
+    call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.close",
+        json!({ "sessionId": session_id, "settle": false }),
+    )
+    .await;
+
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("winner on disk"),
+        "winner from A",
+        "close must materialize the winning lineage before it returns"
+    );
+    call(&transport, &handle, 6, "workspace.close", json!({})).await;
 }

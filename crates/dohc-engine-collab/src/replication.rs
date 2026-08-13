@@ -128,7 +128,7 @@ pub fn apply_remote_update_in_transaction(
         || remote.origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
     {
         return Err(CollabError::InvalidIdentifier {
-            reason: "remote origin_id must be non-empty and bounded",
+            reason: "remote origin_id must be non-empty and bounded".to_owned(),
         });
     }
     let sha = crate::hex_sha256(&remote.bytes);
@@ -139,7 +139,7 @@ pub fn apply_remote_update_in_transaction(
     let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
     if marker.regime != Regime::Replicated {
         return Err(CollabError::InvalidIdentifier {
-            reason: "remote update applied to a non-replicated lineage",
+            reason: "remote update applied to a non-replicated lineage".to_owned(),
         });
     }
     let base = load_for_replay_gate(tx, key)?;

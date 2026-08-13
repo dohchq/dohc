@@ -109,6 +109,10 @@ pub struct Marker {
     pub lineage_parent_claim_id: Option<String>,
     pub lineage_epoch_tag: Option<String>,
     pub path: Option<String>,
+    pub base_origin_id: Option<String>,
+    pub base_origin_seq: Option<i64>,
+    pub base_relay_seq: Option<i64>,
+    pub base_relay_confirmed_absent: bool,
 }
 
 /// A reconstructed durable doc plus the lineage metadata it was rebuilt from.
@@ -164,6 +168,66 @@ pub enum ClaimOutcome {
     /// A base already existed: the caller resumes the winner and emits NO second
     /// base (base-once). The existing base is left byte-intact.
     Resumed,
+    /// A lower relay position replaced this machine's active lineage.
+    Replaced {
+        losing_lineage_claim_id: String,
+        winner: Marker,
+    },
+    /// The active lineage owns the lower relay position. No bytes changed.
+    AlreadyWon { winner: Marker },
+}
+
+/// The authenticated relay coordinate of one base envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseRelayCoordinate {
+    pub origin_id: String,
+    pub origin_seq: i64,
+    pub relay_seq: i64,
+}
+
+/// The exact base coordinate to persist for an active lineage claim.
+#[derive(Debug, Clone, Copy)]
+pub struct BaseCoordinateRecord<'a> {
+    pub key: &'a DocKey,
+    pub lineage_claim_id: &'a str,
+    pub origin_id: &'a str,
+    pub origin_seq: i64,
+    pub relay_seq: Option<i64>,
+    pub now_ms: i64,
+}
+
+impl BaseRelayCoordinate {
+    pub fn new(
+        origin_id: impl Into<String>,
+        origin_seq: i64,
+        relay_seq: i64,
+    ) -> Result<Self, CollabError> {
+        let origin_id = origin_id.into();
+        if origin_id.is_empty() || origin_id.bytes().any(|byte| byte.is_ascii_control()) {
+            return Err(CollabError::InvalidIdentifier {
+                reason: "origin_id must be non-empty and contain no control bytes".to_owned(),
+            });
+        }
+        if origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES {
+            return Err(CollabError::InvalidIdentifier {
+                reason: format!(
+                    "origin_id is {} bytes; the limit is {} bytes",
+                    origin_id.len(),
+                    dohc_engine_storage::MAX_IDENTIFIER_BYTES
+                ),
+            });
+        }
+        if origin_seq < 0 || relay_seq < 0 {
+            return Err(CollabError::InvalidIdentifier {
+                reason: "base relay coordinates must be nonnegative".to_owned(),
+            });
+        }
+        Ok(Self {
+            origin_id,
+            origin_seq,
+            relay_seq,
+        })
+    }
 }
 
 /// The result of an exact predecessor-claim/state-vector successor CAS.
@@ -517,6 +581,85 @@ pub fn record_local_update_creating_marker_guarded<F>(
 where
     F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
 {
+    record_local_update_creating_marker_guarded_inner(
+        store,
+        key,
+        path,
+        content_kind,
+        regime,
+        update,
+        actor_origin_id,
+        None,
+        ensure_parent_row,
+        require_empty_lineage,
+        request_id,
+        faults,
+        now_ms,
+        post_append,
+    )
+}
+
+/// [`record_local_update_creating_marker_guarded`] with an active-lineage CAS.
+/// `None` means the caller is bound to an unclaimed lineage, not "skip the
+/// guard". The idempotency hash binds the expected claim before replay.
+#[allow(clippy::too_many_arguments)]
+pub fn record_local_update_creating_marker_guarded_for_lineage<F>(
+    store: &mut EngineStore,
+    key: &DocKey,
+    path: Option<&str>,
+    content_kind: ContentKind,
+    regime: Regime,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    expected_lineage_claim_id: Option<&str>,
+    ensure_parent_row: bool,
+    require_empty_lineage: bool,
+    request_id: Option<&str>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+    post_append: F,
+) -> Result<TxnOutcome<AppendOutcome>, CollabError>
+where
+    F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
+{
+    record_local_update_creating_marker_guarded_inner(
+        store,
+        key,
+        path,
+        content_kind,
+        regime,
+        update,
+        actor_origin_id,
+        Some(expected_lineage_claim_id),
+        ensure_parent_row,
+        require_empty_lineage,
+        request_id,
+        faults,
+        now_ms,
+        post_append,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_local_update_creating_marker_guarded_inner<F>(
+    store: &mut EngineStore,
+    key: &DocKey,
+    path: Option<&str>,
+    content_kind: ContentKind,
+    regime: Regime,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    lineage_guard: Option<Option<&str>>,
+    ensure_parent_row: bool,
+    require_empty_lineage: bool,
+    request_id: Option<&str>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+    post_append: F,
+) -> Result<TxnOutcome<AppendOutcome>, CollabError>
+where
+    F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
+{
     // The caller's idempotency key hashes over the DOC COORDINATES and the
     // update bytes: content-addressed dedupe alone only holds while the
     // original row survives compaction — a retry after the fold would
@@ -529,11 +672,16 @@ where
         };
         crate::hex_sha256(
             format!(
-                "ydoc-record-v2{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}",
+                "ydoc-record-v3{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}{sep}{}",
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
                 crate::hex_sha256(update),
+                match lineage_guard {
+                    None => "unguarded".to_owned(),
+                    Some(None) => "unclaimed".to_owned(),
+                    Some(Some(claim)) => format!("claim:{claim}"),
+                },
                 sep = char::from(0),
             )
             .as_bytes(),
@@ -560,6 +708,15 @@ where
                     seq: -result_seq,
                     deduped: true,
                     emit_outbound: false,
+                });
+            }
+        }
+        if let Some(expected) = lineage_guard {
+            let observed = query_marker(tx, key)?.and_then(|marker| marker.lineage_claim_id);
+            if observed.as_deref() != expected {
+                return Err(CollabError::LineageWriteStale {
+                    expected: expected.map(ToOwned::to_owned),
+                    observed,
                 });
             }
         }
@@ -631,6 +788,10 @@ where
                     lineage_parent_claim_id: None,
                     lineage_epoch_tag: None,
                     path: path.map(str::to_owned),
+                    base_origin_id: None,
+                    base_origin_seq: None,
+                    base_relay_seq: None,
+                    base_relay_confirmed_absent: false,
                 }
             }
         };
@@ -831,6 +992,34 @@ pub fn claim_base(
     })
 }
 
+/// Claim or arbitrate a base observed at an authenticated relay coordinate.
+/// Lower relay position wins.
+pub fn claim_base_at_relay(
+    store: &mut EngineStore,
+    key: &DocKey,
+    content_kind: ContentKind,
+    base_bytes: &[u8],
+    coordinate: &BaseRelayCoordinate,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<ClaimOutcome>, CollabError> {
+    validate_update_bytes(base_bytes)?;
+    let doc = Ydoc::wire();
+    doc.apply(base_bytes)?;
+    let sv_bytes = doc.encode_state_vector();
+    store.write_with(faults, |tx| {
+        claim_base_at_relay_in_tx(
+            tx,
+            key,
+            content_kind,
+            base_bytes,
+            &sv_bytes,
+            coordinate,
+            now_ms,
+        )
+    })
+}
+
 /// Transaction-composable form of [`claim_base`] for callers that must claim
 /// a REMOTE base atomically with the imported coordinate's admission and ack
 /// (a standalone claim before admission would persist a marker for an
@@ -841,6 +1030,39 @@ pub fn claim_base_in_tx(
     content_kind: ContentKind,
     base_bytes: &[u8],
     sv_bytes: &[u8],
+    now_ms: i64,
+) -> Result<ClaimOutcome, CollabError> {
+    claim_base_with_coordinate_in_tx(tx, key, content_kind, base_bytes, sv_bytes, None, now_ms)
+}
+
+/// Transaction-composable form of [`claim_base_at_relay`].
+pub fn claim_base_at_relay_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    content_kind: ContentKind,
+    base_bytes: &[u8],
+    sv_bytes: &[u8],
+    coordinate: &BaseRelayCoordinate,
+    now_ms: i64,
+) -> Result<ClaimOutcome, CollabError> {
+    claim_base_with_coordinate_in_tx(
+        tx,
+        key,
+        content_kind,
+        base_bytes,
+        sv_bytes,
+        Some(coordinate),
+        now_ms,
+    )
+}
+
+fn claim_base_with_coordinate_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    content_kind: ContentKind,
+    base_bytes: &[u8],
+    sv_bytes: &[u8],
+    coordinate: Option<&BaseRelayCoordinate>,
     now_ms: i64,
 ) -> Result<ClaimOutcome, CollabError> {
     validate_update_bytes(base_bytes)?;
@@ -860,8 +1082,12 @@ pub fn claim_base_in_tx(
               head_update_seq, head_snapshot_seq, lineage_claim_status, updated_at_ms) \
              VALUES (?1, ?2, ?3, ?4, 'replicated', 0, 0, 'unclaimed', ?5) \
              ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET \
-               regime = 'replicated', content_kind = excluded.content_kind, \
-               updated_at_ms = excluded.updated_at_ms",
+               regime = CASE WHEN lineage_claim_status='unclaimed' \
+                             THEN 'replicated' ELSE regime END, \
+               content_kind = CASE WHEN lineage_claim_status='unclaimed' \
+                                   THEN excluded.content_kind ELSE content_kind END, \
+               updated_at_ms = CASE WHEN lineage_claim_status='unclaimed' \
+                                    THEN excluded.updated_at_ms ELSE updated_at_ms END",
             rusqlite::params![
                 key.workspace_id,
                 key.version_id,
@@ -881,9 +1107,76 @@ pub fn claim_base_in_tx(
         match marker.lineage_claim_status {
             LineageClaimStatus::Unclaimed => {}
             LineageClaimStatus::Exact => {
-                return match marker.lineage_claim_id {
-                    Some(stored) if stored == incoming_claim_id => Ok(ClaimOutcome::Resumed),
-                    Some(_) => Err(CollabError::BaseStateDiverged),
+                return match marker.lineage_claim_id.clone() {
+                    Some(stored) if stored == incoming_claim_id => {
+                        if let Some(coordinate) = coordinate {
+                            record_base_coordinate_in_tx(
+                                tx,
+                                BaseCoordinateRecord {
+                                    key,
+                                    lineage_claim_id: &incoming_claim_id,
+                                    origin_id: &coordinate.origin_id,
+                                    origin_seq: coordinate.origin_seq,
+                                    relay_seq: Some(coordinate.relay_seq),
+                                    now_ms,
+                                },
+                            )?;
+                        }
+                        Ok(ClaimOutcome::Resumed)
+                    }
+                    Some(stored) => {
+                        let Some(coordinate) = coordinate else {
+                            return Err(CollabError::BaseStateDiverged);
+                        };
+                        let local_relay_seq = match marker.base_relay_seq {
+                            Some(relay_seq) => relay_seq,
+                            None if marker.base_relay_confirmed_absent => {
+                                replace_base_snapshot(
+                                    tx,
+                                    BaseSnapshotReplacement {
+                                        key,
+                                        content_kind,
+                                        base_bytes,
+                                        state_vector_bytes: sv_bytes,
+                                        coordinate,
+                                        incoming_claim_id: &incoming_claim_id,
+                                        now_ms,
+                                    },
+                                )?;
+                                let winner = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+                                return Ok(ClaimOutcome::Replaced {
+                                    losing_lineage_claim_id: stored,
+                                    winner,
+                                });
+                            }
+                            None => return Err(CollabError::BaseRelaySequencePending),
+                        };
+                        if coordinate.relay_seq == local_relay_seq {
+                            return Err(CollabError::BaseRelaySequenceCollision {
+                                relay_seq: coordinate.relay_seq,
+                            });
+                        }
+                        if coordinate.relay_seq > local_relay_seq {
+                            return Ok(ClaimOutcome::AlreadyWon { winner: marker });
+                        }
+                        replace_base_snapshot(
+                            tx,
+                            BaseSnapshotReplacement {
+                                key,
+                                content_kind,
+                                base_bytes,
+                                state_vector_bytes: sv_bytes,
+                                coordinate,
+                                incoming_claim_id: &incoming_claim_id,
+                                now_ms,
+                            },
+                        )?;
+                        let winner = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+                        Ok(ClaimOutcome::Replaced {
+                            losing_lineage_claim_id: stored,
+                            winner,
+                        })
+                    }
                     None => Err(CollabError::Corrupt {
                         reason: "exact Y.Doc lineage claim is missing its claim id".to_owned(),
                     }),
@@ -918,13 +1211,17 @@ pub fn claim_base_in_tx(
         tx.execute(
             "UPDATE ydoc_docs SET lineage_claim_status='exact', \
              lineage_claim_id=?4, lineage_parent_claim_id=NULL, lineage_epoch_tag=NULL, \
-             updated_at_ms = ?5 \
+             base_origin_id=?5,base_origin_seq=?6,base_relay_seq=?7, \
+             base_relay_confirmed_absent=0,updated_at_ms=?8 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             rusqlite::params![
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
                 incoming_claim_id,
+                coordinate.map(|value| value.origin_id.as_str()),
+                coordinate.map(|value| value.origin_seq),
+                coordinate.map(|value| value.relay_seq),
                 now_ms
             ],
         )
@@ -933,6 +1230,175 @@ pub fn claim_base_in_tx(
             base_snapshot_sha: base_sha,
         })
     })()
+}
+
+/// Persist an exact base origin and, when supplied, its authenticated relay
+/// position. The claim id must still be active in this transaction.
+pub fn record_base_coordinate(
+    store: &mut EngineStore,
+    record: BaseCoordinateRecord<'_>,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<()>, CollabError> {
+    store.write_with(faults, |tx| record_base_coordinate_in_tx(tx, record))
+}
+
+pub fn record_base_coordinate_in_tx(
+    tx: &Transaction<'_>,
+    record: BaseCoordinateRecord<'_>,
+) -> Result<(), CollabError> {
+    let BaseCoordinateRecord {
+        key,
+        lineage_claim_id,
+        origin_id,
+        origin_seq,
+        relay_seq,
+        now_ms,
+    } = record;
+    if origin_id.is_empty()
+        || origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+        || origin_id.bytes().any(|byte| byte.is_ascii_control())
+        || origin_seq < 0
+        || relay_seq.is_some_and(|value| value < 0)
+    {
+        return Err(CollabError::InvalidIdentifier {
+            reason: "base relay coordinates must be bounded and nonnegative".to_owned(),
+        });
+    }
+    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.lineage_claim_id.as_deref() != Some(lineage_claim_id) {
+        return Err(CollabError::LineageWriteStale {
+            expected: Some(lineage_claim_id.to_owned()),
+            observed: marker.lineage_claim_id,
+        });
+    }
+    let replace = marker.base_origin_id.is_none()
+        || marker.base_origin_seq.is_none()
+        || matches!((relay_seq, marker.base_relay_seq), (Some(new), Some(old)) if new < old)
+        || matches!((relay_seq, marker.base_relay_seq), (Some(_), None));
+    if replace {
+        tx.execute(
+            "UPDATE ydoc_docs SET base_origin_id=?4,base_origin_seq=?5, \
+             base_relay_seq=COALESCE(?6,base_relay_seq), \
+             base_relay_confirmed_absent=CASE WHEN ?6 IS NULL \
+               THEN base_relay_confirmed_absent ELSE 0 END,updated_at_ms=?7 \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            rusqlite::params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                origin_id,
+                origin_seq,
+                relay_seq,
+                now_ms,
+            ],
+        )
+        .map_err(map_sql)?;
+    }
+    Ok(())
+}
+
+/// Mark a stored exact coordinate as authoritatively absent at the relay.
+pub fn mark_base_coordinate_absent_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    lineage_claim_id: &str,
+    origin_id: &str,
+    origin_seq: i64,
+    now_ms: i64,
+) -> Result<(), CollabError> {
+    let changed = tx
+        .execute(
+            "UPDATE ydoc_docs SET base_relay_confirmed_absent=1,updated_at_ms=?7 \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+               AND lineage_claim_id=?4 AND base_origin_id=?5 AND base_origin_seq=?6 \
+               AND base_relay_seq IS NULL",
+            rusqlite::params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                lineage_claim_id,
+                origin_id,
+                origin_seq,
+                now_ms,
+            ],
+        )
+        .map_err(map_sql)?;
+    if changed != 1 {
+        return Err(CollabError::BaseStateDiverged);
+    }
+    Ok(())
+}
+
+struct BaseSnapshotReplacement<'a> {
+    key: &'a DocKey,
+    content_kind: ContentKind,
+    base_bytes: &'a [u8],
+    state_vector_bytes: &'a [u8],
+    coordinate: &'a BaseRelayCoordinate,
+    incoming_claim_id: &'a str,
+    now_ms: i64,
+}
+
+fn replace_base_snapshot(
+    tx: &Transaction<'_>,
+    replacement: BaseSnapshotReplacement<'_>,
+) -> Result<(), CollabError> {
+    let BaseSnapshotReplacement {
+        key,
+        content_kind,
+        base_bytes,
+        state_vector_bytes,
+        coordinate,
+        incoming_claim_id,
+        now_ms,
+    } = replacement;
+    tx.execute(
+        "DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(map_sql)?;
+    tx.execute(
+        "DELETE FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(map_sql)?;
+    let base_sha = put_binary_blob(tx, base_bytes)?;
+    let sv_sha = put_binary_blob(tx, state_vector_bytes)?;
+    tx.execute(
+        "INSERT INTO ydoc_snapshots (workspace_id,version_id,object_id,up_to_seq, \
+         snapshot_blob_sha256,state_vector_blob_sha256,recorded_at_ms) \
+         VALUES (?1,?2,?3,0,?4,?5,?6)",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            base_sha,
+            sv_sha,
+            now_ms,
+        ],
+    )
+    .map_err(map_sql)?;
+    tx.execute(
+        "UPDATE ydoc_docs SET content_kind=?4,regime='replicated',head_update_seq=0, \
+         head_snapshot_seq=0,last_settled_sha=NULL,lineage_claim_status='exact', \
+         lineage_claim_id=?5,lineage_parent_claim_id=NULL,lineage_epoch_tag=NULL, \
+         base_origin_id=?6,base_origin_seq=?7,base_relay_seq=?8, \
+         base_relay_confirmed_absent=0,updated_at_ms=?9 \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            content_kind.as_str(),
+            incoming_claim_id,
+            coordinate.origin_id,
+            coordinate.origin_seq,
+            coordinate.relay_seq,
+            now_ms,
+        ],
+    )
+    .map_err(map_sql)?;
+    Ok(())
 }
 
 /// Atomically archive an exact active predecessor and install a fresh
@@ -1363,6 +1829,27 @@ pub fn record_update_in_tx(
     append_local_update(tx, key, &marker, update, &sha, None, now_ms)
 }
 
+/// Append only if the active claim matches the lineage an open session bound
+/// to. The check runs before any blob, update, or journal mutation.
+pub fn record_update_for_lineage_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    expected_lineage_claim_id: Option<&str>,
+    update: &[u8],
+    now_ms: i64,
+) -> Result<AppendOutcome, CollabError> {
+    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.lineage_claim_id.as_deref() != expected_lineage_claim_id {
+        return Err(CollabError::LineageWriteStale {
+            expected: expected_lineage_claim_id.map(ToOwned::to_owned),
+            observed: marker.lineage_claim_id,
+        });
+    }
+    validate_update_bytes(update)?;
+    let sha = crate::hex_sha256(update);
+    append_local_update(tx, key, &marker, update, &sha, None, now_ms)
+}
+
 /// Encode the base bytes (and their state vector) that ORIGINATE `key`'s
 /// replicated lineage, from the state persisted inside the caller's
 /// transaction.
@@ -1727,6 +2214,10 @@ struct MarkerRow {
     lineage_parent_claim_id: Option<String>,
     lineage_epoch_tag: Option<String>,
     path: Option<String>,
+    base_origin_id: Option<String>,
+    base_origin_seq: Option<i64>,
+    base_relay_seq: Option<i64>,
+    base_relay_confirmed_absent: bool,
 }
 
 pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Marker>, CollabError> {
@@ -1734,7 +2225,8 @@ pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Mar
         .query_row(
             "SELECT content_kind, regime, head_update_seq, head_snapshot_seq, \
              lineage_claim_status, lineage_claim_id, lineage_parent_claim_id, \
-             lineage_epoch_tag, path FROM ydoc_docs \
+             lineage_epoch_tag, path, base_origin_id, base_origin_seq, base_relay_seq, \
+             base_relay_confirmed_absent FROM ydoc_docs \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id],
             |row| {
@@ -1748,6 +2240,10 @@ pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Mar
                     lineage_parent_claim_id: row.get(6)?,
                     lineage_epoch_tag: row.get(7)?,
                     path: row.get(8)?,
+                    base_origin_id: row.get(9)?,
+                    base_origin_seq: row.get(10)?,
+                    base_relay_seq: row.get(11)?,
+                    base_relay_confirmed_absent: row.get(12)?,
                 })
             },
         )
@@ -1764,6 +2260,10 @@ pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Mar
             lineage_parent_claim_id: row.lineage_parent_claim_id,
             lineage_epoch_tag: row.lineage_epoch_tag,
             path: row.path,
+            base_origin_id: row.base_origin_id,
+            base_origin_seq: row.base_origin_seq,
+            base_relay_seq: row.base_relay_seq,
+            base_relay_confirmed_absent: row.base_relay_confirmed_absent,
         })
     })
     .transpose()

@@ -63,12 +63,20 @@ function deferredBridge() {
   const api = {
     openEngineYDocSession: vi.fn(
       () =>
-        new Promise<{ available: boolean; initialUpdate?: Uint8Array }>(
+        new Promise<{
+          available: boolean;
+          initialUpdate?: Uint8Array;
+          lineageGeneration?: number;
+        }>(
           (resolve, reject) => {
             settle = (result) =>
               resolve(
                 result.available
-                  ? { available: true, initialUpdate: Y.encodeStateAsUpdate(doc) }
+                  ? {
+                      available: true,
+                      initialUpdate: Y.encodeStateAsUpdate(doc),
+                      lineageGeneration: 1,
+                    }
                   : { available: false },
               );
             fail = reject;
@@ -77,6 +85,7 @@ function deferredBridge() {
     ),
     applyEngineYDocUpdate: vi.fn(async () => undefined),
     onEngineYDocRemoteUpdate: () => () => undefined,
+    onEngineYDocLineageReplacement: () => () => undefined,
     onEngineYDocSaveState: () => () => undefined,
     closeEngineYDocSession: vi.fn(async () => undefined),
   };

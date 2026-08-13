@@ -94,6 +94,7 @@ pub(crate) enum ContentKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MomentMaterializationChange {
+    pub version_id: String,
     pub path: String,
     pub operation: &'static str,
     pub content_kind: &'static str,
@@ -289,6 +290,11 @@ pub(crate) fn stored_materialization_changes(
     values
         .into_iter()
         .map(|value| {
+            let version_id = value
+                .get("versionId")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(SyncError::CoordinateDiverged)?
+                .to_owned();
             let path = value
                 .get("path")
                 .and_then(serde_json::Value::as_str)
@@ -302,9 +308,11 @@ pub(crate) fn stored_materialization_changes(
             let content_kind = match value.get("contentKind").and_then(serde_json::Value::as_str) {
                 Some("text") => "text",
                 Some("binary") => "binary",
+                Some("secret") => "secret",
                 _ => return Err(SyncError::CoordinateDiverged),
             };
             Ok(MomentMaterializationChange {
+                version_id,
                 path,
                 operation,
                 content_kind,
@@ -337,6 +345,7 @@ pub(crate) fn record_materialization_changes(
             .iter()
             .map(|change| {
                 serde_json::json!({
+                    "versionId": change.version_id,
                     "path": change.path,
                     "operation": change.operation,
                     "contentKind": change.content_kind,
@@ -549,6 +558,7 @@ fn apply_moment_append(
             )?;
             let materialization_changes = active
                 .then(|| MomentMaterializationChange {
+                    version_id: payload.version_id.clone(),
                     path: payload.path.clone(),
                     operation: "delete",
                     content_kind: after_kind.as_str(),
@@ -637,12 +647,14 @@ fn apply_moment_append(
                 && before_path != payload.payload_after_path
             {
                 materialization_changes.push(MomentMaterializationChange {
+                    version_id: payload.version_id.clone(),
                     path: before_path.to_owned(),
                     operation: "delete",
                     content_kind: after_kind.as_str(),
                 });
             }
             materialization_changes.push(MomentMaterializationChange {
+                version_id: payload.version_id.clone(),
                 path: payload.payload_after_path.clone(),
                 operation: "write",
                 content_kind: after_kind.as_str(),

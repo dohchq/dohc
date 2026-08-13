@@ -27,6 +27,10 @@ function conflict(id: string): WorkspaceVersionConflict {
   };
 }
 
+function syncConflict(id: string): WorkspaceVersionConflict {
+  return { ...conflict(id), origin: "sync" };
+}
+
 // #691: findBy/waitFor deadlines are wall-clock, so a loaded machine can spend
 // them before the event loop returns to the render. Every async path here is a
 // mocked bridge call, so drive it to its end instead of waiting on a clock:
@@ -73,6 +77,26 @@ describe("conflictCountCopy", () => {
 });
 
 describe("ConflictReviewDialog paging", () => {
+  it("labels a sync conflict as two machines, not two versions", async () => {
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+      conflicts: [syncConflict("sync-c-1")],
+      nextAfterConflictId: null,
+    });
+    render(
+      <ConflictReviewDialog
+        workspaceId="ws-1"
+        onWorkspaceStateChanged={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    await settle();
+
+    expect(screen.getByText("On this machine")).toBeTruthy();
+    expect(screen.getByText("On your other machine")).toBeTruthy();
+    expect(screen.queryByText("Main")).toBeNull();
+    expect(screen.queryByText("Feature")).toBeNull();
+  });
+
   it("loads the next page with the continuation and appends it", async () => {
     bridgeMock.listWorkspaceVersionConflicts.mockImplementation(
       async (payload: { afterConflictId?: string }) =>

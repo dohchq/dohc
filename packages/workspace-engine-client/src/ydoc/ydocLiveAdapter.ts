@@ -24,6 +24,7 @@ import {
   decodeYdocOpenResult,
   decodeYdocRecordUpdateResult,
   decodeYdocRemoteUpdatePayload,
+  decodeYdocResyncResult,
   decodeYdocSettleResult,
   type YdocApplyExternalMarkdownEditParams,
   type YdocApplyExternalMarkdownEditResult,
@@ -53,6 +54,7 @@ export interface EngineTransport {
 
 export type YdocAdapterErrorCode =
   | "invalid-update"
+  | "lineage-changed"
   | "response-mismatch"
   | "resync-needed"
   | "seed-not-permitted"
@@ -555,7 +557,10 @@ interface LocalRecordCapture {
 }
 
 export class YdocAdapterSession {
-  readonly doc: Y.Doc;
+  private activeDoc: Y.Doc;
+  get doc(): Y.Doc {
+    return this.activeDoc;
+  }
   initialUpdate: Uint8Array;
   readonly objectId: string;
   readonly path: string;
@@ -573,6 +578,7 @@ export class YdocAdapterSession {
   // of those edits — refusing it would strand them and wedge the lease on an
   // unsettled close.
   lineage: "existing" | "absent" = "existing";
+  lineageClaimId: string | null;
 
   private readonly adapter: YdocLiveAdapter;
   private closed = false;
@@ -598,6 +604,10 @@ export class YdocAdapterSession {
     (error: YdocResyncNeededError) => void
   >();
   private readonly sessionErrorListeners = new Set<(error: unknown) => void>();
+  private readonly lineageReplacementListeners = new Set<
+    (doc: Y.Doc, recoveredPaths: string[]) => void
+  >();
+  private readonly retiredDocs = new Set<Y.Doc>();
 
   constructor(
     adapter: YdocLiveAdapter,
@@ -609,6 +619,7 @@ export class YdocAdapterSession {
       contentKind: YdocContentKind;
       initialUpdate: Uint8Array;
       artifactAssets?: readonly ArtifactAssetDescriptor[];
+      lineageClaimId: string | null;
     },
   ) {
     this.adapter = adapter;
@@ -619,10 +630,11 @@ export class YdocAdapterSession {
     this.contentKind = input.contentKind;
     this.artifactAssets = input.artifactAssets ?? [];
     this.initialUpdate = input.initialUpdate;
-    this.doc = new Y.Doc();
-    declareDohcRootSchema(this.doc, this.contentKind);
-    Y.applyUpdate(this.doc, this.initialUpdate, ENGINE_DELIVERED_ORIGIN);
-    this.doc.on("update", this.handleDocUpdate);
+    this.lineageClaimId = input.lineageClaimId;
+    this.activeDoc = new Y.Doc();
+    declareDohcRootSchema(this.activeDoc, this.contentKind);
+    Y.applyUpdate(this.activeDoc, this.initialUpdate, ENGINE_DELIVERED_ORIGIN);
+    this.activeDoc.on("update", this.handleDocUpdate);
   }
 
   canonicalSource(): "ydoc" {
@@ -714,6 +726,12 @@ export class YdocAdapterSession {
         try {
           return await this.recoverCanonicalState(update, options);
         } catch (recoveryFailure) {
+          if (
+            recoveryFailure instanceof YdocAdapterError &&
+            recoveryFailure.code === "lineage-changed"
+          ) {
+            throw recoveryFailure;
+          }
           // The desktop rebind boundary classifies the thrown value itself.
           // Do not hide a daemon restart inside the diagnostic cause wrapper:
           // either reconnect-class failure is sufficient to require a fresh
@@ -820,7 +838,14 @@ export class YdocAdapterSession {
     if (!this.engineMissingLocalState) return Promise.resolve();
     const operation = this.recordChain.then(async () => {
       this.assertOpen();
-      const durableUpdate = await this.requestResyncUpdate();
+      const durableState = await this.requestResyncState();
+      if (durableState.lineageClaimId !== this.lineageClaimId) {
+        throw new YdocAdapterError(
+          "lineage-changed",
+          "The document lineage changed before missing local state could be resent. The edit remains in this editor and was not applied to the winning lineage.",
+        );
+      }
+      const durableUpdate = durableState.update;
       const durableDoc = new Y.Doc();
       declareDohcRootSchema(durableDoc, this.contentKind);
       Y.applyUpdate(durableDoc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
@@ -852,7 +877,7 @@ export class YdocAdapterSession {
         : {}),
     };
     const idempotencyKey = `${this.sessionId}:${this.nextLocalUpdateSeq++}`;
-    return decodeYdocRecordUpdateResult(
+    const result = decodeYdocRecordUpdateResult(
       await this.adapter.request(
         this.workspace,
         YDOC_METHOD.recordUpdate,
@@ -860,6 +885,8 @@ export class YdocAdapterSession {
         { idempotencyKey },
       ),
     );
+    this.lineageClaimId = result.lineageClaimId;
+    return result;
   }
 
   private async recoverCanonicalState(
@@ -868,7 +895,14 @@ export class YdocAdapterSession {
   ): Promise<
     YdocRecordUpdateResult | undefined
   > {
-    const durableUpdate = await this.requestResyncUpdate();
+    const durableState = await this.requestResyncState();
+    if (durableState.lineageClaimId !== this.lineageClaimId) {
+      throw new YdocAdapterError(
+        "lineage-changed",
+        "The document lineage changed while the edit was being recorded. The edit remains in this editor and was not applied to the winning lineage.",
+      );
+    }
+    const durableUpdate = durableState.update;
     const durableDoc = new Y.Doc();
     declareDohcRootSchema(durableDoc, this.contentKind);
     Y.applyUpdate(durableDoc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
@@ -970,6 +1004,13 @@ export class YdocAdapterSession {
     return () => this.resyncNeededListeners.delete(handler);
   }
 
+  onLineageReplaced(
+    handler: (doc: Y.Doc, recoveredPaths: string[]) => void,
+  ): () => void {
+    this.lineageReplacementListeners.add(handler);
+    return () => this.lineageReplacementListeners.delete(handler);
+  }
+
   onSessionError(handler: (error: unknown) => void): () => void {
     this.sessionErrorListeners.add(handler);
     return () => this.sessionErrorListeners.delete(handler);
@@ -1023,8 +1064,24 @@ export class YdocAdapterSession {
       );
     }
     await this.recordChain.catch(() => undefined);
-    const update = await this.requestResyncUpdate();
-    Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
+    const result = await this.requestResyncState();
+    const update = result.update;
+    if (result.lineageClaimId !== this.lineageClaimId) {
+      const replacement = new Y.Doc();
+      declareDohcRootSchema(replacement);
+      Y.applyUpdate(replacement, update, ENGINE_DELIVERED_ORIGIN);
+      replacement.on("update", this.handleDocUpdate);
+      this.activeDoc.off("update", this.handleDocUpdate);
+      this.retiredDocs.add(this.activeDoc);
+      this.activeDoc = replacement;
+      this.lineageClaimId = result.lineageClaimId;
+      this.initialUpdate = update;
+      for (const listener of this.lineageReplacementListeners) {
+        listener(replacement, result.recoveredPaths);
+      }
+    } else {
+      Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
+    }
     // The event baseline is PRESERVED across resync: transport event seqs
     // stay monotone within a session generation, and clearing the position
     // would let the first post-resync gap pass undetected (the next event
@@ -1045,24 +1102,20 @@ export class YdocAdapterSession {
     return update;
   }
 
-  private async requestResyncUpdate(): Promise<Uint8Array> {
+  private async requestResyncState(): Promise<{
+    update: Uint8Array;
+    lineageClaimId: string | null;
+    recoveredPaths: string[];
+  }> {
     const raw = await this.adapter.request(this.workspace, YDOC_METHOD.resync, {
       sessionId: this.sessionId,
     });
-    if (raw === null || Array.isArray(raw) || typeof raw !== "object") {
-      throw new YdocAdapterError(
-        "response-mismatch",
-        "ydoc.resync result must be an object.",
-      );
-    }
-    const encoded = (raw as Record<string, unknown>).initialUpdateBase64;
-    if (typeof encoded !== "string") {
-      throw new YdocAdapterError(
-        "response-mismatch",
-        "ydoc.resync result.initialUpdateBase64 must be a string.",
-      );
-    }
-    return base64ToBytes(encoded);
+    const result = decodeYdocResyncResult(raw);
+    return {
+      update: base64ToBytes(result.initialUpdateBase64),
+      lineageClaimId: result.lineageClaimId,
+      recoveredPaths: result.recoveredPaths,
+    };
   }
 
   async close(options?: { settle?: boolean; summary?: string }): Promise<void> {
@@ -1082,6 +1135,8 @@ export class YdocAdapterSession {
     }
     this.closed = true;
     this.doc.off("update", this.handleDocUpdate);
+    for (const retired of this.retiredDocs) retired.destroy();
+    this.retiredDocs.clear();
     this.adapter.releaseSession(this.sessionId);
   }
 
@@ -1101,6 +1156,8 @@ export class YdocAdapterSession {
     }
     this.closed = true;
     this.doc.off("update", this.handleDocUpdate);
+    for (const retired of this.retiredDocs) retired.destroy();
+    this.retiredDocs.clear();
     this.adapter.releaseSession(this.sessionId);
   }
 
@@ -1249,6 +1306,7 @@ export class YdocLiveAdapter {
       contentKind: result.contentKind,
       initialUpdate: base64ToBytes(result.initialUpdateBase64),
       artifactAssets: result.artifactAssets,
+      lineageClaimId: result.lineageClaimId,
     });
     this.sessions.set(result.sessionId, session);
     session.head = result.head;

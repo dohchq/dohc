@@ -9699,11 +9699,16 @@ describe("set-aside draft recovery", () => {
     Object.assign(bridge, {
       openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
         sessionId = payload.sessionId;
-        return { available: true, initialUpdate: Y.encodeStateAsUpdate(doc) };
+        return {
+          available: true,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          lineageGeneration: 1,
+        };
       }),
       applyEngineYDocUpdate: vi.fn(async () => undefined),
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(
         (listener: (event: EngineYDocSaveStateEvent) => void) => {
           saveStateListeners.add(listener);
@@ -9805,7 +9810,12 @@ describe("set-aside draft recovery", () => {
     // degrades to not-engine-backed instead of ever attempting the open, so
     // this mock needs it even though this test never emits through it.
     const onEngineYDocSaveState = vi.fn(() => () => undefined);
-    Object.assign(bridge, { openEngineYDocSession, onEngineYDocSaveState });
+    const onEngineYDocLineageReplacement = vi.fn(() => () => undefined);
+    Object.assign(bridge, {
+      openEngineYDocSession,
+      onEngineYDocSaveState,
+      onEngineYDocLineageReplacement,
+    });
     renderShell(bridge);
     await screen.findByTestId("view-markdown");
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
@@ -9892,7 +9902,12 @@ describe("set-aside draft recovery", () => {
     // degrades to not-engine-backed instead of ever attempting the open, so
     // this mock needs it even though this test never emits through it.
     const onEngineYDocSaveState = vi.fn(() => () => undefined);
-    Object.assign(bridge, { openEngineYDocSession, onEngineYDocSaveState });
+    const onEngineYDocLineageReplacement = vi.fn(() => () => undefined);
+    Object.assign(bridge, {
+      openEngineYDocSession,
+      onEngineYDocSaveState,
+      onEngineYDocLineageReplacement,
+    });
     renderShell(bridge);
     await screen.findByTestId("view-markdown");
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));

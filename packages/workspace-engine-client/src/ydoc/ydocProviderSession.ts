@@ -84,6 +84,7 @@ export interface EngineYdocProviderSessionOptions {
   onRemoteApplyError?: (error: RemoteYdocApplyError) => void;
   onLocalEditError?: (error: unknown) => void;
   onResyncNeeded?: (error: YdocResyncNeededError) => void;
+  onLineageReplaced?: (doc: Y.Doc, recoveredPaths: string[]) => void;
   onSessionError?: (error: unknown) => void;
   // A settle is going to the engine now, identified by `token`. Every
   // outcome below echoes the SAME token, so a caller pairs start to outcome
@@ -109,6 +110,7 @@ export interface EngineYdocProviderSession {
   readonly objectId?: string;
   // The provider echoes the requested versionId.
   readonly versionId?: string;
+  readonly lineageClaimId?: string | null;
   readonly contentKind: YdocContentKind;
   readonly artifactAssets?: readonly ArtifactAssetDescriptor[];
   readonly path: string;
@@ -321,6 +323,11 @@ export async function openEngineYdocProviderSession(
   const unsubscribeResync = session.onResyncNeeded((error) => {
     options.onResyncNeeded?.(error);
   });
+  const unsubscribeReplacement = session.onLineageReplaced(
+    (replacement, recoveredPaths) => {
+      options.onLineageReplaced?.(replacement, recoveredPaths);
+    },
+  );
   const unsubscribeSessionError = session.onSessionError((error) => {
     notifyError(options.onSessionError, error);
   });
@@ -333,6 +340,7 @@ export async function openEngineYdocProviderSession(
     unsubscribeRemote();
     unsubscribeRemoteError();
     unsubscribeResync();
+    unsubscribeReplacement();
     unsubscribeSessionError();
     await journalChain.catch(() => undefined);
     await settleChain.catch(() => undefined);
@@ -340,10 +348,15 @@ export async function openEngineYdocProviderSession(
   }
 
   return {
-    doc: session.doc,
+    get doc() {
+      return session.doc;
+    },
     initialUpdate: session.initialUpdate,
     objectId: session.objectId,
     versionId: options.versionId,
+    get lineageClaimId() {
+      return session.lineageClaimId;
+    },
     contentKind: session.contentKind,
     artifactAssets: session.artifactAssets,
     path: session.path,

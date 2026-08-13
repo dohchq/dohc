@@ -354,6 +354,450 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
   await capture.stop();
 });
 
+it("replaces rather than merges an independently rooted lineage after restart", async () => {
+  const rootPath = await createTestScratch("dohc-ydoc-lineage-restart-");
+  const loopback = new VersionedLoopbackEngine();
+  const client = (): EngineDaemonClient & EngineTransport => ({
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "lineage-restart" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  });
+  const losingClient = client();
+  const winningClient = client();
+  let currentClient = losingClient;
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => currentClient },
+    { sleep: async () => undefined },
+  );
+  const openProvider = async (
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
+    const losing = options.transport === losingClient;
+    const doc = new Y.Doc();
+    doc.getText("plainText").insert(0, losing ? "losing root" : "winning root");
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      lineageClaimId: losing ? null : "winning-claim",
+      contentKind: "plaintext",
+      path: options.path,
+      head: "present",
+      lineage: "existing",
+      evict: async () => undefined,
+      async applyLocalUpdate() {
+        return;
+      },
+      async settleNow() {
+        if (losing) {
+          currentClient = winningClient;
+          throw Object.assign(new Error("daemon exited"), {
+            code: "transport-error",
+          });
+        }
+        return {
+          momentId: "winner-moment",
+          path: options.path,
+          content: "winning root",
+          sha256: createHash("sha256").update("winning root").digest("hex"),
+          materialized: true,
+          projection: {
+            contentKind: "plaintext",
+            sourceStateVectorSha256: "a".repeat(64),
+            destructive: false,
+          },
+        };
+      },
+      async applyExternalMarkdownEdit(markdown) {
+        return { kind: "merged", markdown } as const;
+      },
+      async close() {
+        return;
+      },
+    };
+  };
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "lineage-restart",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+  });
+  const replacements: Array<{ text: string; recoveredPaths: string[] }> = [];
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+    onLineageReplaced: (update, recoveredPaths) => {
+      const doc = new Y.Doc();
+      Y.applyUpdate(doc, update);
+      replacements.push({
+        text: doc.getText("plainText").toString(),
+        recoveredPaths,
+      });
+    },
+  });
+  const losingDoc = session.doc;
+
+  await expect(session.settleNow()).resolves.toMatchObject({
+    content: "winning root",
+  });
+  expect(session.doc).not.toBe(losingDoc);
+  expect(session.doc.getText("plainText").toString()).toBe("winning root");
+  expect(session.doc.getText("plainText").toString()).not.toContain("losing root");
+  expect(replacements).toEqual([{ text: "winning root", recoveredPaths: [] }]);
+
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("keeps an unclaimed lineage when its full state is the claimed base", async () => {
+  const rootPath = await createTestScratch("dohc-ydoc-lineage-promotion-");
+  const loopback = new VersionedLoopbackEngine();
+  const client = (): EngineDaemonClient & EngineTransport => ({
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "lineage-promotion" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  });
+  const unclaimedClient = client();
+  const claimedClient = client();
+  let currentClient = unclaimedClient;
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => currentClient },
+    { sleep: async () => undefined },
+  );
+  const base = new Y.Doc();
+  base.getText("plainText").insert(0, "shared root");
+  const baseUpdate = Y.encodeStateAsUpdate(base);
+  const promotedClaimId = createHash("sha256")
+    .update(baseUpdate)
+    .digest("hex");
+  const openProvider = async (
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
+    const unclaimed = options.transport === unclaimedClient;
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, baseUpdate);
+    if (!unclaimed) doc.getText("plainText").insert("shared root".length, " remote");
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      lineageClaimId: unclaimed ? null : promotedClaimId,
+      contentKind: "plaintext",
+      path: options.path,
+      head: "present",
+      lineage: "existing",
+      evict: async () => undefined,
+      async applyLocalUpdate() {
+        return;
+      },
+      async settleNow() {
+        if (unclaimed) {
+          currentClient = claimedClient;
+          throw Object.assign(new Error("daemon exited"), {
+            code: "transport-error",
+          });
+        }
+        const markdown = doc.getText("plainText").toString();
+        return {
+          momentId: "promoted-moment",
+          path: options.path,
+          content: markdown,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
+          projection: {
+            contentKind: "plaintext",
+            sourceStateVectorSha256: "a".repeat(64),
+            destructive: false,
+          },
+        };
+      },
+      async applyExternalMarkdownEdit(markdown) {
+        return { kind: "merged", markdown } as const;
+      },
+      async close() {
+        return;
+      },
+    };
+  };
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "lineage-promotion",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+  });
+  const replacements: Y.Doc[] = [];
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+    onLineageReplaced: (update) => {
+      const replacement = new Y.Doc();
+      Y.applyUpdate(replacement, update);
+      replacements.push(replacement);
+    },
+  });
+  const stableDoc = session.doc;
+
+  await expect(session.settleNow()).resolves.toMatchObject({
+    content: "shared root remote",
+  });
+  expect(session.doc).toBe(stableDoc);
+  expect(session.doc.getText("plainText").toString()).toBe("shared root remote");
+  expect(session.lineageClaimId).toBe(promotedClaimId);
+  expect(replacements).toEqual([]);
+
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("keeps a locally promoted lineage after later updates change its full state", async () => {
+  const rootPath = await createTestScratch("dohc-ydoc-lineage-local-promotion-");
+  const loopback = new VersionedLoopbackEngine();
+  const client = (): EngineDaemonClient & EngineTransport => ({
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "local-promotion" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  });
+  const unclaimedClient = client();
+  const claimedClient = client();
+  let currentClient = unclaimedClient;
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => currentClient },
+    { sleep: async () => undefined },
+  );
+  const base = new Y.Doc();
+  base.getText("plainText").insert(0, "shared root");
+  let durableUpdate = Y.encodeStateAsUpdate(base);
+  let promotedClaimId: string | null = null;
+  const openProvider = async (
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
+    const unclaimed = options.transport === unclaimedClient;
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, durableUpdate);
+    if (!unclaimed) {
+      const text = doc.getText("plainText");
+      text.insert(text.length, " remote");
+    }
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      get lineageClaimId() {
+        return promotedClaimId;
+      },
+      contentKind: "plaintext",
+      path: options.path,
+      head: "present",
+      lineage: "existing",
+      evict: async () => undefined,
+      async applyLocalUpdate(update) {
+        Y.applyUpdate(doc, update);
+        durableUpdate = Y.encodeStateAsUpdate(doc);
+        if (promotedClaimId === null) {
+          promotedClaimId = createHash("sha256")
+            .update(durableUpdate)
+            .digest("hex");
+        }
+      },
+      async settleNow() {
+        if (unclaimed) {
+          currentClient = claimedClient;
+          throw Object.assign(new Error("daemon exited"), {
+            code: "transport-error",
+          });
+        }
+        const markdown = doc.getText("plainText").toString();
+        return {
+          momentId: "promoted-moment",
+          path: options.path,
+          content: markdown,
+          sha256: createHash("sha256").update(markdown).digest("hex"),
+          materialized: true,
+          projection: {
+            contentKind: "plaintext",
+            sourceStateVectorSha256: "a".repeat(64),
+            destructive: false,
+          },
+        };
+      },
+      async applyExternalMarkdownEdit(markdown) {
+        return { kind: "merged", markdown } as const;
+      },
+      async close() {
+        return;
+      },
+    };
+  };
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "local-promotion",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+  });
+  const replacements: Y.Doc[] = [];
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+    onLineageReplaced: (update) => {
+      const replacement = new Y.Doc();
+      Y.applyUpdate(replacement, update);
+      replacements.push(replacement);
+    },
+  });
+  const stableDoc = session.doc;
+  const rendererDoc = new Y.Doc();
+  Y.applyUpdate(rendererDoc, session.initialUpdate);
+  let before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(11, " promoted");
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+  before = Y.encodeStateVector(rendererDoc);
+  rendererDoc.getText("plainText").insert(20, " later");
+  session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
+
+  await expect(session.settleNow()).resolves.toMatchObject({
+    content: "shared root promoted later remote",
+  });
+  expect(session.doc).toBe(stableDoc);
+  expect(session.doc.getText("plainText").toString()).toBe(
+    "shared root promoted later remote",
+  );
+  expect(session.lineageClaimId).toBe(promotedClaimId);
+  expect(replacements).toEqual([]);
+
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
+it("replaces a fork that claims a base descended from the same Y.Doc history", async () => {
+  const rootPath = await createTestScratch("dohc-ydoc-lineage-fork-");
+  const loopback = new VersionedLoopbackEngine();
+  const client = (): EngineDaemonClient & EngineTransport => ({
+    close: () => undefined,
+    onEvent: () => () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "lineage-fork" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  });
+  const losingClient = client();
+  const winningClient = client();
+  let currentClient = losingClient;
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => currentClient },
+    { sleep: async () => undefined },
+  );
+  const shared = new Y.Doc();
+  shared.getText("plainText").insert(0, "shared");
+  const sharedUpdate = Y.encodeStateAsUpdate(shared);
+  const winnerBase = new Y.Doc();
+  Y.applyUpdate(winnerBase, sharedUpdate);
+  winnerBase.getText("plainText").insert(6, " winner");
+  const winnerBaseUpdate = Y.encodeStateAsUpdate(winnerBase);
+  const winnerClaimId = createHash("sha256")
+    .update(winnerBaseUpdate)
+    .digest("hex");
+  const openProvider = async (
+    options: EngineYdocProviderSessionOptions,
+  ): Promise<EngineYdocProviderSession> => {
+    const losing = options.transport === losingClient;
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, losing ? sharedUpdate : winnerBaseUpdate);
+    if (losing) doc.getText("plainText").insert(6, " loser");
+    return {
+      doc,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      lineageClaimId: losing ? null : winnerClaimId,
+      contentKind: "plaintext",
+      path: options.path,
+      head: "present",
+      lineage: "existing",
+      evict: async () => undefined,
+      async applyLocalUpdate() {
+        return;
+      },
+      async settleNow() {
+        if (losing) {
+          currentClient = winningClient;
+          throw Object.assign(new Error("daemon exited"), {
+            code: "transport-error",
+          });
+        }
+        return {
+          momentId: "winner-moment",
+          path: options.path,
+          content: "shared winner",
+          sha256: createHash("sha256").update("shared winner").digest("hex"),
+          materialized: true,
+          projection: {
+            contentKind: "plaintext",
+            sourceStateVectorSha256: "a".repeat(64),
+            destructive: false,
+          },
+        };
+      },
+      async applyExternalMarkdownEdit(markdown) {
+        return { kind: "merged", markdown } as const;
+      },
+      async close() {
+        return;
+      },
+    };
+  };
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "lineage-fork",
+    rootPath,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: openProvider,
+  });
+  const replacements: Y.Doc[] = [];
+  const session = await capture.openYDocSession({
+    path: "note.md",
+    onRemoteUpdate: () => undefined,
+    onLineageReplaced: (update) => {
+      const replacement = new Y.Doc();
+      Y.applyUpdate(replacement, update);
+      replacements.push(replacement);
+    },
+  });
+  const losingDoc = session.doc;
+
+  await expect(session.settleNow()).resolves.toMatchObject({
+    content: "shared winner",
+  });
+  expect(session.doc).not.toBe(losingDoc);
+  expect(session.doc.getText("plainText").toString()).toBe("shared winner");
+  expect(replacements).toHaveLength(1);
+
+  await session.close({ settle: false });
+  await capture.stop();
+});
+
 it("opens first when record recovery loses the restarted daemon transport", async () => {
   const rootPath = await createTestScratch("dohc-ydoc-chain-restart-");
   const workspaceHandle = "ydoc-chain-restart";

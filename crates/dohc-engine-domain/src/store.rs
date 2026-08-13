@@ -2288,11 +2288,34 @@ where
             .is_some_and(|head| head.content_kind == "binary")
             .then(|| "Became a text file".to_owned()),
     };
+    let now_ms = input.now_ms.to_string();
+    let (actual_summary_kind, actual_summary) =
+        hash_optional_text_fields(metadata_summary.as_deref());
+    let mutation_identity = hash_fields(&[
+        input.path.as_bytes(),
+        content_sha256.as_bytes(),
+        input.metadata_origin.as_bytes(),
+        actual_summary_kind,
+        actual_summary,
+        correlation_kind,
+        correlation,
+        author_kind,
+        author_json,
+        now_ms.as_bytes(),
+    ]);
     let next_order = match reserved_moment_order {
         Some(next_order) => next_order,
         None => next_moment_order(tx)?,
     };
-    let moment_id = derive_capture_moment_id(&input.workspace_id, &object_id, next_order);
+    let producer_id = capture_producer_id(tx, &input.workspace_id)?;
+    let moment_id = derive_capture_moment_id(
+        &producer_id,
+        &input.workspace_id,
+        &object_id,
+        next_order,
+        "write",
+        &mutation_identity,
+    );
     let write = WriteText {
         workspace_id: input.workspace_id.clone(),
         version_id: input.version_id.clone(),
@@ -2443,7 +2466,24 @@ pub fn capture_retire_in_tx(
         }
     }
     let next_order = next_moment_order(tx)?;
-    let moment_id = derive_capture_retire_moment_id(&input.workspace_id, &object_id, next_order);
+    let producer_id = capture_producer_id(tx, &input.workspace_id)?;
+    let now_ms = input.now_ms.to_string();
+    let mutation_identity = hash_fields(&[
+        input.path.as_bytes(),
+        summary_kind,
+        summary,
+        correlation_kind,
+        correlation,
+        now_ms.as_bytes(),
+    ]);
+    let moment_id = derive_capture_retire_moment_id(
+        &producer_id,
+        &input.workspace_id,
+        &object_id,
+        next_order,
+        "delete",
+        &mutation_identity,
+    );
     let delete = DeleteTextFile {
         workspace_id: input.workspace_id.clone(),
         version_id: input.version_id.clone(),
@@ -2661,10 +2701,6 @@ where
         Some(next_order) => next_order,
         None => next_moment_order(tx)?,
     };
-    let moment_id = derive_capture_moment_id(&input.workspace_id, &object_id, next_order);
-    if moment_exists(tx, &input.workspace_id, &moment_id)? {
-        return Err(DomainError::DuplicateMomentId.into());
-    }
     // TS `writeIfChanged` parity: pass summary wins; a text-tracked path
     // whose bytes stop round-tripping as UTF-8 keeps its object identity and
     // the moment says so honestly; a plain binary update is labeled per file.
@@ -2678,6 +2714,30 @@ where
             format!("Updated {}", path_basename(&path))
         }
     });
+    let now_ms = input.now_ms.to_string();
+    let mutation_identity = hash_fields(&[
+        path.as_bytes(),
+        binary_sha256.as_bytes(),
+        input.metadata_origin.as_bytes(),
+        metadata_summary.as_bytes(),
+        correlation_kind,
+        correlation,
+        author_kind,
+        author_json,
+        now_ms.as_bytes(),
+    ]);
+    let producer_id = capture_producer_id(tx, &input.workspace_id)?;
+    let moment_id = derive_capture_moment_id(
+        &producer_id,
+        &input.workspace_id,
+        &object_id,
+        next_order,
+        "write-binary",
+        &mutation_identity,
+    );
+    if moment_exists(tx, &input.workspace_id, &moment_id)? {
+        return Err(DomainError::DuplicateMomentId.into());
+    }
     let before_head = before.map(|before| {
         (
             before.content_kind,
@@ -5728,22 +5788,40 @@ fn derive_disambiguated_capture_object_id(
     )
 }
 
-/// Derive a capture moment id from its workspace, object, and next monotonic
-/// moment order: `moment-` plus lowercase-hex SHA-256 over those length-prefixed
-/// fields. The store allocates the same order inside the caller-owned write
-/// transaction, so delete/recreate cycles never reuse an id.
+fn capture_producer_id(tx: &Transaction<'_>, workspace_id: &str) -> Result<String, DomainError> {
+    tx.query_row(
+        "SELECT COALESCE(\
+             (SELECT origin_id FROM sync_identity WHERE workspace_id = ?1), \
+             (SELECT engine_uuid FROM engine_ownership WHERE rowid_guard = 1))",
+        [workspace_id],
+        |row| row.get(0),
+    )
+    .map_err(DomainError::sql_corrupt)
+}
+
+/// Derive a capture moment id from its producer, coordinate, operation, and
+/// mutation identity. The producer is the replica origin when the workspace
+/// has one and the durable engine id before that. The operation and content
+/// fields keep two divergent writes from cloned engines distinct even before
+/// one clone recovers its origin.
 pub fn derive_capture_moment_id(
+    producer_id: &str,
     workspace_id: &str,
     object_id: &str,
     next_moment_order: i64,
+    operation: &str,
+    mutation_identity: &str,
 ) -> String {
     let next_moment_order = next_moment_order.to_string();
     format!(
         "moment-{}",
         hash_fields(&[
+            producer_id.as_bytes(),
             workspace_id.as_bytes(),
             object_id.as_bytes(),
             next_moment_order.as_bytes(),
+            operation.as_bytes(),
+            mutation_identity.as_bytes(),
         ])
     )
 }
@@ -5751,11 +5829,21 @@ pub fn derive_capture_moment_id(
 /// Derive a capture delete moment id with the same order-based scheme as a
 /// capture write.
 pub fn derive_capture_retire_moment_id(
+    producer_id: &str,
     workspace_id: &str,
     object_id: &str,
     next_moment_order: i64,
+    operation: &str,
+    mutation_identity: &str,
 ) -> String {
-    derive_capture_moment_id(workspace_id, object_id, next_moment_order)
+    derive_capture_moment_id(
+        producer_id,
+        workspace_id,
+        object_id,
+        next_moment_order,
+        operation,
+        mutation_identity,
+    )
 }
 
 /// Deterministic fingerprint over length-framed fields (idempotency
