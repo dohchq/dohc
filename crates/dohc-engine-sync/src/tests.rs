@@ -9,7 +9,8 @@ use dohc_engine_domain::{
     ChatChannelKind, ChatReactionState, CreateFileThread, FollowState, FollowTargetKind,
     GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, MAX_SECRET_FILE_BYTES, MAX_TEXT_BYTES,
     ResolveDecision, SECRET_IV_BYTES, SECRET_TAG_BYTES, SaveBookmark, SendMessage, SetFollow,
-    SetReaction, StartChannelThread, VersionedTextStore, attachment_id_for, channel_slug_for_name,
+    SetReaction, StartChannelThread, VersionedTextStore, WriteBinary, attachment_id_for,
+    channel_slug_for_name,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -8123,6 +8124,172 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
     assert_eq!(parked, 0, "the base arrival drains the parked coordinate");
     assert_eq!(updates, 1, "the dependent update reaches the lineage");
     assert_eq!(head, "before base");
+}
+
+#[test]
+fn oversized_hydrated_scene_base_is_refused_without_storing_the_projection() {
+    const ASSET_BYTES: usize = 3 * 1024 * 1024;
+    const ASSET_IDS: [&str; 4] = ["image-a", "image-b", "image-c", "image-d"];
+
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let object_id = "scene-over-projection-cap";
+    let drawing_path = "drawings/over-cap.excalidraw";
+    let asset_bytes = vec![7_u8; ASSET_BYTES];
+    let asset_sha = dohc_engine_storage::hex_sha256(&asset_bytes);
+    let asset_ref =
+        dohc_engine_collab::scene_asset_ref("ws", "main", object_id, &asset_sha, "image/png")
+            .expect("asset ref");
+    VersionedTextStore::new(&mut engine)
+        .write_binary(
+            &WriteBinary {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "oversized-scene-asset".to_owned(),
+                path: asset_ref.clone(),
+                bytes: asset_bytes,
+                moment_id: "oversized-scene-asset-write".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1_500,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("store authoritative asset");
+
+    let elements = ASSET_IDS
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            json!({
+                "id": format!("element-{index}"),
+                "type": "image",
+                "version": 1,
+                "versionNonce": index + 1,
+                "isDeleted": false,
+                "index": format!("a{index}"),
+                "fileId": id,
+            })
+        })
+        .collect::<Vec<_>>();
+    let files = ASSET_IDS
+        .iter()
+        .map(|id| {
+            (
+                (*id).to_owned(),
+                json!({
+                    "id": id,
+                    "mimeType": "image/png",
+                    "created": 1,
+                    "dataURL": "data:image/png;base64,AQ==",
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let portable = json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "https://excalidraw.com",
+        "elements": elements,
+        "appState": {},
+        "files": files,
+    })
+    .to_string();
+    let imported = dohc_engine_collab::import_portable_scene(&portable).expect("scene import");
+    let records = ASSET_IDS
+        .iter()
+        .map(|id| {
+            (
+                (*id).to_owned(),
+                json!({
+                    "created": 1,
+                    "id": id,
+                    "mimeType": "image/png",
+                    "ref": asset_ref,
+                    "sha256": asset_sha,
+                })
+                .to_string(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let asset_update =
+        dohc_engine_collab::encode_scene_asset_records(&records).expect("asset records");
+    let base_update = dohc_engine_collab::merge_updates(&[imported.initial_update, asset_update])
+        .expect("scene base");
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&base_update).expect("scene applies");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", object_id).expect("scene key");
+    let projection_error = engine
+        .read_with(|conn| {
+            project_ydoc_with_store(conn, &key, &doc, dohc_engine_collab::ContentKind::Scene)
+        })
+        .expect_err("the shared runtime/sync projector must enforce the cap");
+    assert!(matches!(
+        projection_error,
+        SyncError::ProjectionTooLarge {
+            actual_bytes,
+            limit_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES,
+        } if actual_bytes > dohc_engine_collab::limits::MAX_PROJECTION_BYTES
+    ));
+    let update_sha = engine
+        .put_binary_blob(&doc.encode_full_state())
+        .expect("scene update blob");
+    let operation = envelope(
+        "oversized-scene-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": drawing_path,
+            "contentKind": "scene",
+            "updateBlobSha256": update_sha,
+            "isBaseState": true,
+        }),
+    );
+
+    let outcome = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases)
+        .expect("oversized projection is a terminal refusal");
+    assert!(matches!(
+        outcome,
+        ApplyOutcome::Refused(ReplicationRefusal {
+            reason: RefusalReason::InvalidInput { ref reason },
+            ..
+        }) if reason == "scene projection exceeds MAX_PROJECTION_BYTES (16777216 bytes)"
+    ));
+    assert!(
+        dohc_engine_collab::read_marker(&engine, &key)
+            .expect("read marker")
+            .is_none(),
+        "the refused base must not store a canonical lineage"
+    );
+    let (drawing_heads, drawing_jobs, text_blobs): (i64, i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, SyncError>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots WHERE workspace_id='ws' \
+                     AND version_id='main' AND path=?1",
+                    [drawing_path],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM materialization_jobs WHERE workspace_id='ws' \
+                     AND target_path=?1",
+                    [drawing_path],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?,
+                conn.query_row("SELECT COUNT(*) FROM blobs", [], |row| row.get(0))
+                    .map_err(SyncError::corrupt)?,
+            ))
+        })
+        .expect("inspect refused projection");
+    assert_eq!((drawing_heads, drawing_jobs, text_blobs), (0, 0, 0));
 }
 
 #[test]

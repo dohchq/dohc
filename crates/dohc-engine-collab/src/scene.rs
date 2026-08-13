@@ -8,12 +8,16 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{self, Write};
 
 use base64::Engine as _;
+use serde::ser::{SerializeMap, Serializer};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::canonical_json::canonical_json_string;
+use crate::error::CollabError;
+use crate::limits::MAX_PROJECTION_BYTES;
 
 const EXPORT_SOURCE: &str = "https://excalidraw.com";
 const EXPORT_VERSION: u8 = 2;
@@ -75,7 +79,7 @@ pub struct FoldedScene {
 }
 
 #[derive(Serialize)]
-struct PortableScene<'a> {
+struct PortableScene<'a, F> {
     #[serde(rename = "type")]
     kind: &'static str,
     version: u8,
@@ -83,7 +87,139 @@ struct PortableScene<'a> {
     elements: &'a [Value],
     #[serde(rename = "appState")]
     app_state: &'a BTreeMap<String, Value>,
-    files: BTreeMap<String, Value>,
+    files: F,
+}
+
+struct PortableFileSource<'a> {
+    asset: &'a SceneAsset,
+    bytes: &'a [u8],
+    data_url_len: usize,
+}
+
+struct PortableFiles<'a> {
+    files: Vec<PortableFileSource<'a>>,
+}
+
+#[derive(Serialize)]
+struct PortableFile<'a> {
+    created: u64,
+    #[serde(rename = "dataURL")]
+    data_url: String,
+    id: &'a str,
+    #[serde(rename = "lastRetrieved", skip_serializing_if = "Option::is_none")]
+    last_retrieved: Option<u64>,
+    #[serde(rename = "mimeType")]
+    mime_type: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<u64>,
+}
+
+impl Serialize for PortableFiles<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(self.files.len()))?;
+        for source in &self.files {
+            // Encode one provider file at a time. The bounded output writer
+            // owns the aggregate projection; this temporary never exceeds the
+            // same projection cap and is dropped before the next file.
+            let mut data_url = String::with_capacity(source.data_url_len);
+            data_url.push_str("data:");
+            data_url.push_str(&source.asset.mime_type);
+            data_url.push_str(";base64,");
+            base64::engine::general_purpose::STANDARD.encode_string(source.bytes, &mut data_url);
+            map.serialize_entry(
+                &source.asset.id,
+                &PortableFile {
+                    created: source.asset.created,
+                    data_url,
+                    id: &source.asset.id,
+                    last_retrieved: source.asset.last_retrieved,
+                    mime_type: &source.asset.mime_type,
+                    version: source.asset.version,
+                },
+            )?;
+        }
+        map.end()
+    }
+}
+
+struct ProjectionWriter {
+    bytes: Vec<u8>,
+    overflow: Option<usize>,
+}
+
+impl ProjectionWriter {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            overflow: None,
+        }
+    }
+}
+
+impl Write for ProjectionWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let attempted = self.bytes.len().saturating_add(buffer.len());
+        if attempted > MAX_PROJECTION_BYTES {
+            self.overflow = Some(attempted);
+            return Err(io::Error::other("scene projection exceeded its byte cap"));
+        }
+        self.bytes.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn bounded_portable_json(value: &impl Serialize) -> Result<String, CollabError> {
+    let mut writer = ProjectionWriter::new();
+    if let Err(error) = serde_json::to_writer_pretty(&mut writer, value) {
+        if let Some(actual) = writer.overflow {
+            return Err(CollabError::ProjectionTooLarge {
+                actual,
+                max: MAX_PROJECTION_BYTES,
+            });
+        }
+        return Err(CollabError::Corrupt {
+            reason: format!("scene projection serialization failed: {error}"),
+        });
+    }
+    String::from_utf8(writer.bytes).map_err(|error| CollabError::Corrupt {
+        reason: format!("scene projection serialization produced invalid UTF-8: {error}"),
+    })
+}
+
+/// The exact native data-URL length for one hydrated scene asset. This checks
+/// arithmetic and the existing projection cap before base64 allocates.
+pub fn scene_data_url_len(mime_type: &str, byte_length: usize) -> Result<usize, CollabError> {
+    let encoded = byte_length
+        .checked_add(2)
+        .and_then(|value| value.checked_div(3))
+        .and_then(|value| value.checked_mul(4))
+        .ok_or(CollabError::ProjectionTooLarge {
+            actual: usize::MAX,
+            max: MAX_PROJECTION_BYTES,
+        })?;
+    let actual = "data:"
+        .len()
+        .checked_add(mime_type.len())
+        .and_then(|value| value.checked_add(";base64,".len()))
+        .and_then(|value| value.checked_add(encoded))
+        .ok_or(CollabError::ProjectionTooLarge {
+            actual: usize::MAX,
+            max: MAX_PROJECTION_BYTES,
+        })?;
+    if actual > MAX_PROJECTION_BYTES {
+        return Err(CollabError::ProjectionTooLarge {
+            actual,
+            max: MAX_PROJECTION_BYTES,
+        });
+    }
+    Ok(actual)
 }
 
 impl FoldedScene {
@@ -91,14 +227,14 @@ impl FoldedScene {
     /// replaces `files` after it resolves the validated asset records. The
     /// two-space layout matches Excalidraw's native JSON export; durable map
     /// records and fingerprints remain compact canonical JSON.
-    pub fn portable_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string_pretty(&PortableScene {
+    pub fn portable_json(&self) -> Result<String, CollabError> {
+        bounded_portable_json(&PortableScene {
             kind: "excalidraw",
             version: EXPORT_VERSION,
             source: EXPORT_SOURCE,
             elements: &self.elements,
             app_state: &self.app_state,
-            files: BTreeMap::new(),
+            files: BTreeMap::<String, Value>::new(),
         })
     }
 
@@ -106,54 +242,34 @@ impl FoldedScene {
     pub fn portable_json_with_asset_bytes(
         &self,
         bytes_by_id: &BTreeMap<String, Vec<u8>>,
-    ) -> Result<String, SceneImportError> {
+    ) -> Result<String, CollabError> {
         let referenced: BTreeSet<&str> = self
             .elements
             .iter()
             .filter(|element| element.get("type").and_then(Value::as_str) == Some("image"))
             .filter_map(|element| element.get("fileId").and_then(Value::as_str))
             .collect();
-        let mut files = BTreeMap::new();
+        let mut files = Vec::with_capacity(referenced.len());
         for id in referenced {
-            let asset = self.assets.get(id).ok_or(SceneImportError::Invalid {
-                reason: "a live image references a missing asset record",
+            let asset = self.assets.get(id).ok_or(CollabError::Corrupt {
+                reason: "a live image references a missing asset record".to_owned(),
             })?;
-            let bytes = bytes_by_id.get(id).ok_or(SceneImportError::Invalid {
-                reason: "a live image asset has no resolved bytes",
+            let bytes = bytes_by_id.get(id).ok_or(CollabError::Corrupt {
+                reason: "a live image asset has no resolved bytes".to_owned(),
             })?;
-            let mut file = Map::new();
-            file.insert("created".to_owned(), serde_json::json!(asset.created));
-            file.insert(
-                "dataURL".to_owned(),
-                serde_json::json!(format!(
-                    "data:{};base64,{}",
-                    asset.mime_type,
-                    base64::engine::general_purpose::STANDARD.encode(bytes)
-                )),
-            );
-            file.insert("id".to_owned(), serde_json::json!(asset.id));
-            if let Some(last_retrieved) = asset.last_retrieved {
-                file.insert(
-                    "lastRetrieved".to_owned(),
-                    serde_json::json!(last_retrieved),
-                );
-            }
-            file.insert("mimeType".to_owned(), serde_json::json!(asset.mime_type));
-            if let Some(version) = asset.version {
-                file.insert("version".to_owned(), serde_json::json!(version));
-            }
-            files.insert(id.to_owned(), Value::Object(file));
+            files.push(PortableFileSource {
+                asset,
+                bytes,
+                data_url_len: scene_data_url_len(&asset.mime_type, bytes.len())?,
+            });
         }
-        serde_json::to_string_pretty(&PortableScene {
+        bounded_portable_json(&PortableScene {
             kind: "excalidraw",
             version: EXPORT_VERSION,
             source: EXPORT_SOURCE,
             elements: &self.elements,
             app_state: &self.app_state,
-            files,
-        })
-        .map_err(|_| SceneImportError::Invalid {
-            reason: "the portable scene could not be encoded",
+            files: PortableFiles { files },
         })
     }
 }

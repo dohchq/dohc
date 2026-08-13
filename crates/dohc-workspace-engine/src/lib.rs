@@ -11500,6 +11500,9 @@ fn map_runtime(error: RuntimeError) -> WireError {
         ) => {
             return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
         }
+        RuntimeError::Sync(sync @ SyncError::ProjectionTooLarge { .. }) => {
+            return WireError::new(ErrorCode::PayloadTooLarge, sync.to_string());
+        }
         _ => {}
     }
     if let RuntimeError::Domain(domain) = &error {
@@ -11715,7 +11718,9 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
         | SyncError::BlobInvalid => ErrorCode::InvalidParams,
         // Same condition as its relay twin, so the same code. A blob over a
         // fixed ceiling is a size refusal on either path.
-        SyncError::BlobTooLarge { .. } => ErrorCode::PayloadTooLarge,
+        SyncError::BlobTooLarge { .. } | SyncError::ProjectionTooLarge { .. } => {
+            ErrorCode::PayloadTooLarge
+        }
     }
 }
 
@@ -12034,6 +12039,15 @@ mod tests {
                 limit_bytes: 5 * 1024 * 1024,
                 observed: ObservedBytes::Exact(5 * 1024 * 1024 + 1),
             })
+        );
+        let projection = map_runtime(RuntimeError::Sync(SyncError::ProjectionTooLarge {
+            actual_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES + 1,
+            limit_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES,
+        }));
+        assert_eq!(projection.code, ErrorCode::PayloadTooLarge);
+        assert_eq!(
+            projection.message,
+            "Y.Doc projection is at least 16777217 bytes, over MAX_PROJECTION_BYTES (16777216 bytes)"
         );
     }
 

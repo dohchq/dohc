@@ -300,11 +300,7 @@ impl Ydoc {
     }
 
     fn project_scene(&self) -> Result<String, CollabError> {
-        self.fold_scene()
-            .portable_json()
-            .map_err(|error| CollabError::Corrupt {
-                reason: format!("scene projection serialization failed: {error}"),
-            })
+        self.fold_scene().portable_json()
     }
 
     fn scene_string_map(&self, root: &str) -> BTreeMap<String, String> {
@@ -3530,6 +3526,27 @@ mod projection_tests {
                 .expect("scene projection")
                 .content
         );
+    }
+
+    #[test]
+    fn oversized_scene_projection_is_refused_at_the_existing_byte_cap() {
+        let doc = Ydoc::wire();
+        let oversized_color = serde_json::to_string(&"x".repeat(MAX_PROJECTION_BYTES))
+            .expect("encode oversized app state");
+        scene_map_set(
+            &doc,
+            ROOT_SCENE_APP_STATE,
+            "viewBackgroundColor",
+            &oversized_color,
+        );
+
+        assert!(matches!(
+            doc.project(ContentKind::Scene),
+            Err(CollabError::ProjectionTooLarge {
+                actual,
+                max: MAX_PROJECTION_BYTES
+            }) if actual > MAX_PROJECTION_BYTES
+        ));
     }
 
     #[test]

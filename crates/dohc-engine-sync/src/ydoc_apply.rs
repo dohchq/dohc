@@ -21,6 +21,9 @@ use crate::error::local_corruption;
 use crate::file_search::{search_policy_for_store, upsert_file_search_index};
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
 
+const SCENE_PROJECTION_TOO_LARGE_REASON: &str =
+    "scene projection exceeds MAX_PROJECTION_BYTES (16777216 bytes)";
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct YdocUpdatePayload {
@@ -378,7 +381,7 @@ pub fn drain_deferred_ydoc_for_key(
             // retaining the marker would wedge every later drain. The CRDT
             // content is durable above; the visible path legitimately remains
             // governed by its current owner, so consume the marker.
-            Err(SyncError::InvalidInput { .. }) => {}
+            Err(SyncError::InvalidInput { .. } | SyncError::ProjectionTooLarge { .. }) => {}
             // Anything else (storage) is retryable: keep the markers so the
             // next drain retries the projection.
             Err(other) => return Err(other),
@@ -707,13 +710,17 @@ pub fn project_ydoc_with_store(
     content_kind: dohc_engine_collab::ContentKind,
 ) -> Result<dohc_engine_collab::Projection, SyncError> {
     if content_kind != dohc_engine_collab::ContentKind::Scene {
-        return doc
-            .project(content_kind)
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "ydoc projection exceeds materialization cap",
-            });
+        return doc.project(content_kind).map_err(map_projection_error);
     }
     let folded = doc.fold_scene();
+    // The unhydrated portable form bounds the scene-owned JSON before any
+    // binary reads. Track a lower bound for the final data URLs as each asset
+    // is resolved so repeated files cannot accumulate unbounded raw blobs only
+    // to be refused by the serializer afterward.
+    let mut projected_bytes = folded
+        .portable_json()
+        .map_err(map_scene_projection_error)?
+        .len();
     let referenced: std::collections::BTreeSet<&str> = folded
         .elements
         .iter()
@@ -744,19 +751,20 @@ pub fn project_ydoc_with_store(
                 reason: "scene asset authority is invalid",
             });
         }
-        let head: Option<(String, Option<String>)> = conn
+        let head: Option<(String, Option<String>, Option<i64>)> = conn
             .query_row(
-                "SELECT COALESCE(s.content_kind, 'text'), s.binary_sha256 \
+                "SELECT COALESCE(s.content_kind, 'text'), s.binary_sha256, b.byte_length \
                  FROM path_aliases a JOIN snapshots s \
-                   ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id \
-                  AND s.object_id=a.object_id \
-                 WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
+                    ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id \
+                   AND s.object_id=a.object_id \
+                 LEFT JOIN binary_blobs b ON b.sha256=s.binary_sha256 \
+                  WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
                 params![key.workspace_id, key.version_id, asset.path],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
             .map_err(SyncError::corrupt)?;
-        let Some((kind, sha256)) = head else {
+        let Some((kind, sha256, byte_length)) = head else {
             return Err(SyncError::RetryableState {
                 reason: "scene asset head is pending",
             });
@@ -764,6 +772,30 @@ pub fn project_ydoc_with_store(
         if kind != "binary" || sha256.as_deref() != Some(asset.sha256.as_str()) {
             return Err(SyncError::InvalidInput {
                 reason: "scene asset authority is invalid",
+            });
+        }
+        let byte_length = byte_length
+            .ok_or(SyncError::RetryableState {
+                reason: "scene asset blob is pending",
+            })
+            .and_then(|value| {
+                usize::try_from(value).map_err(|_| SyncError::InvalidInput {
+                    reason: "scene asset authority is invalid",
+                })
+            })?;
+        let data_url_len = dohc_engine_collab::scene_data_url_len(&asset.mime_type, byte_length)
+            .map_err(map_scene_projection_error)?;
+        projected_bytes =
+            projected_bytes
+                .checked_add(data_url_len)
+                .ok_or(SyncError::ProjectionTooLarge {
+                    actual_bytes: usize::MAX,
+                    limit_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES,
+                })?;
+        if projected_bytes > dohc_engine_collab::limits::MAX_PROJECTION_BYTES {
+            return Err(SyncError::ProjectionTooLarge {
+                actual_bytes: projected_bytes,
+                limit_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES,
             });
         }
         let bytes = get_binary_blob(conn, &asset.sha256)?.ok_or(SyncError::RetryableState {
@@ -778,15 +810,41 @@ pub fn project_ydoc_with_store(
     }
     let content = folded
         .portable_json_with_asset_bytes(&bytes_by_id)
-        .map_err(|_| SyncError::InvalidInput {
-            reason: "scene projection is invalid",
-        })?;
+        .map_err(map_scene_projection_error)?;
     Ok(dohc_engine_collab::Projection {
         content,
         content_kind,
         source_state_vector_sha256: hex_sha256(&doc.encode_state_vector()),
         destructive: false,
     })
+}
+
+fn map_scene_projection_error(error: dohc_engine_collab::CollabError) -> SyncError {
+    match error {
+        dohc_engine_collab::CollabError::ProjectionTooLarge { actual, max } => {
+            SyncError::ProjectionTooLarge {
+                actual_bytes: actual,
+                limit_bytes: max,
+            }
+        }
+        _ => SyncError::InvalidInput {
+            reason: "scene projection is invalid",
+        },
+    }
+}
+
+fn map_projection_error(error: dohc_engine_collab::CollabError) -> SyncError {
+    match error {
+        dohc_engine_collab::CollabError::ProjectionTooLarge { actual, max } => {
+            SyncError::ProjectionTooLarge {
+                actual_bytes: actual,
+                limit_bytes: max,
+            }
+        }
+        _ => SyncError::InvalidInput {
+            reason: "ydoc projection is invalid",
+        },
+    }
 }
 
 /// Oracle parity for applied `ydoc.update` ops (`projectYDocUpdate` →
@@ -1313,6 +1371,9 @@ pub fn apply_ydoc_envelope(
             Err(SyncError::InvalidInput { reason }) => {
                 return refuse_ydoc(store, envelope, faults, reason);
             }
+            Err(SyncError::ProjectionTooLarge { .. }) => {
+                return refuse_ydoc(store, envelope, faults, SCENE_PROJECTION_TOO_LARGE_REASON);
+            }
             Err(hard) => return Err(hard),
         };
         if matches!(outcome, ApplyOutcome::Applied(_) | ApplyOutcome::Skipped)
@@ -1461,6 +1522,16 @@ pub fn apply_ydoc_envelope(
                     )
                     .map_err(SyncError::persist)?;
                     return Ok(crate::apply::MutationOutcome::RefusedRetainingMutation { reason });
+                }
+                Err(SyncError::ProjectionTooLarge { .. }) => {
+                    tx.execute_batch(
+                        "ROLLBACK TO dohc_ydoc_projection; \
+                     RELEASE dohc_ydoc_projection",
+                    )
+                    .map_err(SyncError::persist)?;
+                    return Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {
+                        reason: SCENE_PROJECTION_TOO_LARGE_REASON,
+                    });
                 }
                 Err(hard) => return Err(hard),
             }
