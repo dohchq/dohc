@@ -4,6 +4,10 @@ import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { createPluginUtilityTransport } from "./pluginUtilityTransport";
 
+vi.mock("../process/windowsSpawn", () => ({
+  killProcessTreeWin32: vi.fn(async () => false),
+}));
+
 class FakeUtilityProcess extends EventEmitter {
   readonly stderr = new PassThrough();
   readonly postMessage = vi.fn();
@@ -100,5 +104,27 @@ describe("createPluginUtilityTransport", () => {
     await expect(transport.request("plugin.activate")).rejects.toThrow(
       "Plugin utility transport is closed",
     );
+  });
+
+  it("logs the live PID when the 5000 ms descendant wait cap wins", async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const { child, transport } = setup();
+      child.pid = 4242;
+
+      const disposing = transport.dispose();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await disposing;
+
+      expect(error).toHaveBeenCalledWith(
+        expect.stringContaining("4242"),
+      );
+      expect(error).toHaveBeenCalledWith(
+        expect.stringContaining("5000 ms"),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

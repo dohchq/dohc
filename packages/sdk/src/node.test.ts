@@ -167,6 +167,15 @@ describe("@dohc/sdk/node", () => {
     });
   });
 
+  it("normalizes a void stdio handler result to JSON null without timing out", async () => {
+    const harness = createLinkedTransports();
+    harness.handler.onRequest("sdk.request", () => undefined);
+
+    await expect(
+      harness.caller.request("plugin.void", undefined, { timeoutMs: 250 }),
+    ).resolves.toBeNull();
+  });
+
   it("writes notifications without request ids", async () => {
     const harness = createStdioHarness();
 

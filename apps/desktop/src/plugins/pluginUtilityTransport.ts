@@ -148,12 +148,20 @@ export function createPluginUtilityTransport(
       }, 2_000);
       forceKill.unref();
       let waitCap: NodeJS.Timeout | undefined;
-      const capped = new Promise<void>((resolve) => {
-        waitCap = setTimeout(resolve, 5_000);
+      const capped = new Promise<"capped">((resolve) => {
+        waitCap = setTimeout(() => resolve("capped"), 5_000);
         waitCap.unref?.();
       });
       try {
-        await Promise.race([exited, capped]);
+        const outcome = await Promise.race([
+          exited.then(() => "exited" as const),
+          capped,
+        ]);
+        if (outcome === "capped" && child.pid !== undefined) {
+          console.error(
+            `[desktop] plugin utility process PID ${child.pid} did not exit before the 5000 ms descendant shutdown limit.`,
+          );
+        }
       } finally {
         clearTimeout(forceKill);
         if (waitCap) clearTimeout(waitCap);

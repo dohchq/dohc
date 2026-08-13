@@ -17,7 +17,15 @@ import {
 type LoadState =
   | { status: "loading" }
   | { status: "ready"; panel: StartPluginPanelResult }
+  | { status: "unavailable" }
   | { status: "error"; message: string };
+
+function isMissingPluginRegistration(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /^Plugin ".+" is not registered\./.test(error.message)
+  );
+}
 
 export function PluginPanelPage(props: {
   workspaceId: string;
@@ -66,6 +74,10 @@ export function PluginPanelPage(props: {
           requestContext !== sdkContextRef.current ||
           stoppingRef.current
         ) {
+          return;
+        }
+        if (isMissingPluginRegistration(error)) {
+          setLoad({ status: "unavailable" });
           return;
         }
         setLoad({
@@ -172,6 +184,8 @@ export function PluginPanelPage(props: {
         </div>
       ) : load.status === "error" ? (
         <EmptyState body={load.message} />
+      ) : load.status === "unavailable" ? (
+        <PluginUnavailable />
       ) : !panelUrlAllowed ? (
         <EmptyState body="The plugin panel URL must use loopback HTTP." />
       ) : panel ? (
@@ -193,6 +207,8 @@ export function PluginPanelPage(props: {
 function EmptyState(props: { body: string }) {
   return (
     <div
+      role="alert"
+      aria-label="Could not open plugin panel"
       data-testid="plugin-panel-error"
       className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
     >
@@ -201,6 +217,21 @@ function EmptyState(props: { body: string }) {
       <span className="max-w-sm text-xs text-muted">{props.body}</span>
       <span className="max-w-sm text-xs text-muted">
         Close this tab and try again.
+      </span>
+    </div>
+  );
+}
+
+function PluginUnavailable() {
+  return (
+    <div
+      data-testid="plugin-panel-unavailable"
+      className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
+    >
+      <Plug size={20} aria-hidden className="text-subtle" />
+      <span className="text-sm text-ink">This plugin is not running yet.</span>
+      <span className="max-w-sm text-xs text-muted">
+        Open this panel from the plugin to start it.
       </span>
     </div>
   );

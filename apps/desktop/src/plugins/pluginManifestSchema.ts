@@ -34,7 +34,10 @@ const PluginPath = z.string()
   });
 
 const PluginPanel = z.object({
-  id: z.string().min(1).max(120),
+  id: z.string().min(1).max(120).refine(
+    (value) => !value.includes("\0"),
+    "panel id must not contain NUL bytes",
+  ),
   title: z.string().min(1).max(120),
   entry: PluginPath,
 }).strict();

@@ -2185,8 +2185,14 @@ export type StopSitePreviewPayload = z.infer<typeof StopSitePreviewPayload>;
 export const StopSitePreviewResult = z.void();
 export type StopSitePreviewResult = z.infer<typeof StopSitePreviewResult>;
 
-const PLUGIN_ID = z.string().min(1).max(214);
-const PLUGIN_PANEL_ID = z.string().min(1).max(120);
+const PLUGIN_ID = z.string().min(1).max(214).refine(
+  (value) => !value.includes("\0"),
+  "plugin id must not contain NUL bytes",
+);
+const PLUGIN_PANEL_ID = z.string().min(1).max(120).refine(
+  (value) => !value.includes("\0"),
+  "plugin panel id must not contain NUL bytes",
+);
 const PLUGIN_ROOT = z.string().min(1).max(4096).refine(
   (value) => !value.includes("\0"),
   "plugin root must not contain NUL bytes",

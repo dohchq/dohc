@@ -1202,7 +1202,9 @@ describe("site IPC contract", () => {
     for (const patch of [
       { workspaceId: "WS-PLUGINS" },
       { pluginId: "" },
+      { pluginId: "hello\0main" },
       { panelId: "" },
+      { panelId: "main\0alias" },
       { panelId: "x".repeat(121) },
     ]) {
       expect(StartPluginPanelPayload.safeParse({ ...base, ...patch }).success).toBe(

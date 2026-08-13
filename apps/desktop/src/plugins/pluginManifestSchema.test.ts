@@ -109,6 +109,15 @@ describe("DohcPluginManifest", () => {
     }).success).toBe(false);
   });
 
+  it("rejects a panel id containing the authority-key delimiter", () => {
+    expect(DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      panels: [
+        { id: "main\0alias", title: "Main", entry: "main.html" },
+      ],
+    }).success).toBe(false);
+  });
+
   it("rejects more than 100 panels", () => {
     const result = DohcPluginManifest.safeParse({
       ...minimalManifest,

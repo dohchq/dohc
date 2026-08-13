@@ -186,6 +186,67 @@ describe("PluginPanelPage", () => {
     expect(postMessage).not.toHaveBeenCalled();
   });
 
+  it("drops a stale panel start after the panel identity changes", async () => {
+    const pending = deferred<StartPluginPanelResult>();
+    bridgeMock.startPluginPanel
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce({
+        url: "http://127.0.0.1:49162/",
+        title: "Other",
+      });
+    const view = render(
+      <PluginPanelPage
+        workspaceId="ws-plugins"
+        pluginId="hello-plugin"
+        panelId="main"
+      />,
+    );
+    await vi.waitFor(() =>
+      expect(bridgeMock.startPluginPanel).toHaveBeenCalledTimes(1),
+    );
+
+    view.rerender(
+      <PluginPanelPage
+        workspaceId="ws-plugins"
+        pluginId="hello-plugin"
+        panelId="other"
+      />,
+    );
+    await screen.findByTitle("Other");
+    await act(async () => {
+      pending.resolve({
+        url: "http://127.0.0.1:49163/",
+        title: "Stale",
+      });
+      await pending.promise;
+    });
+
+    expect(screen.queryByTitle("Stale")).toBeNull();
+    expect(screen.getAllByTestId("plugin-panel-frame")).toHaveLength(1);
+  });
+
+  it("shows a stable placeholder when a restored panel has no registration", async () => {
+    bridgeMock.startPluginPanel.mockRejectedValueOnce(
+      new Error(
+        'Plugin "hello-plugin" is not registered. Open the panel from its plugin root first.',
+      ),
+    );
+
+    render(
+      <PluginPanelPage
+        workspaceId="ws-plugins"
+        pluginId="hello-plugin"
+        panelId="main"
+      />,
+    );
+
+    expect(
+      (await screen.findByTestId("plugin-panel-unavailable")).textContent,
+    ).toContain("This plugin is not running yet.");
+    expect(screen.queryByTestId("plugin-panel-error")).toBeNull();
+    expect(bridgeMock.startPluginPanel).toHaveBeenCalledTimes(1);
+  });
+
   it("shows start failures and refuses non-loopback panel URLs", async () => {
     bridgeMock.startPluginPanel.mockRejectedValueOnce(
       new Error("Plugin panel entry was not found."),
@@ -198,6 +259,9 @@ describe("PluginPanelPage", () => {
       />,
     );
     expect(await screen.findByText("Plugin panel entry was not found.")).toBeTruthy();
+    expect(
+      screen.getByRole("alert", { name: /Could not open plugin panel/i }),
+    ).toBeTruthy();
     expect(screen.getByText("Close this tab and try again.")).toBeTruthy();
     first.unmount();
 
