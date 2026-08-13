@@ -229,8 +229,12 @@ test("a takeover already claimed by a racer is lost, not repeated", () => {
     utimesSync(lock, then, then);
     // The racing winner's claim for this exact observed identity: our
     // exclusive create must collide with it and defer instead of sweeping
-    // a second time.
-    writeFileSync(`${lock}.claim-${Math.round(statSync(lock).mtimeMs)}`, "");
+    // a second time. Both the current and next time bucket are planted so
+    // the test cannot flake across a bucket boundary.
+    const mtime = Math.round(statSync(lock).mtimeMs);
+    const bucket = Math.floor(Date.now() / (5 * 60_000));
+    writeFileSync(`${lock}.claim-${mtime}-${bucket}`, "");
+    writeFileSync(`${lock}.claim-${mtime}-${bucket + 1}`, "");
     assert.equal(
       reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000 }),
       0,

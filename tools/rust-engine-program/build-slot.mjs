@@ -128,19 +128,28 @@ export function reclaimStaleSlots({ root, slots, staleMs }) {
   } catch {
     // A live sweeper's lock defers to it. A dead sweeper's is taken over by
     // whichever waiter wins the exclusive create of a claim file named for
-    // the OBSERVED heartbeat — that single O_EXCL create is the whole
-    // takeover's atomicity, on every platform. Two waiters who statted the
-    // same dead lock derive the same claim name, so one create must throw;
-    // and a fresh replacement lock can never be removed by a stale
-    // observation, because the path only frees through a takeover whose
-    // claim file already exists. Claim files accumulate one empty file per
-    // dead sweeper — rare debris, never a hazard.
+    // the OBSERVED heartbeat and the current five-minute bucket — that
+    // single O_EXCL create is the takeover's atomicity, on every platform.
+    // Concurrent waiters derive the same claim name, so one create must
+    // throw; the bucket makes a claim orphaned by a winner that died
+    // mid-takeover expire instead of wedging reclamation forever; and the
+    // winner re-checks the lock is still the object it statted before
+    // removing it. Residual, accepted: a takeover suspended for minutes
+    // between stat and claim can straddle buckets and still remove a
+    // replacement lock — the cost is one transient extra sweeper over
+    // already-tombstoned slots, not corruption, and closing it entirely
+    // needs a lock manager this gate does not. Claim files accumulate one
+    // empty file per dead sweeper per bucket — rare debris, never a hazard.
     try {
       const observedMtime = statSync(sweepLock).mtimeMs;
       if (Date.now() - observedMtime < 5 * 60_000) return 0;
-      writeFileSync(`${sweepLock}.claim-${Math.round(observedMtime)}`, "", {
-        flag: "wx",
-      });
+      const bucket = Math.floor(Date.now() / (5 * 60_000));
+      writeFileSync(
+        `${sweepLock}.claim-${Math.round(observedMtime)}-${bucket}`,
+        "",
+        { flag: "wx" },
+      );
+      if (statSync(sweepLock).mtimeMs !== observedMtime) return 0;
       rmSync(sweepLock, { recursive: true, force: true });
       mkdirSync(sweepLock);
     } catch {
