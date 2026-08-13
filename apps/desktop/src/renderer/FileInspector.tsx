@@ -69,95 +69,6 @@ import {
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
-type PendingMarkdownMaterializer = {
-  source: object;
-  materialize: () => string;
-};
-type PendingMarkdownState = {
-  pending: PendingMarkdownMaterializer | null;
-  listeners: Set<() => void>;
-};
-
-// A local WYSIWYG edit is expensive to project back to Markdown. Keep the
-// live editor as the draft source until an autosave or save-first flush needs
-// the string. The entry is shared by duplicate panes so either pane can force
-// the newest editor body before it checks the shared buffer.
-const pendingMarkdownStates = new WeakMap<
-  SharedLocalDocument,
-  PendingMarkdownState
->();
-
-function pendingMarkdownState(buffer: SharedLocalDocument): PendingMarkdownState {
-  let state = pendingMarkdownStates.get(buffer);
-  if (!state) {
-    state = { pending: null, listeners: new Set() };
-    pendingMarkdownStates.set(buffer, state);
-  }
-  return state;
-}
-
-function setPendingMarkdown(
-  buffer: SharedLocalDocument,
-  pending: PendingMarkdownMaterializer,
-): void {
-  const state = pendingMarkdownState(buffer);
-  const wasPending = state.pending !== null;
-  state.pending = pending;
-  if (!wasPending) state.listeners.forEach((listener) => listener());
-}
-
-function subscribePendingMarkdown(
-  buffer: SharedLocalDocument,
-  listener: () => void,
-): () => void {
-  const state = pendingMarkdownState(buffer);
-  state.listeners.add(listener);
-  return () => state.listeners.delete(listener);
-}
-
-function pendingMarkdownSource(buffer: SharedLocalDocument): object | null {
-  return pendingMarkdownState(buffer).pending?.source ?? null;
-}
-
-function takePendingMarkdown(
-  buffer: SharedLocalDocument,
-  source: object,
-): string | null {
-  const state = pendingMarkdownState(buffer);
-  const pending = state.pending;
-  if (!pending || pending.source !== source) return null;
-  const text = pending.materialize();
-  if (state.pending === pending) state.pending = null;
-  state.listeners.forEach((listener) => listener());
-  return text;
-}
-
-function materializePendingMarkdown(
-  buffer: SharedLocalDocument,
-): string | null {
-  const state = pendingMarkdownState(buffer);
-  const pending = state.pending;
-  if (!pending) return null;
-  const text = pending.materialize();
-  if (state.pending === pending) {
-    state.pending = null;
-  }
-  buffer.publishDraft(text, pending.source);
-  state.listeners.forEach((listener) => listener());
-  return text;
-}
-
-function clearPendingMarkdown(
-  buffer: SharedLocalDocument,
-  source: object,
-): void {
-  const state = pendingMarkdownState(buffer);
-  if (state.pending?.source === source) {
-    state.pending = null;
-    state.listeners.forEach((listener) => listener());
-  }
-}
-
 // The engine Y.Doc frontmatter map field name — the same key PageIdentity and
 // PropertiesPanel use for title, icon, and properties. Read it directly so
 // engine-mode export/copy reflects live frontmatter edits.
@@ -1568,19 +1479,10 @@ function MarkdownView(props: {
     props.localBuffer.getSnapshot,
     props.localBuffer.getSnapshot,
   );
-  const pendingMarkdownSubscribe = useCallback(
-    (listener: () => void) =>
-      subscribePendingMarkdown(props.localBuffer, listener),
-    [props.localBuffer],
-  );
-  const pendingMarkdownGetSnapshot = useCallback(
-    () => pendingMarkdownSource(props.localBuffer),
-    [props.localBuffer],
-  );
   const pendingMarkdownOwner = useSyncExternalStore(
-    pendingMarkdownSubscribe,
-    pendingMarkdownGetSnapshot,
-    pendingMarkdownGetSnapshot,
+    props.localBuffer.subscribe,
+    props.localBuffer.getPendingDraftSource,
+    props.localBuffer.getPendingDraftSource,
   );
   const sharedRevision = useRef<{
     buffer: SharedLocalDocument;
@@ -1765,7 +1667,7 @@ function MarkdownView(props: {
       text ??
       (unmounted.current
         ? latestDraft.current
-        : takePendingMarkdown(props.localBuffer, localSource.current) ??
+        : props.localBuffer.takePendingDraft(localSource.current) ??
           latestDraft.current);
     if (capturedConflictDraft.current === capturedText) return;
     conflictDraftId.current = captureOrphanedDraft(
@@ -1901,7 +1803,7 @@ function MarkdownView(props: {
     }
     if (unsavedDraft.current) {
       unsavedDraft.current = false;
-      clearPendingMarkdown(props.localBuffer, localSource.current);
+      props.localBuffer.clearPendingDraft(localSource.current);
       captureOrphanedDraft(
         props.workspaceId,
         props.path,
@@ -2551,7 +2453,7 @@ function MarkdownView(props: {
     }
     const enteredRevision = draftRevision.current;
     const run = async (): Promise<void> => {
-      materializePendingMarkdown(props.localBuffer);
+      props.localBuffer.materializePendingDraft();
       if (
         enteredRevision <= blockedDraftRevision.current &&
         !props.localBuffer.getSnapshot().dirty
@@ -2718,10 +2620,7 @@ function MarkdownView(props: {
 
   function onPropertiesDraft(next: string) {
     if (readOnly) return;
-    const pending = takePendingMarkdown(
-      props.localBuffer,
-      localSource.current,
-    );
+    const pending = props.localBuffer.takePendingDraft(localSource.current);
     const combined = pending
       ? mergeMarkdownEditorBody(next, markdownEditorBody(pending))
       : next;
@@ -2737,7 +2636,7 @@ function MarkdownView(props: {
   ) {
     if (readOnly) return;
     if (kind === "wysiwyg") {
-      const pending: PendingMarkdownMaterializer = {
+      const pending = {
         source: localSource.current,
         materialize: () => {
           const serialized = materializeWysiwyg
@@ -2750,9 +2649,9 @@ function MarkdownView(props: {
           return serialized;
         },
       };
-      setPendingMarkdown(props.localBuffer, pending);
+      props.localBuffer.setPendingDraft(pending);
     } else {
-      clearPendingMarkdown(props.localBuffer, localSource.current);
+      props.localBuffer.clearPendingDraft(localSource.current);
       props.localBuffer.publishDraft(latestDraft.current, localSource.current);
     }
     draftRevision.current += 1;
@@ -2763,9 +2662,9 @@ function MarkdownView(props: {
   }
 
   function onWysiwygFocus() {
-    const owner = pendingMarkdownSource(props.localBuffer);
+    const owner = props.localBuffer.getPendingDraftSource();
     if (owner === null || owner === localSource.current) return;
-    const text = materializePendingMarkdown(props.localBuffer);
+    const text = props.localBuffer.materializePendingDraft();
     if (text === null) return;
     latestDraft.current = text;
     setDraft(text);
@@ -2778,7 +2677,7 @@ function MarkdownView(props: {
     // edit surface (search jumps already force source mode this way). Only
     // the editable WYSIWYG mode is off-limits.
     if (readOnly && next === "wysiwyg") return;
-    const pending = materializePendingMarkdown(props.localBuffer);
+    const pending = props.localBuffer.materializePendingDraft();
     const current =
       pending ??
       (mode === "wysiwyg" && !unsavedDraft.current
@@ -2862,7 +2761,7 @@ function MarkdownView(props: {
       }
       unsavedDraft.current = false;
       const text =
-        materializePendingMarkdown(props.localBuffer) ??
+        props.localBuffer.materializePendingDraft() ??
         serializeDraftRef.current();
       // Same invariant as the plain-text hook (#579 adversarial review, F3):
       // a draft this unmount may not write is set aside rather than dropped.
@@ -2918,7 +2817,7 @@ function MarkdownView(props: {
       // Arming and reading the tail are one synchronous step, so no writer
       // can slip between them.
       flushBarrier.current = true;
-      materializePendingMarkdown(props.localBuffer);
+      props.localBuffer.materializePendingDraft();
       const localWritePending = writersLive.current > 0;
       const flush = (async () => {
         try {

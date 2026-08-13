@@ -46,6 +46,10 @@ export class SharedLocalDocument {
   private initialized = false;
   private refs = 0;
   private listeners = new Set<() => void>();
+  private pendingDraft: {
+    source: object;
+    materialize: () => string;
+  } | null = null;
   private tail: Promise<void> = Promise.resolve();
   private writers = 0;
   private latestReadTicket = 0;
@@ -80,6 +84,44 @@ export class SharedLocalDocument {
   };
 
   getSnapshot = (): LocalDocumentSnapshot => this.snapshot;
+
+  getPendingDraftSource = (): object | null =>
+    this.pendingDraft?.source ?? null;
+
+  setPendingDraft(pending: {
+    source: object;
+    materialize: () => string;
+  }): void {
+    const wasPending = this.pendingDraft !== null;
+    this.pendingDraft = pending;
+    if (!wasPending) this.notify();
+  }
+
+  takePendingDraft(source: object): string | null {
+    const pending = this.pendingDraft;
+    if (!pending || pending.source !== source) return null;
+    const text = pending.materialize();
+    if (this.pendingDraft === pending) this.pendingDraft = null;
+    this.notify();
+    return text;
+  }
+
+  materializePendingDraft(): string | null {
+    const pending = this.pendingDraft;
+    if (!pending) return null;
+    const text = pending.materialize();
+    if (this.pendingDraft === pending) this.pendingDraft = null;
+    const revision = this.snapshot.revision;
+    this.publishDraft(text, pending.source);
+    if (this.snapshot.revision === revision) this.notify();
+    return text;
+  }
+
+  clearPendingDraft(source: object): void {
+    if (this.pendingDraft?.source !== source) return;
+    this.pendingDraft = null;
+    this.notify();
+  }
 
   beginRead(): number {
     this.latestReadTicket += 1;
@@ -249,6 +291,10 @@ export class SharedLocalDocument {
       revision: current.revision + 1,
       source,
     };
+    this.notify();
+  }
+
+  private notify(): void {
     for (const listener of [...this.listeners]) listener();
   }
 

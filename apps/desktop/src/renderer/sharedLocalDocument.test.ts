@@ -169,6 +169,58 @@ describe("SharedLocalDocument", () => {
     expect(getSharedLocalDocument(key)).not.toBe(buffer);
   });
 
+  it("lets only the pending draft owner take its lazy text", () => {
+    const buffer = getSharedLocalDocument(
+      localDocumentKey("ws", "pending-owner.md", 1),
+    );
+    const release = buffer.retain();
+    const source = {};
+    const otherSource = {};
+    const materialize = vi.fn(() => "lazy draft");
+    const listener = vi.fn();
+    const unsubscribe = buffer.subscribe(listener);
+
+    buffer.setPendingDraft({ source, materialize });
+
+    expect(buffer.getPendingDraftSource()).toBe(source);
+    expect(buffer.takePendingDraft(otherSource)).toBeNull();
+    expect(materialize).not.toHaveBeenCalled();
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    expect(buffer.takePendingDraft(source)).toBe("lazy draft");
+    expect(materialize).toHaveBeenCalledTimes(1);
+    expect(buffer.getPendingDraftSource()).toBeNull();
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(buffer.getSnapshot().body).toBe("");
+
+    unsubscribe();
+    release();
+  });
+
+  it("notifies when materializing a pending draft leaves the snapshot unchanged", () => {
+    const buffer = getSharedLocalDocument(
+      localDocumentKey("ws", "pending-same.md", 1),
+    );
+    const release = buffer.retain();
+    const source = {};
+    buffer.initializeRead("same", "hash-1", buffer.beginRead());
+    buffer.publishDraft("same", source);
+    const revision = buffer.getSnapshot().revision;
+    const listener = vi.fn();
+    const unsubscribe = buffer.subscribe(listener);
+    buffer.setPendingDraft({ source, materialize: () => "same" });
+    listener.mockClear();
+
+    expect(buffer.materializePendingDraft()).toBe("same");
+
+    expect(buffer.getPendingDraftSource()).toBeNull();
+    expect(buffer.getSnapshot().revision).toBe(revision);
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    unsubscribe();
+    release();
+  });
+
   it("reports a dirty draft that has no write baseline", async () => {
     const buffer = getSharedLocalDocument(
       localDocumentKey("ws", "no-baseline.txt", 1),
