@@ -242,6 +242,9 @@ function Harness(props: {
       <span data-testid="read-only-transition">
         {String(engine.readOnlyWhileEditing)}
       </span>
+      <span data-testid="permanent-failure-transition">
+        {String(engine.permanentFailureWhileEditing)}
+      </span>
       <span data-testid="draft">
         {props.compactDraft
           ? drafts.at(-1)
@@ -920,6 +923,113 @@ it.each([
   );
   expect(Number(screen.getByTestId("draft-size").textContent)).toBeGreaterThan(
     ENGINE_YDOC_UPDATE_MAX_BYTES,
+  );
+});
+
+it("reports pending and complete image recovery for an oversized scene", async () => {
+  harness = harnessBridge("scene");
+  let resolveAsset!: (value: {
+    descriptor: typeof IMAGE_DESCRIPTOR;
+    bytes: Uint8Array;
+  }) => void;
+  const asset = new Promise<{
+    descriptor: typeof IMAGE_DESCRIPTOR;
+    bytes: Uint8Array;
+  }>((resolve) => {
+    resolveAsset = resolve;
+  });
+  harness.setArtifactReader([IMAGE_DESCRIPTOR], () => asset);
+  putSceneAsset(harness.sourceDoc, IMAGE_DESCRIPTOR);
+  insertElementRevision(harness.sourceDoc, {
+    id: "image-element",
+    type: "image",
+    fileId: IMAGE_DESCRIPTOR.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    index: "a1",
+  });
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  act(() => screen.getByTestId("type-oversized").click());
+  await flushLocalBatch();
+
+  expect(
+    screen.getByTestId("permanent-failure-transition").textContent,
+  ).toBe("true");
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("loading:1");
+  const immediate = parseExcalidrawDocument(
+    screen.getByTestId("draft").textContent!,
+  );
+  expect(immediate.files).toEqual({});
+  expect(immediate.elements).toContainEqual(
+    expect.objectContaining({ id: "image-element", fileId: null }),
+  );
+
+  await act(async () => {
+    resolveAsset({ descriptor: IMAGE_DESCRIPTOR, bytes: new Uint8Array([1, 2, 3]) });
+    await asset;
+  });
+
+  await waitFor(() =>
+    expect(screen.getByTestId("asset-recovery").textContent).toBe("none"),
+  );
+  const recovered = parseExcalidrawDocument(
+    screen.getByTestId("draft").textContent!,
+  );
+  expect(recovered.elements).toContainEqual(
+    expect.objectContaining({
+      id: "image-element",
+      fileId: IMAGE_DESCRIPTOR.id,
+    }),
+  );
+  expect(recovered.files[IMAGE_DESCRIPTOR.id]).toMatchObject({
+    id: IMAGE_DESCRIPTOR.id,
+    dataURL: "data:image/png;base64,AQID",
+  });
+});
+
+it("reports a missing image after oversized-scene recovery fails", async () => {
+  harness = harnessBridge("scene");
+  harness.setArtifactReader([IMAGE_DESCRIPTOR], async () => {
+    throw new Error("asset unavailable");
+  });
+  putSceneAsset(harness.sourceDoc, IMAGE_DESCRIPTOR);
+  insertElementRevision(harness.sourceDoc, {
+    id: "image-element",
+    type: "image",
+    fileId: IMAGE_DESCRIPTOR.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    index: "a1",
+  });
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  act(() => screen.getByTestId("type-oversized").click());
+  await flushLocalBatch();
+
+  await waitFor(() =>
+    expect(screen.getByTestId("asset-recovery").textContent).toBe("missing:1"),
+  );
+  const recovered = parseExcalidrawDocument(
+    screen.getByTestId("draft").textContent!,
+  );
+  expect(recovered.files).toEqual({});
+  expect(recovered.elements).toContainEqual(
+    expect.objectContaining({ id: "image-element", fileId: null }),
   );
 });
 

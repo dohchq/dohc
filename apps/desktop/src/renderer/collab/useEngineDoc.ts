@@ -248,11 +248,15 @@ export type UseEngineDoc = {
   // The recovery row created for this deletion, if it still exists.
   deletedDraftId: number | null;
   // Image recovery for a drawing retained after deletion or a read-only
-  // transition. While loading, the immediate draft has null file references.
+  // transition, or after a permanent local-update refusal. While loading, the
+  // immediate draft has null file references.
   recoveryAssets:
     | { state: "loading"; count: number }
     | { state: "missing"; count: number }
     | null;
+  // A local update exceeded the permanent transport limit. The rejected
+  // document is retained for recovery only.
+  permanentFailureWhileEditing: boolean;
   // Main refused a live edit because this workspace became read-only after
   // the session opened. The rejected document is retained for recovery only.
   readOnlyWhileEditing: boolean;
@@ -415,6 +419,9 @@ export function useEngineDoc(input: {
   const [readOnlyTransition, setReadOnlyTransition] = useState<{
     token: number;
   } | null>(null);
+  const [permanentFailure, setPermanentFailure] = useState<{
+    token: number;
+  } | null>(null);
   const [sceneRecoveryAssets, setSceneRecoveryAssets] = useState<{
     token: number;
     state: "loading" | "missing";
@@ -463,8 +470,12 @@ export function useEngineDoc(input: {
   const deletedDraftId = deletedWhileEditing ? deletion.draftId : null;
   const readOnlyWhileEditing =
     settled?.kind === "bound" && readOnlyTransition?.token === settled.token;
+  const permanentFailureWhileEditing =
+    settled?.kind === "bound" && permanentFailure?.token === settled.token;
   const recoveryAssets =
-    (deletedWhileEditing || readOnlyWhileEditing) &&
+    (deletedWhileEditing ||
+      readOnlyWhileEditing ||
+      permanentFailureWhileEditing) &&
     sceneRecoveryAssets?.token === settled.token
       ? {
           state: sceneRecoveryAssets.state,
@@ -480,6 +491,7 @@ export function useEngineDoc(input: {
   if (
     deletedWhileEditing ||
     readOnlyWhileEditing ||
+    permanentFailureWhileEditing ||
     removalInProgress !== null
   ) {
     writesRefused.current = true;
@@ -498,6 +510,7 @@ export function useEngineDoc(input: {
     const token = ++openTokenRef.current;
     setDeletion(null);
     setReadOnlyTransition(null);
+    setPermanentFailure(null);
     setSceneRecoveryAssets(null);
     let cancelled = false;
     let binding: EngineYDocBinding | null = null;
@@ -513,7 +526,11 @@ export function useEngineDoc(input: {
     // resolves late (the projection import, and each markdown conversion,
     // are async now).
     let recoveryQueue: Promise<void> = Promise.resolve();
-    let recoveryTransition: "deletion" | "read-only" | null = null;
+    let recoveryTransition:
+      | "deletion"
+      | "read-only"
+      | "permanent-failure"
+      | null = null;
     let deletionPending = false;
     let releaseStarted = false;
     let recoveryRevision = 0;
@@ -591,7 +608,7 @@ export function useEngineDoc(input: {
     const enqueueRecoverySnapshot = (
       bytes: Uint8Array,
       forceCreate: boolean,
-      transition: "deletion" | "read-only" | null,
+      transition: "deletion" | "read-only" | "permanent-failure" | null,
       sceneRecovery: SceneRecoveryWork | null = null,
     ): void => {
       const revision = ++recoveryRevision;
@@ -747,6 +764,7 @@ export function useEngineDoc(input: {
       doc: Y.Doc,
     ): void => {
       writesRefused.current = true;
+      recoveryTransition = "permanent-failure";
       const bytes = Y.encodeStateAsUpdate(doc);
       recoverySnapshotBytes = bytes;
       const sceneRecovery =
@@ -759,9 +777,10 @@ export function useEngineDoc(input: {
         sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc),
       );
       if (!cancelled && token === openTokenRef.current) {
+        setPermanentFailure({ token });
         reportSaveState("error", error.message);
       }
-      enqueueRecoverySnapshot(bytes, true, null, sceneRecovery);
+      enqueueRecoverySnapshot(bytes, true, recoveryTransition, sceneRecovery);
     };
 
     const releaseBinding = (): void => {
@@ -957,6 +976,7 @@ export function useEngineDoc(input: {
     deletedWhileEditing,
     deletedDraftId,
     recoveryAssets,
+    permanentFailureWhileEditing,
     readOnlyWhileEditing,
     removalInProgress,
     artifactAssets,

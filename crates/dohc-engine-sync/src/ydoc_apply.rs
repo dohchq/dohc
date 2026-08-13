@@ -997,6 +997,89 @@ fn put_projection_text_blob(
     Ok(())
 }
 
+struct AuthorizedSceneAsset {
+    bytes: Vec<u8>,
+    byte_length: usize,
+}
+
+fn authorize_scene_asset_with_store(
+    conn: &Connection,
+    key: &DocKey,
+    asset: &dohc_engine_collab::SceneAsset,
+) -> Result<AuthorizedSceneAsset, SyncError> {
+    let expected = dohc_engine_collab::scene_asset_ref(
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+        &asset.sha256,
+        &asset.mime_type,
+    )
+    .map_err(|_| SyncError::InvalidInput {
+        reason: "scene asset authority is invalid",
+    })?;
+    let (classification, normalized) = classify_engine_file_path_normalized(&asset.path);
+    if asset.path != expected
+        || classification != PathClassification::Tracked
+        || normalized.as_deref() != Some(asset.path.as_str())
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "scene asset authority is invalid",
+        });
+    }
+    let head: Option<(String, Option<String>, Option<i64>)> = conn
+        .query_row(
+            "SELECT COALESCE(s.content_kind, 'text'), s.binary_sha256, b.byte_length \
+                 FROM path_aliases a JOIN snapshots s \
+                    ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id \
+                   AND s.object_id=a.object_id \
+                 LEFT JOIN binary_blobs b ON b.sha256=s.binary_sha256 \
+                  WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
+            params![key.workspace_id, key.version_id, asset.path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let byte_length = match head {
+        Some((kind, sha256, byte_length)) => {
+            if kind != "binary" || sha256.as_deref() != Some(asset.sha256.as_str()) {
+                return Err(SyncError::InvalidInput {
+                    reason: "scene asset authority is invalid",
+                });
+            }
+            byte_length.ok_or(SyncError::RetryableState {
+                reason: "scene asset blob is pending",
+            })?
+        }
+        None => retired_scene_asset_byte_length(conn, key, &asset.path, &asset.sha256)?.ok_or(
+            SyncError::RetryableState {
+                reason: "scene asset head is pending",
+            },
+        )?,
+    }
+    .try_into()
+    .map_err(|_| SyncError::InvalidInput {
+        reason: "scene asset authority is invalid",
+    })?;
+    let bytes = get_binary_blob(conn, &asset.sha256)?.ok_or(SyncError::RetryableState {
+        reason: "scene asset blob is pending",
+    })?;
+    if hex_sha256(&bytes) != asset.sha256 {
+        return Err(SyncError::InvalidInput {
+            reason: "scene asset authority is invalid",
+        });
+    }
+    Ok(AuthorizedSceneAsset { bytes, byte_length })
+}
+
+/// Verify that a scene asset belongs to this lineage and has its exact blob.
+pub fn validate_scene_asset_with_store(
+    conn: &Connection,
+    key: &DocKey,
+    asset: &dohc_engine_collab::SceneAsset,
+) -> Result<(), SyncError> {
+    authorize_scene_asset_with_store(conn, key, asset).map(|_| ())
+}
+
 /// Project one canonical live document through authoritative versioned state.
 /// Scene bytes never enter the Y.Doc; they resolve from the same workspace and
 /// version as its lineage and are injected only into the portable artifact.
@@ -1031,61 +1114,10 @@ pub fn project_ydoc_with_store(
         let asset = folded.assets.get(id).ok_or(SyncError::InvalidInput {
             reason: "scene asset record is invalid",
         })?;
-        let expected = dohc_engine_collab::scene_asset_ref(
-            &key.workspace_id,
-            &key.version_id,
-            &key.object_id,
-            &asset.sha256,
-            &asset.mime_type,
-        )
-        .map_err(|_| SyncError::InvalidInput {
-            reason: "scene asset authority is invalid",
-        })?;
-        let (classification, normalized) = classify_engine_file_path_normalized(&asset.path);
-        if asset.path != expected
-            || classification != PathClassification::Tracked
-            || normalized.as_deref() != Some(asset.path.as_str())
-        {
-            return Err(SyncError::InvalidInput {
-                reason: "scene asset authority is invalid",
-            });
-        }
-        let head: Option<(String, Option<String>, Option<i64>)> = conn
-            .query_row(
-                "SELECT COALESCE(s.content_kind, 'text'), s.binary_sha256, b.byte_length \
-                 FROM path_aliases a JOIN snapshots s \
-                    ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id \
-                   AND s.object_id=a.object_id \
-                 LEFT JOIN binary_blobs b ON b.sha256=s.binary_sha256 \
-                  WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
-                params![key.workspace_id, key.version_id, asset.path],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(SyncError::corrupt)?;
-        let byte_length = match head {
-            Some((kind, sha256, byte_length)) => {
-                if kind != "binary" || sha256.as_deref() != Some(asset.sha256.as_str()) {
-                    return Err(SyncError::InvalidInput {
-                        reason: "scene asset authority is invalid",
-                    });
-                }
-                byte_length.ok_or(SyncError::RetryableState {
-                    reason: "scene asset blob is pending",
-                })?
-            }
-            None => retired_scene_asset_byte_length(conn, key, &asset.path, &asset.sha256)?.ok_or(
-                SyncError::RetryableState {
-                    reason: "scene asset head is pending",
-                },
-            )?,
-        }
-        .try_into()
-        .map_err(|_| SyncError::InvalidInput {
-            reason: "scene asset authority is invalid",
-        })?;
-        let data_url_len = dohc_engine_collab::scene_data_url_len(&asset.mime_type, byte_length)
-            .map_err(|error| map_projection_error(error, "scene projection is invalid"))?;
+        let authorized = authorize_scene_asset_with_store(conn, key, asset)?;
+        let data_url_len =
+            dohc_engine_collab::scene_data_url_len(&asset.mime_type, authorized.byte_length)
+                .map_err(|error| map_projection_error(error, "scene projection is invalid"))?;
         projected_bytes =
             projected_bytes
                 .checked_add(data_url_len)
@@ -1101,15 +1133,7 @@ pub fn project_ydoc_with_store(
                 limit_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES,
             });
         }
-        let bytes = get_binary_blob(conn, &asset.sha256)?.ok_or(SyncError::RetryableState {
-            reason: "scene asset blob is pending",
-        })?;
-        if hex_sha256(&bytes) != asset.sha256 {
-            return Err(SyncError::InvalidInput {
-                reason: "scene asset authority is invalid",
-            });
-        }
-        bytes_by_id.insert(id.to_owned(), bytes);
+        bytes_by_id.insert(id.to_owned(), authorized.bytes);
     }
     let content = folded
         .portable_json_with_asset_bytes(&bytes_by_id)

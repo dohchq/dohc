@@ -575,6 +575,65 @@ it("hydrates an engine-bound image outside the Y.Doc", async () => {
   );
 });
 
+it("hydrates a tombstoned image before a remote undo revives it", async () => {
+  const doc = new Y.Doc();
+  declareSceneRoots(doc);
+  insertElementRevision(doc, {
+    id: "image-element",
+    type: "image",
+    version: 2,
+    versionNonce: 2,
+    isDeleted: true,
+    index: "a0",
+    fileId: "image-file",
+  });
+  const hydrateAssets = vi.fn(async () => [
+    {
+      id: "image-file",
+      mimeType: "image/png",
+      dataURL: "data:image/png;base64,AQID",
+      created: 1,
+    },
+  ] as never);
+
+  render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={doc}
+      hydrateAssets={hydrateAssets}
+    />,
+  );
+
+  await vi.waitFor(() => expect(excalidraw.addFiles).toHaveBeenCalledOnce());
+  excalidraw.updateScene.mockClear();
+  act(() =>
+    insertElementRevision(doc, {
+      id: "image-element",
+      type: "image",
+      version: 3,
+      versionNonce: 3,
+      isDeleted: false,
+      index: "a0",
+      fileId: "image-file",
+    }),
+  );
+
+  expect(excalidraw.updateScene).toHaveBeenCalledWith(
+    expect.objectContaining({
+      elements: [
+        expect.objectContaining({
+          id: "image-element",
+          fileId: "image-file",
+          isDeleted: false,
+        }),
+      ],
+    }),
+  );
+  expect(hydrateAssets).toHaveBeenCalledOnce();
+  expect(excalidraw.addFiles).toHaveBeenCalledOnce();
+});
+
 it("drops asset hydration that resolves after the scene changes", async () => {
   const firstDoc = new Y.Doc();
   const secondDoc = new Y.Doc();

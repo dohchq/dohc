@@ -168,6 +168,29 @@ fn image_scene_update_with_asset_record(
     )
 }
 
+fn image_scene_revision_update(asset_id: &str, version: u64, is_deleted: bool) -> Vec<u8> {
+    let portable = serde_json::to_string(&json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "https://excalidraw.com",
+        "elements": [{
+            "id": "image-element",
+            "type": "image",
+            "version": version,
+            "versionNonce": version,
+            "isDeleted": is_deleted,
+            "index": "a0",
+            "fileId": asset_id
+        }],
+        "appState": {},
+        "files": {}
+    }))
+    .expect("portable image revision");
+    dohc_engine_collab::import_portable_scene(&portable)
+        .expect("scene revision import")
+        .initial_update
+}
+
 async fn call_error(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
@@ -1765,6 +1788,148 @@ async fn scene_open_rejects_forged_asset_namespace_without_a_writable_fallback()
     .await;
     assert_eq!(invalid.code, ErrorCode::Internal);
     assert_eq!(invalid.message, "ydoc-artifact-assets-invalid");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scene_join_authorizes_a_tombstoned_image_for_remote_undo_only() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let image_bytes = valid_png_with_text_padding(1024);
+    let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+    let artifact = serde_json::to_string(&json!({
+        "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+        "elements": [{
+            "id": "image-element", "type": "image", "version": 1,
+            "versionNonce": 1, "isDeleted": false, "index": "a0",
+            "fileId": "image-file"
+        }],
+        "appState": {},
+        "files": {
+            "image-file": {
+                "id": "image-file", "mimeType": "image/png", "created": 12,
+                "dataURL": format!("data:image/png;base64,{image_base64}")
+            }
+        }
+    }))
+    .expect("portable scene");
+    write_file(scratch.path(), "undo.excalidraw", artifact.as_bytes());
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-undo", 201).await;
+    let first = call(
+        &transport,
+        &handle,
+        202,
+        "ydoc.open",
+        json!({
+            "versionId": "main", "path": "undo.excalidraw",
+            "contentKind": "scene", "seedFromArtifact": true
+        }),
+    )
+    .await;
+    let descriptor = first["artifactAssets"][0].clone();
+
+    let tombstone = image_scene_revision_update("image-file", 2, true);
+    let dormant_sha = "f".repeat(64);
+    let dormant = dohc_engine_collab::encode_scene_asset_records(&BTreeMap::from([(
+        "dormant".to_owned(),
+        serde_json::to_string(&json!({
+            "created": 99,
+            "id": "dormant",
+            "mimeType": "image/png",
+            "ref": "unrelated/private.png",
+            "sha256": dormant_sha
+        }))
+        .expect("dormant asset record"),
+    )]))
+    .expect("valid record shape");
+    let deleted =
+        dohc_engine_collab::merge_updates(&[tombstone, dormant]).expect("deleted scene update");
+    call(
+        &transport,
+        &handle,
+        203,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": first["sessionId"],
+            "updateBase64": base64::engine::general_purpose::STANDARD.encode(deleted)
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        204,
+        "ydoc.settle",
+        json!({ "sessionId": first["sessionId"] }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        205,
+        "ydoc.evict",
+        json!({ "sessionId": first["sessionId"] }),
+    )
+    .await;
+
+    let joined = call(
+        &transport,
+        &handle,
+        206,
+        "ydoc.open",
+        json!({
+            "versionId": "main", "path": "undo.excalidraw",
+            "contentKind": "scene", "seedFromArtifact": false
+        }),
+    )
+    .await;
+    assert_eq!(joined["artifactAssets"], json!([descriptor]));
+    let joined_doc = Ydoc::wire();
+    let initial = base64::engine::general_purpose::STANDARD
+        .decode(
+            joined["initialUpdateBase64"]
+                .as_str()
+                .expect("initial update"),
+        )
+        .expect("initial update base64");
+    joined_doc.apply(&initial).expect("joined scene applies");
+    assert!(joined_doc.fold_scene().elements.is_empty());
+    assert_eq!(
+        joined_doc.fold_scene().referenced_asset_ids,
+        std::collections::BTreeSet::from(["image-file".to_owned()])
+    );
+
+    let undo = image_scene_revision_update("image-file", 3, false);
+    call(
+        &transport,
+        &handle,
+        207,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": joined["sessionId"],
+            "updateBase64": base64::engine::general_purpose::STANDARD.encode(undo)
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        208,
+        "ydoc.settle",
+        json!({ "sessionId": joined["sessionId"] }),
+    )
+    .await;
+    let settled: Value = serde_json::from_slice(
+        &std::fs::read(scratch.path().join("undo.excalidraw")).expect("settled scene"),
+    )
+    .expect("settled scene JSON");
+    assert_eq!(settled["elements"][0]["fileId"], json!("image-file"));
+    assert_eq!(
+        settled["files"]["image-file"]["dataURL"],
+        json!(format!("data:image/png;base64,{image_base64}"))
+    );
+    assert!(settled["files"].get("dormant").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

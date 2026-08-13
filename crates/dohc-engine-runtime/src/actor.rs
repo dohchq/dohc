@@ -9117,6 +9117,32 @@ fn validate_scene_artifact_assets_on_store(
                 _ => RuntimeError::YdocArtifactAssetsInvalid,
             },
         )?;
+        let folded = doc.fold_scene();
+        let live_asset_ids: HashSet<&str> = folded
+            .elements
+            .iter()
+            .filter(|element| {
+                element.get("type").and_then(serde_json::Value::as_str) == Some("image")
+            })
+            .filter_map(|element| element.get("fileId").and_then(serde_json::Value::as_str))
+            .collect();
+        for asset in assets {
+            if live_asset_ids.contains(asset.id.as_str()) {
+                continue;
+            }
+            let folded_asset = folded
+                .assets
+                .get(&asset.id)
+                .ok_or(RuntimeError::YdocArtifactAssetsInvalid)?;
+            dohc_engine_sync::validate_scene_asset_with_store(conn, key, folded_asset).map_err(
+                |error| match error {
+                    dohc_engine_sync::SyncError::RetryableState { .. } => {
+                        RuntimeError::YdocArtifactAssetsPending
+                    }
+                    _ => RuntimeError::YdocArtifactAssetsInvalid,
+                },
+            )?;
+        }
         let mut pending_jobs = Vec::new();
         for asset in assets {
             let mut statement = conn
@@ -9146,16 +9172,11 @@ fn validate_scene_artifact_assets_on_store(
     })
 }
 
-fn live_scene_asset_descriptors(doc: &Ydoc) -> Vec<ArtifactAssetDescriptor> {
+fn scene_asset_descriptors_for_open(doc: &Ydoc) -> Vec<ArtifactAssetDescriptor> {
     let folded = doc.fold_scene();
-    let referenced: std::collections::BTreeSet<&str> = folded
-        .elements
+    folded
+        .referenced_asset_ids
         .iter()
-        .filter(|element| element.get("type").and_then(serde_json::Value::as_str) == Some("image"))
-        .filter_map(|element| element.get("fileId").and_then(serde_json::Value::as_str))
-        .collect();
-    referenced
-        .into_iter()
         .filter_map(|id| folded.assets.get(id))
         .map(|asset| ArtifactAssetDescriptor {
             id: asset.id.clone(),
@@ -9532,7 +9553,7 @@ fn ydoc_open_state_on_store(
                     }
                 }
                 let artifact_assets = if kind == ContentKind::Scene {
-                    live_scene_asset_descriptors(&persisted.doc)
+                    scene_asset_descriptors_for_open(&persisted.doc)
                 } else {
                     Vec::new()
                 };

@@ -31,6 +31,7 @@ const engineDocState: UseEngineDoc = {
   deletedWhileEditing: false,
   deletedDraftId: null,
   recoveryAssets: null,
+  permanentFailureWhileEditing: false,
   readOnlyWhileEditing: false,
   removalInProgress: null,
   artifactAssets: [],

@@ -1773,6 +1773,7 @@ function MarkdownView(props: {
     engine.notInVersion ||
     engine.deletedWhileEditing ||
     engine.readOnlyWhileEditing ||
+    engine.permanentFailureWhileEditing ||
     engine.removalInProgress !== null ||
     // #564: the engine open hit its retry deadline. The plain editor stays
     // read-only — its autosave would race the session the engine may still
@@ -3500,6 +3501,7 @@ function DrawingView({
     engine.opening ||
     engine.deletedWhileEditing ||
     engine.readOnlyWhileEditing ||
+    engine.permanentFailureWhileEditing ||
     engine.engineMayHoldDocument ||
     engine.artifactAssetsInvalid ||
     engine.removalInProgress !== null;
@@ -4171,6 +4173,7 @@ export function FileInspector(props: {
     switchUnresyncedRef.current ||
     engine.deletedWhileEditing ||
     engine.readOnlyWhileEditing ||
+    engine.permanentFailureWhileEditing ||
     engine.removalInProgress !== null;
   const pendingTextUndo =
     props.pendingUndo?.path === props.path &&
@@ -4222,13 +4225,17 @@ export function FileInspector(props: {
       path={props.path}
       message={
         kind === "drawing" &&
-        (engine.deletedWhileEditing || engine.readOnlyWhileEditing)
+        (engine.deletedWhileEditing ||
+          engine.readOnlyWhileEditing ||
+          engine.permanentFailureWhileEditing)
           ? engine.recoveryAssets?.state === "loading"
             ? `dohc is adding ${engine.recoveryAssets.count} ${engine.recoveryAssets.count === 1 ? "image" : "images"} to your set-aside drawing. Wait before you copy it.`
             : engine.recoveryAssets?.state === "missing"
               ? `dohc could not recover ${engine.recoveryAssets.count} ${engine.recoveryAssets.count === 1 ? "image" : "images"}. Copy your set-aside drawing to keep the rest.`
               : engine.deletedWhileEditing
                 ? "This drawing was deleted. Copy your set-aside drawing to keep it."
+                : engine.permanentFailureWhileEditing
+                  ? "dohc could not save this drawing. Copy your set-aside drawing to keep it."
                 : "This drawing became read-only before your edit saved. Copy your set-aside drawing to keep it."
           : engine.readOnlyWhileEditing
             ? "This document became read-only before your edit saved. Copy your text to keep it."

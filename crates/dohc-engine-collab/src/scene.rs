@@ -76,6 +76,9 @@ pub struct FoldedScene {
     pub elements: Vec<Value>,
     pub app_state: BTreeMap<String, Value>,
     pub assets: BTreeMap<String, SceneAsset>,
+    /// Asset IDs referenced by winning image revisions, including tombstones.
+    /// A joining client can hydrate an image before a remote undo revives it.
+    pub referenced_asset_ids: BTreeSet<String>,
 }
 
 #[derive(Serialize)]
@@ -1108,6 +1111,17 @@ pub fn fold_scene(
         }
     }
 
+    let referenced_asset_ids = winners
+        .values()
+        .filter_map(|winner| {
+            let element = winner.element.as_object()?;
+            (element.get("type").and_then(Value::as_str) == Some("image"))
+                .then(|| element.get("fileId").and_then(Value::as_str))
+                .flatten()
+                .map(str::to_owned)
+        })
+        .collect();
+
     let mut elements: Vec<Value> = winners
         .into_values()
         .filter_map(|winner| {
@@ -1142,6 +1156,7 @@ pub fn fold_scene(
         elements,
         app_state,
         assets,
+        referenced_asset_ids,
     }
 }
 
