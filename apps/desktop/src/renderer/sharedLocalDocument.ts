@@ -128,6 +128,9 @@ export class SharedLocalDocument {
     ) {
       return false;
     }
+    if (readTicket !== undefined) {
+      this.latestAcceptedReadTicket = readTicket;
+    }
     if (this.snapshot.dirty || this.writers > 0) {
       const ownedByCaller = this.snapshot.source === source;
       const canReplaceOwnDraft = force && ownedByCaller && this.writers === 0;
@@ -135,9 +138,6 @@ export class SharedLocalDocument {
         if (force && !ownedByCaller) this.markError();
         return false;
       }
-    }
-    if (readTicket !== undefined) {
-      this.latestAcceptedReadTicket = readTicket;
     }
     this.initialized = true;
     this.replace(

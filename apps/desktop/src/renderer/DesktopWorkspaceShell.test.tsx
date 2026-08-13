@@ -198,6 +198,31 @@ function dmSyncResult(
 
 Element.prototype.scrollIntoView = vi.fn();
 
+const originalSetPointerCapture = Object.getOwnPropertyDescriptor(
+  Element.prototype,
+  "setPointerCapture",
+);
+const originalHasPointerCapture = Object.getOwnPropertyDescriptor(
+  Element.prototype,
+  "hasPointerCapture",
+);
+const originalElementFromPoint = Object.getOwnPropertyDescriptor(
+  document,
+  "elementFromPoint",
+);
+
+function restoreProperty(
+  target: object,
+  key: PropertyKey,
+  descriptor: PropertyDescriptor | undefined,
+): void {
+  if (descriptor) {
+    Object.defineProperty(target, key, descriptor);
+  } else {
+    Reflect.deleteProperty(target, key);
+  }
+}
+
 // The dirty-draft test types into the real markdown editor, which needs the
 // same two globals jsdom lacks that FileInspector.test.tsx stubs.
 vi.stubGlobal(
@@ -629,6 +654,17 @@ async function settleEngineOnRead(bridge: ReturnType<typeof makeEngineBridge>) {
 
 afterEach(async () => {
   cleanup();
+  restoreProperty(
+    Element.prototype,
+    "setPointerCapture",
+    originalSetPointerCapture,
+  );
+  restoreProperty(
+    Element.prototype,
+    "hasPointerCapture",
+    originalHasPointerCapture,
+  );
+  restoreProperty(document, "elementFromPoint", originalElementFromPoint);
   await disposeEngineDocLeasesForTests();
   resetSharedLocalDocumentsForTests();
   vi.unstubAllGlobals();

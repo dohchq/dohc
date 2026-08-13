@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { createElement, createRef, type SetStateAction } from "react";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -980,10 +981,11 @@ describe("MarkdownEditor history", () => {
         code: "KeyZ",
         ctrlKey: true,
       });
-      await waitFor(() => {
-        expect(paneA!.textContent).toBe("seed");
-        expect(paneB!.textContent).toBe("seed");
+      await act(async () => {
+        await Promise.resolve();
       });
+      expect(paneA!.textContent).toBe("seed");
+      expect(paneB!.textContent).toBe("seed");
 
       view.rerender(createElement("div", null, paneBElement()));
       await waitFor(() => {

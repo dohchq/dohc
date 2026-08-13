@@ -101,6 +101,48 @@ describe("SharedLocalDocument", () => {
     release();
   });
 
+  it("recovers after a writer rejects without poisoning later writes", async () => {
+    const buffer = getSharedLocalDocument(
+      localDocumentKey("ws", "retry-after-error.txt", 1),
+    );
+    const release = buffer.retain();
+    const source = {};
+    buffer.initializeRead("before", "hash-1", buffer.beginRead());
+    buffer.publishDraft("after", source);
+
+    const writeError = new Error("disk unavailable");
+    await expect(
+      buffer.write(source, vi.fn().mockRejectedValue(writeError)),
+    ).rejects.toBe(writeError);
+    expect(buffer.getSnapshot()).toMatchObject({
+      body: "after",
+      contentHash: "hash-1",
+      dirty: true,
+      saveState: "error",
+      source,
+    });
+
+    const retryWriter = vi.fn().mockResolvedValue({
+      status: "written" as const,
+      contentHash: "hash-2",
+    });
+    await expect(buffer.write(source, retryWriter)).resolves.toMatchObject({
+      status: "written",
+      body: "after",
+      expectedContentHash: "hash-1",
+      contentHash: "hash-2",
+    });
+    await expect(buffer.settled()).resolves.toBeUndefined();
+    expect(retryWriter).toHaveBeenCalledWith("after", "hash-1");
+    expect(buffer.getSnapshot()).toMatchObject({
+      body: "after",
+      contentHash: "hash-2",
+      dirty: false,
+      saveState: "saved",
+    });
+    release();
+  });
+
   it("keeps a clean buffer saved when a writer has nothing to do", async () => {
     const key = localDocumentKey("ws", "clean.txt", 1);
     const buffer = getSharedLocalDocument(key);
@@ -194,6 +236,37 @@ describe("SharedLocalDocument", () => {
       body: "newer",
       contentHash: "hash-2",
       dirty: false,
+    });
+    release();
+  });
+
+  it("rejects an older read after a newer response was refused while dirty", async () => {
+    const buffer = getSharedLocalDocument(
+      localDocumentKey("ws", "refused-newer-read.txt", 1),
+    );
+    const release = buffer.retain();
+    const draftSource = {};
+    buffer.reset("before", "hash-0", draftSource);
+    const older = buffer.beginRead();
+    const newer = buffer.beginRead();
+    buffer.publishDraft("written draft", draftSource);
+
+    expect(
+      buffer.acceptRead("newer response", "hash-newer", {}, false, newer),
+    ).toBe(false);
+    await buffer.write(draftSource, async () => ({
+      status: "written",
+      contentHash: "hash-written",
+    }));
+
+    expect(
+      buffer.acceptRead("older response", "hash-older", {}, false, older),
+    ).toBe(false);
+    expect(buffer.getSnapshot()).toMatchObject({
+      body: "written draft",
+      contentHash: "hash-written",
+      dirty: false,
+      saveState: "saved",
     });
     release();
   });
