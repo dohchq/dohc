@@ -286,7 +286,7 @@ export function insertImageAtPosition(
   const transaction = view.state.tr.insert(clamped, node);
   if (!transaction.docChanged) return clamped;
   view.dispatch(transaction);
-  return clamped + node.nodeSize;
+  return transaction.mapping.map(clamped, 1);
 }
 
 function rebasePositionAfterDocumentChange(
@@ -305,7 +305,7 @@ function rebasePositionAfterDocumentChange(
   const mapped =
     pos >= end.a
       ? pos + end.b - end.a
-      : start + Math.min(pos - start, end.b - start);
+      : start + Math.min(pos - start, Math.max(0, end.b - start));
   return Math.max(0, Math.min(mapped, after.content.size));
 }
 
@@ -322,8 +322,8 @@ export async function placeImageFiles(
   sources: readonly ImageSource[],
   context: ImagePasteContext,
   startPos: number,
+  anchorDoc: ProseMirrorNode = view.state.doc,
 ): Promise<void> {
-  let anchorDoc = view.state.doc;
   // One read for the whole batch: every image in a single paste/drop/pick lands
   // under the setting as it stands at that moment.
   const attachments = await resolveAttachmentSettings(context);
@@ -468,6 +468,7 @@ export async function pickAndInsertImages(
 ): Promise<void> {
   const pick = context.pickImages;
   if (!pick) return;
+  const anchorDoc = view.state.doc;
   let picked: readonly PickedImage[];
   try {
     picked = await pick();
@@ -476,5 +477,11 @@ export async function pickAndInsertImages(
     return;
   }
   if (picked.length === 0) return; // cancelled
-  await placeImageFiles(view, picked.map(pickedImageSource), context, pos);
+  await placeImageFiles(
+    view,
+    picked.map(pickedImageSource),
+    context,
+    pos,
+    anchorDoc,
+  );
 }
