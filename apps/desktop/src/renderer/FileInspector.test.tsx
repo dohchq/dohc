@@ -4714,6 +4714,238 @@ describe("markdown editor unmount flush", () => {
     });
   });
 
+  it("does not consume a v2 plain-text draft when a v1 writer settles", async () => {
+    const firstHash = "1".repeat(64);
+    const secondHash = "2".repeat(64);
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      return reads === 1
+        ? { text: "Version one", truncated: false, contentHash: firstHash }
+        : { text: "Version two", truncated: false, contentHash: secondHash };
+    });
+    let resolveFirst!: () => void;
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        resolveFirst = () => resolve({ status: "written", contentHash: firstHash });
+      },
+    );
+    bridgeMock.writeWorkspaceText
+      .mockImplementationOnce(() => heldFirst)
+      .mockResolvedValue({ status: "written", contentHash: secondHash });
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        engineVersionKey={1}
+        refreshKey={1}
+      />,
+    );
+    const firstContent = (
+      await screen.findByTestId("view-text-editor")
+    ).querySelector(".cm-content") as HTMLElement;
+    await user.click(firstContent);
+    await user.keyboard("{End} v1");
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        engineVersionKey={2}
+        refreshKey={2}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    const secondBuffer = getSharedLocalDocument(
+      documentVersionKey("ws-1", "notes/plain.txt", 2),
+    );
+    await waitFor(() =>
+      expect(secondBuffer.getSnapshot()).toMatchObject({
+        initialized: true,
+        contentHash: secondHash,
+      }),
+    );
+    const secondEditor = screen.getByTestId("view-text-editor");
+    const secondContent = secondEditor.querySelector(".cm-content") as HTMLElement;
+    await user.click(secondContent);
+    await user.keyboard("{Control>}a{/Control}Version two v2");
+
+    await act(async () => {
+      resolveFirst();
+      await heldFirst;
+    });
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+      { timeout: 5_000 },
+    );
+    expect(bridgeMock.writeWorkspaceText.mock.calls[1]?.[0].text).toBe(
+      "Version two v2",
+    );
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+    view.unmount();
+  });
+
+  it("retires an in-flight plain-text conflict after a real unmount", async () => {
+    const initialHash = "3".repeat(64);
+    const externalHash = "4".repeat(64);
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "Base",
+      truncated: false,
+      contentHash: initialHash,
+    });
+    let resolveConflict!: () => void;
+    const heldConflict = new Promise<{
+      status: "conflict";
+      currentContentHash: string;
+    }>((resolve) => {
+      resolveConflict = () =>
+        resolve({ status: "conflict", currentContentHash: externalHash });
+    });
+    bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldConflict);
+    const key = documentVersionKey("ws-1", "notes/plain.txt", 1);
+    const user = userEvent.setup();
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        engineVersionKey={1}
+      />,
+    );
+    const content = (await screen.findByTestId("view-text-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+    await user.click(content);
+    await user.keyboard("{End} Draft");
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    const oldBuffer = getSharedLocalDocument(key);
+    view.unmount();
+
+    await act(async () => {
+      resolveConflict();
+      await heldConflict;
+    });
+    await waitFor(() =>
+      expect(getSharedLocalDocument(key)).not.toBe(oldBuffer),
+    );
+  });
+
+  it("does not consume a v2 Markdown draft when a v1 writer settles", async () => {
+    const firstHash = "5".repeat(64);
+    const secondHash = "6".repeat(64);
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      return reads === 1
+        ? { text: "# Version one\n", truncated: false, contentHash: firstHash }
+        : { text: "# Version two\n", truncated: false, contentHash: secondHash };
+    });
+    let resolveFirst!: () => void;
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        resolveFirst = () => resolve({ status: "written", contentHash: firstHash });
+      },
+    );
+    bridgeMock.writeWorkspaceText
+      .mockImplementationOnce(() => heldFirst)
+      .mockResolvedValue({ status: "written", contentHash: secondHash });
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/versioned.md"
+        engineVersionKey={1}
+        refreshKey={1}
+      />,
+    );
+    fireEvent.click(await screen.findByTestId("markdown-edit-toggle"));
+    const firstSource = await findSourceEditor();
+    fireEvent.change(firstSource, { target: { value: `${firstSource.value}v1` } });
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/versioned.md"
+        engineVersionKey={2}
+        refreshKey={2}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    await waitFor(async () =>
+      expect((await findSourceEditor()).value).toContain("Version two"),
+    );
+    const secondSource = await findSourceEditor();
+    fireEvent.change(secondSource, { target: { value: `${secondSource.value}v2` } });
+
+    await act(async () => {
+      resolveFirst();
+      await heldFirst;
+    });
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+      { timeout: 5_000 },
+    );
+    expect(bridgeMock.writeWorkspaceText.mock.calls[1]?.[0].text).toContain(
+      "Version two\nv2",
+    );
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+    view.unmount();
+  });
+
+  it("retires an in-flight Markdown conflict after a real unmount", async () => {
+    const initialHash = "7".repeat(64);
+    const externalHash = "8".repeat(64);
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "# Base\n",
+      truncated: false,
+      contentHash: initialHash,
+    });
+    let resolveConflict!: () => void;
+    const heldConflict = new Promise<{
+      status: "conflict";
+      currentContentHash: string;
+    }>((resolve) => {
+      resolveConflict = () =>
+        resolve({ status: "conflict", currentContentHash: externalHash });
+    });
+    bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldConflict);
+    const key = documentVersionKey("ws-1", "notes/versioned.md", 1);
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/versioned.md"
+        engineVersionKey={1}
+      />,
+    );
+    fireEvent.click(await screen.findByTestId("markdown-edit-toggle"));
+    const source = await findSourceEditor();
+    fireEvent.change(source, { target: { value: `${source.value}Draft` } });
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    const oldBuffer = getSharedLocalDocument(key);
+    view.unmount();
+
+    await act(async () => {
+      resolveConflict();
+      await heldConflict;
+    });
+    await waitFor(() =>
+      expect(getSharedLocalDocument(key)).not.toBe(oldBuffer),
+    );
+  });
+
   it("can start editing an empty CSV as a table", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "",

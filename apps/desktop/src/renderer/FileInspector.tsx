@@ -794,6 +794,8 @@ function useAutosavedTextDraft(props: {
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [writerSettledEpoch, setWriterSettledEpoch] = useState(0);
   const localSource = useRef<object>({});
+  const activeLocalBuffer = useRef(props.localBuffer);
+  activeLocalBuffer.current = props.localBuffer;
   const sharedSnapshot = useSyncExternalStore(
     props.localBuffer.subscribe,
     props.localBuffer.getSnapshot,
@@ -1119,6 +1121,15 @@ function useAutosavedTextDraft(props: {
       ) {
         return;
       }
+      const current = props.localBuffer.getSnapshot();
+      if (
+        props.switchUnresyncedRef.current &&
+        !props.switchReadPending &&
+        current.initialized &&
+        current.contentHash === props.contentHash
+      ) {
+        props.switchUnresyncedRef.current = false;
+      }
       if (writesBlocked()) {
         if (props.localBuffer.getSnapshot().dirty) {
           props.localBuffer.markError();
@@ -1135,19 +1146,28 @@ function useAutosavedTextDraft(props: {
       const issuedBaseRequestId = baseContentRequestId.current;
       unsavedDraft.current = false;
       if (!unmounted.current) setSaveState("saving");
+      let issuedText: string | null = null;
       try {
         const writing = props.localBuffer.write(
           localSource.current,
-          (text, expectedContentHash) =>
-            bridge().writeWorkspaceText({
+          (text, expectedContentHash) => {
+            issuedText = text;
+            return bridge().writeWorkspaceText({
               workspaceId: props.workspaceId,
               relativePath: props.path,
               text,
               expectedContentHash,
-            }),
+            });
+          },
         );
         if (options.releaseUnusedDraft) props.localBuffer.releaseUnusedDraft();
         const result = await writing;
+        if (activeLocalBuffer.current !== props.localBuffer) {
+          if (result.status === "conflict" || result.status === "no-baseline") {
+            captureOrphanedDraft(props.workspaceId, props.path, result.body);
+          }
+          return;
+        }
         const text = result.body;
         latestDraft.current = props.localBuffer.getSnapshot().body;
         if (result.status === "skipped") {
@@ -1208,6 +1228,13 @@ function useAutosavedTextDraft(props: {
           setSaveState("saved");
         }
       } catch (error) {
+        if (activeLocalBuffer.current !== props.localBuffer) {
+          if (issuedText !== null) {
+            captureOrphanedDraft(props.workspaceId, props.path, issuedText);
+          }
+          if (options.rejectOnError) throw error;
+          return;
+        }
         unsavedDraft.current = true;
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
@@ -1260,9 +1287,18 @@ function useAutosavedTextDraft(props: {
       if (!unsavedDraft.current) {
         if (writersLive.current > 0) {
           void writeChain.current.then(() => {
-            if (!unsavedDraft.current) return;
-            unsavedDraft.current = false;
-            captureOrphanedDraft(workspaceId, path, latestDraft.current);
+            // A replacement effect means the component is still mounted on a
+            // different buffer. Its refs now belong to that version; only
+            // settle this cleanup's captured buffer.
+            if (!unmounted.current) {
+              localBuffer.retireCapturedDraft(localSource.current);
+              localBuffer.releaseUnusedDraft();
+              return;
+            }
+            if (unsavedDraft.current) {
+              unsavedDraft.current = false;
+              captureOrphanedDraft(workspaceId, path, latestDraft.current);
+            }
             localBuffer.retireCapturedDraft(localSource.current);
             localBuffer.releaseUnusedDraft();
           });
@@ -1495,6 +1531,8 @@ function MarkdownView(props: {
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
   const [writerSettledEpoch, setWriterSettledEpoch] = useState(0);
   const localSource = useRef<object>({});
+  const activeLocalBuffer = useRef(props.localBuffer);
+  activeLocalBuffer.current = props.localBuffer;
   const sharedSnapshot = useSyncExternalStore(
     props.localBuffer.subscribe,
     props.localBuffer.getSnapshot,
@@ -2487,6 +2525,15 @@ function MarkdownView(props: {
       ) {
         return;
       }
+      const current = props.localBuffer.getSnapshot();
+      if (
+        props.switchUnresyncedRef.current &&
+        !props.switchReadPending &&
+        current.initialized &&
+        current.contentHash === props.contentHash
+      ) {
+        props.switchUnresyncedRef.current = false;
+      }
       // The REFS, not captured values. The 800ms autosave timer holds the
       // closure from the render that armed it, where readOnly was false — so
       // a document that turned read-only after the keystroke still wrote
@@ -2529,19 +2576,28 @@ function MarkdownView(props: {
       const issuedRevision = draftRevision.current;
       unsavedDraft.current = false;
       if (!unmounted.current) setSaveState("saving");
+      let issuedText: string | null = null;
       try {
         const writing = props.localBuffer.write(
           localSource.current,
-          (text, expectedContentHash) =>
-            bridge().writeWorkspaceText({
+          (text, expectedContentHash) => {
+            issuedText = text;
+            return bridge().writeWorkspaceText({
               workspaceId: props.workspaceId,
               relativePath: props.path,
               text,
               expectedContentHash,
-            }),
+            });
+          },
         );
         if (options.releaseUnusedDraft) props.localBuffer.releaseUnusedDraft();
         const result = await writing;
+        if (activeLocalBuffer.current !== props.localBuffer) {
+          if (result.status === "conflict" || result.status === "no-baseline") {
+            captureOrphanedDraft(props.workspaceId, props.path, result.body);
+          }
+          return;
+        }
         const text = result.body;
         latestDraft.current = props.localBuffer.getSnapshot().body;
         if (result.status === "skipped") {
@@ -2607,6 +2663,13 @@ function MarkdownView(props: {
           setSaveState("saved");
         }
       } catch (error) {
+        if (activeLocalBuffer.current !== props.localBuffer) {
+          if (issuedText !== null) {
+            captureOrphanedDraft(props.workspaceId, props.path, issuedText);
+          }
+          if (options.rejectOnError) throw error;
+          return;
+        }
         // The write failed: the draft is still unsaved, so the unmount flush
         // gets another shot at landing it.
         unsavedDraft.current = true;
@@ -2793,9 +2856,18 @@ function MarkdownView(props: {
       if (!unsavedDraft.current) {
         if (writersLive.current > 0) {
           void writeChain.current.then(() => {
-            if (!unsavedDraft.current) return;
-            unsavedDraft.current = false;
-            captureOrphanedDraft(workspaceId, path, latestDraft.current);
+            // A buffer-key replacement reuses this component and its refs.
+            // Never consume the replacement version's draft from an older
+            // cleanup callback; retire only the buffer captured above.
+            if (!unmounted.current) {
+              localBuffer.retireCapturedDraft(localSource.current);
+              localBuffer.releaseUnusedDraft();
+              return;
+            }
+            if (unsavedDraft.current) {
+              unsavedDraft.current = false;
+              captureOrphanedDraft(workspaceId, path, latestDraft.current);
+            }
             localBuffer.retireCapturedDraft(localSource.current);
             localBuffer.releaseUnusedDraft();
           });
