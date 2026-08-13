@@ -608,6 +608,15 @@ describe("markdown editor unmount flush", () => {
   beforeEach(() => {
     stubEditorGlobals();
     resetOrphanedDrafts();
+    bridgeMock.readWorkspaceText.mockReset().mockResolvedValue({
+      text: "# Hello\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    bridgeMock.writeWorkspaceText.mockReset().mockResolvedValue({
+      status: "written",
+      contentHash: TEST_CONTENT_HASH,
+    });
     vi.stubGlobal("dohcDesktop", bridgeMock);
   });
 
@@ -784,6 +793,470 @@ describe("markdown editor unmount flush", () => {
         dirty: true,
       }),
     );
+  });
+
+  it("unblocks a duplicate text pane after its matching switch read preserves a peer draft", async () => {
+    type ReadResult = {
+      text: string;
+      truncated: false;
+      contentHash: string;
+    };
+    let resolveFirstSwitch!: (value: ReadResult) => void;
+    let resolveSecondSwitch!: (value: ReadResult) => void;
+    const firstSwitch = new Promise<ReadResult>((resolve) => {
+      resolveFirstSwitch = resolve;
+    });
+    const secondSwitch = new Promise<ReadResult>((resolve) => {
+      resolveSecondSwitch = resolve;
+    });
+    const oldHash = "1".repeat(64);
+    const switchedHash = "2".repeat(64);
+    const peerSavedHash = "3".repeat(64);
+    bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: "Old",
+        truncated: false,
+        contentHash: oldHash,
+      })
+      .mockResolvedValueOnce({
+        text: "Old",
+        truncated: false,
+        contentHash: oldHash,
+      })
+      .mockImplementationOnce(() => firstSwitch)
+      .mockImplementationOnce(() => secondSwitch);
+    bridgeMock.writeWorkspaceText
+      .mockResolvedValueOnce({ status: "written", contentHash: peerSavedHash })
+      .mockResolvedValueOnce({
+        status: "written",
+        contentHash: "4".repeat(64),
+      });
+    const flushes: DraftFlush[] = [];
+    const view = render(
+      <>
+        <FileInspector
+          workspaceId="ws-1"
+          path="notes/versioned.txt"
+          engineVersionKey={1}
+          registerDraftFlush={(flush) => {
+            if (flush) flushes[0] = flush;
+          }}
+        />
+        <FileInspector
+          workspaceId="ws-1"
+          path="notes/versioned.txt"
+          engineVersionKey={1}
+          registerDraftFlush={(flush) => {
+            if (flush) flushes[1] = flush;
+          }}
+        />
+      </>,
+    );
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-text-editor")).toHaveLength(2),
+    );
+    view.rerender(
+      <>
+        <FileInspector
+          workspaceId="ws-1"
+          path="notes/versioned.txt"
+          engineVersionKey={2}
+          refreshKey={1}
+          registerDraftFlush={(flush) => {
+            if (flush) flushes[0] = flush;
+          }}
+        />
+        <FileInspector
+          workspaceId="ws-1"
+          path="notes/versioned.txt"
+          engineVersionKey={2}
+          refreshKey={1}
+          registerDraftFlush={(flush) => {
+            if (flush) flushes[1] = flush;
+          }}
+        />
+      </>,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(4),
+    );
+    await act(async () => {
+      resolveFirstSwitch({
+        text: "New",
+        truncated: false,
+        contentHash: switchedHash,
+      });
+      await firstSwitch;
+    });
+    const user = userEvent.setup();
+    let editors = screen.getAllByTestId("view-text-editor");
+    const firstContent = editors[0]!.querySelector(".cm-content") as HTMLElement;
+    await waitFor(() => expect(firstContent.textContent).toBe("New"));
+    await user.click(firstContent);
+    await user.keyboard("{End} peer");
+
+    await act(async () => {
+      resolveSecondSwitch({
+        text: "New",
+        truncated: false,
+        contentHash: switchedHash,
+      });
+      await secondSwitch;
+    });
+    await act(async () => flushes[0]!());
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "notes/versioned.txt",
+      text: "New peer",
+      expectedContentHash: switchedHash,
+    });
+
+    editors = screen.getAllByTestId("view-text-editor");
+    const secondContent = editors[1]!.querySelector(".cm-content") as HTMLElement;
+    await waitFor(() => expect(secondContent.textContent).toBe("New peer"));
+    await user.click(secondContent);
+    await user.keyboard("{End} second");
+    await act(async () => flushes[1]!());
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "notes/versioned.txt",
+      text: "New peer second",
+      expectedContentHash: peerSavedHash,
+    });
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2);
+  });
+
+  it("marks every duplicate text pane errored when a blocked write leaves a shared draft dirty", async () => {
+    const flushes: DraftFlush[] = [];
+    const first = (
+      <FileInspector
+        key="first"
+        workspaceId="ws-1"
+        path="notes/blocked.txt"
+        registerDraftFlush={(flush) => {
+          if (flush) flushes[0] = flush;
+        }}
+      />
+    );
+    const second = (
+      <FileInspector
+        key="second"
+        workspaceId="ws-1"
+        path="notes/blocked.txt"
+        registerDraftFlush={(flush) => {
+          if (flush) flushes[1] = flush;
+        }}
+      />
+    );
+    const view = render(<>{first}{second}</>);
+    const editors = await screen.findAllByTestId("view-text-editor");
+    const firstContent = editors[0]!.querySelector(".cm-content") as HTMLElement;
+    const user = userEvent.setup();
+    await user.click(firstContent);
+    await user.keyboard("{End} dirty");
+    view.rerender(
+      <>
+        <FileInspector
+          key="first"
+          workspaceId="ws-1"
+          path="notes/blocked.txt"
+          readOnly
+          registerDraftFlush={(flush) => {
+            if (flush) flushes[0] = flush;
+          }}
+        />
+        {second}
+      </>,
+    );
+
+    await act(async () => flushes[0]!());
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId("view-text-save-state")
+          .every((state) => state.dataset.state === "error"),
+      ).toBe(true),
+    );
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("marks every duplicate Markdown pane errored when a blocked write leaves a shared draft dirty", async () => {
+    const flushes: DraftFlush[] = [];
+    const toggles: Array<(() => void) | null> = [null, null];
+    const second = (
+      <FileInspector
+        key="second"
+        workspaceId="ws-1"
+        path="notes/blocked.md"
+        registerDraftFlush={(flush) => {
+          if (flush) flushes[1] = flush;
+        }}
+        registerSourceToggle={(toggle) => {
+          toggles[1] = toggle;
+        }}
+      />
+    );
+    const view = render(
+      <>
+        <FileInspector
+          key="first"
+          workspaceId="ws-1"
+          path="notes/blocked.md"
+          registerDraftFlush={(flush) => {
+            if (flush) flushes[0] = flush;
+          }}
+          registerSourceToggle={(toggle) => {
+            toggles[0] = toggle;
+          }}
+        />
+        {second}
+      </>,
+    );
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+    await toggleSourceOnce(() => toggles[0]);
+    await toggleSourceOnce(() => toggles[1]);
+    const editors = screen.getAllByTestId("markdown-editor") as HTMLTextAreaElement[];
+    const user = userEvent.setup();
+    await user.click(editors[0]!);
+    await user.keyboard("{End} dirty");
+    view.rerender(
+      <>
+        <FileInspector
+          key="first"
+          workspaceId="ws-1"
+          path="notes/blocked.md"
+          readOnly
+          registerDraftFlush={(flush) => {
+            if (flush) flushes[0] = flush;
+          }}
+          registerSourceToggle={(toggle) => {
+            toggles[0] = toggle;
+          }}
+        />
+        {second}
+      </>,
+    );
+
+    await act(async () => flushes[0]!());
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId("markdown-save-state")
+          .every((state) => state.dataset.state === "error"),
+      ).toBe(true),
+    );
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("refreshes a stale duplicate text pane once its peer-owned conflict draft saves", async () => {
+    const initialHash = "1".repeat(64);
+    const externalHash = "2".repeat(64);
+    const peerSavedHash = "3".repeat(64);
+    let readBody = "Base";
+    let readHash = initialHash;
+    type ReadResult = {
+      text: string;
+      truncated: false;
+      contentHash: string;
+    };
+    let resolveRefresh!: (value: ReadResult) => void;
+    const heldRefresh = new Promise<ReadResult>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(() => {
+      reads += 1;
+      if (reads === 4) return heldRefresh;
+      return Promise.resolve({
+        text: readBody,
+        truncated: false,
+        contentHash: readHash,
+      });
+    });
+    let resolveConflict!: () => void;
+    const heldConflict = new Promise<{
+      status: "conflict";
+      currentContentHash: string;
+    }>((resolve) => {
+      resolveConflict = () =>
+        resolve({ status: "conflict", currentContentHash: externalHash });
+    });
+    bridgeMock.writeWorkspaceText
+      .mockImplementationOnce(() => heldConflict)
+      .mockResolvedValueOnce({ status: "written", contentHash: peerSavedHash });
+    const flushes: DraftFlush[] = [];
+    const textPane = (key: string, refreshKey: number, index: number) => (
+      <FileInspector
+        key={key}
+        workspaceId="ws-1"
+        path="notes/conflict-refresh.txt"
+        refreshKey={refreshKey}
+        registerDraftFlush={(flush) => {
+          if (flush) flushes[index] = flush;
+        }}
+      />
+    );
+    const view = render(<>{textPane("first", 0, 0)}{textPane("second", 0, 1)}</>);
+    let editors = await screen.findAllByTestId("view-text-editor");
+    const user = userEvent.setup();
+    const firstContent = editors[0]!.querySelector(".cm-content") as HTMLElement;
+    await user.click(firstContent);
+    await user.keyboard("{End} local");
+    await waitFor(() => expect(flushes).toHaveLength(2));
+    const firstFlush = flushes[0]!().then(
+      () => "resolved" as const,
+      () => "rejected" as const,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+    );
+
+    readBody = "External";
+    readHash = externalHash;
+    view.rerender(
+      <>{textPane("first", 1, 0)}{textPane("second", 0, 1)}</>,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(3),
+    );
+    editors = screen.getAllByTestId("view-text-editor");
+    const secondContent = editors[1]!.querySelector(".cm-content") as HTMLElement;
+    await user.click(secondContent);
+    await user.keyboard("{End} peer");
+
+    await act(async () => {
+      resolveConflict();
+      await heldConflict;
+    });
+    expect(await firstFlush).toBe("rejected");
+    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(3);
+
+    readBody = "Base local peer";
+    readHash = peerSavedHash;
+    await act(async () => flushes[1]!());
+    await waitFor(() =>
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(4),
+    );
+    await act(async () => {
+      resolveRefresh({
+        text: readBody,
+        truncated: false,
+        contentHash: readHash,
+      });
+      await heldRefresh;
+    });
+    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(4);
+  });
+
+  it("refreshes a stale duplicate Markdown pane once its peer-owned conflict draft saves", async () => {
+    const initialHash = "4".repeat(64);
+    const externalHash = "5".repeat(64);
+    const peerSavedHash = "6".repeat(64);
+    let readBody = "# Base\n";
+    let readHash = initialHash;
+    type ReadResult = {
+      text: string;
+      truncated: false;
+      contentHash: string;
+    };
+    let resolveRefresh!: (value: ReadResult) => void;
+    const heldRefresh = new Promise<ReadResult>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(() => {
+      reads += 1;
+      if (reads === 4) return heldRefresh;
+      return Promise.resolve({
+        text: readBody,
+        truncated: false,
+        contentHash: readHash,
+      });
+    });
+    let resolveConflict!: () => void;
+    const heldConflict = new Promise<{
+      status: "conflict";
+      currentContentHash: string;
+    }>((resolve) => {
+      resolveConflict = () =>
+        resolve({ status: "conflict", currentContentHash: externalHash });
+    });
+    bridgeMock.writeWorkspaceText
+      .mockImplementationOnce(() => heldConflict)
+      .mockResolvedValueOnce({ status: "written", contentHash: peerSavedHash });
+    const flushes: DraftFlush[] = [];
+    const toggles: Array<(() => void) | null> = [null, null];
+    const markdownPane = (key: string, refreshKey: number, index: number) => (
+      <FileInspector
+        key={key}
+        workspaceId="ws-1"
+        path="notes/conflict-refresh.md"
+        refreshKey={refreshKey}
+        registerDraftFlush={(flush) => {
+          if (flush) flushes[index] = flush;
+        }}
+        registerSourceToggle={(toggle) => {
+          toggles[index] = toggle;
+        }}
+      />
+    );
+    const view = render(
+      <>{markdownPane("first", 0, 0)}{markdownPane("second", 0, 1)}</>,
+    );
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+    await toggleSourceOnce(() => toggles[0]);
+    await toggleSourceOnce(() => toggles[1]);
+    let editors = screen.getAllByTestId("markdown-editor") as HTMLTextAreaElement[];
+    const user = userEvent.setup();
+    await user.click(editors[0]!);
+    await user.keyboard("{End} local");
+    await waitFor(() => expect(flushes).toHaveLength(2));
+    const firstFlush = flushes[0]!().then(
+      () => "resolved" as const,
+      () => "rejected" as const,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+    );
+
+    readBody = "# External\n";
+    readHash = externalHash;
+    view.rerender(
+      <>{markdownPane("first", 1, 0)}{markdownPane("second", 0, 1)}</>,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(3),
+    );
+    editors = screen.getAllByTestId("markdown-editor") as HTMLTextAreaElement[];
+    await user.click(editors[1]!);
+    await user.keyboard("{End} peer");
+
+    await act(async () => {
+      resolveConflict();
+      await heldConflict;
+    });
+    expect(await firstFlush).toBe("rejected");
+    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(3);
+
+    readBody = "# Base\n local peer";
+    readHash = peerSavedHash;
+    await act(async () => flushes[1]!());
+    await waitFor(() =>
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(4),
+    );
+    await act(async () => {
+      resolveRefresh({
+        text: readBody,
+        truncated: false,
+        contentHash: readHash,
+      });
+      await heldRefresh;
+    });
+    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(4);
   });
 
   it("flushes the pending draft on unmount — the write carries the FINAL text", async () => {

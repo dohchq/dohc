@@ -824,6 +824,7 @@ function useAutosavedTextDraft(props: {
   const flushConflict = useRef(false);
   const conflictContentHash = useRef<string | null>(null);
   const conflictRequestId = useRef(0);
+  const conflictRefreshRequestId = useRef<number | null>(null);
   const verifyAfterRequestId = useRef<number | null>(null);
   const editGeneration = useRef(0);
   const blockedEditGeneration = useRef(-1);
@@ -921,7 +922,7 @@ function useAutosavedTextDraft(props: {
       readTicket: number;
     },
     state: SaveState,
-  ) {
+  ): boolean {
     if (
       !props.localBuffer.acceptRead(
         snapshot.body,
@@ -931,7 +932,16 @@ function useAutosavedTextDraft(props: {
         snapshot.readTicket,
       )
     ) {
-      return;
+      const current = props.localBuffer.getSnapshot();
+      if (
+        props.switchUnresyncedRef.current &&
+        !props.switchReadPending &&
+        current.initialized &&
+        current.contentHash === snapshot.contentHash
+      ) {
+        props.switchUnresyncedRef.current = false;
+      }
+      return false;
     }
     if (saveTimer.current) {
       clearTimeout(saveTimer.current);
@@ -963,18 +973,37 @@ function useAutosavedTextDraft(props: {
     latestDraft.current = snapshot.body;
     setSaveState(state);
     props.switchUnresyncedRef.current = false;
+    return true;
   }
 
   function acceptConflictSnapshotIfCurrent(): boolean {
     const snapshot = latestSnapshot.current;
+    const shared = props.localBuffer.getSnapshot();
     if (
-      snapshot.contentHash !== conflictContentHash.current &&
-      snapshot.requestId <= conflictRequestId.current
+      (snapshot.contentHash !== conflictContentHash.current &&
+        snapshot.requestId <= conflictRequestId.current) ||
+      (shared.initialized &&
+        !shared.dirty &&
+        shared.contentHash !== snapshot.contentHash)
     ) {
       return false;
     }
-    acceptSnapshot(snapshot, "error");
-    return true;
+    return acceptSnapshot(snapshot, "error");
+  }
+
+  function reconcileConflictSnapshot() {
+    if (acceptConflictSnapshotIfCurrent()) return;
+    const shared = props.localBuffer.getSnapshot();
+    if (
+      shared.dirty &&
+      (shared.source !== localSource.current || writersLive.current > 0)
+    ) {
+      return;
+    }
+    const requestId = latestSnapshot.current.requestId;
+    if (conflictRefreshRequestId.current === requestId) return;
+    conflictRefreshRequestId.current = requestId;
+    props.refreshAfterConflict();
   }
 
   useEffect(() => {
@@ -994,7 +1023,7 @@ function useAutosavedTextDraft(props: {
   useEffect(() => {
     if (props.switchReadPending) return;
     if (staleBaseline.current) {
-      if (!acceptConflictSnapshotIfCurrent()) props.refreshAfterConflict();
+      reconcileConflictSnapshot();
       return;
     }
     if (
@@ -1015,6 +1044,7 @@ function useAutosavedTextDraft(props: {
     props.contentHash,
     props.contentRequestId,
     props.path,
+    sharedSnapshot,
     props.switchReadPending,
     props.switchUnresyncedRef,
     writerSettledEpoch,
@@ -1086,6 +1116,9 @@ function useAutosavedTextDraft(props: {
         return;
       }
       if (writesBlocked()) {
+        if (props.localBuffer.getSnapshot().dirty) {
+          props.localBuffer.markError();
+        }
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
         }
@@ -1143,7 +1176,7 @@ function useAutosavedTextDraft(props: {
           captureLatestConflictDraft();
           if (!unmounted.current) {
             setSaveState("error");
-            if (!acceptConflictSnapshotIfCurrent()) props.refreshAfterConflict();
+            reconcileConflictSnapshot();
           }
           if (options.rejectOnError) {
             throw new Error("The file changed on disk while dohc saved it.");
@@ -1541,6 +1574,7 @@ function MarkdownView(props: {
   const flushConflict = useRef(false);
   const conflictContentHash = useRef<string | null>(null);
   const conflictRequestId = useRef(0);
+  const conflictRefreshRequestId = useRef<number | null>(null);
   const verifyAfterRequestId = useRef<number | null>(null);
   const blockedDraftRevision = useRef(-1);
   const capturedConflictDraft = useRef<string | null>(null);
@@ -1649,7 +1683,7 @@ function MarkdownView(props: {
       readTicket: number;
     },
     state: SaveState,
-  ) {
+  ): boolean {
     if (
       !props.localBuffer.acceptRead(
         snapshot.body,
@@ -1659,7 +1693,7 @@ function MarkdownView(props: {
         snapshot.readTicket,
       )
     ) {
-      return;
+      return false;
     }
     if (saveTimer.current) {
       clearTimeout(saveTimer.current);
@@ -1692,18 +1726,37 @@ function MarkdownView(props: {
     latestDraft.current = snapshot.body;
     if (mode === "wysiwyg") setWysiwygResyncEpoch((epoch) => epoch + 1);
     setSaveState(state);
+    return true;
   }
 
   function acceptConflictSnapshotIfCurrent(): boolean {
     const snapshot = latestSnapshot.current;
+    const shared = props.localBuffer.getSnapshot();
     if (
-      snapshot.contentHash !== conflictContentHash.current &&
-      snapshot.requestId <= conflictRequestId.current
+      (snapshot.contentHash !== conflictContentHash.current &&
+        snapshot.requestId <= conflictRequestId.current) ||
+      (shared.initialized &&
+        !shared.dirty &&
+        shared.contentHash !== snapshot.contentHash)
     ) {
       return false;
     }
-    acceptSnapshot(snapshot, "error");
-    return true;
+    return acceptSnapshot(snapshot, "error");
+  }
+
+  function reconcileConflictSnapshot() {
+    if (acceptConflictSnapshotIfCurrent()) return;
+    const shared = props.localBuffer.getSnapshot();
+    if (
+      shared.dirty &&
+      (shared.source !== localSource.current || writersLive.current > 0)
+    ) {
+      return;
+    }
+    const requestId = latestSnapshot.current.requestId;
+    if (conflictRefreshRequestId.current === requestId) return;
+    conflictRefreshRequestId.current = requestId;
+    props.refreshAfterConflict();
   }
 
   // #567 cancel-and-restore: the moment `opening` flips true, the pending
@@ -2047,7 +2100,7 @@ function MarkdownView(props: {
   // applies before that effect lifts the shared write refusal.
   useEffect(() => {
     if (staleBaseline.current) {
-      if (!acceptConflictSnapshotIfCurrent()) props.refreshAfterConflict();
+      reconcileConflictSnapshot();
       return;
     }
     const verificationFloor = verifyAfterRequestId.current;
@@ -2089,6 +2142,7 @@ function MarkdownView(props: {
     props.contentHash,
     props.contentRequestId,
     editing,
+    sharedSnapshot,
     writerSettledEpoch,
   ]);
   useEffect(() => {
@@ -2404,6 +2458,9 @@ function MarkdownView(props: {
       // `opening` window is different: its render-phase capture serialized
       // the draft eagerly and surfaced it, so this gate only refuses.
       if (writesBlocked() || openingRef.current) {
+        if (props.localBuffer.getSnapshot().dirty) {
+          props.localBuffer.markError();
+        }
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
         }
@@ -2471,7 +2528,7 @@ function MarkdownView(props: {
           captureLatestConflictDraft();
           if (!unmounted.current) {
             setSaveState("error");
-            if (!acceptConflictSnapshotIfCurrent()) props.refreshAfterConflict();
+            reconcileConflictSnapshot();
           }
           if (options.rejectOnError) {
             throw new Error("The file changed on disk while dohc saved it.");
