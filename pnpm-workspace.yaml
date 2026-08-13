@@ -43,5 +43,8 @@ overrides:
   "@tiptap/extensions": "3.29.2"
   "@tiptap/pm": "3.29.2"
   "@tiptap/y-tiptap": "3.0.8"
+  "@excalidraw/excalidraw>nanoid": "3.3.18"
+  "@excalidraw/mermaid-to-excalidraw>nanoid": "5.1.16"
+  lodash-es: "4.18.1"
   prosemirror-model: "1.25.11"
   prosemirror-view: "1.42.2"
