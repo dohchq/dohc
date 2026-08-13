@@ -21,6 +21,7 @@ import {
   packageManagerCommand,
   splitCommandLine,
   startSiteDevServer,
+  startStaticDirectoryPreview,
   startStaticSitePreview,
 } from "./siteRunner";
 
@@ -91,6 +92,33 @@ describe("startStaticSitePreview", () => {
     await expect(
       startStaticSitePreview(root, "site", { entry: "nested/.dohc/secret.txt" }),
     ).rejects.toThrow(/reserved metadata path/);
+  });
+});
+
+describe("startStaticDirectoryPreview", () => {
+  it("serves an arbitrary contained panel directory with the static safeguards", async () => {
+    const pluginRoot = join(root, "plugin");
+    const panelRoot = join(pluginRoot, "panel");
+    await mkdir(join(panelRoot, ".dohc"), { recursive: true });
+    await writeFile(join(panelRoot, "index.html"), "<h1>Plugin panel</h1>");
+    await writeFile(join(panelRoot, ".dohc", "secret.txt"), "secret");
+
+    const preview = await startStaticDirectoryPreview(panelRoot, {
+      containmentRoot: pluginRoot,
+      entry: "index.html",
+    });
+    try {
+      const response = await fetch(preview.url);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      await expect(response.text()).resolves.toContain("Plugin panel");
+      await expect(
+        fetch(new URL("/.dohc/secret.txt", preview.url)).then(
+          (result) => result.status,
+        ),
+      ).resolves.toBe(403);
+    } finally {
+      await preview.stop();
+    }
   });
 });
 

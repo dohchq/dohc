@@ -33,6 +33,7 @@ import type {
   ListEngineMomentsResult,
   ListWorkspaceVersionsResult,
   McpConfigResult,
+  PluginPanelOpenedEvent,
   ReadWorkspaceTextPayload,
   ReadEngineMomentResult,
   RefreshSharedViewResult,
@@ -81,6 +82,7 @@ import {
   OPEN_EDITORS_DEFAULT_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
   momentDiffTabPath,
+  pluginPanelTabPath,
   versionCompareTabPath,
 } from "./workbench/workbenchState";
 import {
@@ -238,9 +240,14 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
   let activityCallback: (() => void) | null = null;
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommandId) => void) | null = null;
+  let pluginPanelOpenedCallback:
+    | ((event: PluginPanelOpenedEvent) => void)
+    | null = null;
   return {
     emitWorkspaceActivity: () => activityCallback?.(),
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
+    emitPluginPanelOpened: (event: PluginPanelOpenedEvent) =>
+      pluginPanelOpenedCallback?.(event),
     getWorkspaceUiState: vi.fn(() => uiStatePromise),
     // The shell re-reads the registry to pick up a share's durable skip
     // record. Default: a workspace with nothing skipped.
@@ -432,6 +439,14 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
         menuCallback = null;
       };
     }),
+    onPluginPanelOpened: vi.fn(
+      (callback: (event: PluginPanelOpenedEvent) => void) => {
+        pluginPanelOpenedCallback = callback;
+        return () => {
+          pluginPanelOpenedCallback = null;
+        };
+      },
+    ),
     emitMenuCommand: (command: MenuCommandId) => menuCallback?.(command),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.
@@ -443,6 +458,12 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     }),
     searchWorkspace: vi.fn(async (_payload: WorkspaceSearchPayload) => undefined),
     cancelWorkspaceSearch: vi.fn(async () => undefined),
+    startPluginPanel: vi.fn(async () => ({
+      url: "http://127.0.0.1:49160/" as const,
+      title: "Hello panel",
+    })),
+    stopPluginPanel: vi.fn(async () => undefined),
+    invokePluginPanelSdk: vi.fn(async () => ({ result: null })),
   };
 }
 
@@ -632,6 +653,102 @@ afterEach(() => {
   // The set-aside drafts (#567) live in a module store on purpose; tests
   // that seed it must not leak into each other.
   resetOrphanedDrafts();
+});
+
+describe("plugin panel tabs", () => {
+  const path = pluginPanelTabPath("hello-plugin", "main");
+
+  it("opens a requested panel only in its workspace", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+
+    act(() => {
+      bridge.emitPluginPanelOpened({
+        workspaceId: "ws-other",
+        pluginId: "hello-plugin",
+        panelId: "main",
+      });
+    });
+    expect(screen.queryByTestId("plugin-panel-page")).toBeNull();
+
+    act(() => {
+      bridge.emitPluginPanelOpened({
+        workspaceId: WORKSPACE.workspaceId,
+        pluginId: "hello-plugin",
+        panelId: "main",
+      });
+    });
+
+    expect(await screen.findByTestId("plugin-panel-page")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "main" }).dataset.active).toBe(
+      "true",
+    );
+  });
+
+  it("restores the panel tab, mounts its page, and stops it when closed", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs([path], path)),
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    expect(await screen.findByTestId("plugin-panel-page")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "main" }).title).toBe(
+      "hello-plugin — main",
+    );
+    expect(bridge.startPluginPanel).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      pluginId: "hello-plugin",
+      panelId: "main",
+    });
+
+    await user.click(screen.getByRole("button", { name: "Close main" }));
+    await waitFor(() =>
+      expect(bridge.stopPluginPanel).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        pluginId: "hello-plugin",
+        panelId: "main",
+      }),
+    );
+    expect(screen.queryByTestId("plugin-panel-page")).toBeNull();
+  });
+
+  it("stops the old panel before mounting it for another workspace", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs([path], path)),
+    );
+    const view = renderShell(bridge);
+    await screen.findByTestId("plugin-panel-page");
+    const otherWorkspace: Workspace = {
+      ...WORKSPACE,
+      workspaceId: "ws-other",
+      rootPath: "/home/ice/dohc/other",
+    };
+
+    view.rerender(
+      <DesktopWorkspaceShell
+        workspace={otherWorkspace}
+        workspaces={[otherWorkspace]}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(bridge.stopPluginPanel).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        pluginId: "hello-plugin",
+        panelId: "main",
+      }),
+    );
+    await waitFor(() =>
+      expect(bridge.startPluginPanel).toHaveBeenCalledWith({
+        workspaceId: otherWorkspace.workspaceId,
+        pluginId: "hello-plugin",
+        panelId: "main",
+      }),
+    );
+  });
 });
 
 describe("global letter shortcut ownership", () => {

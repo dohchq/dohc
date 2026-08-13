@@ -100,7 +100,18 @@ function isAtOrBelow(path: string, root: string): boolean {
   return root === "." || path === root || path.startsWith(`${root}/`);
 }
 
-export function assertRawTextWritable(path: string): void {
+export function assertRawTextWritable(
+  path: string,
+  options: { protectPluginSource?: boolean } = {},
+): void {
+  // Plugins run with full-trust authority. A sandboxed site must not change
+  // plugin source and cross that authority boundary.
+  const [topLevel] = path.replaceAll("\\", "/").split("/");
+  if (options.protectPluginSource && topLevel?.toLowerCase() === "plugins") {
+    throw new Error(
+      "files.write cannot write plugin source under the workspace-root plugins/ tree. Sandboxed sites cannot modify source that runs with full-trust authority.",
+    );
+  }
   // SQLite files are canonical structured artifacts. Replacing their raw
   // bytes/text would bypass the operation log, transactions, provenance,
   // and collaboration convergence used by databases.edit.
@@ -295,13 +306,15 @@ export async function invokeSiteSdkHost(
       }
       const input = record(params);
       const path = siteSdkWorkspacePath(null, input.path, "write");
-      assertRawTextWritable(path);
+      assertRawTextWritable(path, { protectPluginSource: true });
       const body = typeof input.text === "string" ? input.text : null;
       if (body === null) throw new Error("files.write text must be a string.");
       if (input.overwrite === false) {
         try {
           await createWorkspaceTextExclusive(context.workspaceRoot, path, body, {
             signal: context.signal,
+            resolvedPathPolicy: (resolvedPath) =>
+              assertRawTextWritable(resolvedPath, { protectPluginSource: true }),
           });
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === "EEXIST") {
@@ -313,6 +326,8 @@ export async function invokeSiteSdkHost(
       }
       await restoreWorkspaceText(context.workspaceRoot, path, body, {
         signal: context.signal,
+        resolvedPathPolicy: (resolvedPath) =>
+          assertRawTextWritable(resolvedPath, { protectPluginSource: true }),
       });
       return { path };
     }

@@ -44,10 +44,12 @@ import {
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isPluginPanelTabPath,
   isSiteTabPath,
   isVersionCompareTabPath,
   isVirtualTabPath,
   parseHistoryDiffTabPath,
+  parsePluginPanelTabPath,
   parseSiteTabPath,
 } from "./workbenchState";
 
@@ -180,6 +182,9 @@ export function editorTitle(path: string): string {
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
     return `Diff: ${leafOf(parsed?.filePath ?? "file")}`;
+  }
+  if (isPluginPanelTabPath(path)) {
+    return `Plugin: ${parsePluginPanelTabPath(path)?.panelId ?? "panel"}`;
   }
   if (isSiteTabPath(path)) return `Site: ${parseSiteTabPath(path) ?? "preview"}`;
   if (isVersionCompareTabPath(path)) return "Compare with Main";

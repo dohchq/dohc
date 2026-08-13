@@ -3,18 +3,28 @@ import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
   InvokeSiteSdkPayload,
+  InvokePluginPanelSdkPayload,
   ListSitesPayload,
   MenuCommand,
+  PluginPanelOpenedEvent,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
   SitePackagePayload,
   StartSitePreviewPayload,
+  OpenPluginPanelPayload,
+  StartPluginPanelPayload,
+  StopPluginPanelPayload,
   StopSitePreviewPayload,
   WorkspaceSettingsPayload,
   WorkspaceSummary,
   WriteClipboardTextPayload,
 } from "./ipc/bridgeContract";
-import { parseInvokeSiteSdkPayloadForIpc } from "./ipc/bridgeContract";
+import {
+  OpenPluginPanelResult,
+  StartPluginPanelResult,
+  parseInvokePluginPanelSdkPayloadForIpc,
+  parseInvokeSiteSdkPayloadForIpc,
+} from "./ipc/bridgeContract";
 import {
   CHANNELS,
   isExplorerMenuCommand,
@@ -31,6 +41,10 @@ import {
 // typed operations — never raw ipcRenderer, never Node. Typed as
 // DohcDesktopBridge so it cannot drift from the contract (a missing or
 // mistyped method fails the desktop typecheck).
+const pluginPanelOpenedListeners = new Set<
+  (event: PluginPanelOpenedEvent) => void
+>();
+
 const bridge: DohcDesktopBridge = {
   platform: process.platform,
   reloadRenderer: () => ipcRenderer.invoke(CHANNELS.reloadRenderer),
@@ -134,6 +148,32 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(
       CHANNELS.invokeSiteSdk,
       parseInvokeSiteSdkPayloadForIpc(payload),
+    ),
+  openPluginPanel: async (payload: OpenPluginPanelPayload) => {
+    const result = OpenPluginPanelResult.parse(
+      await ipcRenderer.invoke(CHANNELS.openPluginPanel, payload),
+    );
+    const event: PluginPanelOpenedEvent = {
+      workspaceId: payload.workspaceId,
+      ...result,
+    };
+    for (const listener of pluginPanelOpenedListeners) listener(event);
+    return result;
+  },
+  onPluginPanelOpened: (listener) => {
+    pluginPanelOpenedListeners.add(listener);
+    return () => pluginPanelOpenedListeners.delete(listener);
+  },
+  startPluginPanel: async (payload: StartPluginPanelPayload) =>
+    StartPluginPanelResult.parse(
+      await ipcRenderer.invoke(CHANNELS.startPluginPanel, payload),
+    ),
+  stopPluginPanel: (payload: StopPluginPanelPayload) =>
+    ipcRenderer.invoke(CHANNELS.stopPluginPanel, payload),
+  invokePluginPanelSdk: (payload: InvokePluginPanelSdkPayload) =>
+    ipcRenderer.invoke(
+      CHANNELS.invokePluginPanelSdk,
+      parseInvokePluginPanelSdkPayloadForIpc(payload),
     ),
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),

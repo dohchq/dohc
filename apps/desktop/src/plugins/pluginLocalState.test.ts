@@ -229,6 +229,48 @@ describe("plugin local state", () => {
     expect(result.warning).toContain("expected 1");
   });
 
+  it.each([
+    ["non-hex", "g".repeat(64)],
+    ["wrong-length", "a".repeat(63)],
+  ])("fails closed for a %s approvedHash", async (_case, approvedHash) => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const path = statePath(localStateDir, root);
+    await mkdir(dirname(path));
+    await writeFile(path, JSON.stringify({
+      version: 1,
+      plugins: { "hello-plugin": { approvedHash } },
+    }));
+
+    const result = await readPluginLocalState(localStateDir, root);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected an invalid approvedHash to fail");
+    expect(result.warning).toContain(
+      "approvedHash: must be a 64-character lowercase hex sha256 digest",
+    );
+  });
+
+  it("reads a 64-character lowercase hex approvedHash", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const path = statePath(localStateDir, root);
+    const approvedHash = "0123456789abcdef".repeat(4);
+    await mkdir(dirname(path));
+    await writeFile(path, JSON.stringify({
+      version: 1,
+      plugins: { "hello-plugin": { approvedHash } },
+    }));
+
+    expect(await readPluginLocalState(localStateDir, root)).toEqual({
+      ok: true,
+      state: {
+        version: 1,
+        plugins: { "hello-plugin": { approvedHash } },
+      },
+    });
+  });
+
   it("fails closed when the file is over 256 KiB", async () => {
     const root = await workspaceRoot();
     const localStateDir = await stateDir();

@@ -38,7 +38,16 @@ function createTransport(sendMessage, receiveMessages) {
         }
         try {
             const result = await handler(message.params);
-            send({ jsonrpc: "2.0", id, result });
+            if (!send({ jsonrpc: "2.0", id, result: result === undefined ? null : result })) {
+                send({
+                    jsonrpc: "2.0",
+                    id,
+                    error: {
+                        code: -32603,
+                        message: `JSON-RPC method "${method}" returned a result that was not serializable.`,
+                    },
+                });
+            }
         }
         catch (error) {
             send({

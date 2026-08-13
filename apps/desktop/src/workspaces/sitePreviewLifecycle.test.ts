@@ -15,8 +15,8 @@ vi.mock("electron", () => ({
 }));
 
 import {
-  allowSitePreviewOrigin,
-  isAllowedSitePreviewUrl,
+  allowLoopbackFrameOrigin,
+  isAllowedLoopbackFrameUrl,
 } from "../window/createMainWindow";
 import {
   createSitePreviewLifecycle,
@@ -67,7 +67,7 @@ describe("site preview lifecycle", () => {
   it("revokes an SDK grant even when no preview handle remains", async () => {
     const authorities = createSitePreviewSdkAuthorityRegistry();
     const previews = createSitePreviewLifecycle({
-      allowOrigin: allowSitePreviewOrigin,
+      allowOrigin: allowLoopbackFrameOrigin,
       revokePreview: authorities.revokePreview,
     });
     const grant = authorities.register(grantInput(7));
@@ -80,7 +80,7 @@ describe("site preview lifecycle", () => {
   it("revokes the handle, origin, and SDK grant when a ready server exits", () => {
     const authorities = createSitePreviewSdkAuthorityRegistry();
     const previews = createSitePreviewLifecycle({
-      allowOrigin: allowSitePreviewOrigin,
+      allowOrigin: allowLoopbackFrameOrigin,
       revokePreview: authorities.revokePreview,
     });
     const server = fakeProcessHandle("http://127.0.0.1:4173/");
@@ -88,12 +88,16 @@ describe("site preview lifecycle", () => {
     const grant = authorities.register(grantInput(11));
 
     expect(previews.isRunning("workspace-1", "site")).toBe(true);
-    expect(isAllowedSitePreviewUrl("http://127.0.0.1:4173/frame")).toBe(true);
+    expect(isAllowedLoopbackFrameUrl("http://127.0.0.1:4173/frame")).toBe(
+      true,
+    );
 
     server.exit();
 
     expect(previews.isRunning("workspace-1", "site")).toBe(false);
-    expect(isAllowedSitePreviewUrl("http://127.0.0.1:4173/frame")).toBe(false);
+    expect(isAllowedLoopbackFrameUrl("http://127.0.0.1:4173/frame")).toBe(
+      false,
+    );
     expect(grant.signal.aborted).toBe(true);
     expect(() =>
       authorities.authorize({
@@ -110,7 +114,7 @@ describe("site preview lifecycle", () => {
   it("revokes the handle, origin, and SDK grant even when stop fails", async () => {
     const authorities = createSitePreviewSdkAuthorityRegistry();
     const previews = createSitePreviewLifecycle({
-      allowOrigin: allowSitePreviewOrigin,
+      allowOrigin: allowLoopbackFrameOrigin,
       revokePreview: authorities.revokePreview,
     });
     const server = fakeProcessHandle("http://127.0.0.1:4174/");
@@ -125,14 +129,16 @@ describe("site preview lifecycle", () => {
     );
 
     expect(previews.isRunning("workspace-1", "site")).toBe(false);
-    expect(isAllowedSitePreviewUrl("http://127.0.0.1:4174/frame")).toBe(false);
+    expect(isAllowedLoopbackFrameUrl("http://127.0.0.1:4174/frame")).toBe(
+      false,
+    );
     expect(grant.signal.aborted).toBe(true);
   });
 
   it("ignores an old exit after a replacement reuses the same origin", () => {
     const authorities = createSitePreviewSdkAuthorityRegistry();
     const previews = createSitePreviewLifecycle({
-      allowOrigin: allowSitePreviewOrigin,
+      allowOrigin: allowLoopbackFrameOrigin,
       revokePreview: authorities.revokePreview,
     });
     const oldServer = fakeProcessHandle("http://127.0.0.1:5173/");
@@ -147,7 +153,9 @@ describe("site preview lifecycle", () => {
     oldServer.exit();
 
     expect(previews.isCurrent("workspace-1", "site", newServer.handle)).toBe(true);
-    expect(isAllowedSitePreviewUrl("http://127.0.0.1:5173/frame")).toBe(true);
+    expect(isAllowedLoopbackFrameUrl("http://127.0.0.1:5173/frame")).toBe(
+      true,
+    );
     expect(
       authorities.authorize({
         senderId: 22,
@@ -162,14 +170,16 @@ describe("site preview lifecycle", () => {
     newServer.exit();
 
     expect(previews.isRunning("workspace-1", "site")).toBe(false);
-    expect(isAllowedSitePreviewUrl("http://127.0.0.1:5173/frame")).toBe(false);
+    expect(isAllowedLoopbackFrameUrl("http://127.0.0.1:5173/frame")).toBe(
+      false,
+    );
     expect(newGrant.signal.aborted).toBe(true);
   });
 
   it("does not stop a replacement after workspace cleanup snapshots the old handle", async () => {
     const authorities = createSitePreviewSdkAuthorityRegistry();
     const previews = createSitePreviewLifecycle({
-      allowOrigin: allowSitePreviewOrigin,
+      allowOrigin: allowLoopbackFrameOrigin,
       revokePreview: authorities.revokePreview,
     });
     const oldServer = fakeProcessHandle("http://127.0.0.1:4173/");

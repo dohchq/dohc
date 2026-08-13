@@ -6,14 +6,19 @@ import {
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isPluginPanelTabPath,
   isVersionCompareTabPath,
   parseHistoryDiffTabPath,
+  parsePluginPanelTabPath,
 } from "./workbenchState";
 
 function fileName(path: string): string {
   if (isGraphTabPath(path)) return "Graph";
   if (isHistoryTabPath(path)) return "History";
   if (isChatsTabPath(path)) return "Chats";
+  if (isPluginPanelTabPath(path)) {
+    return parsePluginPanelTabPath(path)?.panelId ?? "Plugin panel";
+  }
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
     const name = parsed?.filePath.split("/").pop() ?? "Diff";
@@ -27,6 +32,10 @@ function tabTitle(path: string): string {
   if (isGraphTabPath(path)) return "Workspace graph";
   if (isHistoryTabPath(path)) return "Workspace history";
   if (isChatsTabPath(path)) return "Workspace chats";
+  if (isPluginPanelTabPath(path)) {
+    const panel = parsePluginPanelTabPath(path);
+    return panel ? `${panel.pluginId} — ${panel.panelId}` : "Plugin panel";
+  }
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
     return parsed ? `History diff: ${parsed.filePath}` : "History diff";
