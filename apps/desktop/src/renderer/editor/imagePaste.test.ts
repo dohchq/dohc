@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
+import { Schema } from "@tiptap/pm/model";
+import { EditorState } from "@tiptap/pm/state";
 import {
   computeAttachmentPaths,
   dragCarriesFiles,
@@ -11,6 +13,7 @@ import {
   handlePaneImageDrop,
   imageExtension,
   insertImageAtPosition,
+  placeImageFiles,
   pickAndInsertImages,
   sanitizeAttachmentFolderName,
   shortContentHash,
@@ -281,6 +284,71 @@ describe("insertImageAtPosition", () => {
     const { view, dispatched } = makeMockView(8);
     insertImageAtPosition(view as never, { src: "x", alt: "" }, 999);
     expect(dispatched[0]!.pos).toBe(8);
+  });
+});
+
+describe("placeImageFiles", () => {
+  it("rebases the insertion position when peer content lands during the asset write", async () => {
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: { content: "inline*", group: "block" },
+        text: { group: "inline" },
+        image: {
+          inline: true,
+          group: "inline",
+          atom: true,
+          attrs: { src: {}, alt: { default: "" } },
+        },
+      },
+    });
+    const paragraph = (text: string) =>
+      schema.node("paragraph", null, text ? schema.text(text) : undefined);
+    let state = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [paragraph("Target")]),
+    });
+    const startPos = state.doc.content.size - 1;
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch(transaction: Parameters<typeof state.apply>[0]) {
+        state = state.apply(transaction);
+      },
+    };
+
+    await placeImageFiles(
+      view as never,
+      [
+        {
+          name: "photo.png",
+          mimeType: "image/png",
+          size: 1,
+          read: async () => new Uint8Array([1]),
+        },
+      ],
+      {
+        workspaceId: "ws1",
+        docPath: "notes/plan.md",
+        writeAsset: async () => undefined,
+        onBeforeInsert() {
+          state = EditorState.create({
+            schema,
+            doc: schema.node("doc", null, [
+              paragraph("Peer"),
+              paragraph("Target"),
+            ]),
+          });
+        },
+      },
+      startPos,
+    );
+
+    expect(state.doc.child(0).textContent).toBe("Peer");
+    const target = state.doc.child(1);
+    expect(target.textContent).toBe("Target");
+    expect(target.lastChild?.type.name).toBe("image");
   });
 });
 

@@ -1,4 +1,5 @@
 import { validateUserWritePath } from "@dohc/workspace-core/paths";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { EditorView } from "@tiptap/pm/view";
 import { documentDir } from "./imageSrc";
 
@@ -286,6 +287,26 @@ export function insertImageAtPosition(
   return clamped + node.nodeSize;
 }
 
+function rebasePositionAfterDocumentChange(
+  pos: number,
+  before: ProseMirrorNode,
+  after: ProseMirrorNode,
+): number {
+  if (before === after) {
+    return Math.max(0, Math.min(pos, after.content.size));
+  }
+  const start = before.content.findDiffStart(after.content);
+  if (start === null) return Math.min(pos, after.content.size);
+  const end = before.content.findDiffEnd(after.content);
+  if (end === null) return Math.min(pos, after.content.size);
+  if (pos <= start) return pos;
+  const mapped =
+    pos >= end.a
+      ? pos + end.b - end.a
+      : start + Math.min(pos - start, end.b - start);
+  return Math.max(0, Math.min(mapped, after.content.size));
+}
+
 // Writes each image to the workspace and inserts an image node for it. Images
 // too large are skipped with a quiet console warning. Insertions walk forward
 // from the starting position so multiple images land in order.
@@ -334,7 +355,13 @@ export async function placeImageFiles(
       console.warn(`[dohc] could not write image "${filename}":`, error);
       continue;
     }
+    const docBeforeInsert = view.state.doc;
     context.onBeforeInsert?.();
+    pos = rebasePositionAfterDocumentChange(
+      pos,
+      docBeforeInsert,
+      view.state.doc,
+    );
     pos = insertImageAtPosition(view, { src: relativeSrc, alt: "" }, pos);
   }
 }
