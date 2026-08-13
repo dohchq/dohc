@@ -254,8 +254,8 @@ function Harness(props: {
       </span>
       <span data-testid="draft-count">{drafts.length}</span>
       <span data-testid="asset-recovery">
-        {engine.deletedRecoveryAssets
-          ? `${engine.deletedRecoveryAssets.state}:${engine.deletedRecoveryAssets.count}`
+        {engine.recoveryAssets
+          ? `${engine.recoveryAssets.state}:${engine.recoveryAssets.count}`
           : "none"}
       </span>
       <span data-testid="removal-operation">

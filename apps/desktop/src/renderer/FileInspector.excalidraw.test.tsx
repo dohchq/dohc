@@ -742,7 +742,9 @@ describe("FileInspector Excalidraw view", () => {
         x: 40,
       }),
     );
-    await waitFor(() => expect(bridge.applyEngineYDocUpdate).toHaveBeenCalledOnce());
+    await waitFor(() =>
+      expect(bridge.applyEngineYDocUpdate).toHaveBeenCalledOnce(),
+    );
 
     act(() => bridge.emitSaveState("read-only", 1));
 
@@ -751,7 +753,7 @@ describe("FileInspector Excalidraw view", () => {
     expect(chip.dataset.state).toBe("read-only");
     expect(chip.title).toContain("edit was set aside");
     expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
-      "This document became read-only before your edit saved.",
+      "This drawing became read-only before your edit saved.",
     );
     expect(bridge.closeEngineYDocSession).toHaveBeenCalledTimes(
       closesBeforeTransition + 1,
@@ -771,6 +773,75 @@ describe("FileInspector Excalidraw view", () => {
     );
     await new Promise((resolve) => setTimeout(resolve, 40));
     expect(bridge.applyEngineYDocUpdate).toHaveBeenCalledTimes(sent);
+  });
+
+  it("reports drawing image recovery before read-only copy", async () => {
+    const scene = new Y.Doc();
+    declareSceneRoots(scene);
+    insertElementRevision(scene, {
+      id: "image-1",
+      type: "image",
+      fileId: ARTIFACT_DESCRIPTOR.id,
+      version: 1,
+      versionNonce: 1,
+      isDeleted: false,
+      index: "a0",
+    });
+    putSceneAsset(scene, ARTIFACT_DESCRIPTOR);
+    let rejectAsset!: (cause: Error) => void;
+    const pendingAsset = new Promise<{
+      descriptor: typeof ARTIFACT_DESCRIPTOR;
+      bytes: Uint8Array;
+    }>((_resolve, reject) => {
+      rejectAsset = reject;
+    });
+    const bridge = bridgeFor(drawing("engine"), scene, [ARTIFACT_DESCRIPTOR]);
+    bridge.readEngineYDocArtifactAsset = vi.fn(() => pendingAsset);
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
+
+    await screen.findByTestId("mock-excalidraw-canvas");
+    const doc = (canvas.props as unknown as ExcalidrawCanvasProps).sceneDoc!;
+    act(() =>
+      insertElementRevision(doc, {
+        id: "image-1",
+        type: "image",
+        fileId: ARTIFACT_DESCRIPTOR.id,
+        version: 2,
+        versionNonce: 2,
+        isDeleted: false,
+        index: "a0",
+        x: 40,
+      }),
+    );
+    await waitFor(() => expect(bridge.applyEngineYDocUpdate).toHaveBeenCalledOnce());
+    act(() => bridge.emitSaveState("read-only", 1));
+
+    const notice = await screen.findByTestId("orphaned-draft-notice");
+    expect(notice.textContent).toContain(
+      "dohc is adding 1 image to your set-aside drawing. Wait before you copy it.",
+    );
+    expect(notice.textContent).not.toContain(
+      "This drawing became read-only before your edit saved.",
+    );
+
+    await act(async () => {
+      rejectAsset(new Error("asset unavailable"));
+      await pendingAsset.catch(() => undefined);
+    });
+    await waitFor(() =>
+      expect(notice.textContent).toContain(
+        "dohc could not recover 1 image. Copy your set-aside drawing to keep the rest.",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
+    const recovered = parseExcalidrawDocument(
+      (navigator.clipboard as Clipboard & { lastText: string }).lastText,
+    );
+    expect(recovered.elements).toContainEqual(
+      expect.objectContaining({ id: "image-1", fileId: null, x: 40 }),
+    );
+    expect(recovered.files).toEqual({});
   });
 
   it("keeps a truncated drawing non-writable while its scene opens", async () => {
@@ -858,6 +929,34 @@ describe("FileInspector Excalidraw view", () => {
     );
     expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1);
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open externally" }));
+    expect(bridge.openFileExternally).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "drawing.excalidraw",
+    });
+  });
+
+  it("offers external recovery when the disk read and image verification fail", async () => {
+    const bridge = bridgeFor(drawing("disk"));
+    bridge.readWorkspaceText = vi.fn(async () => {
+      throw new Error("disk unavailable");
+    });
+    bridge.openEngineYDocSession = vi.fn(async () => ({
+      available: false,
+      artifactAssetsInvalid: true,
+    }));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
+
+    const notice = await screen.findByTestId(
+      "engine-artifact-assets-invalid-notice",
+    );
+    expect(notice.textContent).toContain(
+      "dohc could not verify this drawing's images.",
+    );
+    expect(screen.getByText("Couldn't read this file.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Open externally" }));
     expect(bridge.openFileExternally).toHaveBeenCalledWith({

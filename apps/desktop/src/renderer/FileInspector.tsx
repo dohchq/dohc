@@ -4221,15 +4221,18 @@ export function FileInspector(props: {
       workspaceId={props.workspaceId}
       path={props.path}
       message={
-        engine.readOnlyWhileEditing
-          ? "This document became read-only before your edit saved. Copy your text to keep it."
-          : kind === "drawing" && engine.deletedWhileEditing
-            ? engine.deletedRecoveryAssets?.state === "loading"
-              ? `dohc is adding ${engine.deletedRecoveryAssets.count} ${engine.deletedRecoveryAssets.count === 1 ? "image" : "images"} to your set-aside drawing. Wait before you copy it.`
-              : engine.deletedRecoveryAssets?.state === "missing"
-                ? `dohc could not recover ${engine.deletedRecoveryAssets.count} ${engine.deletedRecoveryAssets.count === 1 ? "image" : "images"}. Copy your set-aside drawing to keep the rest.`
-                : "This drawing was deleted. Copy your set-aside drawing to keep it."
-          : undefined
+        kind === "drawing" &&
+        (engine.deletedWhileEditing || engine.readOnlyWhileEditing)
+          ? engine.recoveryAssets?.state === "loading"
+            ? `dohc is adding ${engine.recoveryAssets.count} ${engine.recoveryAssets.count === 1 ? "image" : "images"} to your set-aside drawing. Wait before you copy it.`
+            : engine.recoveryAssets?.state === "missing"
+              ? `dohc could not recover ${engine.recoveryAssets.count} ${engine.recoveryAssets.count === 1 ? "image" : "images"}. Copy your set-aside drawing to keep the rest.`
+              : engine.deletedWhileEditing
+                ? "This drawing was deleted. Copy your set-aside drawing to keep it."
+                : "This drawing became read-only before your edit saved. Copy your set-aside drawing to keep it."
+          : engine.readOnlyWhileEditing
+            ? "This document became read-only before your edit saved. Copy your text to keep it."
+            : undefined
       }
     />
   );
@@ -4280,6 +4283,12 @@ export function FileInspector(props: {
           // no retry on exactly the path where the engine session is the only
           // way back to the content.
           <EngineMayHoldDocumentNotice onRetry={retryEngineOpen} contentShown={false} />
+        ) : null}
+        {engine.artifactAssetsInvalid ? (
+          <EngineArtifactAssetsInvalidNotice
+            workspaceId={props.workspaceId}
+            path={props.path}
+          />
         ) : null}
         {engine.removalInProgress ? (
           <EngineRemovalInProgressNotice
