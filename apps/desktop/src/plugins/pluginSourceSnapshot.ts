@@ -127,6 +127,11 @@ export type PluginSourceSnapshotResult =
     ok: true;
     snapshotRoot: string;
     sourceHash: string;
+    /** The full digest already computed to produce sourceHash — callers
+     * that need per-file hashes (the install baseline manifest) reuse this
+     * instead of re-hashing the whole tree a second time (fixround Section
+     * C F1). */
+    digest: PluginSourceDigest;
     pnpmPaths: PluginPnpmPaths;
   }
   | {
@@ -906,7 +911,8 @@ export async function snapshotPluginSource(
     await copySourceTree(realPluginRoot, stagingRoot, realPluginRoot);
     await readAndValidatePackageJson(stagingRoot);
     await readAndValidatePnpmLockfile(stagingRoot);
-    const { sourceHash } = await hashPluginSourceFiles(stagingRoot);
+    const digest = await hashPluginSourceFiles(stagingRoot);
+    const { sourceHash } = digest;
     const snapshotRoot = join(output.pluginDataRoot, "snapshot");
     if (sourceHash === input.preserveIfHashMatches) {
       await rm(stagingRoot, {
@@ -916,11 +922,11 @@ export async function snapshotPluginSource(
         retryDelay: 200,
       });
       stagingRoot = null;
-      return { ok: true, snapshotRoot, sourceHash, pnpmPaths };
+      return { ok: true, snapshotRoot, sourceHash, digest, pnpmPaths };
     }
     await replaceSnapshot(stagingRoot, snapshotRoot);
     stagingRoot = null;
-    return { ok: true, snapshotRoot, sourceHash, pnpmPaths };
+    return { ok: true, snapshotRoot, sourceHash, digest, pnpmPaths };
   } catch (error) {
     let failure = resultError(error);
     if (stagingRoot) {

@@ -11,18 +11,9 @@ import {
   discoverInstalledPlugins,
   type InstalledPluginRecord,
 } from "./pluginDiscovery";
-import {
-  buildPluginBundle,
-  type PluginBuildResult,
-} from "./pluginBuildRunner";
-import {
-  installPluginDependencies,
-  type PluginInstallResult,
-} from "./pluginInstallRunner";
-import {
-  scanPluginLifecycleScripts,
-  type PluginLifecycleScanResult,
-} from "./pluginLifecycleScan";
+import { buildPluginBundle } from "./pluginBuildRunner";
+import { installPluginDependencies } from "./pluginInstallRunner";
+import { scanPluginLifecycleScripts } from "./pluginLifecycleScan";
 import {
   mutatePluginRecord,
   pluginDataDir,
@@ -32,7 +23,6 @@ import {
 import type { DohcPluginManifest } from "./pluginManifestSchema";
 import type { PluginRuntimeStatus } from "./pluginHostProtocol";
 import {
-  hashPluginSourceFiles,
   pluginIdToSafePath,
   snapshotPluginSource,
   type PluginSourceSnapshotResult,
@@ -903,18 +893,16 @@ export class PluginPipeline {
     try {
       const snapshot = await this.snapshotOrThrow(validCandidate);
       sourceHash = snapshot.sourceHash;
-      const baselineDigest = await hashPluginSourceFiles(snapshot.snapshotRoot);
-      if (baselineDigest.sourceHash !== snapshot.sourceHash) {
-        throw new PipelineFailure(pipelineError(
-          "snapshot",
-          "snapshot-hash-mismatch",
-          `Plugin snapshot hash changed from ${snapshot.sourceHash} to ` +
-            `${baselineDigest.sourceHash} before dependency installation.`,
-        ));
-      }
+      // snapshotOrThrow's own digest is reused for the install baseline
+      // manifest below instead of re-hashing the whole tree a second time
+      // (fixround Section C F1) — writePluginBaselineManifest already
+      // enforces canonicalPluginSourceHash(digest.files) === digest.sourceHash
+      // and digest.sourceHash === installedBaselineHash, which is the same
+      // invariant a second hash pass would have re-verified.
+      const baselineDigest = snapshot.digest;
 
       this.setStatus(candidate, { status: "installing", error: null });
-      const install = await this.operations.install({
+      this.unwrap("install", await this.operations.install({
         workspaceRoot: this.workspaceRoot,
         pluginId: candidate.id,
         snapshotRoot: snapshot.snapshotRoot,
@@ -922,27 +910,24 @@ export class PluginPipeline {
         resourcesBasePath: this.options.resourcesBasePath,
         pnpmRunnerEntry: this.options.pnpmRunnerEntry,
         signal: this.abortController.signal,
-      });
-      this.assertInstall(install);
+      }));
 
       this.setStatus(candidate, { status: "scanning" });
-      const scan = await this.operations.scan({
+      const scan = this.unwrap("scan", await this.operations.scan({
         snapshotRoot: snapshot.snapshotRoot,
         manifest: candidate.manifest,
-      });
-      this.assertScan(scan);
+      }));
       this.setStatus(candidate, { warnings: [...scan.warningLines] });
 
       this.setStatus(candidate, { status: "building" });
-      const build = await this.operations.build({
+      const built = this.unwrap("build", await this.operations.build({
         dohcDir: this.dohcDir,
         pluginId: candidate.id,
         snapshotRoot: snapshot.snapshotRoot,
         manifest: candidate.manifest,
         resourcesBasePath: this.options.resourcesBasePath,
         signal: this.abortController.signal,
-      });
-      const built = this.assertBuild(build);
+      }));
       const warnings = [
         ...scan.warningLines,
         ...(built.cleanupWarning ? [built.cleanupWarning] : []),
@@ -1095,36 +1080,16 @@ export class PluginPipeline {
     return snapshot;
   }
 
-  private assertInstall(result: PluginInstallResult): asserts result is Extract<
-    PluginInstallResult,
-    { ok: true }
-  > {
+  // assertInstall/assertScan/assertBuild were the same body three times —
+  // "if !result.ok, throw PipelineFailure(pipelineError(stage,
+  // result.error.code, result.error.message))" — differing only in which
+  // stage name they threw with (fixround Section C F4).
+  private unwrap<T extends { ok: true }, E extends { code: string; message: string }>(
+    stage: PluginPipelineErrorStage,
+    result: T | { ok: false; error: E },
+  ): T {
     if (!result.ok) {
-      throw new PipelineFailure(
-        pipelineError("install", result.error.code, result.error.message),
-      );
-    }
-  }
-
-  private assertScan(result: PluginLifecycleScanResult): asserts result is Extract<
-    PluginLifecycleScanResult,
-    { ok: true }
-  > {
-    if (!result.ok) {
-      throw new PipelineFailure(
-        pipelineError("scan", result.error.code, result.error.message),
-      );
-    }
-  }
-
-  private assertBuild(result: PluginBuildResult): Extract<
-    PluginBuildResult,
-    { ok: true }
-  > {
-    if (!result.ok) {
-      throw new PipelineFailure(
-        pipelineError("build", result.error.code, result.error.message),
-      );
+      throw new PipelineFailure(pipelineError(stage, result.error.code, result.error.message));
     }
     return result;
   }
