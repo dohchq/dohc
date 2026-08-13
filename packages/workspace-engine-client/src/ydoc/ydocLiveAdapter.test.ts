@@ -270,7 +270,7 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
-  it("refuses scene settlement instead of reporting an empty materialization", async () => {
+  it("refuses scene settlement and releases the scene on close", async () => {
     const materialized: Array<{ path: string; content: string }> = [];
     const engine = new YdocLoopbackEngine({
       materialize: (input) => materialized.push(input),
@@ -297,7 +297,17 @@ describe("YdocLiveAdapter", () => {
       }),
     ).toBe(false);
 
-    await session.evict();
+    await expect(session.close()).resolves.toBeUndefined();
+    expect(engine.activeSessionIds()).toHaveLength(0);
+
+    const reopened = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: "drawing.excalidraw",
+      contentKind: "scene",
+    });
+    expect(reopened.lineage).toBe("absent");
+    await reopened.close({ settle: false });
     adapter.dispose();
   });
 
