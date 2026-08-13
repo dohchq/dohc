@@ -374,7 +374,7 @@ export class PluginPipeline {
         );
       }
 
-      const snapshot = await this.snapshot(candidate);
+      const snapshot = await this.snapshot(candidate, state.approvedHash);
       if (!snapshot.ok) return snapshot.result;
       if (snapshot.value.sourceHash !== state.approvedHash) {
         return this.holdForApproval(candidate, snapshot.value.sourceHash);
@@ -432,7 +432,7 @@ export class PluginPipeline {
         });
       }
 
-      const snapshot = await this.snapshot(candidate);
+      const snapshot = await this.snapshot(candidate, state.approvedHash);
       if (!snapshot.ok) return snapshot.result;
       if (snapshot.value.sourceHash !== state.approvedHash) {
         return this.holdForApproval(candidate, snapshot.value.sourceHash);
@@ -810,7 +810,7 @@ export class PluginPipeline {
       this.setStatus(candidate, { status: "discovered" });
       return;
     }
-    const snapshot = await this.snapshot(candidate);
+    const snapshot = await this.snapshot(candidate, record.approvedHash);
     if (!snapshot.ok) return;
     if (snapshot.value.sourceHash !== record.approvedHash) {
       await this.holdForApproval(candidate, snapshot.value.sourceHash);
@@ -1035,12 +1035,16 @@ export class PluginPipeline {
 
   private async snapshot(
     candidate: InstalledPluginRecord & { manifest: DohcPluginManifest },
+    preserveIfHashMatches?: string,
   ): Promise<
     | { ok: true; value: Extract<PluginSourceSnapshotResult, { ok: true }> }
     | { ok: false; result: PluginPipelineActionResult }
   > {
     try {
-      return { ok: true, value: await this.snapshotOrThrow(candidate) };
+      return {
+        ok: true,
+        value: await this.snapshotOrThrow(candidate, preserveIfHashMatches),
+      };
     } catch (error) {
       const detail = error instanceof PipelineFailure
         ? error.detail
@@ -1051,6 +1055,7 @@ export class PluginPipeline {
 
   private async snapshotOrThrow(
     candidate: InstalledPluginRecord & { manifest: DohcPluginManifest },
+    preserveIfHashMatches?: string,
   ): Promise<Extract<PluginSourceSnapshotResult, { ok: true }>> {
     this.setStatus(candidate, { status: "snapshotting", error: null });
     const snapshot = await this.operations.snapshot({
@@ -1060,6 +1065,7 @@ export class PluginPipeline {
       pluginId: candidate.id,
       pluginRoot: candidate.rootPath,
       manifest: candidate.manifest,
+      preserveIfHashMatches,
     });
     if (!snapshot.ok) {
       throw new PipelineFailure(

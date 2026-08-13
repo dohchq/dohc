@@ -439,4 +439,29 @@ describe("snapshotPluginSource canonical hash and replacement", () => {
     expect((await readdir(pluginDataRoot)).filter((name) =>
       name.startsWith(".snap-staging-"))).toEqual([]);
   });
+
+  it("preserves an installed node_modules across a hash-check reconcile that finds no change (fixround Section B item 11)", async () => {
+    const fixture = await createPluginFixture();
+    const first = requireSuccess(await runSnapshot(fixture));
+    // Stands in for a real pnpm install's node_modules living inside the
+    // snapshot — excluded from the source copy itself, so only a
+    // destructive replace (not a source change) can remove it.
+    const installedMarker = join(first.snapshotRoot, "node_modules", ".marker");
+    await mkdir(join(first.snapshotRoot, "node_modules"));
+    await writeFile(installedMarker, "installed\n");
+
+    const reconciled = requireSuccess(await snapshotPluginSource({
+      workspaceRoot: fixture.root,
+      stateDir: fixture.stateDir,
+      dohcDir: fixture.dohcDir,
+      pluginId: fixture.manifest.name,
+      pluginRoot: fixture.pluginRoot,
+      manifest: fixture.manifest,
+      preserveIfHashMatches: first.sourceHash,
+    }));
+
+    expect(reconciled.sourceHash).toBe(first.sourceHash);
+    expect(reconciled.snapshotRoot).toBe(first.snapshotRoot);
+    await expect(readFile(installedMarker, "utf8")).resolves.toBe("installed\n");
+  });
 });

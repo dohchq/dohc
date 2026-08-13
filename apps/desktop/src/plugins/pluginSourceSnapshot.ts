@@ -88,6 +88,17 @@ export interface SnapshotPluginSourceInput {
   pluginId: string;
   pluginRoot: string;
   manifest: DohcPluginManifest;
+  /**
+   * A caller that only needs to verify source still matches an already-
+   * approved hash (enable(), ensureStarted(), reconcileApprovedCandidate())
+   * passes it here. When the freshly-hashed source matches, the existing
+   * snapshot — and its installed node_modules, which live inside it — is
+   * left untouched instead of being destructively replaced (CodeRabbit
+   * #779 fixround Section B item 11: a hash-check reconcile was rebuilding
+   * the snapshot from scratch, discarding a perfectly good install, even
+   * when nothing had actually changed).
+   */
+  preserveIfHashMatches?: string;
 }
 
 export interface PluginSourceFileDigest {
@@ -845,6 +856,16 @@ export async function snapshotPluginSource(
     await readAndValidatePnpmLockfile(stagingRoot);
     const { sourceHash } = await hashPluginSourceFiles(stagingRoot);
     const snapshotRoot = join(output.pluginDataRoot, "snapshot");
+    if (sourceHash === input.preserveIfHashMatches) {
+      await rm(stagingRoot, {
+        recursive: true,
+        force: true,
+        maxRetries: WINDOWS_RENAME_RETRY_DELAYS_MS.length,
+        retryDelay: 200,
+      });
+      stagingRoot = null;
+      return { ok: true, snapshotRoot, sourceHash, pnpmPaths };
+    }
     await replaceSnapshot(stagingRoot, snapshotRoot);
     stagingRoot = null;
     return { ok: true, snapshotRoot, sourceHash, pnpmPaths };
