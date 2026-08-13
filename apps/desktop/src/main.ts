@@ -860,7 +860,14 @@ async function ensurePluginPipeline(
 ): Promise<PluginPipeline> {
   assertWritableWorkspace(workspace);
   const existing = pluginPipelines.get(workspace.workspaceId);
-  if (existing) return existing;
+  if (existing) {
+    // start() memoizes its own promise, so a concurrent caller that lands
+    // here while startInternal() is still running must still wait for it —
+    // otherwise it can observe an empty pipeline.list() and report "no
+    // plugins" with no retry (CodeRabbit #779 R5).
+    await existing.start();
+    return existing;
+  }
   const pipeline = createPluginPipeline(workspace);
   pluginPipelines.set(workspace.workspaceId, pipeline);
   try {
@@ -6495,7 +6502,16 @@ function registerIpcHandlers(
     refreshNativeWorkspaceSurfaces();
     const status = SyncStatusResult.parse(await openWorkspaceActivity(workspace));
     if (!sharedViewOf(workspace.workspaceId)) {
-      await ensurePluginPipeline(workspace);
+      // A plugin-pipeline start failure must not fail the whole handler —
+      // the workspace itself already opened. listPlugins and friends
+      // separately convert a failed ensurePluginPipeline into a structured
+      // pluginIpcError (CodeRabbit #779 R6); this is best-effort warmup.
+      await ensurePluginPipeline(workspace).catch((error: unknown) => {
+        console.error(
+          `[desktop] plugin pipeline warmup failed for ${workspace.workspaceId}:`,
+          error,
+        );
+      });
     }
     return status;
   });

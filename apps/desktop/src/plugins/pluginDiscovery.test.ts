@@ -1,9 +1,31 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { discoverInstalledPlugins } from "./pluginDiscovery";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { PLUGIN_MANIFEST_FILE_NAME } from "./pluginManifest";
+
+// A pure JS-level interception (never real filesystem permissions, which
+// Windows can't simulate the same way POSIX chmod can) — lets a single test
+// make one specific nested directory's readdir fail, without touching how
+// every other test in this file reads real fixture directories.
+let poisonedPath: string | null = null;
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    readdir: (async (path: Parameters<typeof readdir>[0], options?: unknown) => {
+      if (poisonedPath !== null && String(path) === poisonedPath) {
+        throw Object.assign(
+          new Error("EACCES: permission denied, scandir"),
+          { code: "EACCES" },
+        );
+      }
+      return actual.readdir(path as string, options as never);
+    }) as typeof readdir,
+  };
+});
+
+const { discoverInstalledPlugins } = await import("./pluginDiscovery");
 
 const roots: string[] = [];
 
@@ -29,6 +51,7 @@ async function writeManifest(
 }
 
 afterEach(async () => {
+  poisonedPath = null;
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -148,5 +171,43 @@ describe("discoverInstalledPlugins", () => {
     roots.push(root);
 
     await expect(discoverInstalledPlugins(root)).resolves.toEqual([]);
+  });
+
+  it("does not walk into node_modules or .dohc for nested manifests (CodeRabbit #779 R11)", async () => {
+    const root = await createWorkspace();
+    const pluginRoot = await writeManifest(root, "with-deps");
+    await mkdir(join(pluginRoot, "node_modules", "dep"), { recursive: true });
+    await writeFile(
+      join(pluginRoot, "node_modules", "dep", PLUGIN_MANIFEST_FILE_NAME),
+      JSON.stringify({ version: 1, name: "dep-manifest", entry: "index.ts" }),
+    );
+    await mkdir(join(pluginRoot, ".dohc"), { recursive: true });
+    await writeFile(
+      join(pluginRoot, ".dohc", PLUGIN_MANIFEST_FILE_NAME),
+      JSON.stringify({ version: 1, name: "generated-manifest", entry: "index.ts" }),
+    );
+
+    const records = await discoverInstalledPlugins(root);
+
+    expect(records).toEqual([
+      expect.objectContaining({ directoryName: "with-deps", diagnostics: [], valid: true }),
+    ]);
+  });
+
+  it("keeps a candidate isolated when one of its nested directories cannot be read (CodeRabbit #779 R12)", async () => {
+    const root = await createWorkspace();
+    await writeManifest(root, "alpha");
+    const brokenRoot = await writeManifest(root, "broken");
+    const lockedDir = join(brokenRoot, "locked");
+    await mkdir(lockedDir);
+    poisonedPath = lockedDir;
+
+    const records = await discoverInstalledPlugins(root);
+
+    expect(records.map((record) => record.directoryName)).toEqual(["alpha", "broken"]);
+    expect(records[0]).toMatchObject({ directoryName: "alpha", valid: true });
+    expect(records[1]).toMatchObject({ directoryName: "broken", manifest: null, valid: false });
+    expect(records[1]?.diagnostics[0]).toContain("could not be fully inspected");
+    expect(records[1]?.diagnostics[0]).toContain(brokenRoot);
   });
 });

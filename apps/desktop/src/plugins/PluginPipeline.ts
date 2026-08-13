@@ -1264,7 +1264,14 @@ export class PluginPipeline {
       ...patch,
       directoryName: candidate.directoryName,
       rootPath: candidate.rootPath,
-      valid: candidate.valid && candidate.manifest !== null,
+      // A caller with no real discovery candidate left (failure()'s
+      // synthetic fallback, below) explicitly states the validity it wants
+      // preserved via patch.valid; every other caller passes a real
+      // discovered candidate and gets the normal derived computation
+      // (CodeRabbit #779 R23: without this, a failure recorded after a
+      // still-valid plugin's discovery entry was replaced always read back
+      // as invalid).
+      valid: patch.valid ?? (candidate.valid && candidate.manifest !== null),
       diagnostics: patch.diagnostics
         ? [...patch.diagnostics]
         : [...current.diagnostics],
@@ -1292,7 +1299,7 @@ export class PluginPipeline {
           diagnostics: current.diagnostics,
           valid: current.valid,
         },
-        { error },
+        { error, valid: current.valid },
       );
     }
     return {

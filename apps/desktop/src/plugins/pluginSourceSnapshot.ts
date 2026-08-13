@@ -42,7 +42,9 @@ const DEPENDENCY_FIELDS = [
   "optionalDependencies",
   "peerDependencies",
 ] as const;
-const EXCLUDED_SOURCE_NAMES = new Set(["node_modules", ".dohc"]);
+// Shared with pluginDiscovery.ts's nested-manifest walk (CodeRabbit #779
+// R11/R12): one excluded-name list, so the two can never drift apart.
+export const EXCLUDED_SOURCE_NAMES = new Set(["node_modules", ".dohc"]);
 const WINDOWS_RENAME_RETRY_DELAYS_MS = [100, 150, 200, 250, 300] as const;
 const READ_NO_FOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 

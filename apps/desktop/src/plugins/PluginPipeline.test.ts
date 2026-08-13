@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { stop } from "esbuild";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
+import { discoverInstalledPlugins } from "./pluginDiscovery";
 import { PluginPipeline } from "./PluginPipeline";
 import {
   installPluginDependencies,
@@ -452,4 +453,64 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.dispose();
     }
   }, 60_000);
+
+  it("preserves a valid plugin's own validity in a failure recorded after its discovery entry disappeared (CodeRabbit #779 R23)", async () => {
+    const fixture = await createPluginWorkspace();
+    const installGate = deferred();
+    let pipeline: PluginPipeline;
+    let discoverCalls = 0;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceId: "workspace-1",
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        // Real discovery once (to seed a real, valid status), then empty —
+        // simulating the plugin's directory disappearing while its own
+        // install is still in flight below.
+        discover: async (workspaceRoot) => {
+          discoverCalls += 1;
+          return discoverCalls === 1
+            ? await discoverInstalledPlugins(workspaceRoot)
+            : [];
+        },
+        install: async () => {
+          await installGate.promise;
+          throw new Error("synthetic install failure (R23 PoC)");
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      expect(pipeline.list()[0]).toMatchObject({ id: "example-plugin", valid: true });
+
+      const installPromise = pipeline.install("example-plugin");
+      // The watcher observes the plugin's directory vanishing WHILE the
+      // install above is still in flight — discovery.find(id) inside
+      // failure() (below) will miss by the time the install rejects.
+      pipeline.handleWatcherEvents([
+        { path: "plugins/example-plugin", operation: "delete" },
+      ]);
+      await waitFor(() => discoverCalls >= 2, "Watcher-driven rediscovery did not run.");
+      installGate.resolve();
+
+      const result = await installPromise;
+      expect(result.ok).toBe(false);
+      expect(result.plugin).toMatchObject({ id: "example-plugin", valid: true });
+    } finally {
+      installGate.resolve();
+      await pipeline.dispose();
+    }
+  });
 });

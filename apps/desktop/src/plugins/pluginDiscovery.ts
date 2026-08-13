@@ -7,6 +7,7 @@ import {
   type PluginManifestReadResult,
 } from "./pluginManifest";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
+import { EXCLUDED_SOURCE_NAMES } from "./pluginSourceSnapshot";
 
 export type PluginRootKind = "directory" | "symlink" | "invalid";
 
@@ -95,6 +96,7 @@ async function findNestedManifestPaths(
   const nested: string[] = [];
   const entries = await readdir(current, { withFileTypes: true });
   for (const entry of entries) {
+    if (EXCLUDED_SOURCE_NAMES.has(entry.name)) continue;
     const path = join(current, entry.name);
     if (current !== pluginRoot && entry.name === PLUGIN_MANIFEST_FILE_NAME) {
       nested.push(workspaceRelativePath(workspaceRoot, path));
@@ -154,10 +156,28 @@ async function inspectCandidate(
     };
   }
 
-  const [manifestResult, nestedManifestPaths] = await Promise.all([
-    readPluginManifestFile(rootPath),
-    findNestedManifestPaths(workspaceRoot, rootPath),
-  ]);
+  // An unreadable nested directory (EACCES/EPERM, e.g.) must invalidate only
+  // this one candidate — not the whole discoverInstalledPlugins batch it's
+  // Promise.all'd into below (CodeRabbit #779 R12).
+  let manifestResult: PluginManifestReadResult;
+  let nestedManifestPaths: string[];
+  try {
+    [manifestResult, nestedManifestPaths] = await Promise.all([
+      readPluginManifestFile(rootPath),
+      findNestedManifestPaths(workspaceRoot, rootPath),
+    ]);
+  } catch (error) {
+    return {
+      directoryName,
+      rootPath,
+      rootKind: "invalid",
+      manifestResult: null,
+      nestedManifestPaths: [],
+      diagnostics: [
+        `plugin root at ${rootPath} could not be fully inspected: ${errorMessage(error)}`,
+      ],
+    };
+  }
   return {
     directoryName,
     rootPath,
