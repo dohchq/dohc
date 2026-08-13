@@ -23,6 +23,18 @@ use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
 
 const SCENE_PROJECTION_TOO_LARGE_REASON: &str =
     "scene projection exceeds MAX_PROJECTION_BYTES (16777216 bytes)";
+const PLAINTEXT_PROJECTION_TOO_LARGE_REASON: &str =
+    "plaintext projection exceeds MAX_PROJECTION_BYTES (16777216 bytes)";
+const RICHDOC_PROJECTION_TOO_LARGE_REASON: &str =
+    "richdoc projection exceeds MAX_PROJECTION_BYTES (16777216 bytes)";
+
+fn projection_too_large_reason(content_kind: dohc_engine_collab::ContentKind) -> &'static str {
+    match content_kind {
+        dohc_engine_collab::ContentKind::Plaintext => PLAINTEXT_PROJECTION_TOO_LARGE_REASON,
+        dohc_engine_collab::ContentKind::Richdoc => RICHDOC_PROJECTION_TOO_LARGE_REASON,
+        dohc_engine_collab::ContentKind::Scene => SCENE_PROJECTION_TOO_LARGE_REASON,
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1372,7 +1384,7 @@ pub fn apply_ydoc_envelope(
                 return refuse_ydoc(store, envelope, faults, reason);
             }
             Err(SyncError::ProjectionTooLarge { .. }) => {
-                return refuse_ydoc(store, envelope, faults, SCENE_PROJECTION_TOO_LARGE_REASON);
+                return refuse_ydoc(store, envelope, faults, projection_too_large_reason(kind));
             }
             Err(hard) => return Err(hard),
         };
@@ -1530,7 +1542,7 @@ pub fn apply_ydoc_envelope(
                     )
                     .map_err(SyncError::persist)?;
                     return Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {
-                        reason: SCENE_PROJECTION_TOO_LARGE_REASON,
+                        reason: projection_too_large_reason(update_kind),
                     });
                 }
                 Err(hard) => return Err(hard),
@@ -1685,5 +1697,26 @@ fn map_domain_hard_error(error: DomainError) -> SyncError {
     match error {
         DomainError::Storage(storage) => SyncError::Storage(storage),
         hard => SyncError::Storage(StorageError::corrupt_public(hard)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projection_limit_reason_names_each_content_kind() {
+        assert_eq!(
+            projection_too_large_reason(dohc_engine_collab::ContentKind::Plaintext),
+            "plaintext projection exceeds MAX_PROJECTION_BYTES (16777216 bytes)"
+        );
+        assert_eq!(
+            projection_too_large_reason(dohc_engine_collab::ContentKind::Richdoc),
+            "richdoc projection exceeds MAX_PROJECTION_BYTES (16777216 bytes)"
+        );
+        assert_eq!(
+            projection_too_large_reason(dohc_engine_collab::ContentKind::Scene),
+            "scene projection exceeds MAX_PROJECTION_BYTES (16777216 bytes)"
+        );
     }
 }
