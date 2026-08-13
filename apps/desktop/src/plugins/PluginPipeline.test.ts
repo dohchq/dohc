@@ -221,7 +221,6 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
-      workspaceId: "workspace-1",
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       pluginHost: host,
@@ -399,7 +398,6 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
-      workspaceId: "workspace-1",
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       pluginHost: host,
@@ -468,7 +466,6 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
-      workspaceId: "workspace-1",
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       pluginHost: host,
@@ -526,7 +523,6 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       },
     });
     pipeline = new PluginPipeline({
-      workspaceId: "workspace-1",
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
       pluginHost: host,

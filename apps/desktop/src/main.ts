@@ -843,7 +843,6 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     },
   });
   pipeline = new PluginPipeline({
-    workspaceId: workspace.workspaceId,
     workspaceRoot: workspace.rootPath,
     stateDir: stateDir(),
     pluginHost,

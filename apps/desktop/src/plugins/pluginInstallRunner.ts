@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
+  PINNED_PLUGIN_PACKAGE_MANAGER,
   PLUGIN_INSTALL_TIMEOUT_MS,
   type PluginPnpmPaths,
 } from "./pluginSourceSnapshot";
@@ -446,7 +447,7 @@ async function runInstallJob(
           "lockfile-mismatch",
           `pnpm rejected pnpm-lock.yaml for plugin "${input.pluginId}" ` +
             `under --frozen-lockfile with exit code ${exitCode}. ` +
-            "Regenerate the lockfile with pnpm@11.20.0 and retry.",
+            `Regenerate the lockfile with ${PINNED_PLUGIN_PACKAGE_MANAGER} and retry.`,
           timeoutMs,
           logs,
           exitCode,

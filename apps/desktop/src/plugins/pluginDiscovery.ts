@@ -9,9 +9,9 @@ import {
 import type { DohcPluginManifest } from "./pluginManifestSchema";
 import { EXCLUDED_SOURCE_NAMES } from "./pluginSourceSnapshot";
 
-export type PluginRootKind = "directory" | "symlink" | "invalid";
+type PluginRootKind = "directory" | "symlink" | "invalid";
 
-export interface PluginDiscoveryCandidate {
+interface PluginDiscoveryCandidate {
   directoryName: string;
   rootPath: string;
   rootKind: PluginRootKind;
@@ -60,7 +60,7 @@ function recordFromCandidate(candidate: PluginDiscoveryCandidate): InstalledPlug
   };
 }
 
-export function classifyInstalledPlugins(
+function classifyInstalledPlugins(
   candidates: readonly PluginDiscoveryCandidate[],
 ): InstalledPluginRecord[] {
   const records = candidates

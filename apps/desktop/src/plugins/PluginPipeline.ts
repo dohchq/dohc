@@ -108,7 +108,6 @@ interface PluginPipelineOperations {
 }
 
 export interface PluginPipelineOptions {
-  workspaceId: string;
   workspaceRoot: string;
   stateDir: string;
   pluginHost: PluginHost;
@@ -125,7 +124,6 @@ export interface PluginPipelineOptions {
   operations?: Partial<PluginPipelineOperations>;
 }
 
-interface MutablePluginStatus extends PluginPipelinePluginStatus {}
 
 interface QueuedJob {
   sourceRefresh: boolean;
@@ -147,7 +145,7 @@ interface UninstallConfirmation {
 interface FullBuildOptions {
   candidate: InstalledPluginRecord;
   startRuntime: boolean;
-  disabledReasonAfterBuild: MutablePluginStatus["disabledReason"];
+  disabledReasonAfterBuild: PluginPipelinePluginStatus["disabledReason"];
   resetCrashAccounting: boolean;
   freshInstall: boolean;
 }
@@ -233,7 +231,7 @@ export class PluginPipeline {
   private readonly workspaceRoot: string;
   private readonly dohcDir: string;
   private readonly operations: PluginPipelineOperations;
-  private readonly statuses = new Map<string, MutablePluginStatus>();
+  private readonly statuses = new Map<string, PluginPipelinePluginStatus>();
   private readonly queues = new Map<string, PluginJobQueue>();
   private readonly uninstallConfirmations = new Map<string, UninstallConfirmation>();
   private discovery: InstalledPluginRecord[] = [];
@@ -1267,7 +1265,7 @@ export class PluginPipeline {
     }
   }
 
-  private baseStatus(candidate: InstalledPluginRecord): MutablePluginStatus {
+  private baseStatus(candidate: InstalledPluginRecord): PluginPipelinePluginStatus {
     return {
       id: candidate.id,
       directoryName: candidate.directoryName,
@@ -1287,10 +1285,10 @@ export class PluginPipeline {
 
   private setStatus(
     candidate: InstalledPluginRecord,
-    patch: Partial<MutablePluginStatus>,
-  ): MutablePluginStatus {
+    patch: Partial<PluginPipelinePluginStatus>,
+  ): PluginPipelinePluginStatus {
     const current = this.statuses.get(candidate.id) ?? this.baseStatus(candidate);
-    const next: MutablePluginStatus = {
+    const next: PluginPipelinePluginStatus = {
       ...current,
       ...patch,
       directoryName: candidate.directoryName,
