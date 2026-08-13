@@ -411,9 +411,20 @@ describe("documentReplacementMap", () => {
       paragraph: { content: "inline*", group: "block" },
       text: { group: "inline" },
     },
+    marks: {
+      strong: {},
+      emphasis: {},
+    },
   });
   const paragraph = (text: string) =>
     schema.node("paragraph", null, schema.text(text));
+  const changedRanges = (mapping: ReturnType<typeof documentReplacementMap>) => {
+    const ranges: number[] = [];
+    mapping.forEach((oldStart, oldEnd, newStart, newEnd) => {
+      ranges.push(oldStart, oldEnd - oldStart, newEnd - newStart);
+    });
+    return ranges;
+  };
 
   it("maps through disjoint edits within one text node", () => {
     const before = schema.node("doc", null, [paragraph("before Target after")]);
@@ -437,6 +448,58 @@ describe("documentReplacementMap", () => {
     ]);
 
     expect(documentReplacementMap(before, after).map(12, 1)).toBe(19);
+  });
+
+  it("merges touching marked-child changes at their selection junction", () => {
+    const strong = schema.mark("strong");
+    const emphasis = schema.mark("emphasis");
+    const before = schema.node("doc", null, [
+      schema.node("paragraph", null, [
+        schema.text("AA", [strong]),
+        schema.text("BB", [emphasis]),
+      ]),
+    ]);
+    const after = schema.node("doc", null, [
+      schema.node("paragraph", null, [
+        schema.text("AAAA", [strong]),
+        schema.text("CCBB", [emphasis]),
+      ]),
+    ]);
+    const mapping = documentReplacementMap(before, after);
+
+    expect(changedRanges(mapping)).toEqual([3, 0, 4]);
+    expect(mapping.map(3, 1)).toBe(7);
+  });
+
+  it("falls back to one bounded range for an adversarial large rewrite", () => {
+    const stable = " stable ";
+    const before = schema.node("doc", null, [
+      paragraph("Lead"),
+      paragraph(`${"a".repeat(96)}${stable}${"b".repeat(96)}`),
+      paragraph("Tail"),
+    ]);
+    const after = schema.node("doc", null, [
+      paragraph("Lead"),
+      paragraph(`${"x".repeat(100)}${stable}${"y".repeat(100)}`),
+      paragraph("Tail"),
+    ]);
+    const mapping = documentReplacementMap(before, after);
+
+    expect(changedRanges(mapping)).toEqual([7, 200, 208]);
+    expect(mapping.map(2, 1)).toBe(2);
+    expect(mapping.map(210, 1)).toBe(218);
+  });
+
+  it("keeps precise ranges for 32 independent ordinary edits", () => {
+    const beforeText = Array.from({ length: 32 }, (_, index) =>
+      `a${index.toString().padStart(2, "0")}-`,
+    ).join("");
+    const afterText = beforeText.replaceAll("a", "b");
+    const before = schema.node("doc", null, [paragraph(beforeText)]);
+    const after = schema.node("doc", null, [paragraph(afterText)]);
+    const mapping = documentReplacementMap(before, after);
+
+    expect(changedRanges(mapping)).toHaveLength(32 * 3);
   });
 });
 

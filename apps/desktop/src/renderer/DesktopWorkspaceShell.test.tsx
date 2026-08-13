@@ -4001,6 +4001,50 @@ describe("workspace shell errors", () => {
 // active row used to mark anyway — no remount/measure follows, so the stale
 // mark corrupts the NEXT open's latency measure.
 describe("file-open-start marking", () => {
+  it("marks the source fallback and target after a delayed move creates a group", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["a.md", "fallback.md"], "a.md")),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["a.md", "fallback.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.readWorkspaceText = vi.fn(async () => ({
+      text: "# Doc\n\n",
+      truncated: false as const,
+      contentHash: "a".repeat(64),
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    bridge.showWorkbenchMenu.mockResolvedValue("move-tab-to-new-group");
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(screen.getByTestId("markdown-editor"), "Draft");
+    await waitFor(() => expect(screen.getByTestId("tab-dirty")).toBeTruthy());
+    const mark = vi.spyOn(rendererMarks, "mark");
+
+    fireEvent.contextMenu(screen.getByTestId("tab-a.md"));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+    expect(mark.mock.calls.some(([name]) => isFileOpenStartMark(name))).toBe(false);
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    const target = await screen.findByRole("region", { name: "Editor group 2" });
+    const targetGroupId = target.dataset.editorGroupId!;
+    expect(mark).toHaveBeenCalledWith("file-open-start:primary");
+    expect(mark).toHaveBeenCalledWith(`file-open-start:${targetGroupId}`);
+    mark.mockRestore();
+  });
+
   it("marks both Markdown mounts in an active cross-group move", async () => {
     const bridge = makeBridge(
       Promise.resolve({

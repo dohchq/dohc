@@ -194,13 +194,12 @@ function groupsMountingNewDocument(
   current: WorkbenchState,
   next: WorkbenchState,
 ): string[] {
-  return current.editorGroups.flatMap((before) => {
-    const after = next.editorGroups.find((group) => group.id === before.id);
-    return after !== undefined &&
-      after.activeTab !== before.activeTab &&
+  return next.editorGroups.flatMap((after) => {
+    const before = current.editorGroups.find((group) => group.id === after.id);
+    return after.activeTab !== before?.activeTab &&
       after.activeTab !== null &&
       !isVirtualTabPath(after.activeTab)
-      ? [before.id]
+      ? [after.id]
       : [];
   });
 }
@@ -3587,19 +3586,31 @@ export function DesktopWorkspaceShell(props: {
           .find((candidate) => candidate.id === groupId)
           ?.tabs.find((candidate) => candidate.path === tabPath);
         if (live !== tab) return;
-        invalidateDeferredFileOpenForGroupChange(
-          current.activeEditorGroup,
-          newGroupId,
-        );
-        mutateWb((state) =>
+        const moveState = (state: WorkbenchState) =>
           moveTabToNewGroup(
             state,
             groupId,
             tabPath,
             newGroupId,
             hasEditorFocus(state, focus) ? "target" : "preserve",
-          ),
+          );
+        const next = moveState(current);
+        if (next === current) return;
+        invalidateDeferredFileOpenForGroupChange(
+          current.activeEditorGroup,
+          newGroupId,
         );
+        for (const mountingGroupId of groupsMountingNewDocument(current, next)) {
+          const nextActiveTab = next.editorGroups.find(
+            (candidate) => candidate.id === mountingGroupId,
+          )?.activeTab;
+          if (nextActiveTab === undefined || nextActiveTab === null) continue;
+          const viewKind = classifyForView(nextActiveTab);
+          if (viewKind === "markdown" || viewKind === "database") {
+            rendererMarks.mark(fileOpenStartMark(mountingGroupId));
+          }
+        }
+        mutateWb(moveState);
       };
       commitAfterTabFlush(
         groupId,

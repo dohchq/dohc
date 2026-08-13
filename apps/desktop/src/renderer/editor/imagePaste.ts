@@ -307,6 +307,17 @@ type DiffPath = {
   last?: DiffComponent;
 };
 
+type DiffBudget = {
+  remaining: number;
+};
+
+// This bounds the quadratic part of Myers's algorithm by diagonal visits, not
+// by document size. The focused measurement keeps all precise ranges for 32
+// independent substitutions within this budget. A rewrite that needs more
+// work gets one coarse range; the update still applies, and positions outside
+// that changed range stay exact.
+const SEQUENCE_DIFF_WORK_BUDGET = 4_096;
+
 // Myers's sequence diff gives us every unchanged island, not only the common
 // prefix and suffix. Converting its changed runs to StepMap ranges lets both
 // cursors and async image anchors stay attached to unchanged content between
@@ -315,7 +326,8 @@ function sequenceDiff<T>(
   before: readonly T[],
   after: readonly T[],
   equal: (left: T, right: T) => boolean,
-): DiffComponent[] {
+  budget: DiffBudget,
+): DiffComponent[] | null {
   const addToPath = (
     path: DiffPath,
     added: boolean,
@@ -383,6 +395,8 @@ function sequenceDiff<T>(
       diagonal <= Math.min(maxDiagonal, editLength);
       diagonal += 2
     ) {
+      if (budget.remaining === 0) return null;
+      budget.remaining -= 1;
       const removePath = paths[diagonal - 1];
       const insertPath = paths[diagonal + 1];
       if (removePath) paths[diagonal - 1] = undefined;
@@ -433,7 +447,17 @@ function appendRange(
   oldSize: number,
   newSize: number,
 ): void {
-  if (oldSize !== 0 || newSize !== 0) ranges.push(start, oldSize, newSize);
+  if (oldSize === 0 && newSize === 0) return;
+  const previous = ranges.length - 3;
+  if (
+    previous >= 0 &&
+    ranges[previous]! + ranges[previous + 1]! === start
+  ) {
+    ranges[previous + 1] += oldSize;
+    ranges[previous + 2] += newSize;
+    return;
+  }
+  ranges.push(start, oldSize, newSize);
 }
 
 function diffText(
@@ -441,6 +465,7 @@ function diffText(
   after: string,
   start: number,
   ranges: number[],
+  budget: DiffBudget,
 ): void {
   let pos = start;
   let oldSize = 0;
@@ -449,7 +474,12 @@ function diffText(
     before.split(""),
     after.split(""),
     (a, b) => a === b,
+    budget,
   );
+  if (components === null) {
+    appendRange(ranges, start, before.length, after.length);
+    return;
+  }
   for (const component of components) {
     if (!component.added && !component.removed) {
       appendRange(ranges, pos, oldSize, newSize);
@@ -470,6 +500,7 @@ function diffNode(
   after: ProseMirrorNode,
   start: number,
   ranges: number[],
+  budget: DiffBudget,
 ): void {
   if (before.eq(after)) return;
   if (!before.sameMarkup(after)) {
@@ -477,14 +508,14 @@ function diffNode(
     return;
   }
   if (before.isText && after.isText) {
-    diffText(before.text ?? "", after.text ?? "", start, ranges);
+    diffText(before.text ?? "", after.text ?? "", start, ranges, budget);
     return;
   }
   if (before.isLeaf || after.isLeaf) {
     appendRange(ranges, start, before.nodeSize, after.nodeSize);
     return;
   }
-  diffContent(before, after, start + 1, ranges);
+  diffContent(before, after, start + 1, ranges, budget);
 }
 
 function diffContent(
@@ -492,6 +523,7 @@ function diffContent(
   after: ProseMirrorNode,
   start: number,
   ranges: number[],
+  budget: DiffBudget,
 ): void {
   const oldChildren: ProseMirrorNode[] = [];
   const newChildren: ProseMirrorNode[] = [];
@@ -511,7 +543,13 @@ function diffContent(
     ) {
       let nestedPos = pos;
       for (let index = 0; index < changedOld.length; index += 1) {
-        diffNode(changedOld[index]!, changedNew[index]!, nestedPos, ranges);
+        diffNode(
+          changedOld[index]!,
+          changedNew[index]!,
+          nestedPos,
+          ranges,
+          budget,
+        );
         nestedPos += changedOld[index]!.nodeSize;
       }
     } else {
@@ -527,7 +565,16 @@ function diffContent(
     changedNew = [];
   };
 
-  const components = sequenceDiff(oldChildren, newChildren, (a, b) => a.eq(b));
+  const components = sequenceDiff(
+    oldChildren,
+    newChildren,
+    (a, b) => a.eq(b),
+    budget,
+  );
+  if (components === null) {
+    appendRange(ranges, start, before.content.size, after.content.size);
+    return;
+  }
   for (const component of components) {
     if (!component.added && !component.removed) {
       flush();
@@ -552,7 +599,9 @@ export function documentReplacementMap(
 ): StepMap {
   if (before.eq(after)) return StepMap.empty;
   const ranges: number[] = [];
-  diffContent(before, after, 0, ranges);
+  diffContent(before, after, 0, ranges, {
+    remaining: SEQUENCE_DIFF_WORK_BUDGET,
+  });
   return new StepMap(ranges);
 }
 
