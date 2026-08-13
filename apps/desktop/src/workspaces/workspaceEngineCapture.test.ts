@@ -2585,7 +2585,7 @@ describe("workspaceEngineCapture agent attribution", () => {
         pluginId: "hello-plugin",
         workspaceRoot: root,
         spawnId,
-        writable: true,
+        isWritable: () => true,
         writeAvailable: async () => true,
         writeAuthoredText: async (path, text, options) => {
           expect(options.overwrite).toBe(true);

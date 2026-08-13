@@ -1,3 +1,9 @@
+import {
+  VERSIONED_METHOD,
+  VersionedLoopbackEngine,
+  type Request,
+} from "@dohc/workspace-engine-client";
+import { existsSync } from "node:fs";
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5,6 +11,8 @@ import type { DohcPluginManifest } from "./pluginManifestSchema";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JsonRpcTransport } from "../agents/JsonRpcTransport";
 import { createTestScratch } from "../workspaces/testTemp";
+import { mockLiveSessions } from "../testing/liveEngineSessions";
+import { createWorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import {
   pluginStateFileName,
@@ -14,6 +22,11 @@ import {
 import { readPluginManifestFile } from "./pluginManifest";
 import { invokePluginSdkHost } from "./pluginSdkHost";
 import { createPluginPanelSdkAuthorityRegistry } from "./pluginPanelSdkAuthority";
+import {
+  revokePluginPanelAuthoritiesForStatus,
+  startPluginPanelWithLock,
+  stopPluginPanelWithLock,
+} from "./pluginPanelStartLifecycle";
 import {
   PLUGIN_ACTIVATION_TIMEOUT_MS,
   PLUGIN_HOST_METHODS,
@@ -44,6 +57,14 @@ async function waitFor(
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function deferredVoid(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
 }
 
 async function workspaceRoot(): Promise<string> {
@@ -228,7 +249,7 @@ describe("PluginHost", () => {
             pluginId,
             workspaceRoot: root,
             spawnId,
-            writable: true,
+            isWritable: () => true,
             writeAvailable: async () => true,
             writeAuthoredText: async (path, text, options) => {
               writes.push({ path, text, author: options.author });
@@ -820,7 +841,6 @@ describe("PluginHost", () => {
       workspaceId: "workspace-a",
       pluginId: "hello-plugin",
       panelId: "main",
-      writable: true,
     });
     const authority = registry.authorize({
       senderId: 1,
@@ -838,7 +858,7 @@ describe("PluginHost", () => {
         pluginId: "hello-plugin",
         workspaceRoot: root,
         spawnId: authority.spawnId,
-        writable: true,
+        isWritable: () => true,
         writeAvailable: async () => true,
         writeAuthoredText: async (path, _text, options) => {
           authoredRunId = options.author.agentRunId;
@@ -850,6 +870,261 @@ describe("PluginHost", () => {
     );
 
     expect(authoredRunId).toBe(liveSpawnId);
+  });
+
+  it("aborts a queued panel write when the plugin crashes", async () => {
+    const root = await workspaceRoot();
+    const entered = deferredVoid();
+    const release = deferredVoid();
+    const writeQueued = deferredVoid();
+    const loopbackTarget = new VersionedLoopbackEngine();
+    let blocked = false;
+    const loopback = new Proxy(loopbackTarget, {
+      get(target, property, receiver) {
+        if (property !== "sendRequest") {
+          return Reflect.get(target, property, receiver);
+        }
+        return async (request: Request) => {
+          if (!blocked && request.method === VERSIONED_METHOD.textWrite) {
+            blocked = true;
+            entered.resolve();
+            await release.promise;
+          }
+          return target.sendRequest(request);
+        };
+      },
+    });
+    const engine = createWorkspaceEngineCapture({
+      workspaceId: "workspace-a",
+      rootPath: root,
+      rustEngineSessions: mockLiveSessions(loopback),
+    });
+    await writeFile(join(root, "queue-blocker.txt"), "block\n", "utf8");
+    engine.captureBatch([{ path: "queue-blocker.txt", operation: "update" }]);
+    await entered.promise;
+
+    const registry = createPluginPanelSdkAuthorityRegistry();
+    const grant = registry.register({
+      senderId: 1,
+      generation: 1,
+      workspaceId: "workspace-a",
+      pluginId: "hello-plugin",
+      panelId: "main",
+    });
+    const spawned: SpawnTransportParams[] = [];
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: (callbacks) => {
+        spawned.push(callbacks);
+        return {
+          request: async <T,>(method: string) =>
+            (method === PLUGIN_HOST_METHODS.activate
+              ? { commands: [] }
+              : {}) as T,
+          dispose: async () => undefined,
+        };
+      },
+      routeSdkRequest: defaultRouter,
+      onStatusChange: (pluginId, status) =>
+        revokePluginPanelAuthoritiesForStatus({
+          workspaceId: "workspace-a",
+          pluginId,
+          status,
+          panels: [
+            {
+              workspaceId: "workspace-a",
+              pluginId: "hello-plugin",
+              panelId: "main",
+            },
+          ],
+          revokePanel: registry.revokePanel,
+        }),
+    });
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+    const spawnId = host.getSpawnId("hello-plugin");
+    if (!spawnId) throw new Error("Plugin did not expose its spawn id.");
+
+    const pending = invokePluginSdkHost(
+      {
+        pluginId: "hello-plugin",
+        workspaceRoot: root,
+        spawnId,
+        isWritable: () => true,
+        writeAvailable: async () => true,
+        signal: grant.signal,
+        writeAuthoredText: (path, text, options) => {
+          writeQueued.resolve();
+          return engine
+            .writeAuthoredTextFile(
+              join(root, path),
+              text,
+              options.author,
+              { signal: grant.signal },
+            )
+            .then(() => ({ path }));
+        },
+      },
+      "files.write",
+      { path: "cancelled.txt", text: "must not land\n" },
+    );
+    await writeQueued.promise;
+    spawned[0]?.onExit({ code: 1, signal: null });
+    await waitFor(
+      () => spawned.length === 2,
+      "Plugin did not respawn after the crash.",
+    );
+    await delay(0);
+    release.resolve();
+
+    await expect(pending).rejects.toThrow("Plugin panel is no longer active.");
+    expect(grant.signal.aborted).toBe(true);
+    expect(existsSync(join(root, "cancelled.txt"))).toBe(false);
+    await engine.stop();
+  });
+
+  it("rejects a tracked panel grant after its underlying host stops", async () => {
+    const root = await workspaceRoot();
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: () => ({
+        request: async <T,>(method: string) =>
+          (method === PLUGIN_HOST_METHODS.activate ? { commands: [] } : {}) as T,
+        dispose: async () => undefined,
+      }),
+      routeSdkRequest: defaultRouter,
+    });
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+    const registry = createPluginPanelSdkAuthorityRegistry();
+    const grant = registry.register({
+      senderId: 1,
+      generation: 1,
+      workspaceId: "workspace-a",
+      pluginId: "hello-plugin",
+      panelId: "main",
+    });
+
+    await host.stop("hello-plugin");
+    const liveSpawnId = host.getSpawnId("hello-plugin");
+    expect(liveSpawnId).toBeUndefined();
+    expect(() =>
+      registry.authorize({
+        senderId: 1,
+        generation: 1,
+        activeWorkspaceId: "workspace-a",
+        workspaceId: "workspace-a",
+        pluginId: "hello-plugin",
+        panelId: "main",
+        panelRunning: Boolean(liveSpawnId),
+        liveSpawnId,
+      }),
+    ).toThrow(/stale/i);
+    expect(grant.signal.aborted).toBe(true);
+  });
+
+  it("sequences different panels against one plugin host", async () => {
+    const root = await workspaceRoot();
+    const stopEntered = deferredVoid();
+    const releaseStop = deferredVoid();
+    let spawnCount = 0;
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: () => {
+        spawnCount += 1;
+        const thisSpawn = spawnCount;
+        return {
+          request: async <T,>(method: string) => {
+            if (
+              thisSpawn === 1 &&
+              method === PLUGIN_HOST_METHODS.deactivate
+            ) {
+              stopEntered.resolve();
+              await releaseStop.promise;
+            }
+            return (method === PLUGIN_HOST_METHODS.activate
+              ? { commands: [] }
+              : {}) as T;
+          },
+          dispose: async () => undefined,
+        };
+      },
+      routeSdkRequest: defaultRouter,
+    });
+    const manifest = await fixtureManifest();
+    await host.start(helloPluginRoot, manifest);
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    const panelLocks = new Map<string, Promise<void>>();
+    const pluginLocks = new Map<string, Promise<void>>();
+    const lock = (locks: Map<string, Promise<void>>) =>
+      async <T>(key: string, operation: () => Promise<T>) => {
+        const previous = locks.get(key) ?? Promise.resolve();
+        let release!: () => void;
+        const current = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const queued = previous.catch(() => undefined).then(() => current);
+        locks.set(key, queued);
+        await previous.catch(() => undefined);
+        try {
+          return await operation();
+        } finally {
+          release();
+          if (locks.get(key) === queued) locks.delete(key);
+        }
+      };
+    const withPanelLock = lock(panelLocks);
+    const withPluginLock = lock(pluginLocks);
+    const panels = new Set(["panel-a"]);
+
+    const stop = stopPluginPanelWithLock(
+      "workspace-a\0hello-plugin\0panel-a",
+      "workspace-a\0hello-plugin",
+      withPanelLock,
+      withPluginLock,
+      async () => {
+        panels.delete("panel-a");
+        await host.stop("hello-plugin");
+      },
+    );
+    await stopEntered.promise;
+    const start = startPluginPanelWithLock(
+      "workspace-a\0hello-plugin\0panel-b",
+      "workspace-a\0hello-plugin",
+      withPanelLock,
+      withPluginLock,
+      async () => {
+        if (!host.getSpawnId("hello-plugin")) {
+          await host.start(helloPluginRoot, manifest);
+        }
+        return host;
+      },
+      async () => {
+        panels.add("panel-b");
+      },
+    );
+    expect(spawnCount).toBe(1);
+    expect(panels).toEqual(new Set());
+
+    releaseStop.resolve();
+    await Promise.all([stop, start]);
+
+    expect(spawnCount).toBe(2);
+    expect(host.getSpawnId("hello-plugin")).toBeTruthy();
+    expect(panels).toEqual(new Set(["panel-b"]));
   });
 
   it("cleanly stops the respawned plugin when a status listener reacts to a crash", async () => {

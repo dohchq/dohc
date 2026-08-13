@@ -7,6 +7,7 @@ import {
   invokePluginSdkHost,
   type PluginSdkHostContext,
 } from "./pluginSdkHost";
+import { createPluginPanelSdkAuthorityRegistry } from "./pluginPanelSdkAuthority";
 
 const roots: string[] = [];
 
@@ -27,7 +28,7 @@ function context(root: string, writes: AuthoredWrite[] = []): PluginSdkHostConte
     pluginId: "hello-plugin",
     workspaceRoot: root,
     spawnId: "spawn-123",
-    writable: true,
+    isWritable: () => true,
     writeAvailable: async () => true,
     writeAuthoredText: vi.fn<PluginSdkHostContext["writeAuthoredText"]>(
       async (path, text, options) => {
@@ -215,7 +216,7 @@ describe("invokePluginSdkHost", () => {
 
   it("refuses writes from a read-only or stopped panel authority", async () => {
     const root = await workspaceRoot();
-    const readOnly = { ...context(root), writable: false };
+    const readOnly = { ...context(root), isWritable: () => false };
     await expect(
       invokePluginSdkHost(readOnly, "files.write", {
         path: "notes/x.txt",
@@ -235,5 +236,47 @@ describe("invokePluginSdkHost", () => {
         { path: "notes/x.txt", text: "x" },
       ),
     ).rejects.toThrow(/no longer active/);
+  });
+
+  it("rechecks writability for a still-live host context", async () => {
+    const root = await workspaceRoot();
+    let writable = true;
+    const registry = createPluginPanelSdkAuthorityRegistry();
+    registry.register({
+      senderId: 1,
+      generation: 1,
+      workspaceId: "workspace-a",
+      pluginId: "hello-plugin",
+      panelId: "main",
+    });
+    const authority = () =>
+      registry.authorize({
+        senderId: 1,
+        generation: 1,
+        activeWorkspaceId: "workspace-a",
+        workspaceId: "workspace-a",
+        pluginId: "hello-plugin",
+        panelId: "main",
+        panelRunning: true,
+        liveSpawnId: "spawn-123",
+      });
+    const hostContext = {
+      ...context(root),
+      isWritable: () => writable,
+      signal: authority().signal,
+    };
+
+    await expect(
+      invokePluginSdkHost(hostContext, "capabilities"),
+    ).resolves.toMatchObject({ files: { write: true } });
+    writable = false;
+    expect(authority().signal).toBe(hostContext.signal);
+    await expect(
+      invokePluginSdkHost(hostContext, "files.write", {
+        path: "notes/after-share.txt",
+        text: "must not write",
+      }),
+    ).rejects.toThrow(/read-only workspace authority/i);
+    expect(hostContext.writeAuthoredText).not.toHaveBeenCalled();
   });
 });

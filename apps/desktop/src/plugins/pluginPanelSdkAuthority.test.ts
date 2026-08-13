@@ -7,7 +7,6 @@ const owned = {
   workspaceId: "workspace-a",
   pluginId: "hello-plugin",
   panelId: "main",
-  writable: true,
 };
 
 function authorize(
@@ -39,8 +38,14 @@ describe("plugin panel SDK authority", () => {
       authorize(registry, { senderId: 2 }),
     ).toMatchObject({
       spawnId: "spawn-live",
-      writable: true,
     });
+  });
+
+  it("does not pin workspace writability to a panel grant", () => {
+    const registry = createPluginPanelSdkAuthorityRegistry();
+    registry.register(owned);
+
+    expect(authorize(registry)).not.toHaveProperty("writable");
   });
 
   it("rejects the wrong sender, workspace, plugin, and panel", () => {
@@ -69,6 +74,16 @@ describe("plugin panel SDK authority", () => {
     const inactivePanel = panels.register(owned);
     expect(() => authorize(panels, { panelRunning: false })).toThrow(/stale/i);
     expect(inactivePanel.signal.aborted).toBe(true);
+  });
+
+  it("revokes a tracked panel when its plugin has no live spawn", () => {
+    const registry = createPluginPanelSdkAuthorityRegistry();
+    const grant = registry.register(owned);
+
+    expect(() =>
+      authorize(registry, { panelRunning: true, liveSpawnId: undefined }),
+    ).toThrow(/stale/i);
+    expect(grant.signal.aborted).toBe(true);
   });
 
   it("revokes a panel, a renderer, and all remaining grants with abort", () => {

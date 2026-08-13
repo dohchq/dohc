@@ -546,6 +546,9 @@ import { PluginHost } from "./plugins/PluginHost";
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { stopPluginPanelPreview } from "./plugins/pluginPanelLifecycle";
 import {
+  assertPluginPanelRequestCurrent,
+  loadPluginPanelRegistrationForCurrentRenderer,
+  revokePluginPanelAuthoritiesForStatus,
   startPluginPanelWithLock,
   stopPluginPanelWithLock,
 } from "./plugins/pluginPanelStartLifecycle";
@@ -2571,6 +2574,7 @@ const pluginStarts = new Map<string, Promise<void>>();
 const pluginPanelSdkAuthorities = createPluginPanelSdkAuthorityRegistry();
 const runningPluginPanels = new Map<string, RunningPluginPanel>();
 const pluginPanelStartLocks = new Map<string, Promise<void>>();
+const pluginHostLifecycleLocks = new Map<string, Promise<void>>();
 
 function pluginPanelKey(
   workspaceId: string,
@@ -2580,8 +2584,17 @@ function pluginPanelKey(
   return `${workspaceId}\0${pluginId}\0${panelId}`;
 }
 
+function pluginLifecycleKey(workspaceId: string, pluginId: string): string {
+  return `${workspaceId}\0${pluginId}`;
+}
+
 const withPluginPanelStartLock = <T>(key: string, operation: () => Promise<T>) =>
   withKeyedStartLock(pluginPanelStartLocks, key, operation);
+
+const withPluginHostLifecycleLock = <T>(
+  key: string,
+  operation: () => Promise<T>,
+) => withKeyedStartLock(pluginHostLifecycleLocks, key, operation);
 
 async function requirePluginEngineCapture(workspaceId: string) {
   const workspace = requireWorkspace(workspaceId);
@@ -2603,7 +2616,7 @@ function invokeWorkspacePluginSdk(input: {
   workspaceId: string;
   pluginId: string;
   spawnId: string;
-  writable: boolean;
+  isWritable: () => boolean;
   signal?: AbortSignal;
   method: string;
   params?: unknown;
@@ -2614,7 +2627,7 @@ function invokeWorkspacePluginSdk(input: {
       pluginId: input.pluginId,
       workspaceRoot: workspace.rootPath,
       spawnId: input.spawnId,
-      writable: input.writable,
+      isWritable: input.isWritable,
       writeAvailable: async () => {
         try {
           const workspaceForWrite = requireWorkspace(input.workspaceId);
@@ -2630,11 +2643,13 @@ function invokeWorkspacePluginSdk(input: {
         text,
         { overwrite, author },
       ) => {
-        const absolutePath = join(workspace.rootPath, path);
-        const { capture } = await requirePluginEngineCapture(input.workspaceId);
+        const { workspace: workspaceForWrite, capture } =
+          await requirePluginEngineCapture(input.workspaceId);
+        assertWritableWorkspace(workspaceForWrite);
         if (input.signal?.aborted) {
           throw new Error("Plugin panel is no longer active.");
         }
+        const absolutePath = join(workspaceForWrite.rootPath, path);
         await capture.writeAuthoredTextFile(absolutePath, text, author, {
           createOnly: !overwrite,
           signal: input.signal,
@@ -2670,9 +2685,17 @@ function pluginHostFor(workspace: CreatedWorkspace): PluginHost {
         workspaceId: workspace.workspaceId,
         pluginId,
         spawnId,
-        writable: !sharedViewOf(workspace.workspaceId),
+        isWritable: () => !sharedViewOf(workspace.workspaceId),
         method,
         params,
+      }),
+    onStatusChange: (pluginId, status) =>
+      revokePluginPanelAuthoritiesForStatus({
+        workspaceId: workspace.workspaceId,
+        pluginId,
+        status,
+        panels: runningPluginPanels.values(),
+        revokePanel: pluginPanelSdkAuthorities.revokePanel,
       }),
   });
   pluginHosts.set(workspace.workspaceId, host);
@@ -2761,18 +2784,25 @@ async function stopPluginPanel(
 ): Promise<void> {
   const key = pluginPanelKey(workspaceId, pluginId, panelId);
   pluginPanelSdkAuthorities.revokePanel(workspaceId, pluginId, panelId);
-  await stopPluginPanelWithLock(key, withPluginPanelStartLock, async () => {
-    const panel = runningPluginPanels.get(key);
-    runningPluginPanels.delete(key);
-    if (panel) await stopRunningPluginPanelPreview(panel);
-    const hasAnotherPanel = [...runningPluginPanels.values()].some(
-      (candidate) =>
-        candidate.workspaceId === workspaceId && candidate.pluginId === pluginId,
-    );
-    if (!hasAnotherPanel) {
-      await pluginHosts.get(workspaceId)?.stop(pluginId);
-    }
-  });
+  await stopPluginPanelWithLock(
+    key,
+    pluginLifecycleKey(workspaceId, pluginId),
+    withPluginPanelStartLock,
+    withPluginHostLifecycleLock,
+    async () => {
+      const panel = runningPluginPanels.get(key);
+      runningPluginPanels.delete(key);
+      if (panel) await stopRunningPluginPanelPreview(panel);
+      const hasAnotherPanel = [...runningPluginPanels.values()].some(
+        (candidate) =>
+          candidate.workspaceId === workspaceId &&
+          candidate.pluginId === pluginId,
+      );
+      if (!hasAnotherPanel) {
+        await pluginHosts.get(workspaceId)?.stop(pluginId);
+      }
+    },
+  );
 }
 
 async function stopPluginPanelsForWorkspace(workspaceId: string): Promise<void> {
@@ -6005,25 +6035,40 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = OpenPluginPanelPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    if (activeWorkspaceIdBySender.get(event.sender.id) !== workspace.workspaceId) {
-      throw new Error(
-        "The plugin panel request does not target the active workspace. Open the workspace and try again.",
-      );
-    }
+    const sender = event.sender;
+    const generation = rendererGeneration(sender.id);
+    const isCurrent = () =>
+      !sender.isDestroyed() &&
+      rendererGeneration(sender.id) === generation &&
+      activeWorkspaceIdBySender.get(sender.id) === workspace.workspaceId;
+    assertPluginPanelRequestCurrent(isCurrent);
     assertWritableWorkspace(workspace);
-    const registration = await loadPluginPanelRegistration({
-      workspaceRoot: workspace.rootPath,
-      pluginRoot: input.pluginRoot,
-      pluginId: input.pluginId,
-      panelId: input.panelId,
-    });
+    const registration = await loadPluginPanelRegistrationForCurrentRenderer(
+      () =>
+        loadPluginPanelRegistration({
+          workspaceRoot: workspace.rootPath,
+          pluginRoot: input.pluginRoot,
+          pluginId: input.pluginId,
+          panelId: input.panelId,
+        }),
+      isCurrent,
+    );
+    assertWritableWorkspace(workspace);
     const plugin = rememberPluginRegistration(
       workspace.workspaceId,
       registration,
     );
     await withPluginPanelStartLock(
       pluginPanelKey(workspace.workspaceId, input.pluginId, input.panelId),
-      () => ensurePluginStarted(workspace, plugin),
+      () =>
+        withPluginHostLifecycleLock(
+          pluginLifecycleKey(workspace.workspaceId, input.pluginId),
+          () => {
+            assertPluginPanelRequestCurrent(isCurrent);
+            assertWritableWorkspace(workspace);
+            return ensurePluginStarted(workspace, plugin);
+          },
+        ),
     );
     return OpenPluginPanelResult.parse({
       pluginId: input.pluginId,
@@ -6068,7 +6113,9 @@ function registerIpcHandlers(
     );
     return startPluginPanelWithLock(
       key,
+      pluginLifecycleKey(workspace.workspaceId, input.pluginId),
       withPluginPanelStartLock,
+      withPluginHostLifecycleLock,
       () => ensurePluginStarted(workspace, plugin),
       async (host) => {
         const spawnId = host.getSpawnId(input.pluginId);
@@ -6117,7 +6164,6 @@ function registerIpcHandlers(
           workspaceId: workspace.workspaceId,
           pluginId: input.pluginId,
           panelId: input.panelId,
-          writable: true,
         });
         return StartPluginPanelResult.parse({
           url: handle.url,
@@ -6188,7 +6234,7 @@ function registerIpcHandlers(
       workspaceId: authority.workspaceId,
       pluginId: authority.pluginId,
       spawnId: authority.spawnId,
-      writable: authority.writable,
+      isWritable: () => !sharedViewOf(authority.workspaceId),
       signal: authority.signal,
       method: input.method,
       params: input.params,

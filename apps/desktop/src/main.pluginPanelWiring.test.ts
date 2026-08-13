@@ -12,14 +12,23 @@ function handler(channel: string): string {
 describe("plugin panel main-process wiring", () => {
   it("validates a contained plugin registration before starting its host", () => {
     const open = handler("openPluginPanel");
-    const loadAt = open.indexOf("loadPluginPanelRegistration({");
+    const loadAt = open.indexOf(
+      "loadPluginPanelRegistrationForCurrentRenderer(",
+    );
+    const currentAt = open.indexOf("isCurrent,", loadAt);
     const rememberAt = open.indexOf("rememberPluginRegistration(");
     const lockAt = open.indexOf("await withPluginPanelStartLock(");
-    const startAt = open.indexOf("() => ensurePluginStarted(workspace, plugin)");
+    const startAt = open.indexOf(
+      "return ensurePluginStarted(workspace, plugin)",
+    );
 
     expect(loadAt).toBeGreaterThan(-1);
+    expect(currentAt).toBeGreaterThan(loadAt);
+    expect(currentAt).toBeLessThan(rememberAt);
     expect(rememberAt).toBeGreaterThan(loadAt);
     expect(lockAt).toBeGreaterThan(rememberAt);
+    expect(open).toContain("withPluginHostLifecycleLock(");
+    expect(open).toContain("assertPluginPanelRequestCurrent(isCurrent);");
     expect(startAt).toBeGreaterThan(lockAt);
   });
 
@@ -35,6 +44,7 @@ describe("plugin panel main-process wiring", () => {
     expect(rememberAt).toBeGreaterThan(allowAt);
     expect(grantAt).toBeGreaterThan(rememberAt);
     expect(start).toContain("startPluginPanelWithLock(");
+    expect(start).toContain("withPluginHostLifecycleLock,");
     expect(start).toContain("() => ensurePluginStarted(workspace, plugin)");
     expect(start).toContain("await stopRunningPluginPanelPreview(previous);");
 
@@ -46,6 +56,7 @@ describe("plugin panel main-process wiring", () => {
     expect(stopEnd).toBeGreaterThan(-1);
     const stop = mainSource.slice(stopStart, stopEnd);
     expect(stop).toContain("stopPluginPanelWithLock(");
+    expect(stop).toContain("withPluginHostLifecycleLock,");
     expect(stop).toContain("await stopRunningPluginPanelPreview(panel);");
     expect(stop).toContain("await pluginHosts.get(workspaceId)?.stop(pluginId);");
   });
@@ -89,10 +100,19 @@ describe("plugin panel main-process wiring", () => {
 
     expect(host).toContain("utilityProcess.fork(");
     expect(host).toContain('join(import.meta.dirname, "plugin-host.js")');
+    expect(host).toContain("onStatusChange:");
+    expect(host).toContain("revokePluginPanelAuthoritiesForStatus(");
     expect(workspaceOpen).toContain("pluginPanelSdkAuthorities.revokeSender(senderId);");
     expect(workspaceOpen).toContain("void stopPluginWorkspace(activeWorkspaceId);");
     expect(workspaceOpen).toContain("await stopPluginWorkspace(previousWorkspaceId);");
     expect(willQuit).toContain("pluginPanelSdkAuthorities.revokeAll();");
     expect(willQuit).toContain("const pluginStop = stopAllPluginWorkspaces();");
+  });
+
+  it("derives panel writability from the current workspace on every invocation", () => {
+    const invoke = handler("invokePluginPanelSdk");
+
+    expect(invoke).not.toContain("writable: authority.writable");
+    expect(invoke).toContain("isWritable: () => !sharedViewOf(authority.workspaceId)");
   });
 });

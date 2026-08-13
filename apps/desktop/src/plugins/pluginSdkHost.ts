@@ -12,7 +12,7 @@ export interface PluginSdkHostContext {
   workspaceRoot: string;
   /** The uuid PluginHost assigned this plugin at spawn time (agentRunId). */
   spawnId: string;
-  writable: boolean;
+  isWritable: () => boolean;
   writeAvailable: () => Promise<boolean>;
   signal?: AbortSignal;
   writeAuthoredText: (
@@ -39,25 +39,29 @@ export async function invokePluginSdkHost(
   const siteContext: SiteSdkHostContext = {
     workspaceRoot: context.workspaceRoot,
     scopeRoot: null,
-    writable: context.writable,
+    writable: context.isWritable(),
     signal: context.signal,
   };
 
   switch (method) {
-    case "capabilities":
-      return pluginCapabilities(
-        context.writable && (await context.writeAvailable()),
-      );
+    case "capabilities": {
+      const writeAvailable =
+        context.isWritable() && (await context.writeAvailable());
+      return pluginCapabilities(writeAvailable && context.isWritable());
+    }
     case "files.read":
     case "files.list":
     case "workspace.search":
       return invokeSiteSdkHost(siteContext, method, params);
     case "files.write": {
-      if (!context.writable) {
+      if (!context.isWritable()) {
         throw new Error("This plugin has read-only workspace authority.");
       }
       if (!(await context.writeAvailable())) {
         throw new Error("Plugin file writes are unavailable in this workspace.");
+      }
+      if (!context.isWritable()) {
+        throw new Error("This plugin has read-only workspace authority.");
       }
       if (context.signal?.aborted) {
         throw new Error("Plugin panel is no longer active.");

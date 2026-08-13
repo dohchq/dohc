@@ -9,7 +9,6 @@ export interface PluginPanelSdkGrantInput {
   workspaceId: string;
   pluginId: string;
   panelId: string;
-  writable: boolean;
 }
 
 export interface PluginPanelSdkGrant extends PluginPanelSdkGrantInput {
