@@ -4,6 +4,7 @@ import {
   FolderOpen,
   Keyboard,
   MonitorCog,
+  Puzzle,
   Settings,
   Shield,
   SlidersHorizontal,
@@ -49,6 +50,13 @@ export const SETTINGS_SECTIONS = [
     scope: "Workspace",
     keywords: ["attachment", "attachments", "image", "images", "assets", "paste", "upload", "folder"],
     Icon: FolderOpen,
+  },
+  {
+    id: "plugins",
+    label: "Plugins",
+    scope: "Workspace",
+    keywords: ["plugin", "install", "disable", "enable", "approve", "uninstall"],
+    Icon: Puzzle,
   },
   {
     id: "agents",

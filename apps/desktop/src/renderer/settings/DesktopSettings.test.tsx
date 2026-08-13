@@ -118,6 +118,14 @@ const bridge = {
     state: updateReady ? readyUpdateState : idleUpdateState,
   })),
   onUpdateState: vi.fn(() => () => {}),
+  listPlugins: vi.fn(async () => ({ ok: true as const, plugins: [] })),
+  installPlugin: vi.fn(),
+  disablePlugin: vi.fn(),
+  enablePlugin: vi.fn(),
+  approvePlugin: vi.fn(),
+  pluginUninstallPreflight: vi.fn(),
+  uninstallPlugin: vi.fn(),
+  onPluginStatusChanged: vi.fn(() => () => {}),
   getUserSettings: vi.fn(async () => ({
     settings: DEFAULT_USER_SETTINGS,
     source: "default" as const,
@@ -189,6 +197,17 @@ describe("DesktopSettings", () => {
     await user.clear(screen.getByTestId("settings-search"));
     await user.type(screen.getByTestId("settings-search"), "nothing-here");
     expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
+  });
+
+  it("finds and opens Plugins from settings search", async () => {
+    const user = userEvent.setup();
+    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+
+    await user.type(await screen.findByTestId("settings-search"), "uninstall");
+
+    expect(screen.getByTestId("settings-nav-plugins")).toBeTruthy();
+    expect(await screen.findByTestId("settings-section-plugins")).toBeTruthy();
+    expect(screen.getByTestId("plugins-empty")).toBeTruthy();
   });
 
   it("closes from Escape", async () => {
