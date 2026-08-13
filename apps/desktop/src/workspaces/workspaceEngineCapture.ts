@@ -1112,10 +1112,9 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
     if (info.size > MAX_ENGINE_CAPTURE_TEXT_BYTES) return { kind: "untracked-content" };
     const bytes = await readFile(absolute);
     if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
-      // Bytes in hand: carry the sha so a settle's own materialization past
-      // even the BINARY cap is recognizable as our write, exactly like the
-      // text-cap case below. (The size-only early-out above cannot — it
-      // deliberately refuses to load the file to find out.)
+      // Bytes in hand: carry the sha so a settle's own oversized
+      // materialization is recognizable as our write. The size-only early-out
+      // above cannot because it deliberately refuses to load the file.
       return { kind: "untracked-content", sha256: sha256Bytes(bytes) };
     }
     const text = bytes.toString("utf8");
@@ -1129,13 +1128,6 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
         return { kind: "untracked-content", sha256: sha256Bytes(bytes) };
       }
       return { kind: "binary", bytes, sha256: sha256Bytes(bytes), byteLength: bytes.byteLength };
-    }
-    // Genuine text over the text cap stays untracked (established behavior —
-    // oversized text is neither snapshotted nor demoted to bytes). The sha
-    // rides along so a settle's own oversized materialization is still
-    // recognizable as OUR write rather than a reason to retire the record.
-    if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
-      return { kind: "untracked-content", sha256: sha256Utf8(text) };
     }
     return { kind: "text", text, sha256: sha256Utf8(text) };
   } catch (error) {
