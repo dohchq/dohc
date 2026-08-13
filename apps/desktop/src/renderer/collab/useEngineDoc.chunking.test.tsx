@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
 import { resetOrphanedDrafts, useOrphanedDrafts } from "../orphanedDrafts";
+import { ORPHANED_DRAFT_STORAGE_KEY } from "../orphanedDraftStorage";
 import {
   disposeEngineDocLeasesForTests,
   useEngineDoc,
@@ -22,6 +23,7 @@ import {
 // chain from useEngineDoc.ts down to the projection module would already
 // have run the factory below before any `it()` executes.
 let projectionLoads = 0;
+let projectionShouldFail = false;
 // A held gate: while armed, the mocked import does not resolve until the
 // test releases it — the only way to prove what is durable BEFORE the
 // projection module answers, not just eventually.
@@ -30,6 +32,7 @@ let projectionGate: { promise: Promise<void>; release: () => void } | null =
 vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
   projectionLoads += 1;
   if (projectionGate) await projectionGate.promise;
+  if (projectionShouldFail) throw new Error("projection import failed");
   return importOriginal();
 });
 
@@ -47,6 +50,7 @@ type SaveStateListener = (event: EngineYDocSaveStateEvent) => void;
 function harnessBridge(initialUpdate?: Uint8Array) {
   const saveStateListeners = new Set<SaveStateListener>();
   const applied: Array<{ sessionId: string; seq: number }> = [];
+  let rejectUpdates = false;
   let openedSessionId: string | null = null;
   const doc = new Y.Doc();
   doc.getMap("meta").set("contentKind", "plain-text");
@@ -60,6 +64,7 @@ function harnessBridge(initialUpdate?: Uint8Array) {
     },
     async applyEngineYDocUpdate(payload: { sessionId: string; seq: number }) {
       applied.push({ sessionId: payload.sessionId, seq: payload.seq });
+      if (rejectUpdates) throw new Error("update delivery failed");
     },
     onEngineYDocRemoteUpdate: () => () => undefined,
     onEngineYDocSaveState: (listener: SaveStateListener) => {
@@ -86,6 +91,9 @@ function harnessBridge(initialUpdate?: Uint8Array) {
     applied,
     emitNow,
     sessionId: () => openedSessionId,
+    rejectUpdates() {
+      rejectUpdates = true;
+    },
   };
 }
 
@@ -111,6 +119,44 @@ function Harness(props: { workspaceId: string; path: string }) {
       >
         type
       </button>
+      <button
+        type="button"
+        data-testid="type-rich"
+        onClick={() => {
+          const doc = engine.doc;
+          if (!doc) return;
+          doc.transact(() => {
+            const body = doc.getXmlFragment("body");
+            const list = new Y.XmlElement("bulletList");
+            const item = new Y.XmlElement("listItem");
+            const paragraph = new Y.XmlElement("paragraph");
+            const link = new Y.XmlText();
+            link.insert(0, "linked", {
+              link: { href: "https://example.test" },
+            });
+            const image = new Y.XmlElement("image");
+            image.setAttribute("src", "assets/diagram.png");
+            image.setAttribute("alt", "Diagram");
+            paragraph.insert(0, [link, image]);
+            item.insert(0, [paragraph]);
+            list.insert(0, [item]);
+
+            const table = new Y.XmlElement("table");
+            const row = new Y.XmlElement("tableRow");
+            const cell = new Y.XmlElement("tableCell");
+            const cellParagraph = new Y.XmlElement("paragraph");
+            const cellText = new Y.XmlText();
+            cellText.insert(0, "Cell");
+            cellParagraph.insert(0, [cellText]);
+            cell.insert(0, [cellParagraph]);
+            row.insert(0, [cell]);
+            table.insert(0, [row]);
+            body.insert(body.length, [list, table]);
+          });
+        }}
+      >
+        type rich
+      </button>
     </div>
   );
 }
@@ -120,6 +166,7 @@ let harness: ReturnType<typeof harnessBridge>;
 beforeEach(() => {
   harness = harnessBridge();
   projectionGate = null;
+  projectionShouldFail = false;
   vi.stubGlobal("dohcDesktop", harness.api);
   resetOrphanedDrafts();
 });
@@ -130,6 +177,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   resetOrphanedDrafts();
   projectionGate = null;
+  projectionShouldFail = false;
 });
 
 it("does not load the Tiptap projection module merely by importing useEngineDoc", () => {
@@ -155,6 +203,56 @@ function richTextInitialUpdate(): Uint8Array {
   frag.insert(0, [heading]);
   return Y.encodeStateAsUpdate(doc);
 }
+
+it("persists a lossless rich snapshot when delivery and projection fail", async () => {
+  projectionShouldFail = true;
+  harness = harnessBridge(richTextInitialUpdate());
+  harness.rejectUpdates();
+  vi.stubGlobal("dohcDesktop", harness.api);
+  const consoleError = vi
+    .spyOn(console, "error")
+    .mockImplementation(() => undefined);
+
+  const view = render(<Harness workspaceId="ws-1" path="notes/rich.md" />);
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  act(() => {
+    screen.getByTestId("type-rich").click();
+  });
+  await waitFor(() => expect(harness.applied.length).toBeGreaterThan(0));
+  view.unmount();
+
+  // The live mirror is destroyed. Read the raw durable row, as the next
+  // renderer process would, instead of consulting this run's in-memory store.
+  let storedText = "";
+  await waitFor(() => {
+    const raw = localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY);
+    expect(raw).not.toBeNull();
+    storedText = (JSON.parse(raw!) as Array<{ text: string }>)[0]?.text ?? "";
+    expect(storedText).toMatch(/<!-- dohc-ydoc-recovery-v1:[A-Za-z0-9+/=]+ -->/u);
+  });
+
+  const encoded = storedText.match(
+    /<!-- dohc-ydoc-recovery-v1:([A-Za-z0-9+/=]+) -->/u,
+  )![1]!;
+  const binary = atob(encoded);
+  const snapshot = Uint8Array.from(binary, (character) =>
+    character.charCodeAt(0),
+  );
+  const recovered = new Y.Doc();
+  Y.applyUpdate(recovered, snapshot);
+  const body = recovered.getXmlFragment("body").toString();
+  expect(body).toContain("<bulletlist>");
+  expect(body).toContain('href="https://example.test"');
+  expect(body).toContain('<image alt="Diagram" src="assets/diagram.png"></image>');
+  expect(body).toContain("<table>");
+  expect(consoleError).toHaveBeenCalledWith(
+    expect.stringContaining("could not refine the recovery draft"),
+    expect.any(Error),
+  );
+  consoleError.mockRestore();
+});
 
 // MUST run before any test that lets a real projection load complete:
 // `useEngineDoc.ts`'s own `loadProjectionModule` caches the promise at

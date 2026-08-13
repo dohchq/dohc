@@ -90,6 +90,32 @@ function crudeMarkdownFromDoc(doc: Y.Doc): string {
   return frontmatterText + blocks.join("\n\n");
 }
 
+const YDOC_RECOVERY_MARKER = "dohc-ydoc-recovery-v1";
+
+function snapshotAsBase64(snapshot: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 32_768;
+  for (let offset = 0; offset < snapshot.length; offset += chunkSize) {
+    binary += String.fromCharCode(
+      ...snapshot.subarray(offset, offset + chunkSize),
+    );
+  }
+  return btoa(binary);
+}
+
+function durableMarkdownFromSnapshot(doc: Y.Doc, snapshot: Uint8Array): string {
+  const fallback = crudeMarkdownFromDoc(doc);
+  if (doc.getMap("meta").get("contentKind") === "plain-text") return fallback;
+  const separator = fallback.length > 0 ? "\n\n" : "";
+  // The text store cannot hold a Uint8Array. Keep the canonical Y.Doc update
+  // in an inert Markdown comment until the async projection replaces this
+  // whole fallback. A failed chunk load or renderer exit can lose formatting
+  // from the readable fallback, but it cannot lose the document structure.
+  return `${fallback}${separator}<!-- ${YDOC_RECOVERY_MARKER}:${snapshotAsBase64(
+    snapshot,
+  )} -->`;
+}
+
 function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i += 1) {
@@ -470,7 +496,7 @@ function createEngineDocSession(
   const captureUndeliveredSnapshot = (bytes: Uint8Array): void => {
     const rebuilt = new Y.Doc();
     Y.applyUpdate(rebuilt, bytes);
-    const fallback = crudeMarkdownFromDoc(rebuilt);
+    const fallback = durableMarkdownFromSnapshot(rebuilt, bytes);
     rebuilt.destroy();
     if (deletionDraftId === null) {
       deletionDraftId = captureOrphanedDraft(workspaceId, path, fallback);

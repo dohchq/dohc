@@ -471,7 +471,7 @@ describe("documentReplacementMap", () => {
     expect(mapping.map(3, 1)).toBe(7);
   });
 
-  it("falls back to one bounded range for an adversarial large rewrite", () => {
+  it("preserves an obvious middle anchor after the exact-diff budget expires", () => {
     const stable = " stable ";
     const before = schema.node("doc", null, [
       paragraph("Lead"),
@@ -485,9 +485,27 @@ describe("documentReplacementMap", () => {
     ]);
     const mapping = documentReplacementMap(before, after);
 
-    expect(changedRanges(mapping)).toEqual([7, 200, 208]);
+    expect(changedRanges(mapping)).toEqual([7, 96, 100, 111, 96, 100]);
     expect(mapping.map(2, 1)).toBe(2);
+    expect(mapping.map(107, 1)).toBe(111);
     expect(mapping.map(210, 1)).toBe(218);
+  });
+
+  it("uses one bounded range when a large rewrite has no usable anchor", () => {
+    const before = schema.node("doc", null, [
+      paragraph("Lead"),
+      paragraph(`${"a".repeat(96)}cat${"b".repeat(96)}`),
+      paragraph("Tail"),
+    ]);
+    const after = schema.node("doc", null, [
+      paragraph("Lead"),
+      paragraph(`${"x".repeat(100)}cat${"y".repeat(100)}`),
+      paragraph("Tail"),
+    ]);
+    const mapping = documentReplacementMap(before, after);
+
+    expect(changedRanges(mapping)).toEqual([7, 195, 203]);
+    expect(mapping.map(205, 1)).toBe(213);
   });
 
   it("keeps precise ranges for 32 independent ordinary edits", () => {
@@ -769,6 +787,70 @@ describe("placeImageFiles", () => {
     expect(target.child(0).textContent).toBe("Tar");
     expect(target.child(1).type.name).toBe("image");
     expect(target.child(2).textContent).toBe("get");
+  });
+
+  it("keeps an async image inside an unchanged island after a large rewrite", async () => {
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: { content: "inline*", group: "block" },
+        text: { group: "inline" },
+        image: {
+          inline: true,
+          group: "inline",
+          atom: true,
+          attrs: { src: {}, alt: { default: "" } },
+        },
+      },
+    });
+    const paragraph = (text: string) =>
+      schema.node("paragraph", null, schema.text(text));
+    const stable = " stable ";
+    let state = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [
+        paragraph(`${"a".repeat(96)}${stable}${"b".repeat(96)}`),
+      ]),
+    });
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch(transaction: Parameters<typeof state.apply>[0]) {
+        state = state.apply(transaction);
+      },
+    };
+
+    await placeImageFiles(
+      view as never,
+      [
+        {
+          name: "photo.png",
+          mimeType: "image/png",
+          size: 1,
+          read: async () => new Uint8Array([1]),
+        },
+      ],
+      {
+        workspaceId: "ws1",
+        docPath: "notes/plan.md",
+        writeAsset: async () => {
+          state = EditorState.create({
+            schema,
+            doc: schema.node("doc", null, [
+              paragraph(`${"x".repeat(100)}${stable}${"y".repeat(100)}`),
+            ]),
+          });
+        },
+      },
+      100,
+    );
+
+    let imagePosition: number | null = null;
+    state.doc.descendants((node, pos) => {
+      if (node.type.name === "image") imagePosition = pos;
+    });
+    expect(imagePosition).toBe(104);
   });
 
   it("anchors before the asynchronous attachment-settings read", async () => {

@@ -314,9 +314,11 @@ type DiffBudget = {
 // This bounds the quadratic part of Myers's algorithm by diagonal visits, not
 // by document size. The focused measurement keeps all precise ranges for 32
 // independent substitutions within this budget. A rewrite that needs more
-// work gets one coarse range; the update still applies, and positions outside
-// that changed range stay exact.
+// work switches to unique fixed-width anchors and coarse ranges between them.
+// That fallback is O(n log n), never rejects the update, and keeps positions
+// outside each changed range exact.
 const SEQUENCE_DIFF_WORK_BUDGET = 4_096;
+const FALLBACK_TEXT_ANCHOR_LENGTH = 8;
 
 // Myers's sequence diff gives us every unchanged island, not only the common
 // prefix and suffix. Converting its changed runs to StepMap ranges lets both
@@ -460,6 +462,124 @@ function appendRange(
   ranges.push(start, oldSize, newSize);
 }
 
+type TextAnchor = {
+  oldStart: number;
+  newStart: number;
+  length: number;
+};
+
+function uniqueTextWindows(text: string): Map<string, number> {
+  const windows = new Map<string, number>();
+  for (
+    let index = 0;
+    index + FALLBACK_TEXT_ANCHOR_LENGTH <= text.length;
+    index += 1
+  ) {
+    const window = text.slice(index, index + FALLBACK_TEXT_ANCHOR_LENGTH);
+    windows.set(window, windows.has(window) ? -1 : index);
+  }
+  return windows;
+}
+
+function increasingTextAnchors(
+  before: string,
+  after: string,
+): TextAnchor[] {
+  const oldWindows = uniqueTextWindows(before);
+  const newWindows = uniqueTextWindows(after);
+  const candidates: TextAnchor[] = [];
+  for (const [window, oldStart] of oldWindows) {
+    const newStart = newWindows.get(window);
+    if (oldStart >= 0 && newStart !== undefined && newStart >= 0) {
+      candidates.push({
+        oldStart,
+        newStart,
+        length: FALLBACK_TEXT_ANCHOR_LENGTH,
+      });
+    }
+  }
+
+  const tails: number[] = [];
+  const previous = new Array<number>(candidates.length).fill(-1);
+  for (let index = 0; index < candidates.length; index += 1) {
+    let low = 0;
+    let high = tails.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (candidates[tails[middle]!]!.newStart < candidates[index]!.newStart) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    if (low > 0) previous[index] = tails[low - 1]!;
+    tails[low] = index;
+  }
+
+  const anchors: TextAnchor[] = [];
+  for (
+    let index = tails.length === 0 ? -1 : tails[tails.length - 1]!;
+    index >= 0;
+    index = previous[index]!
+  ) {
+    anchors.push(candidates[index]!);
+  }
+  anchors.reverse();
+
+  const normalized: TextAnchor[] = [];
+  for (const anchor of anchors) {
+    const last = normalized[normalized.length - 1];
+    if (!last) {
+      normalized.push({ ...anchor });
+      continue;
+    }
+    const sameOffset =
+      anchor.newStart - anchor.oldStart === last.newStart - last.oldStart;
+    const overlaps =
+      anchor.oldStart <= last.oldStart + last.length &&
+      anchor.newStart <= last.newStart + last.length;
+    if (sameOffset && overlaps) {
+      last.length = Math.max(
+        last.length,
+        anchor.oldStart + anchor.length - last.oldStart,
+      );
+    } else if (
+      anchor.oldStart >= last.oldStart + last.length &&
+      anchor.newStart >= last.newStart + last.length
+    ) {
+      normalized.push({ ...anchor });
+    }
+  }
+  return normalized;
+}
+
+function diffTextWithAnchors(
+  before: string,
+  after: string,
+  start: number,
+  ranges: number[],
+): void {
+  const anchors = increasingTextAnchors(before, after);
+  let oldCursor = 0;
+  let newCursor = 0;
+  for (const anchor of anchors) {
+    appendRange(
+      ranges,
+      start + oldCursor,
+      anchor.oldStart - oldCursor,
+      anchor.newStart - newCursor,
+    );
+    oldCursor = anchor.oldStart + anchor.length;
+    newCursor = anchor.newStart + anchor.length;
+  }
+  appendRange(
+    ranges,
+    start + oldCursor,
+    before.length - oldCursor,
+    after.length - newCursor,
+  );
+}
+
 function diffText(
   before: string,
   after: string,
@@ -477,7 +597,7 @@ function diffText(
     budget,
   );
   if (components === null) {
-    appendRange(ranges, start, before.length, after.length);
+    diffTextWithAnchors(before, after, start, ranges);
     return;
   }
   for (const component of components) {
