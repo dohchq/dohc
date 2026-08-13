@@ -3980,10 +3980,12 @@ function registerIpcHandlers(
     const input = WriteWorkspaceTextPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
+    const writePath = validateUserWritePath(input.relativePath);
     for (const entry of engineYDocSessions.values()) {
       if (
+        writePath.ok &&
         entry.workspaceId === workspace.workspaceId &&
-        entry.path === input.relativePath
+        entry.path === writePath.normalized
       ) {
         throw new Error(
           "The engine owns this live document. Close its editor before writing the file directly.",

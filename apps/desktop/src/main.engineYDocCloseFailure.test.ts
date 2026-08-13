@@ -204,7 +204,8 @@ describe("workspace text writes: a live Y.Doc stays canonical", () => {
     expect(sessionGuardAt).toBeGreaterThan(-1);
     expect(sessionGuardAt).toBeLessThan(diskWriteAt);
     expect(handler).toContain("entry.workspaceId === workspace.workspaceId");
-    expect(handler).toContain("entry.path === input.relativePath");
+    expect(handler).toContain("const writePath = validateUserWritePath(input.relativePath)");
+    expect(handler).toContain("entry.path === writePath.normalized");
     expect(handler).toContain("The engine owns this live document.");
   });
 });
