@@ -481,7 +481,13 @@ describe("SharedLocalDocument", () => {
     await writing;
 
     expect(
-      buffer.acceptRead("disk after", "hash-2", writerSource, true),
+      buffer.acceptRead(
+        "disk after",
+        "hash-2",
+        writerSource,
+        true,
+        buffer.beginRead(),
+      ),
     ).toBe(false);
 
     expect(buffer.getSnapshot()).toMatchObject({

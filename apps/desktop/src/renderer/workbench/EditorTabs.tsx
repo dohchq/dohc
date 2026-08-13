@@ -125,7 +125,7 @@ const Tab = memo(function Tab(props: {
 
         const detach = () => {
           window.removeEventListener("pointermove", onMove);
-          window.removeEventListener("pointerup", onUp);
+          window.removeEventListener("pointerup", finish);
           window.removeEventListener("pointercancel", onCancel);
         };
         const finish = (pointerEvent: PointerEvent | null) => {
@@ -178,25 +178,25 @@ const Tab = memo(function Tab(props: {
           // shuffling the source strip while the pointer is over its destination.
           if (target && target.groupId !== props.groupId) return;
           const current = ref.current;
-          const siblings = current?.parentElement?.querySelectorAll('[role="tab"]');
+          const siblings = current?.parentElement?.querySelectorAll<HTMLElement>(
+            '[role="tab"]',
+          );
           if (!current || !siblings) return;
-          let toIndex = 0;
-          for (const sibling of siblings) {
-            if (sibling === current) continue;
-            const box = sibling.getBoundingClientRect();
-            if (box.left + box.width / 2 < pointerEvent.clientX) toIndex += 1;
-          }
+          const toIndex = tabInsertionIndex(
+            siblings,
+            pointerEvent.clientX,
+            current,
+          );
           props.onDragPreview(props.path, toIndex);
           props.onMove(props.path, toIndex);
         };
-        const onUp = (pointerEvent: PointerEvent) => finish(pointerEvent);
         const onCancel = (pointerEvent: PointerEvent) => {
           if (drag.current?.pointerId !== pointerEvent.pointerId) return;
           finish(null);
         };
         cancelDrag.current = () => finish(null);
         window.addEventListener("pointermove", onMove);
-        window.addEventListener("pointerup", onUp);
+        window.addEventListener("pointerup", finish);
         window.addEventListener("pointercancel", onCancel);
       }}
       // The strip's bottom hairline is drawn PER TAB so the active one can
@@ -255,13 +255,22 @@ function editorGroupAtPoint(
   const groupId = group?.dataset.editorGroupId;
   if (!group || !groupId) return null;
 
-  let toIndex = 0;
   const tabs = group.querySelectorAll<HTMLElement>('[role="tab"]');
+  return { groupId, toIndex: tabInsertionIndex(tabs, clientX) };
+}
+
+function tabInsertionIndex(
+  tabs: Iterable<HTMLElement>,
+  clientX: number,
+  skippedTab?: HTMLElement,
+): number {
+  let toIndex = 0;
   for (const tab of tabs) {
+    if (tab === skippedTab) continue;
     const box = tab.getBoundingClientRect();
     if (box.left + box.width / 2 < clientX) toIndex += 1;
   }
-  return { groupId, toIndex };
+  return toIndex;
 }
 
 // The overlay thumb never shrinks below a grabbable pill (VS Code's minimum

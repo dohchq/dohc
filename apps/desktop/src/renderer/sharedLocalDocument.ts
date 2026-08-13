@@ -171,18 +171,13 @@ export class SharedLocalDocument {
     body: string,
     contentHash: string | null,
     source: object,
-    force = false,
-    readTicket?: number,
+    force: boolean,
+    readTicket: number,
   ): boolean {
-    if (
-      readTicket !== undefined &&
-      readTicket < this.latestAcceptedReadTicket
-    ) {
+    if (readTicket < this.latestAcceptedReadTicket) {
       return false;
     }
-    if (readTicket !== undefined) {
-      this.latestAcceptedReadTicket = readTicket;
-    }
+    this.latestAcceptedReadTicket = readTicket;
     const pendingDraft = this.pendingDraft;
     if (this.snapshot.dirty || this.writers > 0 || pendingDraft !== null) {
       const ownsDirtySnapshot =

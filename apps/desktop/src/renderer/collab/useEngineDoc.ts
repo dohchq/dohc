@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
 import { bridge } from "../bridge";
-import { documentVersionKey } from "../documentVersionKey";
+import { documentKey, documentVersionKey } from "../documentVersionKey";
 import {
   captureOrphanedDraft,
   replaceOrphanedDraft,
@@ -301,11 +301,10 @@ type EngineDocSession = {
 
 type EngineDocLease = Omit<EngineDocSession, "start"> & {
   documentKey: string;
-  versionKey: string;
   startAfter: (barrier: Promise<void> | undefined) => void;
   retain: () => void;
   release: () => void;
-  disposeIfReleased: () => boolean;
+  disposeIfReleased: () => void;
   reopenForRetry: (input: EngineDocInput, requestKey: string) => void;
 };
 
@@ -653,7 +652,7 @@ function createEngineDocLease(
   requestKey: string,
   versionKey: string,
 ): EngineDocLease {
-  const documentKey = JSON.stringify([input.workspaceId, input.path]);
+  const stableDocumentKey = documentKey(input.workspaceId, input.path);
   const listeners = new Set<() => void>();
   let snapshot: EngineDocLeaseSnapshot = {
     key: requestKey,
@@ -689,18 +688,16 @@ function createEngineDocLease(
   };
 
   let lease: EngineDocLease;
-  const disposeReleasedLease = (): boolean => {
+  const disposeReleasedLease = (): void => {
     if (refCount !== 0 || engineDocLeases.get(versionKey) !== lease) {
-      return false;
+      return;
     }
     engineDocLeases.delete(versionKey);
     void trackEngineDocDisposal(lease);
-    return true;
   };
 
   lease = {
-    documentKey,
-    versionKey,
+    documentKey: stableDocumentKey,
     retain() {
       refCount += 1;
       releaseToken += 1;
@@ -717,7 +714,7 @@ function createEngineDocLease(
     },
     disposeIfReleased() {
       releaseToken += 1;
-      return disposeReleasedLease();
+      disposeReleasedLease();
     },
     reopenForRetry(nextInput, nextRequestKey) {
       if (disposed) return;
@@ -818,15 +815,15 @@ function retainEngineDocLease(
   );
   let lease = engineDocLeases.get(versionKey);
   if (!lease) {
-    const documentKey = JSON.stringify([input.workspaceId, input.path]);
+    const stableDocumentKey = documentKey(input.workspaceId, input.path);
     for (const candidate of engineDocLeases.values()) {
-      if (candidate.documentKey === documentKey) {
+      if (candidate.documentKey === stableDocumentKey) {
         candidate.disposeIfReleased();
       }
     }
     lease = createEngineDocLease(input, requestKey, versionKey);
     engineDocLeases.set(versionKey, lease);
-    lease.startAfter(engineDocDisposalBarriers.get(documentKey));
+    lease.startAfter(engineDocDisposalBarriers.get(stableDocumentKey));
   } else if (isRetry) {
     lease.reopenForRetry(input, requestKey);
   }

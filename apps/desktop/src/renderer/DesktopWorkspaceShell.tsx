@@ -2953,10 +2953,10 @@ export function DesktopWorkspaceShell(props: {
         (candidate) => candidate.id === groupId,
       );
       if (!group?.tabs.some((tab) => tab.path === path)) return;
-      invalidateDeferredFileOpen(groupId);
-      if (current.activeEditorGroup !== groupId) {
-        invalidateDeferredFileOpen(current.activeEditorGroup);
-      }
+      invalidateDeferredFileOpenForGroupChange(
+        current.activeEditorGroup,
+        groupId,
+      );
       if (isVirtualTabPath(path)) {
         mutateWb((state) => activateTab(state, groupId, path));
         return;
@@ -2970,7 +2970,7 @@ export function DesktopWorkspaceShell(props: {
         recordRecentFile(activateTab(state, groupId, path), path),
       );
     },
-    [invalidateDeferredFileOpen, mutateWb],
+    [invalidateDeferredFileOpenForGroupChange, mutateWb],
   );
   const focusWorkbenchEditorGroup = useCallback(
     (groupId: string) => {
@@ -2981,11 +2981,13 @@ export function DesktopWorkspaceShell(props: {
       ) {
         return;
       }
-      invalidateDeferredFileOpen(current.activeEditorGroup);
-      invalidateDeferredFileOpen(groupId);
+      invalidateDeferredFileOpenForGroupChange(
+        current.activeEditorGroup,
+        groupId,
+      );
       mutateWb((state) => focusEditorGroup(state, groupId));
     },
-    [invalidateDeferredFileOpen, mutateWb],
+    [invalidateDeferredFileOpenForGroupChange, mutateWb],
   );
 
   // Chats view "Files" grouping cross-link: a file-linked Chat opens where

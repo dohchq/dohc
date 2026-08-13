@@ -2134,9 +2134,15 @@ describe("markdown editor unmount flush", () => {
     expect(buffer.getSnapshot().dirty).toBe(true);
 
     act(() => {
-      expect(buffer.acceptRead("disk after", "b".repeat(64), {}, true)).toBe(
-        false,
-      );
+      expect(
+        buffer.acceptRead(
+          "disk after",
+          "b".repeat(64),
+          {},
+          true,
+          buffer.beginRead(),
+        ),
+      ).toBe(false);
     });
 
     expect(buffer.getSnapshot()).toMatchObject({
@@ -9565,7 +9571,13 @@ describe("markdown document opening state", () => {
     );
     expect(oldBuffer.getSnapshot().revision).toBe(1);
     await act(async () => {
-      oldBuffer.acceptRead(oldBody, TEST_CONTENT_HASH, {});
+      oldBuffer.acceptRead(
+        oldBody,
+        TEST_CONTENT_HASH,
+        {},
+        false,
+        oldBuffer.beginRead(),
+      );
       await Promise.resolve();
     });
     expect(oldBuffer.getSnapshot().revision).toBe(2);

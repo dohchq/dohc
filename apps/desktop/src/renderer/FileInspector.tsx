@@ -805,7 +805,6 @@ function useAutosavedTextDraft(props: {
   } | null>(null);
   const orphanedDrafts = useOrphanedDrafts(props.workspaceId, props.path);
   const latestDraft = useRef(props.body);
-  const baseContentHash = useRef(props.contentHash);
   const baseContentRequestId = useRef(props.contentRequestId);
   const latestSnapshot = useRef({
     body: props.body,
@@ -867,7 +866,6 @@ function useAutosavedTextDraft(props: {
       revision: sharedSnapshot.revision,
     };
     const bodyChanged = latestDraft.current !== sharedSnapshot.body;
-    baseContentHash.current = sharedSnapshot.contentHash;
     latestDraft.current = sharedSnapshot.body;
     setSaveState(sharedSnapshot.saveState);
     if (
@@ -958,7 +956,6 @@ function useAutosavedTextDraft(props: {
       editGeneration.current,
     );
     staleBaseline.current = false;
-    baseContentHash.current = snapshot.contentHash;
     baseContentRequestId.current = snapshot.requestId;
     if (
       verifyAfterRequestId.current !== null &&
@@ -1086,7 +1083,6 @@ function useAutosavedTextDraft(props: {
       setSaveState("saved");
       setDraft(props.body);
       latestDraft.current = props.body;
-      baseContentHash.current = props.contentHash;
       baseContentRequestId.current = props.contentRequestId;
       acceptedRequestFloor.current = Math.max(
         acceptedRequestFloor.current,
@@ -1151,7 +1147,6 @@ function useAutosavedTextDraft(props: {
         const text = result.body;
         latestDraft.current = props.localBuffer.getSnapshot().body;
         if (result.status === "skipped") {
-          baseContentHash.current = result.contentHash;
           if (!unmounted.current) setSaveState("saved");
           return;
         }
@@ -1190,7 +1185,6 @@ function useAutosavedTextDraft(props: {
           }
           return;
         }
-        baseContentHash.current = result.contentHash;
         acceptedRequestFloor.current = Math.max(
           acceptedRequestFloor.current,
           issuedBaseRequestId,

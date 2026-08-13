@@ -215,6 +215,46 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     expect(attempts).toBe(3);
   });
 
+  it("immediately repairs the full current state when an edit arrives during a failed repair", async () => {
+    vi.useFakeTimers();
+    try {
+      const mock = mockTransport();
+      let attempts = 0;
+      let rejectRepair!: (error: Error) => void;
+      const heldRepair = new Promise<void>((_resolve, reject) => {
+        rejectRepair = reject;
+      });
+      mock.transport.applyLocalUpdate = async (update) => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("incremental delivery failed");
+        if (attempts === 2) return heldRepair;
+        Y.applyUpdate(mock.mainDoc, update);
+      };
+      const binding = await bindEngineYDoc(mock.transport);
+
+      typeIntoBody(binding.doc!, "Edit A.");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attempts).toBe(2);
+
+      typeIntoBody(binding.doc!, "Edit B.");
+      expect(attempts).toBe(3);
+      expect(bodyText(mock.mainDoc)).not.toContain("Edit A.");
+      expect(bodyText(mock.mainDoc)).not.toContain("Edit B.");
+
+      rejectRepair(new Error("full-state repair failed"));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(attempts).toBe(4);
+      expect(bodyText(mock.mainDoc)).toContain("Edit A.");
+      expect(bodyText(mock.mainDoc)).toContain("Edit B.");
+
+      await binding.destroy();
+      expect(attempts).toBe(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("retries outstanding delivery debt when another edit arrives", async () => {
     const mock = mockTransport();
     let attempts = 0;
