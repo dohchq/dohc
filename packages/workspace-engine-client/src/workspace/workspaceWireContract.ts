@@ -350,6 +350,17 @@ const ReplicatedConflictResultSchema = Schema.Union([
   }),
 ]);
 
+type ReplicatedConflictResultSchemaType =
+  typeof ReplicatedConflictResultSchema.Type;
+type Assert<T extends true> = T;
+type _ReplicatedConflictResultSchemaMatchesPublicType = Assert<
+  ReplicatedConflictResultSchemaType extends ReplicatedConflictResult
+    ? ReplicatedConflictResult extends ReplicatedConflictResultSchemaType
+      ? true
+      : false
+    : false
+>;
+
 const SearchResultSchema = mutableStruct({
   surface: Schema.Literals(["file", "chat"]),
   path: Schema.String,

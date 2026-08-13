@@ -113,4 +113,36 @@ describe("workspace wire schemas", () => {
       delete: { path: "old.md", reason: "replaced" },
     });
   });
+
+  it.each([
+    {
+      replicated: true,
+      status: "applied",
+      conflictId: "conflict",
+      inserted: null,
+      matched: true,
+    },
+    { replicated: true, status: "skipped" },
+    { replicated: true, status: "crashed", committed: true },
+  ])("decodes replicated conflict result $status", (result) => {
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.conflictsOpen, result),
+    ).toEqual(result);
+  });
+
+  it.each(["deferred", "pendingResolve"])(
+    "rejects the removed replicated conflict field %s",
+    (field) => {
+      expect(() =>
+        decodeWorkspaceResult(WORKSPACE_METHOD.conflictsOpen, {
+          replicated: true,
+          status: "applied",
+          conflictId: "conflict",
+          inserted: null,
+          matched: true,
+          [field]: field === "deferred" ? false : null,
+        }),
+      ).toThrow(WorkspaceProtocolShapeError);
+    },
+  );
 });
