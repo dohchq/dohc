@@ -10,9 +10,10 @@
 // PowerShell and Git Bash (spawns through the platform shell).
 //
 // Steps: native target (see below), fixture drift, cargo fmt --check, cargo
-// clippy -D warnings, cargo build --workspace, cargo test --workspace, the
-// collab crash tier (which only compiles under `--features fault-injection`,
-// so the plain workspace run never sees it), then cargo-deny / cargo-audit IF
+// clippy -D warnings, cargo build --workspace, the workspace test run (cargo
+// nextest), the doctest run (nextest runs no doctests by design), the collab
+// crash tier (which only compiles under `--features fault-injection`, so the
+// plain workspace run never sees it), then cargo-deny / cargo-audit IF
 // installed (skip-with-warning when absent, never fail on a missing tool).
 //
 // A REQUIRED step that SKIPs fails the verdict: a gate that silently drops a
@@ -101,9 +102,28 @@ const slot = budget ? await acquireBuildSlot(budget) : null;
 process.env.CARGO_INCREMENTAL = "0";
 if (budget) {
   process.env.CARGO_BUILD_JOBS ??= String(budget.jobs);
+  // Both runners: nextest reads its own variable, libtest (the doctest
+  // step) reads RUST_TEST_THREADS.
   process.env.RUST_TEST_THREADS ??= String(budget.jobs);
+  process.env.NEXTEST_TEST_THREADS ??= String(budget.jobs);
 }
-const capsField = `jobs ${process.env.CARGO_BUILD_JOBS ?? "default"}, test-threads ${process.env.RUST_TEST_THREADS ?? "default"}`;
+// A caller's libtest cap carries to nextest unless the caller split them
+// deliberately: the evidence line must never claim a cap the child does
+// not actually have.
+if (process.env.RUST_TEST_THREADS !== undefined) {
+  process.env.NEXTEST_TEST_THREADS ??= process.env.RUST_TEST_THREADS;
+}
+// One value covers both runners unless the caller split them. A divergent
+// nextest cap governs the heavy test steps, so the evidence names both
+// values rather than reporting a share nextest is not using.
+const libtestThreads = process.env.RUST_TEST_THREADS ?? "default";
+const nextestThreads = process.env.NEXTEST_TEST_THREADS ?? libtestThreads;
+const capsField =
+  `jobs ${process.env.CARGO_BUILD_JOBS ?? "default"}, test-threads ${
+    nextestThreads === libtestThreads
+      ? libtestThreads
+      : `${nextestThreads} (doctests ${libtestThreads})`
+  }`;
 // Hand the tests the absolute root instead of a name they would re-derive.
 // `os.tmpdir()` and Rust's `std::env::temp_dir()` read different variables and
 // agree only by luck: under WSL the inherited TEMP/TMP point at /mnt/c, which
@@ -165,14 +185,19 @@ const required = [
     cmd: "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
   },
   { name: "build --workspace", cmd: "cargo build --locked --workspace" },
-  { name: "test --workspace", cmd: "cargo test --locked --workspace" },
+  // nextest schedules the workspace's ~73 test binaries in parallel where
+  // `cargo test` runs them one at a time — measured, that was ~90% of the
+  // gate's wall clock. It runs no doctests by design; the `doctests` row
+  // below keeps them.
+  { name: "test --workspace", cmd: "cargo nextest run --locked --workspace" },
+  { name: "doctests", cmd: "cargo test --locked --workspace --doc" },
   {
     // The crash-recovery / exactly-once tests in dohc-engine-collab are behind
     // its `fault-injection` feature, which nothing in the workspace graph
     // enables — `cargo test --workspace` compiles them out. The workspace root
     // is virtual, so the feature must be enabled through an explicit `-p` run.
     name: "test collab crash tier",
-    cmd: "cargo test --locked -p dohc-engine-collab --features fault-injection",
+    cmd: "cargo nextest run --locked -p dohc-engine-collab --features fault-injection",
   },
 ];
 
@@ -200,8 +225,8 @@ let failed = false;
 // Each reading is a `git rev-parse`, a `git status --untracked-files=all`, and
 // two bounded reads of this checkout's HEAD reflog, all through a shell.
 // Measured on this repo on Windows, the slowest of the platforms the gate runs
-// on: ~1s per reading, ~10s for the ten a full run takes — under a percent of
-// a gate that spends twenty minutes in cargo.
+// on: ~1s per reading, ~11s for the eleven a full run takes — around a percent
+// of a gate that spends ten minutes in cargo.
 
 // Where this checkout keeps its HEAD log. `--git-path` names the log of the
 // worktree the run is in, not the main one, and answers relatively there and
