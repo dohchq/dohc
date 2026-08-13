@@ -727,7 +727,10 @@ async fn scene_delete_rollback_stays_closed_over_foreign_disk_bytes_then_recover
     )
     .await;
     assert_eq!(blocked.code, ErrorCode::Internal, "{blocked:?}");
-    assert_eq!(blocked.message, "ydoc-artifact-assets-invalid");
+    assert_eq!(
+        blocked.message,
+        "ydoc-artifact-assets-invalid: invalid_jobs=1, incomplete_jobs=1"
+    );
 
     std::fs::remove_file(scratch.path().join(&asset_path)).expect("resolve disk conflict");
     let reopened = call(

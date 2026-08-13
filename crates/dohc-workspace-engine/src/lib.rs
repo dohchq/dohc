@@ -39,6 +39,7 @@ use dohc_engine_protocol::{
     },
     wire::{Request, Response, WorkspaceHandle},
 };
+use dohc_engine_runtime::actor::YdocSeedMaterialization;
 use dohc_engine_runtime::{
     ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, LifecycleState, NoFaults,
     PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
@@ -3601,6 +3602,42 @@ impl EngineService {
         }
     }
 
+    /// Keep scene-open exclusion owned by the detached completion. The
+    /// protocol supervisor can stop waiting on cancellation or deadline, but
+    /// a queued actor command still runs after its reply receiver is dropped.
+    async fn complete_scene_seed_materialization(
+        cancellation: &OperationCancellation,
+        materialization: impl std::future::Future<
+            Output = Result<YdocSeedMaterialization, RuntimeError>,
+        > + Send
+        + 'static,
+        serial: tokio::sync::OwnedMutexGuard<()>,
+        lease: Lease,
+    ) -> Result<
+        (
+            YdocSeedMaterialization,
+            tokio::sync::OwnedMutexGuard<()>,
+            Lease,
+        ),
+        WireError,
+    > {
+        let completion = tokio::spawn(async move {
+            let materialization = materialization.await;
+            (materialization, serial, lease)
+        });
+        tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                Err(cancellation.interruption("ydoc.open (scene asset materialization)"))
+            }
+            completed = completion => {
+                let (materialization, serial, lease) = completed
+                    .map_err(|_| wire(ErrorCode::Internal, "ydoc scene asset materialization task failed"))?;
+                Ok((materialization.map_err(map_runtime)?, serial, lease))
+            }
+        }
+    }
+
     async fn versions_active(
         &self,
         ctx: &RequestContext,
@@ -7136,12 +7173,12 @@ impl EngineService {
             ));
         }
         let cancellation = OperationCancellation::new(ctx);
-        let _serial = tokio::select! {
+        let serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.open (queued)"));
             }
-            serial = open.session_ops.lock() => serial,
+            serial = Arc::clone(&open.session_ops).lock_owned() => serial,
         };
         // The first read only DERIVES the key (head resolution can't happen
         // without it). The lease is then taken on that key and the state is
@@ -7190,26 +7227,38 @@ impl EngineService {
             // held lease guards the WRONG key. Refuse; the client retries.
             return Err(wire(ErrorCode::InvalidParams, "ydoc-session-busy"));
         }
-        if !state.seed_materialization_jobs.is_empty() {
-            let materialization = open
-                .actor
-                .ydoc_materialize_scene_seed_assets(
-                    open.root.clone(),
-                    open.workspace_id.clone(),
-                    state.seed_materialization_jobs.clone(),
-                    Arc::new(self.self_writes.scoped(&open.root)),
-                    now_ms()?,
-                )
-                .await
-                .map_err(map_runtime)?;
+        let (serial, lease) = if state.seed_materialization_jobs.is_empty() {
+            (serial, lease)
+        } else {
+            let actor = open.actor.clone();
+            let root = open.root.clone();
+            let workspace_id = open.workspace_id.clone();
+            let job_ids = state.seed_materialization_jobs.clone();
+            let self_writes = Arc::new(self.self_writes.scoped(&open.root));
+            let materialization_now_ms = now_ms()?;
+            let materialization = async move {
+                actor
+                    .ydoc_materialize_scene_seed_assets(
+                        root,
+                        workspace_id,
+                        job_ids,
+                        self_writes,
+                        materialization_now_ms,
+                    )
+                    .await
+            };
+            let (materialization, serial, lease) = Self::complete_scene_seed_materialization(
+                &cancellation,
+                materialization,
+                serial,
+                lease,
+            )
+            .await?;
             if !materialization.materialized {
-                return Err(if materialization.invalid_jobs > 0 {
-                    wire(ErrorCode::Internal, "ydoc-artifact-assets-invalid")
-                } else {
-                    wire(ErrorCode::Overloaded, "ydoc-artifact-assets-pending")
-                });
+                return Err(scene_seed_materialization_error(materialization));
             }
-        }
+            (serial, lease)
+        };
         let sequence = self
             .next_session
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -7277,6 +7326,7 @@ impl EngineService {
                 _lease: lease,
             },
         );
+        drop(serial);
         serde_json::to_value(result)
             .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
     }
@@ -8315,6 +8365,21 @@ fn map_ydoc_open_runtime(error: RuntimeError) -> WireError {
         }
         other => map_runtime(other),
     }
+}
+
+fn scene_seed_materialization_error(materialization: YdocSeedMaterialization) -> WireError {
+    let (code, message) = if materialization.invalid_jobs > 0 {
+        (ErrorCode::Internal, "ydoc-artifact-assets-invalid")
+    } else {
+        (ErrorCode::Overloaded, "ydoc-artifact-assets-pending")
+    };
+    WireError::new(
+        code,
+        format!(
+            "{message}: invalid_jobs={}, incomplete_jobs={}",
+            materialization.invalid_jobs, materialization.incomplete_jobs
+        ),
+    )
 }
 
 async fn close_ydoc_session_for_version_fence(
@@ -12381,6 +12446,113 @@ mod tests {
         assert_eq!(budget.permits.available_permits(), 3);
         drop(second);
         assert_eq!(budget.permits.available_permits(), 8);
+    }
+
+    async fn assert_scene_seed_interruption_retains_exclusion(
+        ctx: RequestContext,
+        expected_code: ErrorCode,
+    ) {
+        let signal = ctx.cancel.clone();
+        let cancellation = OperationCancellation::new(&ctx);
+        let session_ops = Arc::new(tokio::sync::Mutex::new(()));
+        let serial = Arc::clone(&session_ops).lock_owned().await;
+        let leases = LeaseRegistry::new();
+        let key =
+            DocKey::new("ws-seed-cancel", "main", "drawing-object").expect("valid document key");
+        let lease = leases.acquire(&key).expect("initial lease");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let waiting = tokio::spawn(async move {
+            EngineService::complete_scene_seed_materialization(
+                &cancellation,
+                async move {
+                    let _ = started_tx.send(());
+                    release_rx.await.expect("release materialization");
+                    Ok(YdocSeedMaterialization {
+                        materialized: true,
+                        incomplete_jobs: 0,
+                        invalid_jobs: 0,
+                    })
+                },
+                serial,
+                lease,
+            )
+            .await
+        });
+        started_rx.await.expect("materialization started");
+        if expected_code == ErrorCode::Cancelled {
+            signal.cancel();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("interrupted wait completed")
+            .expect("completion task");
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("an interrupted wait must not return materialization"),
+        };
+        assert_eq!(error.code, expected_code);
+        assert!(
+            session_ops.try_lock().is_err(),
+            "the session serial must stay held until actor completion"
+        );
+        assert!(
+            leases.is_held(&key),
+            "the document lease must stay held until actor completion"
+        );
+
+        release_tx.send(()).expect("release actor completion");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if session_ops.try_lock().is_ok() && !leases.is_held(&key) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completion released serial and lease");
+    }
+
+    #[tokio::test]
+    async fn scene_seed_cancellation_keeps_exclusion_until_actor_completion() {
+        assert_scene_seed_interruption_retains_exclusion(
+            RequestContext::unbounded(),
+            ErrorCode::Cancelled,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn scene_seed_deadline_keeps_exclusion_until_actor_completion() {
+        let mut ctx = RequestContext::unbounded();
+        ctx.deadline = Some(std::time::Instant::now() + Duration::from_millis(100));
+        assert_scene_seed_interruption_retains_exclusion(ctx, ErrorCode::DeadlineExceeded).await;
+    }
+
+    #[test]
+    fn scene_seed_materialization_errors_report_exact_job_counts() {
+        let invalid = scene_seed_materialization_error(YdocSeedMaterialization {
+            materialized: false,
+            incomplete_jobs: 3,
+            invalid_jobs: 2,
+        });
+        assert_eq!(invalid.code, ErrorCode::Internal);
+        assert_eq!(
+            invalid.message,
+            "ydoc-artifact-assets-invalid: invalid_jobs=2, incomplete_jobs=3"
+        );
+
+        let pending = scene_seed_materialization_error(YdocSeedMaterialization {
+            materialized: false,
+            incomplete_jobs: 4,
+            invalid_jobs: 0,
+        });
+        assert_eq!(pending.code, ErrorCode::Overloaded);
+        assert_eq!(
+            pending.message,
+            "ydoc-artifact-assets-pending: invalid_jobs=0, incomplete_jobs=4"
+        );
     }
 
     #[test]
