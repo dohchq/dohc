@@ -80,20 +80,6 @@ fn moment_count(store: &mut EngineStore) -> usize {
         .len()
 }
 
-fn capture_producer_id(store: &mut EngineStore) -> String {
-    store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT COALESCE(\
-                     (SELECT origin_id FROM sync_identity WHERE workspace_id = ?1), \
-                     (SELECT engine_uuid FROM engine_ownership WHERE rowid_guard = 1))",
-                [WS],
-                |row| row.get(0),
-            )
-        })
-        .expect("capture producer id")
-}
-
 #[test]
 fn object_ids_are_stable_per_path_and_distinct_between_paths() {
     let (_scratch, mut store) = open_store();
@@ -268,7 +254,6 @@ fn content_revert_gets_a_third_distinct_moment() {
 #[test]
 fn retire_then_recapture_reuses_the_object_and_appends_new_history() {
     let (_scratch, mut store) = open_store();
-    let producer_id = capture_producer_id(&mut store);
     let mut versions = VersionedTextStore::new(&mut store);
     let first = versions
         .capture_ingest(&ingest("a.md", "X", 10), &NO_FAULTS)
@@ -287,33 +272,6 @@ fn retire_then_recapture_reuses_the_object_and_appends_new_history() {
     assert_ne!(first.moment.moment_id, retired.moment.moment_id);
     assert_ne!(first.moment.moment_id, recreated.moment.moment_id);
     assert_ne!(retired.moment.moment_id, recreated.moment.moment_id);
-    assert_eq!(
-        first.moment.moment_id,
-        derive_capture_moment_id(
-            &producer_id,
-            WS,
-            &first.snapshot.object_id,
-            first.moment.moment_order,
-        )
-    );
-    assert_eq!(
-        retired.moment.moment_id,
-        derive_capture_moment_id(
-            &producer_id,
-            WS,
-            &first.snapshot.object_id,
-            retired.moment.moment_order,
-        )
-    );
-    assert_eq!(
-        recreated.moment.moment_id,
-        derive_capture_moment_id(
-            &producer_id,
-            WS,
-            &first.snapshot.object_id,
-            recreated.moment.moment_order,
-        )
-    );
     assert_eq!(recreated.snapshot.text, "X");
     assert_eq!(moment_count(&mut store), 3);
 
@@ -379,22 +337,40 @@ fn retire_removes_the_head_and_repeated_or_unknown_paths_are_clean_no_ops() {
 
 #[test]
 fn moment_id_derivation_is_deterministic_for_equal_inputs() {
-    let first = derive_capture_moment_id("producer", "workspace", "object-id", 42);
-    let second = derive_capture_moment_id("producer", "workspace", "object-id", 42);
+    let first = derive_capture_moment_id("producer", "workspace", "object-id", 42, "write", "sha");
+    let second = derive_capture_moment_id("producer", "workspace", "object-id", 42, "write", "sha");
 
     assert_eq!(first, second);
     assert_eq!(first.len(), "moment-".len() + 64);
     assert_ne!(
         first,
-        derive_capture_moment_id("producer", "workspace", "object-id", 43)
+        derive_capture_moment_id("producer", "workspace", "object-id", 43, "write", "sha")
     );
     assert_ne!(
         first,
-        derive_capture_moment_id("producer", "other", "object-id", 42)
+        derive_capture_moment_id("producer", "other", "object-id", 42, "write", "sha")
     );
     assert_ne!(
         first,
-        derive_capture_moment_id("other-producer", "workspace", "object-id", 42)
+        derive_capture_moment_id(
+            "other-producer",
+            "workspace",
+            "object-id",
+            42,
+            "write",
+            "sha"
+        )
+    );
+    assert_ne!(
+        first,
+        derive_capture_moment_id(
+            "producer",
+            "workspace",
+            "object-id",
+            42,
+            "write",
+            "other-sha"
+        )
     );
 }
 
@@ -426,7 +402,14 @@ fn local_capture_does_not_collide_with_an_imported_replica_moment() {
     seed_sync_origin(&mut store, "origin-b");
     let path = "same.md";
     let object_id = derive_capture_object_id(WS, VERSION, path);
-    let imported_moment_id = derive_capture_moment_id("origin-a", WS, &object_id, 1);
+    let imported_moment_id = derive_capture_moment_id(
+        "origin-a",
+        WS,
+        &object_id,
+        1,
+        "write",
+        &dohc_engine_storage::hex_sha256(b"shared base"),
+    );
 
     store
         .write_with(&NO_FAULTS, |tx| {

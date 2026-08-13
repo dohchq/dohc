@@ -759,15 +759,12 @@ function announceOnce(announce: (() => void) | undefined): () => void {
   };
 }
 
-function sharesYDocHistory(left: Y.Doc, right: Y.Doc): boolean {
-  // Shared client clocks prove shared CRDT structs; equal text does not.
-  const leftState = Y.decodeStateVector(Y.encodeStateVector(left));
-  const rightState = Y.decodeStateVector(Y.encodeStateVector(right));
-  if (leftState.size === 0 && rightState.size === 0) return true;
-  for (const [clientId, leftClock] of leftState) {
-    if (leftClock > 0 && (rightState.get(clientId) ?? 0) > 0) return true;
-  }
-  return false;
+function isExactYDocClaimPromotion(doc: Y.Doc, claimId: string): boolean {
+  // Promotion claims the SHA-256 of this lineage's full-state base.
+  // Shared client clocks prove ancestry only: two peers can clone a base and
+  // then fork. The exact base hash proves that this unclaimed document is the
+  // lineage that received the claim.
+  return sha256Bytes(Y.encodeStateAsUpdate(doc)) === claimId;
 }
 
 function sha256Utf8(text: string): string {
@@ -1906,12 +1903,12 @@ export function createWorkspaceEngineCapture(
       onReplayArmed?: () => void,
     ): Promise<void> => {
       try {
-        const replacementClaimId = replacement.lineageClaimId ?? null;
+        let replacementClaimId = replacement.lineageClaimId ?? null;
         const claimChanged = replacementClaimId !== canonicalLineageClaimId;
         const promotedSameLineage =
           canonicalLineageClaimId === null &&
           replacementClaimId !== null &&
-          sharesYDocHistory(doc, replacement.doc);
+          isExactYDocClaimPromotion(doc, replacementClaimId);
         if (claimChanged && !promotedSameLineage) {
           openingRemoteUpdates.delete(replacement);
           canonicalDoc = replacement.doc;
@@ -1944,6 +1941,8 @@ export function createWorkspaceEngineCapture(
           const journaled = replacement.applyLocalUpdate(replay);
           onReplayArmed?.();
           await journaled;
+          replacementClaimId =
+            replacement.lineageClaimId ?? replacementClaimId;
         } else {
           // Nothing to replay: the replacement already holds this text, so
           // every settle it runs carries it.
@@ -2165,6 +2164,14 @@ export function createWorkspaceEngineCapture(
             armed();
             await journaled;
             Y.applyUpdate(doc, update);
+            // A successful record can promote a local-only lineage. Retain
+            // the durable claim now; later deltas change the full-state hash.
+            if (
+              canonicalLineageClaimId === null &&
+              generation.lineageClaimId != null
+            ) {
+              canonicalLineageClaimId = generation.lineageClaimId;
+            }
           } catch (error) {
             // A live refusal still owns its lease and must close first; a
             // transport restart opens first because the old daemon is gone.

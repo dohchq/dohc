@@ -14285,6 +14285,153 @@ fn recover_origin_continues_an_advancing_stream_past_the_pull_page_ceiling() {
 }
 
 #[test]
+fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() {
+    let (source_scratch, source_path, mut source) = store();
+    seed_identity(&mut source);
+    VersionedTextStore::new(&mut source)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    let capture = |engine: &mut EngineStore, text: &str, now_ms: i64| {
+        let result = VersionedTextStore::new(engine)
+            .capture_ingest(
+                &dohc_engine_domain::CaptureIngest {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: "notes/cloned.md".to_owned(),
+                    text: text.to_owned(),
+                    metadata_origin: "capture".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms,
+                    request_id: None,
+                    claim_foreign_head: true,
+                },
+                &NoFaults,
+            )
+            .expect("capture cloned path");
+        let journaled = engine
+            .write_with(&NoFaults, |tx| {
+                journal_moment_append_in_tx(tx, "ws", &result.moment.moment_id)
+            })
+            .expect("journal captured moment");
+        assert_eq!(journaled, TxnOutcome::Committed(()));
+        result
+    };
+    capture(&mut source, "shared base", 1_100);
+    drop(source);
+
+    let clone_scratch = ScratchDir::new().expect("clone scratch");
+    let clone_path = clone_scratch.engine_db_path().expect("clone db path");
+    std::fs::copy(&source_path, &clone_path).expect("clone engine database");
+    let mut left = EngineStore::open(&source_path, 1_200).expect("open original engine");
+    let mut right = EngineStore::open(&clone_path, 1_200).expect("open cloned engine");
+
+    let left_capture = capture(&mut left, "edit from original", 1_200);
+    let right_capture = capture(&mut right, "edit from clone", 1_200);
+    assert_eq!(
+        left_capture.moment.moment_order,
+        right_capture.moment.moment_order
+    );
+    assert_ne!(
+        left_capture.moment.moment_id, right_capture.moment.moment_id,
+        "the content-bound capture id must separate divergent cloned writes before recovery"
+    );
+
+    let original_stream =
+        list_replication_ops(&left, "ws", "local", -1, 10).expect("original stream");
+    let recovery = RelaySyncClient::new(PagedRelay::new([(
+        0,
+        PullResponse {
+            next_cursor: i64::try_from(original_stream.len()).expect("stream cursor"),
+            has_more: false,
+            ops: original_stream.clone(),
+        },
+    )]));
+    let recovered = recovery
+        .recover_origin(&mut right, "ws", "recovered-clone", &NoFaults)
+        .expect("recover cloned origin");
+    assert_eq!(recovered.shared_prefix_length, 2);
+    assert_eq!(recovered.preserved_ops, 1);
+
+    let recovered_op = list_replication_ops(&right, "ws", "recovered-clone", -1, 10)
+        .expect("recovered clone stream")
+        .into_iter()
+        .next()
+        .expect("recovered clone moment");
+    let shared_probe = original_stream[0].clone();
+    let shared_base = original_stream[1].clone();
+    let original_op = original_stream
+        .iter()
+        .find(|operation| operation.origin_seq == 2)
+        .cloned()
+        .expect("original divergent moment");
+    assert_ne!(
+        recovered_op.payload["momentId"],
+        original_op.payload["momentId"]
+    );
+
+    let (_peer_a_scratch, _peer_a_path, mut peer_a) = store();
+    let (_peer_b_scratch, _peer_b_path, mut peer_b) = store();
+    for engine in [&mut peer_a, &mut peer_b] {
+        seed_replication_version(engine, "main", "main");
+        engine
+            .read_with(|conn| {
+                for text in ["shared base", "edit from clone", "edit from original"] {
+                    let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+                    conn.execute(
+                        "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                        params![sha, text.len() as i64, text],
+                    )?;
+                }
+                Ok::<_, rusqlite::Error>(())
+            })
+            .expect("hydrate peer text");
+        assert!(matches!(
+            apply_envelope_with(engine, &shared_probe, &NoFaults, insert_probe),
+            Ok(ApplyOutcome::Applied(()))
+        ));
+        assert!(matches!(
+            apply_moment_envelope(engine, &shared_base, &NoFaults, &NoLiveLeases),
+            Ok(ApplyOutcome::Applied(_))
+        ));
+    }
+    assert!(matches!(
+        apply_moment_envelope(&mut peer_a, &original_op, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    assert!(matches!(
+        apply_moment_envelope(&mut peer_a, &recovered_op, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    assert!(matches!(
+        apply_moment_envelope(&mut peer_b, &recovered_op, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    assert!(matches!(
+        apply_moment_envelope(&mut peer_b, &original_op, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    let conflict_ids = |engine: &EngineStore| {
+        engine
+            .read_with(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT conflict_id FROM conflicts WHERE workspace_id='ws' ORDER BY conflict_id",
+                )?;
+                statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .expect("conflict ids")
+    };
+    assert_eq!(conflict_ids(&peer_a), conflict_ids(&peer_b));
+    assert_eq!(conflict_ids(&peer_a).len(), 1);
+
+    drop((left, right));
+    drop((source_scratch, clone_scratch));
+}
+
+#[test]
 fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration() {
     let (_scratch, _path, mut engine) = store();
     seed_identity(&mut engine);
