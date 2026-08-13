@@ -263,11 +263,12 @@ export function reclaimStaleSlots({ root, slots, staleMs }) {
 
 function claimSlot(dir, name, heartbeatMs) {
   const ownerPath = join(dir, "owner.json");
+  const ownerRecord = JSON.stringify({
+    pid: process.pid,
+    start: new Date().toISOString(),
+  });
   try {
-    writeFileSync(
-      ownerPath,
-      JSON.stringify({ pid: process.pid, start: new Date().toISOString() }),
-    );
+    writeFileSync(ownerPath, ownerRecord);
   } catch (error) {
     // A slot without its owner file only frees after the 30-minute reclaim
     // window; give the name back now instead.
@@ -290,10 +291,16 @@ function claimSlot(dir, name, heartbeatMs) {
     released = true;
     clearInterval(beat);
     try {
+      // Release by identity, never by path: if this claim's own record is
+      // no longer at the path — the slot was reclaimed out from under a
+      // suspended holder and re-granted — deleting would take a live
+      // lane's slot and re-free its name.
+      if (readFileSync(ownerPath, "utf8") !== ownerRecord) return;
       rmSync(dir, { recursive: true, force: true });
     } catch {
-      // A slot that cannot be removed is reclaimed by the next waiter once
-      // this process is dead and the heartbeat goes stale.
+      // Unreadable means nothing of ours is left at the path. A slot that
+      // cannot be removed is reclaimed by the next waiter once this
+      // process is dead and the heartbeat goes stale.
     }
   };
   process.once("exit", release);

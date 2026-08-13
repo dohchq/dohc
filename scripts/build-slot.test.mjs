@@ -96,6 +96,27 @@ test("acquire takes a free slot, writes its owner, and release frees it", async 
   }
 });
 
+test("release removes nothing when the slot no longer holds this claim", async () => {
+  const root = slotRoot();
+  try {
+    const slot = await acquireBuildSlot({ root, slots: 1, waitMs: 0 });
+    // The slot was reclaimed out from under a suspended holder and
+    // re-granted: the path now carries another lane's owner record.
+    writeFileSync(
+      join(slot.dir, "owner.json"),
+      JSON.stringify({ pid: 99999, start: "someone else" }),
+    );
+    slot.release();
+    assert.equal(
+      existsSync(slot.dir),
+      true,
+      "release must not delete a slot it no longer owns",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("two lanes get two different slots", async () => {
   const root = slotRoot();
   try {
