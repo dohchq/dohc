@@ -943,6 +943,10 @@ function useAutosavedTextDraft(props: {
       }
       return false;
     }
+    sharedRevision.current = {
+      buffer: props.localBuffer,
+      revision: props.localBuffer.getSnapshot().revision,
+    };
     if (saveTimer.current) {
       clearTimeout(saveTimer.current);
       saveTimer.current = null;
@@ -1719,6 +1723,10 @@ function MarkdownView(props: {
     ) {
       return false;
     }
+    sharedRevision.current = {
+      buffer: props.localBuffer,
+      revision: props.localBuffer.getSnapshot().revision,
+    };
     if (saveTimer.current) {
       clearTimeout(saveTimer.current);
       saveTimer.current = null;

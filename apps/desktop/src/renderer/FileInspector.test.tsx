@@ -3315,6 +3315,83 @@ describe("markdown editor unmount flush", () => {
     view.unmount();
   });
 
+  it("settles both duplicate text panes after conflict recovery is dismissed", async () => {
+    const path = "notes/shared-conflict.txt";
+    const initialHash = "4".repeat(64);
+    const externalHash = "5".repeat(64);
+    bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: "Base",
+        truncated: false,
+        contentHash: initialHash,
+      })
+      .mockResolvedValueOnce({
+        text: "Base",
+        truncated: false,
+        contentHash: initialHash,
+      })
+      .mockResolvedValue({
+        text: "External",
+        truncated: false,
+        contentHash: externalHash,
+      });
+    bridgeMock.writeWorkspaceText.mockResolvedValue({
+      status: "conflict",
+      currentContentHash: externalHash,
+    });
+    const user = userEvent.setup();
+    const view = render(
+      <>
+        <FileInspector workspaceId="ws-1" path={path} />
+        <FileInspector workspaceId="ws-1" path={path} />
+      </>,
+    );
+    const editors = await screen.findAllByTestId("view-text-editor");
+    const first = editors[0]!.querySelector(".cm-content") as HTMLElement;
+    await user.click(first);
+    await user.keyboard("{End} Local");
+
+    await screen.findAllByTestId(
+      "orphaned-draft-notice",
+      {},
+      { timeout: 5_000 },
+    );
+    await waitFor(() =>
+      expect(
+        editors.every((editor) => editor.textContent?.includes("External")),
+      ).toBe(true),
+    );
+    expect(
+      screen
+        .getAllByTestId("view-text-save-state")
+        .map((state) => state.getAttribute("data-state")),
+    ).toEqual(["error", "saved"]);
+
+    await user.click(screen.getAllByTestId("recovery-dismiss")[0]!);
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull(),
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId("view-text-save-state")
+          .map((state) => state.getAttribute("data-state")),
+      ).toEqual(["saved", "saved"]),
+    );
+    expect(
+      getSharedLocalDocument(
+        documentVersionKey("ws-1", path, undefined),
+      ).getSnapshot(),
+    ).toMatchObject({
+      body: "External",
+      contentHash: externalHash,
+      dirty: false,
+      saveState: "saved",
+    });
+    view.unmount();
+  });
+
   it("rereads plain text after a write overlaps a newer content request", async () => {
     const initialHash = "7".repeat(64);
     const localHash = "8".repeat(64);

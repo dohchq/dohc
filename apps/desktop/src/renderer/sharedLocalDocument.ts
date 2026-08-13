@@ -198,7 +198,7 @@ export class SharedLocalDocument {
       { body, contentHash },
       source,
       false,
-      force ? "error" : "saved",
+      "saved",
     );
     this.deleteWhenUnused();
     return true;

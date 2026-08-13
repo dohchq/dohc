@@ -426,7 +426,7 @@ describe("SharedLocalDocument", () => {
       body: "reconciled",
       contentHash: "hash-2",
       dirty: false,
-      saveState: "error",
+      saveState: "saved",
       source,
     });
     expect(listener).toHaveBeenCalledTimes(1);
