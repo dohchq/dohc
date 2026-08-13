@@ -830,6 +830,150 @@ async fn capture_retire_of_a_scene_removes_its_owned_asset_sidecar() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retired_scene_asset_sidecar_still_supports_open_settle_and_close() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let image_bytes = valid_png_with_text_padding(1024);
+    let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+    let artifact = serde_json::to_string(&json!({
+        "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+        "elements": [{ "id": "image", "type": "image", "version": 1,
+            "versionNonce": 1, "isDeleted": false, "index": "a0", "fileId": "file" }],
+        "appState": {},
+        "files": { "file": { "id": "file", "mimeType": "image/png", "created": 1,
+            "dataURL": format!("data:image/png;base64,{image_base64}") } }
+    }))
+    .expect("scene");
+    const PATH: &str = "drawings/retired-sidecar.excalidraw";
+    write_file(scratch.path(), PATH, artifact.as_bytes());
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, "ws-scene-retired-sidecar", 1).await;
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "scene",
+            "seedFromArtifact": true }),
+    )
+    .await;
+    let asset_path = opened["artifactAssets"][0]["ref"]
+        .as_str()
+        .expect("asset ref")
+        .to_owned();
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.close",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+
+    call(&transport, &handle, 4, "workspace.close", json!({})).await;
+    std::fs::remove_file(scratch.path().join(&asset_path)).expect("remove generated sidecar");
+    let handle = open_workspace(&transport, &scratch, "ws-scene-retired-sidecar", 5).await;
+    let mut retired = false;
+    for attempt in 0..40 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        call(
+            &transport,
+            &handle,
+            6 + attempt * 2,
+            "capture.flush",
+            json!({}),
+        )
+        .await;
+        let head = call(
+            &transport,
+            &handle,
+            7 + attempt * 2,
+            "versionedBinary.read",
+            json!({ "versionId": "main", "path": asset_path }),
+        )
+        .await;
+        if head == Value::Null {
+            retired = true;
+            break;
+        }
+    }
+    assert!(
+        retired,
+        "capture never retired the missing scene sidecar head"
+    );
+
+    let reopened = call(
+        &transport,
+        &handle,
+        90,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "scene",
+            "seedFromArtifact": true }),
+    )
+    .await;
+    assert_eq!(reopened["lineage"], "existing");
+    assert_eq!(reopened["artifactAssets"][0]["ref"], asset_path);
+    let hydrated = call(
+        &transport,
+        &handle,
+        95,
+        "versionedBinary.readBlob",
+        json!({
+            "workspaceId": "ws-scene-retired-sidecar",
+            "sha256": reopened["artifactAssets"][0]["sha256"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        hydrated["bytesBase64"],
+        base64::engine::general_purpose::STANDARD.encode(&image_bytes)
+    );
+    let settled = call(
+        &transport,
+        &handle,
+        91,
+        "ydoc.settle",
+        json!({ "sessionId": reopened["sessionId"] }),
+    )
+    .await;
+    assert_eq!(settled["materialized"], true);
+    call(
+        &transport,
+        &handle,
+        92,
+        "ydoc.close",
+        json!({ "sessionId": reopened["sessionId"] }),
+    )
+    .await;
+    let portable: Value =
+        serde_json::from_slice(&std::fs::read(scratch.path().join(PATH)).expect("settled drawing"))
+            .expect("portable scene");
+    assert_eq!(
+        portable["files"]["file"]["dataURL"],
+        format!("data:image/png;base64,{image_base64}")
+    );
+
+    let final_open = call(
+        &transport,
+        &handle,
+        93,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": PATH, "contentKind": "scene",
+            "seedFromArtifact": true }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        94,
+        "ydoc.evict",
+        json!({ "sessionId": final_open["sessionId"] }),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deleting_a_forked_scene_retires_inherited_asset_heads_without_touching_active_disk() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");

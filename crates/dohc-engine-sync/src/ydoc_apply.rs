@@ -1022,25 +1022,27 @@ pub fn project_ydoc_with_store(
             )
             .optional()
             .map_err(SyncError::corrupt)?;
-        let Some((kind, sha256, byte_length)) = head else {
-            return Err(SyncError::RetryableState {
-                reason: "scene asset head is pending",
-            });
-        };
-        if kind != "binary" || sha256.as_deref() != Some(asset.sha256.as_str()) {
-            return Err(SyncError::InvalidInput {
-                reason: "scene asset authority is invalid",
-            });
+        let byte_length = match head {
+            Some((kind, sha256, byte_length)) => {
+                if kind != "binary" || sha256.as_deref() != Some(asset.sha256.as_str()) {
+                    return Err(SyncError::InvalidInput {
+                        reason: "scene asset authority is invalid",
+                    });
+                }
+                byte_length.ok_or(SyncError::RetryableState {
+                    reason: "scene asset blob is pending",
+                })?
+            }
+            None => retired_scene_asset_byte_length(conn, key, &asset.path, &asset.sha256)?.ok_or(
+                SyncError::RetryableState {
+                    reason: "scene asset head is pending",
+                },
+            )?,
         }
-        let byte_length = byte_length
-            .ok_or(SyncError::RetryableState {
-                reason: "scene asset blob is pending",
-            })
-            .and_then(|value| {
-                usize::try_from(value).map_err(|_| SyncError::InvalidInput {
-                    reason: "scene asset authority is invalid",
-                })
-            })?;
+        .try_into()
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "scene asset authority is invalid",
+        })?;
         let data_url_len = dohc_engine_collab::scene_data_url_len(&asset.mime_type, byte_length)
             .map_err(map_scene_projection_error)?;
         projected_bytes =
@@ -1077,6 +1079,47 @@ pub fn project_ydoc_with_store(
         source_state_vector_sha256: hex_sha256(&doc.encode_state_vector()),
         destructive: false,
     })
+}
+
+/// Resolve a scene asset whose generated sidecar head was retired after the
+/// file disappeared from disk. The current delete and its exact producer are
+/// the authority; a blob referenced elsewhere in the workspace is not.
+fn retired_scene_asset_byte_length(
+    conn: &Connection,
+    key: &DocKey,
+    path: &str,
+    sha256: &str,
+) -> Result<Option<i64>, SyncError> {
+    conn.query_row(
+        "SELECT b.byte_length FROM moments deleted \
+         JOIN moments producer ON producer.workspace_id=deleted.workspace_id \
+           AND producer.moment_id=deleted.before_latest_moment_id \
+         JOIN binary_blobs b ON b.sha256=deleted.before_binary_sha256 \
+         WHERE deleted.workspace_id=?1 AND deleted.version_id=?2 AND deleted.path=?3 \
+           AND deleted.operation='delete' AND COALESCE(deleted.sync_record_only,0)=0 \
+           AND deleted.before_present=2 AND deleted.before_content_kind='binary' \
+           AND deleted.before_binary_sha256=?4 AND deleted.payload_before_path=?3 \
+           AND deleted.payload_before_content_kind='binary' \
+           AND deleted.payload_before_blob_sha256=?4 \
+           AND producer.version_id=deleted.version_id \
+           AND producer.object_id=deleted.object_id \
+           AND producer.operation='write' AND COALESCE(producer.sync_record_only,0)=0 \
+           AND producer.after_content_kind='binary' \
+           AND producer.after_binary_sha256=?4 AND producer.path=?3 \
+           AND producer.payload_after_path=?3 \
+           AND producer.payload_after_content_kind='binary' \
+           AND producer.payload_after_blob_sha256=?4 \
+           AND NOT EXISTS (SELECT 1 FROM moments newer \
+             WHERE newer.workspace_id=deleted.workspace_id \
+               AND newer.version_id=deleted.version_id AND newer.path=deleted.path \
+               AND COALESCE(newer.sync_record_only,0)=0 \
+               AND newer.moment_order>deleted.moment_order) \
+         ORDER BY deleted.moment_order DESC LIMIT 1",
+        params![key.workspace_id, key.version_id, path, sha256],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(SyncError::corrupt)
 }
 
 fn map_scene_projection_error(error: dohc_engine_collab::CollabError) -> SyncError {

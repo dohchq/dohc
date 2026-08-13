@@ -7,10 +7,10 @@ use dohc_engine_domain::chats::{
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind,
-    ChatChannelKind, ChatReactionState, CreateFileThread, FollowState, FollowTargetKind,
-    GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, MAX_SECRET_FILE_BYTES, MAX_TEXT_BYTES,
-    ResolveDecision, SECRET_IV_BYTES, SECRET_TAG_BYTES, SaveBookmark, SendMessage, SetFollow,
-    SetReaction, StartChannelThread, VersionedTextStore, WriteBinary, attachment_id_for,
+    ChatChannelKind, ChatReactionState, CreateFileThread, DeleteTextFile, FollowState,
+    FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, MAX_SECRET_FILE_BYTES,
+    MAX_TEXT_BYTES, ResolveDecision, SECRET_IV_BYTES, SECRET_TAG_BYTES, SaveBookmark, SendMessage,
+    SetFollow, SetReaction, StartChannelThread, VersionedTextStore, WriteBinary, attachment_id_for,
     channel_slug_for_name,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
@@ -8469,6 +8469,137 @@ fn oversized_hydrated_scene_base_is_refused_without_storing_the_projection() {
         })
         .expect("inspect refused projection");
     assert_eq!((drawing_heads, drawing_jobs, text_blobs), (0, 0, 0));
+}
+
+#[test]
+fn an_old_scene_asset_tombstone_cannot_authorize_a_reused_path() {
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    let drawing_object_id = "scene-tombstone-owner";
+    let asset_bytes = vec![1_u8, 2, 3, 4, 5];
+    let asset_sha = dohc_engine_storage::hex_sha256(&asset_bytes);
+    let asset_ref = dohc_engine_collab::scene_asset_ref(
+        "ws",
+        "main",
+        drawing_object_id,
+        &asset_sha,
+        "image/png",
+    )
+    .expect("asset ref");
+    let replacement_bytes = vec![9_u8, 8, 7, 6];
+
+    {
+        let mut versioned = VersionedTextStore::new(&mut engine);
+        versioned
+            .write_binary(
+                &WriteBinary {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "asset-a".to_owned(),
+                    path: asset_ref.clone(),
+                    bytes: asset_bytes,
+                    moment_id: "asset-a-write".to_owned(),
+                    metadata_origin: "ydoc".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_400,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("write original asset");
+        versioned
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: asset_ref.clone(),
+                    moment_id: "asset-a-delete".to_owned(),
+                    request_id: None,
+                    metadata_origin: "capture".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_500,
+                },
+                &NoFaults,
+            )
+            .expect("retire original asset");
+        versioned
+            .write_binary(
+                &WriteBinary {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "asset-b".to_owned(),
+                    path: asset_ref.clone(),
+                    bytes: replacement_bytes,
+                    moment_id: "asset-b-write".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_600,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("reuse path");
+        versioned
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: asset_ref.clone(),
+                    moment_id: "asset-b-delete".to_owned(),
+                    request_id: None,
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_700,
+                },
+                &NoFaults,
+            )
+            .expect("delete replacement");
+    }
+
+    let portable = json!({
+        "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+        "elements": [{ "id": "image", "type": "image", "version": 1,
+            "versionNonce": 1, "isDeleted": false, "index": "a0", "fileId": "file" }],
+        "appState": {},
+        "files": { "file": { "id": "file", "mimeType": "image/png", "created": 1,
+            "dataURL": "data:image/png;base64,AQIDBAU=" } }
+    })
+    .to_string();
+    let imported = dohc_engine_collab::import_portable_scene(&portable).expect("scene import");
+    let records = BTreeMap::from([(
+        "file".to_owned(),
+        json!({ "created": 1, "id": "file", "mimeType": "image/png",
+            "ref": asset_ref, "sha256": asset_sha })
+        .to_string(),
+    )]);
+    let assets = dohc_engine_collab::encode_scene_asset_records(&records).expect("asset record");
+    let update = dohc_engine_collab::merge_updates(&[imported.initial_update, assets])
+        .expect("scene update");
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&update).expect("apply scene");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", drawing_object_id).expect("key");
+
+    assert!(matches!(
+        engine.read_with(|conn| project_ydoc_with_store(
+            conn,
+            &key,
+            &doc,
+            dohc_engine_collab::ContentKind::Scene,
+        )),
+        Err(SyncError::RetryableState {
+            reason: "scene asset head is pending"
+        })
+    ));
 }
 
 #[test]
