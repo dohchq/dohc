@@ -232,6 +232,7 @@ describe("tabs", () => {
     ]);
     expect(state.editorGroups[1].activeTab).toBe("c.md");
     expect(state.activeEditorGroup).toBe("right");
+    expect(state.editorGroups[0].tabs).toEqual([]);
   });
 
   it("keeps Chats in its existing editor group", () => {

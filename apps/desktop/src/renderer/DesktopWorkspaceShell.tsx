@@ -3596,7 +3596,8 @@ export function DesktopWorkspaceShell(props: {
           current.activeEditorGroup,
           newGroupId,
         );
-        if (classifyForView(tab.path) === "markdown") {
+        const viewKind = classifyForView(tab.path);
+        if (viewKind === "markdown" || viewKind === "database") {
           rendererMarks.mark("file-open-start");
         }
         mutateWb(splitState);

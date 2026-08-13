@@ -3927,6 +3927,34 @@ describe("file-open-start marking", () => {
     mark.mockRestore();
   });
 
+  it("marks before a SQLite split loads another first page", async () => {
+    const mark = vi.spyOn(rendererMarks, "mark");
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["data.db"], "data.db")),
+    );
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      files: [{ path: "data.db", kind: "file" }],
+      folders: [],
+    });
+    Object.assign(bridge, {
+      readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
+    });
+    renderShell(bridge);
+
+    await screen.findByTestId("view-database");
+    const openStartCalls = () =>
+      mark.mock.calls.filter(([name]) => name === "file-open-start").length;
+    const before = openStartCalls();
+
+    await userEvent.click(screen.getByTestId("create-editor-group-right"));
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-database")).toHaveLength(2),
+    );
+
+    expect(openStartCalls()).toBe(before + 1);
+    mark.mockRestore();
+  });
+
   it("focuses an already-mounted Open Editors tab without marking a file open", async () => {
     const mark = vi.spyOn(rendererMarks, "mark");
     const bridge = makeBridge(
