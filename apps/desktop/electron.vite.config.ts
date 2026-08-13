@@ -61,6 +61,7 @@ export default defineConfig({
         entry: {
           main: "src/main.ts",
           "plugin-host": "src/plugins/pluginHostProcess.ts",
+          "pnpm-runner": "src/plugins/pluginPnpmRunnerProcess.ts",
         },
       },
     },

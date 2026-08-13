@@ -191,6 +191,37 @@ async function resolveRealDirectory(path: string, label: string): Promise<string
   }
 }
 
+/**
+ * Same as resolveRealDirectory, except a missing path returns null instead
+ * of failing closed. Only for node_modules itself: a zero-dependency frozen
+ * install legitimately creates none. Every other check in this scan (the
+ * plugin root, the virtual store once node_modules exists, each physical
+ * package) still fails closed on ENOENT via resolveRealDirectory.
+ */
+async function resolveOptionalRealDirectory(
+  path: string,
+  label: string,
+): Promise<string | null> {
+  try {
+    return await resolveRealDirectory(path, label);
+  } catch (error) {
+    if (
+      error instanceof PluginInstallationIntegrityError &&
+      isEnoentAt(error, path)
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function isEnoentAt(
+  error: PluginInstallationIntegrityError,
+  path: string,
+): boolean {
+  return error.path === path && error.message.includes("ENOENT");
+}
+
 async function readContainedManifest(
   manifestPath: string,
   realContainmentRoot: string,
@@ -304,12 +335,45 @@ function collectHooks(
 async function locateVirtualStore(
   nodeModulesRoot: string,
   realNodeModulesRoot: string,
-): Promise<string> {
+): Promise<string | null> {
   const modulesPath = join(nodeModulesRoot, ".modules.yaml");
   let realModulesPath: string;
   try {
     realModulesPath = await realpath(modulesPath);
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      // Measured with pnpm@11.20.0: a healthy zero-dependency frozen install
+      // creates node_modules but omits .modules.yaml. Accept only that empty
+      // physical-store shape. Package entries without metadata remain an
+      // installation-integrity failure.
+      const topLevelEntries = await directoryEntries(realNodeModulesRoot);
+      const unexpectedTopLevel = topLevelEntries.filter((entry) =>
+        entry.name !== ".pnpm" &&
+        entry.name !== ".package-map.json" &&
+        entry.name !== ".pnpm-workspace-state-v1.json"
+      );
+      let physicalPackageDirectories = 0;
+      const virtualStorePath = join(realNodeModulesRoot, ".pnpm");
+      try {
+        const virtualEntries = await readdir(virtualStorePath, { withFileTypes: true });
+        physicalPackageDirectories = virtualEntries.filter((entry) =>
+          entry.isDirectory() && entry.name !== "node_modules"
+        ).length;
+      } catch (virtualError) {
+        if ((virtualError as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw virtualError;
+        }
+      }
+      if (unexpectedTopLevel.length === 0 && physicalPackageDirectories === 0) {
+        return null;
+      }
+      throw new PluginInstallationIntegrityError(
+        `pnpm metadata at ${modulesPath} is missing while node_modules contains ` +
+          `${unexpectedTopLevel.map((entry) => entry.name).join(", ") || "no top-level package entries"} ` +
+          `and ${physicalPackageDirectories} physical package directories.`,
+        modulesPath,
+      );
+    }
     throw new PluginInstallationIntegrityError(
       `pnpm metadata at ${modulesPath} could not be resolved: ${errorMessage(error)}`,
       modulesPath,
@@ -475,21 +539,29 @@ export async function scanPluginLifecycleScripts(
     });
     collectHooks(diagnostics, rootManifest, rootManifestPath, ROOT_HOOKS);
 
+    // A frozen install with zero dependencies is a real, healthy pnpm
+    // outcome (measured directly against this machine's pinned pnpm@11.20.0:
+    // an install with no dependencies creates no node_modules directory at
+    // all, not merely an empty one) — there is nothing to scan, not a
+    // corrupted install.
     const nodeModulesRoot = join(realSnapshotRoot, "node_modules");
-    const realNodeModulesRoot = await resolveRealDirectory(
+    const realNodeModulesRoot = await resolveOptionalRealDirectory(
       nodeModulesRoot,
       "Plugin node_modules directory",
     );
-    const realVirtualStore = await locateVirtualStore(
-      nodeModulesRoot,
-      realNodeModulesRoot,
-    );
-    const packageDirectories = await listPhysicalPackageDirectories(realVirtualStore);
-    for (const packageDirectory of packageDirectories) {
-      const manifestPath = join(packageDirectory, "package.json");
-      const value = await readContainedManifest(manifestPath, realVirtualStore);
-      const manifest = packageManifestRecord(value, manifestPath);
-      collectHooks(diagnostics, manifest, manifestPath, DEPENDENCY_HOOKS);
+    const realVirtualStore = realNodeModulesRoot
+      ? await locateVirtualStore(nodeModulesRoot, realNodeModulesRoot)
+      : null;
+    if (realVirtualStore) {
+      const packageDirectories = await listPhysicalPackageDirectories(
+        realVirtualStore,
+      );
+      for (const packageDirectory of packageDirectories) {
+        const manifestPath = join(packageDirectory, "package.json");
+        const value = await readContainedManifest(manifestPath, realVirtualStore);
+        const manifest = packageManifestRecord(value, manifestPath);
+        collectHooks(diagnostics, manifest, manifestPath, DEPENDENCY_HOOKS);
+      }
     }
 
     diagnostics.sort(compareDiagnostics);

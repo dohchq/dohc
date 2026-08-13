@@ -1,4 +1,7 @@
-import { deriveSyncStatus } from "@dohc/workspace-core";
+import {
+  deriveSyncStatus,
+  type WatcherEvent,
+} from "@dohc/workspace-core";
 import type { SyncStatusResult } from "../ipc/bridgeContract";
 import type { CloudSyncEngine } from "./relaySyncEngine";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
@@ -81,6 +84,12 @@ export interface WorkspaceActivityOptions {
     workspaceId: string;
     rootPath: string;
   }) => void | Promise<void>;
+  // Receives the watcher's already-settled path-rich batch. The callback is
+  // internal to main and runs before the path-free renderer notification.
+  onWatcherBatch?: (
+    workspace: CreatedWorkspace,
+    events: readonly WatcherEvent[],
+  ) => void;
 }
 
 // What the open-time settings read decided: the recorder, and — when the file
@@ -231,6 +240,7 @@ export function createWorkspaceActivity(
         // Non-null from the FIRST batch for engine workspaces; null records
         // nothing (opt-out).
         engineCapture: () => entry.capture,
+        onSettledBatch: (events) => options.onWatcherBatch?.(workspace, events),
         onRecorded: () => {
           entry.inFlight = false;
           entry.lastSyncedAtMs = Date.now();

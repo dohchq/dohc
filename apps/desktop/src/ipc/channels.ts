@@ -99,6 +99,38 @@ export function isWorkbenchMenuCommand(
   );
 }
 
+// Closed plugin pipeline states shared by main, the zod bridge contract, and
+// the sandboxed preload event parser. Keep these dependency-free like the
+// other main-to-renderer event tuples in this module.
+export const PLUGIN_PIPELINE_STATUSES = [
+  "discovered",
+  "queued",
+  "snapshotting",
+  "installing",
+  "scanning",
+  "building",
+  "starting",
+  "ready",
+  "failed",
+  "crashed",
+  "disabled",
+  "disabled-pending-approval",
+  "disabled-pending-repair",
+  "invalid",
+  "uninstalling",
+] as const;
+
+export const PLUGIN_PIPELINE_ERROR_STAGES = [
+  "discovery",
+  "snapshot",
+  "install",
+  "scan",
+  "build",
+  "state",
+  "runtime",
+  "uninstall",
+] as const;
+
 // Closed main→renderer update-state event shape (Phase E2 status bar). Like
 // MENU_COMMANDS this lives here, not bridgeContract, because the SANDBOXED
 // preload validates against it as a plain value and must stay dependency-free.
@@ -540,6 +572,14 @@ export const CHANNELS = {
   startPluginPanel: "desktop:start-plugin-panel",
   stopPluginPanel: "desktop:stop-plugin-panel",
   invokePluginPanelSdk: "desktop:invoke-plugin-panel-sdk",
+  listPlugins: "desktop:list-plugins",
+  installPlugin: "desktop:install-plugin",
+  disablePlugin: "desktop:disable-plugin",
+  enablePlugin: "desktop:enable-plugin",
+  approvePlugin: "desktop:approve-plugin",
+  pluginUninstallPreflight: "desktop:plugin-uninstall-preflight",
+  uninstallPlugin: "desktop:uninstall-plugin",
+  pluginStatusChanged: "desktop:plugin-status-changed",
   openExternalUrl: "desktop:open-external-url",
   cloudLoginStart: "desktop:cloud-login-start",
   cloudLoginPoll: "desktop:cloud-login-poll",

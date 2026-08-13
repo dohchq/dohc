@@ -47,7 +47,7 @@ async function saveBaseline(fixture: PreflightFixture): Promise<string> {
   await writePluginBaselineManifest({
     workspaceRoot: fixture.workspaceRoot,
     pluginId,
-    baselineRoot: fixture.pluginRoot,
+    baselineDigest: digest,
     installedBaselineHash: digest.sourceHash,
   });
   return digest.sourceHash;

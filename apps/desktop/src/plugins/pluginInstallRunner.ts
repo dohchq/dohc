@@ -80,6 +80,17 @@ export interface InstallPluginDependenciesInput {
   snapshotRoot: string;
   pnpmPaths: PluginPnpmPaths;
   resourcesBasePath?: string;
+  /**
+   * Built path to pluginPnpmRunnerProcess's own output (dist/main/pnpm-runner.js
+   * in this repo's build). Required for the real Electron fork path — see
+   * that module's header comment: Electron's utilityProcess does not exit on
+   * its own when a forked script's work is done (electron/electron#47228),
+   * so pnpm's own bin/pnpm.mjs, which never calls process.exit() on success,
+   * hangs forever if forked directly. The wrapper imports pnpm in-process and
+   * calls process.exit() itself once that import settles. Not required when
+   * a test supplies its own `forkProcess` (bypassing the default entirely).
+   */
+  pnpmRunnerEntry?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
   forkProcess?: PluginInstallFork;
@@ -218,10 +229,20 @@ async function runInstallJob(
     PNPM_CONFIG_STATE_DIR: input.pnpmPaths.stateDir,
     PNPM_CONFIG_UPDATE_NOTIFIER: "false",
   };
+  // A supplied forkProcess (tests) runs pnpm directly — a plain Node
+  // child process exits normally on its own. The default Electron path goes
+  // through the wrapper instead; see InstallPluginDependenciesInput.pnpmRunnerEntry.
+  const usingDefaultFork = input.forkProcess === undefined;
   const forkProcess = input.forkProcess ?? forkElectronUtilityProcess;
+  const modulePath = usingDefaultFork
+    ? requirePnpmRunnerEntry(input.pnpmRunnerEntry)
+    : pnpmEntry;
+  const forkArgs = usingDefaultFork
+    ? [pnpmEntry, ...PLUGIN_INSTALL_ARGS]
+    : [...PLUGIN_INSTALL_ARGS];
   let child: PluginInstallProcessHandle;
   try {
-    child = await forkProcess(pnpmEntry, [...PLUGIN_INSTALL_ARGS], {
+    child = await forkProcess(modulePath, forkArgs, {
       cwd: input.snapshotRoot,
       env,
       serviceName: PLUGIN_INSTALL_SERVICE_NAME,
@@ -348,6 +369,17 @@ export function resolvePluginPnpmEntry(
   resourcesBasePath = process.resourcesPath,
 ): string {
   return join(resolve(resourcesBasePath), "plugin-tools", "pnpm", "bin", "pnpm.mjs");
+}
+
+function requirePnpmRunnerEntry(pnpmRunnerEntry: string | undefined): string {
+  if (!pnpmRunnerEntry) {
+    throw new Error(
+      "installPluginDependencies needs pnpmRunnerEntry to fork pnpm through " +
+        "the real Electron utility-process path (no forkProcess override " +
+        "was supplied).",
+    );
+  }
+  return pnpmRunnerEntry;
 }
 
 export function installPluginDependencies(

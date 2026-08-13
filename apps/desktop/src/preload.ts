@@ -7,6 +7,7 @@ import type {
   ListSitesPayload,
   MenuCommand,
   PluginPanelOpenedEvent,
+  PluginStatusChangedEvent,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
   SitePackagePayload,
@@ -24,6 +25,7 @@ import {
   StartPluginPanelResult,
   parseInvokePluginPanelSdkPayloadForIpc,
   parseInvokeSiteSdkPayloadForIpc,
+  parsePluginStatusChangedEventForIpc,
 } from "./ipc/bridgeContract";
 import {
   CHANNELS,
@@ -175,6 +177,15 @@ const bridge: DohcDesktopBridge = {
       CHANNELS.invokePluginPanelSdk,
       parseInvokePluginPanelSdkPayloadForIpc(payload),
     ),
+  listPlugins: (payload) => ipcRenderer.invoke(CHANNELS.listPlugins, payload),
+  installPlugin: (payload) => ipcRenderer.invoke(CHANNELS.installPlugin, payload),
+  disablePlugin: (payload) => ipcRenderer.invoke(CHANNELS.disablePlugin, payload),
+  enablePlugin: (payload) => ipcRenderer.invoke(CHANNELS.enablePlugin, payload),
+  approvePlugin: (payload) => ipcRenderer.invoke(CHANNELS.approvePlugin, payload),
+  pluginUninstallPreflight: (payload) =>
+    ipcRenderer.invoke(CHANNELS.pluginUninstallPreflight, payload),
+  uninstallPlugin: (payload) =>
+    ipcRenderer.invoke(CHANNELS.uninstallPlugin, payload),
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),
   cloudLoginStart: (payload) =>
@@ -318,6 +329,14 @@ const bridge: DohcDesktopBridge = {
     const handler = () => listener();
     ipcRenderer.on(CHANNELS.workspaceActivity, handler);
     return () => ipcRenderer.removeListener(CHANNELS.workspaceActivity, handler);
+  },
+  onPluginStatusChanged: (listener: (event: PluginStatusChangedEvent) => void) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      const parsed = parsePluginStatusChangedEventForIpc(raw);
+      if (parsed) listener(parsed);
+    };
+    ipcRenderer.on(CHANNELS.pluginStatusChanged, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.pluginStatusChanged, handler);
   },
   onCloudSessionChanged: (
     listener: (event: {

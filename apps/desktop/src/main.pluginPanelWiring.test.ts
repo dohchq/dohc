@@ -58,7 +58,9 @@ describe("plugin panel main-process wiring", () => {
     expect(stop).toContain("stopPluginPanelWithLock(");
     expect(stop).toContain("withPluginHostLifecycleLock,");
     expect(stop).toContain("await stopRunningPluginPanelPreview(panel);");
-    expect(stop).toContain("await pluginHosts.get(workspaceId)?.stop(pluginId);");
+    expect(stop).toContain(
+      "await pluginPipelines.get(workspaceId)?.host.stop(pluginId);",
+    );
   });
 
   it("authorizes panel SDK calls before routing them through the plugin host", () => {
@@ -67,7 +69,7 @@ describe("plugin panel main-process wiring", () => {
     const routeAt = invoke.indexOf("invokeWorkspacePluginSdk({");
     const routerStart = mainSource.indexOf("function invokeWorkspacePluginSdk");
     const routerEnd = mainSource.indexOf(
-      "\n}\n\nfunction pluginHostFor",
+      "\n}\n\nfunction registeredPlugin",
       routerStart,
     );
     expect(routerEnd).toBeGreaterThan(-1);
@@ -84,9 +86,9 @@ describe("plugin panel main-process wiring", () => {
   });
 
   it("uses utilityProcess and tears plugin hosts down with their owners", () => {
-    const hostStart = mainSource.indexOf("function pluginHostFor");
+    const hostStart = mainSource.indexOf("function createPluginPipeline");
     const hostEnd = mainSource.indexOf(
-      "\n}\n\nfunction registeredPlugin",
+      "\n}\n\nasync function ensurePluginPipeline",
       hostStart,
     );
     expect(hostEnd).toBeGreaterThan(-1);

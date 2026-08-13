@@ -131,6 +131,32 @@ afterEach(async () => {
 });
 
 describe("scanPluginLifecycleScripts", () => {
+  it("accepts a zero-dependency install that creates no node_modules directory at all", async () => {
+    // Measured directly against this machine's pinned pnpm@11.20.0: a real
+    // frozen install with zero dependencies creates no node_modules
+    // directory whatsoever, not merely an empty one (that's the distinct
+    // case the .modules.yaml-less fixture above covers). #777's e2e caught
+    // this — a real hello-plugin install failed closed here with an
+    // installation-integrity error before this fix.
+    const root = await mkdtemp(join(tmpdir(), "dohc-plugin-lifecycle-"));
+    roots.push(root);
+    const snapshotRoot = join(root, "snapshot");
+    await mkdir(snapshotRoot, { recursive: true });
+    await writeFile(
+      join(snapshotRoot, "package.json"),
+      `${JSON.stringify({ name: "root-plugin", version: "1.0.0" }, null, 2)}\n`,
+    );
+    const manifest = DohcPluginManifest.parse({
+      version: 1,
+      name: "root-plugin",
+      entry: "src/index.ts",
+    });
+
+    const result = await scanPluginLifecycleScripts({ snapshotRoot, manifest });
+
+    expect(result).toMatchObject({ ok: true, warnings: [], warningLines: [] });
+  });
+
   it("reports a dependency postinstall hook without exposing its command in UI text", async () => {
     const fixture = await createLifecycleFixture();
     const manifestPath = await addPhysicalPackage(fixture, {

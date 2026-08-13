@@ -26,6 +26,8 @@ import {
   SEARCH_EVENT_MAX_ENTRIES,
   SEARCH_EVENT_MAX_ID_CHARS,
   SEARCH_EVENT_MAX_PREVIEW_CHARS,
+  PLUGIN_PIPELINE_ERROR_STAGES,
+  PLUGIN_PIPELINE_STATUSES,
   UPDATE_CHANNELS,
   UPDATE_STATUSES,
   WORKBENCH_MENU_COMMANDS,
@@ -2241,6 +2243,154 @@ export type StopPluginPanelPayload = z.infer<typeof StopPluginPanelPayload>;
 export const StopPluginPanelResult = z.void();
 export type StopPluginPanelResult = z.infer<typeof StopPluginPanelResult>;
 
+// Workspace plugin management (PR2). Main owns one pipeline for the active
+// workspace. Every action returns a discriminated result, so expected plugin
+// failures cross as bounded data instead of opaque Electron exceptions.
+// Reuses PLUGIN_ID above (PR1b/#777's panel schemas) rather than a second
+// plugin-id validator for the same field.
+const PLUGIN_SOURCE_HASH = z.string().regex(/^[0-9a-f]{64}$/);
+const PLUGIN_DIAGNOSTIC = z.string().min(1).max(10_000);
+
+export const PluginPipelineError = z.object({
+  stage: z.enum(PLUGIN_PIPELINE_ERROR_STAGES),
+  code: z.string().min(1).max(100),
+  message: z.string().min(1).max(10_000),
+}).strict();
+export type PluginPipelineError = z.infer<typeof PluginPipelineError>;
+
+export const PluginStatusRecord = z.object({
+  id: PLUGIN_ID,
+  directoryName: z.string().min(1).max(255),
+  rootPath: PATH_STRING,
+  valid: z.boolean(),
+  status: z.enum(PLUGIN_PIPELINE_STATUSES),
+  disabledReason: z.enum(["user", "crash-loop", "approval", "repair"]).nullable(),
+  runtimeStatus: z
+    .enum(["starting", "ready", "failed", "crashed", "disabled"])
+    .nullable(),
+  sourceHash: PLUGIN_SOURCE_HASH.nullable(),
+  approvedHash: PLUGIN_SOURCE_HASH.nullable(),
+  installedBaselineHash: PLUGIN_SOURCE_HASH.nullable(),
+  diagnostics: z.array(PLUGIN_DIAGNOSTIC),
+  warnings: z.array(PLUGIN_DIAGNOSTIC),
+  error: PluginPipelineError.nullable(),
+}).strict();
+export type PluginStatusRecord = z.infer<typeof PluginStatusRecord>;
+
+export const PluginActionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+}).strict();
+export type PluginActionPayload = z.infer<typeof PluginActionPayload>;
+
+export const ListPluginsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+}).strict();
+export type ListPluginsPayload = z.infer<typeof ListPluginsPayload>;
+
+export const ListPluginsResult = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), plugins: z.array(PluginStatusRecord) }).strict(),
+  z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
+]);
+export type ListPluginsResult = z.infer<typeof ListPluginsResult>;
+
+export const PluginActionResult = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), plugin: PluginStatusRecord }).strict(),
+  z.object({
+    ok: z.literal(false),
+    error: PluginPipelineError,
+    plugin: PluginStatusRecord.nullable(),
+  }).strict(),
+]);
+export type PluginActionResult = z.infer<typeof PluginActionResult>;
+
+const PluginUninstallCounts = z.object({
+  unchanged: z.number().int().nonnegative(),
+  modified: z.number().int().nonnegative(),
+  addedSinceBaseline: z.number().int().nonnegative(),
+  removedSinceBaseline: z.number().int().nonnegative(),
+  unknownWithoutBaseline: z.number().int().nonnegative(),
+  capturedRecoverable: z.number().int().nonnegative(),
+  notRecoverableFromHistory: z.number().int().nonnegative(),
+}).strict();
+
+const PluginUninstallFileInventory = z.object({
+  relPath: PATH_STRING,
+  status: z.enum([
+    "unchanged",
+    "modified",
+    "added-since-baseline",
+    "removed-since-baseline",
+    "unknown-without-baseline",
+  ]),
+  byteLength: z.number().int().nonnegative().nullable(),
+  contentKind: z.enum(["text", "binary"]).nullable(),
+  historyRecovery: z
+    .enum(["captured-recoverable", "not-recoverable-from-history"])
+    .nullable(),
+}).strict();
+
+const PluginUninstallWarning = z.object({
+  kind: z.enum(["local-modifications", "cannot-verify-baseline"]),
+  summary: z.string().min(1).max(10_000),
+  details: z.array(PLUGIN_DIAGNOSTIC),
+  counts: PluginUninstallCounts,
+  notRecoverablePaths: z.array(PATH_STRING),
+}).strict();
+
+export const PluginUninstallPreflightRecord = z.object({
+  verification: z.enum(["verified", "cannot-verify"]),
+  installedBaselineHash: PLUGIN_SOURCE_HASH.nullable(),
+  liveHash: PLUGIN_SOURCE_HASH.nullable(),
+  baselineManifestPath: PATH_STRING,
+  summary: z.string().min(1).max(10_000),
+  counts: PluginUninstallCounts,
+  files: z.array(PluginUninstallFileInventory),
+  notRecoverablePaths: z.array(PATH_STRING),
+  warning: PluginUninstallWarning.nullable(),
+}).strict();
+export type PluginUninstallPreflightRecord = z.infer<
+  typeof PluginUninstallPreflightRecord
+>;
+
+export const PluginUninstallPreflightResult = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    confirmationToken: z.uuid(),
+    preflight: PluginUninstallPreflightRecord,
+  }).strict(),
+  z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
+]);
+export type PluginUninstallPreflightResult = z.infer<
+  typeof PluginUninstallPreflightResult
+>;
+
+export const UninstallPluginPayload = PluginActionPayload.extend({
+  confirmationToken: z.uuid(),
+}).strict();
+export type UninstallPluginPayload = z.infer<typeof UninstallPluginPayload>;
+
+export const PluginStatusChangedEvent = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("changed"),
+    workspaceId: WORKSPACE_ID,
+    plugin: PluginStatusRecord,
+  }).strict(),
+  z.object({
+    kind: z.literal("removed"),
+    workspaceId: WORKSPACE_ID,
+    pluginId: PLUGIN_ID,
+  }).strict(),
+]);
+export type PluginStatusChangedEvent = z.infer<typeof PluginStatusChangedEvent>;
+
+export function parsePluginStatusChangedEventForIpc(
+  value: unknown,
+): PluginStatusChangedEvent | null {
+  const parsed = PluginStatusChangedEvent.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 // Sites never supply user or workspace identity. The containing renderer
 // identifies the open site and main re-derives its owned/share authority.
 // The preload applies this contract before ipcRenderer.invoke. The byte cap
@@ -3530,6 +3680,15 @@ export interface DohcDesktopBridge {
   invokePluginPanelSdk(
     payload: InvokePluginPanelSdkPayload,
   ): Promise<InvokePluginPanelSdkResult>;
+  listPlugins(payload: ListPluginsPayload): Promise<ListPluginsResult>;
+  installPlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
+  disablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
+  enablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
+  approvePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
+  pluginUninstallPreflight(
+    payload: PluginActionPayload,
+  ): Promise<PluginUninstallPreflightResult>;
+  uninstallPlugin(payload: UninstallPluginPayload): Promise<PluginActionResult>;
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;
   cloudLoginPoll(): Promise<CloudLoginPollResult>;
@@ -3708,6 +3867,9 @@ export interface DohcDesktopBridge {
   // or history changed (settled filesystem batch recorded). Returns an
   // unsubscribe function.
   onWorkspaceActivity(listener: () => void): () => void;
+  onPluginStatusChanged(
+    listener: (event: PluginStatusChangedEvent) => void,
+  ): () => void;
   // Live push: main signals a cloud session transition (login, logout,
   // account switch, or a relay proving the session dead). Account-scoped
   // renderer caches — the relay-backed share rows — refresh on this signal;

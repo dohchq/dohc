@@ -106,7 +106,7 @@ export interface PluginUninstallPreflightResult {
 export interface WritePluginBaselineManifestInput {
   workspaceRoot: string;
   pluginId: string;
-  baselineRoot: string;
+  baselineDigest: PluginSourceDigest;
   installedBaselineHash: string;
 }
 
@@ -177,7 +177,13 @@ function manifestFromDigest(digest: PluginSourceDigest): PluginBaselineManifest 
 export async function writePluginBaselineManifest(
   input: WritePluginBaselineManifestInput,
 ): Promise<{ path: string; manifest: PluginBaselineManifest }> {
-  const digest = await hashPluginSourceFiles(resolve(input.baselineRoot));
+  const digest = input.baselineDigest;
+  const canonicalHash = canonicalPluginSourceHash(digest.files);
+  if (canonicalHash !== digest.sourceHash) {
+    throw new Error(
+      `Plugin baseline file digest ${canonicalHash} does not match sourceHash ${digest.sourceHash}.`,
+    );
+  }
   if (digest.sourceHash !== input.installedBaselineHash) {
     throw new Error(
       `Plugin baseline source hash ${digest.sourceHash} does not match installedBaselineHash ${input.installedBaselineHash}.`,

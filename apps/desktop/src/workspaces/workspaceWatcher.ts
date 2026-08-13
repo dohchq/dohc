@@ -88,6 +88,10 @@ export function startWorkspaceWatch(
   options: {
     settleMs?: number;
     onRecorded?: () => void;
+    // Internal consumers that need path detail (for example, the plugin
+    // pipeline) receive the same settled batch before onRecorded triggers the
+    // renderer's path-free activity notification. This adds no debounce.
+    onSettledBatch?: (events: WatcherEvent[]) => void;
     // Read at the moment a batch settles: a non-null capture records the
     // batch as engine moments. Null (explicit engine opt-out, or a failed
     // capture build) means NOTHING records — retirement Phase C removed the
@@ -126,6 +130,14 @@ export function startWorkspaceWatch(
     }
     desktopMarks.measureSince("sync-batch", "sync-batch-start");
     desktopMarks.mark("sync-batch-complete");
+    try {
+      options.onSettledBatch?.(events.map((event) => ({ ...event })));
+    } catch (error) {
+      console.error(
+        `[desktop] settled workspace batch callback failed for ${workspace.rootPath}:`,
+        error,
+      );
+    }
     options.onRecorded?.();
   }
 

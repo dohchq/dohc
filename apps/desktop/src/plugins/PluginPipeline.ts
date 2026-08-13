@@ -1,0 +1,1368 @@
+import type { WatcherEvent } from "@dohc/workspace-core";
+import { randomUUID } from "node:crypto";
+import { lstat, rm } from "node:fs/promises";
+import { join, relative, resolve } from "node:path";
+import {
+  PLUGIN_PIPELINE_ERROR_STAGES,
+  PLUGIN_PIPELINE_STATUSES,
+} from "../ipc/channels";
+import type { PluginHost } from "./PluginHost";
+import {
+  discoverInstalledPlugins,
+  type InstalledPluginRecord,
+} from "./pluginDiscovery";
+import {
+  buildPluginBundle,
+  type PluginBuildResult,
+} from "./pluginBuildRunner";
+import {
+  installPluginDependencies,
+  type PluginInstallResult,
+} from "./pluginInstallRunner";
+import {
+  scanPluginLifecycleScripts,
+  type PluginLifecycleScanResult,
+} from "./pluginLifecycleScan";
+import {
+  mutatePluginRecord,
+  readPluginLocalState,
+  type PluginRecordShape,
+} from "./pluginLocalState";
+import type { DohcPluginManifest } from "./pluginManifestSchema";
+import type { PluginRuntimeStatus } from "./pluginHostProtocol";
+import {
+  hashPluginSourceFiles,
+  pluginIdToSafePath,
+  snapshotPluginSource,
+  type PluginSourceSnapshotResult,
+} from "./pluginSourceSnapshot";
+import {
+  pluginUninstallPreflight,
+  writePluginBaselineManifest,
+  type PluginUninstallPreflightResult,
+} from "./pluginUninstallPreflight";
+
+export { PLUGIN_PIPELINE_ERROR_STAGES, PLUGIN_PIPELINE_STATUSES };
+
+export type PluginPipelineStatus = typeof PLUGIN_PIPELINE_STATUSES[number];
+
+export type PluginPipelineErrorStage =
+  typeof PLUGIN_PIPELINE_ERROR_STAGES[number];
+
+export interface PluginPipelineError {
+  stage: PluginPipelineErrorStage;
+  code: string;
+  message: string;
+}
+
+export interface PluginPipelinePluginStatus {
+  id: string;
+  directoryName: string;
+  rootPath: string;
+  valid: boolean;
+  status: PluginPipelineStatus;
+  disabledReason: "user" | "crash-loop" | "approval" | "repair" | null;
+  runtimeStatus: PluginRuntimeStatus | null;
+  sourceHash: string | null;
+  approvedHash: string | null;
+  installedBaselineHash: string | null;
+  diagnostics: string[];
+  warnings: string[];
+  error: PluginPipelineError | null;
+}
+
+export type PluginPipelineStatusEvent =
+  | { kind: "changed"; plugin: PluginPipelinePluginStatus }
+  | { kind: "removed"; pluginId: string };
+
+export type PluginPipelineActionResult =
+  | { ok: true; plugin: PluginPipelinePluginStatus }
+  | {
+    ok: false;
+    error: PluginPipelineError;
+    plugin: PluginPipelinePluginStatus | null;
+  };
+
+export type PluginPipelineUninstallPreflightResult =
+  | {
+    ok: true;
+    confirmationToken: string;
+    preflight: PluginUninstallPreflightResult;
+  }
+  | { ok: false; error: PluginPipelineError };
+
+interface PluginPipelineOperations {
+  discover: typeof discoverInstalledPlugins;
+  snapshot: typeof snapshotPluginSource;
+  install: typeof installPluginDependencies;
+  scan: typeof scanPluginLifecycleScripts;
+  build: typeof buildPluginBundle;
+  readLocalState: typeof readPluginLocalState;
+  mutateRecord: typeof mutatePluginRecord;
+  writeBaseline: typeof writePluginBaselineManifest;
+  uninstallPreflight: typeof pluginUninstallPreflight;
+  removePath: typeof rm;
+  inspectPath: typeof lstat;
+}
+
+export interface PluginPipelineOptions {
+  workspaceId: string;
+  workspaceRoot: string;
+  stateDir: string;
+  pluginHost: PluginHost;
+  resourcesBasePath?: string;
+  /** See pluginInstallRunner's InstallPluginDependenciesInput.pnpmRunnerEntry. */
+  pnpmRunnerEntry?: string;
+  onStatusChange?: (event: PluginPipelineStatusEvent) => void;
+  operations?: Partial<PluginPipelineOperations>;
+}
+
+interface MutablePluginStatus extends PluginPipelinePluginStatus {}
+
+interface QueuedJob {
+  sourceRefresh: boolean;
+  run: () => Promise<void>;
+}
+
+interface PluginJobQueue {
+  jobs: QueuedJob[];
+  sourceRefreshQueued: boolean;
+  draining: Promise<void> | null;
+}
+
+interface UninstallConfirmation {
+  token: string;
+  pluginRoot: string;
+  liveHash: string | null;
+}
+
+interface FullBuildOptions {
+  candidate: InstalledPluginRecord;
+  startRuntime: boolean;
+  disabledReasonAfterBuild: MutablePluginStatus["disabledReason"];
+  resetCrashAccounting: boolean;
+  freshInstall: boolean;
+}
+
+class PipelineFailure extends Error {
+  constructor(readonly detail: PluginPipelineError) {
+    super(detail.message);
+    this.name = "PipelineFailure";
+  }
+}
+
+const DEFAULT_OPERATIONS: PluginPipelineOperations = {
+  discover: discoverInstalledPlugins,
+  snapshot: snapshotPluginSource,
+  install: installPluginDependencies,
+  scan: scanPluginLifecycleScripts,
+  build: buildPluginBundle,
+  readLocalState: readPluginLocalState,
+  mutateRecord: mutatePluginRecord,
+  writeBaseline: writePluginBaselineManifest,
+  uninstallPreflight: pluginUninstallPreflight,
+  removePath: rm,
+  inspectPath: lstat,
+};
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function pipelineError(
+  stage: PluginPipelineErrorStage,
+  code: string,
+  message: string,
+): PluginPipelineError {
+  return { stage, code, message };
+}
+
+function failureFromUnknown(
+  stage: PluginPipelineErrorStage,
+  code: string,
+  error: unknown,
+): PipelineFailure {
+  return new PipelineFailure(pipelineError(stage, code, errorMessage(error)));
+}
+
+function cloneError(error: PluginPipelineError | null): PluginPipelineError | null {
+  return error ? { ...error } : null;
+}
+
+function cloneStatus(status: PluginPipelinePluginStatus): PluginPipelinePluginStatus {
+  return {
+    ...status,
+    diagnostics: [...status.diagnostics],
+    warnings: [...status.warnings],
+    error: cloneError(status.error),
+  };
+}
+
+function generatedManifest(manifest: DohcPluginManifest): DohcPluginManifest {
+  return { ...manifest, entry: "bundle.mjs" };
+}
+
+function relativeSourceRoot(workspaceRoot: string, rootPath: string): string {
+  return relative(workspaceRoot, rootPath).replaceAll("\\", "/");
+}
+
+function eventTouchesRoot(event: WatcherEvent, root: string): boolean {
+  const path = event.path.replaceAll("\\", "/");
+  return path === root || path.startsWith(`${root}/`);
+}
+
+function pluginTreeEvent(event: WatcherEvent): boolean {
+  const path = event.path.replaceAll("\\", "/");
+  return path === "plugins" || path.startsWith("plugins/");
+}
+
+function candidateKey(candidate: InstalledPluginRecord): string {
+  return `${candidate.id}\0${resolve(candidate.rootPath)}`;
+}
+
+export class PluginPipeline {
+  private readonly workspaceRoot: string;
+  private readonly dohcDir: string;
+  private readonly operations: PluginPipelineOperations;
+  private readonly statuses = new Map<string, MutablePluginStatus>();
+  private readonly queues = new Map<string, PluginJobQueue>();
+  private readonly uninstallConfirmations = new Map<string, UninstallConfirmation>();
+  private discovery: InstalledPluginRecord[] = [];
+  private discoveryTail: Promise<void> = Promise.resolve();
+  private startPromise: Promise<void> | null = null;
+  private readonly abortController = new AbortController();
+  private disposed = false;
+
+  constructor(private readonly options: PluginPipelineOptions) {
+    this.workspaceRoot = resolve(options.workspaceRoot);
+    this.dohcDir = join(this.workspaceRoot, ".dohc");
+    this.operations = { ...DEFAULT_OPERATIONS, ...options.operations };
+  }
+
+  /**
+   * The single PluginHost this pipeline owns for its workspace. #777's panel
+   * surface shares this instance (rather than creating its own host) so a
+   * panel and the install/build pipeline can never race two independent
+   * hosts over the same plugin id.
+   */
+  get host(): PluginHost {
+    return this.options.pluginHost;
+  }
+
+  start(): Promise<void> {
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.startInternal();
+    return this.startPromise;
+  }
+
+  list(): PluginPipelinePluginStatus[] {
+    const listed: PluginPipelinePluginStatus[] = [];
+    const included = new Set<string>();
+    for (const candidate of this.discovery) {
+      if (!candidate.valid || !candidate.manifest) {
+        listed.push({
+          id: candidate.id,
+          directoryName: candidate.directoryName,
+          rootPath: candidate.rootPath,
+          valid: false,
+          status: "invalid",
+          disabledReason: null,
+          runtimeStatus: null,
+          sourceHash: null,
+          approvedHash: null,
+          installedBaselineHash: null,
+          diagnostics: [...candidate.diagnostics],
+          warnings: [],
+          error: candidate.diagnostics.length > 0
+            ? pipelineError(
+              "discovery",
+              "invalid-plugin",
+              candidate.diagnostics.join(" "),
+            )
+            : null,
+        });
+        continue;
+      }
+      const status = this.statuses.get(candidate.id);
+      if (!status) continue;
+      listed.push(cloneStatus(status));
+      included.add(candidate.id);
+    }
+    for (const [pluginId, status] of this.statuses) {
+      if (!included.has(pluginId)) listed.push(cloneStatus(status));
+    }
+    return listed.sort((left, right) =>
+      left.directoryName.localeCompare(right.directoryName) ||
+      left.id.localeCompare(right.id)
+    );
+  }
+
+  install(pluginId: string): Promise<PluginPipelineActionResult> {
+    return this.enqueueAction(pluginId, async () => {
+      const candidate = this.requireValidCandidate(pluginId);
+      return this.runFullBuild({
+        candidate,
+        startRuntime: true,
+        disabledReasonAfterBuild: null,
+        resetCrashAccounting: true,
+        freshInstall: true,
+      });
+    });
+  }
+
+  disable(pluginId: string): Promise<PluginPipelineActionResult> {
+    return this.enqueueAction(pluginId, async () => {
+      const candidate = this.requireValidCandidate(pluginId);
+      try {
+        await this.operations.mutateRecord(
+          this.options.stateDir,
+          this.workspaceRoot,
+          pluginId,
+          (record) => ({ ...record, disabled: true }),
+        );
+        await this.options.pluginHost.stop(pluginId);
+        return this.success(this.setStatus(candidate, {
+          status: "disabled",
+          disabledReason: "user",
+          runtimeStatus: null,
+          error: null,
+        }));
+      } catch (error) {
+        return this.failure(
+          pluginId,
+          pipelineError("state", "disable-failed", errorMessage(error)),
+        );
+      }
+    });
+  }
+
+  enable(pluginId: string): Promise<PluginPipelineActionResult> {
+    return this.enqueueAction(pluginId, async () => {
+      const candidate = this.requireValidCandidate(pluginId);
+      const state = await this.localRecord(pluginId);
+      if (!state?.approvedHash) {
+        return this.failure(
+          pluginId,
+          pipelineError(
+            "state",
+            "install-required",
+            `Plugin "${pluginId}" must be installed before it can be enabled.`,
+          ),
+        );
+      }
+
+      const snapshot = await this.snapshot(candidate);
+      if (!snapshot.ok) return snapshot.result;
+      if (snapshot.value.sourceHash !== state.approvedHash) {
+        return this.holdForApproval(candidate, snapshot.value.sourceHash);
+      }
+
+      const current = this.statuses.get(pluginId);
+      const resetCrashAccounting = current?.disabledReason === "crash-loop";
+      const liveRoot = this.liveRoot(pluginId);
+      const hasBundle = await this.hasLiveBundle(liveRoot);
+      if (!hasBundle) {
+        return this.runFullBuild({
+          candidate,
+          startRuntime: true,
+          disabledReasonAfterBuild: null,
+          resetCrashAccounting,
+          freshInstall: false,
+        });
+      }
+
+      try {
+        await this.operations.mutateRecord(
+          this.options.stateDir,
+          this.workspaceRoot,
+          pluginId,
+          (record) => ({ ...record, disabled: false }),
+        );
+        if (resetCrashAccounting) {
+          this.options.pluginHost.resetCrashAccounting(pluginId);
+        }
+        if (!this.options.pluginHost.getStatus(pluginId)) {
+          await this.options.pluginHost.start(
+            liveRoot,
+            generatedManifest(candidate.manifest),
+          );
+        }
+        return this.success(this.setStatus(candidate, {
+          status: "starting",
+          disabledReason: null,
+          runtimeStatus: "starting",
+          error: null,
+        }));
+      } catch (error) {
+        return this.failure(
+          pluginId,
+          pipelineError("runtime", "enable-failed", errorMessage(error)),
+        );
+      }
+    });
+  }
+
+  /**
+   * Starts an already-approved, hash-verified plugin if it isn't already
+   * running, refusing otherwise. This is the gate #777's panel surface calls
+   * before it can execute a plugin's process: opening a panel must never run
+   * code this pipeline hasn't verified and built. Unlike `enable()`, this
+   * never clears a `disabled` flag — a user's explicit disable must not be
+   * silently bypassed by opening a panel.
+   *
+   * A plugin discovered for the first time (no local record yet) runs the
+   * same full install path `install()` uses: frozen pnpm install, the
+   * lifecycle-hook scan, a real build, and only then a recorded approved
+   * hash. This still verifies and builds every byte before it can execute —
+   * "verify hash before execute" holds either way — it just doesn't require
+   * a separate explicit Install click before the very first open, matching
+   * the design doc's "no permission prompts" rule (design rule 3): a plugin
+   * an agent or the user placed under plugins/ is trusted the same way any
+   * local process is, the first time its panel opens as much as any other.
+   */
+  ensureStarted(pluginId: string): Promise<PluginPipelineActionResult> {
+    return this.enqueueAction(pluginId, async () => {
+      const candidate = this.requireValidCandidate(pluginId);
+      const state = await this.localRecord(pluginId);
+      if (state?.disabled === true) {
+        return this.failure(
+          pluginId,
+          pipelineError(
+            "state",
+            "plugin-disabled",
+            `Plugin "${pluginId}" is disabled. Enable it before opening it.`,
+          ),
+        );
+      }
+      if (!state?.approvedHash) {
+        return this.runFullBuild({
+          candidate,
+          startRuntime: true,
+          disabledReasonAfterBuild: null,
+          resetCrashAccounting: true,
+          freshInstall: true,
+        });
+      }
+
+      const snapshot = await this.snapshot(candidate);
+      if (!snapshot.ok) return snapshot.result;
+      if (snapshot.value.sourceHash !== state.approvedHash) {
+        return this.holdForApproval(candidate, snapshot.value.sourceHash);
+      }
+
+      const liveRoot = this.liveRoot(pluginId);
+      const hasBundle = await this.hasLiveBundle(liveRoot);
+      if (!hasBundle) {
+        return this.runFullBuild({
+          candidate,
+          startRuntime: true,
+          disabledReasonAfterBuild: null,
+          resetCrashAccounting: false,
+          freshInstall: false,
+        });
+      }
+
+      try {
+        if (!this.options.pluginHost.getStatus(pluginId)) {
+          await this.options.pluginHost.start(
+            liveRoot,
+            generatedManifest(candidate.manifest),
+          );
+        }
+        return this.success(this.setStatus(candidate, {
+          status: "starting",
+          disabledReason: null,
+          runtimeStatus: "starting",
+          error: null,
+        }));
+      } catch (error) {
+        return this.failure(
+          pluginId,
+          pipelineError("runtime", "start-failed", errorMessage(error)),
+        );
+      }
+    });
+  }
+
+  approve(pluginId: string): Promise<PluginPipelineActionResult> {
+    return this.enqueueAction(pluginId, async () => {
+      const candidate = this.requireValidCandidate(pluginId);
+      return this.runFullBuild({
+        candidate,
+        startRuntime: true,
+        disabledReasonAfterBuild: null,
+        resetCrashAccounting: true,
+        freshInstall: false,
+      });
+    });
+  }
+
+  handleDoorWrittenSourceChange(pluginId: string): void {
+    this.enqueueSourceRefresh(pluginId, async () => {
+      const candidate = this.validCandidate(pluginId);
+      if (!candidate) return;
+      const state = await this.localRecord(pluginId);
+      if (!state?.approvedHash) {
+        this.setStatus(candidate, { status: "discovered" });
+        return;
+      }
+      const disabled = state.disabled === true;
+      await this.runFullBuild({
+        candidate,
+        startRuntime: !disabled,
+        disabledReasonAfterBuild: disabled ? "user" : null,
+        resetCrashAccounting: !disabled,
+        freshInstall: false,
+      });
+    });
+  }
+
+  handleWatcherEvents(events: readonly WatcherEvent[]): void {
+    if (this.disposed || !events.some(pluginTreeEvent)) return;
+    const batch = events.map((event) => ({ ...event }));
+    this.discoveryTail = this.discoveryTail.then(
+      () => this.processWatcherBatch(batch),
+      () => this.processWatcherBatch(batch),
+    ).catch((error) => {
+      console.error(
+        `[desktop] plugin discovery refresh failed for ${this.workspaceRoot}:`,
+        error,
+      );
+    });
+  }
+
+  noteRuntimeStatus(pluginId: string, runtimeStatus: PluginRuntimeStatus): void {
+    if (this.disposed) return;
+    const candidate = this.validCandidate(pluginId);
+    if (!candidate) return;
+    if (runtimeStatus === "disabled") {
+      this.setStatus(candidate, {
+        status: "disabled",
+        disabledReason: "crash-loop",
+        runtimeStatus,
+        error: null,
+      });
+      return;
+    }
+    this.setStatus(candidate, {
+      status: runtimeStatus,
+      runtimeStatus,
+      disabledReason: null,
+      error: runtimeStatus === "failed" || runtimeStatus === "crashed"
+        ? pipelineError(
+          "runtime",
+          runtimeStatus,
+          `Plugin "${pluginId}" ${runtimeStatus}.`,
+        )
+        : null,
+    });
+  }
+
+  uninstallPreflight(
+    pluginId: string,
+  ): Promise<PluginPipelineUninstallPreflightResult> {
+    return this.enqueueActionValue(pluginId, async () => {
+      try {
+        const candidate = this.requireValidCandidate(pluginId);
+        const record = await this.localRecord(pluginId);
+        const preflight = await this.operations.uninstallPreflight({
+          workspaceRoot: this.workspaceRoot,
+          pluginId,
+          pluginRoot: candidate.rootPath,
+          installedBaselineHash: record?.installedBaselineHash,
+        });
+        const confirmationToken = randomUUID();
+        this.uninstallConfirmations.set(pluginId, {
+          token: confirmationToken,
+          pluginRoot: resolve(candidate.rootPath),
+          liveHash: preflight.liveHash,
+        });
+        return { ok: true, confirmationToken, preflight };
+      } catch (error) {
+        return {
+          ok: false,
+          error: pipelineError(
+            "uninstall",
+            "preflight-failed",
+            errorMessage(error),
+          ),
+        };
+      }
+    });
+  }
+
+  uninstall(
+    pluginId: string,
+    confirmationToken: string,
+  ): Promise<PluginPipelineActionResult> {
+    return this.enqueueAction(pluginId, async () => {
+      const confirmation = this.uninstallConfirmations.get(pluginId);
+      this.uninstallConfirmations.delete(pluginId);
+      if (!confirmation || confirmation.token !== confirmationToken) {
+        return this.failure(
+          pluginId,
+          pipelineError(
+            "uninstall",
+            "confirmation-required",
+            `Plugin "${pluginId}" requires a current uninstall preflight confirmation.`,
+          ),
+        );
+      }
+
+      const candidate = this.requireValidCandidate(pluginId);
+      if (resolve(candidate.rootPath) !== confirmation.pluginRoot) {
+        return this.failure(
+          pluginId,
+          pipelineError(
+            "uninstall",
+            "confirmation-stale",
+            `Plugin "${pluginId}" moved after uninstall preflight. Run preflight again.`,
+          ),
+        );
+      }
+      const record = await this.localRecord(pluginId);
+      const currentPreflight = await this.operations.uninstallPreflight({
+        workspaceRoot: this.workspaceRoot,
+        pluginId,
+        pluginRoot: candidate.rootPath,
+        installedBaselineHash: record?.installedBaselineHash,
+      });
+      if (currentPreflight.liveHash !== confirmation.liveHash) {
+        return this.failure(
+          pluginId,
+          pipelineError(
+            "uninstall",
+            "confirmation-stale",
+            `Plugin "${pluginId}" changed after uninstall preflight. Review it again.`,
+          ),
+        );
+      }
+
+      this.setStatus(candidate, {
+        status: "uninstalling",
+        disabledReason: "user",
+        error: null,
+      });
+      try {
+        await this.operations.mutateRecord(
+          this.options.stateDir,
+          this.workspaceRoot,
+          pluginId,
+          (existing) => ({ ...existing, disabled: true }),
+        );
+        await this.options.pluginHost.stop(pluginId);
+        await this.operations.removePath(candidate.rootPath, {
+          recursive: true,
+          force: true,
+          maxRetries: 5,
+          retryDelay: 200,
+        });
+        await this.operations.removePath(this.liveRoot(pluginId), {
+          recursive: true,
+          force: true,
+          maxRetries: 5,
+          retryDelay: 200,
+        });
+        await this.operations.mutateRecord(
+          this.options.stateDir,
+          this.workspaceRoot,
+          pluginId,
+          () => undefined,
+        );
+        this.statuses.delete(pluginId);
+        this.discovery = this.discovery.filter((entry) =>
+          entry.id !== pluginId || resolve(entry.rootPath) !== resolve(candidate.rootPath)
+        );
+        this.emit({ kind: "removed", pluginId });
+        return {
+          ok: true,
+          plugin: {
+            ...this.baseStatus(candidate),
+            status: "disabled",
+            disabledReason: "user",
+          },
+        };
+      } catch (error) {
+        return this.failure(
+          pluginId,
+          pipelineError("uninstall", "delete-failed", errorMessage(error)),
+        );
+      }
+    });
+  }
+
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.abortController.abort();
+    this.options.pluginHost.bumpGeneration();
+    await this.discoveryTail.catch(() => undefined);
+    await Promise.all(
+      [...this.queues.values()]
+        .map((queue) => queue.draining)
+        .filter((draining): draining is Promise<void> => draining !== null),
+    );
+    await this.options.pluginHost.stopAll();
+    this.uninstallConfirmations.clear();
+  }
+
+  private async startInternal(): Promise<void> {
+    try {
+      this.discovery = await this.operations.discover(this.workspaceRoot);
+      await this.seedStatuses();
+      for (const candidate of this.discovery) {
+        if (!candidate.valid || !candidate.manifest) continue;
+        const record = await this.localRecord(candidate.id);
+        if (!record?.approvedHash) continue;
+        this.enqueueSourceRefresh(candidate.id, () =>
+          this.reconcileApprovedCandidate(candidate.id, true));
+      }
+    } catch (error) {
+      throw failureFromUnknown("discovery", "discovery-failed", error);
+    }
+  }
+
+  private async seedStatuses(): Promise<void> {
+    const stateResult = await this.operations.readLocalState(
+      this.options.stateDir,
+      this.workspaceRoot,
+    );
+    if (!stateResult.ok) {
+      throw new PipelineFailure(
+        pipelineError("state", "local-state-unreadable", stateResult.warning),
+      );
+    }
+    for (const candidate of this.discovery) {
+      if (!candidate.valid || !candidate.manifest) continue;
+      const record = stateResult.state.plugins[candidate.id];
+      this.setStatus(candidate, {
+        status: record?.approvedHash
+          ? record.disabled === true
+            ? "disabled"
+            : "queued"
+          : "discovered",
+        disabledReason: record?.disabled === true ? "user" : null,
+        approvedHash: record?.approvedHash ?? null,
+        installedBaselineHash: record?.installedBaselineHash ?? null,
+        diagnostics: [...candidate.diagnostics],
+      });
+    }
+  }
+
+  private async processWatcherBatch(events: readonly WatcherEvent[]): Promise<void> {
+    if (this.disposed) return;
+    const previous = this.discovery;
+    const next = await this.operations.discover(this.workspaceRoot);
+    this.discovery = next;
+    await this.seedStatusesForNewCandidates(next);
+
+    const previousValid = previous.filter(
+      (candidate): candidate is InstalledPluginRecord & { manifest: DohcPluginManifest } =>
+        candidate.valid && candidate.manifest !== null,
+    );
+    const nextValid = next.filter(
+      (candidate): candidate is InstalledPluginRecord & { manifest: DohcPluginManifest } =>
+        candidate.valid && candidate.manifest !== null,
+    );
+    const nextById = new Map(nextValid.map((candidate) => [candidate.id, candidate]));
+    const nextByRoot = new Map(
+      nextValid.map((candidate) => [resolve(candidate.rootPath), candidate]),
+    );
+    const replaced = new Set<string>();
+
+    for (const oldCandidate of previousValid) {
+      const sameId = nextById.get(oldCandidate.id);
+      const sameRoot = nextByRoot.get(resolve(oldCandidate.rootPath));
+      const identityChanged =
+        !sameId ||
+        resolve(sameId.rootPath) !== resolve(oldCandidate.rootPath) ||
+        !sameRoot ||
+        sameRoot.id !== oldCandidate.id;
+      if (!identityChanged) continue;
+
+      const oldRecord = await this.localRecord(oldCandidate.id);
+      const wasInstalled = oldRecord?.approvedHash !== undefined;
+      await this.enqueueActionValue(oldCandidate.id, () =>
+        this.removeOldIdentity(oldCandidate));
+
+      const replacement = sameRoot ?? sameId;
+      if (
+        wasInstalled &&
+        replacement?.valid &&
+        replacement.manifest &&
+        !replaced.has(candidateKey(replacement))
+      ) {
+        replaced.add(candidateKey(replacement));
+        await this.enqueueActionValue(replacement.id, async () => {
+          await this.runFullBuild({
+            candidate: replacement,
+            startRuntime: true,
+            disabledReasonAfterBuild: null,
+            resetCrashAccounting: true,
+            freshInstall: true,
+          });
+        });
+      }
+    }
+
+    for (const candidate of nextValid) {
+      if (replaced.has(candidateKey(candidate))) continue;
+      const sourceRoot = relativeSourceRoot(this.workspaceRoot, candidate.rootPath);
+      if (!events.some((event) => eventTouchesRoot(event, sourceRoot))) continue;
+      const old = previousValid.find((entry) =>
+        entry.id === candidate.id && resolve(entry.rootPath) === resolve(candidate.rootPath)
+      );
+      if (!old) continue;
+      this.enqueueSourceRefresh(candidate.id, () =>
+        this.reconcileApprovedCandidate(candidate.id, false));
+    }
+  }
+
+  private async seedStatusesForNewCandidates(
+    candidates: readonly InstalledPluginRecord[],
+  ): Promise<void> {
+    for (const candidate of candidates) {
+      if (!candidate.valid || !candidate.manifest || this.statuses.has(candidate.id)) {
+        continue;
+      }
+      const record = await this.localRecord(candidate.id);
+      this.setStatus(candidate, {
+        status: record?.approvedHash
+          ? record.disabled === true
+            ? "disabled"
+            : "queued"
+          : "discovered",
+        disabledReason: record?.disabled === true ? "user" : null,
+        approvedHash: record?.approvedHash ?? null,
+        installedBaselineHash: record?.installedBaselineHash ?? null,
+      });
+    }
+  }
+
+  private async reconcileApprovedCandidate(
+    pluginId: string,
+    startRuntime: boolean,
+  ): Promise<void> {
+    const candidate = this.validCandidate(pluginId);
+    if (!candidate) return;
+    const record = await this.localRecord(pluginId);
+    if (!record?.approvedHash) {
+      this.setStatus(candidate, { status: "discovered" });
+      return;
+    }
+    const snapshot = await this.snapshot(candidate);
+    if (!snapshot.ok) return;
+    if (snapshot.value.sourceHash !== record.approvedHash) {
+      await this.holdForApproval(candidate, snapshot.value.sourceHash);
+      return;
+    }
+    this.setStatus(candidate, {
+      sourceHash: snapshot.value.sourceHash,
+      approvedHash: record.approvedHash,
+      installedBaselineHash: record.installedBaselineHash ?? null,
+    });
+    if (record.disabled === true) {
+      this.setStatus(candidate, {
+        status: "disabled",
+        disabledReason: this.statuses.get(pluginId)?.disabledReason ?? "user",
+        runtimeStatus: null,
+      });
+      return;
+    }
+    if (!startRuntime || this.options.pluginHost.getStatus(pluginId)) return;
+    await this.runFullBuild({
+      candidate,
+      startRuntime: true,
+      disabledReasonAfterBuild: null,
+      resetCrashAccounting: true,
+      freshInstall: false,
+    });
+  }
+
+  private async removeOldIdentity(candidate: InstalledPluginRecord): Promise<void> {
+    try {
+      await this.options.pluginHost.stop(candidate.id);
+      await this.operations.mutateRecord(
+        this.options.stateDir,
+        this.workspaceRoot,
+        candidate.id,
+        () => undefined,
+      );
+      await this.operations.removePath(this.liveRoot(candidate.id), {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 200,
+      });
+      this.statuses.delete(candidate.id);
+      this.uninstallConfirmations.delete(candidate.id);
+      this.emit({ kind: "removed", pluginId: candidate.id });
+    } catch (error) {
+      const detail = pipelineError(
+        "uninstall",
+        "identity-cleanup-failed",
+        errorMessage(error),
+      );
+      this.failure(candidate.id, detail);
+      throw new PipelineFailure(detail);
+    }
+  }
+
+  private async runFullBuild(
+    input: FullBuildOptions,
+  ): Promise<PluginPipelineActionResult> {
+    const { candidate } = input;
+    if (!candidate.manifest) {
+      return this.failure(
+        candidate.id,
+        pipelineError("discovery", "invalid-plugin", "Plugin manifest is invalid."),
+      );
+    }
+    const validCandidate = { ...candidate, manifest: candidate.manifest };
+    const oldRuntime = this.options.pluginHost.getStatus(candidate.id) ?? null;
+    let sourceHash: string | null = null;
+    try {
+      const snapshot = await this.snapshotOrThrow(validCandidate);
+      sourceHash = snapshot.sourceHash;
+      const baselineDigest = await hashPluginSourceFiles(snapshot.snapshotRoot);
+      if (baselineDigest.sourceHash !== snapshot.sourceHash) {
+        throw new PipelineFailure(pipelineError(
+          "snapshot",
+          "snapshot-hash-mismatch",
+          `Plugin snapshot hash changed from ${snapshot.sourceHash} to ` +
+            `${baselineDigest.sourceHash} before dependency installation.`,
+        ));
+      }
+
+      this.setStatus(candidate, { status: "installing", error: null });
+      const install = await this.operations.install({
+        workspaceRoot: this.workspaceRoot,
+        pluginId: candidate.id,
+        snapshotRoot: snapshot.snapshotRoot,
+        pnpmPaths: snapshot.pnpmPaths,
+        resourcesBasePath: this.options.resourcesBasePath,
+        pnpmRunnerEntry: this.options.pnpmRunnerEntry,
+        signal: this.abortController.signal,
+      });
+      this.assertInstall(install);
+
+      this.setStatus(candidate, { status: "scanning" });
+      const scan = await this.operations.scan({
+        snapshotRoot: snapshot.snapshotRoot,
+        manifest: candidate.manifest,
+      });
+      this.assertScan(scan);
+      this.setStatus(candidate, { warnings: [...scan.warningLines] });
+
+      this.setStatus(candidate, { status: "building" });
+      const build = await this.operations.build({
+        workspaceRoot: this.workspaceRoot,
+        pluginId: candidate.id,
+        snapshotRoot: snapshot.snapshotRoot,
+        manifest: candidate.manifest,
+        resourcesBasePath: this.options.resourcesBasePath,
+        signal: this.abortController.signal,
+      });
+      const built = this.assertBuild(build);
+      const warnings = [
+        ...scan.warningLines,
+        ...(built.cleanupWarning ? [built.cleanupWarning] : []),
+      ];
+
+      try {
+        await this.operations.writeBaseline({
+          workspaceRoot: this.workspaceRoot,
+          pluginId: candidate.id,
+          baselineDigest,
+          installedBaselineHash: snapshot.sourceHash,
+        });
+        await this.operations.mutateRecord(
+          this.options.stateDir,
+          this.workspaceRoot,
+          candidate.id,
+          () => ({
+            disabled: !input.startRuntime,
+            approvedHash: snapshot.sourceHash,
+            installedBaselineHash: snapshot.sourceHash,
+          }),
+        );
+      } catch (error) {
+        throw failureFromUnknown("state", "state-write-failed", error);
+      }
+
+      if (input.startRuntime) {
+        this.setStatus(candidate, { status: "starting", warnings });
+        if (oldRuntime) await this.options.pluginHost.stop(candidate.id);
+        if (input.resetCrashAccounting) {
+          this.options.pluginHost.resetCrashAccounting(candidate.id);
+        }
+        await this.options.pluginHost.start(
+          built.liveRoot,
+          generatedManifest(candidate.manifest),
+        );
+      }
+
+      return this.success(this.setStatus(candidate, {
+        status: input.startRuntime ? "starting" : "disabled",
+        disabledReason: input.disabledReasonAfterBuild,
+        runtimeStatus: input.startRuntime ? "starting" : null,
+        sourceHash: snapshot.sourceHash,
+        approvedHash: snapshot.sourceHash,
+        installedBaselineHash: snapshot.sourceHash,
+        warnings,
+        error: null,
+      }));
+    } catch (error) {
+      const detail = error instanceof PipelineFailure
+        ? error.detail
+        : pipelineError("runtime", "pipeline-failed", errorMessage(error));
+      if (input.freshInstall && oldRuntime === null) {
+        await this.operations.mutateRecord(
+          this.options.stateDir,
+          this.workspaceRoot,
+          candidate.id,
+          (record) => ({ ...record, disabled: true }),
+        ).catch(() => undefined);
+        this.setStatus(candidate, {
+          status: "disabled-pending-repair",
+          disabledReason: "repair",
+          runtimeStatus: null,
+          sourceHash,
+          error: detail,
+        });
+      } else {
+        this.setStatus(candidate, {
+          status: "failed",
+          runtimeStatus: oldRuntime,
+          sourceHash,
+          error: detail,
+        });
+      }
+      return this.failure(candidate.id, detail);
+    }
+  }
+
+  private async holdForApproval(
+    candidate: InstalledPluginRecord & { manifest: DohcPluginManifest },
+    sourceHash: string,
+  ): Promise<PluginPipelineActionResult> {
+    try {
+      await this.operations.mutateRecord(
+        this.options.stateDir,
+        this.workspaceRoot,
+        candidate.id,
+        (record) => ({ ...record, disabled: true }),
+      );
+      await this.options.pluginHost.stop(candidate.id);
+      const record = await this.localRecord(candidate.id);
+      return this.success(this.setStatus(candidate, {
+        status: "disabled-pending-approval",
+        disabledReason: "approval",
+        runtimeStatus: null,
+        sourceHash,
+        approvedHash: record?.approvedHash ?? null,
+        installedBaselineHash: record?.installedBaselineHash ?? null,
+        error: null,
+      }));
+    } catch (error) {
+      return this.failure(
+        candidate.id,
+        pipelineError("state", "approval-hold-failed", errorMessage(error)),
+      );
+    }
+  }
+
+  private async snapshot(
+    candidate: InstalledPluginRecord & { manifest: DohcPluginManifest },
+  ): Promise<
+    | { ok: true; value: Extract<PluginSourceSnapshotResult, { ok: true }> }
+    | { ok: false; result: PluginPipelineActionResult }
+  > {
+    try {
+      return { ok: true, value: await this.snapshotOrThrow(candidate) };
+    } catch (error) {
+      const detail = error instanceof PipelineFailure
+        ? error.detail
+        : pipelineError("snapshot", "snapshot-failed", errorMessage(error));
+      return { ok: false, result: this.failure(candidate.id, detail) };
+    }
+  }
+
+  private async snapshotOrThrow(
+    candidate: InstalledPluginRecord & { manifest: DohcPluginManifest },
+  ): Promise<Extract<PluginSourceSnapshotResult, { ok: true }>> {
+    this.setStatus(candidate, { status: "snapshotting", error: null });
+    const snapshot = await this.operations.snapshot({
+      workspaceRoot: this.workspaceRoot,
+      dohcDir: this.dohcDir,
+      pluginId: candidate.id,
+      pluginRoot: candidate.rootPath,
+      manifest: candidate.manifest,
+    });
+    if (!snapshot.ok) {
+      throw new PipelineFailure(
+        pipelineError("snapshot", snapshot.error.code, snapshot.error.message),
+      );
+    }
+    this.setStatus(candidate, { sourceHash: snapshot.sourceHash });
+    return snapshot;
+  }
+
+  private assertInstall(result: PluginInstallResult): asserts result is Extract<
+    PluginInstallResult,
+    { ok: true }
+  > {
+    if (!result.ok) {
+      throw new PipelineFailure(
+        pipelineError("install", result.error.code, result.error.message),
+      );
+    }
+  }
+
+  private assertScan(result: PluginLifecycleScanResult): asserts result is Extract<
+    PluginLifecycleScanResult,
+    { ok: true }
+  > {
+    if (!result.ok) {
+      throw new PipelineFailure(
+        pipelineError("scan", result.error.code, result.error.message),
+      );
+    }
+  }
+
+  private assertBuild(result: PluginBuildResult): Extract<
+    PluginBuildResult,
+    { ok: true }
+  > {
+    if (!result.ok) {
+      throw new PipelineFailure(
+        pipelineError("build", result.error.code, result.error.message),
+      );
+    }
+    return result;
+  }
+
+  private async localRecord(pluginId: string): Promise<PluginRecordShape | undefined> {
+    const result = await this.operations.readLocalState(
+      this.options.stateDir,
+      this.workspaceRoot,
+    );
+    if (!result.ok) {
+      throw new PipelineFailure(
+        pipelineError("state", "local-state-unreadable", result.warning),
+      );
+    }
+    return result.state.plugins[pluginId];
+  }
+
+  private validCandidate(
+    pluginId: string,
+  ): (InstalledPluginRecord & { manifest: DohcPluginManifest }) | null {
+    const candidate = this.discovery.find((entry) =>
+      entry.id === pluginId && entry.valid && entry.manifest !== null
+    );
+    return candidate
+      ? candidate as InstalledPluginRecord & { manifest: DohcPluginManifest }
+      : null;
+  }
+
+  private requireValidCandidate(
+    pluginId: string,
+  ): InstalledPluginRecord & { manifest: DohcPluginManifest } {
+    const candidate = this.validCandidate(pluginId);
+    if (!candidate) {
+      throw new PipelineFailure(
+        pipelineError(
+          "discovery",
+          "plugin-not-found",
+          `Plugin "${pluginId}" is not a valid discovered plugin.`,
+        ),
+      );
+    }
+    return candidate;
+  }
+
+  private liveRoot(pluginId: string): string {
+    return join(this.dohcDir, "plugins", pluginIdToSafePath(pluginId));
+  }
+
+  private async hasLiveBundle(liveRoot: string): Promise<boolean> {
+    try {
+      const [bundle, manifest] = await Promise.all([
+        this.operations.inspectPath(join(liveRoot, "bundle.mjs")),
+        this.operations.inspectPath(join(liveRoot, "dohc-plugin.generated.json")),
+      ]);
+      return bundle.isFile() && manifest.isFile();
+    } catch {
+      return false;
+    }
+  }
+
+  private baseStatus(candidate: InstalledPluginRecord): MutablePluginStatus {
+    return {
+      id: candidate.id,
+      directoryName: candidate.directoryName,
+      rootPath: candidate.rootPath,
+      valid: candidate.valid && candidate.manifest !== null,
+      status: candidate.valid ? "discovered" : "invalid",
+      disabledReason: null,
+      runtimeStatus: null,
+      sourceHash: null,
+      approvedHash: null,
+      installedBaselineHash: null,
+      diagnostics: [...candidate.diagnostics],
+      warnings: [],
+      error: null,
+    };
+  }
+
+  private setStatus(
+    candidate: InstalledPluginRecord,
+    patch: Partial<MutablePluginStatus>,
+  ): MutablePluginStatus {
+    const current = this.statuses.get(candidate.id) ?? this.baseStatus(candidate);
+    const next: MutablePluginStatus = {
+      ...current,
+      ...patch,
+      directoryName: candidate.directoryName,
+      rootPath: candidate.rootPath,
+      valid: candidate.valid && candidate.manifest !== null,
+      diagnostics: patch.diagnostics
+        ? [...patch.diagnostics]
+        : [...current.diagnostics],
+      warnings: patch.warnings ? [...patch.warnings] : [...current.warnings],
+      error: patch.error === undefined ? cloneError(current.error) : cloneError(patch.error),
+    };
+    this.statuses.set(candidate.id, next);
+    this.emit({ kind: "changed", plugin: cloneStatus(next) });
+    return next;
+  }
+
+  private success(plugin: PluginPipelinePluginStatus): PluginPipelineActionResult {
+    return { ok: true, plugin: cloneStatus(plugin) };
+  }
+
+  private failure(pluginId: string, error: PluginPipelineError): PluginPipelineActionResult {
+    const current = this.statuses.get(pluginId);
+    if (current && current.error !== error) {
+      this.setStatus(
+        this.discovery.find((candidate) => candidate.id === pluginId) ?? {
+          id: current.id,
+          directoryName: current.directoryName,
+          rootPath: current.rootPath,
+          manifest: null,
+          diagnostics: current.diagnostics,
+          valid: current.valid,
+        },
+        { error },
+      );
+    }
+    return {
+      ok: false,
+      error: { ...error },
+      plugin: current ? cloneStatus(this.statuses.get(pluginId) ?? current) : null,
+    };
+  }
+
+  private emit(event: PluginPipelineStatusEvent): void {
+    if (this.disposed) return;
+    const listener = this.options.onStatusChange;
+    if (!listener) return;
+    queueMicrotask(() => {
+      if (!this.disposed) listener(event);
+    });
+  }
+
+  private enqueueSourceRefresh(pluginId: string, run: () => Promise<void>): void {
+    if (this.disposed) return;
+    const queue = this.queueFor(pluginId);
+    if (queue.sourceRefreshQueued) return;
+    queue.sourceRefreshQueued = true;
+    queue.jobs.push({
+      sourceRefresh: true,
+      run: async () => {
+        queue.sourceRefreshQueued = false;
+        await run();
+      },
+    });
+    this.drain(pluginId, queue);
+  }
+
+  private enqueueAction(
+    pluginId: string,
+    run: () => Promise<PluginPipelineActionResult>,
+  ): Promise<PluginPipelineActionResult> {
+    return this.enqueueActionValue(pluginId, async () => {
+      try {
+        return await run();
+      } catch (error) {
+        const detail = error instanceof PipelineFailure
+          ? error.detail
+          : pipelineError("runtime", "action-failed", errorMessage(error));
+        return this.failure(pluginId, detail);
+      }
+    });
+  }
+
+  private enqueueActionValue<T>(pluginId: string, run: () => Promise<T>): Promise<T> {
+    if (this.disposed) {
+      return Promise.reject(new Error("Plugin pipeline is closed."));
+    }
+    return new Promise<T>((resolveResult, rejectResult) => {
+      const queue = this.queueFor(pluginId);
+      queue.jobs.push({
+        sourceRefresh: false,
+        run: async () => {
+          try {
+            resolveResult(await run());
+          } catch (error) {
+            rejectResult(error);
+          }
+        },
+      });
+      this.drain(pluginId, queue);
+    });
+  }
+
+  private queueFor(pluginId: string): PluginJobQueue {
+    const existing = this.queues.get(pluginId);
+    if (existing) return existing;
+    const queue: PluginJobQueue = {
+      jobs: [],
+      sourceRefreshQueued: false,
+      draining: null,
+    };
+    this.queues.set(pluginId, queue);
+    return queue;
+  }
+
+  private drain(pluginId: string, queue: PluginJobQueue): void {
+    if (queue.draining) return;
+    queue.draining = (async () => {
+      while (queue.jobs.length > 0) {
+        const job = queue.jobs.shift();
+        if (!job) continue;
+        try {
+          await job.run();
+        } catch (error) {
+          if (job.sourceRefresh) {
+            const candidate = this.validCandidate(pluginId);
+            if (candidate) {
+              this.failure(
+                pluginId,
+                pipelineError("runtime", "refresh-failed", errorMessage(error)),
+              );
+            }
+          }
+        }
+      }
+    })().finally(() => {
+      queue.draining = null;
+      if (queue.jobs.length > 0) {
+        this.drain(pluginId, queue);
+      } else if (this.queues.get(pluginId) === queue) {
+        this.queues.delete(pluginId);
+      }
+    });
+  }
+}
