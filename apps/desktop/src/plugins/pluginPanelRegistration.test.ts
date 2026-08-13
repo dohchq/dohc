@@ -75,6 +75,32 @@ describe("plugin panel registration", () => {
     ).rejects.toThrow(`Plugin root escapes the workspace: ${outside}.`);
   });
 
+  it("requires the canonical plugin root to be under the workspace plugins tree", async () => {
+    const workspace = await scratch("dohc-plugin-panel-workspace-");
+    const sourcePlugin = join(workspace, "src", "hello-plugin");
+    await writePlugin(sourcePlugin);
+
+    await expect(
+      loadPluginPanelRegistration({
+        workspaceRoot: workspace,
+        pluginRoot: "src/hello-plugin",
+        pluginId: "hello-plugin",
+        panelId: "main",
+      }),
+    ).rejects.toThrow(/must be under the workspace plugins\/ tree/i);
+
+    const installedPlugin = join(workspace, "plugins", "hello-plugin");
+    await writePlugin(installedPlugin);
+    await expect(
+      loadPluginPanelRegistration({
+        workspaceRoot: workspace,
+        pluginRoot: "plugins/hello-plugin",
+        pluginId: "hello-plugin",
+        panelId: "main",
+      }),
+    ).resolves.toMatchObject({ pluginRoot: installedPlugin });
+  });
+
   it("refuses executable plugins from shared-with-me", async () => {
     const workspace = await scratch("dohc-plugin-panel-workspace-");
     const pluginRoot = join(workspace, "shared-with-me", "hello-plugin");

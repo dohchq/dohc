@@ -155,7 +155,6 @@ const IGNORED_SITE_SEGMENTS = new Set([
   ".turbo",
   ".yarn",
   "node_modules",
-  "plugins",
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -211,6 +210,9 @@ function stripSiteIgnoredAliasSuffix(segment: string): string {
 
 function hasIgnoredSiteSegment(path: string): boolean {
   const segments = path.replaceAll("\\", "/").toLowerCase().split("/");
+  if (stripSiteIgnoredAliasSuffix(segments[0] ?? "") === "plugins") {
+    return true;
+  }
   return segments.some((segment, index) => {
     const stripped = stripSiteIgnoredAliasSuffix(segment);
     const nextStripped =

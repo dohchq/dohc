@@ -1,4 +1,4 @@
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, sep } from "node:path";
 import { resolveWorkspaceFile } from "../workspaces/workspaceAssets";
 import { readPluginManifestFile } from "./pluginManifest";
@@ -42,6 +42,20 @@ export async function loadPluginPanelRegistration(input: {
     requestedRoot,
     "write",
   );
+  const canonicalWorkspaceRoot = await realpath(input.workspaceRoot);
+  const canonicalRelative = relative(canonicalWorkspaceRoot, pluginRoot).replaceAll(
+    "\\",
+    "/",
+  );
+  const canonicalSegments = canonicalRelative.split("/");
+  if (
+    canonicalSegments.length < 2 ||
+    canonicalSegments[0]?.toLowerCase() !== "plugins"
+  ) {
+    throw new Error(
+      `Plugin root must be under the workspace plugins/ tree: ${input.pluginRoot}.`,
+    );
+  }
   if (!(await stat(pluginRoot)).isDirectory()) {
     throw new Error(`Plugin root is not a directory: ${input.pluginRoot}.`);
   }
