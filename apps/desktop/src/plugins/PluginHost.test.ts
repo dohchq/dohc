@@ -294,6 +294,45 @@ describe("PluginHost", () => {
     ).rejects.toThrow('Plugin "hello-plugin" is not running.');
   });
 
+  it("rejects invokeCommand while the plugin is still starting", async () => {
+    const root = await workspaceRoot();
+    let invokeCommandCalls = 0;
+    let resolveActivation:
+      | ((result: { commands: string[] }) => void)
+      | undefined;
+    const activation = new Promise<{ commands: string[] }>((resolve) => {
+      resolveActivation = resolve;
+    });
+    const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
+      request<T = unknown>(method: string): Promise<T> {
+        if (method === PLUGIN_HOST_METHODS.activate) {
+          return activation as Promise<T>;
+        }
+        if (method === PLUGIN_HOST_METHODS.invokeCommand) invokeCommandCalls += 1;
+        return Promise.resolve({} as T);
+      },
+      dispose: () => Promise.resolve(),
+    }));
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await expect(
+      host.invokeCommand("hello-plugin", "hello.write"),
+    ).rejects.toThrow('Plugin "hello-plugin" is still starting.');
+
+    expect(invokeCommandCalls).toBe(0);
+    resolveActivation?.({ commands: [] });
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not finish activation.",
+    );
+  });
+
   it("rejects a second start while the first start continues", async () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness();
@@ -483,6 +522,33 @@ describe("PluginHost", () => {
     } finally {
       process.off("unhandledRejection", onUnhandledRejection);
     }
+  });
+
+  it("rejects duplicate command ids returned by activation", async () => {
+    const root = await workspaceRoot();
+    const statuses: PluginRuntimeStatus[] = [];
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "duplicate-command" },
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+      onStatusChange: (_pluginId, status) => statuses.push(status),
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => statuses.includes("failed") || statuses.includes("ready"),
+      "Duplicate command activation did not settle.",
+    );
+
+    expect(statuses).toContain("failed");
+    expect(statuses).not.toContain("ready");
+    expect(host.getStderrLog("hello-plugin")).toContain(
+      'Activation failed: Plugin activation returned duplicate command id "hello.write". Command ids must be unique.',
+    );
   });
 
   it("reports a post-activation asynchronous crash", async () => {
@@ -954,6 +1020,46 @@ describe("PluginHost", () => {
     expect(harness.deactivateRequestCount).toBe(1);
   });
 
+  it("does not respawn when a crash races a stop in failure accounting", async () => {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "crash-after-activate" },
+    });
+    let host: PluginHost;
+    let nowCalls = 0;
+    let stopDuringAccounting: Promise<void> | undefined;
+    host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+      now: () => {
+        nowCalls += 1;
+        if (nowCalls === 2) {
+          stopDuringAccounting = host.stop("hello-plugin");
+        }
+        return nowCalls;
+      },
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready before the crash.",
+    );
+
+    void host.invokeCommand("hello-plugin", "hello.write").catch(() => undefined);
+    await waitFor(
+      () => stopDuringAccounting !== undefined,
+      "Plugin crash did not reach failure accounting.",
+    );
+    await stopDuringAccounting;
+    await delay(100);
+
+    expect(harness.spawnedPluginIds).toEqual(["hello-plugin"]);
+    expect(host.getStatus("hello-plugin")).toBeUndefined();
+  });
+
   it("stops the plugin process and its heartbeat descendant", async () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness({
@@ -979,9 +1085,10 @@ describe("PluginHost", () => {
     expect(secondSize).toBeGreaterThan(firstSize);
 
     await host.stop("hello-plugin");
-    const stoppedSize = (await stat(heartbeatPath)).size;
     await delay(500);
-    expect((await stat(heartbeatPath)).size).toBe(stoppedSize);
+    const settledSize = (await stat(heartbeatPath)).size;
+    await delay(500);
+    expect((await stat(heartbeatPath)).size).toBe(settledSize);
   }, 15_000);
 
   it("discards an activation result from an older host generation", async () => {

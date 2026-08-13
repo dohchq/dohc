@@ -81,9 +81,22 @@ describe("DohcPluginManifest", () => {
   it.each([
     ["uppercase", "Example"],
     ["spaces", "example plugin"],
-    ["over 214 characters", "a".repeat(215)],
   ])("rejects a name with %s", (_case, name) => {
     expect(DohcPluginManifest.safeParse({ ...minimalManifest, name }).success).toBe(false);
+  });
+
+  it("accepts a 214-character name and reports the limit for 215 characters", () => {
+    expect(DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      name: "a".repeat(214),
+    }).success).toBe(true);
+
+    const result = DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      name: "a".repeat(215),
+    });
+    if (result.success) throw new Error("expected the name limit to reject the manifest");
+    expect(result.error.issues.map((issue) => issue.message).join("; ")).toContain("214");
   });
 
   it("rejects duplicate panel ids", () => {

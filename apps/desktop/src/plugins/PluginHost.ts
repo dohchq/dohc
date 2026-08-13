@@ -122,10 +122,21 @@ function isPluginActivateResult(value: unknown): value is PluginActivateResult {
   );
 }
 
+function findDuplicateCommandId(commands: readonly string[]): string | undefined {
+  const commandIds = new Set<string>();
+  for (const commandId of commands) {
+    if (commandIds.has(commandId)) return commandId;
+    commandIds.add(commandId);
+  }
+  return undefined;
+}
+
 export class PluginHost {
   private readonly plugins = new Map<string, PluginRecord>();
   private readonly pendingStarts = new Set<string>();
   private readonly abortedStarts = new Set<string>();
+  // A clean stop deliberately does not reset this count. A fast clean stop is
+  // indistinguishable from a fast pre-ready failure, so crash-loop protection wins.
   private readonly consecutiveFastFailures = new Map<string, number>();
   private readonly activationTimeoutMs: number;
   private currentGeneration = 0;
@@ -208,12 +219,16 @@ export class PluginHost {
 
   /** Runs a command the plugin registered during activation and returns its result. */
   async invokeCommand(pluginId: string, commandId: string): Promise<unknown> {
-    const spawn = this.plugins.get(pluginId)?.current;
-    if (!spawn?.transport) {
+    const record = this.plugins.get(pluginId);
+    const spawn = record?.current;
+    if (!record || !spawn?.transport) {
       throw new Error(`Plugin "${pluginId}" is not running.`);
     }
     if (spawn.stopping) {
       throw new Error(`Plugin "${pluginId}" is stopping.`);
+    }
+    if (record.status === "starting") {
+      throw new Error(`Plugin "${pluginId}" is still starting.`);
     }
     return spawn.transport.request(PLUGIN_HOST_METHODS.invokeCommand, {
       commandId,
@@ -319,6 +334,17 @@ export class PluginHost {
         spawn,
         new Error(
           'Plugin activation returned an invalid result: "commands" must be an array of non-empty strings.',
+        ),
+      );
+      return;
+    }
+    const duplicateCommandId = findDuplicateCommandId(result.commands);
+    if (duplicateCommandId !== undefined) {
+      void this.handleActivationFailure(
+        record,
+        spawn,
+        new Error(
+          `Plugin activation returned duplicate command id "${duplicateCommandId}". Command ids must be unique.`,
         ),
       );
       return;

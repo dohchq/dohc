@@ -31,6 +31,21 @@ function createStdioHarness() {
   };
 }
 
+function createLinkedTransports() {
+  const callerToHandler = new PassThrough();
+  const handlerToCaller = new PassThrough();
+  return {
+    caller: createProcessTransport({
+      input: handlerToCaller,
+      output: callerToHandler,
+    }),
+    handler: createProcessTransport({
+      input: callerToHandler,
+      output: handlerToCaller,
+    }),
+  };
+}
+
 describe("@dohc/sdk/node", () => {
   it("sends nested sdk requests and resolves matching results", async () => {
     const harness = createStdioHarness();
@@ -120,6 +135,36 @@ describe("@dohc/sdk/node", () => {
     await expect(harness.nextLine()).resolves.toBe(
       '{"jsonrpc":"2.0","id":"fail-1","error":{"code":-32603,"message":"Activation failed"}}\n',
     );
+  });
+
+  it("returns an RPC error when a request handler result is not serializable", async () => {
+    const harness = createLinkedTransports();
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    harness.handler.onRequest("sdk.request", () => circular);
+    const controller = new AbortController();
+    const tooSlow = new Error("Unserializable result waited for the request timeout.");
+    let promptTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const pending = harness.caller.request("plugin.circular", undefined, {
+      signal: controller.signal,
+      timeoutMs: 5_000,
+    });
+    const result = await Promise.race([
+      pending.catch((error: unknown) => error),
+      new Promise<Error>((resolve) => {
+        promptTimer = setTimeout(() => resolve(tooSlow), 250);
+      }),
+    ]);
+    if (promptTimer) clearTimeout(promptTimer);
+    if (result === tooSlow) controller.abort();
+
+    expect(result).toBeInstanceOf(DohcSdkError);
+    expect(result).toMatchObject({
+      code: "-32603",
+      message:
+        'JSON-RPC method "sdk.request" returned a result that was not serializable.',
+    });
   });
 
   it("writes notifications without request ids", async () => {

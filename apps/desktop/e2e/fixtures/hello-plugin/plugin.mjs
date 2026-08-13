@@ -39,6 +39,14 @@ switch (mode) {
       },
     };
     break;
+  case "duplicate-command":
+    handler = {
+      activate(ctx) {
+        registerHelloCommand(ctx);
+        registerHelloCommand(ctx);
+      },
+    };
+    break;
   case "async-throw-after-activate":
     handler = {
       activate(ctx) {
