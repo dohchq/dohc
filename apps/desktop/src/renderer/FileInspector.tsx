@@ -850,6 +850,8 @@ function useAutosavedTextDraft(props: {
   // Assigned during render, read at call time — `readOnlyRef` precedent.
   const disabledRef = useRef(props.disabled);
   disabledRef.current = props.disabled;
+  const switchReadPendingRef = useRef(props.switchReadPending);
+  switchReadPendingRef.current = props.switchReadPending;
   const writesBlocked = () =>
     disabledRef.current === true ||
     props.switchUnresyncedRef.current === true ||
@@ -936,8 +938,9 @@ function useAutosavedTextDraft(props: {
     ) {
       const current = props.localBuffer.getSnapshot();
       if (
+        activeLocalBuffer.current === props.localBuffer &&
         props.switchUnresyncedRef.current &&
-        !props.switchReadPending &&
+        !switchReadPendingRef.current &&
         current.initialized &&
         current.contentHash === snapshot.contentHash
       ) {
@@ -1123,10 +1126,11 @@ function useAutosavedTextDraft(props: {
       }
       const current = props.localBuffer.getSnapshot();
       if (
+        activeLocalBuffer.current === props.localBuffer &&
         props.switchUnresyncedRef.current &&
-        !props.switchReadPending &&
+        !switchReadPendingRef.current &&
         current.initialized &&
-        current.contentHash === props.contentHash
+        current.contentHash === latestSnapshot.current.contentHash
       ) {
         props.switchUnresyncedRef.current = false;
       }
@@ -1281,6 +1285,14 @@ function useAutosavedTextDraft(props: {
   const { workspaceId, path, registerDraftFlush, localBuffer } = props;
   useEffect(() => {
     unmounted.current = false;
+    const retireAfterSettlement = () => {
+      localBuffer.retireCapturedDraft(localSource.current);
+      localBuffer.releaseUnusedDraft();
+      void localBuffer.settled().then(() => {
+        localBuffer.retireCapturedDraft(localSource.current);
+        localBuffer.releaseUnusedDraft();
+      });
+    };
     return () => {
       unmounted.current = true;
       if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -1290,25 +1302,22 @@ function useAutosavedTextDraft(props: {
             // A replacement effect means the component is still mounted on a
             // different buffer. Its refs now belong to that version; only
             // settle this cleanup's captured buffer.
-            if (!unmounted.current) {
-              localBuffer.retireCapturedDraft(localSource.current);
-              localBuffer.releaseUnusedDraft();
+            if (activeLocalBuffer.current !== localBuffer) {
+              retireAfterSettlement();
               return;
             }
             if (unsavedDraft.current) {
               unsavedDraft.current = false;
               captureOrphanedDraft(workspaceId, path, latestDraft.current);
             }
-            localBuffer.retireCapturedDraft(localSource.current);
-            localBuffer.releaseUnusedDraft();
+            retireAfterSettlement();
           });
         } else {
           // A version-switch render can move the draft into recovery before
           // this buffer-scoped cleanup runs. Retire only this pane's work on
           // the buffer the effect captured; the replacement version may
           // already contain a peer draft.
-          localBuffer.retireCapturedDraft(localSource.current);
-          localBuffer.releaseUnusedDraft();
+          retireAfterSettlement();
         }
         return;
       }
@@ -1317,18 +1326,37 @@ function useAutosavedTextDraft(props: {
       // branch while the refusal stays live, so this view is gone before a
       // later success can let it act on the lift. Capturing here needs nothing
       // to survive: it is the last moment this draft exists.
+      const current = localBuffer.getSnapshot();
+      if (
+        activeLocalBuffer.current === localBuffer &&
+        props.switchUnresyncedRef.current &&
+        !switchReadPendingRef.current &&
+        current.initialized &&
+        current.contentHash === latestSnapshot.current.contentHash
+      ) {
+        props.switchUnresyncedRef.current = false;
+      }
       if (writesBlocked()) {
         unsavedDraft.current = false;
         captureOrphanedDraft(workspaceId, path, latestDraft.current);
-        localBuffer.retireCapturedDraft(localSource.current);
-        localBuffer.releaseUnusedDraft();
+        retireAfterSettlement();
         return;
       }
       const text = latestDraft.current;
+      const operationSettlement = flushInFlight.current;
       void writeDraftNow({
         textSnapshot: text,
         captureOnFailure: true,
         releaseUnusedDraft: true,
+      }).then(() => {
+        if (operationSettlement) {
+          void operationSettlement.then(
+            retireAfterSettlement,
+            retireAfterSettlement,
+          );
+        } else {
+          retireAfterSettlement();
+        }
       });
     };
     // `disabled` is deliberately NOT a dep: as one it made every flip run this
@@ -2081,6 +2109,8 @@ function MarkdownView(props: {
   // the flip. See writeDraftNow and the unmount flush.
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
+  const switchReadPendingRef = useRef(props.switchReadPending);
+  switchReadPendingRef.current = props.switchReadPending;
   // The single question all three write paths ask. Both refs, because they
   // close different gaps: `readOnlyRef` a flip this component rendered,
   // `writesRefusedRef` an engine refusal or unapplied switch resync (already
@@ -2527,10 +2557,11 @@ function MarkdownView(props: {
       }
       const current = props.localBuffer.getSnapshot();
       if (
+        activeLocalBuffer.current === props.localBuffer &&
         props.switchUnresyncedRef.current &&
-        !props.switchReadPending &&
+        !switchReadPendingRef.current &&
         current.initialized &&
-        current.contentHash === props.contentHash
+        current.contentHash === latestSnapshot.current.contentHash
       ) {
         props.switchUnresyncedRef.current = false;
       }
@@ -2847,6 +2878,14 @@ function MarkdownView(props: {
   const { workspaceId, path, localBuffer } = props;
   useEffect(() => {
     unmounted.current = false;
+    const retireAfterSettlement = () => {
+      localBuffer.retireCapturedDraft(localSource.current);
+      localBuffer.releaseUnusedDraft();
+      void localBuffer.settled().then(() => {
+        localBuffer.retireCapturedDraft(localSource.current);
+        localBuffer.releaseUnusedDraft();
+      });
+    };
     return () => {
       unmounted.current = true;
       draftRevision.current += 1;
@@ -2859,24 +2898,21 @@ function MarkdownView(props: {
             // A buffer-key replacement reuses this component and its refs.
             // Never consume the replacement version's draft from an older
             // cleanup callback; retire only the buffer captured above.
-            if (!unmounted.current) {
-              localBuffer.retireCapturedDraft(localSource.current);
-              localBuffer.releaseUnusedDraft();
+            if (activeLocalBuffer.current !== localBuffer) {
+              retireAfterSettlement();
               return;
             }
             if (unsavedDraft.current) {
               unsavedDraft.current = false;
               captureOrphanedDraft(workspaceId, path, latestDraft.current);
             }
-            localBuffer.retireCapturedDraft(localSource.current);
-            localBuffer.releaseUnusedDraft();
+            retireAfterSettlement();
           });
         } else {
           // A reopen can capture and clear the local pending flag during
           // render. Finish that same captured buffer's retirement here; never
           // reach through to the replacement version's shared document.
-          localBuffer.retireCapturedDraft(localSource.current);
-          localBuffer.releaseUnusedDraft();
+          retireAfterSettlement();
         }
         return;
       }
@@ -2898,20 +2934,39 @@ function MarkdownView(props: {
       // `openingRef` holds the last RENDERED value and `writesBlocked` reads
       // the parent's ref, so neither depends on this view living long enough
       // to observe the refusal. Kept as a backstop, not as covered code.
+      const current = localBuffer.getSnapshot();
+      if (
+        activeLocalBuffer.current === localBuffer &&
+        props.switchUnresyncedRef.current &&
+        !switchReadPendingRef.current &&
+        current.initialized &&
+        current.contentHash === latestSnapshot.current.contentHash
+      ) {
+        props.switchUnresyncedRef.current = false;
+      }
       if (writesBlocked() || openingRef.current) {
         captureOrphanedDraft(workspaceId, path, text);
-        localBuffer.retireCapturedDraft(localSource.current);
-        localBuffer.releaseUnusedDraft();
+        retireAfterSettlement();
         return;
       }
       // Join the same queue as every mounted save. The hash is read when this
       // task reaches the head, after any in-flight write has advanced it.
       // Capture the text now because the editor is gone before the task runs.
       latestDraft.current = text;
+      const operationSettlement = flushInFlight.current;
       void writeDraftNow({
         textSnapshot: text,
         captureOnFailure: true,
         releaseUnusedDraft: true,
+      }).then(() => {
+        if (operationSettlement) {
+          void operationSettlement.then(
+            retireAfterSettlement,
+            retireAfterSettlement,
+          );
+        } else {
+          retireAfterSettlement();
+        }
       });
     };
   }, [workspaceId, path, localBuffer]);
