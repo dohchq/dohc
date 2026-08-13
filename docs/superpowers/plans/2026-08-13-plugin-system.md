@@ -95,6 +95,9 @@ Three pieces. The engine stays the core.
   partition instead — per plugin because cookies scope by host, not
   port, so two loopback-served plugins in one partition could read each
   other's sessions. A PR3 surface, not part of PR1b's generic panel.
+  Site discovery must also exclude `plugins/` roots
+  (`discoverSites` currently would promote a plugin's panel code to a
+  workspace site) — lands with PR1b/PR2.
 
 Language split: anything that must be true (history, atomicity, replication,
 gates) is Rust below the daemon RPC. The host, SDK, pipeline, and plugins
@@ -192,9 +195,10 @@ Spike first, then three stacked PRs, each independently green.
   plugin — re-enable is the reverse of auto-disable; uninstall is not.
   Uninstalling a user-modified plugin warns before it runs that the
   edited source is deleted and recoverable only file-by-file from
-  history until folder restore ships (versioning stage 2); the engine's
-  moment log retains every byte, so nothing is truly lost, but the
-  visible path back is per-file today.
+  history until folder restore ships (versioning stage 2). The moment
+  log retains captured files — but text over 128 KiB and binaries over
+  5 MiB are never captured, so the warning must name any such files as
+  genuinely unrecoverable, per the irreversible-change invariant.
   (PR1a's host already honors a `disabled` flag and auto-disables a
   plugin that crash-loops, so a broken plugin can never wedge app
   startup.) Packaged installs have no system Node, so dependency
@@ -206,7 +210,8 @@ Spike first, then three stacked PRs, each independently green.
   attack surface, so dependencies that require install scripts are
   unsupported until a shipped-Node decision is made. `--ignore-scripts`
   skips silently, so after install the pipeline scans installed
-  packages for declared install/postinstall hooks and fails the plugin
+  packages for any declared lifecycle hook pnpm would have run
+  (preinstall, install, postinstall, prepare) and fails the plugin
   build naming each one — an error an author's agent can act on.
   Plugins distribute `pnpm-lock.yaml` (the lockfile pnpm actually
   reads); a plugin authored with npm runs `pnpm import` before
@@ -221,7 +226,10 @@ Spike first, then three stacked PRs, each independently green.
 
 - The store, registry, signing, and hosted execution (cloud; phase 3).
 - Agent tools over MCP (contribution point ships in the manifest shape, but
-  wiring to agents comes after PR3).
+  wiring to agents comes after PR3). That milestone must resolve one open
+  invariant question before shipping: an agent invoking a plugin tool that
+  writes via `node:fs` would bypass the locks and gates the agent itself
+  is bound by — tool-invoked writes need a routing or declaration answer.
 - Versioning stage 2 (changesets, folder and point-in-time restore,
   rename-safe restore, the 128 KiB capture-cap fix). It is the feature
   plugin forking leans on, and it is Rust engine work sequenced after the
