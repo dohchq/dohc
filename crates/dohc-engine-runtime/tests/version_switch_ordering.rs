@@ -89,6 +89,7 @@ async fn binary_head_retires_its_ydoc_lineage_before_the_unsettled_scan() {
             Regime::LocalOnly,
             Ydoc::wire().plaintext_insert(0, "durable text"),
             None,
+            None,
             true,
             None,
             3,

@@ -228,6 +228,7 @@ function makeTransport(
   localSeq: { current: number },
   writesRefused: { current: boolean },
 ): EngineYDocTransport {
+  let lineageGeneration = 1;
   return {
     async open() {
       const result = await bridge().openEngineYDocSession({
@@ -235,9 +236,15 @@ function makeTransport(
         path,
         sessionId,
       });
+      if (result.available && result.lineageGeneration !== undefined) {
+        lineageGeneration = result.lineageGeneration;
+      }
       return {
         available: result.available,
         ...(result.initialUpdate ? { initialUpdate: result.initialUpdate } : {}),
+        ...(result.available && result.lineageGeneration !== undefined
+          ? { lineageGeneration: result.lineageGeneration }
+          : {}),
         ...(result.notInVersion ? { notInVersion: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
         ...(result.removalInProgress
@@ -245,7 +252,7 @@ function makeTransport(
           : {}),
       };
     },
-    applyLocalUpdate(update) {
+    applyLocalUpdate(update, updateGeneration) {
       if (writesRefused.current) return;
       // Fire-and-forget: main journals + settles. A transient IPC error never
       // tears the editor down; the mirror doc keeps the edit and the next update
@@ -255,14 +262,38 @@ function makeTransport(
       localSeq.current += 1;
       const seq = localSeq.current;
       void bridge()
-        .applyEngineYDocUpdate({ sessionId, update, seq })
+        .applyEngineYDocUpdate({
+          sessionId,
+          update,
+          seq,
+          lineageGeneration: updateGeneration,
+        })
         .catch(() => undefined);
     },
     onRemoteUpdate(listener) {
       return bridge().onEngineYDocRemoteUpdate((event) => {
         if (event.sessionId !== sessionId) return;
-        listener(event.update);
+        listener(event.update, event.lineageGeneration);
       });
+    },
+    onLineageReplacement(listener) {
+      return bridge().onEngineYDocLineageReplacement((event) => {
+        if (event.sessionId !== sessionId) return;
+        if (event.lineageGeneration <= lineageGeneration) return;
+        void listener({
+          update: event.update,
+          recoveredPaths: event.recoveredPaths,
+          lineageGeneration: event.lineageGeneration,
+        });
+      });
+    },
+    async acknowledgeLineageReplacement(nextLineageGeneration) {
+      const result = await bridge().acknowledgeEngineYDocLineageReplacement({
+        sessionId,
+        lineageGeneration: nextLineageGeneration,
+      });
+      lineageGeneration = nextLineageGeneration;
+      return result.updates;
     },
     async close() {
       await bridge().closeEngineYDocSession({ sessionId }).catch(() => undefined);
@@ -360,6 +391,7 @@ export function useEngineDoc(input: {
     // are async now).
     let deletionQueue: Promise<void> = Promise.resolve();
     let deletionPending = false;
+    const retiredDraftObservers = new Map<Y.Doc, () => void>();
 
     const sessionId = nextSessionId();
     const localSeq = { current: 0 };
@@ -484,13 +516,70 @@ export function useEngineDoc(input: {
       if (event.seq >= localSeq.current) reportSaveState("saved");
     };
 
+    const observeSaveState = (doc: Y.Doc): void => {
+      detachSaveObserver?.();
+      const onUpdate = () => {
+        if (cancelled) return;
+        if (writesRefused.current) {
+          refreshDeletionDraft(doc);
+          return;
+        }
+        reportSaveState("saving");
+      };
+      doc.on("update", onUpdate);
+      detachSaveObserver = () => doc.off("update", onUpdate);
+    };
+
+    const preserveRetiredDocument = (retired: Y.Doc): void => {
+      writesRefused.current = true;
+      let draftId: number | null = null;
+      let projectionQueue: Promise<void> = Promise.resolve();
+      const persist = (): void => {
+        const bytes = Y.encodeStateAsUpdate(retired);
+        const crude = crudeMarkdownFromDoc(retired);
+        if (draftId === null) {
+          draftId = captureOrphanedDraft(workspaceId, path, crude);
+        } else {
+          replaceOrphanedDraft(workspaceId, path, draftId, crude);
+        }
+        const capturedDraftId = draftId;
+        projectionQueue = projectionQueue
+          .then(async () => {
+            const markdown = await markdownFromSnapshot(bytes);
+            replaceOrphanedDraft(
+              workspaceId,
+              path,
+              capturedDraftId,
+              markdown,
+            );
+          })
+          .catch((error: unknown) => {
+            console.error(
+              `[desktop] could not refine the recovery draft for ${workspaceId}:${path} after lineage replacement:`,
+              error,
+            );
+          });
+      };
+      // A dirty mirror may contain the update main refused when replacement
+      // began. Persist it synchronously before acknowledging. If a transaction
+      // already in the editor lands before React unmounts the retired doc, the
+      // observer refreshes that same durable draft.
+      if (saveStateRef.current !== "saved") persist();
+      const onRetiredUpdate = () => persist();
+      retired.on("update", onRetiredUpdate);
+      retiredDraftObservers.set(retired, () => retired.off("update", onRetiredUpdate));
+      setOutcome(null);
+    };
+
     const openAttempt = (async (): Promise<EngineYDocBinding> => {
       // Subscribe before open: main registers the live entry before the IPC
       // answer returns, so deletion can otherwise notify an empty listener set
       // in that hand-over window. The async boundary catches an older preload
       // that does not expose this channel without delaying the open itself.
       unsubscribeSaveState = bridge().onEngineYDocSaveState(onSaveState);
-      return bindEngineYDoc(transport);
+      return bindEngineYDoc(transport, {
+        onDocumentReplacing: preserveRetiredDocument,
+      });
     })();
     void openAttempt
       .then((bound) => {
@@ -501,6 +590,13 @@ export function useEngineDoc(input: {
           return;
         }
         binding = bound;
+        bound.onDocumentReplaced((replacement) => {
+          if (cancelled || token !== openTokenRef.current) return;
+          writesRefused.current = false;
+          reportSaveState("saved");
+          observeSaveState(replacement);
+          setOutcome({ key, token, kind: "bound", doc: replacement });
+        });
         // Preload, don't block: by the time any real deletion can arrive,
         // the module is very likely already resolved, so a draft's markdown
         // lands within the same microtask as its snapshot. The snapshot in
@@ -533,16 +629,7 @@ export function useEngineDoc(input: {
         // may clear it — nothing here guesses "saved". The seed apply happened
         // before this observer attached, so it never shows a spurious "saving".
         const doc = bound.doc;
-        const onUpdate = () => {
-          if (cancelled) return;
-          if (writesRefused.current) {
-            refreshDeletionDraft(doc);
-            return;
-          }
-          reportSaveState("saving");
-        };
-        doc.on("update", onUpdate);
-        detachSaveObserver = () => doc.off("update", onUpdate);
+        observeSaveState(doc);
         if (deletionPending) captureDeletion(doc);
         setOutcome({ key, token, kind: "bound", doc });
       })
@@ -562,6 +649,8 @@ export function useEngineDoc(input: {
       cancelled = true;
       unsubscribeSaveState?.();
       detachSaveObserver?.();
+      for (const detach of retiredDraftObservers.values()) detach();
+      retiredDraftObservers.clear();
       // Settle + close the engine session in main (releases the single-canonical
       // reservation so a version/file switch can reopen the same object), then
       // drop the mirror doc.

@@ -118,7 +118,7 @@ describe("CloudLogin", () => {
     );
   });
 
-  it("gates workspace sync rather than badging an unsynced workspace as synced", async () => {
+  it("enables sync for an unsynced workspace", async () => {
     bridgeMock.cloudStatus.mockResolvedValue({
       connected: true,
       email: "ice@dohc.dev",
@@ -127,19 +127,70 @@ describe("CloudLogin", () => {
 
     render(<CloudLogin workspaceId="ws-1" />);
 
-    const button = (await screen.findByTestId(
-      "cloud-enable-sync",
-    )) as HTMLButtonElement;
-    expect(button.disabled).toBe(true);
-    expect(screen.getByTestId("cloud-sync-unavailable").textContent).toContain(
-      "isn't ready yet",
+    fireEvent.click(await screen.findByTestId("cloud-enable-sync"));
+    await waitFor(() =>
+      expect(bridgeMock.cloudEnableSync).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+      }),
+    );
+    expect(await screen.findByTestId("cloud-workspace-synced")).toBeTruthy();
+  });
+
+  it("prompts before an unsynced workspace enrolls its protected-file key", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: true,
+      email: "ice@dohc.dev",
+      workspaceSynced: false,
+      workspaceSecretState: "protected-key-present",
+    });
+    bridgeMock.cloudEnableSync
+      .mockRejectedValueOnce(
+        new Error("Passphrase required to protect synced secrets."),
+      )
+      .mockResolvedValueOnce(undefined);
+
+    render(<CloudLogin workspaceId="ws-1" />);
+    fireEvent.click(await screen.findByTestId("cloud-enable-sync"));
+    const input = await screen.findByTestId("cloud-sync-passphrase");
+    const enable = screen.getByTestId("cloud-enable-sync") as HTMLButtonElement;
+    expect(screen.getByTestId("cloud-sync-error").textContent).toBe(
+      "Enter at least 8 characters to protect synced secrets.",
+    );
+    fireEvent.change(input, { target: { value: "1234567" } });
+    expect(enable.disabled).toBe(true);
+    expect(bridgeMock.cloudEnableSync).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(input, { target: { value: "12345678" } });
+    expect(enable.disabled).toBe(false);
+    fireEvent.click(screen.getByTestId("cloud-enable-sync"));
+
+    await waitFor(() =>
+      expect(bridgeMock.cloudEnableSync).toHaveBeenLastCalledWith({
+        workspaceId: "ws-1",
+        passphrase: "12345678",
+      }),
+    );
+    expect(await screen.findByTestId("cloud-workspace-synced")).toBeTruthy();
+  });
+
+  it("states the minimum when the engine rejects an enrollment passphrase", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: true,
+      email: "ice@dohc.dev",
+      workspaceSynced: false,
+      workspaceSecretState: "protected-key-present",
+    });
+    bridgeMock.cloudEnableSync.mockRejectedValueOnce(
+      new Error("Passphrase must be at least 8 characters."),
     );
 
-    // enableSync runs its IPC call synchronously, so a gated click that still
-    // enrolled would be visible here.
-    fireEvent.click(button);
-    expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
-    expect(screen.queryByTestId("cloud-workspace-synced")).toBeNull();
+    render(<CloudLogin workspaceId="ws-1" />);
+    fireEvent.click(await screen.findByTestId("cloud-enable-sync"));
+
+    expect((await screen.findByTestId("cloud-sync-error")).textContent).toBe(
+      "Enter at least 8 characters to protect synced secrets.",
+    );
+    expect(screen.getByTestId("cloud-sync-passphrase")).toBeTruthy();
   });
 
   it("shows the copyable sync code for a synced workspace (0P-C join handle)", async () => {
@@ -265,10 +316,8 @@ describe("CloudLogin", () => {
     );
   });
 
-  // Enrollment is gated (#356), but the protect/unlock buttons on a SYNCED
-  // workspace still call enableSync, so its workspace-switch guard is live
-  // code. This is the only test that switches workspaces mid-flight, which is
-  // what makes deleting that guard fail rather than pass silently.
+  // This is the only test that switches workspaces mid-flight, which is what
+  // makes deleting the stale-result guard fail rather than pass silently.
   it("does not let a stale protect result mark the next workspace as synced", async () => {
     const staleEnable = deferred<void>();
     bridgeMock.cloudStatus.mockImplementation(async (payload) => ({

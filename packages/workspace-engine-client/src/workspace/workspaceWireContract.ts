@@ -16,6 +16,7 @@ export const WORKSPACE_METHOD = {
   searchQueryChatMessagesGranular: "search.queryChatMessagesGranular",
   watcherStatus: "watcher.status",
   captureFlush: "capture.flush",
+  captureReconcile: "capture.reconcile",
   captureSetAuthor: "capture.setAuthor",
 } as const;
 
@@ -236,6 +237,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: SearchQueryChatMessagesGranularParams;
   [WORKSPACE_METHOD.watcherStatus]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.captureReconcile]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
 };
 
@@ -250,6 +252,7 @@ export type WorkspaceMethodResultMap = {
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: GranularChatMessageSearchResponse;
   [WORKSPACE_METHOD.watcherStatus]: WatcherStatusResult;
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResult;
+  [WORKSPACE_METHOD.captureReconcile]: CaptureFlushResult;
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorResult;
 };
 
@@ -393,6 +396,12 @@ const GranularChatMessageSearchResponseSchema = mutableStruct({
   saturated: Schema.Boolean,
 });
 
+const CaptureFlushResultSchema = mutableStruct({
+  settled: Schema.Boolean,
+  running: Schema.Boolean,
+  degraded: Schema.Boolean,
+});
+
 const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.open]: mutableStruct({ workspace: Schema.String }),
   [WORKSPACE_METHOD.close]: mutableStruct({ closed: Schema.Boolean }),
@@ -421,11 +430,8 @@ const WorkspaceResultSchemas = {
     degraded: Schema.Boolean,
     terminal: Schema.Boolean,
   }),
-  [WORKSPACE_METHOD.captureFlush]: mutableStruct({
-    settled: Schema.Boolean,
-    running: Schema.Boolean,
-    degraded: Schema.Boolean,
-  }),
+  [WORKSPACE_METHOD.captureFlush]: CaptureFlushResultSchema,
+  [WORKSPACE_METHOD.captureReconcile]: CaptureFlushResultSchema,
   [WORKSPACE_METHOD.captureSetAuthor]: mutableStruct({
     updated: Schema.Literal(true),
   }),

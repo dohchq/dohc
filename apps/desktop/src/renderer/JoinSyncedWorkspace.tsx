@@ -30,6 +30,8 @@ export function JoinSyncedWorkspace(props: {
   const [gate, setGate] = useState<Gate>({ kind: "checking" });
   const [code, setCode] = useState("");
   const [folder, setFolder] = useState<string | null>(null);
+  const [needsPassphrase, setNeedsPassphrase] = useState(false);
+  const [passphrase, setPassphrase] = useState("");
   const [joining, setJoining] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
@@ -83,6 +85,7 @@ export function JoinSyncedWorkspace(props: {
       const result = await bridge().cloudJoinWorkspace({
         syncCode: code.trim(),
         rootPath: folder,
+        ...(needsPassphrase ? { passphrase } : {}),
       });
       // Unmounted mid-join: ignore the handler's result gracefully — the
       // user backed out, so never navigate them into the workspace.
@@ -98,14 +101,26 @@ export function JoinSyncedWorkspace(props: {
       props.onWorkspaceReady(result.workspace);
     } catch (cause) {
       if (cancelledRef.current) return;
-      setError(joinErrorMessage(cause));
+      const message = joinErrorMessage(cause);
+      if (/passphrase required to unlock synced secrets/i.test(message)) {
+        setNeedsPassphrase(true);
+        setError(
+          "This workspace has protected files. Enter the protected-file passphrase to join.",
+        );
+      } else {
+        setError(message);
+      }
     } finally {
       if (!cancelledRef.current) setJoining(false);
     }
   }
 
   const canJoin =
-    gate.kind === "signed-in" && !joining && code.trim().length > 0 && folder !== null;
+    gate.kind === "signed-in" &&
+    !joining &&
+    code.trim().length > 0 &&
+    folder !== null &&
+    (!needsPassphrase || passphrase.length > 0);
 
   return (
     <div
@@ -156,7 +171,12 @@ export function JoinSyncedWorkspace(props: {
             <input
               data-testid="join-sync-code"
               value={code}
-              onChange={(event) => setCode(event.currentTarget.value)}
+              onChange={(event) => {
+                setCode(event.currentTarget.value);
+                setNeedsPassphrase(false);
+                setPassphrase("");
+                setError(null);
+              }}
               placeholder="dohc-sync:…"
               spellCheck={false}
               className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
@@ -181,6 +201,19 @@ export function JoinSyncedWorkspace(props: {
               </button>
             </div>
           </div>
+          {needsPassphrase ? (
+            <label className="block text-[11px] font-medium text-subtle">
+              Protected-file passphrase
+              <input
+                data-testid="join-sync-passphrase"
+                value={passphrase}
+                type="password"
+                spellCheck={false}
+                onChange={(event) => setPassphrase(event.currentTarget.value)}
+                className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
+              />
+            </label>
+          ) : null}
           <PrimaryButton
             type="button"
             data-testid="join-workspace-start"

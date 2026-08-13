@@ -31,16 +31,20 @@ pub mod replication;
 pub mod ydoc;
 
 pub use durable::{
-    archive_active_lineage_in_tx, claim_base, claim_base_in_tx, close_session,
-    encode_origination_base_in_tx, ensure_marker, load_doc_in_tx, load_persisted, maybe_compact,
-    read_last_settled_sha, read_marker, read_marker_in_tx, record_local_update,
-    record_local_update_creating_marker, record_local_update_creating_marker_guarded,
+    archive_active_lineage_in_tx, claim_base, claim_base_at_relay, claim_base_at_relay_in_tx,
+    claim_base_in_tx, close_session, encode_origination_base_in_tx, ensure_marker, load_doc_in_tx,
+    load_persisted, mark_base_coordinate_absent_in_tx, maybe_compact, read_last_settled_sha,
+    read_marker, read_marker_in_tx, record_base_coordinate, record_base_coordinate_in_tx,
+    record_local_update, record_local_update_creating_marker,
+    record_local_update_creating_marker_guarded,
+    record_local_update_creating_marker_guarded_for_lineage,
     record_local_update_creating_marker_with_hook, record_local_update_with_origin,
-    record_local_update_with_origin_and_hook, record_update_in_tx, replace_lineage_with_successor,
-    replace_lineage_with_successor_in_tx, rewrite_bare_marker_content_kind, settle,
-    validate_remote_update_for, validate_remote_update_with_pending, AppendOutcome, ClaimOutcome,
-    CloseOutcome, CompactOutcome, LineageClaimStatus, Marker, OriginationBase, PersistedDoc,
-    Regime, SettleOutcome, SuccessorInstallOutcome, SuccessorReplacement,
+    record_local_update_with_origin_and_hook, record_update_for_lineage_in_tx, record_update_in_tx,
+    replace_lineage_with_successor, replace_lineage_with_successor_in_tx,
+    rewrite_bare_marker_content_kind, settle, validate_remote_update_for,
+    validate_remote_update_with_pending, AppendOutcome, BaseCoordinateRecord, BaseRelayCoordinate,
+    ClaimOutcome, CloseOutcome, CompactOutcome, LineageClaimStatus, Marker, OriginationBase,
+    PersistedDoc, Regime, SettleOutcome, SuccessorInstallOutcome, SuccessorReplacement,
 };
 pub use error::CollabError;
 pub use lease::{Lease, LeaseRegistry};
@@ -95,14 +99,18 @@ impl DocKey {
 
 fn check_identifier(value: &str, reason: &'static str) -> Result<(), CollabError> {
     if value.is_empty() || value.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES {
-        return Err(CollabError::InvalidIdentifier { reason });
+        return Err(CollabError::InvalidIdentifier {
+            reason: reason.to_owned(),
+        });
     }
     // Reject NUL and other control characters: the settle job id and payload
     // fingerprints are NUL-delimited (`"{ws}\0{ver}\0{obj}\0…"`), so a NUL (or
     // other control char) in a coordinate could forge a collision across
     // distinct keys. Identifiers are opaque handles, never control bytes.
     if value.bytes().any(|b| b.is_ascii_control()) {
-        return Err(CollabError::InvalidIdentifier { reason });
+        return Err(CollabError::InvalidIdentifier {
+            reason: reason.to_owned(),
+        });
     }
     Ok(())
 }

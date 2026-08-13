@@ -658,6 +658,238 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
+  it("replaces an independently rooted lineage and binds later writes to the winner claim", async () => {
+    const engine = seedPlaintextEngine("losing root");
+    const winner = new Y.Doc();
+    winner.getText("plainText").insert(0, "winning root");
+    const winnerUpdate = Y.encodeStateAsUpdate(winner);
+    let recordCount = 0;
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.open) {
+          const response = await engine.sendRequest(request);
+          return {
+            ...response,
+            result: {
+              ...(response.result as Record<string, unknown>),
+              lineageClaimId: null,
+            },
+          };
+        }
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          recordCount += 1;
+          return engine.sendRequest(request);
+        }
+        if (request.method === YDOC_METHOD.resync) {
+          return {
+            id: request.id,
+            result: {
+              initialUpdateBase64: btoa(
+                String.fromCharCode(...winnerUpdate),
+              ),
+              lineageClaimId: "winning-claim",
+              recoveredPaths: ["notes/live (recovered).txt"],
+            },
+          };
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    const losingDoc = session.doc;
+    const replacements: Array<{ doc: Y.Doc; recoveredPaths: string[] }> = [];
+    session.onLineageReplaced((doc, recoveredPaths) => {
+      replacements.push({ doc, recoveredPaths });
+    });
+
+    await session.resync();
+
+    expect(session.doc).not.toBe(losingDoc);
+    expect(session.doc.getText("plainText").toString()).toBe("winning root");
+    expect(losingDoc.getText("plainText").toString()).toBe("losing root");
+    expect(replacements).toEqual([
+      {
+        doc: session.doc,
+        recoveredPaths: ["notes/live (recovered).txt"],
+      },
+    ]);
+
+    await session.applyLocalTextEdit({
+      root: "plainText",
+      index: "winning root".length,
+      insert: " fresh",
+    });
+    expect(recordCount).toBe(2);
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("never replays a refused losing-lineage edit into the winner", async () => {
+    const engine = seedPlaintextEngine("losing root");
+    const winner = new Y.Doc();
+    winner.getText("plainText").insert(0, "winning root");
+    const winnerUpdate = Y.encodeStateAsUpdate(winner);
+    let records = 0;
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          records += 1;
+          if (records > 1) throw new Error("ydoc-lineage-stale");
+          const response = await engine.sendRequest(request);
+          return {
+            ...response,
+            result: {
+              ...(response.result as Record<string, unknown>),
+              lineageClaimId: "losing-claim",
+            },
+          };
+        }
+        if (request.method === YDOC_METHOD.resync) {
+          return {
+            id: request.id,
+            result: {
+              initialUpdateBase64: btoa(String.fromCharCode(...winnerUpdate)),
+              lineageClaimId: "winning-claim",
+              recoveredPaths: ["notes/live (recovered).txt"],
+            },
+          };
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    const losingDoc = session.doc;
+    const replacements: Y.Doc[] = [];
+    session.onLineageReplaced((doc) => replacements.push(doc));
+
+    await expect(
+      session.applyLocalTextEdit({
+        root: "plainText",
+        index: "losing root".length,
+        insert: " preserved edit",
+      }),
+    ).rejects.toMatchObject({ code: "lineage-changed" });
+
+    expect(session.doc).toBe(losingDoc);
+    expect(session.doc.getText("plainText").toString()).toBe(
+      "losing root preserved edit",
+    );
+    expect(session.doc.getText("plainText").toString()).not.toContain(
+      "winning root",
+    );
+    expect(replacements).toEqual([]);
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("never resends missing local state across a changed lineage claim", async () => {
+    const engine = seedPlaintextEngine("losing root");
+    const winner = new Y.Doc();
+    winner.getText("plainText").insert(0, "winning root");
+    const winnerUpdate = Y.encodeStateAsUpdate(winner);
+    const busy = new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: "engine-store-busy",
+        retry: "afterBackoff",
+      },
+      new Error("daemon response"),
+    );
+    let winnerInstalled = false;
+    let recordCount = 0;
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.open) {
+          const response = await engine.sendRequest(request);
+          return {
+            ...response,
+            result: {
+              ...(response.result as Record<string, unknown>),
+              lineageClaimId: "losing-claim",
+            },
+          };
+        }
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          recordCount += 1;
+          if (recordCount === 1) {
+            const response = await engine.sendRequest(request);
+            return {
+              ...response,
+              result: {
+                ...(response.result as Record<string, unknown>),
+                lineageClaimId: "losing-claim",
+              },
+            };
+          }
+          throw busy;
+        }
+        if (request.method === YDOC_METHOD.resync) {
+          if (!winnerInstalled) {
+            const response = await engine.sendRequest(request);
+            return {
+              ...response,
+              result: {
+                ...(response.result as Record<string, unknown>),
+                lineageClaimId: "losing-claim",
+              },
+            };
+          }
+          return {
+            id: request.id,
+            result: {
+              initialUpdateBase64: btoa(String.fromCharCode(...winnerUpdate)),
+              lineageClaimId: "winning-claim",
+              recoveredPaths: [],
+            },
+          };
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    await expect(
+      session.applyLocalTextEdit({
+        root: "plainText",
+        index: "losing root".length,
+        insert: " preserved edit",
+      }),
+    ).rejects.toThrow("engine-store-busy");
+    expect(session.missingLocalState).toBe(true);
+    winnerInstalled = true;
+
+    await expect(session.resendMissingState()).rejects.toMatchObject({
+      code: "lineage-changed",
+    });
+    expect(recordCount).toBe(3);
+    expect(session.doc.getText("plainText").toString()).toBe(
+      "losing root preserved edit",
+    );
+    adapter.dispose();
+  });
+
   it("always sends ydoc.close after an unrecoverable poisoned record chain", async () => {
     const engine = seedPlaintextEngine();
     const recordFailure = new Error("injected record refusal");
@@ -718,7 +950,10 @@ describe("YdocLiveAdapter", () => {
         methods.push(request.method);
         if (request.method === YDOC_METHOD.recordUpdate) {
           await recordHeld;
-          return { id: request.id, result: { seq: 1 } };
+          return {
+            id: request.id,
+            result: { seq: 1, lineageClaimId: null },
+          };
         }
         return engine.sendRequest(request);
       },

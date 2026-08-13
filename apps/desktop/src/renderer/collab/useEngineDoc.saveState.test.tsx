@@ -20,13 +20,21 @@ import { useEngineDoc } from "./useEngineDoc";
 afterEach(cleanup);
 
 type SaveStateListener = (event: EngineYDocSaveStateEvent) => void;
+type LineageReplacementListener = (event: {
+  sessionId: string;
+  update: Uint8Array;
+  recoveredPaths: string[];
+  lineageGeneration: number;
+}) => void;
 
 function harnessBridge() {
   const saveStateListeners = new Set<SaveStateListener>();
   const remoteUpdateListeners = new Set<
     (event: { sessionId: string; update: Uint8Array }) => void
   >();
+  const lineageReplacementListeners = new Set<LineageReplacementListener>();
   const applied: Array<{ sessionId: string; seq: number }> = [];
+  const acknowledgedGenerations: number[] = [];
   let openedSessionId: string | null = null;
   const doc = new Y.Doc();
   doc.getMap("meta").set("contentKind", "plain-text");
@@ -48,7 +56,11 @@ function harnessBridge() {
       if (removalInProgress) {
         return { available: false, removalInProgress };
       }
-      return { available: true, initialUpdate: Y.encodeStateAsUpdate(doc) };
+      return {
+        available: true,
+        initialUpdate: Y.encodeStateAsUpdate(doc),
+        lineageGeneration: 1,
+      };
     },
     async applyEngineYDocUpdate(payload: { sessionId: string; seq: number }) {
       applied.push({ sessionId: payload.sessionId, seq: payload.seq });
@@ -58,6 +70,16 @@ function harnessBridge() {
     ) => {
       remoteUpdateListeners.add(listener);
       return () => remoteUpdateListeners.delete(listener);
+    },
+    onEngineYDocLineageReplacement: (listener: LineageReplacementListener) => {
+      lineageReplacementListeners.add(listener);
+      return () => lineageReplacementListeners.delete(listener);
+    },
+    async acknowledgeEngineYDocLineageReplacement(payload: {
+      lineageGeneration: number;
+    }) {
+      acknowledgedGenerations.push(payload.lineageGeneration);
+      return { updates: [] };
     },
     onEngineYDocSaveState: (listener: SaveStateListener) => {
       saveStateListeners.add(listener);
@@ -82,6 +104,22 @@ function harnessBridge() {
     const event = { sessionId: openedSessionId, update };
     act(() => {
       for (const listener of [...remoteUpdateListeners]) listener(event);
+    });
+  }
+
+  function emitLineageReplacement(text: string): void {
+    if (openedSessionId === null) throw new Error("session not open yet");
+    const replacement = new Y.Doc();
+    replacement.getMap("meta").set("contentKind", "plain-text");
+    replacement.getText("plainText").insert(0, text);
+    const event = {
+      sessionId: openedSessionId,
+      update: Y.encodeStateAsUpdate(replacement),
+      recoveredPaths: [],
+      lineageGeneration: 2,
+    };
+    act(() => {
+      for (const listener of [...lineageReplacementListeners]) listener(event);
     });
   }
 
@@ -113,7 +151,9 @@ function harnessBridge() {
     emit,
     emitNow,
     emitRemoteEdit,
+    emitLineageReplacement,
     applied,
+    acknowledgedGenerations,
     sessionId: () => openedSessionId,
     setRemovalInProgress(value: typeof removalInProgress) {
       removalInProgress = value;
@@ -124,6 +164,8 @@ function harnessBridge() {
   };
 }
 
+let lastBoundDoc: Y.Doc | null = null;
+
 function Harness(props: { workspaceId: string; path: string; enabled?: boolean }) {
   const [retryKey, setRetryKey] = useState(0);
   const engine = useEngineDoc({
@@ -132,6 +174,7 @@ function Harness(props: { workspaceId: string; path: string; enabled?: boolean }
     enabled: props.enabled ?? true,
     retryKey,
   });
+  if (engine.doc !== null) lastBoundDoc = engine.doc;
   const drafts = useOrphanedDrafts(props.workspaceId, props.path);
   return (
     <div>
@@ -169,6 +212,7 @@ beforeEach(() => {
   harness = harnessBridge();
   vi.stubGlobal("dohcDesktop", harness.api);
   resetOrphanedDrafts();
+  lastBoundDoc = null;
 });
 
 afterEach(() => {
@@ -200,6 +244,37 @@ it("never flips back to Saved on a timer — only a real settle report clears it
   // Only main's real report clears it.
   harness.emit("saved", harness.applied.at(-1)!.seq);
   expect(screen.getByTestId("state").textContent).toBe("saved");
+});
+
+it("observes unsaved edits on a replacement document", async () => {
+  await mountBound();
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+
+  expect(screen.getByTestId("state").textContent).toBe("saving");
+  expect(harness.applied).toHaveLength(1);
+});
+
+it("persists a late edit on the losing mirror during replacement", async () => {
+  await mountBound();
+  const losingDoc = lastBoundDoc!;
+
+  harness.emitLineageReplacement("winner");
+  act(() => {
+    const text = losingDoc.getText("plainText");
+    text.insert(text.length, "!");
+  });
+
+  await waitFor(() =>
+    expect(screen.getByTestId("draft").textContent).toBe("seed!"),
+  );
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  expect(harness.applied).toHaveLength(0);
+  expect(screen.getByTestId("available").textContent).toBe("true");
 });
 
 it("shows the failure when a settle fails, instead of reading Saved", async () => {

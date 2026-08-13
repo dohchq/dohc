@@ -2,6 +2,7 @@ import {
   RelayOriginDivergedError,
   RelayUnauthorizedError,
   type PullWorkspaceFromRelayResult,
+  type MaterializeRelayPullPage,
   type PushWorkspaceToRelayResult,
   type RecoverRelayOriginResult,
   type SharingDeclined,
@@ -11,7 +12,9 @@ import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
 export interface RelaySyncOperations {
   push(): Promise<PushWorkspaceToRelayResult>;
-  pull(): Promise<PullWorkspaceFromRelayResult>;
+  pull(
+    materializePage: MaterializeRelayPullPage,
+  ): Promise<PullWorkspaceFromRelayResult>;
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
 }
 
@@ -152,36 +155,38 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     const beforePending = pendingChangeCount;
     const bootstrapPass = bootstrapPullPending;
     const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
-    const pullResult = await options.capture.runRelaySync(async () => {
-      // A join-bootstrap engine is pull-only until its first pull succeeds:
-      // a fresh join must never append ops before it has the remote state.
-      if (!bootstrapPass) {
+    const pullResult = await options.capture.runRelaySync(
+      async (materializePage) => {
+        // A join-bootstrap engine is pull-only until its first pull succeeds:
+        // a fresh join must never append ops before it has the remote state.
+        if (!bootstrapPass) {
+          try {
+            passSharingDeclined.push(...(await operations.push()).sharingDeclined);
+          } catch (error) {
+            if (!(error instanceof RelayOriginDivergedError)) throw error;
+            // The local engine.db was restored-from-older or cloned, so its
+            // origin diverged from the relay's authoritative record. Re-baseline
+            // onto a fresh origin — preserving local-only work as conflicts where
+            // it clashes, never dropping it — then push under the fresh origin.
+            await operations.recoverOrigin();
+            passSharingDeclined.push(...(await operations.push()).sharingDeclined);
+          }
+        }
         try {
-          passSharingDeclined.push(...(await operations.push()).sharingDeclined);
+          return await operations.pull(materializePage);
         } catch (error) {
           if (!(error instanceof RelayOriginDivergedError)) throw error;
-          // The local engine.db was restored-from-older or cloned, so its
-          // origin diverged from the relay's authoritative record. Re-baseline
-          // onto a fresh origin — preserving local-only work as conflicts where
-          // it clashes, never dropping it — then push under the fresh origin.
+          // A pull can find that this machine's local origin disagrees with its
+          // own relay echo. Re-baseline that origin, preserve its local suffix,
+          // and retry the pass instead of backing off against the same page.
           await operations.recoverOrigin();
-          passSharingDeclined.push(...(await operations.push()).sharingDeclined);
+          if (!bootstrapPass) {
+            passSharingDeclined.push(...(await operations.push()).sharingDeclined);
+          }
+          return operations.pull(materializePage);
         }
-      }
-      try {
-        return await operations.pull();
-      } catch (error) {
-        if (!(error instanceof RelayOriginDivergedError)) throw error;
-        // A pull can find that this machine's local origin disagrees with its
-        // own relay echo. Re-baseline that origin, preserve its local suffix,
-        // and retry the pass instead of backing off against the same page.
-        await operations.recoverOrigin();
-        if (!bootstrapPass) {
-          passSharingDeclined.push(...(await operations.push()).sharingDeclined);
-        }
-        return operations.pull();
-      }
-    });
+      },
+    );
     // Only a FULLY successful pull (materialized + cursor committed inside
     // runRelaySync) completes the bootstrap; a throw above leaves the next
     // retry pull-only.

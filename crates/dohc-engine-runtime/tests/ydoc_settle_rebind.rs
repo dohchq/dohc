@@ -10,7 +10,7 @@ use dohc_engine_runtime::{
     WorkspaceSupervisor,
 };
 use dohc_engine_storage::EngineStore;
-use dohc_engine_sync::{LeaseProbe, ReplicationEnvelope, apply_ydoc_envelope};
+use dohc_engine_sync::{LeaseProbe, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
 use dohc_engine_testkit::{ScratchDir, try_make_dir_alias};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -63,7 +63,7 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
 
-    let (key, expected_head_sha) = {
+    let (key, expected_head_sha, lineage_claim_id) = {
         let mut store = EngineStore::open(&db, 1).expect("open store");
         let mut versions = VersionedTextStore::new(&mut store);
         versions
@@ -96,21 +96,35 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
 
         let doc = dohc_engine_collab::Ydoc::wire();
         doc.plaintext_insert(0, "client");
-        dohc_engine_collab::claim_base(
-            &mut store,
-            &key,
-            ContentKind::Plaintext,
-            &doc.encode_full_state(),
-            &NoFaults,
-            3,
-        )
-        .expect("claim replicated base");
+        let base = doc.encode_full_state();
+        let lineage_claim_id = dohc_engine_storage::hex_sha256(&base);
+        let base_sha = store.put_binary_blob(&base).expect("base update blob");
+        let base_envelope = ReplicationEnvelope {
+            workspace_id: WS.to_owned(),
+            origin_id: "identity-refusal-peer".to_owned(),
+            origin_seq: 0,
+            relay_seq: Some(0),
+            op_kind: "ydoc.update".to_owned(),
+            payload: serde_json::json!({
+                "versionId": "main",
+                "objectId": key.object_id,
+                "path": PATH,
+                "contentKind": "plaintext",
+                "updateBlobSha256": base_sha.clone(),
+                "lineageClaimId": base_sha,
+                "isBaseState": true
+            }),
+            recorded_at_ms: 3,
+        };
+        apply_ydoc_envelope(&mut store, &base_envelope, &NoFaults, &NoLiveLeases)
+            .expect("apply verified base");
         let remote = doc.plaintext_insert(6, " remote");
         let remote_sha = store.put_binary_blob(&remote).expect("remote update blob");
         let envelope = ReplicationEnvelope {
             workspace_id: WS.to_owned(),
             origin_id: "identity-refusal-peer".to_owned(),
-            origin_seq: 0,
+            origin_seq: 1,
+            relay_seq: Some(1),
             op_kind: "ydoc.update".to_owned(),
             payload: serde_json::json!({
                 "versionId": "main",
@@ -118,13 +132,14 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
                 "path": WRONG_PATH,
                 "contentKind": "plaintext",
                 "updateBlobSha256": remote_sha,
+                "lineageClaimId": lineage_claim_id.clone(),
                 "isBaseState": false
             }),
             recorded_at_ms: 4,
         };
         apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLive)
             .expect("park stale-path remote update");
-        (key, head.blob_sha256)
+        (key, head.blob_sha256, lineage_claim_id)
     };
     std::fs::create_dir_all(scratch.path().join("notes")).expect("notes dir");
     std::fs::write(scratch.path().join(PATH), "client").expect("seed disk");
@@ -137,6 +152,7 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
             key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
+            Some(lineage_claim_id),
             Some(expected_head_sha),
             "identity-refusal-session".to_owned(),
             Arc::new(NoRecorder),
@@ -218,6 +234,7 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
             Regime::LocalOnly,
             update,
             None,
+            None,
             true,
             None,
             20,
@@ -232,6 +249,7 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
             key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
+            state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-rebind".to_owned(),
             Arc::new(NoRecorder),
@@ -310,6 +328,7 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
             key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
+            state.lineage_claim_id.clone(),
             None,
             "session-rebind".to_owned(),
             Arc::new(NoRecorder),
@@ -361,6 +380,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
             Regime::LocalOnly,
             update,
             None,
+            None,
             true,
             None,
             20,
@@ -375,6 +395,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
             key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
+            state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-prune".to_owned(),
             Arc::new(NoRecorder),
@@ -447,6 +468,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
             Regime::LocalOnly,
             update,
             None,
+            None,
             true,
             None,
             70,
@@ -461,6 +483,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
             reopened.key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
+            reopened.lineage_claim_id.clone(),
             reopened.head_blob_sha256.clone(),
             "session-prune-2".to_owned(),
             Arc::new(NoRecorder),
@@ -510,6 +533,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
             Regime::LocalOnly,
             update,
             None,
+            None,
             true,
             None,
             20,
@@ -524,6 +548,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
             key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
+            state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-retire".to_owned(),
             Arc::new(NoRecorder),
@@ -589,6 +614,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
             Regime::LocalOnly,
             update,
             None,
+            None,
             true,
             None,
             60,
@@ -603,6 +629,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
             reopened.key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
+            reopened.lineage_claim_id.clone(),
             reopened.head_blob_sha256.clone(),
             "session-retire-2".to_owned(),
             Arc::new(NoRecorder),
@@ -656,6 +683,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             Regime::LocalOnly,
             first,
             None,
+            None,
             true,
             None,
             20,
@@ -670,6 +698,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
+            state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-portable".to_owned(),
             Arc::new(NoRecorder),
@@ -693,6 +722,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             Regime::LocalOnly,
             second,
             None,
+            None,
             false,
             None,
             40,
@@ -710,6 +740,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
+            state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-portable".to_owned(),
             Arc::new(NoRecorder),
@@ -755,6 +786,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
+            state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-portable".to_owned(),
             Arc::new(NoRecorder),
@@ -811,6 +843,7 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
             Regime::LocalOnly,
             update,
             None,
+            None,
             true,
             None,
             20,
@@ -827,6 +860,7 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
             key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
+            state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-blocked".to_owned(),
             recorder.clone(),
@@ -871,6 +905,7 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
             key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
+            state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-blocked".to_owned(),
             recorder.clone(),
@@ -896,6 +931,7 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
             key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
+            state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-blocked".to_owned(),
             recorder,

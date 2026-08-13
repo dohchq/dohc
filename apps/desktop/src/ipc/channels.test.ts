@@ -487,38 +487,63 @@ describe("update channel drift guard", () => {
 });
 
 describe("parseEngineYDocRemoteUpdateEvent (preload boundary)", () => {
-  it("accepts a bounded sessionId + a real Uint8Array, rebuilding only validated fields", () => {
+  it("accepts a bounded sessionId, real Uint8Array, and lineage generation", () => {
     const update = new Uint8Array([1, 2, 3]);
     const parsed = parseEngineYDocRemoteUpdateEvent({
       sessionId: "s-1",
       update,
+      lineageGeneration: 2,
       // An extra field must never cross the boundary.
       evil: "drop me",
     });
-    expect(parsed).toEqual({ sessionId: "s-1", update });
+    expect(parsed).toEqual({ sessionId: "s-1", update, lineageGeneration: 2 });
     expect((parsed as unknown as Record<string, unknown>).evil).toBeUndefined();
   });
 
   it("rejects a missing field, a bad sessionId, and a non-Uint8Array update", () => {
     const update = new Uint8Array([1]);
-    expect(parseEngineYDocRemoteUpdateEvent({ update })).toBeNull();
-    expect(parseEngineYDocRemoteUpdateEvent({ sessionId: "s", update: [1, 2, 3] })).toBeNull();
+    expect(parseEngineYDocRemoteUpdateEvent({ update, lineageGeneration: 1 })).toBeNull();
     expect(
-      parseEngineYDocRemoteUpdateEvent({ sessionId: "s", update: update.buffer }),
+      parseEngineYDocRemoteUpdateEvent({
+        sessionId: "s",
+        update: [1, 2, 3],
+        lineageGeneration: 1,
+      }),
     ).toBeNull();
-    expect(parseEngineYDocRemoteUpdateEvent({ sessionId: "", update })).toBeNull();
+    expect(
+      parseEngineYDocRemoteUpdateEvent({
+        sessionId: "s",
+        update: update.buffer,
+        lineageGeneration: 1,
+      }),
+    ).toBeNull();
+    expect(
+      parseEngineYDocRemoteUpdateEvent({ sessionId: "", update, lineageGeneration: 1 }),
+    ).toBeNull();
+    expect(
+      parseEngineYDocRemoteUpdateEvent({
+        sessionId: "s",
+        update,
+        lineageGeneration: 0,
+      }),
+    ).toBeNull();
     expect(parseEngineYDocRemoteUpdateEvent(null)).toBeNull();
     expect(parseEngineYDocRemoteUpdateEvent([{ sessionId: "s", update }])).toBeNull();
   });
 
   it("rejects an empty or over-bound update", () => {
     expect(
-      parseEngineYDocRemoteUpdateEvent({ sessionId: "s", update: new Uint8Array(0) }),
+      parseEngineYDocRemoteUpdateEvent({
+        sessionId: "s",
+        update: new Uint8Array(0),
+        lineageGeneration: 1,
+      }),
     ).toBeNull();
     expect(
       parseEngineYDocRemoteUpdateEvent({
         sessionId: "s",
         update: new Uint8Array(ENGINE_YDOC_UPDATE_MAX_BYTES + 1),
+        lineageGeneration: 1,
       }),
     ).toBeNull();
   });

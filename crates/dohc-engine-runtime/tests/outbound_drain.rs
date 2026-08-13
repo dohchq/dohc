@@ -41,6 +41,7 @@ impl LoggedOp {
             workspace_id: workspace_id.to_owned(),
             origin_id: self.origin_id.clone(),
             origin_seq: self.origin_seq,
+            relay_seq: None,
             op_kind: self.op_kind.clone(),
             payload: self.payload.clone(),
             recorded_at_ms: self.recorded_at_ms,

@@ -61,6 +61,7 @@ type SyncRelayRoute =
   | { route: "epoch"; workspaceId: string }
   | { route: "keys"; workspaceId: string }
   | { route: "log"; workspaceId: string }
+  | { route: "log-coordinate"; workspaceId: string; originId: string; originSeq: number }
   | { route: "shares-create"; workspaceId: string }
   | { route: "shares-list" }
   | { route: "share"; shareId: string }
@@ -869,10 +870,8 @@ export function createSyncRelayHandler({
           route.workspaceId,
           identity,
         );
-        const since = Math.max(
-          parseCursor(url.searchParams.get("since")),
-          epochLogFloor,
-        );
+        const requestedSince = parseCursor(url.searchParams.get("since"));
+        const since = Math.max(requestedSince, epochLogFloor);
         const limit = parseLimit(url.searchParams.get("limit"));
         const page = storage.fetchLogPage({
           workspaceId: route.workspaceId,
@@ -890,8 +889,49 @@ export function createSyncRelayHandler({
             payload: JSON.parse(row.payloadJson) as unknown,
             recordedAtMs: row.recordedAtMs,
           })),
-          nextCursor: page.nextCursor,
+          // A hidden epoch floor is a read filter, not a served log row. An
+          // empty response therefore cannot advance the caller's cursor: the
+          // strict page contract requires nextCursor to equal the final
+          // relaySeq, or the requested cursor when no row was served.
+          nextCursor: page.rows.length === 0 ? requestedSince : page.nextCursor,
           hasMore: page.hasMore,
+        });
+      }
+
+      if (route.route === "log-coordinate" && request.method === "GET") {
+        const url = new URL(request.url);
+        const identity = parseOptionalWorkspaceIdentityQuery(url.searchParams);
+        const epochLogFloor = enforceWorkspaceIdentity(
+          storage,
+          route.workspaceId,
+          identity,
+        );
+        const row = storage.fetchLogCoordinate({
+          workspaceId: route.workspaceId,
+          originId: route.originId,
+          originSeq: route.originSeq,
+        });
+        if (!row) return jsonResponse({ ok: true, status: "absent" });
+        const op = {
+          relaySeq: row.relaySeq,
+          workspaceId: row.workspaceId,
+          originId: row.originId,
+          originSeq: row.originSeq,
+          opKind: row.opKind,
+          payload: JSON.parse(row.payloadJson) as unknown,
+          recordedAtMs: row.recordedAtMs,
+        };
+        if (row.relaySeq <= epochLogFloor) {
+          return jsonResponse({
+            ok: true,
+            status: "presentBelowEpochFloor",
+            op,
+          });
+        }
+        return jsonResponse({
+          ok: true,
+          status: "present",
+          op,
         });
       }
 
@@ -934,6 +974,12 @@ function parseRoute(request: Request): SyncRelayRoute {
   }
   if (parts.length === 3 && parts[2] === "log") {
     return { route: "log", workspaceId };
+  }
+  if (parts.length === 5 && parts[2] === "log") {
+    const originId = parseString(parts[3], "originId", MAX_ORIGIN_ID_CHARS);
+    const originSeq = Number(parts[4]);
+    if (!Number.isSafeInteger(originSeq) || originSeq < 0) throw notFound();
+    return { route: "log-coordinate", workspaceId, originId, originSeq };
   }
   if (parts.length === 3 && parts[2] === "bootstrap") {
     return { route: "bootstrap", workspaceId };

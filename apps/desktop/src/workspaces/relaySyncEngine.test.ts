@@ -36,7 +36,6 @@ function pullResult(
     conflictsOpened: 0,
     fastForwardedPaths: [],
     nextCursor: 0,
-    commitFetchCursor: vi.fn(async () => {}),
     ...overrides,
     sharingDeclined: overrides.sharingDeclined ?? [],
   };
@@ -44,14 +43,12 @@ function pullResult(
 
 function capture(): WorkspaceEngineCapture {
   return {
-    // Mirrors the real capture: run the task (the engine's push+pull
-    // closure), materialize (no-op here), then commit the fetch cursor.
+    // Mirrors the real capture: give the engine's push+pull closure a page
+    // materializer. The relay operation commits each page after that callback
+    // resolves.
     runRelaySync: vi.fn(
-      async (task: () => Promise<{ commitFetchCursor?: () => Promise<void> }>) => {
-        const result = await task();
-        await result.commitFetchCursor?.();
-        return result;
-      },
+      async (task: (materializePage: () => Promise<void>) => Promise<unknown>) =>
+        await task(async () => undefined),
     ),
     start: vi.fn(),
     captureBatch: vi.fn(),
@@ -187,13 +184,11 @@ describe("relaySyncEngine", () => {
   it("runs the dormant Rust adapter hook after a durable pull and contains failure", async () => {
     const calls: string[] = [];
     const cap = capture();
-    pullMock.mockImplementation(async () =>
-      pullResult({
-        commitFetchCursor: vi.fn(async () => {
-          calls.push("commit");
-        }),
-      }),
-    );
+    pullMock.mockImplementation(async (materializePage) => {
+      await materializePage([]);
+      calls.push("commit");
+      return pullResult();
+    });
     const onRustEngineAdapterPull = vi.fn(async () => {
       calls.push("rust-shadow");
       throw new Error("dormant adapter unavailable");
@@ -217,11 +212,11 @@ describe("relaySyncEngine", () => {
   it("runs post-pull work after cursor commit and contains its failure", async () => {
     const calls: string[] = [];
     const cap = capture();
-    pullMock.mockImplementation(async () => pullResult({
-      commitFetchCursor: vi.fn(async () => {
-        calls.push("commit");
-      }),
-    }));
+    pullMock.mockImplementation(async (materializePage) => {
+      await materializePage([]);
+      calls.push("commit");
+      return pullResult();
+    });
     const afterSuccessfulPull = vi.fn(async () => {
       calls.push("after-pull");
       throw new Error("bookmark projection failed");
@@ -277,9 +272,11 @@ describe("relaySyncEngine", () => {
   it("wires push then pull through the capture callback and folds conflicts into the snapshot", async () => {
     const cap = capture();
     const commit = vi.fn(async () => {});
-    pullMock.mockImplementation(async () =>
-      pullResult({ conflictsOpened: 2, commitFetchCursor: commit }),
-    );
+    pullMock.mockImplementation(async (materializePage) => {
+      await materializePage([]);
+      await commit();
+      return pullResult({ conflictsOpened: 2 });
+    });
     const sync = engine({ capture: cap });
     await sync.start();
 

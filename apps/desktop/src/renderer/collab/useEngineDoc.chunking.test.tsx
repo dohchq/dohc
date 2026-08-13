@@ -55,12 +55,17 @@ function harnessBridge(initialUpdate?: Uint8Array) {
   const api = {
     async openEngineYDocSession(payload: { sessionId: string }) {
       openedSessionId = payload.sessionId;
-      return { available: true, initialUpdate: seedUpdate };
+      return {
+        available: true,
+        initialUpdate: seedUpdate,
+        lineageGeneration: 1,
+      };
     },
     async applyEngineYDocUpdate(payload: { sessionId: string; seq: number }) {
       applied.push({ sessionId: payload.sessionId, seq: payload.seq });
     },
     onEngineYDocRemoteUpdate: () => () => undefined,
+    onEngineYDocLineageReplacement: () => () => undefined,
     onEngineYDocSaveState: (listener: SaveStateListener) => {
       saveStateListeners.add(listener);
       return () => saveStateListeners.delete(listener);
