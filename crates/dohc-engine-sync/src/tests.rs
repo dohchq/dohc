@@ -6953,6 +6953,187 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
 }
 
 #[test]
+fn lower_relay_scene_base_recovers_the_loser_as_one_ordinary_sibling() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    let scene = |element_id: &str| {
+        json!({
+            "type": "excalidraw",
+            "version": 2,
+            "source": "https://excalidraw.com",
+            "elements": [{
+                "id": element_id,
+                "type": "rectangle",
+                "version": 1,
+                "versionNonce": 1,
+                "isDeleted": false,
+                "index": "a0"
+            }],
+            "appState": {},
+            "files": {}
+        })
+        .to_string()
+    };
+    let path = "drawings/arbitrated.excalidraw";
+    let loser_portable = scene("losing-rectangle");
+    seed_text_head(
+        &mut engine,
+        "object-arbitrated-scene",
+        path,
+        &loser_portable,
+    );
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-arbitrated-scene")
+        .expect("scene key");
+    let loser = dohc_engine_collab::Ydoc::wire();
+    loser
+        .apply(
+            &dohc_engine_collab::import_portable_scene(&loser_portable)
+                .expect("losing scene import")
+                .initial_update,
+        )
+        .expect("losing scene applies");
+    let loser_bytes = loser.encode_full_state();
+    let loser_claim = dohc_engine_storage::hex_sha256(&loser_bytes);
+    assert!(matches!(
+        dohc_engine_collab::claim_base_at_relay(
+            &mut engine,
+            &key,
+            dohc_engine_collab::ContentKind::Scene,
+            &loser_bytes,
+            &dohc_engine_collab::BaseRelayCoordinate::new("loser", 0, 20)
+                .expect("loser coordinate"),
+            &NoFaults,
+            1_100,
+        ),
+        Ok(TxnOutcome::Committed(
+            dohc_engine_collab::ClaimOutcome::Claimed { .. }
+        ))
+    ));
+    engine
+        .write_with(&NoFaults, |tx| {
+            crate::ydoc_apply::project_and_write_in_tx(
+                tx,
+                &key,
+                path,
+                &loser,
+                dohc_engine_collab::ContentKind::Scene,
+                "loser",
+                0,
+                1_100,
+                None,
+            )
+        })
+        .expect("settle the losing scene projection");
+
+    let winner = dohc_engine_collab::Ydoc::wire();
+    winner
+        .apply(
+            &dohc_engine_collab::import_portable_scene(&scene("winning-rectangle"))
+                .expect("winning scene import")
+                .initial_update,
+        )
+        .expect("winning scene applies");
+    let winner_bytes = winner.encode_full_state();
+    let winner_claim = engine.put_binary_blob(&winner_bytes).expect("winner blob");
+    let mut incoming = envelope(
+        "winner",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": key.object_id,
+            "path": path,
+            "contentKind": "scene",
+            "updateBlobSha256": winner_claim,
+            "lineageClaimId": winner_claim,
+            "isBaseState": true
+        }),
+    );
+    incoming.relay_seq = Some(10);
+    let applied = apply_ydoc_envelope(&mut engine, &incoming, &NoFaults, &NoLiveLeases)
+        .expect("winning scene base applies");
+    let ApplyOutcome::Applied(result) = applied else {
+        panic!("winning scene base did not apply: {applied:?}");
+    };
+    let replacement = result
+        .lineage_replacement
+        .expect("scene replacement result");
+    assert_eq!(replacement.winner_lineage_claim_id, winner_claim);
+    assert_eq!(replacement.recovered_paths.len(), 1);
+    let recovered_path = &replacement.recovered_paths[0];
+    assert!(recovered_path.contains(&loser_claim[..8]));
+    assert!(recovered_path.ends_with(".excalidraw"));
+
+    let (original, recovered, decision_kind, recovered_content_kind, recovery_ydocs): (
+        String,
+        String,
+        String,
+        String,
+        i64,
+    ) = engine
+        .read_with(|conn| {
+            let original = conn.query_row(
+                "SELECT blob.text FROM snapshots snapshot
+                 JOIN blobs blob ON blob.sha256=snapshot.blob_sha256
+                 WHERE snapshot.workspace_id='ws' AND snapshot.version_id='main'
+                   AND snapshot.path=?1",
+                [path],
+                |row| row.get(0),
+            )?;
+            let recovered = conn.query_row(
+                "SELECT blob.text FROM snapshots snapshot
+                 JOIN blobs blob ON blob.sha256=snapshot.blob_sha256
+                 WHERE snapshot.workspace_id='ws' AND snapshot.version_id='main'
+                   AND snapshot.path=?1",
+                [recovered_path],
+                |row| row.get(0),
+            )?;
+            let (decision_kind, recovery_object_id) = conn.query_row(
+                "SELECT incoming_content_kind,recovery_object_id
+                   FROM ydoc_recovery_decisions
+                  WHERE workspace_id='ws' AND origin_id='winner' AND origin_seq=0",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?;
+            let recovered_content_kind = conn.query_row(
+                "SELECT content_kind FROM snapshots
+                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [&recovery_object_id],
+                |row| row.get(0),
+            )?;
+            let recovery_ydocs = conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_docs
+                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [&recovery_object_id],
+                |row| row.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((
+                original,
+                recovered,
+                decision_kind,
+                recovered_content_kind,
+                recovery_ydocs,
+            ))
+        })
+        .expect("scene recovery state");
+    let original: serde_json::Value =
+        serde_json::from_str(&original).expect("winning scene remains portable JSON");
+    let recovered: serde_json::Value =
+        serde_json::from_str(&recovered).expect("recovered scene remains portable JSON");
+    assert_eq!(original["elements"][0]["id"], "winning-rectangle");
+    assert_eq!(recovered["elements"][0]["id"], "losing-rectangle");
+    assert_eq!(decision_kind, "scene");
+    assert_eq!(recovered_content_kind, "text");
+    assert_eq!(
+        recovery_ydocs, 0,
+        "the recovered scene is an ordinary sibling"
+    );
+}
+
+#[test]
 fn lower_relay_base_recovers_the_loser_even_when_the_text_matches() {
     let (_scratch, _path, mut engine) = store();
     VersionedTextStore::new(&mut engine)
