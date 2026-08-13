@@ -912,25 +912,26 @@ export function createSyncRelayHandler({
           originSeq: route.originSeq,
         });
         if (!row) return jsonResponse({ ok: true, status: "absent" });
+        const op = {
+          relaySeq: row.relaySeq,
+          workspaceId: row.workspaceId,
+          originId: row.originId,
+          originSeq: row.originSeq,
+          opKind: row.opKind,
+          payload: JSON.parse(row.payloadJson) as unknown,
+          recordedAtMs: row.recordedAtMs,
+        };
         if (row.relaySeq <= epochLogFloor) {
           return jsonResponse({
             ok: true,
             status: "presentBelowEpochFloor",
-            relaySeq: row.relaySeq,
+            op,
           });
         }
         return jsonResponse({
           ok: true,
           status: "present",
-          op: {
-            relaySeq: row.relaySeq,
-            workspaceId: row.workspaceId,
-            originId: row.originId,
-            originSeq: row.originSeq,
-            opKind: row.opKind,
-            payload: JSON.parse(row.payloadJson) as unknown,
-            recordedAtMs: row.recordedAtMs,
-          },
+          op,
         });
       }
 

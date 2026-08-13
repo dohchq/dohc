@@ -6,6 +6,7 @@ import { PrimaryButton, SecondaryButton } from "./ui/controls";
 
 type WorkspaceSecretState = "none" | "protected-key-present" | "protected-key-missing";
 type PassphrasePurpose = "enable" | "protect" | "unlock";
+const MIN_PASSPHRASE_LENGTH = 8;
 
 type Phase =
   | { kind: "loading" }
@@ -42,6 +43,10 @@ export function CloudLogin(props: {
   const [relayUrl, setRelayUrl] = useState("");
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionRef = useRef(0);
+  const protectPassphraseTooShort =
+    needsPassphrase &&
+    passphrasePurpose === "protect" &&
+    passphrase.length < MIN_PASSPHRASE_LENGTH;
 
   function clearPollTimer() {
     if (pollTimer.current) {
@@ -115,7 +120,7 @@ export function CloudLogin(props: {
         setSyncError(
           /could not/i.test(message)
             ? "That passphrase couldn't unlock synced secrets."
-            : "Enter a passphrase to protect synced secrets.",
+            : "Enter at least 8 characters to protect synced secrets.",
         );
       } else {
         setSyncError(/already claimed/i.test(message) ? message : "Couldn't enable sync.");
@@ -402,10 +407,7 @@ export function CloudLogin(props: {
                         type="button"
                         data-testid="cloud-protect-secrets"
                         disabled={
-                          syncBusy ||
-                          (needsPassphrase &&
-                            passphrasePurpose === "protect" &&
-                            passphrase.length === 0)
+                          syncBusy || protectPassphraseTooShort
                         }
                         onClick={() => startSecretPassphrase("protect")}
                         className="mt-3"
@@ -462,10 +464,7 @@ export function CloudLogin(props: {
                 type="button"
                 data-testid="cloud-enable-sync"
                 disabled={
-                  syncBusy ||
-                  (needsPassphrase &&
-                    passphrasePurpose === "protect" &&
-                    passphrase.length === 0)
+                  syncBusy || protectPassphraseTooShort
                 }
                 onClick={() => void enableSync()}
                 className="mt-3"

@@ -6128,13 +6128,10 @@ fn seed_identity(engine: &mut EngineStore) {
 
 #[test]
 fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
-    for (label, response, expected) in [
-        (
-            "below-floor",
-            LogCoordinateResponse::PresentBelowEpochFloor { relay_seq: 7 },
-            (Some(7), 0_i64),
-        ),
-        ("absent", LogCoordinateResponse::Absent, (None, 1_i64)),
+    for (label, below_floor, mismatch, expected) in [
+        ("below-floor", true, false, (Some(7), 0_i64, 0_i64)),
+        ("below-floor-mismatch", true, true, (None, 0_i64, 1_i64)),
+        ("absent", false, false, (None, 1_i64, 0_i64)),
     ] {
         let (_scratch, _path, mut engine) = store();
         seed_identity(&mut engine);
@@ -6176,6 +6173,26 @@ fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
             "lineageClaimId": &claim_id,
             "isBaseState": true,
         });
+        let response = if below_floor {
+            let response_payload = if mismatch {
+                let mut unrelated = payload.clone();
+                unrelated["path"] = json!("notes/unrelated-clone.md");
+                unrelated
+            } else {
+                payload.clone()
+            };
+            LogCoordinateResponse::PresentBelowEpochFloor(ReplicationEnvelope {
+                relay_seq: Some(7),
+                workspace_id: "ws".to_owned(),
+                origin_id: "legacy-peer".to_owned(),
+                origin_seq: 0,
+                op_kind: "ydoc.update".to_owned(),
+                payload: response_payload,
+                recorded_at_ms: 1_100,
+            })
+        } else {
+            LogCoordinateResponse::Absent
+        };
         engine
             .write_with(&NoFaults, |tx| {
                 tx.execute(
@@ -6205,9 +6222,21 @@ fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
             },
         )])
         .with_coordinate("legacy-peer", 0, response);
-        RelaySyncClient::new(relay)
-            .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_200)
-            .expect("repair legacy coordinate");
+        let result = RelaySyncClient::new(relay).pull_chat_workspace(
+            &mut engine,
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_200,
+        );
+        if mismatch {
+            assert_eq!(
+                result.expect_err("an unrelated below-floor op must not repair the local base"),
+                RelayError::InvalidResponse,
+            );
+        } else {
+            result.expect("repair legacy coordinate");
+        }
         let repaired: (Option<i64>, i64, i64) = engine
             .read_with(|conn| {
                 let marker = conn.query_row(
@@ -6226,7 +6255,7 @@ fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
                 Ok::<_, rusqlite::Error>((marker.0, marker.1, candidates))
             })
             .expect("read repaired marker");
-        assert_eq!(repaired, (expected.0, expected.1, 0));
+        assert_eq!(repaired, expected);
     }
 }
 
@@ -6316,7 +6345,15 @@ fn invalid_pull_page_leaves_legacy_base_repair_and_pull_state_unchanged() {
     .with_coordinate(
         "legacy-peer",
         0,
-        LogCoordinateResponse::PresentBelowEpochFloor { relay_seq: 7 },
+        LogCoordinateResponse::PresentBelowEpochFloor(ReplicationEnvelope {
+            relay_seq: Some(7),
+            workspace_id: "ws".to_owned(),
+            origin_id: "legacy-peer".to_owned(),
+            origin_seq: 0,
+            op_kind: "ydoc.update".to_owned(),
+            payload: payload.clone(),
+            recorded_at_ms: 1_100,
+        }),
     );
     relay.pages.get_mut(&0).expect("page").ops[0].relay_seq = Some(2);
 

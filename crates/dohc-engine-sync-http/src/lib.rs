@@ -322,31 +322,30 @@ impl RelayTransport for HttpRelayTransport {
                 .call(),
             RequestContext::Workspace,
         )?;
-        match wire {
-            WireLogCoordinateResponse::Absent => Ok(LogCoordinateResponse::Absent),
-            WireLogCoordinateResponse::PresentBelowEpochFloor { relay_seq } => {
-                if !(0..=dohc_engine_sync::MAX_WIRE_INTEGER).contains(&relay_seq) {
-                    return Err(RelayError::InvalidResponse);
-                }
-                Ok(LogCoordinateResponse::PresentBelowEpochFloor { relay_seq })
-            }
-            WireLogCoordinateResponse::Present { mut op } => {
-                let workspace_id = op.workspace_id.take().ok_or(RelayError::InvalidResponse)?;
-                if workspace_id != req.workspace_id
-                    || op.origin_id != req.origin_id
-                    || op.origin_seq != req.origin_seq
-                {
-                    return Err(RelayError::InvalidResponse);
-                }
-                let envelope = op.into_workspace_envelope(workspace_id);
-                if envelope.relay_seq.is_none_or(|relay_seq| {
-                    !(0..=dohc_engine_sync::MAX_WIRE_INTEGER).contains(&relay_seq)
-                }) {
-                    return Err(RelayError::InvalidResponse);
-                }
-                Ok(LogCoordinateResponse::Present(envelope))
-            }
+        let (mut op, below_epoch_floor) = match wire {
+            WireLogCoordinateResponse::Absent => return Ok(LogCoordinateResponse::Absent),
+            WireLogCoordinateResponse::Present { op } => (op, false),
+            WireLogCoordinateResponse::PresentBelowEpochFloor { op } => (op, true),
+        };
+        let workspace_id = op.workspace_id.take().ok_or(RelayError::InvalidResponse)?;
+        if workspace_id != req.workspace_id
+            || op.origin_id != req.origin_id
+            || op.origin_seq != req.origin_seq
+        {
+            return Err(RelayError::InvalidResponse);
         }
+        let envelope = op.into_workspace_envelope(workspace_id);
+        if envelope
+            .relay_seq
+            .is_none_or(|relay_seq| !(0..=dohc_engine_sync::MAX_WIRE_INTEGER).contains(&relay_seq))
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        Ok(if below_epoch_floor {
+            LogCoordinateResponse::PresentBelowEpochFloor(envelope)
+        } else {
+            LogCoordinateResponse::Present(envelope)
+        })
     }
 
     fn probe(&self, req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
@@ -936,7 +935,7 @@ struct WireLogPage {
 #[serde(tag = "status", rename_all = "camelCase")]
 enum WireLogCoordinateResponse {
     Present { op: WireLogRow },
-    PresentBelowEpochFloor { relay_seq: i64 },
+    PresentBelowEpochFloor { op: WireLogRow },
     Absent,
 }
 

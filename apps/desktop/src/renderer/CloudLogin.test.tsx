@@ -152,19 +152,45 @@ describe("CloudLogin", () => {
     render(<CloudLogin workspaceId="ws-1" />);
     fireEvent.click(await screen.findByTestId("cloud-enable-sync"));
     const input = await screen.findByTestId("cloud-sync-passphrase");
-    expect(screen.getByTestId("cloud-sync-error").textContent).toContain(
-      "Enter a passphrase",
+    const enable = screen.getByTestId("cloud-enable-sync") as HTMLButtonElement;
+    expect(screen.getByTestId("cloud-sync-error").textContent).toBe(
+      "Enter at least 8 characters to protect synced secrets.",
     );
-    fireEvent.change(input, { target: { value: "shared passphrase" } });
+    fireEvent.change(input, { target: { value: "1234567" } });
+    expect(enable.disabled).toBe(true);
+    expect(bridgeMock.cloudEnableSync).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(input, { target: { value: "12345678" } });
+    expect(enable.disabled).toBe(false);
     fireEvent.click(screen.getByTestId("cloud-enable-sync"));
 
     await waitFor(() =>
       expect(bridgeMock.cloudEnableSync).toHaveBeenLastCalledWith({
         workspaceId: "ws-1",
-        passphrase: "shared passphrase",
+        passphrase: "12345678",
       }),
     );
     expect(await screen.findByTestId("cloud-workspace-synced")).toBeTruthy();
+  });
+
+  it("states the minimum when the engine rejects an enrollment passphrase", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: true,
+      email: "ice@dohc.dev",
+      workspaceSynced: false,
+      workspaceSecretState: "protected-key-present",
+    });
+    bridgeMock.cloudEnableSync.mockRejectedValueOnce(
+      new Error("Passphrase must be at least 8 characters."),
+    );
+
+    render(<CloudLogin workspaceId="ws-1" />);
+    fireEvent.click(await screen.findByTestId("cloud-enable-sync"));
+
+    expect((await screen.findByTestId("cloud-sync-error")).textContent).toBe(
+      "Enter at least 8 characters to protect synced secrets.",
+    );
+    expect(screen.getByTestId("cloud-sync-passphrase")).toBeTruthy();
   });
 
   it("shows the copyable sync code for a synced workspace (0P-C join handle)", async () => {

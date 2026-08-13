@@ -768,6 +768,44 @@ fn exact_log_coordinate_lookup_is_authenticated_and_preserves_relay_order() {
 }
 
 #[test]
+fn below_floor_coordinate_lookup_preserves_the_exact_authenticated_operation() {
+    let server = FakeServer::start(|_| {
+        TestResponse::json(
+            200,
+            json!({
+                "ok": true,
+                "status": "presentBelowEpochFloor",
+                "op": {
+                    "relaySeq": 11,
+                    "workspaceId": "ws",
+                    "originId": "peer/device",
+                    "originSeq": 7,
+                    "opKind": "workspace.init",
+                    "payload": {"clone": "original"},
+                    "recordedAtMs": 1
+                }
+            }),
+        )
+    });
+    let response = transport(&server)
+        .lookup_log_coordinate(LogCoordinateRequest {
+            workspace_id: "ws".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            origin_id: "peer/device".to_owned(),
+            origin_seq: 7,
+        })
+        .expect("lookup below-floor coordinate");
+    let LogCoordinateResponse::PresentBelowEpochFloor(envelope) = response else {
+        panic!("expected a below-floor coordinate");
+    };
+    assert_eq!(envelope.relay_seq, Some(11));
+    assert_eq!(envelope.op_kind, "workspace.init");
+    assert_eq!(envelope.payload, json!({"clone": "original"}));
+    assert_eq!(envelope.recorded_at_ms, 1);
+}
+
+#[test]
 fn direct_transport_rejects_fractional_wire_timestamps_without_rounding() {
     let mut row = remote_row("peer", 0, "workspace.init", json!({}));
     row["recordedAtMs"] = json!(1.5);

@@ -65,7 +65,7 @@ pub struct LogCoordinateRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogCoordinateResponse {
     Present(ReplicationEnvelope),
-    PresentBelowEpochFloor { relay_seq: i64 },
+    PresentBelowEpochFloor(ReplicationEnvelope),
     Absent,
 }
 
@@ -685,7 +685,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 origin_seq: repair.origin_seq,
             })?;
             let relay_seq = match response {
-                LogCoordinateResponse::Present(op) => {
+                LogCoordinateResponse::Present(op)
+                | LogCoordinateResponse::PresentBelowEpochFloor(op) => {
                     if op.validate().is_err()
                         || op.workspace_id != workspace_id
                         || op.origin_id != repair.origin_id
@@ -697,12 +698,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         return Err(RelayError::InvalidResponse);
                     }
                     Some(op.relay_seq.ok_or(RelayError::InvalidResponse)?)
-                }
-                LogCoordinateResponse::PresentBelowEpochFloor { relay_seq } => {
-                    if !(0..=crate::MAX_WIRE_INTEGER).contains(&relay_seq) {
-                        return Err(RelayError::InvalidResponse);
-                    }
-                    Some(relay_seq)
                 }
                 LogCoordinateResponse::Absent
                     if repair.origin_id == identity.origin_id
@@ -727,7 +722,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 origin_seq: repair.origin_seq,
             })?;
             let (relay_seq, unresolved_local_coordinate) = match response {
-                LogCoordinateResponse::Present(op) => {
+                LogCoordinateResponse::Present(op)
+                | LogCoordinateResponse::PresentBelowEpochFloor(op) => {
                     if op.validate().is_err()
                         || op.workspace_id != workspace_id
                         || op.origin_id != repair.origin_id
@@ -747,12 +743,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         Some(op.relay_seq.ok_or(RelayError::InvalidResponse)?),
                         false,
                     )
-                }
-                LogCoordinateResponse::PresentBelowEpochFloor { relay_seq } => {
-                    if !(0..=crate::MAX_WIRE_INTEGER).contains(&relay_seq) {
-                        return Err(RelayError::InvalidResponse);
-                    }
-                    (Some(relay_seq), false)
                 }
                 LogCoordinateResponse::Absent
                     if repair.origin_id == identity.origin_id

@@ -794,7 +794,15 @@ describe("sync relay handler", () => {
     );
     expect(belowFloor).toMatchObject({
       status: "presentBelowEpochFloor",
-      relaySeq: 1,
+      op: {
+        relaySeq: 1,
+        workspaceId: "workspace-a",
+        originId: "origin-a",
+        originSeq: 0,
+        opKind: "opaque.test",
+        payload: { n: 0 },
+        recordedAtMs: 1000,
+      },
     });
     const emptyPage = await json(
       await h(
