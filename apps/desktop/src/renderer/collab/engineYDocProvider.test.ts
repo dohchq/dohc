@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
   bindEngineYDoc,
+  EngineYDocDeliveryRefusedError,
   type EngineYDocTransport,
 } from "./engineYDocProvider";
 
@@ -472,6 +473,119 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
 
     expect(order).toEqual(["recovery", "close"]);
+  });
+
+  it("captures a terminal refusal once without retrying the retired lineage", async () => {
+    vi.useFakeTimers();
+    try {
+      const mock = mockTransport();
+      let attempts = 0;
+      const recovered: string[] = [];
+      mock.transport.applyLocalUpdate = async () => {
+        attempts += 1;
+        throw new EngineYDocDeliveryRefusedError("lineage-transition");
+      };
+      const binding = await bindEngineYDoc(mock.transport, {
+        onDeliveryFailure(snapshot) {
+          const restored = new Y.Doc();
+          Y.applyUpdate(restored, snapshot);
+          recovered.push(bodyText(restored));
+          restored.destroy();
+        },
+      });
+
+      typeIntoBody(binding.doc!, "Retired edit.");
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(attempts).toBe(1);
+      expect(recovered.at(-1)).toContain("Retired edit.");
+      await binding.destroy();
+      expect(attempts).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops retrying when a full-state repair receives a terminal refusal", async () => {
+    vi.useFakeTimers();
+    try {
+      const mock = mockTransport();
+      let attempts = 0;
+      const recovered: string[] = [];
+      mock.transport.applyLocalUpdate = async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("transient delivery failure");
+        throw new EngineYDocDeliveryRefusedError("session-unavailable");
+      };
+      const binding = await bindEngineYDoc(mock.transport, {
+        onDeliveryFailure(snapshot) {
+          const restored = new Y.Doc();
+          Y.applyUpdate(restored, snapshot);
+          recovered.push(bodyText(restored));
+          restored.destroy();
+        },
+      });
+
+      typeIntoBody(binding.doc!, "Repair was refused.");
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(attempts).toBe(2);
+      expect(recovered.at(-1)).toContain("Repair was refused.");
+      await binding.destroy();
+      expect(attempts).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drains an old delivery and preserves its mirror before acknowledging a replacement", async () => {
+    const mock = mockTransport(["Losing root."]);
+    let rejectDelivery!: (error: Error) => void;
+    const heldDelivery = new Promise<void>((_resolve, reject) => {
+      rejectDelivery = reject;
+    });
+    mock.transport.applyLocalUpdate = async (update, generation) => {
+      mock.shipped.push(update);
+      mock.shippedGenerations.push(generation);
+      await heldDelivery;
+    };
+    const preserved: string[] = [];
+    const binding = await bindEngineYDoc(mock.transport, {
+      onDocumentReplacing(retired) {
+        preserved.push(bodyText(retired));
+      },
+    });
+    typeIntoBody(binding.doc!, "Unacknowledged edit.");
+
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+    const replacing = mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(winner),
+      recoveredPaths: [],
+      lineageGeneration: 2,
+    });
+    await Promise.resolve();
+    expect(mock.acknowledgedGenerations).toEqual([]);
+
+    rejectDelivery(new Error("old delivery failed"));
+    for (let turn = 0; turn < 10 && preserved.length === 0; turn += 1) {
+      await Promise.resolve();
+    }
+    expect(preserved).toHaveLength(1);
+    expect(preserved[0]).toContain("Unacknowledged edit.");
+    for (
+      let turn = 0;
+      turn < 10 && mock.acknowledgedGenerations.length === 0;
+      turn += 1
+    ) {
+      await Promise.resolve();
+    }
+    expect(mock.acknowledgedGenerations).toEqual([2]);
+
+    mock.releaseReplacement();
+    await replacing;
+    expect(bodyText(binding.doc!)).toContain("Winning root.");
+    await binding.destroy();
   });
 
   it("replaces an independent lineage instead of merging it and rejects stale updates", async () => {

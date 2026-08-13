@@ -54,7 +54,7 @@ function sharedBridge() {
         };
       },
     ),
-    applyEngineYDocUpdate: vi.fn(async () => undefined),
+    applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
     onEngineYDocRemoteUpdate: (
       listener: (event: {
         sessionId: string;

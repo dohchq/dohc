@@ -87,7 +87,7 @@ function deferredBridge() {
           },
         ),
     ),
-    applyEngineYDocUpdate: vi.fn(async () => undefined),
+    applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
     onEngineYDocRemoteUpdate: () => () => undefined,
     onEngineYDocLineageReplacement: () => () => undefined,
     onEngineYDocSaveState: () => () => undefined,

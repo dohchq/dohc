@@ -5731,7 +5731,7 @@ describe("engine markdown source view", () => {
           };
         },
       ),
-      applyEngineYDocUpdate: vi.fn(async () => undefined),
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(
         (listener: (event: {
@@ -8942,7 +8942,7 @@ describe("markdown document opening state", () => {
             },
           ),
       ),
-      applyEngineYDocUpdate: vi.fn(async () => undefined),
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),

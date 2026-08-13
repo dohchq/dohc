@@ -54,7 +54,7 @@ function engineBridge(
             lineageGeneration: 1,
           };
     }),
-    applyEngineYDocUpdate: vi.fn(async () => undefined),
+    applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
     closeEngineYDocSession: vi.fn(async () => undefined),
     onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
     onEngineYDocLineageReplacement: vi.fn(() => () => undefined),

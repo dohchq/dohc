@@ -69,6 +69,7 @@ function harnessBridge(initialUpdate?: Uint8Array) {
     async applyEngineYDocUpdate(payload: { sessionId: string; seq: number }) {
       applied.push({ sessionId: payload.sessionId, seq: payload.seq });
       if (rejectUpdates) throw new Error("update delivery failed");
+      return { accepted: true as const };
     },
     onEngineYDocRemoteUpdate: () => () => undefined,
     onEngineYDocLineageReplacement: () => () => undefined,

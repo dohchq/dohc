@@ -18,6 +18,7 @@ import {
   CreateWorkspaceVersionPayload,
   EngineMomentDetailRecord,
   ApplyEngineYDocUpdatePayload,
+  ApplyEngineYDocUpdateResult,
   OpenEngineYDocSessionResult,
   ExportDocumentFilePayload,
   ExportDocumentFileResult,
@@ -1874,6 +1875,24 @@ describe("engine Y.Doc update IPC contract", () => {
         lineageGeneration: 0,
       }),
     ).toThrow();
+  });
+
+  it("distinguishes accepted updates from explicit main-process refusals", () => {
+    expect(ApplyEngineYDocUpdateResult.parse({ accepted: true })).toEqual({
+      accepted: true,
+    });
+    expect(
+      ApplyEngineYDocUpdateResult.parse({
+        accepted: false,
+        reason: "lineage-transition",
+      }),
+    ).toEqual({ accepted: false, reason: "lineage-transition" });
+    expect(
+      ApplyEngineYDocUpdateResult.safeParse({
+        accepted: false,
+        reason: "silently-dropped",
+      }).success,
+    ).toBe(false);
   });
 });
 

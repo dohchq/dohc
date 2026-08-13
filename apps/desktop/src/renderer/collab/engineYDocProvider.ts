@@ -76,6 +76,13 @@ export interface EngineYDocTransport {
   close(): Promise<void>;
 }
 
+export class EngineYDocDeliveryRefusedError extends Error {
+  constructor(readonly reason: string) {
+    super(`The engine refused the Y.Doc update: ${reason}.`);
+    this.name = "EngineYDocDeliveryRefusedError";
+  }
+}
+
 export interface EngineYDocBinding {
   // The mirror Y.Doc Tiptap binds to, or null when the doc is not engine-backed
   // (available:false) — the caller stays on the local autosave editor.
@@ -105,6 +112,7 @@ export interface EngineYDocBindingOptions {
   onDeliveryFailure?: (
     snapshot: Uint8Array,
     error: unknown,
+    source: Y.Doc,
   ) => void | Promise<void>;
   // Main can report a later update as saved before an earlier rejected IPC
   // delivery is repaired. Keep the owner informed until every accepted local
@@ -193,6 +201,9 @@ export async function bindEngineYDoc(
   let repairRequested = false;
   let repairRetryDelayMs = REPAIR_RETRY_INITIAL_MS;
   let repairRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let lineageReplacing = false;
+  let terminalDeliveryError: unknown = null;
+  let terminalRecoveryError: unknown = null;
 
   const setDeliveryPending = (pending: boolean): void => {
     if (deliveryPending === pending) return;
@@ -220,6 +231,12 @@ export async function bindEngineYDoc(
     void tracked.catch(() => undefined);
   };
 
+  const drainDeliveries = async (): Promise<void> => {
+    while (activeDeliveries.size > 0) {
+      await Promise.allSettled([...activeDeliveries]);
+    }
+  };
+
   const clearRepairRetry = (): void => {
     if (repairRetryTimer === null) return;
     clearTimeout(repairRetryTimer);
@@ -227,7 +244,15 @@ export async function bindEngineYDoc(
   };
 
   const scheduleRepairRetry = (): void => {
-    if (destroyed || repairRetryTimer !== null || !repairNeeded) return;
+    if (
+      destroyed ||
+      lineageReplacing ||
+      terminalDeliveryError !== null ||
+      repairRetryTimer !== null ||
+      !repairNeeded
+    ) {
+      return;
+    }
     const delay = repairRetryDelayMs;
     repairRetryDelayMs = Math.min(delay * 2, REPAIR_RETRY_MAX_MS);
     repairRetryTimer = setTimeout(() => {
@@ -237,18 +262,31 @@ export async function bindEngineYDoc(
   };
 
   function startRepair(): void {
-    if (destroyed || repairRunning || !repairNeeded) return;
+    if (
+      destroyed ||
+      lineageReplacing ||
+      terminalDeliveryError !== null ||
+      repairRunning ||
+      !repairNeeded
+    ) {
+      return;
+    }
     clearRepairRetry();
     repairNeeded = false;
     repairRunning = true;
     repairRequested = false;
-    const snapshot = Y.encodeStateAsUpdate(doc);
+    const repairDoc = doc;
+    const snapshot = Y.encodeStateAsUpdate(repairDoc);
     const repair = (async () => {
       let repaired = false;
       try {
         await transport.applyLocalUpdate(snapshot, lineageGeneration);
         repaired = true;
-      } catch {
+      } catch (error: unknown) {
+        if (error instanceof EngineYDocDeliveryRefusedError) {
+          await preserveTerminalFailure(snapshot, error, repairDoc);
+          return;
+        }
         repairNeeded = true;
       } finally {
         repairRunning = false;
@@ -262,6 +300,27 @@ export async function bindEngineYDoc(
     trackDelivery(repair);
   }
 
+  const preserveTerminalFailure = (
+    snapshot: Uint8Array,
+    error: unknown,
+    source: Y.Doc,
+  ): Promise<void> => {
+    terminalDeliveryError = error;
+    repairNeeded = false;
+    repairRequested = false;
+    clearRepairRetry();
+    const recovery = Promise.resolve(
+      options.onDeliveryFailure?.(snapshot, error, source),
+    )
+      .catch((captureError: unknown) => {
+        terminalRecoveryError = captureError;
+      })
+      .finally(() => {
+        finishDeliveryIfSafe();
+      });
+    return recovery;
+  };
+
   // Ship every LOCAL editor edit to main. A Tiptap edit carries a non-ENGINE
   // origin; an engine-sourced apply carries ENGINE_SOURCED_ORIGIN and is
   // skipped (no echo back to main).
@@ -269,6 +328,16 @@ export async function bindEngineYDoc(
     if (destroyed) return;
     if (origin === ENGINE_SOURCED_ORIGIN) return;
     setDeliveryPending(true);
+    if (terminalDeliveryError !== null) {
+      trackDelivery(
+        preserveTerminalFailure(
+          Y.encodeStateAsUpdate(doc),
+          terminalDeliveryError,
+          doc,
+        ),
+      );
+      return;
+    }
     if (repairRunning) repairRequested = true;
     let delivery: Promise<void>;
     try {
@@ -279,6 +348,9 @@ export async function bindEngineYDoc(
       delivery = Promise.reject(error);
     }
     const observed = delivery.catch((error: unknown) => {
+      if (error instanceof EngineYDocDeliveryRefusedError) {
+        return preserveTerminalFailure(Y.encodeStateAsUpdate(doc), error, doc);
+      }
       repairNeeded = true;
       startRepair();
       throw error;
@@ -311,10 +383,17 @@ export async function bindEngineYDoc(
       const retired = doc;
       // First close the only path that can ship a losing transaction to main.
       // It stays closed for the whole acknowledgement handoff.
+      lineageReplacing = true;
       retired.off("update", onUpdate);
+      clearRepairRetry();
+      if (activeDeliveries.size > 0) await drainDeliveries();
       if (options.onDocumentReplacing) {
         await options.onDocumentReplacing(retired, input.recoveredPaths);
       }
+      repairNeeded = false;
+      repairRequested = false;
+      terminalDeliveryError = null;
+      terminalRecoveryError = null;
       const bufferedUpdates = await transport.acknowledgeLineageReplacement(
         input.lineageGeneration,
       );
@@ -329,6 +408,8 @@ export async function bindEngineYDoc(
       retiredDocs.add(retired);
       doc = replacement;
       lineageGeneration = input.lineageGeneration;
+      lineageReplacing = false;
+      setDeliveryPending(false);
       for (const listener of replacementListeners) {
         listener(replacement, input.recoveredPaths);
       }
@@ -375,14 +456,14 @@ export async function bindEngineYDoc(
       unsubscribeReplacement();
       destroyPromise = (async () => {
         let deliveryError: unknown = null;
-        let recoveryError: unknown = null;
+        let recoveryError: unknown = terminalRecoveryError;
         if (replacementHandoff) {
           await Promise.allSettled([replacementHandoff]);
         }
-        while (activeDeliveries.size > 0) {
-          await Promise.allSettled([...activeDeliveries]);
-        }
-        if (repairNeeded) {
+        await drainDeliveries();
+        if (terminalDeliveryError !== null) {
+          deliveryError = terminalDeliveryError;
+        } else if (repairNeeded) {
           const finalSnapshot = Y.encodeStateAsUpdate(doc);
           try {
             // Full state, not the failed delta: this also covers every edit
@@ -391,7 +472,7 @@ export async function bindEngineYDoc(
           } catch (error: unknown) {
             deliveryError = error;
             try {
-              await options.onDeliveryFailure?.(finalSnapshot, error);
+            await options.onDeliveryFailure?.(finalSnapshot, error, doc);
             } catch (captureError: unknown) {
               recoveryError = captureError;
             }

@@ -1952,7 +1952,7 @@ describe("editor groups", () => {
     }));
     Object.assign(bridge, {
       openEngineYDocSession,
-      applyEngineYDocUpdate: vi.fn(async () => undefined),
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
@@ -11014,7 +11014,7 @@ describe("set-aside draft recovery", () => {
           lineageGeneration: 1,
         };
       }),
-      applyEngineYDocUpdate: vi.fn(async () => undefined),
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),

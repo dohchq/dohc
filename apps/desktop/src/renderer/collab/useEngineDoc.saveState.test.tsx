@@ -76,7 +76,8 @@ function harnessBridge() {
       if (deferredApplyFailure) {
         const failure = deferredApplyFailure;
         deferredApplyFailure = null;
-        return failure;
+        await failure;
+        return { accepted: true as const };
       }
       if (applyFailuresRemaining > 0) {
         applyFailuresRemaining -= 1;
@@ -84,6 +85,7 @@ function harnessBridge() {
       }
       Y.applyUpdate(doc, payload.update);
       applied.push({ sessionId: payload.sessionId, seq: payload.seq });
+      return { accepted: true as const };
     },
     onEngineYDocRemoteUpdate: (
       listener: (event: { sessionId: string; update: Uint8Array }) => void,
@@ -128,7 +130,7 @@ function harnessBridge() {
     });
   }
 
-  function emitLineageReplacement(text: string): void {
+  function emitLineageReplacement(text: string, lineageGeneration = 2): void {
     if (openedSessionId === null) throw new Error("session not open yet");
     const replacement = new Y.Doc();
     replacement.getMap("meta").set("contentKind", "plain-text");
@@ -137,7 +139,7 @@ function harnessBridge() {
       sessionId: openedSessionId,
       update: Y.encodeStateAsUpdate(replacement),
       recoveredPaths: [],
-      lineageGeneration: 2,
+      lineageGeneration,
     };
     act(() => {
       for (const listener of [...lineageReplacementListeners]) listener(event);
@@ -217,6 +219,8 @@ function Harness(props: { workspaceId: string; path: string; enabled?: boolean }
       <span data-testid="text">{engine.doc?.getText("plainText").toString() ?? "none"}</span>
       <span data-testid="deleted">{String(engine.deletedWhileEditing)}</span>
       <span data-testid="draft">{drafts.at(-1)?.text ?? "none"}</span>
+      <span data-testid="draft-count">{drafts.length}</span>
+      <span data-testid="drafts">{drafts.map((draft) => draft.text).join("|")}</span>
       <span data-testid="removal-operation">
         {engine.removalInProgress?.operation ?? "none"}
       </span>
@@ -312,6 +316,62 @@ it("persists a late edit on the losing mirror during replacement", async () => {
   await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
   expect(harness.applied).toHaveLength(0);
   expect(screen.getByTestId("available").textContent).toBe("true");
+});
+
+it("keeps deletion recovery separate from refused winner edits", async () => {
+  await mountBound();
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  const appliedAtDelete = harness.applied.length;
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+  await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("seed!"));
+
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  expect(screen.getByTestId("state").textContent).toBe("deleted");
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("winner!"));
+  expect(harness.applied).toHaveLength(appliedAtDelete);
+  expect(screen.getByTestId("draft-count").textContent).toBe("2");
+  expect(screen.getByTestId("drafts").textContent).toContain("seed!");
+  expect(screen.getByTestId("drafts").textContent).toContain("winner!");
+  expect(screen.getByTestId("state").textContent).toBe("deleted");
+
+  cleanup();
+  await disposeEngineDocLeasesForTests();
+  render(
+    <Harness
+      workspaceId="ws-1"
+      path="notes/big.md"
+      enabled={false}
+    />,
+  );
+  expect(screen.getByTestId("draft-count").textContent).toBe("2");
+  expect(screen.getByTestId("drafts").textContent).toContain("seed!");
+  expect(screen.getByTestId("drafts").textContent).toContain("winner!");
+});
+
+it("keeps recovery from consecutive independent lineage replacements", async () => {
+  await mountBound();
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  harness.emitLineageReplacement("final", 3);
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2, 3]));
+
+  expect(screen.getByTestId("draft-count").textContent).toBe("2");
+  expect(screen.getByTestId("drafts").textContent).toContain("seed!");
+  expect(screen.getByTestId("drafts").textContent).toContain("winner!");
 });
 
 it("shows the failure when a settle fails, instead of reading Saved", async () => {

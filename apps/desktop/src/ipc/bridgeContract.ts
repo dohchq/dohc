@@ -3399,6 +3399,22 @@ export const ApplyEngineYDocUpdatePayload = z.object({
 });
 export type ApplyEngineYDocUpdatePayload = z.infer<typeof ApplyEngineYDocUpdatePayload>;
 
+export const ApplyEngineYDocUpdateResult = z.discriminatedUnion("accepted", [
+  z.object({ accepted: z.literal(true) }),
+  z.object({
+    accepted: z.literal(false),
+    reason: z.enum([
+      "session-unavailable",
+      "lineage-transition",
+      "deleted",
+      "read-only",
+    ]),
+  }),
+]);
+export type ApplyEngineYDocUpdateResult = z.infer<
+  typeof ApplyEngineYDocUpdateResult
+>;
+
 export const AcknowledgeEngineYDocLineageReplacementPayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
   lineageGeneration: z.number().int().positive(),
@@ -3804,8 +3820,11 @@ export interface DohcDesktopBridge {
     payload: OpenEngineYDocSessionPayload,
   ): Promise<OpenEngineYDocSessionResult>;
   // Ship a local editor CRDT update to main (journaled via recordUpdate +
-  // debounced settle). A no-op if the session is unknown/closed.
-  applyEngineYDocUpdate(payload: ApplyEngineYDocUpdatePayload): Promise<void>;
+  // debounced settle). A refusal is explicit so the renderer can preserve the
+  // mirror instead of treating a dropped update as durable.
+  applyEngineYDocUpdate(
+    payload: ApplyEngineYDocUpdatePayload,
+  ): Promise<ApplyEngineYDocUpdateResult>;
   // Completes the replacement handoff only after the renderer detached the
   // losing mirror and durably preserved any edit that did not reach main.
   acknowledgeEngineYDocLineageReplacement(

@@ -9,6 +9,7 @@ import {
 } from "../orphanedDrafts";
 import {
   bindEngineYDoc,
+  EngineYDocDeliveryRefusedError,
   type EngineRemovalInProgress,
   type EngineYDocBinding,
   type EngineYDocTransport,
@@ -281,7 +282,7 @@ function makeTransport(
     },
     async applyLocalUpdate(update, updateGeneration) {
       if (writesRefused.current) {
-        throw new Error("The live document no longer accepts local updates.");
+        throw new EngineYDocDeliveryRefusedError("document-writes-refused");
       }
       // Main journals + settles. The provider owns the asynchronous delivery
       // tail and repairs a rejected delta with the full mirror state before
@@ -289,12 +290,15 @@ function makeTransport(
       // unsaved until that repair or a later settle covers it.
       localSeq.current += 1;
       const seq = localSeq.current;
-      await bridge().applyEngineYDocUpdate({
+      const result = await bridge().applyEngineYDocUpdate({
         sessionId,
         update,
         seq,
         lineageGeneration: updateGeneration,
       });
+      if (!result.accepted) {
+        throw new EngineYDocDeliveryRefusedError(result.reason);
+      }
     },
     onRemoteUpdate(listener) {
       return bridge().onEngineYDocRemoteUpdate((event) => {
@@ -433,6 +437,8 @@ function createEngineDocSession(
   let unsubscribeSaveState: (() => void) | null = null;
   let deletionSnapshotBytes: Uint8Array | null = null;
   let deletionDraftId: number | null = null;
+  let deletionDocument: Y.Doc | null = null;
+  const recoveryDraftIds = new WeakMap<Y.Doc, number>();
   let deletionQueue: Promise<void> = Promise.resolve();
   let deletionPending = false;
   let deliveryPending = false;
@@ -514,6 +520,7 @@ function createEngineDocSession(
 
   const captureDeletion = (doc: Y.Doc): void => {
     writesRefused.current = true;
+    deletionDocument = doc;
     const bytes = Y.encodeStateAsUpdate(doc);
     deletionSnapshotBytes = bytes;
     const forceCreate = saveStateRef.current !== "saved";
@@ -529,17 +536,41 @@ function createEngineDocSession(
     enqueueDeletionSnapshot(bytes, forceCreate);
   };
 
-  const captureUndeliveredSnapshot = (bytes: Uint8Array): void => {
+  const recoveryDraftId = (source: Y.Doc): number | null => {
+    if (source === deletionDocument) return deletionDraftId;
+    return recoveryDraftIds.get(source) ?? null;
+  };
+
+  const setRecoveryDraftId = (source: Y.Doc, draftId: number): void => {
+    if (source === deletionDocument) {
+      deletionDraftId = draftId;
+    } else {
+      recoveryDraftIds.set(source, draftId);
+    }
+  };
+
+  const captureUndeliveredSnapshot = (
+    bytes: Uint8Array,
+    _error: unknown,
+    source: Y.Doc,
+  ): void => {
     const rebuilt = new Y.Doc();
     Y.applyUpdate(rebuilt, bytes);
     const fallback = durableMarkdownFromSnapshot(rebuilt, bytes);
     rebuilt.destroy();
-    if (deletionDraftId === null) {
-      deletionDraftId = captureOrphanedDraft(workspaceId, path, fallback);
+    let draftId = recoveryDraftId(source);
+    if (draftId === null) {
+      draftId = captureOrphanedDraft(workspaceId, path, fallback);
+      setRecoveryDraftId(source, draftId);
     } else {
-      replaceOrphanedDraft(workspaceId, path, deletionDraftId, fallback);
+      replaceOrphanedDraft(workspaceId, path, draftId, fallback);
     }
-    const draftId = deletionDraftId;
+    if (
+      deletionSnapshotBytes === null &&
+      saveStateRef.current !== "read-only"
+    ) {
+      reportSaveState("error");
+    }
     deletionQueue = deletionQueue
       .then(async () => {
         const text = await markdownFromSnapshot(bytes);
@@ -554,6 +585,7 @@ function createEngineDocSession(
   };
 
   const refreshDeletionDraft = (doc: Y.Doc): void => {
+    if (doc !== deletionDocument) return;
     if (deletionSnapshotBytes === null) return;
     const bytes = Y.encodeStateAsUpdate(doc);
     if (snapshotsEqual(bytes, deletionSnapshotBytes)) return;
@@ -579,12 +611,13 @@ function createEngineDocSession(
     writesRefused.current = true;
     detachSaveObserver?.();
     detachSaveObserver = null;
-    let draftId: number | null = null;
     const persist = (): void => {
       const bytes = Y.encodeStateAsUpdate(retired);
       const fallback = durableMarkdownFromSnapshot(retired, bytes);
+      let draftId = recoveryDraftId(retired);
       if (draftId === null) {
         draftId = captureOrphanedDraft(workspaceId, path, fallback);
+        setRecoveryDraftId(retired, draftId);
       } else {
         replaceOrphanedDraft(workspaceId, path, draftId, fallback);
       }
@@ -606,7 +639,7 @@ function createEngineDocSession(
           );
         });
     };
-    if (saveStateRef.current !== "saved") persist();
+    if (saveStateRef.current !== "saved" || deliveryPending) persist();
     const onRetiredUpdate = () => persist();
     retired.on("update", onRetiredUpdate);
     retiredDraftObservers.set(retired, () => retired.off("update", onRetiredUpdate));
@@ -713,8 +746,12 @@ function createEngineDocSession(
 
           bound.onDocumentReplaced((replacement) => {
             if (disposed) return;
-            writesRefused.current = false;
-            if (!deliveryPending) reportSaveState("saved");
+            if (!deletionPending && deletionSnapshotBytes === null) {
+              writesRefused.current = false;
+            }
+            if (!writesRefused.current && !deliveryPending) {
+              reportSaveState("saved");
+            }
             observeSaveState(replacement);
             setOutcome({ token, kind: "bound", doc: replacement });
           });
