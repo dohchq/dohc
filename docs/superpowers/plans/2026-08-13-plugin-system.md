@@ -123,7 +123,10 @@ Constraints these choices create:
   collaborator's edit to plugin source would otherwise execute
   full-trust on every member's machine via hot reload. Each device
   therefore records the approved content hash of every enabled plugin
-  in `.dohc/plugins.local.json` (device-local, never synced). A hash
+  in per-workspace state under the app's own `userData` — outside the
+  workspace folder entirely, because a Dropbox/OneDrive mirror or a
+  git-tracked `.dohc` could otherwise deliver plugin source and its
+  forged approval together. A hash
   the device has not approved does not execute: the plugin is held
   disabled until the local user approves the change. Approval and build
   read the same bytes — the pipeline copies source to an engine-excluded
@@ -133,13 +136,17 @@ Constraints these choices create:
   snapshot (`file:`/`link:`) are refused at install time — code the hash
   does not bind does not install — and source trees containing symlinks
   or junctions that escape the snapshot are refused the same way. The
-  auto-approve predicate is **attribution, not topology**: an edit whose
-  moments carry dohc-mediated attribution (the user's editor, their
-  agent through the door, the SDK) auto-approves, so normal hot reload
-  stays frictionless; a disk-only out-of-band change — dohc sync later,
-  but equally a git pull or Dropbox delivery today — prompts before it
-  executes, because "no dohc sync peers" never meant "no way for remote
-  bytes to arrive." Writes arriving through the site SDK never
+  auto-approve predicate is **attribution through the door, not
+  topology**: a hash change auto-approves only when every constituent
+  moment was door-written (per-operation authored — the user's editor
+  session, their agent, the SDK). Watcher-captured disk changes never
+  auto-approve, whatever ambient author they carry — the ambient slot
+  stamps whole watcher batches, so a git pull settling during an agent
+  run would otherwise inherit that agent's identity and self-approve. A
+  disk-only out-of-band change — dohc sync later, but equally a git
+  pull or Dropbox delivery today — prompts before it executes, because
+  "no dohc sync peers" never meant "no way for remote bytes to
+  arrive." Writes arriving through the site SDK never
   auto-approve, and `siteSdkHost` refuses writes under `plugins/`
   outright (as it already refuses database files and canonical
   Markdown) — otherwise a sandboxed site could write plugin source and
@@ -175,9 +182,13 @@ Constraints these choices create:
   detection/config parsing (`packages/workspace-core/src/sites.ts`) and
   build/preview execution (`apps/desktop/src/workspaces/siteRunner.ts`).
   Nothing in the repo installs dependencies today — that part of PR2 is
-  genuinely new. Generated bundles go under an engine-excluded path
-  (`.dohc/plugins/`), never inside the captured `plugins/` tree, so
-  builds are not versioned, synced, or watcher-looped.
+  genuinely new. Snapshots, installed dependencies, and generated
+  bundles all live under the app's `userData` beside the device state —
+  never anywhere in the workspace folder, engine-excluded or not,
+  because anything inside the workspace can be replaced by a
+  git/Dropbox mirror, and a mirror-writable bundle would bypass source
+  hashing entirely. The workspace holds exactly what is shared: source
+  and lockfile.
 
 ## Build plan
 
@@ -218,7 +229,9 @@ Spike first, then three stacked PRs, each independently green.
   install runs pnpm's standalone script under a `utilityProcess`, with
   `--ignore-scripts` and `--ignore-workspace` (without the latter, a
   dohc workspace that is itself a pnpm monorepo absorbs the plugin into
-  its own workspace instead of installing from the plugin's lockfile) —
+  its own workspace instead of installing from the plugin's lockfile)
+  and `--frozen-lockfile` (a manifest/lockfile mismatch fails the
+  install; it never resolves a graph nobody reviewed) —
   lifecycle scripts would need a real `node` and are also npm's main
   attack surface, so dependencies that require install scripts are
   unsupported until a shipped-Node decision is made. `--ignore-scripts`
