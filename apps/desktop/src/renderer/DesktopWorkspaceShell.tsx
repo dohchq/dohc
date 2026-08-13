@@ -3255,11 +3255,7 @@ export function DesktopWorkspaceShell(props: {
         ) {
           return;
         }
-        invalidateDeferredFileOpenForGroupChange(
-          current.activeEditorGroup,
-          targetGroupId,
-        );
-        mutateWb((state) =>
+        const moveState = (state: WorkbenchState) =>
           moveTabToGroup(
             state,
             sourceGroupId,
@@ -3267,8 +3263,31 @@ export function DesktopWorkspaceShell(props: {
             path,
             toIndex,
             hasEditorFocus(state, focus) ? "target" : "preserve",
-          ),
+          );
+        const next = moveState(current);
+        if (next === current) return;
+        invalidateDeferredFileOpenForGroupChange(
+          current.activeEditorGroup,
+          targetGroupId,
         );
+        const currentTarget = current.editorGroups.find(
+          (group) => group.id === targetGroupId,
+        );
+        const nextTarget = next.editorGroups.find(
+          (group) => group.id === targetGroupId,
+        );
+        const nextActiveTab = nextTarget?.activeTab;
+        if (
+          nextActiveTab !== undefined &&
+          nextActiveTab !== null &&
+          nextActiveTab !== currentTarget?.activeTab
+        ) {
+          const viewKind = classifyForView(nextActiveTab);
+          if (viewKind === "markdown" || viewKind === "database") {
+            rendererMarks.mark(fileOpenStartMark(targetGroupId));
+          }
+        }
+        mutateWb(moveState);
       };
 
       commitAfterTabFlush(

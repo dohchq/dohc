@@ -3910,6 +3910,58 @@ describe("workspace shell errors", () => {
 // active row used to mark anyway — no remount/measure follows, so the stale
 // mark corrupts the NEXT open's latency measure.
 describe("file-open-start marking", () => {
+  it("marks the target group before a cross-group Markdown move mounts it", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    Object.defineProperty(Element.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    Object.defineProperty(Element.prototype, "hasPointerCapture", {
+      configurable: true,
+      value: vi.fn(() => false),
+    });
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+    const mark = vi.spyOn(rendererMarks, "mark");
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: vi.fn(() => right),
+    });
+    const source = within(left).getByTestId("tab-a.md");
+
+    fireEvent.pointerDown(source, { button: 0, pointerId: 7, clientX: 10 });
+    fireEvent.pointerMove(source, {
+      pointerId: 7,
+      buttons: 1,
+      clientX: 30,
+      clientY: 40,
+    });
+    fireEvent.pointerUp(source, {
+      pointerId: 7,
+      clientX: 30,
+      clientY: 40,
+    });
+
+    await waitFor(() =>
+      expect(within(right).getByTestId("tab-a.md").dataset.active).toBe("true"),
+    );
+    expect(mark).toHaveBeenCalledWith("file-open-start:right");
+    mark.mockRestore();
+  });
+
   it("measures overlapping Markdown opens from each editor group's start", async () => {
     const leftRead = deferred<{
       text: string;
