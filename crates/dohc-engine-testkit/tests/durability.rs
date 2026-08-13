@@ -348,9 +348,10 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // (ordinal 20), the file-object-rooted Y.Doc deferred-update queue (ordinal 21),
     // pending replication refusals (ordinal 22), the parked
     // chat-message-before-thread coordinates (ordinal 23), the
-    // materialization-workspace migration (ordinal 24), and the bootstrap
-    // main-version name backfill (ordinal 25, #325).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 26);
+    // materialization-workspace migration (ordinal 24), the bootstrap
+    // main-version name backfill (ordinal 25, #325), and scene asset delete
+    // authority (ordinal 26).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 27);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(
