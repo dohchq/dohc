@@ -303,7 +303,7 @@ import {
 import { buildMenuTemplate } from "./window/applicationMenu";
 import { renderHtmlToPdf } from "./window/documentPdfExport";
 import {
-  allowSitePreviewOrigin,
+  allowLoopbackFrameOrigin,
   createMainWindow,
   navigationPolicy,
   rememberChromeTheme,
@@ -725,7 +725,7 @@ function assertSitePreviewMode(
 
 const sitePreviewSdkAuthorities = createSitePreviewSdkAuthorityRegistry();
 const sitePreviews = createSitePreviewLifecycle({
-  allowOrigin: allowSitePreviewOrigin,
+  allowOrigin: allowLoopbackFrameOrigin,
   revokePreview: sitePreviewSdkAuthorities.revokePreview,
 });
 const sitePreviewStartLocks = new Map<string, Promise<void>>();
@@ -2549,6 +2549,7 @@ interface RegisteredPlugin {
 
 interface RunningPluginPanel {
   handle: StaticSitePreview;
+  releaseOrigin: () => void;
   workspaceId: string;
   pluginId: string;
   panelId: string;
@@ -2664,7 +2665,7 @@ function pluginHostFor(workspace: CreatedWorkspace): PluginHost {
     workspaceRoot: workspace.rootPath,
     spawnTransport: (callbacks) => {
       const child = utilityProcess.fork(
-        join(app.getAppPath(), "dist", "main", "plugin-host.js"),
+        join(import.meta.dirname, "plugin-host.js"),
         [],
         {
           cwd: callbacks.pluginRoot,
@@ -2753,7 +2754,12 @@ async function stopPluginPanel(
   await withPluginPanelStartLock(key, async () => {
     const panel = runningPluginPanels.get(key);
     runningPluginPanels.delete(key);
-    await panel?.handle.stop();
+    if (!panel) return;
+    try {
+      await panel.handle.stop();
+    } finally {
+      panel.releaseOrigin();
+    }
   });
 }
 
@@ -6058,7 +6064,13 @@ function registerIpcHandlers(
       );
       const previous = runningPluginPanels.get(key);
       runningPluginPanels.delete(key);
-      await previous?.handle.stop();
+      if (previous) {
+        try {
+          await previous.handle.stop();
+        } finally {
+          previous.releaseOrigin();
+        }
+      }
 
       const entryPath = join(plugin.pluginRoot, panel.entry);
       const handle = await startStaticDirectoryPreview(dirname(entryPath), {
@@ -6074,8 +6086,10 @@ function registerIpcHandlers(
           "Plugin panel start was cancelled because the renderer changed.",
         );
       }
+      const releaseOrigin = allowLoopbackFrameOrigin(handle.url);
       runningPluginPanels.set(key, {
         handle,
+        releaseOrigin,
         workspaceId: workspace.workspaceId,
         pluginId: input.pluginId,
         panelId: input.panelId,

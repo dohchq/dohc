@@ -6,6 +6,7 @@ import type {
   InvokePluginPanelSdkPayload,
   ListSitesPayload,
   MenuCommand,
+  PluginPanelOpenedEvent,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
   SitePackagePayload,
@@ -19,6 +20,7 @@ import type {
   WriteClipboardTextPayload,
 } from "./ipc/bridgeContract";
 import {
+  OpenPluginPanelResult,
   parseInvokePluginPanelSdkPayloadForIpc,
   parseInvokeSiteSdkPayloadForIpc,
 } from "./ipc/bridgeContract";
@@ -38,6 +40,10 @@ import {
 // typed operations — never raw ipcRenderer, never Node. Typed as
 // DohcDesktopBridge so it cannot drift from the contract (a missing or
 // mistyped method fails the desktop typecheck).
+const pluginPanelOpenedListeners = new Set<
+  (event: PluginPanelOpenedEvent) => void
+>();
+
 const bridge: DohcDesktopBridge = {
   platform: process.platform,
   reloadRenderer: () => ipcRenderer.invoke(CHANNELS.reloadRenderer),
@@ -142,8 +148,21 @@ const bridge: DohcDesktopBridge = {
       CHANNELS.invokeSiteSdk,
       parseInvokeSiteSdkPayloadForIpc(payload),
     ),
-  openPluginPanel: (payload: OpenPluginPanelPayload) =>
-    ipcRenderer.invoke(CHANNELS.openPluginPanel, payload),
+  openPluginPanel: async (payload: OpenPluginPanelPayload) => {
+    const result = OpenPluginPanelResult.parse(
+      await ipcRenderer.invoke(CHANNELS.openPluginPanel, payload),
+    );
+    const event: PluginPanelOpenedEvent = {
+      workspaceId: payload.workspaceId,
+      ...result,
+    };
+    for (const listener of pluginPanelOpenedListeners) listener(event);
+    return result;
+  },
+  onPluginPanelOpened: (listener) => {
+    pluginPanelOpenedListeners.add(listener);
+    return () => pluginPanelOpenedListeners.delete(listener);
+  },
   startPluginPanel: (payload: StartPluginPanelPayload) =>
     ipcRenderer.invoke(CHANNELS.startPluginPanel, payload),
   stopPluginPanel: (payload: StopPluginPanelPayload) =>

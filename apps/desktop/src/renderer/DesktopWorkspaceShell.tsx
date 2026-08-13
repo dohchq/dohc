@@ -158,6 +158,7 @@ import {
   moveTabToNewGroup,
   parseHistoryDiffTabPath,
   parsePluginPanelTabPath,
+  pluginPanelTabPath,
   parseSiteTabPath,
   parseUiState,
   pruneMissingRestoredTabs,
@@ -1724,6 +1725,17 @@ export function DesktopWorkspaceShell(props: {
       setWb(updater);
     },
     [],
+  );
+
+  useEffect(
+    () =>
+      bridge().onPluginPanelOpened((event) => {
+        if (event.workspaceId !== workspaceId) return;
+        mutateWb((state) =>
+          openTab(state, pluginPanelTabPath(event.pluginId, event.panelId)),
+        );
+      }),
+    [mutateWb, workspaceId],
   );
 
   useEffect(() => {

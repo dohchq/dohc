@@ -24,15 +24,25 @@ describe("plugin panel main-process wiring", () => {
   it("serves the manifest panel and grants only main-derived SDK context", () => {
     const start = handler("startPluginPanel");
     const serveAt = start.indexOf("startStaticDirectoryPreview(dirname(entryPath)");
+    const allowAt = start.indexOf("allowLoopbackFrameOrigin(handle.url)");
     const rememberAt = start.indexOf("runningPluginPanels.set(key");
     const grantAt = start.indexOf("pluginPanelSdkAuthorities.register({");
 
     expect(serveAt).toBeGreaterThan(-1);
-    expect(rememberAt).toBeGreaterThan(serveAt);
+    expect(allowAt).toBeGreaterThan(serveAt);
+    expect(rememberAt).toBeGreaterThan(allowAt);
     expect(grantAt).toBeGreaterThan(rememberAt);
     expect(start).toContain("workspaceRoot: workspace.rootPath");
     expect(start).toContain("pluginRoot: plugin.pluginRoot");
     expect(start).toContain("spawnId");
+    expect(start).toContain("previous.releaseOrigin();");
+
+    const stopStart = mainSource.indexOf("async function stopPluginPanel(");
+    const stop = mainSource.slice(
+      stopStart,
+      mainSource.indexOf("\n}\n\nasync function stopPluginPanelsForWorkspace", stopStart),
+    );
+    expect(stop).toContain("panel.releaseOrigin();");
   });
 
   it("authorizes panel SDK calls before routing them through the plugin host", () => {
@@ -67,7 +77,7 @@ describe("plugin panel main-process wiring", () => {
     );
 
     expect(host).toContain("utilityProcess.fork(");
-    expect(host).toContain('"dist", "main", "plugin-host.js"');
+    expect(host).toContain('join(import.meta.dirname, "plugin-host.js")');
     expect(workspaceOpen).toContain("pluginPanelSdkAuthorities.revokeSender(senderId);");
     expect(workspaceOpen).toContain("void stopPluginWorkspace(activeWorkspaceId);");
     expect(workspaceOpen).toContain("await stopPluginWorkspace(previousWorkspaceId);");

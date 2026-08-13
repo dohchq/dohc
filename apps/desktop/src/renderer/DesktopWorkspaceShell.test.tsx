@@ -33,6 +33,7 @@ import type {
   ListEngineMomentsResult,
   ListWorkspaceVersionsResult,
   McpConfigResult,
+  PluginPanelOpenedEvent,
   ReadWorkspaceTextPayload,
   ReadEngineMomentResult,
   RefreshSharedViewResult,
@@ -239,9 +240,14 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
   let activityCallback: (() => void) | null = null;
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommandId) => void) | null = null;
+  let pluginPanelOpenedCallback:
+    | ((event: PluginPanelOpenedEvent) => void)
+    | null = null;
   return {
     emitWorkspaceActivity: () => activityCallback?.(),
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
+    emitPluginPanelOpened: (event: PluginPanelOpenedEvent) =>
+      pluginPanelOpenedCallback?.(event),
     getWorkspaceUiState: vi.fn(() => uiStatePromise),
     // The shell re-reads the registry to pick up a share's durable skip
     // record. Default: a workspace with nothing skipped.
@@ -433,6 +439,14 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
         menuCallback = null;
       };
     }),
+    onPluginPanelOpened: vi.fn(
+      (callback: (event: PluginPanelOpenedEvent) => void) => {
+        pluginPanelOpenedCallback = callback;
+        return () => {
+          pluginPanelOpenedCallback = null;
+        };
+      },
+    ),
     emitMenuCommand: (command: MenuCommandId) => menuCallback?.(command),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.
@@ -643,6 +657,34 @@ afterEach(() => {
 
 describe("plugin panel tabs", () => {
   const path = pluginPanelTabPath("hello-plugin", "main");
+
+  it("opens a requested panel only in its workspace", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+
+    act(() => {
+      bridge.emitPluginPanelOpened({
+        workspaceId: "ws-other",
+        pluginId: "hello-plugin",
+        panelId: "main",
+      });
+    });
+    expect(screen.queryByTestId("plugin-panel-page")).toBeNull();
+
+    act(() => {
+      bridge.emitPluginPanelOpened({
+        workspaceId: WORKSPACE.workspaceId,
+        pluginId: "hello-plugin",
+        panelId: "main",
+      });
+    });
+
+    expect(await screen.findByTestId("plugin-panel-page")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "main" }).dataset.active).toBe(
+      "true",
+    );
+  });
 
   it("restores the panel tab, mounts its page, and stops it when closed", async () => {
     const bridge = makeBridge(

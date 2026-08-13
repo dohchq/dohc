@@ -80,7 +80,7 @@ function windowStateFile(): string {
   return join(stateDir(), WINDOW_STATE_FILE);
 }
 
-const allowedSitePreviewOrigins = new Map<string, number>();
+const allowedLoopbackFrameOrigins = new Map<string, number>();
 
 function loopbackHttpOrigin(targetUrl: string): string | null {
   try {
@@ -94,26 +94,26 @@ function loopbackHttpOrigin(targetUrl: string): string | null {
   }
 }
 
-export function allowSitePreviewOrigin(previewUrl: string): () => void {
-  const origin = loopbackHttpOrigin(previewUrl);
+export function allowLoopbackFrameOrigin(frameUrl: string): () => void {
+  const origin = loopbackHttpOrigin(frameUrl);
   if (!origin) return () => undefined;
-  allowedSitePreviewOrigins.set(
+  allowedLoopbackFrameOrigins.set(
     origin,
-    (allowedSitePreviewOrigins.get(origin) ?? 0) + 1,
+    (allowedLoopbackFrameOrigins.get(origin) ?? 0) + 1,
   );
   let disposed = false;
   return () => {
     if (disposed) return;
     disposed = true;
-    const count = allowedSitePreviewOrigins.get(origin) ?? 0;
-    if (count <= 1) allowedSitePreviewOrigins.delete(origin);
-    else allowedSitePreviewOrigins.set(origin, count - 1);
+    const count = allowedLoopbackFrameOrigins.get(origin) ?? 0;
+    if (count <= 1) allowedLoopbackFrameOrigins.delete(origin);
+    else allowedLoopbackFrameOrigins.set(origin, count - 1);
   };
 }
 
-export function isAllowedSitePreviewUrl(targetUrl: string): boolean {
+export function isAllowedLoopbackFrameUrl(targetUrl: string): boolean {
   const origin = loopbackHttpOrigin(targetUrl);
-  return origin !== null && allowedSitePreviewOrigins.has(origin);
+  return origin !== null && allowedLoopbackFrameOrigins.has(origin);
 }
 
 function loadPlacement() {
@@ -231,7 +231,7 @@ export function createMainWindow(options?: {
   window.webContents.on("will-navigate", denyDisallowed);
   window.webContents.on("will-redirect", denyDisallowed);
   window.webContents.on("will-frame-navigate", (event) => {
-    if (isAllowedSitePreviewUrl(event.url)) return;
+    if (isAllowedLoopbackFrameUrl(event.url)) return;
     denyDisallowed(event, event.url);
   });
 

@@ -66,6 +66,7 @@ import {
   StopSitePreviewPayload,
   OpenPluginPanelPayload,
   OpenPluginPanelResult,
+  PluginPanelOpenedEvent,
   StartPluginPanelPayload,
   StartPluginPanelResult,
   StopPluginPanelPayload,
@@ -1171,6 +1172,7 @@ describe("site IPC contract", () => {
       panelId: identity.panelId,
     };
     expect(OpenPluginPanelResult.parse(panelIdentity)).toEqual(panelIdentity);
+    expect(PluginPanelOpenedEvent.parse(identity)).toEqual(identity);
     expect(StartPluginPanelPayload.parse(identity)).toEqual(identity);
     expect(StopPluginPanelPayload.parse(identity)).toEqual(identity);
     expect(

@@ -2206,6 +2206,13 @@ export const OpenPluginPanelResult = z.object({
 }).strict();
 export type OpenPluginPanelResult = z.infer<typeof OpenPluginPanelResult>;
 
+export const PluginPanelOpenedEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  panelId: PLUGIN_PANEL_ID,
+}).strict();
+export type PluginPanelOpenedEvent = z.infer<typeof PluginPanelOpenedEvent>;
+
 export const StartPluginPanelPayload = z.object({
   workspaceId: WORKSPACE_ID,
   pluginId: PLUGIN_ID,
@@ -3505,6 +3512,9 @@ export interface DohcDesktopBridge {
   stopSitePreview(payload: StopSitePreviewPayload): Promise<StopSitePreviewResult>;
   invokeSiteSdk(payload: InvokeSiteSdkPayload): Promise<InvokeSiteSdkResult>;
   openPluginPanel(payload: OpenPluginPanelPayload): Promise<OpenPluginPanelResult>;
+  onPluginPanelOpened(
+    listener: (event: PluginPanelOpenedEvent) => void,
+  ): () => void;
   startPluginPanel(payload: StartPluginPanelPayload): Promise<StartPluginPanelResult>;
   stopPluginPanel(payload: StopPluginPanelPayload): Promise<StopPluginPanelResult>;
   invokePluginPanelSdk(
