@@ -1,6 +1,6 @@
 import { lstat, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { DohcPluginManifest } from "@dohc/workspace-contracts/plugin-manifest";
+import { DohcPluginManifest } from "./pluginManifestSchema";
 import { formatZodIssues } from "./zodDiagnostics";
 
 export const MAX_PLUGIN_MANIFEST_FILE_BYTES = 256 * 1024;

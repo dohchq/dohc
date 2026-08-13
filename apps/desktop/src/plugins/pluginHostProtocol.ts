@@ -1,7 +1,7 @@
 // This file is the single source of truth for the plugin-host wire contract.
 // The main process and plugin child share it across their process boundary.
 
-import type { DohcPluginManifest } from "@dohc/workspace-contracts/plugin-manifest";
+import type { DohcPluginManifest } from "./pluginManifestSchema";
 
 export const PLUGIN_HOST_METHODS = {
   activate: "plugin.activate",
