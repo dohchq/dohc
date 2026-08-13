@@ -107,7 +107,17 @@ if (budget) {
   process.env.RUST_TEST_THREADS ??= String(budget.jobs);
   process.env.NEXTEST_TEST_THREADS ??= String(budget.jobs);
 }
-const capsField = `jobs ${process.env.CARGO_BUILD_JOBS ?? "default"}, test-threads ${process.env.RUST_TEST_THREADS ?? "default"}`;
+// One value covers both runners unless the caller split them. A divergent
+// nextest cap governs the heavy test steps, so the evidence names both
+// values rather than reporting a share nextest is not using.
+const libtestThreads = process.env.RUST_TEST_THREADS ?? "default";
+const nextestThreads = process.env.NEXTEST_TEST_THREADS ?? libtestThreads;
+const capsField =
+  `jobs ${process.env.CARGO_BUILD_JOBS ?? "default"}, test-threads ${
+    nextestThreads === libtestThreads
+      ? libtestThreads
+      : `${nextestThreads} (doctests ${libtestThreads})`
+  }`;
 // Hand the tests the absolute root instead of a name they would re-derive.
 // `os.tmpdir()` and Rust's `std::env::temp_dir()` read different variables and
 // agree only by luck: under WSL the inherited TEMP/TMP point at /mnt/c, which
@@ -171,10 +181,8 @@ const required = [
   { name: "build --workspace", cmd: "cargo build --locked --workspace" },
   // nextest schedules the workspace's ~73 test binaries in parallel where
   // `cargo test` runs them one at a time — measured, that was ~90% of the
-  // gate's wall clock. nextest runs no doctests BY DESIGN, so the `doctests`
-  // row exists to keep the ones the workspace has (one, in collab) from
-  // silently vanishing — a required row, because a runner swap that drops
-  // tests without a row is exactly the blind spot this gate refuses.
+  // gate's wall clock. It runs no doctests by design; the `doctests` row
+  // below keeps them.
   { name: "test --workspace", cmd: "cargo nextest run --locked --workspace" },
   { name: "doctests", cmd: "cargo test --locked --workspace --doc" },
   {

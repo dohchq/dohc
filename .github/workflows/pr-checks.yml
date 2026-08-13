@@ -286,9 +286,6 @@ jobs:
             exit 1
           fi
 
-      # The gate's test steps run through nextest; a missing binary fails the
-      # required rows outright, so the pin is verified the same way as the
-      # other two tools.
       - name: Verify pinned cargo-nextest
         run: |
           set -euo pipefail

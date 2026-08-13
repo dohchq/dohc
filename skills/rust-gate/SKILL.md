@@ -22,10 +22,15 @@ gate's evidence line is the only artifact the verifier
 (`tools/rust-engine-program/require-ci-pass-verdict.mjs`) accepts.
 
 The test steps run through cargo-nextest. If the `test --workspace` step
-fails with "no such command: nextest", install it with
-`cargo install cargo-nextest --locked` and rerun. The separate `doctests`
-row is required: nextest runs no doctests by design, and that row is what
-proves the workspace's doctests still ran.
+fails with "no such command: nextest", install the version CI pins
+(`.github/workflows/pr-checks.yml`, `CARGO_NEXTEST_VERSION`):
+
+```
+cargo install cargo-nextest --locked --version 0.9.143
+```
+
+The separate `doctests` row is required: nextest runs no doctests by
+design, and that row is what proves the workspace's doctests still ran.
 
 ## What the gate does for you
 
@@ -37,8 +42,8 @@ You do not set these up:
 - It refuses to start below 40 GB free disk. The error names the floor.
 - It takes one of 4 build slots before any cargo runs. If all slots are
   held, it waits and prints who holds them.
-- It caps `CARGO_BUILD_JOBS` and `RUST_TEST_THREADS` to its share of the
-  cores, and turns incremental compilation off for the run.
+- It caps cargo's build and test parallelism to its share of the cores,
+  and turns incremental compilation off for the run.
 - It records the caps it ran under in the evidence line.
 
 ## Read the verdict correctly
