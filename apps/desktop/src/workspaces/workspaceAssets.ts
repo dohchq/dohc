@@ -519,9 +519,13 @@ async function writeContainedFile(
   relativePath: string,
   data: Uint8Array | string,
   kind: "asset" | "restore",
-  options: { exclusive?: boolean; signal?: AbortSignal } = {},
+  options: {
+    exclusive?: boolean;
+    signal?: AbortSignal;
+    resolvedPathPolicy?: (workspaceRelativePath: string) => void;
+  } = {},
 ): Promise<void> {
-  const { exclusive = false, signal } = options;
+  const { exclusive = false, signal, resolvedPathPolicy } = options;
   assertWriteNotAborted(signal);
   const label = kind === "asset" ? "Asset" : "Restore";
   const validated = validateUserMaterializePath(relativePath);
@@ -537,13 +541,15 @@ async function writeContainedFile(
   // the link and creates its target (measured, not assumed). So the exclusive
   // path must judge the leaf, and a planted `note.md -> .dohc/x` is refused
   // rather than followed. A live link there still answers EEXIST.
-  const { resolvedAbsolute: absolute } = await assertResolvedWorkspacePath({
-    rootPath,
-    absolutePath: join(rootPath, validated.normalized),
-    spelled: relativePath,
-    label: `${label} path`,
-    access: exclusive ? "write" : "entry",
-  });
+  const { relative: resolvedRelative, resolvedAbsolute: absolute } =
+    await assertResolvedWorkspacePath({
+      rootPath,
+      absolutePath: join(rootPath, validated.normalized),
+      spelled: relativePath,
+      label: `${label} path`,
+      access: exclusive ? "write" : "entry",
+    });
+  resolvedPathPolicy?.(resolvedRelative.replaceAll("\\", "/"));
   const realRoot = await realpath(rootPath);
   assertWriteNotAborted(signal);
   // Everything below works on the resolution the guard judged: the mkdir, the
@@ -613,7 +619,10 @@ export async function restoreWorkspaceText(
   rootPath: string,
   relativePath: string,
   text: string,
-  options: { signal?: AbortSignal } = {},
+  options: {
+    signal?: AbortSignal;
+    resolvedPathPolicy?: (workspaceRelativePath: string) => void;
+  } = {},
 ): Promise<void> {
   if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) {
     throw new Error(`Text exceeds the ${MAX_TEXT_BYTES}-byte editor limit`);
@@ -630,7 +639,10 @@ export async function createWorkspaceTextExclusive(
   rootPath: string,
   relativePath: string,
   text: string,
-  options: { signal?: AbortSignal } = {},
+  options: {
+    signal?: AbortSignal;
+    resolvedPathPolicy?: (workspaceRelativePath: string) => void;
+  } = {},
 ): Promise<void> {
   if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) {
     throw new Error(`Text exceeds the ${MAX_TEXT_BYTES}-byte editor limit`);

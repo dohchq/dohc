@@ -49,9 +49,9 @@ import {
   scanWorkspaceFilesTolerant,
 } from "@dohc/workspace-fs";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   MAX_HISTORY_TEXT_SNAPSHOT_BYTES,
@@ -371,6 +371,14 @@ export interface WorkspaceEngineCapture {
   // Registers engine-originated disk writes the watcher is about to observe;
   // matching observations skip engine re-capture. Returns a cancel function.
   registerExpectedEngineEvents(events: readonly ExpectedEngineEvent[]): () => void;
+  // Writes one SDK-originated text file with an explicit per-operation
+  // author. This never reads or changes the workspace's ambient agent slot.
+  writeAuthoredTextFile(
+    absolutePath: string,
+    text: string,
+    author: MomentAuthor,
+    options?: { createOnly?: boolean; signal?: AbortSignal },
+  ): Promise<void>;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
   // file through this capture's Rust workspace sessions. The session journals
   // editor edits as ydoc.update ops and, on each debounced settle, projects the
@@ -3329,6 +3337,61 @@ export function createWorkspaceEngineCapture(
     },
 
     registerExpectedEngineEvents,
+
+    writeAuthoredTextFile(absolutePath, text, author, writeOptions = {}) {
+      return enqueueResult("write authored text", async () => {
+        if (writeOptions.signal?.aborted) {
+          throw new Error("Plugin panel is no longer active.");
+        }
+        const observedBytes = Buffer.byteLength(text, "utf8");
+        if (observedBytes > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
+          throw new Error(
+            `Authored text exceeds the capture limit: limit ${MAX_ENGINE_CAPTURE_TEXT_BYTES} bytes, observed ${observedBytes} bytes.`,
+          );
+        }
+        const { relative: resolvedRelative, resolvedAbsolute } =
+          await assertResolvedWorkspacePath({
+            rootPath,
+            absolutePath: resolve(absolutePath),
+            spelled: absolutePath,
+            label: "Authored text path",
+            access: "write",
+          });
+        const path = resolvedRelative.replaceAll("\\", "/");
+        if (
+          path.length === 0 ||
+          isAbsolute(path) ||
+          path === ".." ||
+          path.startsWith("../")
+        ) {
+          throw new Error(`Authored text path escapes the workspace: ${absolutePath}.`);
+        }
+        if (writeOptions.createOnly && existsSync(resolvedAbsolute)) {
+          throw new Error(`File already exists: ${path}`);
+        }
+        const policy = await readPolicyForTask();
+        assertEngineWritablePath(path, policy);
+        if (writeOptions.signal?.aborted) {
+          throw new Error("Plugin panel is no longer active.");
+        }
+        const engine = await engineStore();
+        const versionId = await activeVersionIdOf(engine);
+        const metadata: ActorNeutralWriteMetadata = {
+          origin: "api",
+          summary: `Updated ${pathBasename(path)}`,
+          correlationId: `authored-write-${createId()}`,
+        };
+        await engine.writeTextFile({
+          workspaceId,
+          versionId,
+          path,
+          text,
+          metadata,
+          author,
+        });
+        await materialize([{ kind: "write", path, text }], policy);
+      });
+    },
 
     openYDocSession(input) {
       // ON THE CAPTURE CHAIN, deliberately (#493). The version this session

@@ -107,12 +107,21 @@ export function resolveSpawnCommand(
 // stdio pipes. Kill the whole tree there; POSIX callers keep plain signals.
 // Resolves true only when taskkill ran and succeeded.
 export function killChildTreeWin32(child: ChildProcess): Promise<boolean> {
-  if (process.platform !== "win32" || !child.pid) return Promise.resolve(false);
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(false);
+  return killProcessTreeWin32(
+    child.pid,
+    () => child.exitCode !== null || child.signalCode !== null,
+  );
+}
+
+export function killProcessTreeWin32(
+  pid: number | undefined,
+  exited: () => boolean,
+): Promise<boolean> {
+  if (process.platform !== "win32" || !pid || exited()) return Promise.resolve(false);
   return new Promise((resolve) => {
     execFile(
       "taskkill",
-      ["/pid", String(child.pid), "/T", "/F"],
+      ["/pid", String(pid), "/T", "/F"],
       { windowsHide: true },
       (error) => resolve(!error),
     );

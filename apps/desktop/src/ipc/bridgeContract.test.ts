@@ -22,6 +22,7 @@ import {
   ExportDocumentFilePayload,
   ExportDocumentFileResult,
   InvokeSiteSdkPayload,
+  InvokePluginPanelSdkPayload,
   ListEngineMomentsPayload,
   ListEngineMomentsResult,
   WorkspaceSummary,
@@ -63,6 +64,12 @@ import {
   StartSitePreviewPayload,
   StartSitePreviewResult,
   StopSitePreviewPayload,
+  OpenPluginPanelPayload,
+  OpenPluginPanelResult,
+  PluginPanelOpenedEvent,
+  StartPluginPanelPayload,
+  StartPluginPanelResult,
+  StopPluginPanelPayload,
   UpdateActionResult,
   UpdateCheckResult,
   UpdateStateEvent,
@@ -71,6 +78,7 @@ import {
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
   parseInvokeSiteSdkPayloadForIpc,
+  parseInvokePluginPanelSdkPayloadForIpc,
 } from "./bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import {
@@ -1145,6 +1153,105 @@ describe("site IPC contract", () => {
     ]) {
       expect(InvokeSiteSdkPayload.safeParse({ ...base, params }).success).toBe(false);
     }
+  });
+
+  it("accepts strict plugin panel open, start, and stop payloads", () => {
+    const identity = {
+      workspaceId: "ws-plugins",
+      pluginId: "@dohc/reports",
+      panelId: "main",
+    };
+    expect(
+      OpenPluginPanelPayload.parse({
+        ...identity,
+        pluginRoot: "plugins/reports",
+      }),
+    ).toEqual({ ...identity, pluginRoot: "plugins/reports" });
+    const panelIdentity = {
+      pluginId: identity.pluginId,
+      panelId: identity.panelId,
+    };
+    expect(OpenPluginPanelResult.parse(panelIdentity)).toEqual(panelIdentity);
+    expect(PluginPanelOpenedEvent.parse(identity)).toEqual(identity);
+    expect(StartPluginPanelPayload.parse(identity)).toEqual(identity);
+    expect(StopPluginPanelPayload.parse(identity)).toEqual(identity);
+    expect(
+      StartPluginPanelResult.parse({
+        status: "ok",
+        url: "http://127.0.0.1:43123/",
+        title: "Reports",
+      }),
+    ).toEqual({
+      status: "ok",
+      url: "http://127.0.0.1:43123/",
+      title: "Reports",
+    });
+    expect(
+      StartPluginPanelResult.parse({ status: "not-registered" }),
+    ).toEqual({ status: "not-registered" });
+
+    expect(
+      StartPluginPanelPayload.safeParse({ ...identity, extra: true }).success,
+    ).toBe(false);
+    expect(
+      OpenPluginPanelPayload.safeParse({
+        ...identity,
+        pluginRoot: "plugins/reports\0escape",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects malformed plugin panel identities and non-loopback results", () => {
+    const base = {
+      workspaceId: "ws-plugins",
+      pluginId: "hello-plugin",
+      panelId: "main",
+    };
+    for (const patch of [
+      { workspaceId: "WS-PLUGINS" },
+      { pluginId: "" },
+      { pluginId: "hello\0main" },
+      { panelId: "" },
+      { panelId: "main\0alias" },
+      { panelId: "x".repeat(121) },
+    ]) {
+      expect(StartPluginPanelPayload.safeParse({ ...base, ...patch }).success).toBe(
+        false,
+      );
+      expect(StopPluginPanelPayload.safeParse({ ...base, ...patch }).success).toBe(
+        false,
+      );
+    }
+    expect(
+      StartPluginPanelResult.safeParse({
+        status: "ok",
+        url: "https://127.0.0.1:43123/",
+        title: "Reports",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("reuses the bounded site SDK params contract for plugin panels", () => {
+    const payload = {
+      workspaceId: "ws-plugins",
+      pluginId: "hello-plugin",
+      panelId: "main",
+      method: "files.write",
+      params: { path: "output.txt", text: "hello" },
+    };
+    expect(parseInvokePluginPanelSdkPayloadForIpc(payload)).toEqual(payload);
+    expect(
+      InvokePluginPanelSdkPayload.safeParse({
+        ...payload,
+        params: { text: "x".repeat(SITE_SDK_PARAMS_MAX_BYTES + 1) },
+      }).success,
+    ).toBe(false);
+    expect(
+      InvokePluginPanelSdkPayload.safeParse({ ...payload, method: "" }).success,
+    ).toBe(false);
+    expect(
+      InvokePluginPanelSdkPayload.safeParse({ ...payload, extra: true }).success,
+    ).toBe(false);
   });
 });
 

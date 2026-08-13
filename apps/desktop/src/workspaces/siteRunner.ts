@@ -154,7 +154,9 @@ async function listen(server: Server): Promise<string> {
     server.listen(0, "127.0.0.1", () => resolve());
   });
   const address = server.address();
-  if (!address || typeof address === "string") throw new Error("Site server did not start.");
+  if (!address || typeof address === "string") {
+    throw new Error("Static server did not start.");
+  }
   return `http://127.0.0.1:${address.port}`;
 }
 
@@ -172,8 +174,33 @@ export async function startStaticSitePreview(
   options: { entry?: string } = {},
 ): Promise<StaticSitePreview> {
   const root = await resolveContainedDir(workspaceRoot, siteRoot);
-  const entry = options.entry ?? "index.html";
-  assertContainedFilePath(entry, "site entry");
+  return startStaticDirectoryPreview(root, {
+    containmentRoot: workspaceRoot,
+    entry: options.entry ?? "index.html",
+    entryLabel: "site entry",
+  });
+}
+
+export async function startStaticDirectoryPreview(
+  rootPath: string,
+  options: {
+    containmentRoot: string;
+    entry: string;
+    entryLabel?: string;
+  },
+): Promise<StaticSitePreview> {
+  const root = await realpath(rootPath);
+  const containmentRoot = await realpath(options.containmentRoot);
+  if (!isInside(containmentRoot, root)) {
+    throw new Error(`Static root escapes its containment root: ${rootPath}`);
+  }
+  const rootRelative = relative(containmentRoot, root).replaceAll("\\", "/");
+  if (rootRelative && hasIgnoredSegment(rootRelative)) {
+    throw new Error(`Static root uses a reserved metadata path: ${rootRelative}`);
+  }
+  const entry = options.entry;
+  const entryLabel = options.entryLabel ?? "static entry";
+  assertContainedFilePath(entry, entryLabel);
   await access(join(root, entry), constants.R_OK);
 
   const server = createServer(async (request, response) => {
@@ -196,10 +223,9 @@ export async function startStaticSitePreview(
       }
       const target = join(root, relativePath);
       // The check above read the request path as SPELLED. A directory alias
-      // inside the site (`assets -> ../.dohc`) still spells an ordinary folder,
-      // and this server would hand its bytes to the preview over HTTP. The
-      // reservation is decided against the WORKSPACE root, because that is what
-      // `.dohc` is relative to — the site root may be any folder below it.
+      // inside the served root (`assets -> ../.dohc`) still spells an ordinary
+      // folder. The reservation is decided against the caller's containment
+      // root, while the final check below keeps every response inside `root`.
       //
       // The stat and the read below use the resolution this JUDGED. Resolving
       // the request's spelling a second time would let an alias swapped
@@ -208,10 +234,10 @@ export async function startStaticSitePreview(
       try {
         realTarget = (
           await assertResolvedWorkspacePath({
-            rootPath: workspaceRoot,
+            rootPath: containmentRoot,
             absolutePath: target,
             spelled: relativePath,
-            label: "Site request path",
+            label: "Static request path",
             access: "read",
           })
         ).resolvedAbsolute;

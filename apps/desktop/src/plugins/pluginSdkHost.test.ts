@@ -1,20 +1,20 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { AgentAuthor } from "@dohc/workspace-engine-client";
+import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
   invokePluginSdkHost,
   type PluginSdkHostContext,
 } from "./pluginSdkHost";
+import { createPluginPanelSdkAuthorityRegistry } from "./pluginPanelSdkAuthority";
 
 const roots: string[] = [];
 
 interface AuthoredWrite {
-  workspaceRoot: string;
   path: string;
   text: string;
-  options: { overwrite: boolean; author: AgentAuthor };
+  options: { overwrite: boolean; author: MomentAuthor };
 }
 
 async function workspaceRoot(): Promise<string> {
@@ -28,9 +28,11 @@ function context(root: string, writes: AuthoredWrite[] = []): PluginSdkHostConte
     pluginId: "hello-plugin",
     workspaceRoot: root,
     spawnId: "spawn-123",
+    isWritable: () => true,
+    writeAvailable: async () => true,
     writeAuthoredText: vi.fn<PluginSdkHostContext["writeAuthoredText"]>(
-      async (workspaceRoot, path, text, options) => {
-        writes.push({ workspaceRoot, path, text, options });
+      async (path, text, options) => {
+        writes.push({ path, text, options });
         return { path };
       },
     ),
@@ -53,6 +55,25 @@ describe("invokePluginSdkHost", () => {
       collections: { read: false },
       provenance: { record: false },
     });
+  });
+
+  it("reports unavailable engine capture honestly and still refuses direct writes", async () => {
+    const root = await workspaceRoot();
+    const unavailable = {
+      ...context(root),
+      writeAvailable: async () => false,
+    };
+
+    await expect(
+      invokePluginSdkHost(unavailable, "capabilities"),
+    ).resolves.toMatchObject({ files: { write: false } });
+    await expect(
+      invokePluginSdkHost(unavailable, "files.write", {
+        path: "notes/no-engine.txt",
+        text: "must not write",
+      }),
+    ).rejects.toThrow(/file writes are unavailable/i);
+    expect(unavailable.writeAuthoredText).not.toHaveBeenCalled();
   });
 
   it("routes file reads, file lists, and workspace searches through the site host", async () => {
@@ -93,7 +114,6 @@ describe("invokePluginSdkHost", () => {
 
     expect(writes).toEqual([
       {
-        workspaceRoot: root,
         path: "notes/from-plugin.txt",
         text: "hello\n",
         options: {
@@ -192,5 +212,71 @@ describe("invokePluginSdkHost", () => {
         path: "data/plugin.sqlite",
       }),
     ).rejects.toThrow("Unsupported dohc SDK method: databases.read");
+  });
+
+  it("refuses writes from a read-only or stopped panel authority", async () => {
+    const root = await workspaceRoot();
+    const readOnly = { ...context(root), isWritable: () => false };
+    await expect(
+      invokePluginSdkHost(readOnly, "files.write", {
+        path: "notes/x.txt",
+        text: "x",
+      }),
+    ).rejects.toThrow(/read-only workspace authority/);
+    await expect(invokePluginSdkHost(readOnly, "capabilities")).resolves.toMatchObject({
+      files: { write: false },
+    });
+
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      invokePluginSdkHost(
+        { ...context(root), signal: controller.signal },
+        "files.write",
+        { path: "notes/x.txt", text: "x" },
+      ),
+    ).rejects.toThrow(/no longer active/);
+  });
+
+  it("rechecks writability for a still-live host context", async () => {
+    const root = await workspaceRoot();
+    let writable = true;
+    const registry = createPluginPanelSdkAuthorityRegistry();
+    registry.register({
+      senderId: 1,
+      generation: 1,
+      workspaceId: "workspace-a",
+      pluginId: "hello-plugin",
+      panelId: "main",
+    });
+    const authority = () =>
+      registry.authorize({
+        senderId: 1,
+        generation: 1,
+        activeWorkspaceId: "workspace-a",
+        workspaceId: "workspace-a",
+        pluginId: "hello-plugin",
+        panelId: "main",
+        panelRunning: true,
+        liveSpawnId: "spawn-123",
+      });
+    const hostContext = {
+      ...context(root),
+      isWritable: () => writable,
+      signal: authority().signal,
+    };
+
+    await expect(
+      invokePluginSdkHost(hostContext, "capabilities"),
+    ).resolves.toMatchObject({ files: { write: true } });
+    writable = false;
+    expect(authority().signal).toBe(hostContext.signal);
+    await expect(
+      invokePluginSdkHost(hostContext, "files.write", {
+        path: "notes/after-share.txt",
+        text: "must not write",
+      }),
+    ).rejects.toThrow(/read-only workspace authority/i);
+    expect(hostContext.writeAuthoredText).not.toHaveBeenCalled();
   });
 });

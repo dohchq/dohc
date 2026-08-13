@@ -11,6 +11,7 @@ import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { createTestScratch } from "./testTemp";
 import { createWorkspaceActivity } from "./workspaceActivity";
+import { invokePluginSdkHost } from "../plugins/pluginSdkHost";
 import {
   EXPECTED_ENGINE_EVENT_EXPIRY_MS,
   DAEMON_CAPTURE_HEALTH_POLL_MS,
@@ -75,6 +76,14 @@ async function write(root: string, path: string, contents: string | Uint8Array) 
 
 function sha256Utf8(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+function deferredVoid(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
 }
 
 const WORKSPACE_ID = "engine-capture-test";
@@ -2564,6 +2573,166 @@ describe("createDefaultDiskWriter symlink containment", () => {
 // unchanged — an absent run means an absent author).
 describe("workspaceEngineCapture agent attribution", () => {
   const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" };
+
+  it("routes plugin files.write with an explicit plugin author, not the ambient run", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback, { activeAgentRun: () => run });
+    const spawnId = "plugin-spawn-123";
+
+    await invokePluginSdkHost(
+      {
+        pluginId: "hello-plugin",
+        workspaceRoot: root,
+        spawnId,
+        isWritable: () => true,
+        writeAvailable: async () => true,
+        writeAuthoredText: async (path, text, options) => {
+          expect(options.overwrite).toBe(true);
+          await engine.writeAuthoredTextFile(
+            join(root, path),
+            text,
+            options.author,
+          );
+          return { path };
+        },
+      },
+      "files.write",
+      { path: "plugin-output.txt", text: "Written by plugin\n" },
+    );
+
+    expect(await readFile(join(root, "plugin-output.txt"), "utf8")).toBe(
+      "Written by plugin\n",
+    );
+    expect(await liveMomentAuthors(engine)).toEqual([
+      {
+        kind: "agent",
+        agentId: "plugin:hello-plugin",
+        onBehalfOf: "local",
+        agentRunId: spawnId,
+      },
+    ]);
+    await engine.stop();
+  });
+
+  it("records the canonical path when an authored write uses an in-workspace alias", async () => {
+    const root = await tempRoot();
+    const canonical = join(root, "canonical");
+    await mkdir(canonical);
+    await symlink(
+      canonical,
+      join(root, "alias"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const engine = liveCapture(root, new VersionedLoopbackEngine());
+
+    await engine.writeAuthoredTextFile(
+      join(root, "alias", "output.txt"),
+      "canonical\n",
+      { kind: "agent", agentId: "plugin:test", onBehalfOf: "local", agentRunId: "spawn" },
+    );
+
+    await expect(readFile(join(canonical, "output.txt"), "utf8")).resolves.toBe(
+      "canonical\n",
+    );
+    expect((await liveMoments(engine)).map((moment) => moment.path)).toEqual([
+      "canonical/output.txt",
+    ]);
+    await engine.stop();
+  });
+
+  it("serializes concurrent create-only authored writes so exactly one wins", async () => {
+    const root = await tempRoot();
+    const engine = liveCapture(root, new VersionedLoopbackEngine());
+    const target = join(root, "exclusive.txt");
+    const author = {
+      kind: "agent" as const,
+      agentId: "plugin:test",
+      onBehalfOf: "local",
+      agentRunId: "spawn",
+    };
+
+    const attempts = await Promise.allSettled([
+      engine.writeAuthoredTextFile(target, "first", author, { createOnly: true }),
+      engine.writeAuthoredTextFile(target, "second", author, { createOnly: true }),
+    ]);
+
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+    expect(String(attempts.find((attempt) => attempt.status === "rejected")?.reason)).toContain(
+      "File already exists: exclusive.txt",
+    );
+    await expect(readFile(target, "utf8")).resolves.toMatch(/^(?:first|second)$/);
+    await engine.stop();
+  });
+
+  it("rechecks panel cancellation after an authored write reaches the capture queue", async () => {
+    const root = await tempRoot();
+    const realLoopback = new VersionedLoopbackEngine();
+    const entered = deferredVoid();
+    const release = deferredVoid();
+    let blocked = false;
+    const loopback = new Proxy(realLoopback, {
+      get(target, property, receiver) {
+        if (property !== "sendRequest") return Reflect.get(target, property, receiver);
+        return async (request: Request) => {
+          if (!blocked && request.method === VERSIONED_METHOD.textWrite) {
+            blocked = true;
+            entered.resolve();
+            await release.promise;
+          }
+          return target.sendRequest(request);
+        };
+      },
+    });
+    const engine = liveCapture(root, loopback);
+    await write(root, "queue-blocker.txt", "block\n");
+    engine.captureBatch([{ path: "queue-blocker.txt", operation: "update" }]);
+    await entered.promise;
+
+    const controller = new AbortController();
+    const pending = engine.writeAuthoredTextFile(
+      join(root, "cancelled.txt"),
+      "must not land\n",
+      { kind: "agent", agentId: "plugin:test", onBehalfOf: "local", agentRunId: "spawn" },
+      { signal: controller.signal },
+    );
+    controller.abort();
+    release.resolve();
+
+    await expect(pending).rejects.toThrow("Plugin panel is no longer active.");
+    expect(existsSync(join(root, "cancelled.txt"))).toBe(false);
+    await engine.stop();
+  });
+
+  it("enforces the authored capture size limit and reports observed UTF-8 bytes", async () => {
+    const root = await tempRoot();
+    const engine = liveCapture(root, new VersionedLoopbackEngine());
+    const author = {
+      kind: "agent" as const,
+      agentId: "plugin:test",
+      onBehalfOf: "local",
+      agentRunId: "spawn",
+    };
+
+    await expect(
+      engine.writeAuthoredTextFile(
+        join(root, "at-limit.txt"),
+        "x".repeat(MAX_ENGINE_CAPTURE_TEXT_BYTES),
+        author,
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      engine.writeAuthoredTextFile(
+        join(root, "over-limit.txt"),
+        "x".repeat(MAX_ENGINE_CAPTURE_TEXT_BYTES + 1),
+        author,
+      ),
+    ).rejects.toThrow(
+      `Authored text exceeds the capture limit: limit ${MAX_ENGINE_CAPTURE_TEXT_BYTES} bytes, observed ${MAX_ENGINE_CAPTURE_TEXT_BYTES + 1} bytes.`,
+    );
+    await engine.stop();
+  });
 
   it("mutation proof: daemon author state is set before work and flushed before clear", async () => {
     const root = await tempRoot();

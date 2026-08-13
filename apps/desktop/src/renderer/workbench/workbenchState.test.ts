@@ -29,11 +29,13 @@ import {
   parseVersionCompareTabPath,
   versionCompareTabPath,
   isSiteTabPath,
+  isPluginPanelTabPath,
   isVirtualTabPath,
   moveTab,
   openTab,
   parseHistoryDiffTabPath,
   parseSiteTabPath,
+  parsePluginPanelTabPath,
   parseUiState,
   pruneMissingRestoredTabs,
   serializeUiState,
@@ -59,6 +61,7 @@ import {
   resizeEditorGroups,
   setFolderExpanded,
   siteTabPath,
+  pluginPanelTabPath,
   moveTabToNewGroup,
   focusEditorGroup,
   toggleFolderExpanded,
@@ -290,6 +293,34 @@ describe("tabs", () => {
 
     const reservedRoot = "clients/site/nested?view=main#summary";
     expect(parseSiteTabPath(siteTabPath(reservedRoot))).toBe(reservedRoot);
+  });
+
+  it("recognizes plugin panels as virtual tabs with two encoded identities", () => {
+    const path = pluginPanelTabPath("@dohc/acme plugin", "reports/main");
+    expect(path).toBe(
+      "dohc://plugin-panel/%40dohc%2Facme%20plugin/reports%2Fmain",
+    );
+    expect(isPluginPanelTabPath(path)).toBe(true);
+    expect(isVirtualTabPath(path)).toBe(true);
+    expect(parsePluginPanelTabPath(path)).toEqual({
+      pluginId: "@dohc/acme plugin",
+      panelId: "reports/main",
+    });
+  });
+
+  it("rejects malformed or empty plugin panel tab paths", () => {
+    for (const path of [
+      "dohc://plugin-panel/",
+      "dohc://plugin-panel/plugin-only",
+      "dohc://plugin-panel//panel",
+      "dohc://plugin-panel/plugin/",
+      "dohc://plugin-panel/plugin/panel/extra",
+      "dohc://plugin-panel/%ZZ/panel",
+      "not-a-plugin-panel-path",
+    ]) {
+      expect(parsePluginPanelTabPath(path)).toBeNull();
+    }
+    expect(parsePluginPanelTabPath(null)).toBeNull();
   });
 
   it("activateTab only activates an OPEN tab", () => {
