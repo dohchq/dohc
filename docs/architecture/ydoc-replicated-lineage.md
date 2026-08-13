@@ -504,18 +504,33 @@ constraint on **un-gating cloud sync**: land the outbound file lane (#356)
 first, or a synced workspace replicates rich `.md` documents and silently drops
 every other file beside them.
 
+**Status, 2026-08-11.** S5 removes the sessionless `ydoc.apply` RPC. The
+inventory above records the pre-S5 implementation; it is not the current wire
+contract. Product callers use `ydoc.open` and `ydoc.recordUpdate`. S5 also
+retries origination after a dependency resolves and after the first relay
+position commits. The two-peer acceptance gate remains part of #356, and
+relay-wide independent-base arbitration remains #547.
+
+Conflict settlement has one wire contract: `conflict.resolve` with
+`formatVersion: 1`. The origin prepares and validates the complete transition
+before it changes durable state. The payload binds the exact conflict sides,
+file effects, and lineage transition. The receiver rejects an unversioned or
+malformed payload before it records or acknowledges the operation. Each peer
+commits the accepted compound change and its replication bookkeeping in one
+SQLite transaction.
+
 **There is currently no acceptance gate for base origination, and the obvious
 candidate is not one.** `apps/desktop/e2e/workspace-sync-rejoin.spec.ts` is
-disabled and is often cited as the gate for the pair. It is a gate for the
-journal-drain gap only. It bootstraps `notes/plan.md` as an ordinary captured
-file and makes its second-machine edit through
-`createVersionedTextStore().writeTextFile`; it never opens a Y.Doc session and
-never asserts a base or delta operation. Its single mention of ydoc is a comment.
+active, but it uses a simulated second peer and removed the offline-conflict
+scenario. It remains a gate for the journal-drain gap only. It bootstraps
+`notes/plan.md` as an ordinary captured file and makes its second-machine edit
+through `createVersionedTextStore().writeTextFile`; it never opens a Y.Doc
+session and never asserts a base or delta operation. Its single mention of ydoc
+is a comment.
 
-So re-enabling that spec once the drain is fixed would go green and report **both**
-gaps closed while base origination remained entirely unimplemented — a green check
-that checks nothing, which is this program's dominant defect class arriving by the
-most plausible-looking route available.
+So that spec can go green and report **both** gaps closed while base origination
+remains broken — a green check that checks nothing, which is this program's
+dominant defect class arriving by the most plausible-looking route available.
 
 Closing #378 therefore needs a **new** assertion: two peers, a rich document, and
 a check that the base operation is emitted exactly once and that a delta follows
@@ -590,9 +605,9 @@ daemons cannot share a relay workspace yet (#356).
   the path, so both peers claim a base for one coordinate and
   `BaseStateDiverged` wedges it. Base-once needs relay-wide arbitration, or
   object ids need to stop deriving from the path.
-- **#548 — origination is not retried when a missing dependency resolves.** The
-  encoder declines while a pending row would be dropped, and only a later local
-  append asks again. The drain that resolves the dependency must ask too.
+- **#548 — origination retry. Built in S5.** Dependency drain and the first
+  committed relay position both retry a previously ineligible lineage. The
+  retry keeps pending rows and publishes the full base only after it is safe.
 
 The size question is settled. #549 measured the base and gave it a bound that
 covers a rich document at `MAX_TEXT_BYTES`, honored from the collab layer

@@ -303,6 +303,132 @@ async fn conflict_list_and_resolve_are_isolated_by_workspace() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn absent_path_live_session_blocks_local_resolve_through_rpc() {
+    let (_scratch, transport, handle, workspace_id) = fixture("absent-live-resolve").await;
+    let path = "absent-live.md";
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10,
+                "ydoc.open",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "path": path,
+                    "contentKind": "plaintext"
+                }),
+            ),
+        )
+        .await
+        .expect("open absent path live");
+    assert_eq!(opened.result["head"], "absent");
+    let session_id = opened.result["sessionId"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+    let incoming_text = "reviewed incoming";
+    let incoming_sha = dohc_engine_storage::hex_sha256(incoming_text.as_bytes());
+    let absent = json!({
+        "path": path,
+        "contentKind": "text",
+        "snapshot": null,
+        "metadataSummary": null,
+        "metadataCorrelationId": null
+    });
+    let incoming = json!({
+        "path": path,
+        "contentKind": "text",
+        "snapshot": {
+            "workspaceId": workspace_id,
+            "versionId": "main",
+            "objectId": "incoming-absent-live",
+            "path": path,
+            "text": incoming_text,
+            "blobSha256": incoming_sha,
+            "updatedAtMs": 20,
+            "latestMomentId": "incoming-absent-live-moment",
+            "metadataOrigin": "sync"
+        },
+        "metadataSummary": null,
+        "metadataCorrelationId": null
+    });
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                11,
+                "conflicts.open",
+                Some(handle.clone()),
+                json!({ "conflict": {
+                    "id": "absent-live-conflict",
+                    "workspaceId": workspace_id,
+                    "path": path,
+                    "targetVersionId": "main",
+                    "sourceVersionId": "peer",
+                    "createdAtMs": 20,
+                    "updatedAtMs": 20,
+                    "status": "open",
+                    "chosenFrom": "current",
+                    "resolution": null,
+                    "metadata": { "origin": "sync" },
+                    "base": absent,
+                    "current": absent,
+                    "incoming": incoming
+                }}),
+            ),
+        )
+        .await
+        .expect("open absent-path conflict");
+    let resolve_params = json!({ "local": {
+        "conflictId": "absent-live-conflict",
+        "resolution": "apply-incoming",
+        "objectId": "resolved-absent-live",
+        "writeMomentId": "resolved-absent-live-write",
+        "deleteMomentId": "resolved-absent-live-delete",
+        "metadataOrigin": "api",
+        "nowMs": 30
+    }});
+
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "conflicts.resolve",
+                Some(handle.clone()),
+                resolve_params.clone(),
+            ),
+        )
+        .await
+        .expect_err("the root-scoped absent-path lease must block resolve");
+    assert_eq!(refused.code, ErrorCode::InvalidParams);
+    assert_eq!(refused.message, "invalid-input");
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                13,
+                "ydoc.close",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id, "settle": false }),
+            ),
+        )
+        .await
+        .expect("close absent-path session");
+    let resolved = transport
+        .call(
+            RequestContext::unbounded(),
+            request(14, "conflicts.resolve", Some(handle), resolve_params),
+        )
+        .await
+        .expect("resolve retries after session close");
+    assert_eq!(resolved.result["conflict"]["status"], "resolved");
+    assert_eq!(resolved.result["write"]["snapshot"]["text"], incoming_text);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resolve_refuses_a_stale_target_without_clobbering_the_newer_head() {
     let (_scratch, transport, handle, workspace_id) = fixture("stale-target").await;
     let path = "conflict-000.md";

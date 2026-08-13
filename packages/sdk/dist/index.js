@@ -1,3 +1,4 @@
+import { abortedError, assertRequestOptions } from "./requestOptions.js";
 export const DOHC_SDK_PROTOCOL = "dohc:sdk:v1";
 export const DohcSdkErrorCodes = {
     hostUnavailable: "DOHC_HOST_UNAVAILABLE",
@@ -105,15 +106,6 @@ function isDohcSdkEvent(value) {
         typeof candidate.event === "string" &&
         candidate.event.length > 0 &&
         "data" in candidate);
-}
-function assertRequestOptions(options) {
-    if (options?.timeoutMs !== undefined &&
-        (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)) {
-        throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Request timeoutMs must be a positive finite number.");
-    }
-}
-function abortedError(method) {
-    return new DohcSdkError(DohcSdkErrorCodes.aborted, `dohc request ${method} was aborted.`);
 }
 /**
  * Applies caller-local cancellation to shared work. The wrapped promise is

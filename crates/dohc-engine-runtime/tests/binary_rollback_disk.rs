@@ -1014,6 +1014,7 @@ async fn conflicted_rename_rollback_terminates_delete_and_capture_sees_survivor(
                 request_id: None,
                 claim_foreign_head: false,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1189,6 +1190,7 @@ async fn capture_ingests_an_inactive_versions_pending_rename_destination() {
                 request_id: None,
                 claim_foreign_head: false,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1390,6 +1392,7 @@ async fn pending_delete_rollback_restore_is_not_seeded_for_capture_retire_on_reo
                 request_id: None,
                 claim_foreign_head: false,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1446,6 +1449,7 @@ async fn pending_delete_rollback_restore_is_not_seeded_for_capture_retire_on_reo
                         only_if_capture_origin: true,
                         allow_ydoc_origin: true,
                     },
+                    dohc_engine_collab::LeaseRegistry::new(),
                     Arc::new(NoFaults),
                     CancellationToken::new(),
                 )
@@ -1982,6 +1986,7 @@ async fn inactive_rollback_write_does_not_hide_active_capture_retire() {
                 request_id: None,
                 claim_foreign_head: false,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )

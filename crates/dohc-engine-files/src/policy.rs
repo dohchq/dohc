@@ -30,6 +30,16 @@ pub enum PathClassification {
 const DOHC_SHORT_NAME_STEM: &str = "DOHC";
 const SHARED_WITH_ME_SHORT_NAME_STEM: &str = "SHARED";
 
+/// Maximum UTF-8 byte length of one canonical workspace-relative path.
+pub const MAX_CANONICAL_WORKSPACE_PATH_BYTES: usize = 1_024;
+
+/// Return whether a canonical workspace path meets the shared byte and
+/// character bounds. Structural canonicalization remains the caller's job.
+pub fn canonical_workspace_path_meets_shared_bounds(path: &str) -> bool {
+    path.len() <= MAX_CANONICAL_WORKSPACE_PATH_BYTES
+        && !path.bytes().any(|byte| byte.is_ascii_control())
+}
+
 /// Classify a write/capture path using the platform-independent Check-A floor.
 pub fn classify_engine_file_path(path: &str) -> PathClassification {
     classify_engine_file_path_normalized(path).0
@@ -88,7 +98,7 @@ enum ReservedMode {
 }
 
 fn validate_workspace_path(path: &str, mode: ReservedMode) -> Option<String> {
-    if path.contains('\0') || is_absolute_path_like(path) {
+    if path.bytes().any(|byte| byte.is_ascii_control()) || is_absolute_path_like(path) {
         return None;
     }
     let decoded = decode_until_stable(path);
@@ -114,6 +124,9 @@ fn validate_workspace_path(path: &str, mode: ReservedMode) -> Option<String> {
         .collect::<Vec<_>>()
         .join("/");
     if normalized.is_empty() {
+        return None;
+    }
+    if !canonical_workspace_path_meets_shared_bounds(&normalized) {
         return None;
     }
     let reserved = match mode {
@@ -379,6 +392,48 @@ mod tests {
                 "",
             ],
         );
+    }
+
+    #[test]
+    fn canonical_workspace_paths_enforce_the_shared_utf8_ceiling() {
+        let exact_ascii = "a".repeat(1_024);
+        assert_eq!(
+            classify_engine_file_path_normalized(&exact_ascii),
+            (PathClassification::Tracked, Some(exact_ascii.clone()))
+        );
+
+        let exact_multibyte = "é".repeat(512);
+        assert_eq!(exact_multibyte.len(), 1_024);
+        assert_eq!(
+            classify_engine_file_path_normalized(&exact_multibyte),
+            (PathClassification::Tracked, Some(exact_multibyte.clone()))
+        );
+
+        for over_limit in ["a".repeat(1_025), "é".repeat(513)] {
+            assert_eq!(
+                classify_engine_file_path_normalized(&over_limit),
+                (PathClassification::Ignored, None),
+                "canonical paths over the 1,024-byte UTF-8 limit must be refused"
+            );
+            assert_eq!(
+                classify_engine_file_path_for_read(&over_limit),
+                PathClassification::Ignored
+            );
+        }
+
+        for byte in (0_u8..=31).chain(std::iter::once(127)) {
+            let control_path = format!("notes/a{}b.md", char::from(byte));
+            assert_eq!(
+                classify_engine_file_path_normalized(&control_path),
+                (PathClassification::Ignored, None),
+                "ASCII control byte 0x{byte:02x} must be refused"
+            );
+            assert_eq!(
+                classify_engine_file_path_for_read(&control_path),
+                PathClassification::Ignored,
+                "read ingress must refuse ASCII control byte 0x{byte:02x}"
+            );
+        }
     }
 
     #[test]

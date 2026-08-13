@@ -1,7 +1,7 @@
 /**
  * Engine contract rename mapping
  *
- * Type-only extraction for this slice; zod schema mirrors are a follow-up
+ * Type-only extraction for this slice; runtime schema mirrors are a follow-up
  * if/when contracts need runtime validation here.
  *
  * | Plan / matrix symbol | Shipped engine contract symbol | Status | Notes |
@@ -359,20 +359,82 @@ export interface VersionCreatePayload {
   forkSnapshots: VersionCreateForkSnapshot[];
 }
 
+export interface ConflictResolveAbsentSide {
+  present: false;
+  pathRef: number;
+}
+
+export interface ConflictResolvePresentSide {
+  present: true;
+  pathRef: number;
+  objectId: WorkspaceObjectId;
+  latestMomentId: VersionedTextMomentId;
+  contentKind: VersionedFileContentKind;
+  blobSha256: string;
+  byteLength: number;
+  updatedAtMs: number;
+}
+
+export type ConflictResolveSide =
+  | ConflictResolveAbsentSide
+  | ConflictResolvePresentSide;
+
+export interface ConflictResolveEffect {
+  kind: "delete" | "write";
+  momentId: VersionedTextMomentId;
+  payloadSha256: string;
+}
+
+export interface ConflictResolveSuccessor {
+  lineageClaimId: string;
+  epochTag: string;
+  contentKind: "plaintext" | "richdoc";
+  resultSha256: string;
+  updateBlobSha256: string;
+  stateVectorBlobSha256: string;
+}
+
 export interface ConflictResolvePayload {
+  formatVersion: 1;
+  workspaceId: WorkspaceId;
   conflictId: VersionedTextConflictId;
   status: "resolved";
   chosenFrom: VersionedTextConflictChoice;
   resolution: VersionedTextConflictResolution;
-  updatedAtMs: number;
-  // Lazy additive matching context (0P-A gate fix): sync divergence conflicts
-  // get independent local ids per peer, so importers that cannot match
-  // conflictId fall back to the mirrored (targetVersionId, current/incoming
-  // head) pair. Absent in payloads journaled before the context shipped.
-  targetVersionId?: VersionId;
-  path?: string;
-  currentLatestMomentId?: VersionedTextMomentId;
-  incomingLatestMomentId?: VersionedTextMomentId;
+  targetVersionId: VersionId;
+  sourceVersionId: VersionId;
+  paths: [string] | [string, string];
+  transition: {
+    current: ConflictResolveSide;
+    incoming: ConflictResolveSide;
+    result: ConflictResolveSide;
+  };
+  effectContext: {
+    recordedAtMs: number;
+    metadata: {
+      origin: ActorNeutralWriteOrigin;
+      summary: string | null;
+      correlationId: string | null;
+    };
+    author: {
+      kind: "agent";
+      agentId: string;
+      onBehalfOf: string;
+      agentRunId: string | null;
+    } | null;
+    currentObjectCreatedAtMs: number | null;
+    resultObjectCreatedAtMs: number | null;
+  };
+  effects:
+    | []
+    | [ConflictResolveEffect]
+    | [ConflictResolveEffect, ConflictResolveEffect];
+  lineageTransition: {
+    predecessorClaimId: string;
+    predecessorStateVectorSha256: string;
+    artifactPreimageSha256: string;
+    successor: ConflictResolveSuccessor | null;
+  } | null;
 }
 
 export interface SecretFilePutPayload {
@@ -657,25 +719,6 @@ export type SyncReplicationEnvelope =
   | SyncReplicationEnvelopeOf<"ydoc.update", YDocUpdatePayload>;
 
 /**
- * Identity of a peer's conflict.resolve that could not be applied here
- * (0P-C gate fix): carried alongside the pendingConflictResolves count so
- * the surfacing layer can LIFECYCLE the notice instead of accumulating a
- * sticky counter — it clears when the referenced local conflict is later
- * resolved (locally or by sync convergence) or on explicit dismissal.
- */
-export interface PendingConflictResolve {
-  // The peer-side conflict id from the resolve payload: a stable identity
-  // for deduping the same op across retries/re-imports.
-  remoteConflictId: VersionedTextConflictId;
-  // The LOCAL open conflict the resolve matched by mirrored heads but could
-  // not safely apply to (live state moved on); null when nothing local
-  // matched at all.
-  localConflictId: VersionedTextConflictId | null;
-  // The affected path when known (conflict row path, else the payload's).
-  path: string | null;
-}
-
-/**
  * Outcome of applying one replicated op. A single status discriminant keeps
  * illegal states unrepresentable: a skipped op can never report opened
  * conflicts, and callers branch on one field instead of two booleans.
@@ -684,13 +727,6 @@ export type SyncApplyResult =
   | {
       status: "applied";
       conflictsOpened: number;
-      // conflict.resolve ops that matched no local conflict (neither by id nor
-      // by mirrored heads). Journaled and acked — the op is preserved for a
-      // future reconciliation pass — but surfaced so import results never
-      // silently swallow a peer's resolution.
-      pendingConflictResolves?: number;
-      // Identities for the count above (same length when present).
-      pendingResolves?: PendingConflictResolve[];
     }
   | { status: "skipped"; conflictsOpened: 0 };
 

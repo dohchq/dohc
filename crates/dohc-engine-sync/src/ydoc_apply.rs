@@ -70,6 +70,7 @@ pub struct YdocApplyResult {
 pub struct YdocDrainResult {
     pub drained: usize,
     pub refusals: Vec<crate::ReplicationRefusal>,
+    pub sharing_declined: Vec<crate::SharingDeclined>,
 }
 
 pub(crate) fn redelivered_materialization_changes(
@@ -252,6 +253,7 @@ pub fn drain_deferred_ydoc_for_key(
     let search_policy = search_policy_for_store(store);
     let mut applied = 0usize;
     let mut refusals = Vec::new();
+    let mut sharing_declined = Vec::new();
     let mut last_payload: Option<YdocUpdatePayload> = None;
     let mut payload_recorded_at = 0_i64;
     let mut drained_coordinates: Vec<(String, i64)> = Vec::new();
@@ -361,10 +363,14 @@ pub fn drain_deferred_ydoc_for_key(
                 drain_seq,
                 payload_recorded_at,
                 search_policy.as_ref(),
-            )
+            )?;
+            crate::originate_ydoc_base_in_tx(tx, key, &payload.path, payload_recorded_at)
         });
         match projected {
-            Ok(TxnOutcome::Committed(())) => {}
+            Ok(TxnOutcome::Committed(crate::BaseOrigination::Declined(declined))) => {
+                sharing_declined.push(declined);
+            }
+            Ok(TxnOutcome::Committed(_)) => {}
             Ok(TxnOutcome::Crashed { .. }) => return Err(SyncError::FaultCrash),
             // These rows are already ACKed and therefore cannot be retried
             // from the relay. If an identity pin now blocks projection,
@@ -403,6 +409,7 @@ pub fn drain_deferred_ydoc_for_key(
     Ok(YdocDrainResult {
         drained: drained_coordinates.len(),
         refusals,
+        sharing_declined,
     })
 }
 
@@ -484,26 +491,41 @@ fn open_sync_conflict_id(
     open_sync_conflict_for_object(conn, &key.workspace_id, &key.version_id, &key.object_id)
 }
 
-/// Retire an object's Y.Doc lineage because a resolution DELETED its path.
+/// Retire a tracked head's Y.Doc lineage in the transaction that deletes it.
 ///
-/// The fourth face of the property the fold serves: the reviewed outcome is
-/// the outcome that ends up in the lineage, permanently. A deletion is a
-/// reviewed outcome, and it is the one resolution that carries no bytes to
-/// fold — so the write-only path skipped it, the conflict closed, and the
-/// canonical rows survived. The next `ydoc.update` then found the path
-/// absent, accepted it, and projected the retained lineage straight back
-/// into a snapshot, silently reversing the deletion the user approved.
-///
-/// Retirement is the representation: the CRDT rows and the marker go, so
-/// nothing can project the deleted content again. A later base for this
-/// coordinate starts a fresh lineage, which is the correct reading of "this
-/// path was deleted and something new arrived".
+/// Removing the CRDT rows and marker prevents a later delta from projecting
+/// deleted content back into a snapshot. A later base starts a fresh lineage.
 pub fn retire_ydoc_lineage_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
     version_id: &str,
     object_id: &str,
 ) -> Result<(), SyncError> {
+    let key =
+        DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
+            reason: "Y.Doc lineage coordinates are invalid",
+        })?;
+    let complete = ensure_ydoc_lineage_complete_in_tx(tx, &key)?;
+    retire_complete_ydoc_lineage_in_tx(tx, &complete)
+}
+
+pub(crate) struct CompleteYdocLineage {
+    key: DocKey,
+    state: Option<(dohc_engine_collab::Marker, dohc_engine_collab::Ydoc)>,
+}
+
+/// The durable file head that must remain canonical after a non-Y.Doc
+/// mutation commits.
+pub enum ResultingHead<'a> {
+    Text { path: &'a str, text: &'a str },
+    BinaryOrAbsent,
+}
+
+pub(crate) fn retire_complete_ydoc_lineage_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    complete: &CompleteYdocLineage,
+) -> Result<(), SyncError> {
+    let key = &complete.key;
     for statement in [
         "DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         "DELETE FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -511,10 +533,218 @@ pub fn retire_ydoc_lineage_in_tx(
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         "DELETE FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
     ] {
-        tx.execute(statement, params![workspace_id, version_id, object_id])
-            .map_err(SyncError::persist)?;
+        tx.execute(
+            statement,
+            params![key.workspace_id, key.version_id, key.object_id],
+        )
+        .map_err(SyncError::persist)?;
     }
     Ok(())
+}
+
+pub(crate) fn ydoc_lineage_has_durable_state_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<bool, SyncError> {
+    tx.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM ydoc_updates
+              WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+             UNION ALL
+             SELECT 1 FROM ydoc_snapshots
+              WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+             UNION ALL
+             SELECT 1 FROM ydoc_deferred_updates
+              WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+             UNION ALL
+             SELECT 1 FROM ydoc_docs
+              WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+                AND (head_update_seq > 0 OR head_snapshot_seq > 0
+                     OR lineage_claim_status <> 'unclaimed')
+         )",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
+enum YdocLineageCompleteness {
+    Complete(Option<(dohc_engine_collab::Marker, dohc_engine_collab::Ydoc)>),
+    DeferredUpdates,
+    PendingDependencies,
+}
+
+fn ydoc_lineage_completeness_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<YdocLineageCompleteness, SyncError> {
+    let deferred: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if deferred {
+        return Ok(YdocLineageCompleteness::DeferredUpdates);
+    }
+    let Some(marker) =
+        dohc_engine_collab::read_marker_in_tx(tx, key).map_err(map_collab_hard_error)?
+    else {
+        return Ok(YdocLineageCompleteness::Complete(None));
+    };
+    let doc = dohc_engine_collab::load_doc_in_tx(tx, key).map_err(map_collab_hard_error)?;
+    if doc.has_pending_dependencies() {
+        return Ok(YdocLineageCompleteness::PendingDependencies);
+    }
+    Ok(YdocLineageCompleteness::Complete(Some((marker, doc))))
+}
+
+pub(crate) fn ensure_ydoc_lineage_complete_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<CompleteYdocLineage, SyncError> {
+    match ydoc_lineage_completeness_in_tx(tx, key)? {
+        YdocLineageCompleteness::Complete(state) => Ok(CompleteYdocLineage {
+            key: key.clone(),
+            state,
+        }),
+        YdocLineageCompleteness::DeferredUpdates => Err(SyncError::RetryableState {
+            reason: "ydoc-deferred-updates-pending",
+        }),
+        YdocLineageCompleteness::PendingDependencies => Err(SyncError::RetryableState {
+            reason: "ydoc-incomplete-lineage",
+        }),
+    }
+}
+
+pub(crate) struct CompleteYdocProjection {
+    pub markdown: Option<String>,
+    pub claim_status: dohc_engine_collab::LineageClaimStatus,
+}
+
+/// Inspect one closed lineage after proving that none of its durable updates
+/// are deferred or dependency-incomplete.
+pub(crate) fn complete_ydoc_projection_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<Option<CompleteYdocProjection>, SyncError> {
+    let complete = ensure_ydoc_lineage_complete_in_tx(tx, key)?;
+    let Some((marker, doc)) = complete.state.as_ref() else {
+        return Ok(None);
+    };
+    let has_content = marker.lineage_claim_status.has_claimed_base()
+        || marker.head_update_seq > 0
+        || marker.head_snapshot_seq > 0;
+    let markdown = if has_content {
+        Some(
+            doc.project(marker.content_kind)
+                .map_err(|_| SyncError::InvalidInput {
+                    reason: "ydoc projection exceeds materialization cap",
+                })?
+                .markdown,
+        )
+    } else {
+        None
+    };
+    Ok(Some(CompleteYdocProjection {
+        markdown,
+        claim_status: marker.lineage_claim_status,
+    }))
+}
+
+/// Reconcile a strict conflict parent with a receiver-local closed lineage.
+/// The parent is the replicated operation, so the local CRDT rewrite must not
+/// emit a second `ydoc.update`.
+pub(crate) fn reconcile_conflict_parent_resulting_head_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    resulting: ResultingHead<'_>,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let complete = ensure_ydoc_lineage_complete_in_tx(tx, key)?;
+    match resulting {
+        ResultingHead::Text { path, text } => {
+            fold_complete_ydoc_lineage_in_tx(tx, &complete, path, text, now_ms, false)
+        }
+        ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
+    }
+}
+
+/// Reconcile a locally-originated file mutation with its closed Y.Doc
+/// lineage. The generated CRDT update is journaled before the mutation's
+/// artifact operation, so every peer applies one canonical rewrite.
+pub fn reconcile_local_resulting_head_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    resulting: ResultingHead<'_>,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let key =
+        DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
+            reason: "Y.Doc lineage coordinates are invalid",
+        })?;
+    let complete = ensure_ydoc_lineage_complete_in_tx(tx, &key)?;
+    match resulting {
+        ResultingHead::Text { path, text } => {
+            fold_complete_ydoc_lineage_in_tx(tx, &complete, path, text, now_ms, true)
+        }
+        ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
+    }
+}
+
+/// Finalize an imported file mutation without creating a second CRDT edit.
+/// A text mutation must follow its origin's ordered Y.Doc rewrite; if that
+/// rewrite is not present yet, the envelope remains unacknowledged.
+pub fn reconcile_imported_resulting_head_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    resulting: ResultingHead<'_>,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let key =
+        DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
+            reason: "Y.Doc lineage coordinates are invalid",
+        })?;
+    let complete = ensure_ydoc_lineage_complete_in_tx(tx, &key)?;
+    reconcile_imported_complete_resulting_head_in_tx(tx, &complete, resulting, now_ms)
+}
+
+pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    complete: &CompleteYdocLineage,
+    resulting: ResultingHead<'_>,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    match resulting {
+        ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, complete),
+        ResultingHead::Text { path, text } => {
+            let Some((marker, doc)) = complete.state.as_ref() else {
+                return Ok(());
+            };
+            let has_content = marker.lineage_claim_status.has_claimed_base()
+                || marker.head_update_seq > 0
+                || marker.head_snapshot_seq > 0;
+            if has_content {
+                let projection =
+                    doc.project(marker.content_kind)
+                        .map_err(|_| SyncError::InvalidInput {
+                            reason: "ydoc projection exceeds materialization cap",
+                        })?;
+                if projection.markdown != text {
+                    return Err(SyncError::RetryableState {
+                        reason: "ydoc-resulting-head-pending",
+                    });
+                }
+            }
+            settle_ydoc_marker_to_text(tx, &complete.key, path, text, now_ms)
+        }
+    }
 }
 
 /// Fold a conflict resolution's chosen text into the object's canonical
@@ -552,47 +782,55 @@ pub fn fold_resolution_into_ydoc_in_tx(
     // queued: a resync or session close drains them, the open conflict
     // coalesces to the freshest incoming state, and the user resolves what
     // they can actually see.
-    let deferred: bool = tx
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
-             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
-            params![key.workspace_id, key.version_id, key.object_id],
-            |row| row.get(0),
-        )
-        .map_err(SyncError::corrupt)?;
-    if deferred {
-        return Err(SyncError::InvalidInput {
-            reason: "ydoc-deferred-updates-pending",
-        });
-    }
-    let Some(marker) =
-        dohc_engine_collab::read_marker_in_tx(tx, &key).map_err(map_collab_hard_error)?
-    else {
+    let complete = match ydoc_lineage_completeness_in_tx(tx, &key)? {
+        YdocLineageCompleteness::Complete(complete) => complete,
+        YdocLineageCompleteness::DeferredUpdates => {
+            return Err(SyncError::InvalidInput {
+                reason: "ydoc-deferred-updates-pending",
+            });
+        }
+        YdocLineageCompleteness::PendingDependencies => {
+            return Err(SyncError::InvalidInput {
+                reason: "ydoc-incomplete-lineage",
+            });
+        }
+    };
+    let complete = CompleteYdocLineage {
+        key,
+        state: complete,
+    };
+    fold_complete_ydoc_lineage_in_tx(tx, &complete, path, chosen_text, now_ms, true)
+}
+
+pub(crate) fn fold_complete_ydoc_lineage_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    complete: &CompleteYdocLineage,
+    path: &str,
+    chosen_text: &str,
+    now_ms: i64,
+    journal: bool,
+) -> Result<(), SyncError> {
+    let key = &complete.key;
+    let Some((marker, doc)) = complete.state.as_ref() else {
         return Ok(());
     };
-    if !marker.base_claimed {
+    let has_content = marker.lineage_claim_status.has_claimed_base()
+        || marker.head_update_seq > 0
+        || marker.head_snapshot_seq > 0;
+    if !has_content {
+        tx.execute(
+            "UPDATE ydoc_docs SET path=?4, updated_at_ms=?5 \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                path,
+                now_ms,
+            ],
+        )
+        .map_err(SyncError::persist)?;
         return Ok(());
-    }
-    let doc = dohc_engine_collab::load_doc_in_tx(tx, &key).map_err(map_collab_hard_error)?;
-    // THE PROPERTY BOTH GUARDS SERVE: the reviewed bytes are the bytes that
-    // end up in the lineage, permanently. A resolution may only run over a
-    // document that is WHOLE.
-    //
-    // "Not whole yet" is recorded in two different places, and consulting
-    // one of them is how this was missed. `ydoc_deferred_updates` holds
-    // coordinates acked but never applied (checked above). This checks the
-    // other: an out-of-order cross-origin update ALREADY appended to
-    // `ydoc_updates` whose predecessor has not arrived. `apply_ydoc_envelope`
-    // skips its projection for exactly this reason, so resolving here would
-    // review a partial document — and when the predecessor lands it
-    // integrates the unseen update and projects it through a review gate
-    // that has already closed, changing the approved head with no second
-    // review. Sourced from the same predicate the apply path uses, so the
-    // two cannot drift apart again.
-    if doc.has_pending_dependencies() {
-        return Err(SyncError::InvalidInput {
-            reason: "ydoc-incomplete-lineage",
-        });
     }
     let projection = doc
         .project(marker.content_kind)
@@ -633,30 +871,30 @@ pub fn fold_resolution_into_ydoc_in_tx(
                 reason: "ydoc-resolution-not-representable",
             });
         }
-        let outcome = dohc_engine_collab::record_update_in_tx(tx, &key, &update, now_ms).map_err(
-            |error| {
+        let outcome =
+            dohc_engine_collab::record_update_in_tx(tx, key, &update, now_ms).map_err(|error| {
                 map_collab_payload_error(error, "conflict resolution fold could not be appended")
-            },
-        )?;
+            })?;
         // Journal only when this workspace actually replicates: a receiver
         // that never enrolled has no sync identity, and its choice needs no
         // peer. `emit_outbound` alone cannot gate this — a claimed lineage
         // exists on identity-less receivers too.
-        if !outcome.deduped
-            && crate::journal::workspace_replicates_with_relay_in_tx(tx, workspace_id)?
+        if journal
+            && marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact
+            && !outcome.deduped
+            && crate::journal::workspace_replicates_with_relay_in_tx(tx, &key.workspace_id)?
         {
             crate::journal::journal_local_op_in_tx(
                 tx,
-                workspace_id,
+                &key.workspace_id,
                 "ydoc.update",
-                &serde_json::json!({
-                    "versionId": key.version_id,
-                    "objectId": key.object_id,
-                    "path": path,
-                    "contentKind": marker.content_kind.as_str(),
-                    "updateBlobSha256": dohc_engine_storage::hex_sha256(&update),
-                    "isBaseState": false,
-                }),
+                &crate::ydoc_update_payload(
+                    key,
+                    path,
+                    marker.content_kind,
+                    &dohc_engine_storage::hex_sha256(&update),
+                    false,
+                ),
                 now_ms,
             )?;
         }
@@ -664,14 +902,25 @@ pub fn fold_resolution_into_ydoc_in_tx(
     // The resolution's head IS the settled artifact now: align the settle
     // expectation so the next session does not refuse ConflictStaleTarget
     // over the very state the user just chose.
+    settle_ydoc_marker_to_text(tx, key, path, chosen_text, now_ms)
+}
+
+fn settle_ydoc_marker_to_text(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    text: &str,
+    now_ms: i64,
+) -> Result<(), SyncError> {
     tx.execute(
-        "UPDATE ydoc_docs SET last_settled_sha=?4, updated_at_ms=?5 \
+        "UPDATE ydoc_docs SET path=?4, last_settled_sha=?5, updated_at_ms=?6 \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         params![
             key.workspace_id,
             key.version_id,
             key.object_id,
-            dohc_engine_storage::hex_sha256(chosen_text.as_bytes()),
+            path,
+            dohc_engine_storage::hex_sha256(text.as_bytes()),
             now_ms,
         ],
     )
@@ -726,26 +975,42 @@ pub fn project_and_write_in_tx(
     if let Some(conflict_id) = open_sync_conflict_id(tx, key)? {
         let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
         put_projection_text_blob(tx, &projection.markdown, &projected_sha)?;
-        crate::moment_apply::coalesce_conflict_sides(
-            tx,
-            &key.workspace_id,
-            &conflict_id,
-            &crate::moment_apply::ConflictSide {
-                exists: true,
-                path: path.to_owned(),
-                object_id: Some(key.object_id.clone()),
-                kind: Some(crate::moment_apply::ContentKind::Text),
-                digest: Some(projected_sha),
-                updated_at_ms: Some(now_ms),
-                latest_moment_id: Some(ydoc_apply_moment_id(key, path, origin_id, origin_seq)),
-                metadata: Some(crate::moment_apply::Metadata {
-                    origin: "sync".to_owned(),
-                    summary: None,
-                    correlation_id: None,
-                }),
-            },
-            now_ms,
-        )?;
+        let matches_reviewed_side: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM conflicts \
+                 WHERE workspace_id=?1 AND conflict_id=?2 AND (\
+                   (current_exists=1 AND current_content_kind='text' \
+                    AND current_blob_sha256=?3) OR \
+                   (incoming_exists=1 AND incoming_content_kind='text' \
+                    AND incoming_blob_sha256=?3)))",
+                params![key.workspace_id, conflict_id, projected_sha],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        // A resolution rewrite names bytes the open conflict already shows.
+        // Keep both side anchors stable for the ordered resolve that follows.
+        if !matches_reviewed_side {
+            crate::moment_apply::coalesce_conflict_sides(
+                tx,
+                &key.workspace_id,
+                &conflict_id,
+                &crate::moment_apply::ConflictSide {
+                    exists: true,
+                    path: path.to_owned(),
+                    object_id: Some(key.object_id.clone()),
+                    kind: Some(crate::moment_apply::ContentKind::Text),
+                    digest: Some(projected_sha),
+                    updated_at_ms: Some(now_ms),
+                    latest_moment_id: Some(ydoc_apply_moment_id(key, path, origin_id, origin_seq)),
+                    metadata: Some(crate::moment_apply::Metadata {
+                        origin: "sync".to_owned(),
+                        summary: None,
+                        correlation_id: None,
+                    }),
+                },
+                now_ms,
+            )?;
+        }
         return Ok(());
     }
     // Idempotent skip: a redelivered (or content-converged) envelope whose
@@ -1077,6 +1342,32 @@ pub fn apply_ydoc_envelope(
             .map_err(|error| {
                 map_collab_payload_error(error, "ydoc.update base could not be claimed")
             })?;
+            // A shipped fork snapshot preserves its source metadata in
+            // `fork_base_snapshots`. Copy that existing ancestry marker onto
+            // the newly claimed target lineage only while the current head is
+            // still the exact fork materialization.
+            tx.execute(
+                "UPDATE ydoc_docs SET last_settled_sha=(
+                     SELECT f.blob_sha256 FROM fork_base_snapshots f
+                     JOIN snapshots s
+                       ON s.workspace_id=f.workspace_id
+                      AND s.version_id=f.version_id
+                      AND s.object_id=f.object_id
+                      AND s.path=f.path
+                      AND s.blob_sha256=f.blob_sha256
+                      AND s.latest_moment_id=f.latest_moment_id
+                    WHERE f.workspace_id=?1 AND f.version_id=?2 AND f.object_id=?3
+                      AND f.path=?4 AND f.metadata_origin='ydoc'
+                 ) WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+                       AND last_settled_sha IS NULL",
+                params![
+                    claim_key.workspace_id,
+                    claim_key.version_id,
+                    claim_key.object_id,
+                    base_path
+                ],
+            )
+            .map_err(SyncError::persist)?;
             // The FIRST base is not a CRDT merge: a local head that no shared
             // lineage ever merged (capture or an external editor wrote it, and
             // the receiver holds no durable Y.Doc rows to union with) must not
@@ -1223,7 +1514,9 @@ pub fn apply_ydoc_envelope(
                 .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
         {
             let drain = drain_deferred_ydoc_for_key(store, &key, faults)?;
-            return Ok(outcome.with_refusals(drain.refusals));
+            return Ok(outcome
+                .with_sharing_declined(drain.sharing_declined)
+                .with_refusals(drain.refusals));
         }
         return Ok(outcome);
     }
@@ -1231,13 +1524,13 @@ pub fn apply_ydoc_envelope(
     // phase drain FIRST, so the projection below reconstructs the COMPLETE
     // applied lineage (a partial projection would materialize a file missing
     // parked content).
-    let drain_refusals = if dohc_engine_collab::read_marker(store, &key)
+    let drain = if dohc_engine_collab::read_marker(store, &key)
         .map_err(map_collab_hard_error)?
         .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
     {
-        drain_deferred_ydoc_for_key(store, &key, faults)?.refusals
+        drain_deferred_ydoc_for_key(store, &key, faults)?
     } else {
-        Vec::new()
+        YdocDrainResult::default()
     };
     // Reconstruct the post-apply doc OUTSIDE the admission tx (commutative:
     // the in-tx apply of the same bytes yields the same converged state, and
@@ -1315,7 +1608,11 @@ pub fn apply_ydoc_envelope(
                 faults,
                 "ydoc.update bytes fail durable validation",
             )
-            .map(|outcome| outcome.with_refusals(drain_refusals));
+            .map(|outcome| {
+                outcome
+                    .with_sharing_declined(drain.sharing_declined)
+                    .with_refusals(drain.refusals)
+            });
         }
         persisted
     };
@@ -1326,6 +1623,7 @@ pub fn apply_ydoc_envelope(
         origin_seq: envelope.origin_seq,
         bytes,
     };
+    let mut sharing_declined = None;
     let outcome =
         crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
             let applied = apply_remote_update_in_transaction(tx, &key, &remote, op.recorded_at_ms)
@@ -1353,6 +1651,11 @@ pub fn apply_ydoc_envelope(
                 search_policy.as_ref(),
             ) {
                 Ok(()) => {
+                    if let crate::BaseOrigination::Declined(declined) =
+                        crate::originate_ydoc_base_in_tx(tx, &key, &update_path, op.recorded_at_ms)?
+                    {
+                        sharing_declined = Some(declined);
+                    }
                     tx.execute_batch("RELEASE dohc_ydoc_projection")
                         .map_err(SyncError::persist)?;
                 }
@@ -1383,24 +1686,33 @@ pub fn apply_ydoc_envelope(
             reason: "ydoc.update compaction failed",
         })?;
     }
-    Ok(map_applied_ydoc_outcome(outcome).with_refusals(drain_refusals))
+    Ok(map_applied_ydoc_outcome(outcome, sharing_declined)
+        .with_sharing_declined(drain.sharing_declined)
+        .with_refusals(drain.refusals))
 }
 
 fn map_applied_ydoc_outcome(
     outcome: ApplyOutcome<ReplicationApplyOutcome>,
+    sharing_declined: Option<crate::SharingDeclined>,
 ) -> ApplyOutcome<YdocApplyResult> {
     match outcome {
         ApplyOutcome::Applied(_) => ApplyOutcome::Applied(YdocApplyResult {
             deferred: false,
             reason: None,
             conflicts_opened: 0,
-        }),
+        })
+        .with_sharing_declined(sharing_declined.into_iter().collect()),
         ApplyOutcome::Refused(refusal) => ApplyOutcome::Refused(refusal),
         ApplyOutcome::Skipped => ApplyOutcome::Skipped,
         ApplyOutcome::Crashed { committed } => ApplyOutcome::Crashed { committed },
-        ApplyOutcome::WithRefusals { outcome, refusals } => ApplyOutcome::WithRefusals {
-            outcome: Box::new(map_applied_ydoc_outcome(*outcome)),
+        ApplyOutcome::WithDiagnostics {
+            outcome,
             refusals,
+            sharing_declined: nested,
+        } => ApplyOutcome::WithDiagnostics {
+            outcome: Box::new(map_applied_ydoc_outcome(*outcome, sharing_declined)),
+            refusals,
+            sharing_declined: nested,
         },
     }
 }

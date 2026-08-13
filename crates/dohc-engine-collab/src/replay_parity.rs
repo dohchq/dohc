@@ -646,7 +646,7 @@ fn safe_read_any(decoder: &mut DecoderV1<'_>, depth: usize) -> Result<Any, Colla
         _ => {
             return Err(CollabError::ReplayParityViolation {
                 reason: "the update contains an unsupported Any value tag".to_owned(),
-            })
+            });
         }
     })
 }
@@ -675,7 +675,7 @@ fn safe_read_type_ref_fingerprint(decoder: &mut DecoderV1<'_>) -> Result<Vec<u8>
         _ => {
             return Err(CollabError::ReplayParityViolation {
                 reason: "the update contains an unsupported type reference".to_owned(),
-            })
+            });
         }
     }
     Ok(canonical)

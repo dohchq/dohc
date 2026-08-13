@@ -16,6 +16,7 @@
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@dohc/ydoc-projection": "workspace:*",
+    "effect": "4.0.0-beta.107",
     "yjs": "13.6.30"
   },
   "devDependencies": {

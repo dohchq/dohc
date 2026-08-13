@@ -54,6 +54,7 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
                 request_id: Some("drain-gate-seed".to_owned()),
                 claim_foreign_head: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )

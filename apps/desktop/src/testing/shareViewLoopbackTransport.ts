@@ -246,7 +246,7 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
       );
     }
     this.committedCursors.set(workspaceId, next);
-    return { committed: true };
+    return { committed: true, sharingDeclined: [] };
   }
 
   private async pullShareView(

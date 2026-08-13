@@ -6,7 +6,7 @@ import {
   RelayWorkspaceUnavailableError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
-  type PendingConflictResolve,
+  type CommitRelayCursorResult,
   type ProbeRelayWorkspaceResult,
   type RelayWorkspaceBootstrapResult,
   type RelayWorkspaceIdentity,
@@ -14,6 +14,7 @@ import {
   MAX_REPORTED_REFUSALS,
   type PullShareViewResult,
   type ShareViewRefusal,
+  type SharingDeclined,
   type PullWorkspaceFromRelayResult,
   type PushSharedChannelResult,
   type PushWorkspaceToRelayResult,
@@ -428,33 +429,22 @@ function shareViewRefusals(
   });
 }
 
-function pendingResolves(
+function sharingDeclined(
   value: JsonValue | undefined,
-): PendingConflictResolve[] {
+  label: string,
+): SharingDeclined[] {
   if (!Array.isArray(value)) {
-    throw new Error("Rust engine sync.pull.pendingResolves must be an array.");
+    throw new Error(`Rust engine ${label}.sharingDeclined must be an array.`);
   }
   return value.map((entry, index) => {
-    const record = resultRecord(
-      entry,
-      `sync.pull.pendingResolves[${index}]`,
-    );
-    const remoteConflictId = stringField(
-      record,
-      "remoteConflictId",
-      `sync.pull.pendingResolves[${index}]`,
-    );
-    const localConflictId =
-      typeof record.localConflictId === "string"
-        ? record.localConflictId
-        : null;
-    const path = typeof record.path === "string" ? record.path : null;
-    const reason = stringField(
-      record,
-      "reason",
-      `sync.pull.pendingResolves[${index}]`,
-    );
-    return { remoteConflictId, localConflictId, path, reason };
+    const at = `${label}.sharingDeclined[${index}]`;
+    const record = resultRecord(entry, at);
+    return {
+      path: stringField(record, "path", at),
+      constraint: stringField(record, "constraint", at),
+      limitBytes: numberField(record, "limitBytes", at),
+      observedBytes: numberField(record, "observedBytes", at),
+    };
   });
 }
 
@@ -502,7 +492,9 @@ function translateRelayError(method: string, error: unknown): never {
 export interface EngineRelayWorkspaceClient {
   push(): Promise<PushWorkspaceToRelayResult>;
   pull(): Promise<PullWorkspaceFromRelayResult>;
-  commitCursor(cursor: Record<string, JsonValue | undefined>): Promise<void>;
+  commitCursor(
+    cursor: Record<string, JsonValue | undefined>,
+  ): Promise<CommitRelayCursorResult>;
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
   claim(): Promise<void>;
   bootstrapJoinIdentity(identity: RelayWorkspaceIdentity | null): Promise<void>;
@@ -627,7 +619,7 @@ export class EngineRelayClient {
 
     const commitCursor = async (
       cursor: Record<string, JsonValue | undefined>,
-    ): Promise<void> => {
+    ): Promise<CommitRelayCursorResult> => {
       const result = resultRecord(
         await request("sync.commitCursor", {
           workspaceId: workspace.workspaceId,
@@ -638,6 +630,20 @@ export class EngineRelayClient {
       if (!booleanField(result, "committed", "sync.commitCursor")) {
         throw new Error("Rust engine sync.commitCursor did not commit.");
       }
+      return {
+        sharingDeclined: sharingDeclined(
+          result.sharingDeclined,
+          "sync.commitCursor",
+        ),
+      };
+    };
+
+    const appendDeclines = (
+      target: SharingDeclined[],
+      source: readonly SharingDeclined[],
+    ): void => {
+      const remaining = MAX_REPORTED_REFUSALS - target.length;
+      if (remaining > 0) target.push(...source.slice(0, remaining));
     };
 
     const claimWith = async (
@@ -683,6 +689,10 @@ export class EngineRelayClient {
           // The daemon owns all origin selection; desktop callers only consume
           // the count, so no origin identifiers cross the process boundary.
           originsPushed: [],
+          sharingDeclined: sharingDeclined(
+            result.sharingDeclined,
+            "sync.push",
+          ),
         };
       },
       pull: async () => {
@@ -693,7 +703,7 @@ export class EngineRelayClient {
         let nextCursor = 0;
         let previousCursor: number | null = null;
         let finalCursor: Record<string, JsonValue | undefined> | null = null;
-        const resolves: PendingConflictResolve[] = [];
+        const declines: SharingDeclined[] = [];
         const changed = new Map<
           string,
           {
@@ -726,7 +736,10 @@ export class EngineRelayClient {
             "conflictsOpened",
             "sync.pull",
           );
-          resolves.push(...pendingResolves(result.pendingResolves));
+          appendDeclines(
+            declines,
+            sharingDeclined(result.sharingDeclined, "sync.pull"),
+          );
           for (const path of changedPaths(result.changedPaths, "sync.pull")) {
             changed.set(path.path, path);
           }
@@ -734,7 +747,7 @@ export class EngineRelayClient {
             finalCursor = cursor;
             break;
           }
-          await commitCursor(cursor);
+          appendDeclines(declines, (await commitCursor(cursor)).sharingDeclined);
         }
         if (!finalCursor) {
           throw new Error("Rust engine sync.pull returned no final cursor.");
@@ -744,11 +757,15 @@ export class EngineRelayClient {
           applied,
           skipped,
           conflictsOpened,
-          pendingConflictResolves: resolves.length,
-          pendingResolves: resolves,
+          sharingDeclined: declines,
           fastForwardedPaths: [...changed.values()],
           nextCursor,
-          commitFetchCursor: async () => await commitCursor(finalCursor),
+          commitFetchCursor: async () => {
+            appendDeclines(
+              declines,
+              (await commitCursor(finalCursor)).sharingDeclined,
+            );
+          },
         };
       },
       commitCursor,
@@ -985,7 +1002,12 @@ export class EngineRelayClient {
           refusalCount,
           changedPaths: [...changed.values()],
           nextCursor,
-          commitCursor: async () => await commitCursor(finalCursor),
+          // Share-view pulls do not surface `sharingDeclined` (out of scope
+          // for share views) — discard the richer relay-cursor result the
+          // shared `commitCursor` closure now returns.
+          commitCursor: async () => {
+            await commitCursor(finalCursor);
+          },
         };
       },
     };

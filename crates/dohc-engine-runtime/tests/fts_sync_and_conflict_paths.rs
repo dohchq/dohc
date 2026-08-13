@@ -4,14 +4,14 @@ use std::sync::Arc;
 use dohc_engine_domain::{
     CaptureIngest, ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus,
     CreateNamedVersion, ResolveConflictKind, ResolveTextConflict, TextConflict, TextSnapshot,
-    VersionedTextStore, WriteBinary, WriteText,
+    VersionedTextStore, WriteText,
 };
 use dohc_engine_runtime::search::{ensure_search_index_for_version, search_workspace};
 use dohc_engine_runtime::{CancellationToken, NoFaults, SearchResult, WorkspaceSupervisor};
 use dohc_engine_storage::{EngineStore, StorageError, hex_sha256, put_binary_blob};
 use dohc_engine_sync::{
-    ApplyOutcome, LeaseProbe, NoLiveLeases, ReplicationEnvelope, SyncError,
-    apply_conflict_envelope, apply_envelope_with, apply_ydoc_envelope, drain_deferred_ydoc_for_key,
+    ApplyOutcome, LeaseProbe, NoLiveLeases, ReplicationEnvelope, SyncError, apply_envelope_with,
+    apply_ydoc_envelope, drain_deferred_ydoc_for_key,
 };
 use dohc_engine_testkit::ScratchDir;
 use rusqlite::params;
@@ -153,237 +153,6 @@ fn replicated_ydoc_base_projection_updates_certified_search_index() {
             .collect::<Vec<_>>(),
         [PATH],
         "replicated Y.Doc projection must update an already-certified index"
-    );
-}
-
-#[test]
-fn mirrored_text_conflict_resolution_replaces_certified_search_content() {
-    const PATH: &str = "doc.md";
-    const OLD: &str = "mirroredconflictoldneedle";
-    const NEW: &str = "mirroredconflictnewneedle";
-    let (scratch, mut store) = open_store();
-    let current = write_text(
-        &mut store,
-        "current-object",
-        PATH,
-        OLD,
-        "current-moment",
-        1_100,
-    );
-    certify(&store, scratch.path(), 1_200);
-    assert_eq!(search_store(&store, scratch.path(), OLD, 1_201).len(), 1);
-
-    let opened = envelope(
-        "conflict-peer",
-        0,
-        "conflict.open",
-        json!({
-            "id": "mirrored-conflict",
-            "workspaceId": WS,
-            "path": PATH,
-            "targetVersionId": VERSION,
-            "sourceVersionId": "peer-version",
-            "createdAtMs": 1_300,
-            "updatedAtMs": 1_300,
-            "base": { "exists": false, "path": PATH, "contentKind": "text" },
-            "current": {
-                "exists": true,
-                "path": PATH,
-                "objectId": current.object_id,
-                "contentKind": "text",
-                "text": current.text,
-                "updatedAtMs": current.updated_at_ms,
-                "latestMomentId": current.latest_moment_id,
-                "metadata": { "origin": current.metadata_origin }
-            },
-            "incoming": {
-                "exists": true,
-                "path": PATH,
-                "objectId": "incoming-object",
-                "contentKind": "text",
-                "text": NEW,
-                "updatedAtMs": 1_250,
-                "latestMomentId": "incoming-moment",
-                "metadata": { "origin": "sync" }
-            },
-            "status": "open",
-            "chosenFrom": "current",
-            "metadata": { "origin": "sync" }
-        }),
-        1_300,
-    );
-    assert!(matches!(
-        apply_conflict_envelope(&mut store, &opened, &NoFaults),
-        Ok(ApplyOutcome::Applied(_))
-    ));
-
-    // A sync-origin conflict is mirrored. The peer's kept-current decision
-    // therefore applies the receiver's recorded incoming side.
-    let resolved = envelope(
-        "conflict-peer",
-        1,
-        "conflict.resolve",
-        json!({
-            "conflictId": "mirrored-conflict",
-            "status": "resolved",
-            "chosenFrom": "current",
-            "resolution": "kept-current",
-            "updatedAtMs": 1_400,
-            "targetVersionId": VERSION
-        }),
-        1_400,
-    );
-    assert!(matches!(
-        apply_conflict_envelope(&mut store, &resolved, &NoFaults),
-        Ok(ApplyOutcome::Applied(result)) if result.matched && !result.deferred()
-    ));
-
-    let new_hits = search_store(&store, scratch.path(), NEW, 1_500);
-    assert_eq!(
-        new_hits
-            .iter()
-            .map(|result| result.path.as_str())
-            .collect::<Vec<_>>(),
-        [PATH],
-        "mirrored conflict resolution must index the resolved text"
-    );
-    assert!(
-        search_store(&store, scratch.path(), OLD, 1_501).is_empty(),
-        "mirrored conflict resolution must remove the old indexed body"
-    );
-}
-
-#[test]
-fn binary_to_text_mirrored_resolve_indexes_the_live_object_id() {
-    const PATH: &str = "doc.md";
-    const NEW: &str = "binarytotextresolvedneedle";
-    let (scratch, mut store) = open_store();
-    let binary = VersionedTextStore::new(&mut store)
-        .write_binary(
-            &WriteBinary {
-                workspace_id: WS.to_owned(),
-                version_id: VERSION.to_owned(),
-                object_id: "live-binary-object".to_owned(),
-                path: PATH.to_owned(),
-                bytes: b"\x00binary live head\xff".to_vec(),
-                moment_id: "live-binary-moment".to_owned(),
-                metadata_origin: "sync".to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                author_json: None,
-                now_ms: 1_100,
-                request_id: None,
-            },
-            &NoFaults,
-        )
-        .expect("seed binary head");
-    certify(&store, scratch.path(), 1_200);
-
-    let opened = envelope(
-        "binary-text-peer",
-        0,
-        "conflict.open",
-        json!({
-            "id": "binary-text-conflict",
-            "workspaceId": WS,
-            "path": PATH,
-            "targetVersionId": VERSION,
-            "sourceVersionId": "peer-version",
-            "createdAtMs": 1_300,
-            "updatedAtMs": 1_300,
-            "base": { "exists": false, "path": PATH, "contentKind": "text" },
-            "current": {
-                "exists": true,
-                "path": PATH,
-                "objectId": binary.object_id,
-                "contentKind": "text",
-                "text": "placeholder",
-                "updatedAtMs": 1_100,
-                "latestMomentId": binary.moment.moment_id,
-                "metadata": { "origin": "sync" }
-            },
-            "incoming": {
-                "exists": true,
-                "path": PATH,
-                "objectId": "synthetic-incoming-object",
-                "contentKind": "text",
-                "text": NEW,
-                "updatedAtMs": 1_250,
-                "latestMomentId": "incoming-text-moment",
-                "metadata": { "origin": "sync" }
-            },
-            "status": "open",
-            "chosenFrom": "current",
-            "metadata": { "origin": "sync" }
-        }),
-        1_300,
-    );
-    assert!(matches!(
-        apply_conflict_envelope(&mut store, &opened, &NoFaults),
-        Ok(ApplyOutcome::Applied(_))
-    ));
-    store
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "UPDATE conflicts SET current_content_kind='binary', \
-                 current_blob_sha256=NULL, current_binary_sha256=?1, \
-                 current_object_id=?2, current_latest_moment_id=?3 \
-                 WHERE workspace_id=?4 AND conflict_id='binary-text-conflict'",
-                params![binary.sha256, binary.object_id, binary.moment.moment_id, WS],
-            )
-            .map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("record exact binary current side");
-
-    let resolved = envelope(
-        "binary-text-peer",
-        1,
-        "conflict.resolve",
-        json!({
-            "conflictId": "binary-text-conflict",
-            "status": "resolved",
-            "chosenFrom": "current",
-            "resolution": "kept-current",
-            "updatedAtMs": 1_400,
-            "targetVersionId": VERSION
-        }),
-        1_400,
-    );
-    assert!(matches!(
-        apply_conflict_envelope(&mut store, &resolved, &NoFaults),
-        Ok(ApplyOutcome::Applied(result)) if result.matched && !result.deferred()
-    ));
-
-    let (head_object_id, fts_object_id): (String, String) = store
-        .read_with(|connection| {
-            Ok::<_, rusqlite::Error>((
-                connection.query_row(
-                    "SELECT object_id FROM snapshots \
-                     WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
-                    params![WS, VERSION, PATH],
-                    |row| row.get(0),
-                )?,
-                connection.query_row(
-                    "SELECT object_id FROM engine_search_files_fts \
-                     WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
-                    params![WS, VERSION, PATH],
-                    |row| row.get(0),
-                )?,
-            ))
-        })
-        .expect("compare head and FTS identities");
-    assert_eq!(head_object_id, binary.object_id);
-    assert_eq!(
-        fts_object_id, head_object_id,
-        "mirrored resolve must index the object identity reused by the write"
-    );
-    assert_eq!(
-        search_store(&store, scratch.path(), NEW, 1_500)
-            .iter()
-            .map(|result| result.path.as_str())
-            .collect::<Vec<_>>(),
-        [PATH]
     );
 }
 
@@ -654,7 +423,7 @@ fn local_resolution(conflict_id: &str, suffix: &str, now_ms: i64) -> ResolveText
         object_id: format!("resolved-object-{suffix}"),
         write_moment_id: format!("resolved-write-{suffix}"),
         delete_moment_id: format!("resolved-delete-{suffix}"),
-        metadata_origin: "agent".to_owned(),
+        metadata_origin: "api".to_owned(),
         metadata_summary: None,
         metadata_correlation_id: None,
         author_json: None,
@@ -678,6 +447,7 @@ async fn local_conflict_resolution_actor_indexes_text_and_deletion() {
     let current = actor
         .capture_ingest(
             capture_text(PATH, OLD, 1_100),
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -800,6 +570,7 @@ async fn named_version_creation_leaves_search_uncertified_for_lazy_first_build()
     actor
         .capture_ingest(
             capture_text(PATH, NEEDLE, 1_100),
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -908,12 +679,28 @@ async fn resolving_onto_a_binary_side_drops_the_indexed_text() {
     let current = actor
         .capture_ingest(
             capture_text(PATH, OLD, 1_100),
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
         .await
         .expect("seed current head")
         .snapshot;
+    let ydoc_key = dohc_engine_collab::DocKey::new(WS, VERSION, &current.object_id)
+        .expect("binary-resolution Y.Doc key");
+    actor
+        .ydoc_open_state(
+            WS.to_owned(),
+            1_150,
+            true,
+            Some(ydoc_key.clone()),
+            VERSION.to_owned(),
+            PATH.to_owned(),
+            Some(dohc_engine_collab::ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claim the text Y.Doc base before binary replacement");
     actor
         .ensure_search_index(
             scratch.path().to_path_buf(),
@@ -941,7 +728,14 @@ async fn resolving_onto_a_binary_side_drops_the_indexed_text() {
                 "local-binary-conflict",
                 PATH,
                 current,
-                ConflictFileState::binary(PATH, sha256.clone()),
+                ConflictFileState::binary_head(
+                    PATH,
+                    sha256.clone(),
+                    i64::try_from(bytes.len()).expect("binary fixture length"),
+                    "incoming-binary-object",
+                    "incoming-binary-moment",
+                    1_250,
+                ),
                 1_300,
             )),
             Arc::new(NoFaults),
@@ -976,5 +770,33 @@ async fn resolving_onto_a_binary_side_drops_the_indexed_text() {
             .await
             .is_empty(),
         "a head that became bytes must leave no searchable text behind"
+    );
+    supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 1_600).expect("inspect retired lineage");
+    let counts: (i64, i64, i64, i64) = store
+        .read_with(|conn| {
+            let count = |table: &str| -> Result<i64, StorageError> {
+                conn.query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {table} WHERE workspace_id=?1 \
+                         AND version_id=?2 AND object_id=?3"
+                    ),
+                    params![WS, VERSION, ydoc_key.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::corrupt_public)
+            };
+            Ok::<_, StorageError>((
+                count("ydoc_docs")?,
+                count("ydoc_updates")?,
+                count("ydoc_snapshots")?,
+                count("ydoc_deferred_updates")?,
+            ))
+        })
+        .expect("lineage counts");
+    assert_eq!(
+        counts,
+        (0, 0, 0, 0),
+        "a local binary resolution must retire every text-lineage table"
     );
 }

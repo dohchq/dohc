@@ -1,5 +1,5 @@
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::SyncError;
 use crate::model::bounded;
@@ -72,7 +72,8 @@ pub fn commit_relay_cursor(
     workspace_id: &str,
     cursor: &RelayCursor,
     faults: &dyn FaultInjector,
-) -> Result<TxnOutcome<()>, SyncError> {
+    now_ms: i64,
+) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, SyncError> {
     bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
     if !(0..=crate::MAX_WIRE_INTEGER).contains(&cursor.cursor) {
         return Err(SyncError::InvalidInput {
@@ -89,6 +90,8 @@ pub fn commit_relay_cursor(
     )?;
     store
         .write_with(faults, |tx| {
+            let was_enrolled =
+                crate::workspace_replicates_with_relay_in_tx(tx, workspace_id)?;
             tx.execute(
                 "INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity) \
                  VALUES (?1,?2,?3,?4) ON CONFLICT(workspace_id) DO UPDATE SET \
@@ -104,14 +107,17 @@ pub fn commit_relay_cursor(
                 ],
             )
             .map_err(SyncError::persist)?;
-            // A committed cursor means the stream never replays coordinates
-            // at or before this pull, so persisted pending-resolve decisions
-            // kept for retry reconstruction are dead.
-            tx.execute(
-                "DELETE FROM replication_pending_resolves WHERE workspace_id=?1",
-                params![workspace_id],
-            )
-            .map_err(SyncError::persist)?;
+            // Cursor commit is the per-pass level trigger. Re-scan here so an
+            // oversized unclaimed base stays visible until it can originate.
+            let sharing_declined = if was_enrolled {
+                crate::enrolment::originate_unclaimed_ydoc_bases_in_tx(
+                    tx,
+                    workspace_id,
+                    now_ms,
+                )?
+            } else {
+                crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, now_ms)?
+            };
             // Refusals can also be created OUTSIDE a pull when open/resync/
             // close drains an already-ACKed Y.Doc coordinate. Delete only the
             // rows that this exact pull claimed and surfaced. A later drain is
@@ -126,7 +132,7 @@ pub fn commit_relay_cursor(
                 )
                 .map_err(SyncError::persist)?;
             }
-            Ok::<(), SyncError>(())
+            Ok::<_, SyncError>(sharing_declined)
     })
 }
 
@@ -157,13 +163,24 @@ pub fn read_pushed_seq(
     })
 }
 
+pub(crate) fn has_relay_position(conn: &Connection, workspace_id: &str) -> Result<bool, SyncError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_relay_cursors WHERE workspace_id=?1) OR \
+                EXISTS(SELECT 1 FROM sync_relay_push_state WHERE workspace_id=?1)",
+        [workspace_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
 pub(crate) fn write_pushed_seq(
     store: &mut EngineStore,
     workspace_id: &str,
     origin_id: &str,
     pushed_seq: i64,
     faults: &dyn FaultInjector,
-) -> Result<TxnOutcome<()>, SyncError> {
+    now_ms: i64,
+) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, SyncError> {
     if !(-1..=crate::MAX_WIRE_INTEGER).contains(&pushed_seq) {
         return Err(SyncError::InvalidInput {
             reason: "pushed_seq is outside the wire integer range",
@@ -171,13 +188,21 @@ pub(crate) fn write_pushed_seq(
     }
     store
         .write_with(faults, |tx| {
+            let was_enrolled =
+                crate::workspace_replicates_with_relay_in_tx(tx, workspace_id)?;
             tx.execute(
                 "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) VALUES (?1,?2,?3) \
                  ON CONFLICT(workspace_id,origin_id) DO UPDATE SET pushed_seq=MAX(pushed_seq,excluded.pushed_seq)",
                 params![workspace_id, origin_id, pushed_seq],
             )
             .map_err(SyncError::persist)?;
-            Ok::<(), SyncError>(())
+            if was_enrolled {
+                // Cursor commit owns the recurring scan. A pushed-origin
+                // update must not repeat that full-state work.
+                Ok(Vec::new())
+            } else {
+                crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, now_ms)
+            }
         })
 }
 

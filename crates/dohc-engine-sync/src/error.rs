@@ -27,6 +27,14 @@ pub enum SyncError {
     Storage(#[from] StorageError),
     #[error("invalid replication input: {reason}")]
     InvalidInput { reason: &'static str },
+    #[error(
+        "replication input exceeds {constraint}: limit {limit_bytes} bytes, observed {observed_bytes} bytes"
+    )]
+    InputTooLarge {
+        constraint: &'static str,
+        limit_bytes: usize,
+        observed_bytes: usize,
+    },
     #[error("replication sequence gap")]
     SequenceGap,
     #[error("replication coordinate contains different content")]
@@ -124,6 +132,7 @@ impl SyncError {
             // Refusals of the op: the relay served something this boundary
             // will not apply. One such op must not wedge the share.
             SyncError::InvalidInput { .. }
+            | SyncError::InputTooLarge { .. }
             | SyncError::UnsupportedOperation
             | SyncError::ShareBoundaryViolation
             | SyncError::ShareVersionMismatch { .. }
@@ -146,6 +155,7 @@ impl SyncError {
         match self {
             SyncError::Storage(err) => err.code(),
             SyncError::InvalidInput { .. } => "invalid-input",
+            SyncError::InputTooLarge { .. } => "invalid-input",
             SyncError::SequenceGap | SyncError::CoordinateDiverged => "state-corrupt",
             SyncError::RetryableState { .. } => "retryable-state",
             SyncError::UnsupportedOperation => "invalid-input",

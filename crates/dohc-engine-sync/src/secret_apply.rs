@@ -278,8 +278,8 @@ fn insert_fork_rows(
         .map_err(SyncError::persist)?;
         tx.execute(
             "INSERT OR IGNORE INTO secret_fork_bases \
-             (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+             (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length,updated_at_ms) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 op.workspace_id,
                 to_version_id,
@@ -287,7 +287,8 @@ fn insert_fork_rows(
                 row.iv_base64,
                 row.auth_tag_base64,
                 ciphertext_base64,
-                row.byte_length
+                row.byte_length,
+                row.updated_at_ms
             ],
         )
         .map_err(SyncError::persist)?;
@@ -442,9 +443,9 @@ fn insert_moment(
     let inserted = tx
         .execute(
         "INSERT OR IGNORE INTO secret_moments \
-         (workspace_id,moment_order,moment_id,version_id,path,recorded_at_ms,operation,metadata_origin,metadata_summary,metadata_correlation_id,after_present,after_iv_base64,after_auth_tag_base64,after_ciphertext_base64,after_byte_length) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
-        params![op.workspace_id,order,moment_id,version_id,path,op.recorded_at_ms,if present == 1 { "write" } else { "delete" },metadata.origin,metadata.summary,metadata.correlation_id,present,iv,tag,ciphertext,byte_length],
+         (workspace_id,moment_order,moment_id,version_id,path,recorded_at_ms,operation,metadata_origin,metadata_summary,metadata_correlation_id,after_present,after_iv_base64,after_auth_tag_base64,after_ciphertext_base64,after_byte_length,source_origin_id,source_origin_seq) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+        params![op.workspace_id,order,moment_id,version_id,path,op.recorded_at_ms,if present == 1 { "write" } else { "delete" },metadata.origin,metadata.summary,metadata.correlation_id,present,iv,tag,ciphertext,byte_length,op.origin_id,op.origin_seq],
     )
         .map_err(SyncError::persist)?;
     // Legitimate redelivery is resolved by `apply_envelope_with` against the

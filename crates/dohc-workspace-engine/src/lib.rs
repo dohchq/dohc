@@ -951,10 +951,6 @@ impl EngineService {
                 self.versioned_text_read(&ctx, request.workspace, request.params)
                     .await?
             }
-            "ydoc.apply" => {
-                self.ydoc_apply(&ctx, request.workspace, request.params)
-                    .await?
-            }
             "ydoc.open" => {
                 self.ydoc_open(&ctx, request.workspace, request.params)
                     .await?
@@ -1703,6 +1699,7 @@ impl EngineService {
                     root.clone(),
                     actor.clone(),
                     params.workspace_id.clone(),
+                    self.leases.scoped(&root),
                     self.self_writes.scoped(&root),
                     Arc::clone(&capture_apply_gate),
                     capture_author_json.flatten(),
@@ -2046,6 +2043,7 @@ impl EngineService {
                 configuration,
                 RelayOperation::Push {
                     workspace_id: open.workspace_id.clone(),
+                    now_ms: now_ms()?,
                 },
                 "sync.push",
             )
@@ -2069,6 +2067,7 @@ impl EngineService {
                 configuration,
                 RelayOperation::Pull {
                     workspace_id: open.workspace_id.clone(),
+                    now_ms: now_ms()?,
                 },
                 "sync.pull",
             )
@@ -2110,6 +2109,7 @@ impl EngineService {
             IssuedCursor::Relay(cursor) => RelayOperation::CommitCursor {
                 workspace_id: open.workspace_id.clone(),
                 cursor,
+                now_ms: now_ms()?,
             },
             IssuedCursor::ShareView(cursor) => RelayOperation::CommitShareViewCursor {
                 workspace_id: open.workspace_id.clone(),
@@ -3230,6 +3230,7 @@ impl EngineService {
         let open = open.clone();
         let handle = handle.clone();
         let sessions = Arc::clone(&self.sessions);
+        let leases = self.leases.clone();
         let self_writes = self.self_writes.clone();
         let events = self.events.clone();
         let detached_operation = operation.to_owned();
@@ -3293,10 +3294,12 @@ impl EngineService {
             if let Some(probe) = &probe {
                 probe.record_version_scan();
             }
+            let capture_leases = leases.scoped(&open.root);
             let reconcile = capture_driver::reconcile_full_for_switch(
                 &open.root,
                 &open.actor,
                 &open.workspace_id,
+                &capture_leases,
                 &capture_status,
                 &self_writes.scoped(&open.root),
                 capture_author_json,
@@ -7056,63 +7059,6 @@ impl EngineService {
         Ok(json!({ "failed": true }))
     }
 
-    async fn ydoc_apply(
-        &self,
-        ctx: &RequestContext,
-        handle: Option<WorkspaceHandle>,
-        params: Value,
-    ) -> Result<Value, WireError> {
-        let params: YdocApplyParams = parse(params)?;
-        let open = self.open(handle.as_ref())?;
-        // Serialize with the session surface: the lease check below is only
-        // meaningful if no ydoc.open can interleave between it and the
-        // append (open holds this same lock across lease + state read).
-        // Cancellation stays honored while queued — a long settle must not
-        // pin an already-expired apply on the transport.
-        let cancellation = OperationCancellation::new(ctx);
-        let _serial = tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption("ydoc.apply (queued)"));
-            }
-            serial = open.session_ops.lock() => serial,
-        };
-        let update = base64::engine::general_purpose::STANDARD
-            .decode(params.update_base64)
-            .map_err(|_| wire(ErrorCode::InvalidParams, "invalid update encoding"))?;
-        let key = DocKey::new(open.workspace_id, params.version_id, params.object_id)
-            .map_err(|_| wire(ErrorCode::InvalidParams, "invalid document coordinates"))?;
-        // A live session's lease is single-writer: the legacy append path
-        // must not advance the durable CRDT behind an open editor (no
-        // remoteUpdate delivery, no forced resync). Same refusal shape as a
-        // second ydoc.open.
-        if self.leases.scoped(&open.root).is_held(&key) {
-            return Err(wire(ErrorCode::InvalidParams, "ydoc-session-busy"));
-        }
-        let content_kind = match params.content_kind.as_str() {
-            "plaintext" => ContentKind::Plaintext,
-            "richdoc" => ContentKind::Richdoc,
-            _ => return Err(wire(ErrorCode::InvalidParams, "unknown Y.Doc content kind")),
-        };
-        let outcome = open
-            .actor
-            .ydoc_apply(
-                key,
-                content_kind,
-                update,
-                params.now_ms.unwrap_or(now_ms()?),
-                Arc::new(NoFaults),
-                cancellation.token(),
-            )
-            .await
-            .map_err(map_runtime)?;
-        Ok(json!({
-            "seq": outcome.seq,
-            "deduped": outcome.deduped,
-            "emitOutbound": outcome.emit_outbound
-        }))
-    }
-
     async fn ydoc_open(
         &self,
         ctx: &RequestContext,
@@ -7138,9 +7084,8 @@ impl EngineService {
         };
         // The first read only DERIVES the key (head resolution can't happen
         // without it). The lease is then taken on that key and the state is
-        // RE-READ under it — a legacy ydoc.apply landing between read one and
-        // the lease can no longer hand the opener stale initial state (the
-        // second read is the authoritative one; apply refuses while leased).
+        // RE-READ under it, so the second read is authoritative for the
+        // acquired session.
         let probe = open
             .actor
             .ydoc_open_state(
@@ -7793,7 +7738,12 @@ impl EngineService {
             enforce_workspace(&open, &envelope.workspace_id)?;
             let result = open
                 .actor
-                .conflict_apply_replicated(envelope, Arc::new(NoFaults), cancellation.token())
+                .conflict_apply_replicated(
+                    envelope,
+                    Arc::new(NoFaults),
+                    self.leases.scoped(&open.root),
+                    cancellation.token(),
+                )
                 .await
                 .map_err(map_runtime)?;
             return Ok(replicated_conflict_json(result));
@@ -7834,7 +7784,12 @@ impl EngineService {
             enforce_workspace(&open, &envelope.workspace_id)?;
             let result = open
                 .actor
-                .conflict_apply_replicated(envelope, Arc::new(NoFaults), cancellation.token())
+                .conflict_apply_replicated(
+                    envelope,
+                    Arc::new(NoFaults),
+                    self.leases.scoped(&open.root),
+                    cancellation.token(),
+                )
                 .await
                 .map_err(map_runtime)?;
             return Ok(replicated_conflict_json(result));
@@ -7915,6 +7870,7 @@ impl EngineService {
                 ));
             }
         };
+        let scoped_leases = self.leases.scoped(&open.root);
         let result = open
             .actor
             .conflict_resolve_indexed(
@@ -7933,7 +7889,7 @@ impl EngineService {
                     request_id,
                     conflict_answer_budget_bytes,
                 },
-                self.leases.clone(),
+                scoped_leases,
                 open.root,
                 Arc::new(NoFaults),
                 cancellation.token(),
@@ -9103,16 +9059,6 @@ struct MomentsGetParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct YdocApplyParams {
-    version_id: String,
-    object_id: String,
-    content_kind: String,
-    update_base64: String,
-    now_ms: Option<i64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct YdocOpenParams {
     version_id: String,
     path: String,
@@ -9942,6 +9888,7 @@ impl ConflictStateDto {
             binary_byte_length: None,
             binary_object_id: None,
             binary_latest_moment_id: None,
+            binary_updated_at_ms: None,
             content_kind,
             metadata_summary: self.metadata_summary,
             metadata_correlation_id: self.metadata_correlation_id,
@@ -10879,15 +10826,12 @@ fn conflict_state_json(state: &ConflictFileState) -> Value {
 fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value {
     match outcome {
         ApplyOutcome::Applied(result) => {
-            let deferred = result.deferred();
             json!({
                 "replicated": true,
                 "status": "applied",
                 "conflictId": result.conflict_id,
                 "inserted": result.inserted,
-                "matched": result.matched,
-                "deferred": deferred,
-                "pendingResolve": result.pending_resolve
+                "matched": result.matched
             })
         }
         ApplyOutcome::Refused(refusal) => json!({
@@ -10906,27 +10850,39 @@ fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value
             "status": "crashed",
             "committed": committed
         }),
-        ApplyOutcome::WithRefusals { outcome, refusals } => {
+        ApplyOutcome::WithDiagnostics {
+            outcome,
+            refusals,
+            sharing_declined,
+        } => {
             let mut value = replicated_conflict_json(*outcome);
             if let Some(object) = value.as_object_mut() {
-                object.insert(
-                    "refusals".to_owned(),
-                    Value::Array(
-                        refusals
-                            .into_iter()
-                            .map(|refusal| {
-                                json!({
-                                    "workspaceId": refusal.workspace_id,
-                                    "originId": refusal.origin_id,
-                                    "originSeq": refusal.origin_seq,
-                                    "opKind": refusal.op_kind,
-                                    "code": refusal.reason.code(),
-                                    "reason": refusal.reason.message()
+                if !refusals.is_empty() {
+                    object.insert(
+                        "refusals".to_owned(),
+                        Value::Array(
+                            refusals
+                                .into_iter()
+                                .map(|refusal| {
+                                    json!({
+                                        "workspaceId": refusal.workspace_id,
+                                        "originId": refusal.origin_id,
+                                        "originSeq": refusal.origin_seq,
+                                        "opKind": refusal.op_kind,
+                                        "code": refusal.reason.code(),
+                                        "reason": refusal.reason.message()
+                                    })
                                 })
-                            })
-                            .collect(),
-                    ),
-                );
+                                .collect(),
+                        ),
+                    );
+                }
+                if !sharing_declined.is_empty() {
+                    object.insert(
+                        "sharingDeclined".to_owned(),
+                        Value::Array(sharing_declined_json(sharing_declined)),
+                    );
+                }
             }
             value
         }
@@ -10996,8 +10952,8 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             conflicts_opened,
             pending_cursor,
             changed_paths,
-            pending_resolves,
             refusals,
+            sharing_declined,
         } => json!({
             "status": "complete",
             "pushed": pushed,
@@ -11014,7 +10970,6 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
                 "operation": change.operation,
                 "contentKind": change.content_kind,
             })).collect::<Vec<_>>(),
-            "pendingResolves": pending_resolves,
             "refusals": refusals.into_iter().map(|refusal| json!({
                 "workspaceId": refusal.workspace_id,
                 "originId": refusal.origin_id,
@@ -11023,6 +10978,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
                 "code": refusal.reason.code(),
                 "reason": refusal.reason.message(),
             })).collect::<Vec<_>>(),
+            "sharingDeclined": sharing_declined_json(sharing_declined),
         }),
         SyncPassOutcome::CrashedAfterRemoteCommit => {
             json!({ "status": "crashedAfterRemoteCommit" })
@@ -11034,8 +10990,8 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             conflicts_opened,
             pending_cursor,
             changed_paths,
-            pending_resolves,
             refusals,
+            sharing_declined,
         } => json!({
             "status": "crashedAfterApply",
             "applied": applied,
@@ -11049,7 +11005,6 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
                 "operation": change.operation,
                 "contentKind": change.content_kind,
             })).collect::<Vec<_>>(),
-            "pendingResolves": pending_resolves,
             "refusals": refusals.into_iter().map(|refusal| json!({
                 "workspaceId": refusal.workspace_id,
                 "originId": refusal.origin_id,
@@ -11058,14 +11013,32 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
                 "code": refusal.reason.code(),
                 "reason": refusal.reason.message(),
             })).collect::<Vec<_>>(),
+            "sharingDeclined": sharing_declined_json(sharing_declined),
         }),
     }
+}
+
+fn sharing_declined_json(declines: Vec<dohc_engine_sync::SharingDeclined>) -> Vec<Value> {
+    declines
+        .into_iter()
+        .map(|declined| {
+            json!({
+                "path": declined.path,
+                "constraint": declined.constraint,
+                "limitBytes": declined.limit_bytes,
+                "observedBytes": declined.observed_bytes,
+            })
+        })
+        .collect()
 }
 
 fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError> {
     Ok(match outcome {
         RelayOperationOutcome::Sync(outcome) => sync_outcome_json(outcome),
-        RelayOperationOutcome::CursorCommitted => json!({ "committed": true }),
+        RelayOperationOutcome::CursorCommitted { sharing_declined } => json!({
+            "committed": true,
+            "sharingDeclined": sharing_declined_json(sharing_declined),
+        }),
         RelayOperationOutcome::Probe(has_content) => json!({ "hasContent": has_content }),
         RelayOperationOutcome::Claimed => json!({ "claimed": true }),
         RelayOperationOutcome::JoinIdentityAdopted => json!({ "adopted": true }),
@@ -11547,6 +11520,14 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::ContentKindMismatch
         | CollabError::BaseAlreadyClaimed
         | CollabError::BaseStateDiverged
+        | CollabError::SuccessorProjectionMismatch { .. }
+        | CollabError::SuccessorResultMismatch { .. }
+        | CollabError::LineageEpochChanged { .. }
+        | CollabError::LineageClaimUnresolved { .. }
+        | CollabError::LineagePredecessorMismatch { .. }
+        | CollabError::LineageStateVectorMismatch { .. }
+        | CollabError::InvalidSuccessorBase { .. }
+        | CollabError::LineageIncomplete { .. }
         | CollabError::LeaseHeld
         | CollabError::NoMarker
         | CollabError::MissingDependencies
@@ -11573,7 +11554,9 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
         | SyncError::BlobInvalid => ErrorCode::InvalidParams,
         // Same condition as its relay twin, so the same code. A blob over a
         // fixed ceiling is a size refusal on either path.
-        SyncError::BlobTooLarge { .. } => ErrorCode::PayloadTooLarge,
+        SyncError::BlobTooLarge { .. } | SyncError::InputTooLarge { .. } => {
+            ErrorCode::PayloadTooLarge
+        }
     }
 }
 
@@ -12307,32 +12290,6 @@ mod tests {
     }
 
     #[test]
-    fn replicated_conflict_json_keeps_deferred_and_adds_pending_resolve() {
-        let value = replicated_conflict_json(ApplyOutcome::Applied(ConflictApplyResult {
-            conflict_id: "remote-c".to_owned(),
-            inserted: None,
-            matched: false,
-            pending_resolve: Some(dohc_engine_sync::PendingResolve {
-                remote_conflict_id: "remote-c".to_owned(),
-                local_conflict_id: Some("local-c".to_owned()),
-                path: Some("doc.md".to_owned()),
-                reason: dohc_engine_sync::PendingResolveReason::BinaryUnhydrated,
-            }),
-        }));
-
-        assert_eq!(value["deferred"], true);
-        assert_eq!(
-            value["pendingResolve"],
-            json!({
-                "remoteConflictId": "remote-c",
-                "localConflictId": "local-c",
-                "path": "doc.md",
-                "reason": "binary-unhydrated"
-            })
-        );
-    }
-
-    #[test]
     fn replicated_conflict_json_surfaces_an_acked_refusal() {
         let value = replicated_conflict_json(ApplyOutcome::Refused(
             dohc_engine_sync::ReplicationRefusal {
@@ -12389,14 +12346,29 @@ mod tests {
             conflicts_opened: 0,
             pending_cursor: None,
             changed_paths: Vec::new(),
-            pending_resolves: Vec::new(),
             refusals: Vec::new(),
+            sharing_declined: vec![dohc_engine_sync::SharingDeclined {
+                path: "notes/oversized.md".to_owned(),
+                constraint: "MAX_YDOC_UPDATE_BYTES",
+                limit_bytes: 20,
+                observed_bytes: 21,
+            }],
         });
 
         assert_eq!(value["status"], "complete");
         assert_eq!(
             value["hasMore"], true,
             "MUTATION: omitting hasMore makes a bounded prefix indistinguishable from a drained relay"
+        );
+        assert_eq!(
+            value["sharingDeclined"],
+            json!([{
+                "path": "notes/oversized.md",
+                "constraint": "MAX_YDOC_UPDATE_BYTES",
+                "limitBytes": 20,
+                "observedBytes": 21,
+            }]),
+            "enrollment refusals must reach the workspace RPC result"
         );
     }
 

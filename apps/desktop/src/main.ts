@@ -84,7 +84,6 @@ import {
   CloudLoginStartResult,
   CloudStatusPayload,
   CloudStatusResult,
-  DismissSyncReviewNoticePayload,
   OpenExternalUrlPayload,
   DatabaseSnapshotResult,
   ImportToDatabasePayload,
@@ -297,6 +296,7 @@ import { buildMenuTemplate } from "./window/applicationMenu";
 import { renderHtmlToPdf } from "./window/documentPdfExport";
 import {
   allowSitePreviewOrigin,
+  createMainWindow,
   navigationPolicy,
   rememberChromeTheme,
   titleBarOverlayOptions,
@@ -1810,10 +1810,7 @@ function engineForWorkspace(
     // the periodic worker remains only a crash/retry backstop.
     afterSuccessfulPull: () =>
       projectPendingChatBookmarksAfterPull(workspace.workspaceId),
-    // Post-pass open-conflict truth: pulled peer resolutions and local
-    // resolutions both clear the status-bar/notice conflict state, and the
-    // ids lifecycle the pending remote-resolve notice (0P-C gate fix).
-    listOpenConflictIds: async () => await capture.listOpenConflictIds(),
+    countOpenConflicts: async () => await capture.countOpenConflicts(),
     // A freshly joined workspace's engine is pull-first: no push before the
     // first successful pull (0P-C gate fix).
     ...(engineOptions.joinBootstrap ? { joinBootstrap: true } : {}),
@@ -2982,7 +2979,6 @@ async function showOrCreateMainWindow(): Promise<void> {
     existing.focus();
     return;
   }
-  const { createMainWindow } = await import("./window/createMainWindow");
   const window = trackWorkspaceWindow(
     createMainWindow({ beforeRendererReload: prepareForRendererReload }),
   );
@@ -5527,16 +5523,6 @@ function registerIpcHandlers(
       workspace: WorkspaceSummary.parse(findWorkspace(workspace.workspaceId)),
     });
     });
-  });
-
-  // Explicit dismissal of the "a choice made on another machine needs a
-  // look" notice (0P-C gate fix): the pending remote-resolve set otherwise
-  // clears itself when the referenced conflict resolves or converges.
-  ipcMain.handle(CHANNELS.dismissSyncReviewNotice, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = DismissSyncReviewNoticePayload.parse(payload);
-    activity.dismissUnmatchedRemoteResolves(input.workspaceId);
-    notifyRenderer();
   });
 
   ipcMain.handle(CHANNELS.readWorkspaceDatabase, async (event, payload) => {
@@ -8926,7 +8912,6 @@ if (!app.requestSingleInstanceLock()) {
     const initialActivatedWorkspace = pendingWorkspace ?? launchWorkspace;
     refreshNativeWorkspaceSurfaces();
 
-    const { createMainWindow } = await import("./window/createMainWindow");
     // A path the handlers queued during the bootstrap is a later intent than the
     // launch arguments, so it wins. Drain before the window exists: creating it
     // starts the load, so a listener registered after any further await can miss

@@ -54,6 +54,7 @@ async function expectTwoDaemonFileSync(input: {
   path: string;
   text: string;
   contentKind?: "text" | "binary";
+  bootstrapRelayBeforeCapture?: boolean;
 }): Promise<void> {
   const token = `test:${input.workspaceId}`;
   // Both roots are opened exclusively through EngineWorkspaceSessions (via
@@ -80,12 +81,14 @@ async function expectTwoDaemonFileSync(input: {
       throw new Error("The relay did not adopt daemon A's replication identity.");
     }
 
-    // A successful relay position makes later file moments relay-visible.
-    // Chat creation always journals, so it can establish that position before
-    // the first file initializes the versioned workspace.
-    await daemonA.chats.ensureGeneralChannel({ workspaceId: input.workspaceId });
-    const bootstrapPush = await daemonA.relay.push();
-    expect(bootstrapPush.pushed).toBeGreaterThan(0);
+    if (input.bootstrapRelayBeforeCapture !== false) {
+      // A successful relay position makes later file moments relay-visible.
+      // Chat creation always journals, so it can establish that position before
+      // the first file initializes the versioned workspace.
+      await daemonA.chats.ensureGeneralChannel({ workspaceId: input.workspaceId });
+      const bootstrapPush = await daemonA.relay.push();
+      expect(bootstrapPush.pushed).toBeGreaterThan(0);
+    }
 
     const absoluteA = join(rootA, input.path);
     await mkdir(dirname(absoluteA), { recursive: true });
@@ -137,6 +140,19 @@ it.skipIf(engine.missing)(
       path: "notes/hello.md",
       text: "hello from daemon A\n",
       contentKind: "text",
+    }),
+  60_000,
+);
+
+it.skipIf(engine.missing)(
+  "backfills a captured file when the first relay position follows capture",
+  async () =>
+    await expectTwoDaemonFileSync({
+      workspaceId: "two-daemon-enrolment-window",
+      path: "notes/before-first-push.md",
+      text: "captured before the first relay position\n",
+      contentKind: "text",
+      bootstrapRelayBeforeCapture: false,
     }),
   60_000,
 );
