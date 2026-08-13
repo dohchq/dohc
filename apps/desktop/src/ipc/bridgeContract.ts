@@ -32,6 +32,7 @@ import {
   WORKBENCH_MENU_COMMANDS,
   ENGINE_YDOC_SAVE_STATES,
   type EngineYDocRemoteUpdateEvent,
+  type EngineYDocLineageReplacementEvent,
   type EngineYDocSaveStateEvent,
   type SearchResultsEvent,
 } from "./channels";
@@ -2186,6 +2187,62 @@ export type StopSitePreviewPayload = z.infer<typeof StopSitePreviewPayload>;
 export const StopSitePreviewResult = z.void();
 export type StopSitePreviewResult = z.infer<typeof StopSitePreviewResult>;
 
+const PLUGIN_ID = z.string().min(1).max(214).refine(
+  (value) => !value.includes("\0"),
+  "plugin id must not contain NUL bytes",
+);
+const PLUGIN_PANEL_ID = z.string().min(1).max(120).refine(
+  (value) => !value.includes("\0"),
+  "plugin panel id must not contain NUL bytes",
+);
+const PLUGIN_ROOT = z.string().min(1).max(4096).refine(
+  (value) => !value.includes("\0"),
+  "plugin root must not contain NUL bytes",
+);
+
+export const OpenPluginPanelPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginRoot: PLUGIN_ROOT,
+  pluginId: PLUGIN_ID,
+  panelId: PLUGIN_PANEL_ID,
+}).strict();
+export type OpenPluginPanelPayload = z.infer<typeof OpenPluginPanelPayload>;
+
+export const OpenPluginPanelResult = z.object({
+  pluginId: PLUGIN_ID,
+  panelId: PLUGIN_PANEL_ID,
+}).strict();
+export type OpenPluginPanelResult = z.infer<typeof OpenPluginPanelResult>;
+
+export const PluginPanelOpenedEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  panelId: PLUGIN_PANEL_ID,
+}).strict();
+export type PluginPanelOpenedEvent = z.infer<typeof PluginPanelOpenedEvent>;
+
+export const StartPluginPanelPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  panelId: PLUGIN_PANEL_ID,
+}).strict();
+export type StartPluginPanelPayload = z.infer<typeof StartPluginPanelPayload>;
+
+export const StartPluginPanelResult = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("ok"),
+    url: LoopbackPreviewUrl,
+    title: z.string().min(1).max(120),
+  }).strict(),
+  z.object({ status: z.literal("not-registered") }).strict(),
+]);
+export type StartPluginPanelResult = z.infer<typeof StartPluginPanelResult>;
+
+export const StopPluginPanelPayload = StartPluginPanelPayload;
+export type StopPluginPanelPayload = z.infer<typeof StopPluginPanelPayload>;
+export const StopPluginPanelResult = z.void();
+export type StopPluginPanelResult = z.infer<typeof StopPluginPanelResult>;
+
 // Sites never supply user or workspace identity. The containing renderer
 // identifies the open site and main re-derives its owned/share authority.
 // The preload applies this contract before ipcRenderer.invoke. The byte cap
@@ -2360,6 +2417,28 @@ export function parseInvokeSiteSdkPayloadForIpc(value: unknown): InvokeSiteSdkPa
 export const InvokeSiteSdkResult = z.object({ result: z.unknown() });
 export type InvokeSiteSdkResult = z.infer<typeof InvokeSiteSdkResult>;
 
+export const InvokePluginPanelSdkPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  panelId: PLUGIN_PANEL_ID,
+  method: z.string().min(1).max(200),
+  params: SiteSdkParams.optional(),
+}).strict();
+export type InvokePluginPanelSdkPayload = z.infer<
+  typeof InvokePluginPanelSdkPayload
+>;
+
+export function parseInvokePluginPanelSdkPayloadForIpc(
+  value: unknown,
+): InvokePluginPanelSdkPayload {
+  return InvokePluginPanelSdkPayload.parse(value);
+}
+
+export const InvokePluginPanelSdkResult = z.object({ result: z.unknown() }).strict();
+export type InvokePluginPanelSdkResult = z.infer<
+  typeof InvokePluginPanelSdkResult
+>;
+
 // dohc Cloud login (device-authorization flow): the desktop shows a short
 // code, the user approves in the system browser, the desktop polls. The
 // session token never reaches the renderer — main stores it via safeStorage
@@ -2419,6 +2498,7 @@ export type CloudEnableSyncPayload = z.infer<typeof CloudEnableSyncPayload>;
 export const CloudJoinWorkspacePayload = z.object({
   syncCode: z.string().min(1).max(4096),
   rootPath: z.string().min(1).max(4096),
+  passphrase: z.string().max(4096).optional(),
 });
 export type CloudJoinWorkspacePayload = z.infer<typeof CloudJoinWorkspacePayload>;
 
@@ -3276,6 +3356,7 @@ export type OpenEngineYDocSessionPayload = z.infer<typeof OpenEngineYDocSessionP
 export const OpenEngineYDocSessionResult = z.object({
   available: z.boolean(),
   initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
+  lineageGeneration: z.number().int().positive().optional(),
   // The path is not in the version the workspace is on — a version switch
   // removed it while this open was queued behind that switch (#534). Every
   // other available:false reason downgrades the document to the writable plain
@@ -3305,6 +3386,7 @@ export type OpenEngineYDocSessionResult = z.infer<typeof OpenEngineYDocSessionRe
 export const ApplyEngineYDocUpdatePayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
   update: ENGINE_YDOC_UPDATE,
+  lineageGeneration: z.number().int().positive(),
   // Monotonic per-session local-edit counter. Main echoes the seq a settle
   // STARTED at back on the save-state channel so the renderer never shows
   // "Saved" for a settle that predates the user's latest keystroke.
@@ -3317,6 +3399,20 @@ export const ApplyEngineYDocUpdatePayload = z.object({
 });
 export type ApplyEngineYDocUpdatePayload = z.infer<typeof ApplyEngineYDocUpdatePayload>;
 
+export const AcknowledgeEngineYDocLineageReplacementPayload = z.object({
+  sessionId: ENGINE_YDOC_SESSION_ID,
+  lineageGeneration: z.number().int().positive(),
+});
+export type AcknowledgeEngineYDocLineageReplacementPayload = z.infer<
+  typeof AcknowledgeEngineYDocLineageReplacementPayload
+>;
+export const AcknowledgeEngineYDocLineageReplacementResult = z.object({
+  updates: z.array(ENGINE_YDOC_UPDATE),
+});
+export type AcknowledgeEngineYDocLineageReplacementResult = z.infer<
+  typeof AcknowledgeEngineYDocLineageReplacementResult
+>;
+
 export const CloseEngineYDocSessionPayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
 });
@@ -3325,6 +3421,14 @@ export type CloseEngineYDocSessionPayload = z.infer<typeof CloseEngineYDocSessio
 export const EngineYDocRemoteUpdateEventSchema = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
   update: ENGINE_YDOC_UPDATE,
+  lineageGeneration: z.number().int().positive(),
+});
+
+export const EngineYDocLineageReplacementEventSchema = z.object({
+  sessionId: ENGINE_YDOC_SESSION_ID,
+  update: ENGINE_YDOC_UPDATE,
+  recoveredPaths: z.array(PATH_STRING),
+  lineageGeneration: z.number().int().positive(),
 });
 
 export const EngineYDocSaveStateEventSchema = z.object({
@@ -3445,6 +3549,15 @@ export interface DohcDesktopBridge {
   startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewResult>;
   stopSitePreview(payload: StopSitePreviewPayload): Promise<StopSitePreviewResult>;
   invokeSiteSdk(payload: InvokeSiteSdkPayload): Promise<InvokeSiteSdkResult>;
+  openPluginPanel(payload: OpenPluginPanelPayload): Promise<OpenPluginPanelResult>;
+  onPluginPanelOpened(
+    listener: (event: PluginPanelOpenedEvent) => void,
+  ): () => void;
+  startPluginPanel(payload: StartPluginPanelPayload): Promise<StartPluginPanelResult>;
+  stopPluginPanel(payload: StopPluginPanelPayload): Promise<StopPluginPanelResult>;
+  invokePluginPanelSdk(
+    payload: InvokePluginPanelSdkPayload,
+  ): Promise<InvokePluginPanelSdkResult>;
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;
   cloudLoginPoll(): Promise<CloudLoginPollResult>;
@@ -3693,6 +3806,11 @@ export interface DohcDesktopBridge {
   // Ship a local editor CRDT update to main (journaled via recordUpdate +
   // debounced settle). A no-op if the session is unknown/closed.
   applyEngineYDocUpdate(payload: ApplyEngineYDocUpdatePayload): Promise<void>;
+  // Completes the replacement handoff only after the renderer detached the
+  // losing mirror and durably preserved any edit that did not reach main.
+  acknowledgeEngineYDocLineageReplacement(
+    payload: AcknowledgeEngineYDocLineageReplacementPayload,
+  ): Promise<AcknowledgeEngineYDocLineageReplacementResult>;
   // Settle + close the session in main (releases the single-canonical
   // reservation so the same object can reopen on a version/file switch).
   closeEngineYDocSession(payload: CloseEngineYDocSessionPayload): Promise<void>;
@@ -3702,6 +3820,9 @@ export interface DohcDesktopBridge {
   // session currently bound. Returns an unsubscribe function.
   onEngineYDocRemoteUpdate(
     listener: (event: EngineYDocRemoteUpdateEvent) => void,
+  ): () => void;
+  onEngineYDocLineageReplacement(
+    listener: (event: EngineYDocLineageReplacementEvent) => void,
   ): () => void;
   // The document's REAL save state, pushed on every settle outcome. The editor
   // must never claim "Saved" from anything else: a settle can fail (and used to

@@ -10,7 +10,7 @@ local evidence pipeline.
 
 | Script | What it does |
 | --- | --- |
-| `run-rust-checks.mjs` | Rust policy gate: tree provenance (the commit the run examined, read at every step boundary; a tree that moves between two readings fails the verdict and names the step, a tree already dirty at the start is recorded), native target, fixture drift, `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace`, the collab crash tier (`cargo test -p dohc-engine-collab --features fault-injection` — those tests are compiled out of the plain workspace run), plus `cargo deny check` / `cargo audit` when installed (skip-with-warning when absent). A required step that SKIPs fails the verdict. Prints a pass/fail summary and a pasteable evidence line. |
+| `run-rust-checks.mjs` | Rust policy gate: tree provenance (the commit the run examined, read at every step boundary; a tree that moves between two readings fails the verdict and names the step, a tree already dirty at the start is recorded), native target, fixture drift, `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace` (`cargo nextest run`), `doctests` (`cargo test --doc` — nextest runs no doctests by design), the collab crash tier (`cargo nextest run -p dohc-engine-collab --features fault-injection` — those tests are compiled out of the plain workspace run), plus `cargo deny check` / `cargo audit` when installed (skip-with-warning when absent). A required step that SKIPs fails the verdict. On a host with a build-slot root it enforces the machine budget (WINDOWS_DEV.md): disk preflight, slot acquisition, capped jobs and test threads. Prints a pass/fail summary with per-step seconds and a pasteable evidence line. |
 | `native-target.mjs` | The gate's first step, importable so it can be tested: asks rustc through cargo what it compiled for. See [Native target](#native-target). |
 | `build-reviewer-packet.mjs` | (R01-ORACLE) assembles per-shard reviewer packets. Unrelated to the runners. |
 
@@ -27,6 +27,9 @@ every artifact carries, which files predate it, and the residual gap.
 - Rust toolchain pinned by `rust-toolchain.toml` (channel 1.96.1, with
   `rustfmt` + `clippy`).
 - `pnpm` on PATH (for the JS workspace install above).
+- `cargo install cargo-nextest --locked --version 0.9.143` (the CI pin;
+  `.github/workflows/pr-checks.yml`, `CARGO_NEXTEST_VERSION`). The test
+  rows run through nextest and fail without it.
 - Optional: `cargo install cargo-deny --locked` and
   `cargo install cargo-audit --locked` to enable the supply-chain checks.
 
@@ -41,14 +44,14 @@ node tools/rust-engine-program/run-rust-checks.mjs
 It prints an `EVIDENCE (paste into EXECUTION_LOG.md)` line, e.g.:
 
 ```
-- 2026-07-28T10:11:10.183Z | run-rust-checks | win32/x64 (rust cfg x86_64/windows/msvc, head 1f47af31 clean, 10 reads) | PASS | tree provenance=PASS native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS test collab crash tier=PASS cargo-deny=PASS cargo-audit=PASS
+- 2026-08-13T14:55:16.852Z | run-rust-checks | win32/x64 (rust cfg x86_64/windows/msvc, jobs 8, test-threads 8, head b056a36b clean, 11 reads) | PASS | tree provenance=PASS native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS doctests=PASS test collab crash tier=PASS cargo-deny=PASS cargo-audit=PASS scratch leak=PASS
 ```
 
 `win32/x64` is Node's view of the host. The `rust cfg` field is what rustc
 reported through cargo, and the run stops before any other step unless the two
 agree — see [Native target](#native-target).
 
-`head 1f47af31 clean, 10 reads` is the tree the run examined. The gate reads
+`head b056a36b clean, 11 reads` is the tree the run examined. The gate reads
 the tree before the first step and after each one, and reports how many
 readings agreed. It is not a claim that the tree was watched between them: a
 change made and undone inside one step is invisible to any number of readings.
@@ -111,7 +114,7 @@ The evidence line records a platform, so the gate verifies it. Its first step
 runs
 
 ```sh
-cargo rustc -p dohc-engine-protocol --lib --profile check -- --print cfg
+cargo rustc --locked -p dohc-engine-protocol --lib --profile check -- --print cfg
 ```
 
 and compares the reported `target_arch`/`target_os` against the host Node

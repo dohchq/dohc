@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorTabs } from "./EditorTabs";
-import { CHATS_TAB_PATH } from "./workbenchState";
+import { CHATS_TAB_PATH, pluginPanelTabPath } from "./workbenchState";
 
 beforeEach(() => {
   // jsdom doesn't implement scrollIntoView; the strip reveals the active
@@ -40,6 +40,29 @@ function renderTabs(activeTab: string) {
 }
 
 describe("EditorTabs strip scrolling", () => {
+  it("uses readable labels for plugin panel tabs", () => {
+    const path = pluginPanelTabPath("hello/plugin", "main panel");
+    render(
+      <EditorTabs
+        groupId="left"
+        groupNumber={1}
+        tabs={[{ path }]}
+        activeTab={path}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />,
+    );
+
+    const tab = screen.getByRole("tab", { name: "main panel" });
+    expect(tab.title).toBe("hello/plugin — main panel");
+  });
+
   it("is a single horizontal row: overflow-x scrolls, overflow-y is locked", () => {
     renderTabs("a.md");
     const strip = screen.getByRole("tablist");

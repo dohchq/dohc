@@ -51,7 +51,7 @@ export type SiteSdkSearchStarter = typeof startRipgrepSearch;
 const MAX_LIST_RESULTS = 10_000;
 const MAX_SEARCH_RESULTS = 2_000;
 
-function record(value: unknown, label = "parameters"): RecordValue {
+export function record(value: unknown, label = "parameters"): RecordValue {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object.`);
   }
@@ -101,6 +101,39 @@ function isAtOrBelow(path: string, root: string): boolean {
 
 function isCanonicalMarkdownPath(path: string): boolean {
   return /\.(?:md|markdown)$/i.test(path);
+}
+
+export function assertRawTextWritable(
+  path: string,
+  options: { protectPluginSource?: boolean } = {},
+): void {
+  // Plugins run with full-trust authority. A sandboxed site must not change
+  // plugin source and cross that authority boundary.
+  const [topLevel] = path.replaceAll("\\", "/").split("/");
+  if (options.protectPluginSource && topLevel?.toLowerCase() === "plugins") {
+    throw new Error(
+      "files.write cannot write plugin source under the workspace-root plugins/ tree. Sandboxed sites cannot modify source that runs with full-trust authority.",
+    );
+  }
+  // SQLite files are canonical structured artifacts. Replacing their raw
+  // bytes/text would bypass the operation log, transactions, provenance,
+  // and collaboration convergence used by databases.edit.
+  if (isDatabaseFile(path) || isDatabaseSidecar(path)) {
+    throw new Error(
+      "files.write cannot overwrite database files. Use databases.edit so structured transactions, history, and collaboration are preserved.",
+    );
+  }
+  // Markdown is projected from the canonical Y.Doc/document model. This
+  // host does not own a document session or the review/lock context needed
+  // to perform a correct canonical transaction, so a raw text overwrite
+  // here would bypass collaboration, history, and live-editor state.
+  // Keep ordinary source/text writes useful while failing closed for rich
+  // documents until the SDK has a first-class document edit capability.
+  if (isCanonicalMarkdownPath(path)) {
+    throw new Error(
+      "files.write cannot overwrite canonical Markdown documents. Use a dohc document editing capability so locks, history, and collaboration are preserved.",
+    );
+  }
 }
 
 function capabilities(context: SiteSdkHostContext) {
@@ -281,31 +314,15 @@ export async function invokeSiteSdkHost(
       }
       const input = record(params);
       const path = siteSdkWorkspacePath(null, input.path, "write");
-      // SQLite files are canonical structured artifacts. Replacing their raw
-      // bytes/text would bypass the operation log, transactions, provenance,
-      // and collaboration convergence used by databases.edit.
-      if (isDatabaseFile(path) || isDatabaseSidecar(path)) {
-        throw new Error(
-          "files.write cannot overwrite database files. Use databases.edit so structured transactions, history, and collaboration are preserved.",
-        );
-      }
-      // Markdown is projected from the canonical Y.Doc/document model. This
-      // host does not own a document session or the review/lock context needed
-      // to perform a correct canonical transaction, so a raw text overwrite
-      // here would bypass collaboration, history, and live-editor state.
-      // Keep ordinary source/text writes useful while failing closed for rich
-      // documents until the SDK has a first-class document edit capability.
-      if (isCanonicalMarkdownPath(path)) {
-        throw new Error(
-          "files.write cannot overwrite canonical Markdown documents. Use a dohc document editing capability so locks, history, and collaboration are preserved.",
-        );
-      }
+      assertRawTextWritable(path, { protectPluginSource: true });
       const body = typeof input.text === "string" ? input.text : null;
       if (body === null) throw new Error("files.write text must be a string.");
       if (input.overwrite === false) {
         try {
           await createWorkspaceTextExclusive(context.workspaceRoot, path, body, {
             signal: context.signal,
+            resolvedPathPolicy: (resolvedPath) =>
+              assertRawTextWritable(resolvedPath, { protectPluginSource: true }),
           });
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === "EEXIST") {
@@ -317,6 +334,8 @@ export async function invokeSiteSdkHost(
       }
       await restoreWorkspaceText(context.workspaceRoot, path, body, {
         signal: context.signal,
+        resolvedPathPolicy: (resolvedPath) =>
+          assertRawTextWritable(resolvedPath, { protectPluginSource: true }),
       });
       return { path };
     }

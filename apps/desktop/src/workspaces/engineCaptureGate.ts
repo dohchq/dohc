@@ -82,6 +82,7 @@ export type EngineOffRecovery = "restart" | "retry";
 export type EngineFeature =
   | "Versions"
   | "Chats"
+  | "Plugins"
   | "Engine history"
   | "Chat mentions";
 
@@ -89,6 +90,7 @@ export type EngineFeature =
 const NOT_ENABLED_COPY: Record<EngineFeature, string> = {
   Versions: "Versions are not enabled for this workspace.",
   Chats: "Chats are not enabled for this workspace.",
+  Plugins: "Plugins are not enabled for this workspace.",
   "Engine history": "Engine history is not enabled for this workspace.",
   "Chat mentions": "Chat mentions are not enabled for this workspace.",
 };
@@ -99,6 +101,7 @@ const NOT_ENABLED_COPY: Record<EngineFeature, string> = {
 const UNAVAILABLE_COPY: Record<EngineFeature, string> = {
   Versions: "Versions are unavailable.",
   Chats: "Chats are unavailable.",
+  Plugins: "Plugins are unavailable.",
   "Engine history": "Engine history is unavailable.",
   "Chat mentions": "Chat mentions are unavailable.",
 };

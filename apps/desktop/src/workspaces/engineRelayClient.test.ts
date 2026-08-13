@@ -8,6 +8,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import {
   MAX_REPORTED_REFUSALS,
+  RelayKeyEnvelopeMissingError,
   RelayOriginDivergedError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
@@ -89,9 +90,16 @@ class MockDaemon implements EngineDaemonClient {
             pendingCursor: { kind: "relay", token: "cursor-9" },
             changedPaths: [
               {
+                versionId: "main",
                 path: "notes/plan.md",
                 operation: "write",
                 contentKind: "text",
+              },
+              {
+                versionId: "main",
+                path: ".env",
+                operation: "write",
+                contentKind: "secret",
               },
             ],
             sharingDeclined: [],
@@ -208,7 +216,8 @@ describe("EngineRelayClient", () => {
       originsPushed: [],
       sharingDeclined: [],
     });
-    const pull = await client.pull();
+    const materializePage = vi.fn(async () => undefined);
+    const pull = await client.pull(materializePage);
     expect(pull).toMatchObject({
       fetched: 4,
       applied: 2,
@@ -217,13 +226,20 @@ describe("EngineRelayClient", () => {
       nextCursor: 9,
       fastForwardedPaths: [
         {
+          versionId: "main",
           path: "notes/plan.md",
           operation: "write",
           contentKind: "text",
         },
+        {
+          versionId: "main",
+          path: ".env",
+          operation: "write",
+          contentKind: "secret",
+        },
       ],
     });
-    await pull.commitFetchCursor();
+    expect(materializePage).toHaveBeenCalledOnce();
     await expect(client.recoverOrigin()).resolves.toEqual({
       oldOriginId: "origin-old",
       newOriginId: "origin-new",
@@ -307,7 +323,7 @@ describe("EngineRelayClient", () => {
     });
     const { sessions, client } = await harness(daemon);
 
-    const pull = await client.pull();
+    const pull = await client.pull(async () => undefined);
 
     expect(
       pull.sharingDeclined,
@@ -326,6 +342,111 @@ describe("EngineRelayClient", () => {
         observedBytes: 22,
       },
     ]);
+    await sessions.closeAll();
+  });
+
+  it("materializes each workspace pull page before committing its cursor", async () => {
+    let committedPages = 0;
+    const materializedPaths: string[] = [];
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "sync.pull") {
+        const page = committedPages + 1;
+        return {
+          status: "complete",
+          pushed: 0,
+          fetched: 1,
+          applied: 1,
+          skipped: 0,
+          conflictsOpened: 0,
+          hasMore: page === 1,
+          nextCursor: page,
+          pendingCursor: { kind: "relay", token: `cursor-${page}` },
+          changedPaths: [
+            {
+              versionId: "main",
+              path: `notes/page-${page}.md`,
+              operation: "write",
+              contentKind: "text",
+            },
+          ],
+          sharingDeclined: [],
+        };
+      }
+      if (request.method === "sync.commitCursor") {
+        const cursor = (request.params as unknown as {
+          pendingCursor: { token?: string };
+        }).pendingCursor;
+        expect(cursor.token).toBe(`cursor-${committedPages + 1}`);
+        expect(materializedPaths.at(-1)).toBe(
+          `notes/page-${committedPages + 1}.md`,
+        );
+        committedPages += 1;
+        return { committed: true, sharingDeclined: [] };
+      }
+      return undefined;
+    });
+    const { sessions, client } = await harness(daemon);
+    let failSecondPage = true;
+    const materializePage = vi.fn(
+      async (paths: readonly { path: string }[]): Promise<void> => {
+        const path = paths[0]?.path;
+        if (path === "notes/page-2.md" && failSecondPage) {
+          failSecondPage = false;
+          throw new Error("disk unavailable");
+        }
+        if (path) materializedPaths.push(path);
+      },
+    );
+
+    await expect(client.pull(materializePage)).rejects.toThrow("disk unavailable");
+    expect(committedPages).toBe(1);
+    expect(materializedPaths).toEqual(["notes/page-1.md"]);
+
+    const pulled = await client.pull(materializePage);
+    expect(committedPages).toBe(2);
+    expect(pulled.fastForwardedPaths).toEqual([
+      expect.objectContaining({ path: "notes/page-2.md" }),
+    ]);
+    expect(materializePage).toHaveBeenNthCalledWith(1, [
+      expect.objectContaining({ path: "notes/page-1.md" }),
+    ]);
+    expect(materializePage).toHaveBeenNthCalledWith(2, [
+      expect.objectContaining({ path: "notes/page-2.md" }),
+    ]);
+    expect(materializePage).toHaveBeenNthCalledWith(3, [
+      expect.objectContaining({ path: "notes/page-2.md" }),
+    ]);
+    await sessions.closeAll();
+  });
+
+  it("rejects a workspace materialization path without its producing version", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "sync.pull") return undefined;
+      return {
+        status: "complete",
+        pushed: 0,
+        fetched: 1,
+        applied: 1,
+        skipped: 0,
+        conflictsOpened: 0,
+        hasMore: false,
+        nextCursor: 1,
+        pendingCursor: { kind: "relay", token: "cursor-1" },
+        changedPaths: [
+          {
+            path: ".env",
+            operation: "write",
+            contentKind: "secret",
+          },
+        ],
+        sharingDeclined: [],
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+
+    await expect(client.pull(async () => undefined)).rejects.toThrow(
+      "Rust engine sync.pull.changedPaths[0].versionId must be a string.",
+    );
     await sessions.closeAll();
   });
 
@@ -419,8 +540,7 @@ describe("EngineRelayClient", () => {
     });
     const { sessions, client } = await harness(daemon);
 
-    const pull = await client.pull();
-    await pull.commitFetchCursor();
+    const pull = await client.pull(async () => undefined);
 
     expect(pull.sharingDeclined).toEqual([
       {
@@ -529,10 +649,48 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("keeps join enrollment inside the capture-free identity session", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "keys.download") {
+        throw new DaemonRefusalError(
+          {
+            code: "KEY_ENVELOPE_MISSING",
+            message: "relay key envelope missing",
+            retry: "no",
+          },
+          new Error("refused"),
+        );
+      }
+      return undefined;
+    });
+    const { sessions, client } = await harness(daemon);
+
+    await client.bootstrapJoinIdentity(
+      {
+        replicationEpoch: "epoch-relay",
+        streamIdentity: "stream-relay",
+      },
+      async () => {
+        await expect(client.downloadKeyEnvelope()).rejects.toBeInstanceOf(
+          RelayKeyEnvelopeMissingError,
+        );
+      },
+    );
+
+    expect(daemon.requests.map((request) => request.method)).toEqual([
+      "workspace.open",
+      "sync.adoptJoinIdentity",
+      "keys.download",
+      "workspace.close",
+    ]);
+    expect(daemon.requests[0]?.params).toMatchObject({ captureMode: "none" });
+    await sessions.closeAll();
+  });
+
   it("orders join identity bootstrap before registration and activity capture", async () => {
     const source = await readFile(new URL("../main.ts", import.meta.url), "utf8");
     const bootstrap = source.indexOf(
-      "await daemonRelay.bootstrapJoinIdentity(probe.identity);",
+      "await bootstrapJoinedWorkspace({",
     );
     const registration = source.indexOf(
       "registerWorkspace({ ...created, joinBootstrapPending: true });",
@@ -1103,6 +1261,7 @@ describe("EngineRelayClient", () => {
           },
           changedPaths: [
             {
+              versionId: "main",
               path: first ? "first.md" : "second.md",
               operation: "write",
               contentKind: "text",
@@ -1150,7 +1309,7 @@ describe("EngineRelayClient", () => {
     });
     const { client, sessions } = await harness(daemon);
 
-    const workspace = await client.pull();
+    const workspace = await client.pull(async () => undefined);
     expect(workspace).toMatchObject({
       fetched: 5,
       applied: 3,
@@ -1166,12 +1325,6 @@ describe("EngineRelayClient", () => {
       workspacePulls,
       "MUTATION: stopping after the first hasMore page strands remote data",
     ).toBe(2);
-    expect(
-      daemon.requests.filter(
-        (request) => request.method === "sync.commitCursor",
-      ),
-    ).toHaveLength(1);
-    await workspace.commitFetchCursor();
     expect(
       daemon.requests.filter(
         (request) => request.method === "sync.commitCursor",
@@ -1235,12 +1388,14 @@ describe("EngineRelayClient", () => {
     const { client, sessions } = await harness(daemon);
 
     await expect(client.push()).rejects.toBeInstanceOf(DaemonRefusalError);
-    await expect(client.pull()).rejects.toBeInstanceOf(DaemonRefusalError);
+    await expect(client.pull(async () => undefined)).rejects.toBeInstanceOf(
+      DaemonRefusalError,
+    );
     originMarker = true;
     await expect(client.push()).rejects.toBeInstanceOf(
       RelayOriginDivergedError,
     );
-    await expect(client.pull()).rejects.toBeInstanceOf(
+    await expect(client.pull(async () => undefined)).rejects.toBeInstanceOf(
       RelayOriginDivergedError,
     );
     await expect(

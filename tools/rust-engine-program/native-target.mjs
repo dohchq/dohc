@@ -20,8 +20,11 @@ import { arch, platform } from "node:os";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
+// `--locked` because the probe is the run's FIRST dependency-resolving cargo
+// step: without it a stale lockfile is silently rewritten here and surfaces
+// later as a provenance refusal instead of a lockfile error.
 export const NATIVE_PROBE =
-  "cargo rustc -p dohc-engine-protocol --lib --profile check -- --print cfg";
+  "cargo rustc --locked -p dohc-engine-protocol --lib --profile check -- --print cfg";
 
 // The host the evidence line claims, in rustc's vocabulary.
 export const RUST_ARCH = {

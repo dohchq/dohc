@@ -109,6 +109,7 @@ fn envelope(
         workspace_id: WS.to_owned(),
         origin_id: origin_id.to_owned(),
         origin_seq,
+        relay_seq: Some(origin_seq),
         op_kind: op_kind.to_owned(),
         payload,
         recorded_at_ms,
@@ -136,7 +137,8 @@ fn replicated_ydoc_base_projection_updates_certified_search_index() {
             "objectId": "replicated-ydoc-object",
             "path": PATH,
             "contentKind": "plaintext",
-            "updateBlobSha256": blob_sha,
+            "updateBlobSha256": blob_sha.clone(),
+            "lineageClaimId": blob_sha,
             "isBaseState": true
         }),
         1_200,
@@ -177,31 +179,11 @@ fn retained_ydoc_drain_replay_keeps_current_search_content() {
             &NoFaults,
         )
         .expect("create inactive replay version");
-    store
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
-                 VALUES (?1,?2,1_100)",
-                params![WS, OBJECT],
-            )
-            .map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("preallocate Y.Doc object");
     let key =
         dohc_engine_collab::DocKey::new(WS, REPLAY_VERSION, OBJECT).expect("replayed Y.Doc key");
-    dohc_engine_collab::ensure_marker(
-        &mut store,
-        &key,
-        dohc_engine_collab::ContentKind::Plaintext,
-        dohc_engine_collab::Regime::Replicated,
-        &NoFaults,
-        1_110,
-    )
-    .expect("replicated marker");
-    let update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, HISTORICAL);
-    let update_sha = store.put_binary_blob(&update).expect("store update");
-    let operation = envelope(
+    let base = dohc_engine_collab::Ydoc::wire().encode_full_state();
+    let base_sha = store.put_binary_blob(&base).expect("store base");
+    let base_operation = envelope(
         "replay-peer",
         0,
         "ydoc.update",
@@ -210,7 +192,29 @@ fn retained_ydoc_drain_replay_keeps_current_search_content() {
             "objectId": OBJECT,
             "path": PATH,
             "contentKind": "plaintext",
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha.clone(),
+            "isBaseState": true
+        }),
+        1_110,
+    );
+    assert!(matches!(
+        apply_ydoc_envelope(&mut store, &base_operation, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(result)) if !result.deferred
+    ));
+    let update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, HISTORICAL);
+    let update_sha = store.put_binary_blob(&update).expect("store update");
+    let operation = envelope(
+        "replay-peer",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": REPLAY_VERSION,
+            "objectId": OBJECT,
+            "path": PATH,
+            "contentKind": "plaintext",
             "updateBlobSha256": update_sha,
+            "lineageClaimId": base_sha,
             "isBaseState": false
         }),
         1_120,
@@ -232,9 +236,10 @@ fn retained_ydoc_drain_replay_keeps_current_search_content() {
         .write_with(&NoFaults, |tx| {
             tx.execute(
                 "INSERT INTO ydoc_deferred_updates \
-                 (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) \
-                 VALUES (?1,?2,?3,'replay-peer',0,1_120)",
-                params![WS, REPLAY_VERSION, OBJECT],
+                 (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms, \
+                  lineage_claim_id,relay_seq) \
+                 VALUES (?1,?2,?3,'replay-peer',1,1_120,?4,1)",
+                params![WS, REPLAY_VERSION, OBJECT, base_sha],
             )
             .map_err(StorageError::persist_public)?;
             Ok::<_, StorageError>(())

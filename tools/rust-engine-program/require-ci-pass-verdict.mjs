@@ -20,6 +20,10 @@ const requiredSteps = [
   "clippy -D warnings",
   "build --workspace",
   "test --workspace",
+  // The workspace test run is nextest, which runs no doctests by design.
+  // Without this row a runner swap silently drops every doctest the
+  // workspace has, and the verdict still reads green.
+  "doctests",
   // The collab crash tier only compiles under `--features fault-injection`,
   // so a verdict line without this row proves the exactly-once tests never
   // ran — exactly the omission that let them go unexecuted for a month.

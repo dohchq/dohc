@@ -15,32 +15,48 @@ vi.mock("electron", () => ({
 }));
 
 import {
-  allowSitePreviewOrigin,
-  isAllowedSitePreviewUrl,
+  allowLoopbackFrameOrigin,
+  isAllowedLoopbackFrameUrl,
 } from "./createMainWindow";
 
-describe("site preview origin allowances", () => {
+describe("loopback frame origin allowances", () => {
   it("keeps origin releases idempotent so duplicate disposal cannot corrupt refcounts", () => {
-    const firstRelease = allowSitePreviewOrigin("http://127.0.0.1:4173/site-a");
-    const secondRelease = allowSitePreviewOrigin("http://127.0.0.1:4173/site-b");
+    const firstRelease = allowLoopbackFrameOrigin(
+      "http://127.0.0.1:4173/site-a",
+    );
+    const secondRelease = allowLoopbackFrameOrigin(
+      "http://127.0.0.1:4173/site-b",
+    );
 
-    expect(isAllowedSitePreviewUrl("http://127.0.0.1:4173/frame")).toBe(true);
+    expect(isAllowedLoopbackFrameUrl("http://127.0.0.1:4173/frame")).toBe(
+      true,
+    );
 
     firstRelease();
     firstRelease();
-    expect(isAllowedSitePreviewUrl("http://127.0.0.1:4173/frame")).toBe(true);
+    expect(isAllowedLoopbackFrameUrl("http://127.0.0.1:4173/frame")).toBe(
+      true,
+    );
 
     secondRelease();
-    expect(isAllowedSitePreviewUrl("http://127.0.0.1:4173/frame")).toBe(false);
+    expect(isAllowedLoopbackFrameUrl("http://127.0.0.1:4173/frame")).toBe(
+      false,
+    );
   });
 
   it("ignores non-loopback preview origins without adding allowances", () => {
-    const release = allowSitePreviewOrigin("http://example.com:4173/site");
+    const release = allowLoopbackFrameOrigin("http://example.com:4173/site");
 
-    expect(isAllowedSitePreviewUrl("http://example.com:4173/frame")).toBe(false);
-    expect(isAllowedSitePreviewUrl("http://127.0.0.1:4173/frame")).toBe(false);
+    expect(isAllowedLoopbackFrameUrl("http://example.com:4173/frame")).toBe(
+      false,
+    );
+    expect(isAllowedLoopbackFrameUrl("http://127.0.0.1:4173/frame")).toBe(
+      false,
+    );
 
     release();
-    expect(isAllowedSitePreviewUrl("http://example.com:4173/frame")).toBe(false);
+    expect(isAllowedLoopbackFrameUrl("http://example.com:4173/frame")).toBe(
+      false,
+    );
   });
 });

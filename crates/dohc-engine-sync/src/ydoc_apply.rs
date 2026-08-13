@@ -19,7 +19,7 @@ use crate::error::local_corruption;
 use crate::file_search::{search_policy_for_store, upsert_file_search_index};
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct YdocUpdatePayload {
     version_id: String,
@@ -27,8 +27,43 @@ struct YdocUpdatePayload {
     path: String,
     content_kind: String,
     update_blob_sha256: String,
+    lineage_claim_id: String,
     #[serde(default)]
     is_base_state: bool,
+}
+
+fn valid_lineage_claim_id(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Admit a valid base only for authenticated, exact-coordinate repair.
+pub(crate) fn is_exact_repairable_ydoc_base_claim(
+    payload: &serde_json::Value,
+    key: &DocKey,
+    lineage_claim_id: &str,
+) -> bool {
+    let Ok(payload) = serde_json::from_value::<YdocUpdatePayload>(payload.clone()) else {
+        return false;
+    };
+    let (classification, normalized) = classify_engine_file_path_normalized(&payload.path);
+    payload.is_base_state
+        && payload.version_id == key.version_id
+        && payload.object_id == key.object_id
+        && payload.update_blob_sha256 == lineage_claim_id
+        && payload.lineage_claim_id == lineage_claim_id
+        && valid_lineage_claim_id(lineage_claim_id)
+        && matches!(payload.content_kind.as_str(), "plaintext" | "richdoc")
+        && classification == PathClassification::Tracked
+        && normalized.as_deref() == Some(payload.path.as_str())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct YdocLineageReplacement {
+    pub winner_lineage_claim_id: String,
+    pub recovered_paths: Vec<String>,
 }
 
 /// Read-only lease seam used by sync apply to avoid mutating a lineage while
@@ -64,6 +99,8 @@ pub struct YdocApplyResult {
     /// Sync conflicts this envelope opened (the first-base-over-divergent-head
     /// branch). Counted like the moment lane so the pull pass reports it.
     pub conflicts_opened: i64,
+    /// Present only when this apply changed the active immutable lineage.
+    pub lineage_replacement: Option<YdocLineageReplacement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -71,6 +108,7 @@ pub struct YdocDrainResult {
     pub drained: usize,
     pub refusals: Vec<crate::ReplicationRefusal>,
     pub sharing_declined: Vec<crate::SharingDeclined>,
+    pub lineage_replacements: Vec<YdocLineageReplacement>,
 }
 
 pub(crate) fn redelivered_materialization_changes(
@@ -80,10 +118,13 @@ pub(crate) fn redelivered_materialization_changes(
     if envelope.op_kind != "ydoc.update" {
         return Ok(Vec::new());
     }
-    let payload: YdocUpdatePayload =
-        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
-            reason: "ydoc.update payload is malformed",
-        })?;
+    let Ok(payload) = serde_json::from_value::<YdocUpdatePayload>(envelope.payload.clone()) else {
+        // A malformed coordinate can only have a durable refusal, never a
+        // Y.Doc projection or recovery moment. Crash-redelivery reaches this
+        // helper after that refusal was ACKed, so return an empty ledger
+        // instead of wedging the pull by decoding the bad payload again.
+        return Ok(Vec::new());
+    };
     let fingerprint = format!(
         "{}\0{}\0{}\0{}\0{}\0{}",
         envelope.workspace_id,
@@ -106,23 +147,30 @@ pub(crate) fn redelivered_materialization_changes(
         .optional()
         .map_err(SyncError::corrupt)
     })?;
-    let Some((path, operation)) = change else {
-        return Ok(Vec::new());
-    };
-    let operation = match operation.as_str() {
-        "write" => "write",
-        "delete" => "delete",
-        _ => {
-            return Err(SyncError::InvalidInput {
-                reason: "ydoc materialization operation is invalid",
-            });
-        }
-    };
-    Ok(vec![crate::MomentMaterializationChange {
-        path,
-        operation,
-        content_kind: "text",
-    }])
+    let mut changes = Vec::new();
+    if let Some((path, operation)) = change {
+        let operation = match operation.as_str() {
+            "write" => "write",
+            "delete" => "delete",
+            _ => {
+                return Err(SyncError::InvalidInput {
+                    reason: "ydoc materialization operation is invalid",
+                });
+            }
+        };
+        changes.push(crate::MomentMaterializationChange {
+            version_id: payload.version_id.clone(),
+            path,
+            operation,
+            content_kind: "text",
+        });
+    }
+    if let Some(recovery) = crate::ydoc_recovery::redelivered_change(store, envelope)?
+        && !changes.iter().any(|change| change.path == recovery.path)
+    {
+        changes.push(recovery);
+    }
+    Ok(changes)
 }
 
 /// Recount the conflicts a redelivered `ydoc.update` base opened, keyed by
@@ -197,6 +245,200 @@ fn record_ydoc_conflicts_opened(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn apply_deferred_base(
+    store: &mut EngineStore,
+    key: &DocKey,
+    payload: &YdocUpdatePayload,
+    bytes: &[u8],
+    origin_id: &str,
+    origin_seq: i64,
+    relay_seq: i64,
+    recorded_at_ms: i64,
+    faults: &dyn FaultInjector,
+    search_policy: Option<&SearchPolicySnapshot>,
+) -> Result<Option<YdocLineageReplacement>, SyncError> {
+    let incoming_doc = dohc_engine_collab::Ydoc::wire();
+    incoming_doc
+        .apply(bytes)
+        .map_err(|error| map_collab_payload_error(error, "parked Y.Doc base is invalid"))?;
+    let state_vector = incoming_doc.encode_state_vector();
+    let key = key.clone();
+    let payload = payload.clone();
+    let bytes = bytes.to_vec();
+    let origin_id = origin_id.to_owned();
+    let outcome = store.write_with(faults, move |tx| {
+        let marker_before =
+            dohc_engine_collab::read_marker_in_tx(tx, &key).map_err(map_collab_hard_error)?;
+        let local_unpublished = marker_before.as_ref().is_some_and(|marker| {
+            marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Unclaimed
+                && (marker.head_update_seq > 0 || marker.head_snapshot_seq > 0)
+        });
+        let has_losing_lineage = local_unpublished
+            || marker_before.as_ref().is_some_and(|marker| {
+                marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact
+                    && marker.lineage_claim_id.as_deref() != Some(payload.lineage_claim_id.as_str())
+            });
+        let losing_doc = if has_losing_lineage {
+            Some(dohc_engine_collab::load_doc_in_tx(tx, &key).map_err(map_collab_hard_error)?)
+        } else {
+            None
+        };
+        let losing_projection = match (losing_doc.as_ref(), marker_before.as_ref()) {
+            (Some(doc), Some(marker)) => Some(
+                doc.project(marker.content_kind)
+                    .map_err(|_| SyncError::InvalidInput {
+                        reason: "ydoc projection exceeds materialization cap",
+                    })?
+                    .markdown,
+            ),
+            (None, _) => None,
+            (Some(_), None) => {
+                return Err(local_corruption(
+                    "parked losing Y.Doc lineage has no marker",
+                ));
+            }
+        };
+        let unpublished_claim_id = if local_unpublished {
+            let doc = losing_doc
+                .as_ref()
+                .ok_or_else(|| local_corruption("parked local Y.Doc lineage has no state"))?;
+            Some(
+                dohc_engine_storage::put_binary_blob(tx, &doc.encode_full_state())
+                    .map_err(SyncError::Storage)?,
+            )
+        } else {
+            None
+        };
+        if local_unpublished {
+            tx.execute(
+                "DELETE FROM ydoc_updates \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "DELETE FROM ydoc_snapshots \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "UPDATE ydoc_docs SET head_update_seq=0,head_snapshot_seq=0, \
+                    lineage_claim_status='unclaimed',lineage_claim_id=NULL, \
+                    base_origin_id=NULL,base_origin_seq=NULL,base_relay_seq=NULL, \
+                    base_relay_confirmed_absent=0 \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+            )
+            .map_err(SyncError::persist)?;
+        }
+        let claim = dohc_engine_collab::claim_base_at_relay_in_tx(
+            tx,
+            &key,
+            dohc_engine_collab::ContentKind::parse(&payload.content_kind),
+            &bytes,
+            &state_vector,
+            &dohc_engine_collab::BaseRelayCoordinate::new(origin_id.clone(), origin_seq, relay_seq)
+                .map_err(map_collab_hard_error)?,
+            recorded_at_ms,
+        )
+        .map_err(|error| {
+            map_collab_payload_error(error, "parked Y.Doc base could not be claimed")
+        })?;
+        let (winner, losing_claim_id) = match claim {
+            dohc_engine_collab::ClaimOutcome::AlreadyWon { winner } => {
+                // A winner/fresh replica cannot recover this incoming loser:
+                // it cannot know whether every dependent delta has arrived.
+                // The peer whose active lineage is replaced owns the one
+                // complete projection and therefore creates the sibling. The
+                // only local result to surface here is a decision this same
+                // coordinate committed before a crash left its queue row.
+                let recorded = crate::ydoc_recovery::recorded_recovery_in_tx(
+                    tx,
+                    &key,
+                    &payload.path,
+                    &crate::ydoc_recovery::RecoveryEnvelopeBinding {
+                        content_kind: &payload.content_kind,
+                        update_blob_sha256: &payload.update_blob_sha256,
+                        lineage_claim_id: &payload.lineage_claim_id,
+                        is_base_state: payload.is_base_state,
+                    },
+                    &origin_id,
+                    origin_seq,
+                    recorded_at_ms,
+                )?;
+                let Some(recorded) = recorded else {
+                    return Ok::<Option<YdocLineageReplacement>, SyncError>(None);
+                };
+                let winner_lineage_claim_id = winner.lineage_claim_id.ok_or_else(|| {
+                    local_corruption("parked winning Y.Doc lineage has no claim identity")
+                })?;
+                return Ok(Some(YdocLineageReplacement {
+                    winner_lineage_claim_id,
+                    recovered_paths: vec![recorded.path],
+                }));
+            }
+            dohc_engine_collab::ClaimOutcome::Replaced {
+                losing_lineage_claim_id,
+                winner,
+            } => (winner, Some(losing_lineage_claim_id)),
+            dohc_engine_collab::ClaimOutcome::Claimed { .. }
+            | dohc_engine_collab::ClaimOutcome::Resumed => {
+                let winner = dohc_engine_collab::read_marker_in_tx(tx, &key)
+                    .map_err(map_collab_hard_error)?
+                    .ok_or_else(|| local_corruption("parked winning Y.Doc has no marker"))?;
+                (winner, unpublished_claim_id)
+            }
+        };
+        let winner_claim_id = winner.lineage_claim_id.clone().ok_or_else(|| {
+            local_corruption("parked winning Y.Doc lineage has no claim identity")
+        })?;
+        let mut recovered_paths = Vec::new();
+        if let (Some(losing_claim_id), Some(markdown)) =
+            (losing_claim_id.as_deref(), losing_projection.as_deref())
+        {
+            let recovery = crate::ydoc_recovery::recover_lineage_in_tx(
+                tx,
+                &key,
+                &payload.path,
+                crate::ydoc_recovery::RecoveryEnvelopeBinding {
+                    content_kind: &payload.content_kind,
+                    update_blob_sha256: &payload.update_blob_sha256,
+                    lineage_claim_id: &payload.lineage_claim_id,
+                    is_base_state: payload.is_base_state,
+                },
+                losing_claim_id,
+                markdown,
+                &origin_id,
+                origin_seq,
+                recorded_at_ms,
+                search_policy,
+            )?;
+            recovered_paths.push(recovery.path);
+        }
+        project_and_write_in_tx(
+            tx,
+            &key,
+            &payload.path,
+            &incoming_doc,
+            winner.content_kind,
+            &origin_id,
+            origin_seq,
+            recorded_at_ms,
+            search_policy,
+        )?;
+        Ok(losing_claim_id.map(|_| YdocLineageReplacement {
+            winner_lineage_claim_id: winner_claim_id,
+            recovered_paths,
+        }))
+    })?;
+    match outcome {
+        TxnOutcome::Committed(replacement) => Ok(replacement),
+        TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
+    }
+}
+
 /// Drain acked Y.Doc envelopes deferred while `key` was leased. The
 /// `ydoc_deferred_updates` table records exactly which coordinates are
 /// pending (written in the same transaction as their ack); the imported
@@ -210,10 +452,54 @@ pub fn drain_deferred_ydoc_for_key(
     key: &DocKey,
     faults: &dyn FaultInjector,
 ) -> Result<YdocDrainResult, SyncError> {
-    let pending: Vec<(String, i64, i64, YdocUpdatePayload)> = store.read_with(|conn| {
-        let mut stmt = conn
-            .prepare(
-                "SELECT log.origin_id, log.origin_seq, log.recorded_at_ms, log.payload_json \
+    drain_deferred_ydoc(store, key, DeferredDrainMode::All, faults)
+}
+
+/// Drain only deferred coordinates that belong to the lineage an open editor
+/// is bound to. The first row for another claim is an arbitration boundary:
+/// it and every later row remain queued until the session is removed and the
+/// ordinary full drain can replace the lineage. This prevents settle/resync
+/// from changing the durable generation underneath a still-live editor.
+pub fn drain_deferred_ydoc_for_live_session(
+    store: &mut EngineStore,
+    key: &DocKey,
+    expected_lineage_claim_id: Option<&str>,
+    faults: &dyn FaultInjector,
+) -> Result<YdocDrainResult, SyncError> {
+    let observed = dohc_engine_collab::read_marker(store, key)
+        .map_err(map_collab_hard_error)?
+        .and_then(|marker| marker.lineage_claim_id);
+    if observed.as_deref() != expected_lineage_claim_id {
+        return Err(SyncError::RetryableState {
+            reason: "live Y.Doc session lineage changed before deferred drain",
+        });
+    }
+    drain_deferred_ydoc(
+        store,
+        key,
+        DeferredDrainMode::Live(expected_lineage_claim_id),
+        faults,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum DeferredDrainMode<'a> {
+    All,
+    Live(Option<&'a str>),
+}
+
+fn drain_deferred_ydoc(
+    store: &mut EngineStore,
+    key: &DocKey,
+    mode: DeferredDrainMode<'_>,
+    faults: &dyn FaultInjector,
+) -> Result<YdocDrainResult, SyncError> {
+    let pending: Vec<(String, i64, i64, i64, String, YdocUpdatePayload)> =
+        store.read_with(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT log.origin_id,log.origin_seq,deferred.relay_seq,log.recorded_at_ms,
+                        deferred.lineage_claim_id,log.payload_json \
                  FROM ydoc_deferred_updates AS deferred \
                  JOIN replication_log AS log \
                    ON log.workspace_id = deferred.workspace_id \
@@ -221,32 +507,54 @@ pub fn drain_deferred_ydoc_for_key(
                   AND log.origin_seq = deferred.origin_seq \
                  WHERE deferred.workspace_id = ?1 AND deferred.version_id = ?2 \
                    AND deferred.object_id = ?3 AND log.op_kind = 'ydoc.update' \
-                 ORDER BY log.recorded_at_ms, log.origin_id, log.origin_seq",
-            )
-            .map_err(SyncError::corrupt)?;
-        let rows = stmt
-            .query_map(
-                params![key.workspace_id, key.version_id, key.object_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )
-            .map_err(SyncError::corrupt)?;
-        let mut pending = Vec::new();
-        for row in rows {
-            let (origin_id, origin_seq, recorded_at_ms, payload_json) =
-                row.map_err(SyncError::corrupt)?;
-            let payload = serde_json::from_str::<YdocUpdatePayload>(&payload_json)
-                .map_err(|_| local_corruption("parked ydoc.update payload is malformed"))?;
-            pending.push((origin_id, origin_seq, recorded_at_ms, payload));
-        }
-        Ok::<_, SyncError>(pending)
-    })?;
+                 ORDER BY deferred.relay_seq,log.origin_id,log.origin_seq",
+                )
+                .map_err(SyncError::corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![key.workspace_id, key.version_id, key.object_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                        ))
+                    },
+                )
+                .map_err(SyncError::corrupt)?;
+            let mut pending = Vec::new();
+            for row in rows {
+                let (
+                    origin_id,
+                    origin_seq,
+                    relay_seq,
+                    recorded_at_ms,
+                    lineage_claim_id,
+                    payload_json,
+                ) = row.map_err(SyncError::corrupt)?;
+                let payload = serde_json::from_str::<YdocUpdatePayload>(&payload_json)
+                    .map_err(|_| local_corruption("parked ydoc.update payload is malformed"))?;
+                if lineage_claim_id != payload.lineage_claim_id
+                    || !valid_lineage_claim_id(&lineage_claim_id)
+                {
+                    return Err(local_corruption(
+                        "parked ydoc.update lineage identity does not match its payload",
+                    ));
+                }
+                pending.push((
+                    origin_id,
+                    origin_seq,
+                    relay_seq,
+                    recorded_at_ms,
+                    lineage_claim_id,
+                    payload,
+                ));
+            }
+            Ok::<_, SyncError>(pending)
+        })?;
     if pending.is_empty() {
         return Ok(YdocDrainResult::default());
     }
@@ -258,7 +566,55 @@ pub fn drain_deferred_ydoc_for_key(
     let mut payload_recorded_at = 0_i64;
     let mut drained_coordinates: Vec<(String, i64)> = Vec::new();
     let mut last_coordinate: Option<(String, i64)> = None;
-    for (origin_id, origin_seq, recorded_at_ms, payload) in pending {
+    let mut lineage_replacements = Vec::new();
+    for (origin_id, origin_seq, relay_seq, recorded_at_ms, lineage_claim_id, payload) in pending {
+        if let DeferredDrainMode::Live(expected_claim_id) = mode
+            && Some(lineage_claim_id.as_str()) != expected_claim_id
+        {
+            break;
+        }
+        let bytes = store
+            .get_binary_blob(&payload.update_blob_sha256)?
+            .ok_or(SyncError::BlobInvalid)?;
+        if dohc_engine_storage::hex_sha256(&bytes) != payload.update_blob_sha256 {
+            return Err(SyncError::BlobInvalid);
+        }
+        if payload.is_base_state {
+            if lineage_claim_id != payload.update_blob_sha256 {
+                return Err(local_corruption(
+                    "parked Y.Doc base claim does not match its full-state digest",
+                ));
+            }
+            if let Some(replacement) = apply_deferred_base(
+                store,
+                key,
+                &payload,
+                &bytes,
+                &origin_id,
+                origin_seq,
+                relay_seq,
+                recorded_at_ms,
+                faults,
+                search_policy.as_ref(),
+            )? {
+                lineage_replacements.push(replacement);
+            }
+            drained_coordinates.push((origin_id, origin_seq));
+            continue;
+        }
+        let marker = dohc_engine_collab::read_marker(store, key)
+            .map_err(map_collab_hard_error)?
+            .ok_or(SyncError::RetryableState {
+                reason: "parked Y.Doc delta is waiting for its base",
+            })?;
+        let winner_claim_id = marker.lineage_claim_id.ok_or(SyncError::RetryableState {
+            reason: "parked Y.Doc delta is waiting for a verified base identity",
+        })?;
+        if lineage_claim_id != winner_claim_id {
+            // A losing lineage's causal bytes must never enter the winner.
+            drained_coordinates.push((origin_id, origin_seq));
+            continue;
+        }
         let established_kind = dohc_engine_collab::read_marker(store, key)
             .map_err(map_collab_hard_error)?
             .map(|marker| marker.content_kind);
@@ -277,12 +633,6 @@ pub fn drain_deferred_ydoc_for_key(
                 Err(SyncError::InvalidInput { reason }) => Some(reason),
                 Err(hard) => return Err(hard),
             };
-        let bytes = store
-            .get_binary_blob(&payload.update_blob_sha256)?
-            .ok_or(SyncError::BlobInvalid)?;
-        if dohc_engine_storage::hex_sha256(&bytes) != payload.update_blob_sha256 {
-            return Err(SyncError::BlobInvalid);
-        }
         let outcome = match apply_remote_update(
             store,
             key,
@@ -410,6 +760,7 @@ pub fn drain_deferred_ydoc_for_key(
         drained: drained_coordinates.len(),
         refusals,
         sharing_declined,
+        lineage_replacements,
     })
 }
 
@@ -884,6 +1235,10 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
             && !outcome.deduped
             && crate::journal::workspace_replicates_with_relay_in_tx(tx, &key.workspace_id)?
         {
+            let lineage_claim_id = marker
+                .lineage_claim_id
+                .as_deref()
+                .ok_or_else(|| local_corruption("exact Y.Doc lineage has no claim id"))?;
             crate::journal::journal_local_op_in_tx(
                 tx,
                 &key.workspace_id,
@@ -893,6 +1248,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
                     path,
                     marker.content_kind,
                     &dohc_engine_storage::hex_sha256(&update),
+                    lineage_claim_id,
                     false,
                 ),
                 now_ms,
@@ -1112,6 +1468,16 @@ pub fn apply_ydoc_envelope(
             return refuse_ydoc(store, envelope, faults, "ydoc.update payload is malformed");
         }
     };
+    if !valid_lineage_claim_id(&payload.lineage_claim_id)
+        || (payload.is_base_state && payload.lineage_claim_id != payload.update_blob_sha256)
+    {
+        return refuse_ydoc(
+            store,
+            envelope,
+            faults,
+            "ydoc.update lineage claim is invalid",
+        );
+    }
     let search_policy = search_policy_for_store(store);
     // Gate on the SAME floor the projection sink applies
     // (`validate_plaintext_storable_path`) rather than R10's narrow
@@ -1164,6 +1530,19 @@ pub fn apply_ydoc_envelope(
     if dohc_engine_storage::hex_sha256(&bytes) != payload.update_blob_sha256 {
         return Err(SyncError::BlobInvalid);
     }
+    if !payload.is_base_state
+        && let Err(error) = dohc_engine_collab::Ydoc::validate_update(&bytes)
+    {
+        return match map_collab_payload_error(error, "ydoc.update bytes fail durable validation") {
+            SyncError::InvalidInput { reason } => refuse_ydoc(store, envelope, faults, reason),
+            hard => Err(hard),
+        };
+    }
+    let Some(relay_seq) = envelope.relay_seq else {
+        return Err(SyncError::RetryableState {
+            reason: "pulled ydoc.update is missing its relay sequence",
+        });
+    };
     if leases.is_live(&key) {
         // FULL durable validation BEFORE admission: byte caps, abort-safe
         // prevalidation, AND the replay-parity gate — replayed on top of the
@@ -1173,25 +1552,41 @@ pub fn apply_ydoc_envelope(
         // deferred update.
         let queued: Vec<Vec<u8>> = {
             let mut queued = Vec::new();
-            let rows: Vec<String> = store.read_with(|conn| {
+            let rows: Vec<(String, String)> = store.read_with(|conn| {
                 let mut stmt = conn
                     .prepare(
-                        "SELECT log.payload_json                          FROM ydoc_deferred_updates AS deferred                          JOIN replication_log AS log                            ON log.workspace_id = deferred.workspace_id                           AND log.origin_id = deferred.origin_id                           AND log.origin_seq = deferred.origin_seq                          WHERE deferred.workspace_id = ?1 AND deferred.version_id = ?2                            AND deferred.object_id = ?3                          ORDER BY log.recorded_at_ms, log.origin_id, log.origin_seq",
+                        "SELECT deferred.lineage_claim_id,log.payload_json
+                           FROM ydoc_deferred_updates AS deferred
+                           JOIN replication_log AS log
+                             ON log.workspace_id = deferred.workspace_id
+                            AND log.origin_id = deferred.origin_id
+                            AND log.origin_seq = deferred.origin_seq
+                          WHERE deferred.workspace_id = ?1 AND deferred.version_id = ?2
+                            AND deferred.object_id = ?3
+                          ORDER BY deferred.relay_seq,log.origin_id,log.origin_seq",
                     )
                     .map_err(SyncError::corrupt)?;
                 let mapped = stmt
                     .query_map(
                         params![key.workspace_id, key.version_id, key.object_id],
-                        |row| row.get::<_, String>(0),
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                     )
                     .map_err(SyncError::corrupt)?;
                 mapped
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(SyncError::corrupt)
             })?;
-            for payload_json in rows {
+            for (queued_claim_id, payload_json) in rows {
                 let queued_payload = serde_json::from_str::<YdocUpdatePayload>(&payload_json)
                     .map_err(|_| local_corruption("parked ydoc.update payload is malformed"))?;
+                if queued_claim_id != queued_payload.lineage_claim_id {
+                    return Err(local_corruption(
+                        "parked ydoc.update lineage identity does not match its payload",
+                    ));
+                }
+                if queued_claim_id != payload.lineage_claim_id {
+                    continue;
+                }
                 let queued_bytes = store
                     .get_binary_blob(&queued_payload.update_blob_sha256)?
                     .ok_or(SyncError::BlobInvalid)?;
@@ -1199,9 +1594,33 @@ pub fn apply_ydoc_envelope(
             }
             queued
         };
-        if let Err(error) =
+        let active_claim = dohc_engine_collab::read_marker(store, &key)
+            .map_err(map_collab_hard_error)?
+            .and_then(|marker| marker.lineage_claim_id);
+        let validation = if active_claim.as_deref() == Some(payload.lineage_claim_id.as_str()) {
             dohc_engine_collab::validate_remote_update_with_pending(store, &key, &queued, &bytes)
-        {
+        } else {
+            // A foreign queued lineage is validated only against its own
+            // relay-ordered prefix. Replaying it on the active winner even in
+            // scratch state would conflate generations and can falsely admit
+            // or reject its later deltas.
+            let scratch = dohc_engine_collab::Ydoc::wire();
+            let mut validation = Ok(());
+            for queued_bytes in &queued {
+                if let Err(error) =
+                    dohc_engine_collab::validate_replay_parity(&scratch, queued_bytes)
+                {
+                    validation = Err(error);
+                    break;
+                }
+                if let Err(error) = scratch.apply(queued_bytes) {
+                    validation = Err(error);
+                    break;
+                }
+            }
+            validation.and_then(|()| dohc_engine_collab::validate_replay_parity(&scratch, &bytes))
+        };
+        if let Err(error) = validation {
             return match map_collab_payload_error(
                 error,
                 "ydoc.update bytes fail durable validation",
@@ -1228,7 +1647,10 @@ pub fn apply_ydoc_envelope(
             // imported history (which after compaction would re-append
             // non-dedupable updates and cost O(history) per open).
             tx.execute(
-                "INSERT OR IGNORE INTO ydoc_deferred_updates                  (workspace_id, version_id, object_id, origin_id, origin_seq, recorded_at_ms)                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR IGNORE INTO ydoc_deferred_updates
+                 (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,
+                  lineage_claim_id,relay_seq)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
                     deferred_key.workspace_id,
                     deferred_key.version_id,
@@ -1236,6 +1658,8 @@ pub fn apply_ydoc_envelope(
                     op.origin_id,
                     op.origin_seq,
                     op.recorded_at_ms,
+                    payload.lineage_claim_id,
+                    relay_seq,
                 ],
             )
             .map_err(SyncError::persist)?;
@@ -1243,6 +1667,7 @@ pub fn apply_ydoc_envelope(
                 deferred: true,
                 reason: Some("ydoc-session-live"),
                 conflicts_opened: 0,
+                lineage_replacement: None,
             })
         });
     }
@@ -1271,31 +1696,25 @@ pub fn apply_ydoc_envelope(
         };
         let claim_key = key.clone();
         let claim_bytes = bytes.clone();
-        // The claim can PROMOTE a local-only lineage that already holds
-        // update rows (a crash left them behind): the projection must be the
-        // reconstructed lineage PLUS the base, or the visible snapshot would
-        // drop local content that is still durably part of the CRDT.
-        let (base_doc, _lineage_has_state) = {
-            let persisted =
-                dohc_engine_collab::load_persisted(store, &key).map_err(map_collab_hard_error)?;
-            let lineage_has_state = persisted.as_ref().is_some_and(|persisted| {
-                persisted.marker.head_update_seq > 0 || persisted.marker.head_snapshot_seq > 0
-            });
-            let doc = match persisted {
-                Some(persisted) => persisted.doc,
-                None => dohc_engine_collab::Ydoc::wire(),
-            };
-            if doc.apply(&claim_bytes).is_err() {
-                return refuse_ydoc(
-                    store,
-                    envelope,
-                    faults,
-                    "ydoc.update base bytes fail validation",
-                );
-            }
-            (doc, lineage_has_state)
-        };
+        // Never union two independent lineages. The relay winner is installed
+        // as its own CRDT. A losing local projection is captured below before
+        // any of its rows are purged and becomes an ordinary sibling file.
+        let incoming_doc = dohc_engine_collab::Ydoc::wire();
+        if incoming_doc.apply(&claim_bytes).is_err() {
+            return refuse_ydoc(
+                store,
+                envelope,
+                faults,
+                "ydoc.update base bytes fail validation",
+            );
+        }
         let base_path = payload.path.clone();
+        let incoming = crate::ydoc_recovery::RecoveryEnvelopeBinding {
+            content_kind: &payload.content_kind,
+            update_blob_sha256: &payload.update_blob_sha256,
+            lineage_claim_id: &payload.lineage_claim_id,
+            is_base_state: payload.is_base_state,
+        };
         let outcome = crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
             // Cross-origin file edits can temporarily occupy this path before
             // the base arrives. Retrying after the later delete/rename is
@@ -1331,17 +1750,162 @@ pub fn apply_ydoc_envelope(
                 ],
             )
             .map_err(SyncError::persist)?;
-            dohc_engine_collab::claim_base_in_tx(
+            let marker_before = dohc_engine_collab::read_marker_in_tx(tx, &claim_key)
+                .map_err(map_collab_hard_error)?;
+            let losing_last_settled_sha: Option<String> = tx
+                .query_row(
+                    "SELECT last_settled_sha FROM ydoc_docs \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    params![
+                        claim_key.workspace_id,
+                        claim_key.version_id,
+                        claim_key.object_id
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(SyncError::corrupt)?
+                .flatten();
+            let local_unpublished = marker_before.as_ref().is_some_and(|marker| {
+                marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Unclaimed
+                    && (marker.head_update_seq > 0 || marker.head_snapshot_seq > 0)
+            });
+            let losing_projection = if local_unpublished
+                || marker_before.as_ref().is_some_and(|marker| {
+                    marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact
+                        && marker.lineage_claim_id.as_deref() != Some(incoming.lineage_claim_id)
+                }) {
+                let doc = dohc_engine_collab::load_doc_in_tx(tx, &claim_key)
+                    .map_err(map_collab_hard_error)?;
+                let marker = marker_before
+                    .as_ref()
+                    .ok_or_else(|| local_corruption("Y.Doc losing lineage has no marker"))?;
+                Some(
+                    doc.project(marker.content_kind)
+                        .map_err(|_| SyncError::InvalidInput {
+                            reason: "ydoc projection exceeds materialization cap",
+                        })?
+                        .markdown,
+                )
+            } else {
+                None
+            };
+            let unpublished_claim_id = if local_unpublished {
+                let doc = dohc_engine_collab::load_doc_in_tx(tx, &claim_key)
+                    .map_err(map_collab_hard_error)?;
+                Some(
+                    dohc_engine_storage::put_binary_blob(tx, &doc.encode_full_state())
+                        .map_err(SyncError::Storage)?,
+                )
+            } else {
+                None
+            };
+            // A local-only cache has no relay identity and cannot participate
+            // in arbitration. Preserve its projection above, then clear its
+            // rows so the winning base starts a clean causal lineage.
+            if local_unpublished {
+                tx.execute(
+                    "DELETE FROM ydoc_updates
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    params![
+                        claim_key.workspace_id,
+                        claim_key.version_id,
+                        claim_key.object_id
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "DELETE FROM ydoc_snapshots
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    params![
+                        claim_key.workspace_id,
+                        claim_key.version_id,
+                        claim_key.object_id
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "UPDATE ydoc_docs SET head_update_seq=0,head_snapshot_seq=0,
+                        lineage_claim_status='unclaimed',lineage_claim_id=NULL,
+                        base_origin_id=NULL,base_origin_seq=NULL,base_relay_seq=NULL,
+                        base_relay_confirmed_absent=0
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    params![
+                        claim_key.workspace_id,
+                        claim_key.version_id,
+                        claim_key.object_id
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            let claim = dohc_engine_collab::claim_base_at_relay_in_tx(
                 tx,
                 &claim_key,
                 kind,
                 &claim_bytes,
                 &sv_bytes,
+                &dohc_engine_collab::BaseRelayCoordinate::new(
+                    op.origin_id.clone(),
+                    op.origin_seq,
+                    relay_seq,
+                )
+                .map_err(map_collab_hard_error)?,
                 op.recorded_at_ms,
             )
             .map_err(|error| {
                 map_collab_payload_error(error, "ydoc.update base could not be claimed")
             })?;
+            let (winner, losing_claim_id, replaced) = match claim {
+                dohc_engine_collab::ClaimOutcome::AlreadyWon { winner } => {
+                    // Loser-only recovery is intentional. This replica has no
+                    // completeness boundary for the incoming lineage's later
+                    // deltas, so synthesizing a sibling here could preserve a
+                    // truncated draft. ACK this base; its deltas are routed by
+                    // claim and dropped without entering the winner. The peer
+                    // whose active lineage is replaced has the complete local
+                    // projection and creates the ordinary recovery sibling.
+                    let _ = winner;
+                    return Ok(YdocApplyResult {
+                        deferred: false,
+                        reason: Some("ydoc-base-already-won"),
+                        conflicts_opened: 0,
+                        lineage_replacement: None,
+                    });
+                }
+                dohc_engine_collab::ClaimOutcome::Replaced {
+                    losing_lineage_claim_id,
+                    winner,
+                } => (winner, Some(losing_lineage_claim_id), true),
+                dohc_engine_collab::ClaimOutcome::Claimed { .. }
+                | dohc_engine_collab::ClaimOutcome::Resumed => {
+                    let winner = dohc_engine_collab::read_marker_in_tx(tx, &claim_key)
+                        .map_err(map_collab_hard_error)?
+                        .ok_or_else(|| local_corruption("claimed Y.Doc lineage has no marker"))?;
+                    (winner, unpublished_claim_id, local_unpublished)
+                }
+            };
+            let winner_lineage_claim_id = winner
+                .lineage_claim_id
+                .clone()
+                .ok_or_else(|| local_corruption("winning Y.Doc lineage has no claim identity"))?;
+            let mut recovered_paths = Vec::new();
+            if let (Some(losing_claim_id), Some(markdown)) =
+                (losing_claim_id.as_deref(), losing_projection.as_deref())
+            {
+                let recovery = crate::ydoc_recovery::recover_lineage_in_tx(
+                    tx,
+                    &claim_key,
+                    &base_path,
+                    incoming.clone(),
+                    losing_claim_id,
+                    markdown,
+                    &op.origin_id,
+                    op.origin_seq,
+                    op.recorded_at_ms,
+                    search_policy.as_ref(),
+                )?;
+                recovered_paths.push(recovery.path);
+            }
             // A shipped fork snapshot preserves its source metadata in
             // `fork_base_snapshots`. Copy that existing ancestry marker onto
             // the newly claimed target lineage only while the current head is
@@ -1410,13 +1974,23 @@ pub fn apply_ydoc_envelope(
                 .flatten();
             let head_is_in_the_union = current.snapshot.as_ref().is_some_and(|snapshot| {
                 head_settled_by_this_lineage.as_deref() == Some(snapshot.blob_sha256.as_str())
+                    || losing_last_settled_sha.as_deref() == Some(snapshot.blob_sha256.as_str())
             });
-            if !head_is_in_the_union && let Some(snapshot) = current.snapshot.as_ref() {
-                let projection = base_doc
-                    .project(kind)
-                    .map_err(|_| SyncError::InvalidInput {
-                        reason: "ydoc projection exceeds materialization cap",
-                    })?;
+            let head_was_recovered = current.snapshot.as_ref().is_some_and(|snapshot| {
+                losing_projection.as_ref().is_some_and(|markdown| {
+                    dohc_engine_storage::hex_sha256(markdown.as_bytes()) == snapshot.blob_sha256
+                })
+            });
+            if !head_was_recovered
+                && !head_is_in_the_union
+                && let Some(snapshot) = current.snapshot.as_ref()
+            {
+                let projection =
+                    incoming_doc
+                        .project(kind)
+                        .map_err(|_| SyncError::InvalidInput {
+                            reason: "ydoc projection exceeds materialization cap",
+                        })?;
                 let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
                 if snapshot.blob_sha256 != projected_sha {
                     put_projection_text_blob(tx, &projection.markdown, &projected_sha)?;
@@ -1487,6 +2061,10 @@ pub fn apply_ydoc_envelope(
                         deferred: false,
                         reason: Some("ydoc-base-conflict"),
                         conflicts_opened,
+                        lineage_replacement: replaced.then_some(YdocLineageReplacement {
+                            winner_lineage_claim_id,
+                            recovered_paths,
+                        }),
                     });
                 }
             }
@@ -1495,8 +2073,8 @@ pub fn apply_ydoc_envelope(
                 tx,
                 &claim_key,
                 &base_path,
-                &base_doc,
-                kind,
+                &incoming_doc,
+                winner.content_kind,
                 &op.origin_id,
                 op.origin_seq,
                 op.recorded_at_ms,
@@ -1506,6 +2084,10 @@ pub fn apply_ydoc_envelope(
                 deferred: false,
                 reason: None,
                 conflicts_opened: 0,
+                lineage_replacement: replaced.then_some(YdocLineageReplacement {
+                    winner_lineage_claim_id,
+                    recovered_paths,
+                }),
             })
         })?;
         if matches!(outcome, ApplyOutcome::Applied(_) | ApplyOutcome::Skipped)
@@ -1514,9 +2096,11 @@ pub fn apply_ydoc_envelope(
                 .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
         {
             let drain = drain_deferred_ydoc_for_key(store, &key, faults)?;
-            return Ok(outcome
-                .with_sharing_declined(drain.sharing_declined)
-                .with_refusals(drain.refusals));
+            return Ok(
+                merge_lineage_replacements(outcome, drain.lineage_replacements)
+                    .with_sharing_declined(drain.sharing_declined)
+                    .with_refusals(drain.refusals),
+            );
         }
         return Ok(outcome);
     }
@@ -1581,9 +2165,10 @@ pub fn apply_ydoc_envelope(
                 )
                 .map_err(SyncError::persist)?;
                 tx.execute(
-                    "INSERT OR IGNORE INTO ydoc_deferred_updates \
-                     (workspace_id, version_id, object_id, origin_id, origin_seq, recorded_at_ms) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    "INSERT OR IGNORE INTO ydoc_deferred_updates
+                     (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,
+                      lineage_claim_id,relay_seq)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                     params![
                         deferred_key.workspace_id,
                         deferred_key.version_id,
@@ -1591,6 +2176,8 @@ pub fn apply_ydoc_envelope(
                         op.origin_id,
                         op.origin_seq,
                         op.recorded_at_ms,
+                        payload.lineage_claim_id,
+                        relay_seq,
                     ],
                 )
                 .map_err(SyncError::persist)?;
@@ -1598,9 +2185,33 @@ pub fn apply_ydoc_envelope(
                     deferred: true,
                     reason: Some("ydoc-lineage-absent"),
                     conflicts_opened: 0,
+                    lineage_replacement: None,
                 })
             });
         };
+        if persisted.marker.lineage_claim_status != dohc_engine_collab::LineageClaimStatus::Exact {
+            return Err(SyncError::RetryableState {
+                reason: "ydoc.update delta is waiting for a verified base identity",
+            });
+        }
+        if persisted.marker.lineage_claim_id.as_deref() != Some(payload.lineage_claim_id.as_str()) {
+            // The relay winner is already known. This coordinate still gets
+            // its normal durable ack/log record, but its causal bytes must not
+            // enter a different immutable lineage.
+            let outcome = crate::apply_envelope_with(store, envelope, faults, |_tx, _op| {
+                Ok(YdocApplyResult {
+                    deferred: false,
+                    reason: Some("ydoc-lineage-lost"),
+                    conflicts_opened: 0,
+                    lineage_replacement: None,
+                })
+            })?;
+            return Ok(
+                merge_lineage_replacements(outcome, drain.lineage_replacements)
+                    .with_sharing_declined(drain.sharing_declined)
+                    .with_refusals(drain.refusals),
+            );
+        }
         if persisted.doc.apply(&bytes).is_err() {
             return refuse_ydoc(
                 store,
@@ -1609,7 +2220,7 @@ pub fn apply_ydoc_envelope(
                 "ydoc.update bytes fail durable validation",
             )
             .map(|outcome| {
-                outcome
+                merge_lineage_replacements(outcome, drain.lineage_replacements)
                     .with_sharing_declined(drain.sharing_declined)
                     .with_refusals(drain.refusals)
             });
@@ -1686,9 +2297,65 @@ pub fn apply_ydoc_envelope(
             reason: "ydoc.update compaction failed",
         })?;
     }
-    Ok(map_applied_ydoc_outcome(outcome, sharing_declined)
-        .with_sharing_declined(drain.sharing_declined)
-        .with_refusals(drain.refusals))
+    Ok(merge_lineage_replacements(
+        map_applied_ydoc_outcome(outcome, sharing_declined),
+        drain.lineage_replacements,
+    )
+    .with_sharing_declined(drain.sharing_declined)
+    .with_refusals(drain.refusals))
+}
+
+fn collapse_lineage_replacements(
+    replacements: Vec<YdocLineageReplacement>,
+) -> Option<YdocLineageReplacement> {
+    let mut collapsed: Option<YdocLineageReplacement> = None;
+    for replacement in replacements {
+        match collapsed.as_mut() {
+            Some(current) => {
+                current.winner_lineage_claim_id = replacement.winner_lineage_claim_id;
+                current.recovered_paths.extend(replacement.recovered_paths);
+            }
+            None => collapsed = Some(replacement),
+        }
+    }
+    collapsed
+}
+
+fn merge_lineage_replacements(
+    outcome: ApplyOutcome<YdocApplyResult>,
+    replacements: Vec<YdocLineageReplacement>,
+) -> ApplyOutcome<YdocApplyResult> {
+    let Some(replacement) = collapse_lineage_replacements(replacements) else {
+        return outcome;
+    };
+    match outcome {
+        ApplyOutcome::Applied(mut result) => {
+            result.lineage_replacement = collapse_lineage_replacements(
+                result
+                    .lineage_replacement
+                    .into_iter()
+                    .chain([replacement])
+                    .collect(),
+            );
+            ApplyOutcome::Applied(result)
+        }
+        ApplyOutcome::Skipped => ApplyOutcome::Applied(YdocApplyResult {
+            deferred: false,
+            reason: Some("ydoc-deferred-lineage-replaced"),
+            conflicts_opened: 0,
+            lineage_replacement: Some(replacement),
+        }),
+        ApplyOutcome::WithDiagnostics {
+            outcome,
+            refusals,
+            sharing_declined,
+        } => ApplyOutcome::WithDiagnostics {
+            outcome: Box::new(merge_lineage_replacements(*outcome, vec![replacement])),
+            refusals,
+            sharing_declined,
+        },
+        hard @ (ApplyOutcome::Refused(_) | ApplyOutcome::Crashed { .. }) => hard,
+    }
 }
 
 fn map_applied_ydoc_outcome(
@@ -1700,6 +2367,7 @@ fn map_applied_ydoc_outcome(
             deferred: false,
             reason: None,
             conflicts_opened: 0,
+            lineage_replacement: None,
         })
         .with_sharing_declined(sharing_declined.into_iter().collect()),
         ApplyOutcome::Refused(refusal) => ApplyOutcome::Refused(refusal),
@@ -1737,6 +2405,9 @@ fn map_collab_payload_error(error: CollabError, reason: &'static str) -> SyncErr
         | CollabError::ProjectionTooLarge { .. }
         | CollabError::ProjectionTooComplex { .. } => SyncError::InvalidInput { reason },
         CollabError::BaseStateDiverged => SyncError::CoordinateDiverged,
+        CollabError::BaseRelaySequencePending => SyncError::RetryableState {
+            reason: "Y.Doc base is waiting for its authenticated relay position",
+        },
         hard => map_collab_hard_error(hard),
     }
 }

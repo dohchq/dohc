@@ -188,6 +188,9 @@ describe("engineOffRefusal", () => {
     expect(engineOffRefusal(failed, "Chats", "restart")).toBe(
       "dohc could not start Chats for this workspace. Restart dohc to try again.",
     );
+    expect(engineOffRefusal(failed, "Plugins", "restart")).toBe(
+      "dohc could not start Plugins for this workspace. Restart dohc to try again.",
+    );
     expect(engineOffRefusal(failed, "Engine history", "restart")).toBe(
       "dohc could not start Engine history for this workspace. Restart dohc to try again.",
     );
@@ -197,6 +200,9 @@ describe("engineOffRefusal", () => {
     const optedOut = { historyRecordingUnavailable: false };
     expect(engineOffRefusal(optedOut, "Chats", "restart")).toBe(
       "Chats are not enabled for this workspace.",
+    );
+    expect(engineOffRefusal(optedOut, "Plugins", "restart")).toBe(
+      "Plugins are not enabled for this workspace.",
     );
     expect(engineOffRefusal(optedOut, "Engine history", "restart")).toBe(
       "Engine history is not enabled for this workspace.",

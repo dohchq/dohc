@@ -136,6 +136,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
     versionId: string;
   }): Promise<CaptureTextFileMetadata[]>;
   flushCapture?(): Promise<void>;
+  reconcileCapture?(): Promise<void>;
   watcherStatus?(): Promise<{
     running: boolean;
     degraded: boolean;
@@ -1246,6 +1247,13 @@ export function createCaptureLiveStores(
         throw new Error(
           `Engine capture for ${workspace.workspaceId} did not settle.`,
         );
+      }
+    },
+
+    async reconcileCapture() {
+      const first = await runRead(async (adapter) => await adapter.reconcileCapture());
+      if (!first.settled) {
+        await this.flushCapture?.();
       }
     },
 

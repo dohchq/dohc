@@ -1,5 +1,5 @@
 use dohc_engine_collab::{ClaimOutcome, ContentKind, DocKey};
-use rusqlite::Transaction;
+use rusqlite::{Transaction, params};
 
 use crate::{SyncError, journal_local_op_in_tx, workspace_replicates_with_relay_in_tx};
 
@@ -86,16 +86,61 @@ pub fn originate_ydoc_base_in_tx(
     .map_err(SyncError::corrupt)?
     {
         ClaimOutcome::Claimed { base_snapshot_sha } => {
-            journal_local_op_in_tx(
+            let origin_seq = journal_local_op_in_tx(
                 tx,
                 &key.workspace_id,
                 "ydoc.update",
-                &ydoc_update_payload(key, path, marker.content_kind, &base_snapshot_sha, true),
+                &ydoc_update_payload(
+                    key,
+                    path,
+                    marker.content_kind,
+                    &base_snapshot_sha,
+                    &base_snapshot_sha,
+                    true,
+                ),
                 now_ms,
             )?;
+            let origin_id: String = tx
+                .query_row(
+                    "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
+                    [&key.workspace_id],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            dohc_engine_collab::record_base_coordinate_in_tx(
+                tx,
+                dohc_engine_collab::BaseCoordinateRecord {
+                    key,
+                    lineage_claim_id: &base_snapshot_sha,
+                    origin_id: &origin_id,
+                    origin_seq,
+                    relay_seq: None,
+                    now_ms,
+                },
+            )
+            .map_err(SyncError::corrupt)?;
+            tx.execute(
+                "INSERT INTO ydoc_base_relay_candidates (
+                     workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq
+                 ) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
+                    &base_snapshot_sha,
+                    &origin_id,
+                    origin_seq,
+                ],
+            )
+            .map_err(SyncError::persist)?;
             Ok(BaseOrigination::Originated { base_snapshot_sha })
         }
         ClaimOutcome::Resumed => Ok(BaseOrigination::NothingToDo),
+        ClaimOutcome::Replaced { .. } | ClaimOutcome::AlreadyWon { .. } => {
+            Err(SyncError::corrupt(std::io::Error::other(
+                "local Y.Doc origination returned a relay-only arbitration outcome",
+            )))
+        }
     }
 }
 
@@ -105,6 +150,7 @@ pub fn ydoc_update_payload(
     path: &str,
     content_kind: ContentKind,
     update_blob_sha256: &str,
+    lineage_claim_id: &str,
     is_base_state: bool,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -113,6 +159,7 @@ pub fn ydoc_update_payload(
         "path": path,
         "contentKind": content_kind.as_str(),
         "updateBlobSha256": update_blob_sha256,
+        "lineageClaimId": lineage_claim_id,
         "isBaseState": is_base_state,
     })
 }

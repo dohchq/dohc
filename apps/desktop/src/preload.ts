@@ -3,24 +3,35 @@ import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
   InvokeSiteSdkPayload,
+  InvokePluginPanelSdkPayload,
   ListSitesPayload,
   MenuCommand,
+  PluginPanelOpenedEvent,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
   SitePackagePayload,
   StartSitePreviewPayload,
+  OpenPluginPanelPayload,
+  StartPluginPanelPayload,
+  StopPluginPanelPayload,
   StopSitePreviewPayload,
   WorkspaceSettingsPayload,
   WorkspaceSummary,
   WriteClipboardTextPayload,
 } from "./ipc/bridgeContract";
-import { parseInvokeSiteSdkPayloadForIpc } from "./ipc/bridgeContract";
+import {
+  OpenPluginPanelResult,
+  StartPluginPanelResult,
+  parseInvokePluginPanelSdkPayloadForIpc,
+  parseInvokeSiteSdkPayloadForIpc,
+} from "./ipc/bridgeContract";
 import {
   CHANNELS,
   isExplorerMenuCommand,
   isMenuCommand,
   isWorkbenchMenuCommand,
   parseEngineYDocRemoteUpdateEvent,
+  parseEngineYDocLineageReplacementEvent,
   parseEngineYDocSaveStateEvent,
   parseSearchResultsEvent,
   parseUpdateStateEvent,
@@ -31,6 +42,10 @@ import {
 // typed operations — never raw ipcRenderer, never Node. Typed as
 // DohcDesktopBridge so it cannot drift from the contract (a missing or
 // mistyped method fails the desktop typecheck).
+const pluginPanelOpenedListeners = new Set<
+  (event: PluginPanelOpenedEvent) => void
+>();
+
 const bridge: DohcDesktopBridge = {
   platform: process.platform,
   reloadRenderer: () => ipcRenderer.invoke(CHANNELS.reloadRenderer),
@@ -134,6 +149,32 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(
       CHANNELS.invokeSiteSdk,
       parseInvokeSiteSdkPayloadForIpc(payload),
+    ),
+  openPluginPanel: async (payload: OpenPluginPanelPayload) => {
+    const result = OpenPluginPanelResult.parse(
+      await ipcRenderer.invoke(CHANNELS.openPluginPanel, payload),
+    );
+    const event: PluginPanelOpenedEvent = {
+      workspaceId: payload.workspaceId,
+      ...result,
+    };
+    for (const listener of pluginPanelOpenedListeners) listener(event);
+    return result;
+  },
+  onPluginPanelOpened: (listener) => {
+    pluginPanelOpenedListeners.add(listener);
+    return () => pluginPanelOpenedListeners.delete(listener);
+  },
+  startPluginPanel: async (payload: StartPluginPanelPayload) =>
+    StartPluginPanelResult.parse(
+      await ipcRenderer.invoke(CHANNELS.startPluginPanel, payload),
+    ),
+  stopPluginPanel: (payload: StopPluginPanelPayload) =>
+    ipcRenderer.invoke(CHANNELS.stopPluginPanel, payload),
+  invokePluginPanelSdk: (payload: InvokePluginPanelSdkPayload) =>
+    ipcRenderer.invoke(
+      CHANNELS.invokePluginPanelSdk,
+      parseInvokePluginPanelSdkPayloadForIpc(payload),
     ),
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),
@@ -426,6 +467,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.engineYDocOpen, payload),
   applyEngineYDocUpdate: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocApplyUpdate, payload),
+  acknowledgeEngineYDocLineageReplacement: (payload) =>
+    ipcRenderer.invoke(CHANNELS.engineYDocAcknowledgeLineageReplacement, payload),
   closeEngineYDocSession: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocClose, payload),
   // Same boundary rule as onSearchResults: every event is validated by the
@@ -439,6 +482,15 @@ const bridge: DohcDesktopBridge = {
     };
     ipcRenderer.on(CHANNELS.engineYDocRemoteUpdate, handler);
     return () => ipcRenderer.removeListener(CHANNELS.engineYDocRemoteUpdate, handler);
+  },
+  onEngineYDocLineageReplacement: (listener) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      const parsed = parseEngineYDocLineageReplacementEvent(raw);
+      if (parsed) listener(parsed);
+    };
+    ipcRenderer.on(CHANNELS.engineYDocLineageReplacement, handler);
+    return () =>
+      ipcRenderer.removeListener(CHANNELS.engineYDocLineageReplacement, handler);
   },
   onEngineYDocSaveState: (listener) => {
     const handler = (_event: unknown, raw: unknown) => {

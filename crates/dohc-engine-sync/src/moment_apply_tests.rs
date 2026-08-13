@@ -39,6 +39,7 @@ fn envelope(origin: &str, seq: i64, workspace_id: &str, payload: Value) -> Repli
         op_kind: "moment.append".to_owned(),
         payload,
         recorded_at_ms: 2_000 + seq,
+        relay_seq: None,
     }
 }
 
@@ -285,10 +286,12 @@ fn moment_after_equivalent_ydoc_projection_fast_forwards() {
             "objectId": "ydoc-settle-object",
             "path": "notes/settled.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha.clone(),
             "isBaseState": true
         }),
         recorded_at_ms: 1_500,
+        relay_seq: Some(0),
     };
     apply_ydoc_envelope(&mut peer, &base, &NoFaults, &NoLiveLeases).expect("peer Y.Doc projection");
     let peer_head: String = peer
@@ -322,9 +325,11 @@ fn moment_after_equivalent_ydoc_projection_fast_forwards() {
                 "path": "notes/settled.md",
                 "contentKind": "plaintext",
                 "updateBlobSha256": update_sha,
+                "lineageClaimId": base_sha.clone(),
                 "isBaseState": false
             }),
             recorded_at_ms: 1_600 + index as i64,
+            relay_seq: Some(index as i64 + 1),
         };
         apply_ydoc_envelope(&mut peer, &delta, &NoFaults, &NoLiveLeases)
             .expect("peer Y.Doc rewrite");
@@ -480,10 +485,12 @@ fn moment_delete_retires_the_receiver_ydoc_lineage() {
                 "objectId": "ydoc-delete-object",
                 "path": "notes/deleted.md",
                 "contentKind": "plaintext",
-                "updateBlobSha256": base_sha,
+                "updateBlobSha256": base_sha.clone(),
+                "lineageClaimId": base_sha,
                 "isBaseState": true
             }),
             recorded_at_ms: 1_500,
+            relay_seq: Some(0),
         },
         &NoFaults,
         &NoLiveLeases,
@@ -755,6 +762,7 @@ fn malformed_moment_append_is_refused_and_acked_before_the_origin_continues() {
             "createdAtMs": 2_001
         }),
         recorded_at_ms: 2_001,
+        relay_seq: Some(1),
     };
     assert!(matches!(
         apply_replication_envelope(&mut store, &next, &NoFaults, &crate::NoLiveLeases),
@@ -1596,6 +1604,7 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
             }]
         }),
         recorded_at_ms: 1_500,
+        relay_seq: Some(0),
     };
     apply_replication_envelope(&mut store, &version, &NoFaults, &crate::NoLiveLeases)
         .expect("materialize shipped fork");
@@ -1802,6 +1811,7 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
             conflict: None,
             conflicts_opened: 0,
             materialization_changes: vec![crate::MomentMaterializationChange {
+                version_id: "main".to_owned(),
                 path: "active-at-apply.md".to_owned(),
                 operation: "write",
                 content_kind: "text",
@@ -1822,6 +1832,7 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
         crate::moment_apply::redelivered_materialization_changes(&store, &incoming)
             .expect("read durable decision"),
         [crate::MomentMaterializationChange {
+            version_id: "main".to_owned(),
             path: "active-at-apply.md".to_owned(),
             operation: "write",
             content_kind: "text",
@@ -2015,6 +2026,7 @@ fn moment_append_requires_version_create_ordering_and_never_acks_a_missing_targe
             "forkSnapshots": []
         }),
         recorded_at_ms: 1_500,
+        relay_seq: Some(0),
     };
     assert!(matches!(
         apply_replication_envelope(&mut store, &version, &NoFaults, &crate::NoLiveLeases),

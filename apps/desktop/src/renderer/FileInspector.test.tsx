@@ -5681,7 +5681,11 @@ describe("engine markdown source view", () => {
   function makeEngineBridge(markdown: string) {
     const serverDoc = markdownToYDoc(markdown);
     const remoteListeners = new Set<
-      (event: { sessionId: string; update: Uint8Array }) => void
+      (event: {
+        sessionId: string;
+        update: Uint8Array;
+        lineageGeneration: number;
+      }) => void
     >();
     const saveStateListeners = new Set<
       (event: {
@@ -5711,18 +5715,35 @@ describe("engine markdown source view", () => {
         settings: DEFAULT_WORKSPACE_SETTINGS,
         source: "default" as const,
       })),
-      openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
-        sessionId = payload.sessionId;
-        return { available: true, initialUpdate: Y.encodeStateAsUpdate(serverDoc) };
-      }),
+      openEngineYDocSession: vi.fn(
+        async (
+          payload: { sessionId: string },
+        ): Promise<{
+          available: boolean;
+          initialUpdate?: Uint8Array;
+          lineageGeneration?: number;
+        }> => {
+          sessionId = payload.sessionId;
+          return {
+            available: true,
+            initialUpdate: Y.encodeStateAsUpdate(serverDoc),
+            lineageGeneration: 1,
+          };
+        },
+      ),
       applyEngineYDocUpdate: vi.fn(async () => undefined),
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(
-        (listener: (event: { sessionId: string; update: Uint8Array }) => void) => {
+        (listener: (event: {
+          sessionId: string;
+          update: Uint8Array;
+          lineageGeneration: number;
+        }) => void) => {
           remoteListeners.add(listener);
           return () => remoteListeners.delete(listener);
         },
       ),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       // The engine editor subscribes to real settle outcomes on mount (the
       // save indicator is no longer a timer). Without this the hook throws
       // "onEngineYDocSaveState is not a function" the moment an enabled
@@ -5746,7 +5767,9 @@ describe("engine markdown source view", () => {
       const before = Y.encodeStateVector(serverDoc);
       replaceYDocWithMarkdown(serverDoc, next);
       const update = Y.encodeStateAsUpdate(serverDoc, before);
-      for (const listener of remoteListeners) listener({ sessionId, update });
+      for (const listener of remoteListeners) {
+        listener({ sessionId, update, lineageGeneration: 1 });
+      }
     };
     const pushSaveState = (
       state: "settling" | "saved" | "error" | "deleted",
@@ -8900,7 +8923,11 @@ describe("markdown document opening state", () => {
       })),
       openEngineYDocSession: vi.fn(
         () =>
-          new Promise<{ available: boolean; initialUpdate?: Uint8Array }>(
+          new Promise<{
+            available: boolean;
+            initialUpdate?: Uint8Array;
+            lineageGeneration?: number;
+          }>(
             (resolve) => {
               settle = (available) =>
                 resolve(
@@ -8908,6 +8935,7 @@ describe("markdown document opening state", () => {
                     ? {
                         available: true,
                         initialUpdate: Y.encodeStateAsUpdate(serverDoc),
+                        lineageGeneration: 1,
                       }
                     : { available: false },
                 );
@@ -8917,6 +8945,7 @@ describe("markdown document opening state", () => {
       applyEngineYDocUpdate: vi.fn(async () => undefined),
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
     };
     return {

@@ -43,6 +43,7 @@ export interface EngineYDocTransport {
   open(): Promise<{
     available: boolean;
     initialUpdate?: Uint8Array;
+    lineageGeneration?: number;
     notInVersion?: boolean;
     // A session for this document may still be the engine's (#564, #657) —
     // the other available:false that must not fall back to the plain editor.
@@ -54,10 +55,23 @@ export interface EngineYDocTransport {
   // Ship a local editor update to main, where it is journaled via recordUpdate.
   // Resolution acknowledges that main accepted the update. The binding joins
   // every acknowledgement before close, so teardown cannot outrun an edit.
-  applyLocalUpdate(update: Uint8Array): Promise<void>;
+  applyLocalUpdate(update: Uint8Array, lineageGeneration: number): Promise<void>;
   // Subscribe to remote CRDT deltas main forwards (a co-editor's edit routed
   // through the engine). Returns an unsubscribe function.
-  onRemoteUpdate(listener: (update: Uint8Array) => void): () => void;
+  onRemoteUpdate(
+    listener: (update: Uint8Array, lineageGeneration: number) => void,
+  ): () => void;
+  // A divergent relay base replaced this session's lineage. The payload is a
+  // full state, not a delta: merging it into the old Y.Doc would preserve the
+  // losing root and corrupt the winner.
+  onLineageReplacement(
+    listener: (input: {
+      update: Uint8Array;
+      recoveredPaths: string[];
+      lineageGeneration: number;
+    }) => void | Promise<void>,
+  ): () => void;
+  acknowledgeLineageReplacement(lineageGeneration: number): Promise<Uint8Array[]>;
   // Settle + close the engine session in main (releases the reservation).
   close(): Promise<void>;
 }
@@ -77,12 +91,15 @@ export interface EngineYDocBinding {
   // A delete or move owns the path for an interval. The caller keeps the
   // document read-only and offers a fresh open after the interval ends.
   readonly removalInProgress: EngineRemovalInProgress | null;
+  onDocumentReplaced(
+    listener: (doc: Y.Doc, recoveredPaths: string[]) => void,
+  ): () => void;
   // Tear down: stop shipping edits, unsubscribe, close the engine session, and
   // destroy the mirror doc. Idempotent.
   destroy(): Promise<void>;
 }
 
-type EngineYDocBindingOptions = {
+export interface EngineYDocBindingOptions {
   // If both ordinary delivery and the final full-state retry fail, preserve
   // the canonical mirror before close destroys it.
   onDeliveryFailure?: (
@@ -93,7 +110,14 @@ type EngineYDocBindingOptions = {
   // delivery is repaired. Keep the owner informed until every accepted local
   // update, including a full-state repair, has finished.
   onDeliveryPendingChange?: (pending: boolean) => void;
-};
+  // Runs after the losing mirror stops shipping updates and before main
+  // accepts the winner generation. The desktop uses this boundary to persist
+  // text that existed only in the losing renderer mirror.
+  onDocumentReplacing?: (
+    retired: Y.Doc,
+    recoveredPaths: string[],
+  ) => void | Promise<void>;
+}
 
 // Bind a mirror Y.Doc to an engine session over `transport`. On success the
 // returned binding's `doc` is ready for the Collaboration extension.
@@ -101,14 +125,42 @@ export async function bindEngineYDoc(
   transport: EngineYDocTransport,
   options: EngineYDocBindingOptions = {},
 ): Promise<EngineYDocBinding> {
-  const opened = await transport.open();
+  type LineageReplacement = {
+    update: Uint8Array;
+    recoveredPaths: string[];
+    lineageGeneration: number;
+  };
+  const replacementsBeforeOpen: LineageReplacement[] = [];
+  let acceptReplacement: ((input: LineageReplacement) => Promise<void>) | null =
+    null;
+  // Main can announce a winner after it creates the session but before the
+  // open invoke resolves in the renderer. Subscribe first so that event is
+  // held until the initial mirror and generation are installed.
+  const unsubscribeReplacement = transport.onLineageReplacement((input) => {
+    if (acceptReplacement === null) {
+      replacementsBeforeOpen.push(input);
+      return;
+    }
+    return acceptReplacement(input);
+  });
+  let opened: Awaited<ReturnType<EngineYDocTransport["open"]>>;
+  try {
+    opened = await transport.open();
+  } catch (error) {
+    unsubscribeReplacement();
+    throw error;
+  }
   if (!opened.available || !opened.initialUpdate) {
+    unsubscribeReplacement();
     return {
       doc: null,
       available: false,
       notInVersion: opened.notInVersion === true,
       engineMayHoldDocument: opened.engineMayHoldDocument === true,
       removalInProgress: opened.removalInProgress ?? null,
+      onDocumentReplaced() {
+        return () => undefined;
+      },
       async destroy() {
         // Best-effort close even on the unavailable path: main may have taken a
         // reservation before deciding not to serve (it should not, but never
@@ -118,7 +170,16 @@ export async function bindEngineYDoc(
     };
   }
 
-  const doc = new Y.Doc();
+  if (
+    typeof opened.lineageGeneration !== "number" ||
+    !Number.isSafeInteger(opened.lineageGeneration) ||
+    opened.lineageGeneration < 1
+  ) {
+    unsubscribeReplacement();
+    throw new Error("The engine Y.Doc open result has no valid lineage generation.");
+  }
+  let lineageGeneration = opened.lineageGeneration;
+  let doc = new Y.Doc();
   // Seed the mirror to the engine's current state BEFORE binding, under the
   // engine origin so the observer we attach next does not ship it back.
   Y.applyUpdate(doc, opened.initialUpdate, ENGINE_SOURCED_ORIGIN);
@@ -185,7 +246,7 @@ export async function bindEngineYDoc(
     const repair = (async () => {
       let repaired = false;
       try {
-        await transport.applyLocalUpdate(snapshot);
+        await transport.applyLocalUpdate(snapshot, lineageGeneration);
         repaired = true;
       } catch {
         repairNeeded = true;
@@ -213,7 +274,7 @@ export async function bindEngineYDoc(
     try {
       // Start synchronously, as before. Main owns update ordering; the
       // acknowledgement tracking below is not a second delivery queue.
-      delivery = transport.applyLocalUpdate(update);
+      delivery = transport.applyLocalUpdate(update, lineageGeneration);
     } catch (error: unknown) {
       delivery = Promise.reject(error);
     }
@@ -231,26 +292,93 @@ export async function bindEngineYDoc(
 
   // Apply forwarded remote deltas under the engine origin so they render live
   // in the editor but are never shipped back to main.
-  const unsubscribe = transport.onRemoteUpdate((update) => {
+  const unsubscribe = transport.onRemoteUpdate((update, updateGeneration) => {
     if (destroyed) return;
+    if (updateGeneration !== lineageGeneration) return;
     Y.applyUpdate(doc, update, ENGINE_SOURCED_ORIGIN);
   });
 
+  const replacementListeners = new Set<
+    (replacement: Y.Doc, recoveredPaths: string[]) => void
+  >();
+  const retiredDocs = new Set<Y.Doc>();
+  let replacementHandoff: Promise<void> | null = null;
+  const queueReplacement = (input: LineageReplacement): Promise<void> => {
+    const replace = async (): Promise<void> => {
+      if (destroyed || input.lineageGeneration <= lineageGeneration) return;
+      const replacement = new Y.Doc();
+      Y.applyUpdate(replacement, input.update, ENGINE_SOURCED_ORIGIN);
+      const retired = doc;
+      // First close the only path that can ship a losing transaction to main.
+      // It stays closed for the whole acknowledgement handoff.
+      retired.off("update", onUpdate);
+      if (options.onDocumentReplacing) {
+        await options.onDocumentReplacing(retired, input.recoveredPaths);
+      }
+      const bufferedUpdates = await transport.acknowledgeLineageReplacement(
+        input.lineageGeneration,
+      );
+      if (destroyed) {
+        replacement.destroy();
+        return;
+      }
+      for (const update of bufferedUpdates) {
+        Y.applyUpdate(replacement, update, ENGINE_SOURCED_ORIGIN);
+      }
+      replacement.on("update", onUpdate);
+      retiredDocs.add(retired);
+      doc = replacement;
+      lineageGeneration = input.lineageGeneration;
+      for (const listener of replacementListeners) {
+        listener(replacement, input.recoveredPaths);
+      }
+    };
+    const handoff = replacementHandoff
+      ? replacementHandoff.then(replace)
+      : replace();
+    replacementHandoff = handoff;
+    void handoff.catch((error: unknown) => {
+      // Stay frozen on a failed handoff. Reattaching the losing observer would
+      // make the editor look writable while main correctly refuses its
+      // generation, recreating the silent-loss window this protocol closes.
+      console.error("[desktop] engine Y.Doc lineage handoff failed:", error);
+    });
+    const clearHandoff = (): void => {
+      if (replacementHandoff === handoff) replacementHandoff = null;
+    };
+    void handoff.then(clearHandoff, clearHandoff);
+    return handoff;
+  };
+  acceptReplacement = queueReplacement;
+  for (const replacement of replacementsBeforeOpen.splice(0)) {
+    void queueReplacement(replacement);
+  }
+
   return {
-    doc,
+    get doc() {
+      return doc;
+    },
     available: true,
     notInVersion: false,
     engineMayHoldDocument: false,
     removalInProgress: null,
+    onDocumentReplaced(listener) {
+      replacementListeners.add(listener);
+      return () => replacementListeners.delete(listener);
+    },
     destroy() {
       if (destroyPromise) return destroyPromise;
       destroyed = true;
       clearRepairRetry();
       doc.off("update", onUpdate);
       unsubscribe();
+      unsubscribeReplacement();
       destroyPromise = (async () => {
         let deliveryError: unknown = null;
         let recoveryError: unknown = null;
+        if (replacementHandoff) {
+          await Promise.allSettled([replacementHandoff]);
+        }
         while (activeDeliveries.size > 0) {
           await Promise.allSettled([...activeDeliveries]);
         }
@@ -259,7 +387,7 @@ export async function bindEngineYDoc(
           try {
             // Full state, not the failed delta: this also covers every edit
             // made while the failed delivery was in flight.
-            await transport.applyLocalUpdate(finalSnapshot);
+            await transport.applyLocalUpdate(finalSnapshot, lineageGeneration);
           } catch (error: unknown) {
             deliveryError = error;
             try {
@@ -274,6 +402,8 @@ export async function bindEngineYDoc(
         // retained and retried by main, so it stays best-effort here.
         await transport.close().catch(() => undefined);
         doc.destroy();
+        for (const retired of retiredDocs) retired.destroy();
+        retiredDocs.clear();
 
         if (recoveryError !== null) throw recoveryError;
         // Generic bindings without a recovery owner must not hide loss.

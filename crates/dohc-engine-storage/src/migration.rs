@@ -2359,6 +2359,117 @@ ADD COLUMN apply_disposition TEXT NOT NULL DEFAULT 'applied'
 
 pub(crate) const REPLICATION_LOG_DISPOSITION_MIGRATION_ID: &str = "v1-replication-log-disposition";
 
+/// Ordinal 32. Persist the relay arbitration coordinate for Y.Doc bases.
+/// Candidate coordinates are only hints recovered from the local append-only
+/// log; sync must authenticate each exact
+/// `(origin_id, origin_seq)` lookup with the relay before it stamps an order.
+const V1_YDOC_RELAY_ARBITRATION_DDL: &str = "\
+ALTER TABLE ydoc_docs ADD COLUMN base_origin_id TEXT;
+ALTER TABLE ydoc_docs ADD COLUMN base_origin_seq INTEGER
+    CHECK (base_origin_seq IS NULL OR base_origin_seq >= 0);
+ALTER TABLE ydoc_docs ADD COLUMN base_relay_seq INTEGER
+    CHECK (base_relay_seq IS NULL OR base_relay_seq >= 0);
+ALTER TABLE ydoc_docs ADD COLUMN base_relay_confirmed_absent INTEGER NOT NULL DEFAULT 0
+    CHECK (base_relay_confirmed_absent IN (0, 1));
+ALTER TABLE ydoc_deferred_updates ADD COLUMN relay_seq INTEGER
+    CHECK (relay_seq IS NULL OR relay_seq >= 0);
+
+CREATE TABLE ydoc_base_relay_candidates (
+    workspace_id     TEXT    NOT NULL,
+    version_id       TEXT    NOT NULL,
+    object_id        TEXT    NOT NULL,
+    lineage_claim_id TEXT    NOT NULL
+      CHECK (length(lineage_claim_id) = 64
+             AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'),
+    origin_id        TEXT    NOT NULL CHECK (length(origin_id) > 0),
+    origin_seq       INTEGER NOT NULL CHECK (origin_seq >= 0),
+    PRIMARY KEY (workspace_id, version_id, object_id, origin_id, origin_seq),
+    FOREIGN KEY (workspace_id, object_id)
+      REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
+    FOREIGN KEY (lineage_claim_id)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX ydoc_base_relay_candidates_by_doc
+    ON ydoc_base_relay_candidates(workspace_id, version_id, object_id);
+
+-- A losing base is recovered as an ordinary sibling file. This decision row
+-- makes the generated path, object, and moment stable across crash-retry.
+CREATE TABLE ydoc_recovery_decisions (
+    workspace_id                    TEXT    NOT NULL,
+    origin_id                       TEXT    NOT NULL CHECK (length(origin_id) > 0),
+    origin_seq                      INTEGER NOT NULL CHECK (origin_seq >= 0),
+    version_id                      TEXT    NOT NULL CHECK (length(version_id) > 0),
+    object_id                       TEXT    NOT NULL CHECK (length(object_id) > 0),
+    original_path                   TEXT    NOT NULL CHECK (length(original_path) > 0),
+    incoming_content_kind           TEXT    NOT NULL
+      CHECK (incoming_content_kind IN ('plaintext', 'richdoc')),
+    incoming_update_blob_sha256     TEXT    NOT NULL
+      CHECK (length(incoming_update_blob_sha256) = 64
+             AND incoming_update_blob_sha256 NOT GLOB '*[^0-9a-f]*'),
+    incoming_lineage_claim_id       TEXT    NOT NULL
+      CHECK (length(incoming_lineage_claim_id) = 64
+             AND incoming_lineage_claim_id NOT GLOB '*[^0-9a-f]*'),
+    incoming_is_base_state          INTEGER NOT NULL
+      CHECK (incoming_is_base_state = 1),
+    losing_claim_id                 TEXT    NOT NULL
+      CHECK (length(losing_claim_id) = 64
+             AND losing_claim_id NOT GLOB '*[^0-9a-f]*'),
+    recovered_path                  TEXT    NOT NULL CHECK (length(recovered_path) > 0),
+    recovery_collision_ordinal      TEXT    NOT NULL
+      CHECK (length(recovery_collision_ordinal) > 0
+             AND recovery_collision_ordinal NOT GLOB '*[^0-9]*'),
+    recovery_object_id              TEXT    NOT NULL CHECK (length(recovery_object_id) > 0),
+    recovery_moment_id              TEXT    NOT NULL CHECK (length(recovery_moment_id) > 0),
+    recorded_at_ms                  INTEGER NOT NULL CHECK (recorded_at_ms >= 0),
+    PRIMARY KEY (workspace_id, origin_id, origin_seq),
+    UNIQUE (workspace_id, recovery_object_id),
+    UNIQUE (workspace_id, recovery_moment_id),
+    FOREIGN KEY (workspace_id)
+      REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (incoming_update_blob_sha256)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (incoming_lineage_claim_id)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    FOREIGN KEY (losing_claim_id)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+
+-- Extract only structurally valid base coordinates whose blob is durable.
+-- A local row is not authority for relay presence or order; it is merely the
+-- exact coordinate that the authenticated lookup endpoint must answer.
+INSERT OR IGNORE INTO ydoc_base_relay_candidates (
+    workspace_id, version_id, object_id, lineage_claim_id, origin_id, origin_seq
+)
+SELECT d.workspace_id, d.version_id, d.object_id,
+       json_extract(r.payload_json, '$.updateBlobSha256'),
+       r.origin_id, r.origin_seq
+  FROM ydoc_docs AS d
+  JOIN replication_log AS r
+    ON r.workspace_id = d.workspace_id
+   AND r.op_kind = 'ydoc.update'
+   AND r.apply_disposition = 'applied'
+ WHERE json_valid(r.payload_json)
+   AND json_type(r.payload_json, '$.versionId') = 'text'
+   AND json_extract(r.payload_json, '$.versionId') = d.version_id
+   AND json_type(r.payload_json, '$.objectId') = 'text'
+   AND json_extract(r.payload_json, '$.objectId') = d.object_id
+   AND json_type(r.payload_json, '$.isBaseState') = 'true'
+   AND json_type(r.payload_json, '$.updateBlobSha256') = 'text'
+   AND length(json_extract(r.payload_json, '$.updateBlobSha256')) = 64
+   AND json_extract(r.payload_json, '$.updateBlobSha256') NOT GLOB '*[^0-9a-f]*'
+   AND json_type(r.payload_json, '$.lineageClaimId') = 'text'
+   AND json_extract(r.payload_json, '$.lineageClaimId') =
+       json_extract(r.payload_json, '$.updateBlobSha256')
+   AND d.lineage_claim_status = 'exact'
+   AND d.lineage_claim_id = json_extract(r.payload_json, '$.updateBlobSha256')
+   AND EXISTS (
+       SELECT 1 FROM binary_blobs AS b
+        WHERE b.sha256 = json_extract(r.payload_json, '$.updateBlobSha256')
+   );
+";
+
+pub(crate) const YDOC_RELAY_ARBITRATION_MIGRATION_ID: &str = "v1-ydoc-relay-arbitration";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -2588,6 +2699,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: REPLICATION_LOG_DISPOSITION_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_REPLICATION_LOG_DISPOSITION_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 32,
+        id: YDOC_RELAY_ARBITRATION_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_YDOC_RELAY_ARBITRATION_DDL,
         sets_user_version: None,
     },
 ];
@@ -4017,7 +4135,7 @@ mod tests {
 
         let disposition = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("apply the later replication-log disposition migration");
-        assert_eq!(disposition, MigrationOutcome::Applied { newly_applied: 1 });
+        assert_eq!(disposition, MigrationOutcome::Applied { newly_applied: 2 });
         let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("rerun current migrations");
         assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 0 });
@@ -4073,6 +4191,158 @@ mod tests {
             [],
         )
         .expect_err("unknown apply dispositions must fail closed");
+        let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("rerun current migrations");
+        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 1 });
+    }
+
+    #[test]
+    fn ydoc_relay_arbitration_migration_preserves_only_exact_repair_candidates() {
+        let dir = tempdir();
+        let path = dir.join("ydoc-relay-arbitration.db");
+        let ctx = MigrationContext::current(3_000);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        let migration_index = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == YDOC_RELAY_ARBITRATION_MIGRATION_ID)
+            .expect("Y.Doc relay arbitration migration is registered");
+        run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("migrate through ordinal 31");
+
+        let claim_id = "a".repeat(64);
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id,main_version_id)
+             VALUES ('ws','main');
+             INSERT INTO file_objects (workspace_id,object_id,created_at_ms)
+             VALUES ('ws','object-a',1);",
+        )
+        .expect("seed lineage parents");
+        conn.execute(
+            "INSERT INTO binary_blobs (sha256,byte_length,bytes) VALUES (?1,1,X'01')",
+            [&claim_id],
+        )
+        .expect("seed lineage blob");
+        conn.execute(
+            "INSERT INTO ydoc_docs (
+                 workspace_id,version_id,object_id,content_kind,regime,
+                 head_update_seq,head_snapshot_seq,settle_seq,updated_at_ms,path,
+                 lineage_claim_status,lineage_claim_id
+             ) VALUES ('ws','main','object-a','plaintext','replicated',0,0,0,2,
+                       'notes/a.md','exact',?1)",
+            [&claim_id],
+        )
+        .expect("seed exact active lineage");
+        let exact_payload = serde_json::json!({
+            "versionId": "main",
+            "objectId": "object-a",
+            "path": "notes/a.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": claim_id,
+            "lineageClaimId": claim_id,
+            "isBaseState": true,
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO replication_log (
+                 workspace_id,origin_id,origin_seq,op_kind,payload_json,
+                 recorded_at_ms,imported,apply_disposition
+             ) VALUES ('ws','peer',4,'ydoc.update',?1,3,1,'applied')",
+            [&exact_payload],
+        )
+        .expect("seed exact legacy coordinate");
+        conn.execute(
+            "INSERT INTO replication_log (
+                 workspace_id,origin_id,origin_seq,op_kind,payload_json,
+                 recorded_at_ms,imported,apply_disposition
+             ) VALUES ('ws','refused-peer',5,'ydoc.update',?1,4,1,'refused')",
+            [&exact_payload],
+        )
+        .expect("seed refused coordinate");
+
+        let outcome = run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..=migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("add relay arbitration schema");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+        let candidate: (String, i64, String) = conn
+            .query_row(
+                "SELECT origin_id,origin_seq,lineage_claim_id
+                   FROM ydoc_base_relay_candidates",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read exact repair candidate");
+        assert_eq!(candidate, ("peer".to_owned(), 4, claim_id.clone()));
+        let marker: (Option<i64>, i64) = conn
+            .query_row(
+                "SELECT base_relay_seq,base_relay_confirmed_absent
+                   FROM ydoc_docs WHERE workspace_id='ws' AND object_id='object-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read migrated marker");
+        assert_eq!(marker, (None, 0));
+        conn.execute(
+            "INSERT INTO versioned_workspaces (workspace_id,main_version_id)
+             VALUES ('ws-recovery-cascade','main')",
+            [],
+        )
+        .expect("seed recovery workspace");
+        conn.execute(
+            "INSERT INTO ydoc_recovery_decisions (
+                 workspace_id,origin_id,origin_seq,version_id,object_id,original_path,
+                 incoming_content_kind,incoming_update_blob_sha256,
+                 incoming_lineage_claim_id,incoming_is_base_state,losing_claim_id,
+                 recovered_path,recovery_collision_ordinal,recovery_object_id,
+                 recovery_moment_id,recorded_at_ms
+             ) VALUES (
+                 'ws-recovery-cascade','peer',4,'main','object-a','notes/a.md',
+                 'plaintext',?1,?1,1,?1,'notes/a.recovered.md','0',
+                 'recovery-object','recovery-moment',3
+             )",
+            [&claim_id],
+        )
+        .expect("seed recovery decision");
+        let workspace_fk: (String, String) = conn
+            .query_row(
+                "SELECT \"table\",on_delete
+                   FROM pragma_foreign_key_list('ydoc_recovery_decisions')
+                  WHERE \"from\"='workspace_id'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("recovery workspace foreign key");
+        assert_eq!(
+            workspace_fk,
+            ("versioned_workspaces".to_owned(), "CASCADE".to_owned())
+        );
+        conn.execute(
+            "DELETE FROM versioned_workspaces WHERE workspace_id='ws-recovery-cascade'",
+            [],
+        )
+        .expect("delete recovery workspace");
+        let decisions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ydoc_recovery_decisions
+                  WHERE workspace_id='ws-recovery-cascade'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("recovery decisions after workspace deletion");
+        assert_eq!(
+            decisions, 0,
+            "workspace deletion must release recovery decisions"
+        );
         let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("rerun current migrations");
         assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 0 });

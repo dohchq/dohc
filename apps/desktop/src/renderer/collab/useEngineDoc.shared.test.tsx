@@ -46,12 +46,17 @@ function sharedBridge() {
         return {
           available: true,
           initialUpdate: Y.encodeStateAsUpdate(source),
+          lineageGeneration: 1,
         };
       },
     ),
     applyEngineYDocUpdate: vi.fn(async () => undefined),
     onEngineYDocRemoteUpdate: (
-      listener: (event: { sessionId: string; update: Uint8Array }) => void,
+      listener: (event: {
+        sessionId: string;
+        update: Uint8Array;
+        lineageGeneration: number;
+      }) => void,
     ) => {
       remoteUpdateListeners.add(listener);
       return () => {
@@ -67,6 +72,8 @@ function sharedBridge() {
       saveStateListeners.add(listener);
       return () => saveStateListeners.delete(listener);
     },
+    onEngineYDocLineageReplacement: () => () => undefined,
+    acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
     closeEngineYDocSession: vi.fn(async () => {
       await closeGate;
     }),

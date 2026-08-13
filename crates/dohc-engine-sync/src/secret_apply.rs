@@ -4,10 +4,15 @@ use dohc_engine_domain::{MAX_SECRET_FILE_BYTES, SECRET_IV_BYTES, SECRET_TAG_BYTE
 use dohc_engine_files::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
 use rusqlite::{OptionalExtension, Transaction, params};
-use serde::Deserialize;
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
 
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct SecretApplyResult {
+    pub(crate) materialization_changes: Vec<crate::MomentMaterializationChange>,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,11 +63,51 @@ struct SecretForkRow {
     updated_at_ms: i64,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SecretForkAssembly {
+    workspace_id: String,
+    origin_id: String,
+    start_origin_seq: i64,
+    from_version_id: String,
+    to_version_id: String,
+    total_rows: usize,
+    next_chunk_index: usize,
+    previous_tips: Vec<SecretForkPreviousTip>,
+    rows: Vec<SecretForkStagedRow>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SecretForkPreviousTip {
+    path: String,
+    latest_moment_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SecretForkStagedRow {
+    path: String,
+    iv_base64: String,
+    auth_tag_base64: String,
+    ciphertext_base64: String,
+    byte_length: i64,
+    updated_at_ms: i64,
+}
+
 pub fn apply_secret_envelope(
     store: &mut EngineStore,
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
 ) -> Result<ApplyOutcome<()>, SyncError> {
+    apply_secret_envelope_detailed(store, envelope, faults).map(|outcome| outcome.map(|_| ()))
+}
+
+pub(crate) fn apply_secret_envelope_detailed(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+) -> Result<ApplyOutcome<SecretApplyResult>, SyncError> {
     if !matches!(
         envelope.op_kind.as_str(),
         "secret.file.put" | "secret.file.delete" | "secret.version.fork"
@@ -77,6 +122,19 @@ pub fn apply_secret_envelope(
             _ => Err(SyncError::UnsupportedOperation),
         }
     })
+}
+
+pub(crate) fn redelivered_materialization_changes(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
+    if !matches!(
+        envelope.op_kind.as_str(),
+        "secret.file.put" | "secret.file.delete" | "secret.version.fork"
+    ) {
+        return Ok(Vec::new());
+    }
+    crate::moment_apply::stored_materialization_changes(store, envelope)
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(value: &serde_json::Value) -> Result<T, SyncError> {
@@ -139,7 +197,7 @@ fn apply_put(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
     p: SecretPut,
-) -> Result<(), SyncError> {
+) -> Result<SecretApplyResult, SyncError> {
     validate_common(tx, op, &p.version_id, &p.path, &p.metadata)?;
     let iv = STANDARD
         .decode(&p.iv_base64)
@@ -180,7 +238,7 @@ fn apply_delete(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
     p: SecretDelete,
-) -> Result<(), SyncError> {
+) -> Result<SecretApplyResult, SyncError> {
     validate_common(tx, op, &p.version_id, &p.path, &p.metadata)?;
     insert_moment(tx, op, &p.version_id, &p.path, &p.metadata, None)
 }
@@ -189,23 +247,62 @@ fn apply_fork(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
     payload: SecretFork,
-) -> Result<(), SyncError> {
+) -> Result<SecretApplyResult, SyncError> {
     validate_fork_versions(tx, op, &payload.from_version_id, &payload.to_version_id)?;
     validate_fork_rows(&payload.rows, payload.total_rows)?;
-
-    if payload.chunk_index == 0 {
-        tx.execute(
-            "DELETE FROM secret_files WHERE workspace_id=?1 AND version_id=?2",
-            params![op.workspace_id, payload.to_version_id],
-        )
-        .map_err(SyncError::persist)?;
-        tx.execute(
-            "DELETE FROM secret_fork_bases WHERE workspace_id=?1 AND version_id=?2",
-            params![op.workspace_id, payload.to_version_id],
-        )
-        .map_err(SyncError::persist)?;
+    let (assembly_id, start_origin_seq) = fork_assembly_id(op, payload.chunk_index)?;
+    let was_stored = payload.chunk_index != 0;
+    let mut assembly = if payload.chunk_index == 0 {
+        SecretForkAssembly {
+            workspace_id: op.workspace_id.clone(),
+            origin_id: op.origin_id.clone(),
+            start_origin_seq,
+            from_version_id: payload.from_version_id.clone(),
+            to_version_id: payload.to_version_id.clone(),
+            total_rows: payload.total_rows,
+            next_chunk_index: 0,
+            previous_tips: read_secret_tips(tx, &op.workspace_id, &payload.to_version_id)?,
+            rows: Vec::new(),
+        }
+    } else {
+        load_fork_assembly(tx, &assembly_id)?
+    };
+    validate_fork_assembly(
+        &assembly,
+        op,
+        start_origin_seq,
+        &payload.from_version_id,
+        &payload.to_version_id,
+        payload.total_rows,
+        payload.chunk_index,
+    )?;
+    append_fork_rows(tx, &mut assembly, payload.rows)?;
+    assembly.next_chunk_index = assembly
+        .next_chunk_index
+        .checked_add(1)
+        .ok_or(SyncError::CoordinateDiverged)?;
+    if assembly.rows.len() < assembly.total_rows {
+        store_fork_assembly(tx, op, &assembly_id, &assembly, was_stored)?;
+        return Ok(SecretApplyResult::default());
     }
-    insert_fork_rows(tx, op, &payload.to_version_id, payload.rows)
+
+    let materialization_changes = finalize_fork(tx, op, assembly)?;
+    if was_stored {
+        let deleted = tx
+            .execute(
+                "DELETE FROM engine_requests \
+                 WHERE request_id=?1 AND kind='sync-secret-fork-assembly'",
+                [&assembly_id],
+            )
+            .map_err(SyncError::persist)?;
+        if deleted != 1 {
+            return Err(SyncError::CoordinateDiverged);
+        }
+    }
+    crate::moment_apply::record_materialization_changes(tx, op, &materialization_changes)?;
+    Ok(SecretApplyResult {
+        materialization_changes,
+    })
 }
 
 fn validate_fork_versions(
@@ -237,6 +334,11 @@ fn validate_fork_rows(rows: &[SecretForkRow], total_rows: usize) -> Result<(), S
             reason: "secret fork chunk claims more rows than its declared total",
         });
     }
+    if total_rows > 0 && rows.is_empty() {
+        return Err(SyncError::InvalidInput {
+            reason: "secret fork chunk must make progress toward its declared total",
+        });
+    }
     let mut seen = HashSet::with_capacity(rows.len());
     for row in rows {
         validate_fork_row(row)?;
@@ -249,51 +351,287 @@ fn validate_fork_rows(rows: &[SecretForkRow], total_rows: usize) -> Result<(), S
     Ok(())
 }
 
-fn insert_fork_rows(
-    tx: &Transaction<'_>,
+fn fork_assembly_id(
     op: &ReplicationEnvelope,
+    chunk_index: usize,
+) -> Result<(String, i64), SyncError> {
+    let chunk_offset = i64::try_from(chunk_index).map_err(|_| SyncError::InvalidInput {
+        reason: "secret fork chunk index is invalid",
+    })?;
+    let start_origin_seq = op
+        .origin_seq
+        .checked_sub(chunk_offset)
+        .filter(|sequence| *sequence >= 0)
+        .ok_or(SyncError::InvalidInput {
+            reason: "secret fork chunk sequence is invalid",
+        })?;
+    let coordinate = format!(
+        "{}\0{}\0{}",
+        op.workspace_id, op.origin_id, start_origin_seq
+    );
+    Ok((
+        format!(
+            "sync-secret-fork-assembly:{}",
+            dohc_engine_storage::hex_sha256(coordinate.as_bytes())
+        ),
+        start_origin_seq,
+    ))
+}
+
+fn read_secret_tips(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<Vec<SecretForkPreviousTip>, SyncError> {
+    tx.prepare(
+        "SELECT path,latest_moment_id FROM secret_files \
+         WHERE workspace_id=?1 AND version_id=?2 ORDER BY path",
+    )
+    .map_err(SyncError::corrupt)?
+    .query_map(params![workspace_id, version_id], |row| {
+        Ok(SecretForkPreviousTip {
+            path: row.get(0)?,
+            latest_moment_id: row.get(1)?,
+        })
+    })
+    .map_err(SyncError::corrupt)?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(SyncError::corrupt)
+}
+
+fn load_fork_assembly(
+    tx: &Transaction<'_>,
+    assembly_id: &str,
+) -> Result<SecretForkAssembly, SyncError> {
+    let encoded = tx
+        .query_row(
+            "SELECT payload_hash FROM engine_requests \
+             WHERE request_id=?1 AND kind='sync-secret-fork-assembly'",
+            [assembly_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?
+        .ok_or(SyncError::InvalidInput {
+            reason: "secret fork chunk has no matching assembly",
+        })?;
+    serde_json::from_str(&encoded).map_err(|_| SyncError::CoordinateDiverged)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_fork_assembly(
+    assembly: &SecretForkAssembly,
+    op: &ReplicationEnvelope,
+    start_origin_seq: i64,
+    from_version_id: &str,
     to_version_id: &str,
+    total_rows: usize,
+    chunk_index: usize,
+) -> Result<(), SyncError> {
+    if assembly.workspace_id != op.workspace_id
+        || assembly.origin_id != op.origin_id
+        || assembly.start_origin_seq != start_origin_seq
+        || assembly.from_version_id != from_version_id
+        || assembly.to_version_id != to_version_id
+        || assembly.total_rows != total_rows
+        || assembly.next_chunk_index != chunk_index
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "secret fork chunk does not match its assembly",
+        });
+    }
+    Ok(())
+}
+
+fn append_fork_rows(
+    tx: &Transaction<'_>,
+    assembly: &mut SecretForkAssembly,
     rows: Vec<SecretForkRow>,
 ) -> Result<(), SyncError> {
-    for (index, row) in rows.into_iter().enumerate() {
+    let mut seen = assembly
+        .rows
+        .iter()
+        .map(|row| row.path.as_str())
+        .collect::<HashSet<_>>();
+    for row in &rows {
+        if !seen.insert(&row.path) {
+            return Err(SyncError::InvalidInput {
+                reason: "secret fork contains duplicate paths across chunks",
+            });
+        }
+    }
+    let next_len = assembly
+        .rows
+        .len()
+        .checked_add(rows.len())
+        .ok_or(SyncError::CoordinateDiverged)?;
+    if next_len > assembly.total_rows {
+        return Err(SyncError::InvalidInput {
+            reason: "secret fork chunks exceed their declared total",
+        });
+    }
+    for row in rows {
         let ciphertext = load_ciphertext(tx, &row.ciphertext_sha256, row.byte_length)?;
-        let ciphertext_base64 = STANDARD.encode(ciphertext);
-        let latest_moment_id = format!("secret-sync-{}-{}-{index}", op.origin_id, op.origin_seq);
+        assembly.rows.push(SecretForkStagedRow {
+            path: row.path,
+            iv_base64: row.iv_base64,
+            auth_tag_base64: row.auth_tag_base64,
+            ciphertext_base64: STANDARD.encode(ciphertext),
+            byte_length: row.byte_length,
+            updated_at_ms: row.updated_at_ms,
+        });
+    }
+    Ok(())
+}
+
+fn store_fork_assembly(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+    assembly_id: &str,
+    assembly: &SecretForkAssembly,
+    already_stored: bool,
+) -> Result<(), SyncError> {
+    let encoded = serde_json::to_string(assembly).map_err(|_| SyncError::CoordinateDiverged)?;
+    let changed = if already_stored {
         tx.execute(
-            "INSERT OR IGNORE INTO secret_files \
-             (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length,updated_at_ms,latest_moment_id) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-            params![
-                op.workspace_id,
-                to_version_id,
-                row.path,
-                row.iv_base64,
-                row.auth_tag_base64,
-                ciphertext_base64,
-                row.byte_length,
-                row.updated_at_ms,
-                latest_moment_id
-            ],
+            "UPDATE engine_requests SET payload_hash=?2,result_seq=?3,committed_at=?4 \
+             WHERE request_id=?1 AND kind='sync-secret-fork-assembly'",
+            params![assembly_id, encoded, op.origin_seq, op.recorded_at_ms],
         )
-        .map_err(SyncError::persist)?;
+        .map_err(SyncError::persist)?
+    } else {
         tx.execute(
-            "INSERT OR IGNORE INTO secret_fork_bases \
+            "INSERT OR IGNORE INTO engine_requests \
+             (request_id,payload_hash,result_seq,committed_at,kind) \
+             VALUES (?1,?2,?3,?4,'sync-secret-fork-assembly')",
+            params![assembly_id, encoded, op.origin_seq, op.recorded_at_ms],
+        )
+        .map_err(SyncError::persist)?
+    };
+    if changed != 1 {
+        return Err(SyncError::CoordinateDiverged);
+    }
+    Ok(())
+}
+
+fn finalize_fork(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+    mut assembly: SecretForkAssembly,
+) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
+    assembly
+        .rows
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    let previous = assembly
+        .previous_tips
+        .into_iter()
+        .map(|tip| (tip.path, tip.latest_moment_id))
+        .collect::<BTreeMap<_, _>>();
+    let mut current = read_secret_tips(tx, &op.workspace_id, &assembly.to_version_id)?
+        .into_iter()
+        .map(|tip| (tip.path, tip.latest_moment_id))
+        .collect::<BTreeMap<_, _>>();
+    let fork_paths = assembly
+        .rows
+        .iter()
+        .map(|row| row.path.as_str())
+        .collect::<HashSet<_>>();
+    let active = is_active_version(tx, &op.workspace_id, &assembly.to_version_id)?;
+    let mut materialization_changes = Vec::new();
+
+    for (path, previous_tip) in &previous {
+        if !fork_paths.contains(path.as_str()) && current.get(path) == Some(previous_tip) {
+            let deleted = tx
+                .execute(
+                    "DELETE FROM secret_files \
+                     WHERE workspace_id=?1 AND version_id=?2 AND path=?3 AND latest_moment_id=?4",
+                    params![op.workspace_id, assembly.to_version_id, path, previous_tip],
+                )
+                .map_err(SyncError::persist)?;
+            if deleted != 1 {
+                return Err(SyncError::CoordinateDiverged);
+            }
+            current.remove(path);
+            if active {
+                materialization_changes.push(crate::MomentMaterializationChange {
+                    version_id: assembly.to_version_id.clone(),
+                    path: path.clone(),
+                    operation: "delete",
+                    content_kind: "secret",
+                });
+            }
+        }
+    }
+
+    tx.execute(
+        "DELETE FROM secret_fork_bases WHERE workspace_id=?1 AND version_id=?2",
+        params![op.workspace_id, assembly.to_version_id],
+    )
+    .map_err(SyncError::persist)?;
+    for (index, row) in assembly.rows.into_iter().enumerate() {
+        tx.execute(
+            "INSERT INTO secret_fork_bases \
              (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length,updated_at_ms) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 op.workspace_id,
-                to_version_id,
+                assembly.to_version_id,
                 row.path,
                 row.iv_base64,
                 row.auth_tag_base64,
-                ciphertext_base64,
+                row.ciphertext_base64,
                 row.byte_length,
-                row.updated_at_ms
+                row.updated_at_ms,
             ],
         )
         .map_err(SyncError::persist)?;
+        let unchanged_previous_tip = previous
+            .get(&row.path)
+            .is_some_and(|previous_tip| current.get(&row.path) == Some(previous_tip));
+        let new_path = !previous.contains_key(&row.path) && !current.contains_key(&row.path);
+        if !unchanged_previous_tip && !new_path {
+            continue;
+        }
+        let latest_moment_id = format!("secret-sync-{}-{}-{index}", op.origin_id, op.origin_seq);
+        tx.execute(
+            "INSERT INTO secret_files \
+             (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length,updated_at_ms,latest_moment_id) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) \
+             ON CONFLICT(workspace_id,version_id,path) DO UPDATE SET \
+                 iv_base64=excluded.iv_base64, \
+                 auth_tag_base64=excluded.auth_tag_base64, \
+                 ciphertext_base64=excluded.ciphertext_base64, \
+                 byte_length=excluded.byte_length, \
+                 updated_at_ms=excluded.updated_at_ms, \
+                 latest_moment_id=excluded.latest_moment_id",
+            params![
+                op.workspace_id,
+                assembly.to_version_id,
+                row.path,
+                row.iv_base64,
+                row.auth_tag_base64,
+                row.ciphertext_base64,
+                row.byte_length,
+                row.updated_at_ms,
+                latest_moment_id,
+            ],
+        )
+        .map_err(SyncError::persist)?;
+        if active {
+            materialization_changes.push(crate::MomentMaterializationChange {
+                version_id: assembly.to_version_id.clone(),
+                path: row.path,
+                operation: "write",
+                content_kind: "secret",
+            });
+        }
     }
-    Ok(())
+    materialization_changes.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.operation.cmp(right.operation))
+    });
+    Ok(materialization_changes)
 }
 
 fn require_version(
@@ -403,7 +741,7 @@ fn insert_moment(
     path: &str,
     metadata: &Metadata,
     after: Option<(&str, &str, &str, i64)>,
-) -> Result<(), SyncError> {
+) -> Result<SecretApplyResult, SyncError> {
     let previous: i64 = tx
         .query_row(
             "SELECT COALESCE(MAX(moment_order),0) FROM secret_moments WHERE workspace_id=?1",
@@ -457,7 +795,8 @@ fn insert_moment(
             reason: "replicated secret moment id collides with existing history",
         });
     }
-    if remote_wins(tx, op, version_id, path, after)? {
+    let won = remote_wins(tx, op, version_id, path, after)?;
+    if won {
         if let Some((iv, tag, ciphertext, byte_length)) = after {
             tx.execute(
                 "INSERT INTO secret_files \
@@ -476,7 +815,39 @@ fn insert_moment(
             .map_err(SyncError::persist)?;
         }
     }
-    Ok(())
+    let materialization_changes = if won && is_active_version(tx, &op.workspace_id, version_id)? {
+        vec![crate::MomentMaterializationChange {
+            version_id: version_id.to_owned(),
+            path: path.to_owned(),
+            operation: if after.is_some() { "write" } else { "delete" },
+            content_kind: "secret",
+        }]
+    } else {
+        Vec::new()
+    };
+    crate::moment_apply::record_materialization_changes(tx, op, &materialization_changes)?;
+    Ok(SecretApplyResult {
+        materialization_changes,
+    })
+}
+
+fn is_active_version(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<bool, SyncError> {
+    let active: Option<String> = tx
+        .query_row(
+            "SELECT COALESCE( \
+               (SELECT version_id FROM active_versions WHERE workspace_id=?1), \
+               (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1) \
+             )",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    Ok(active.as_deref() == Some(version_id))
 }
 
 fn remote_wins(

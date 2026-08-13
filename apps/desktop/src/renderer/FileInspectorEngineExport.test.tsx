@@ -48,11 +48,16 @@ function engineBridge(
       }
       return options?.available === false
         ? { available: false }
-        : { available: true, initialUpdate: Y.encodeStateAsUpdate(serverDoc) };
+        : {
+            available: true,
+            initialUpdate: Y.encodeStateAsUpdate(serverDoc),
+            lineageGeneration: 1,
+          };
     }),
     applyEngineYDocUpdate: vi.fn(async () => undefined),
     closeEngineYDocSession: vi.fn(async () => undefined),
     onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+    onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
     onEngineYDocSaveState: vi.fn(() => () => undefined),
     exportDocumentFile: vi.fn(
       async (_payload: {

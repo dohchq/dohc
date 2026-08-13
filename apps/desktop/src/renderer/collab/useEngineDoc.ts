@@ -255,6 +255,7 @@ function makeTransport(
   localSeq: { current: number },
   writesRefused: { current: boolean },
 ): EngineYDocTransport {
+  let lineageGeneration = 1;
   return {
     async open() {
       const result = await bridge().openEngineYDocSession({
@@ -262,9 +263,15 @@ function makeTransport(
         path,
         sessionId,
       });
+      if (result.available && result.lineageGeneration !== undefined) {
+        lineageGeneration = result.lineageGeneration;
+      }
       return {
         available: result.available,
         ...(result.initialUpdate ? { initialUpdate: result.initialUpdate } : {}),
+        ...(result.available && result.lineageGeneration !== undefined
+          ? { lineageGeneration: result.lineageGeneration }
+          : {}),
         ...(result.notInVersion ? { notInVersion: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
         ...(result.removalInProgress
@@ -272,7 +279,7 @@ function makeTransport(
           : {}),
       };
     },
-    async applyLocalUpdate(update) {
+    async applyLocalUpdate(update, updateGeneration) {
       if (writesRefused.current) {
         throw new Error("The live document no longer accepts local updates.");
       }
@@ -282,13 +289,37 @@ function makeTransport(
       // unsaved until that repair or a later settle covers it.
       localSeq.current += 1;
       const seq = localSeq.current;
-      await bridge().applyEngineYDocUpdate({ sessionId, update, seq });
+      await bridge().applyEngineYDocUpdate({
+        sessionId,
+        update,
+        seq,
+        lineageGeneration: updateGeneration,
+      });
     },
     onRemoteUpdate(listener) {
       return bridge().onEngineYDocRemoteUpdate((event) => {
         if (event.sessionId !== sessionId) return;
-        listener(event.update);
+        listener(event.update, event.lineageGeneration);
       });
+    },
+    onLineageReplacement(listener) {
+      return bridge().onEngineYDocLineageReplacement((event) => {
+        if (event.sessionId !== sessionId) return;
+        if (event.lineageGeneration <= lineageGeneration) return;
+        void listener({
+          update: event.update,
+          recoveredPaths: event.recoveredPaths,
+          lineageGeneration: event.lineageGeneration,
+        });
+      });
+    },
+    async acknowledgeLineageReplacement(nextLineageGeneration) {
+      const result = await bridge().acknowledgeEngineYDocLineageReplacement({
+        sessionId,
+        lineageGeneration: nextLineageGeneration,
+      });
+      lineageGeneration = nextLineageGeneration;
+      return result.updates;
     },
     async close() {
       await bridge().closeEngineYDocSession({ sessionId }).catch(() => undefined);
@@ -406,6 +437,7 @@ function createEngineDocSession(
   let deletionPending = false;
   let deliveryPending = false;
   let pendingSavedSeq: number | null = null;
+  const retiredDraftObservers = new Map<Y.Doc, () => void>();
   let lifecycle: Promise<void> = Promise.resolve();
   let disposePromise: Promise<void> | null = null;
   let closeBarrierPromise: Promise<void> | null = null;
@@ -420,6 +452,10 @@ function createEngineDocSession(
 
   const setOutcome = (outcome: EngineDocOpenOutcome): void => {
     publish((current) => ({ ...current, outcome }));
+  };
+
+  const clearOutcome = (): void => {
+    publish((current) => ({ ...current, outcome: null }));
   };
 
   const setDeletion = (draftId: number | null): void => {
@@ -525,6 +561,58 @@ function createEngineDocSession(
     enqueueDeletionSnapshot(bytes, true);
   };
 
+  const observeSaveState = (doc: Y.Doc): void => {
+    detachSaveObserver?.();
+    const onUpdate = () => {
+      if (disposed) return;
+      if (writesRefused.current) {
+        refreshDeletionDraft(doc);
+        return;
+      }
+      reportSaveState("saving");
+    };
+    doc.on("update", onUpdate);
+    detachSaveObserver = () => doc.off("update", onUpdate);
+  };
+
+  const preserveRetiredDocument = (retired: Y.Doc): void => {
+    writesRefused.current = true;
+    detachSaveObserver?.();
+    detachSaveObserver = null;
+    let draftId: number | null = null;
+    const persist = (): void => {
+      const bytes = Y.encodeStateAsUpdate(retired);
+      const fallback = durableMarkdownFromSnapshot(retired, bytes);
+      if (draftId === null) {
+        draftId = captureOrphanedDraft(workspaceId, path, fallback);
+      } else {
+        replaceOrphanedDraft(workspaceId, path, draftId, fallback);
+      }
+      const capturedDraftId = draftId;
+      deletionQueue = deletionQueue
+        .then(async () => {
+          const markdown = await markdownFromSnapshot(bytes);
+          replaceOrphanedDraft(
+            workspaceId,
+            path,
+            capturedDraftId,
+            markdown,
+          );
+        })
+        .catch((error: unknown) => {
+          console.error(
+            `[desktop] could not refine the recovery draft for ${workspaceId}:${path} after lineage replacement:`,
+            error,
+          );
+        });
+    };
+    if (saveStateRef.current !== "saved") persist();
+    const onRetiredUpdate = () => persist();
+    retired.on("update", onRetiredUpdate);
+    retiredDraftObservers.set(retired, () => retired.off("update", onRetiredUpdate));
+    clearOutcome();
+  };
+
   const onSaveState = (event: EngineYDocSaveStateEvent): void => {
     if (disposed || event.sessionId !== sessionId) return;
     if (event.state === "deleted") {
@@ -597,6 +685,7 @@ function createEngineDocSession(
           const bound = await bindEngineYDoc(transport, {
             onDeliveryFailure: captureUndeliveredSnapshot,
             onDeliveryPendingChange,
+            onDocumentReplacing: preserveRetiredDocument,
           });
           binding = bound;
           if (disposed) {
@@ -622,17 +711,15 @@ function createEngineDocSession(
             return;
           }
 
-          const doc = bound.doc;
-          const onUpdate = () => {
+          bound.onDocumentReplaced((replacement) => {
             if (disposed) return;
-            if (writesRefused.current) {
-              refreshDeletionDraft(doc);
-              return;
-            }
-            reportSaveState("saving");
-          };
-          doc.on("update", onUpdate);
-          detachSaveObserver = () => doc.off("update", onUpdate);
+            writesRefused.current = false;
+            if (!deliveryPending) reportSaveState("saved");
+            observeSaveState(replacement);
+            setOutcome({ token, kind: "bound", doc: replacement });
+          });
+          const doc = bound.doc;
+          observeSaveState(doc);
           if (deletionPending) captureDeletion(doc);
           setOutcome({ token, kind: "bound", doc });
         } catch {
@@ -651,6 +738,8 @@ function createEngineDocSession(
       unsubscribeSaveState = null;
       detachSaveObserver?.();
       detachSaveObserver = null;
+      for (const detach of retiredDraftObservers.values()) detach();
+      retiredDraftObservers.clear();
       const immediateDestroy = binding ? destroyBinding() : null;
       closeBarrierPromise = immediateDestroy
         ? immediateDestroy

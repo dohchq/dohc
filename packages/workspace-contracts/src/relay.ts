@@ -5,10 +5,21 @@ export interface SyncRelayConnection {
 }
 
 export interface RelayMaterializedPath {
+  // The version that was active when the relay applied this change. Retries
+  // keep this binding even if the user enters another version before the
+  // caller materializes the path.
+  versionId: string;
   path: string;
   operation: "write" | "delete";
-  contentKind: "text" | "binary";
+  contentKind: "text" | "binary" | "secret";
 }
+
+// Called once for each relay pull page. The pull commits that page's cursor
+// only after this resolves, so a failed or interrupted disk projection makes
+// the relay offer the same page again on the next pass.
+export type MaterializeRelayPullPage = (
+  paths: readonly RelayMaterializedPath[],
+) => Promise<void>;
 
 export interface SharingDeclined {
   path: string;
@@ -24,15 +35,9 @@ export interface PullWorkspaceFromRelayResult {
   conflictsOpened: number;
   sharingDeclined: SharingDeclined[];
   fastForwardedPaths: RelayMaterializedPath[];
-  // The relay cursor this pull reached. NOT persisted by the pull itself:
-  // the caller must invoke commitFetchCursor() only after fastForwardedPaths
-  // has been materialized to disk. A crash or materialization failure before
-  // the commit leaves the cursor behind, so the next pass re-fetches and
-  // re-reports the owed disk work instead of permanently skipping remote
-  // ops (which would let a later disk reconciliation overwrite pulled engine
-  // state with stale disk content).
+  // The last cursor durably committed by this pull. Every page has already
+  // passed through MaterializeRelayPullPage before the pull returns.
   nextCursor: number;
-  commitFetchCursor: () => Promise<void>;
 }
 
 export interface PushWorkspaceToRelayResult {

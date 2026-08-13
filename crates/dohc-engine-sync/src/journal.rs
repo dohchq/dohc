@@ -56,8 +56,9 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 /// pristine local replication state. That check is deliberately wider — it also
 /// rejects `replication_log`, `replication_peers`, the `shared_channel_*`
 /// tables, `share_view_cursors`, `chat_pending_replication` and
-/// `ydoc_deferred_updates`, because adoption must refuse on ANY prior
-/// replication activity. This predicate wants the narrower question: has THIS
+/// `ydoc_deferred_updates` and the Y.Doc arbitration tables, because adoption
+/// must refuse on ANY prior replication activity. This predicate wants the
+/// narrower question: has THIS
 /// workspace exchanged data with a relay. Do not widen one to match the other.
 ///
 /// The identity is checked as well, because Y.Doc base origination consults
@@ -361,7 +362,9 @@ pub fn adopt_join_identity(
                    EXISTS(SELECT 1 FROM chat_pending_replication WHERE workspace_id = ?1) OR \
                    EXISTS(SELECT 1 FROM replication_pending_conflict_bundles \
                      WHERE workspace_id = ?1) OR \
-                   EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id = ?1)",
+                   EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id = ?1) OR \
+                   EXISTS(SELECT 1 FROM ydoc_base_relay_candidates WHERE workspace_id = ?1) OR \
+                   EXISTS(SELECT 1 FROM ydoc_recovery_decisions WHERE workspace_id = ?1)",
                 [workspace_id],
                 |row| row.get(0),
             )
@@ -437,6 +440,7 @@ pub fn list_replication_ops(
                 workspace_id: workspace_id.to_owned(),
                 origin_id: origin_id.to_owned(),
                 origin_seq,
+                relay_seq: None,
                 op_kind,
                 payload,
                 recorded_at_ms,

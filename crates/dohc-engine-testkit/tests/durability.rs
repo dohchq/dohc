@@ -354,9 +354,10 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // (`ydoc_docs.path`) (ordinal 27), the secret-moment source-origin
     // provenance migration (ordinal 28), Y.Doc lineage claims with compact
     // inactive epochs (ordinal 29), and removal of the obsolete replicated
-    // pending-resolution sidecar (ordinal 30), and the durable replication-log
-    // apply disposition used by compound-shadow replay (ordinal 31).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 32);
+    // pending-resolution sidecar (ordinal 30), the durable replication-log
+    // apply disposition used by compound-shadow replay (ordinal 31), and the
+    // Y.Doc relay-arbitration coordinate (ordinal 32).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 33);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(

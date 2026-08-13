@@ -72,9 +72,15 @@ function stubToolchain({ writes, movesHead } = {}) {
     ? `"${process.execPath}" "${probePath}" "${join(dir, "moved.marker")}" "${repoRoot}"`
     : "";
 
+  // Every stub invocation dumps its environment: the caps are a claim about
+  // what the CHILD saw, and asserting only the strings the gate prints about
+  // itself is how a replaced-not-merged child env shipped a vacuous
+  // scratch-leak row once.
+  const envDump = join(dir, "envdump.txt");
   const touch = writes ? writes.replaceAll("\\", "/") : "";
   const sh = [
     "#!/bin/sh",
+    `env > "${envDump.replaceAll("\\", "/")}"`,
     touch ? `[ -f "${touch}" ] || echo gate-stub > "${touch}"` : "",
     probe.replaceAll("\\", "/"),
     `cat "${cfgPath.replaceAll("\\", "/")}"`,
@@ -83,6 +89,7 @@ function stubToolchain({ writes, movesHead } = {}) {
   ].join("\n");
   const cmd = [
     "@echo off",
+    `set > "${envDump}"`,
     touch ? `if not exist "${writes}" echo gate-stub > "${writes}"` : "",
     probe,
     `type "${cfgPath}"`,
@@ -174,18 +181,31 @@ const withPath = (dir) => ({
   PATH: dir ? `${dir}${platform() === "win32" ? ";" : ":"}${process.env.PATH}` : process.env.PATH,
 });
 
-function runGate(stubDir) {
-  const res = spawnSync(process.execPath, [gate], {
-    cwd: repoRoot,
-    encoding: "utf8",
-    env: withPath(stubDir),
-  });
-  const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
-  return {
-    code: res.status,
-    summary: out.slice(out.indexOf("== summary ==")),
-    evidence: (out.match(/^- .*\| run-rust-checks \|.*$/m) ?? [""])[0],
-  };
+function runGate(stubDir, extraEnv = {}) {
+  // The gate takes a build slot before its first step (build-slot.mjs). A
+  // private root keeps a suite run from holding a real lane's slot, and a
+  // zero disk floor keeps the suite runnable on a low-disk machine.
+  const slotRoot = mkdtempSync(join(tmpdir(), "dohc-gate-slots-"));
+  try {
+    const res = spawnSync(process.execPath, [gate], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: {
+        ...withPath(stubDir),
+        DOHC_BUILD_SLOT_ROOT: slotRoot,
+        DOHC_GATE_DISK_FLOOR_GB: "0",
+        ...extraEnv,
+      },
+    });
+    const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+    return {
+      code: res.status,
+      summary: out.slice(out.indexOf("== summary ==")),
+      evidence: (out.match(/^- .*\| run-rust-checks \|.*$/m) ?? [""])[0],
+    };
+  } finally {
+    rmSync(slotRoot, { recursive: true, force: true });
+  }
 }
 
 test("the gate stamps the tree it read, at every step boundary", () => {
@@ -207,9 +227,9 @@ test("the gate stamps the tree it read, at every step boundary", () => {
     assert.match(run.evidence, /tree provenance=PASS/);
 
     // One reading before the first step and one after each: 1 + native target
-    // + 6 required + 2 optional. Endpoints alone would read 2, which is the
+    // + 7 required + 2 optional. Endpoints alone would read 2, which is the
     // shape that cannot see a tree that changes and changes back.
-    assert.match(run.evidence, /, 10 reads\)/);
+    assert.match(run.evidence, /, 11 reads\)/);
 
     // The stamp names the commit this checkout is on, not any commit.
     const head = spawnSync("git rev-parse HEAD", {
@@ -228,6 +248,69 @@ test("the gate stamps the tree it read, at every step boundary", () => {
     assert.doesNotThrow(() => requireCiPassVerdict(run.evidence, () => head));
   } finally {
     rmSync(stub, { recursive: true, force: true });
+  }
+});
+
+test("the caps and the scratch root reach every cargo child", () => {
+  const stub = stubToolchain();
+  try {
+    const run = runGate(stub);
+
+    // What the child actually received, not what the gate printed about
+    // itself. DOHC_TEST_SCRATCH_ROOT is the one the scratch-leak row depends
+    // on: without it the tests write elsewhere and the row inspects an empty
+    // tree.
+    const child = readFileSync(join(stub, "envdump.txt"), "utf8");
+    assert.match(child, /CARGO_INCREMENTAL=0/);
+    assert.match(child, /CARGO_BUILD_JOBS=\d+/);
+    assert.match(child, /RUST_TEST_THREADS=\d+/);
+    assert.match(child, /NEXTEST_TEST_THREADS=\d+/);
+    assert.match(child, /DOHC_TEST_SCRATCH_ROOT=./);
+
+    // And the evidence line records caps, ahead of the head stamp.
+    assert.match(run.evidence, /, jobs \d+, test-threads \d+, head /);
+  } finally {
+    rmSync(stub, { recursive: true, force: true });
+  }
+});
+
+test("split thread caps are both exported and both reported", () => {
+  const stub = stubToolchain();
+  try {
+    // A caller caps libtest while the budget caps nextest: the child must
+    // receive both values, and the evidence must name both instead of
+    // claiming a share one runner is not using.
+    const run = runGate(stub, { RUST_TEST_THREADS: "2" });
+    const child = readFileSync(join(stub, "envdump.txt"), "utf8");
+    assert.match(child, /RUST_TEST_THREADS=2/);
+    assert.match(child, /NEXTEST_TEST_THREADS=\d+/);
+    assert.match(run.evidence, /, test-threads \d+ \(doctests 2\), head /);
+  } finally {
+    rmSync(stub, { recursive: true, force: true });
+  }
+});
+
+test("the gate refuses to start under the disk floor, naming it", () => {
+  const stub = stubToolchain();
+  const slotRoot = mkdtempSync(join(tmpdir(), "dohc-gate-slots-"));
+  try {
+    const res = spawnSync(process.execPath, [gate], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: {
+        ...withPath(stub),
+        DOHC_BUILD_SLOT_ROOT: slotRoot,
+        // No volume has this much free space; the refusal must name the
+        // floor, per "Show agents the limits they hit".
+        DOHC_GATE_DISK_FLOOR_GB: "9999999",
+      },
+    });
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /below the 9999999 GB floor/);
+    assert.match(res.stderr, /DOHC_GATE_DISK_FLOOR_GB/);
+  } finally {
+    rmSync(stub, { recursive: true, force: true });
+    rmSync(slotRoot, { recursive: true, force: true });
   }
 });
 

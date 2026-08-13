@@ -208,13 +208,12 @@ describe("EngineRelayClient real daemon", () => {
         const pushed = await sender.client.push();
         expect(pushed.pushed).toBeGreaterThan(0);
         expect(relay.pushed.length).toBeGreaterThan(0);
-        const pulled = await receiver.client.pull();
+        const pulled = await receiver.client.pull(async () => undefined);
         expect(pulled.fetched).toBeGreaterThan(0);
         expect(
           await channelIds(receiver.sessions, workspaceId, receiverRoot),
           "MUTATION: fetched counts are insufficient unless the second replica materializes the channel",
         ).toContain("relay-e2e-channel");
-        await pulled.commitFetchCursor();
 
         // `closeAll()` is a ONE-WAY door: it clears `acceptingRuns`, which
         // nothing ever restores, so every later `acquire()` throws

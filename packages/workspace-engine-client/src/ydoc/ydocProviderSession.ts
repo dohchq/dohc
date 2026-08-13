@@ -83,6 +83,7 @@ export interface EngineYdocProviderSessionOptions {
   onRemoteApplyError?: (error: RemoteYdocApplyError) => void;
   onLocalEditError?: (error: unknown) => void;
   onResyncNeeded?: (error: YdocResyncNeededError) => void;
+  onLineageReplaced?: (doc: Y.Doc, recoveredPaths: string[]) => void;
   onSessionError?: (error: unknown) => void;
   // A settle is going to the engine now, identified by `token`. Every
   // outcome below echoes the SAME token, so a caller pairs start to outcome
@@ -103,6 +104,7 @@ export interface EngineYdocProviderSessionOptions {
 export interface EngineYdocProviderSession {
   readonly doc: Y.Doc;
   readonly initialUpdate: Uint8Array;
+  readonly lineageClaimId?: string | null;
   readonly contentKind: YdocContentKind;
   readonly path: string;
   // Whether the ENTERED VERSION has a committed snapshot for this path.
@@ -314,6 +316,11 @@ export async function openEngineYdocProviderSession(
   const unsubscribeResync = session.onResyncNeeded((error) => {
     options.onResyncNeeded?.(error);
   });
+  const unsubscribeReplacement = session.onLineageReplaced(
+    (replacement, recoveredPaths) => {
+      options.onLineageReplaced?.(replacement, recoveredPaths);
+    },
+  );
   const unsubscribeSessionError = session.onSessionError((error) => {
     notifyError(options.onSessionError, error);
   });
@@ -326,6 +333,7 @@ export async function openEngineYdocProviderSession(
     unsubscribeRemote();
     unsubscribeRemoteError();
     unsubscribeResync();
+    unsubscribeReplacement();
     unsubscribeSessionError();
     await journalChain.catch(() => undefined);
     await settleChain.catch(() => undefined);
@@ -333,8 +341,13 @@ export async function openEngineYdocProviderSession(
   }
 
   return {
-    doc: session.doc,
+    get doc() {
+      return session.doc;
+    },
     initialUpdate: session.initialUpdate,
+    get lineageClaimId() {
+      return session.lineageClaimId;
+    },
     contentKind: session.contentKind,
     path: session.path,
     head: session.head,

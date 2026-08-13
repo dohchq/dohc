@@ -187,6 +187,11 @@ export interface SyncRelayStorage {
     sinceRelaySeq: number;
     limit: number;
   }): FetchLogPageResult;
+  fetchLogCoordinate(input: {
+    workspaceId: string;
+    originId: string;
+    originSeq: number;
+  }): SyncRelayLogRow | null;
   // PR 18 share grants. Shares are append-only rows; revocation stamps
   // revoked_at_ms instead of deleting, so a grant leaves an audit trail.
   createShare(input: Omit<SyncRelayShareRow, "revokedAtMs">): void;
@@ -1558,6 +1563,21 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       nextCursor: last?.relaySeq ?? input.sinceRelaySeq,
       hasMore: rows.length > input.limit,
     };
+  }
+
+  fetchLogCoordinate(input: {
+    workspaceId: string;
+    originId: string;
+    originSeq: number;
+  }): SyncRelayLogRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq
+         FROM sync_relay_log
+         WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
+      )
+      .get(input.workspaceId, input.originId, input.originSeq);
+    return row ? rowToLogRow(row) : null;
   }
 }
 

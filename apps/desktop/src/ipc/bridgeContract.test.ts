@@ -22,6 +22,7 @@ import {
   ExportDocumentFilePayload,
   ExportDocumentFileResult,
   InvokeSiteSdkPayload,
+  InvokePluginPanelSdkPayload,
   ListEngineMomentsPayload,
   ListEngineMomentsResult,
   WorkspaceSummary,
@@ -63,6 +64,12 @@ import {
   StartSitePreviewPayload,
   StartSitePreviewResult,
   StopSitePreviewPayload,
+  OpenPluginPanelPayload,
+  OpenPluginPanelResult,
+  PluginPanelOpenedEvent,
+  StartPluginPanelPayload,
+  StartPluginPanelResult,
+  StopPluginPanelPayload,
   UpdateActionResult,
   UpdateCheckResult,
   UpdateStateEvent,
@@ -71,6 +78,8 @@ import {
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
   parseInvokeSiteSdkPayloadForIpc,
+  parseInvokePluginPanelSdkPayloadForIpc,
+  CloudJoinWorkspacePayload,
 } from "./bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import {
@@ -1192,6 +1201,105 @@ describe("site IPC contract", () => {
       expect(InvokeSiteSdkPayload.safeParse({ ...base, params }).success).toBe(false);
     }
   });
+
+  it("accepts strict plugin panel open, start, and stop payloads", () => {
+    const identity = {
+      workspaceId: "ws-plugins",
+      pluginId: "@dohc/reports",
+      panelId: "main",
+    };
+    expect(
+      OpenPluginPanelPayload.parse({
+        ...identity,
+        pluginRoot: "plugins/reports",
+      }),
+    ).toEqual({ ...identity, pluginRoot: "plugins/reports" });
+    const panelIdentity = {
+      pluginId: identity.pluginId,
+      panelId: identity.panelId,
+    };
+    expect(OpenPluginPanelResult.parse(panelIdentity)).toEqual(panelIdentity);
+    expect(PluginPanelOpenedEvent.parse(identity)).toEqual(identity);
+    expect(StartPluginPanelPayload.parse(identity)).toEqual(identity);
+    expect(StopPluginPanelPayload.parse(identity)).toEqual(identity);
+    expect(
+      StartPluginPanelResult.parse({
+        status: "ok",
+        url: "http://127.0.0.1:43123/",
+        title: "Reports",
+      }),
+    ).toEqual({
+      status: "ok",
+      url: "http://127.0.0.1:43123/",
+      title: "Reports",
+    });
+    expect(
+      StartPluginPanelResult.parse({ status: "not-registered" }),
+    ).toEqual({ status: "not-registered" });
+
+    expect(
+      StartPluginPanelPayload.safeParse({ ...identity, extra: true }).success,
+    ).toBe(false);
+    expect(
+      OpenPluginPanelPayload.safeParse({
+        ...identity,
+        pluginRoot: "plugins/reports\0escape",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects malformed plugin panel identities and non-loopback results", () => {
+    const base = {
+      workspaceId: "ws-plugins",
+      pluginId: "hello-plugin",
+      panelId: "main",
+    };
+    for (const patch of [
+      { workspaceId: "WS-PLUGINS" },
+      { pluginId: "" },
+      { pluginId: "hello\0main" },
+      { panelId: "" },
+      { panelId: "main\0alias" },
+      { panelId: "x".repeat(121) },
+    ]) {
+      expect(StartPluginPanelPayload.safeParse({ ...base, ...patch }).success).toBe(
+        false,
+      );
+      expect(StopPluginPanelPayload.safeParse({ ...base, ...patch }).success).toBe(
+        false,
+      );
+    }
+    expect(
+      StartPluginPanelResult.safeParse({
+        status: "ok",
+        url: "https://127.0.0.1:43123/",
+        title: "Reports",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("reuses the bounded site SDK params contract for plugin panels", () => {
+    const payload = {
+      workspaceId: "ws-plugins",
+      pluginId: "hello-plugin",
+      panelId: "main",
+      method: "files.write",
+      params: { path: "output.txt", text: "hello" },
+    };
+    expect(parseInvokePluginPanelSdkPayloadForIpc(payload)).toEqual(payload);
+    expect(
+      InvokePluginPanelSdkPayload.safeParse({
+        ...payload,
+        params: { text: "x".repeat(SITE_SDK_PARAMS_MAX_BYTES + 1) },
+      }).success,
+    ).toBe(false);
+    expect(
+      InvokePluginPanelSdkPayload.safeParse({ ...payload, method: "" }).success,
+    ).toBe(false);
+    expect(
+      InvokePluginPanelSdkPayload.safeParse({ ...payload, extra: true }).success,
+    ).toBe(false);
+  });
 });
 
 describe("workspace versions IPC contract (PR 0M-4)", () => {
@@ -1727,19 +1835,19 @@ describe("engine Y.Doc update IPC contract", () => {
     ).toBe(false);
   });
 
-  // AUDIT-SILENTSAVE round 2 (D1). The engine Y.Doc apply-update handler is a
-  // hardened boundary: for an unknown, foreign, or read-only-shared session it
-  // must be an INERT NO-OP that never throws. Zod runs before the session
-  // lookup, so a REQUIRED seq would reject a hostile/legacy caller with an
-  // exception and convert that silent refusal into a throwing one. The
-  // e2e that pins the refusal (workspace-shares.spec.ts) cannot run without
-  // share infrastructure, so the contract is pinned here instead.
-  it("accepts a payload with no seq, defaulting it, so the boundary cannot throw", () => {
+  it("defaults the save sequence but requires the lineage generation", () => {
     const parsed = ApplyEngineYDocUpdatePayload.parse({
       sessionId: "shared-view-bypass",
       update: new Uint8Array([1, 2, 3]),
+      lineageGeneration: 1,
     });
     expect(parsed.seq).toBe(0);
+    expect(() =>
+      ApplyEngineYDocUpdatePayload.parse({
+        sessionId: "shared-view-bypass",
+        update: new Uint8Array([1, 2, 3]),
+      }),
+    ).toThrow();
   });
 
   it("keeps a supplied seq and still rejects a nonsense one", () => {
@@ -1748,6 +1856,7 @@ describe("engine Y.Doc update IPC contract", () => {
         sessionId: "s",
         update: new Uint8Array([1]),
         seq: 7,
+        lineageGeneration: 2,
       }).seq,
     ).toBe(7);
     expect(() =>
@@ -1755,6 +1864,14 @@ describe("engine Y.Doc update IPC contract", () => {
         sessionId: "s",
         update: new Uint8Array([1]),
         seq: -1,
+        lineageGeneration: 2,
+      }),
+    ).toThrow();
+    expect(() =>
+      ApplyEngineYDocUpdatePayload.parse({
+        sessionId: "s",
+        update: new Uint8Array([1]),
+        lineageGeneration: 0,
       }),
     ).toThrow();
   });
@@ -1845,5 +1962,24 @@ describe("partial-freshness marker on aggregate chat reads", () => {
         `MUTATION (${name}): "0 rows uncovered" is a full refresh reported as a partial one`,
       ).toThrow();
     }
+  });
+});
+
+describe("joined workspace passphrase boundary", () => {
+  it("accepts the optional local passphrase and bounds its IPC size", () => {
+    expect(
+      CloudJoinWorkspacePayload.parse({
+        syncCode: "dohc-sync:workspace:http://relay.test",
+        rootPath: "/workspace",
+        passphrase: "protected-files passphrase",
+      }).passphrase,
+    ).toBe("protected-files passphrase");
+    expect(() =>
+      CloudJoinWorkspacePayload.parse({
+        syncCode: "dohc-sync:workspace:http://relay.test",
+        rootPath: "/workspace",
+        passphrase: "x".repeat(4097),
+      }),
+    ).toThrow();
   });
 });

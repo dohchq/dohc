@@ -1151,6 +1151,10 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(WORKSPACE_METHOD.captureFlush, {});
   }
 
+  async reconcileCapture(): Promise<CaptureFlushResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.captureReconcile, {});
+  }
+
   async setCaptureAuthor(author: AgentAuthor | null): Promise<void> {
     await this.workspaceRequest(WORKSPACE_METHOD.captureSetAuthor, { author });
   }
