@@ -8368,6 +8368,7 @@ fn map_ydoc_open_runtime(error: RuntimeError) -> WireError {
 }
 
 fn scene_seed_materialization_error(materialization: YdocSeedMaterialization) -> WireError {
+    const REFUSAL_DETAIL_DELIMITER: &str = ": ";
     let (code, message) = if materialization.invalid_jobs > 0 {
         (ErrorCode::Internal, "ydoc-artifact-assets-invalid")
     } else {
@@ -8376,7 +8377,7 @@ fn scene_seed_materialization_error(materialization: YdocSeedMaterialization) ->
     WireError::new(
         code,
         format!(
-            "{message}: invalid_jobs={}, incomplete_jobs={}",
+            "{message}{REFUSAL_DETAIL_DELIMITER}invalid_jobs={}, incomplete_jobs={}",
             materialization.invalid_jobs, materialization.incomplete_jobs
         ),
     )

@@ -196,15 +196,31 @@ export function isYdocRemoteUpdatesPendingRefusal(error: unknown): boolean {
   return refusalMessageOf(error) === "ydoc-remote-updates-pending";
 }
 
+const REFUSAL_DETAIL_DELIMITER = ": ";
+
+function refusalMessageMatchesToken(
+  message: string | null,
+  token: string,
+): boolean {
+  if (message === token) return true;
+  const detailPrefix = `${token}${REFUSAL_DETAIL_DELIMITER}`;
+  return (
+    message?.startsWith(detailPrefix) === true &&
+    message.length > detailPrefix.length
+  );
+}
+
 function causeChainHasRefusal(
   error: unknown,
   code: DaemonErrorCode,
-  message: string,
+  token: string,
 ): boolean {
   const seen = new Set<unknown>();
   let current: unknown = error;
   while (current !== null && typeof current === "object" && !seen.has(current)) {
-    if (refusalMessageOf(current, code) === message) return true;
+    if (refusalMessageMatchesToken(refusalMessageOf(current, code), token)) {
+      return true;
+    }
     seen.add(current);
     current = "cause" in current ? current.cause : null;
   }
