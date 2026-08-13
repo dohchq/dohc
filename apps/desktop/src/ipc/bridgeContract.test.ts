@@ -15,6 +15,7 @@ import {
   ChatReactionRecord,
   DatabaseSnapshotResult,
   DesktopMarksResult,
+  CreateWorkspaceFilePayload,
   CreateFileChatPayload,
   CreateWorkspaceVersionPayload,
   EngineMomentDetailRecord,
@@ -80,6 +81,7 @@ import {
   MAX_EDITOR_GROUP_ID_CHARS,
 } from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
+import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
 
 describe("workbench menu IPC contract", () => {
   it("carries a bounded editor group ID and the group-close capability", () => {
@@ -117,6 +119,46 @@ describe("workbench menu IPC contract", () => {
 
 describe("workspace text IPC contract", () => {
   const hash = "a".repeat(64);
+
+  it("bounds new and existing file writes by exact UTF-8 bytes", () => {
+    const exact = "\ud83d\udca1".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES / 4);
+    const over = `${exact}x`;
+    const base = {
+      workspaceId: "workspace-a",
+      relativePath: "notes/a.md",
+    };
+
+    expect(
+      CreateWorkspaceFilePayload.safeParse({
+        ...base,
+        initialText: exact,
+      }).success,
+    ).toBe(true);
+    expect(
+      WriteWorkspaceTextPayload.safeParse({
+        ...base,
+        text: exact,
+        expectedContentHash: hash,
+      }).success,
+    ).toBe(true);
+
+    for (const result of [
+      CreateWorkspaceFilePayload.safeParse({ ...base, initialText: over }),
+      WriteWorkspaceTextPayload.safeParse({
+        ...base,
+        text: over,
+        expectedContentHash: hash,
+      }),
+    ]) {
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues[0]?.message).toBe(
+          "Workspace text exceeds WORKSPACE_TEXT_EDITOR_MAX_BYTES: " +
+            `limit ${WORKSPACE_TEXT_EDITOR_MAX_BYTES} bytes, observed ${WORKSPACE_TEXT_EDITOR_MAX_BYTES + 1} bytes`,
+        );
+      }
+    }
+  });
 
   it("ties complete and truncated reads to an unambiguous content hash", () => {
     expect(

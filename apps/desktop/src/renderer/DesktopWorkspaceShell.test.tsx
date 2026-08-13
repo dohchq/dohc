@@ -13,6 +13,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { EMPTY_EXCALIDRAW_DOCUMENT } from "./excalidrawDocument";
 
 // These drive userEvent through async UI settles — 67 findBy* awaits across 47
 // tests — so the wall-clock profile is the file, not one test (#372).
@@ -8623,6 +8624,7 @@ describe("open editors", () => {
     expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
       workspaceId: "ws-shell-test",
       relativePath: "Untitled.txt",
+      initialText: "",
     });
     expect(await screen.findByTestId("tab-Untitled.txt")).toBeTruthy();
 
@@ -8646,6 +8648,7 @@ describe("open editors", () => {
     expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
       workspaceId: "ws-shell-test",
       relativePath: "Untitled 3.txt",
+      initialText: "",
     });
   });
 
@@ -8687,6 +8690,7 @@ describe("open editors", () => {
       expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
         workspaceId: "ws-shell-test",
         relativePath: "docs/notes.md",
+        initialText: "",
       }),
     );
 
@@ -9247,6 +9251,7 @@ describe("drawing entry point", () => {
       expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
         workspaceId: WORKSPACE.workspaceId,
         relativePath: "Untitled.excalidraw",
+        initialText: EMPTY_EXCALIDRAW_DOCUMENT,
       }),
     );
     expect(
@@ -9275,6 +9280,7 @@ describe("drawing entry point", () => {
       expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
         workspaceId: WORKSPACE.workspaceId,
         relativePath: "Untitled 3.excalidraw",
+        initialText: EMPTY_EXCALIDRAW_DOCUMENT,
       }),
     );
   });

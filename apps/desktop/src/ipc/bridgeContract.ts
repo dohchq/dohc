@@ -54,6 +54,11 @@ import type {
   WorkspaceSettings as WorkspaceSettingsType,
   WorkspaceSettingsResult as WorkspaceSettingsResultType,
 } from "../workspaces/workspaceSettings";
+import {
+  utf8ByteLength,
+  WORKSPACE_TEXT_EDITOR_MAX_BYTES,
+  workspaceTextLimitReason,
+} from "../workspaces/workspaceTextLimits";
 
 // Typed contract for everything the preload bridge exposes. Main-process
 // handlers validate payloads on arrival and results before returning them.
@@ -72,6 +77,14 @@ const WORKSPACE_ID = z
   .max(200)
   .regex(/^[a-z0-9][a-z0-9-]*$/, "workspace id must be lowercase alphanumeric/hyphens");
 const PATH_STRING = z.string().min(1).max(4096);
+const WORKSPACE_EDITOR_TEXT = z.string().superRefine((text, ctx) => {
+  const observedBytes = utf8ByteLength(text);
+  if (observedBytes <= WORKSPACE_TEXT_EDITOR_MAX_BYTES) return;
+  ctx.addIssue({
+    code: "custom",
+    message: workspaceTextLimitReason(observedBytes),
+  });
+});
 
 // Stored-body fields are the exception to the caps above. Every RESPONSE field
 // on this schema carries text the ENGINE already accepted, not text a renderer
@@ -247,6 +260,7 @@ export type ListWorkspaceFilesResult = z.infer<typeof ListWorkspaceFilesResult>;
 export const CreateWorkspaceFilePayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
+  initialText: WORKSPACE_EDITOR_TEXT,
 });
 export type CreateWorkspaceFilePayload = z.infer<
   typeof CreateWorkspaceFilePayload
@@ -437,8 +451,8 @@ export type OpenFileExternallyPayload = z.infer<
 export const WriteWorkspaceTextPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
-  // Editor saves are bounded like reads (2MB); the handler re-checks bytes.
-  text: z.string().max(2 * 1024 * 1024),
+  // Editor saves are bounded like reads; the handler re-checks UTF-8 bytes.
+  text: WORKSPACE_EDITOR_TEXT,
   // SHA-256 of the exact bytes returned by the last complete read. Main uses
   // it for optimistic conflict detection immediately before replacement.
   expectedContentHash: WORKSPACE_TEXT_CONTENT_HASH,

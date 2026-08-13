@@ -18,6 +18,7 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { TextDecoder } from "node:util";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
+import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
 
 // Media types served to the renderer for binary assets. Kept small and
 // explicit — only types a view actually renders (image/audio src, pdf);
@@ -123,7 +124,7 @@ export async function readWorkspaceAsset(
 // renderer fetch — a file:// renderer can't fetch a custom scheme. Capped so a
 // huge file can't stream megabytes through IPC; oversize falls back to a
 // download affordance in the renderer.
-const MAX_TEXT_BYTES = 2 * 1024 * 1024;
+const MAX_TEXT_BYTES = WORKSPACE_TEXT_EDITOR_MAX_BYTES;
 
 export type WorkspaceTextReadResult =
   | { text: string; truncated: false; contentHash: string }

@@ -704,6 +704,7 @@ export function Explorer(props: ExplorerProps) {
           const result = await bridge().createWorkspaceFile({
             workspaceId,
             relativePath: path,
+            initialText: "",
           });
           onOpenFile(result.path);
         } else {

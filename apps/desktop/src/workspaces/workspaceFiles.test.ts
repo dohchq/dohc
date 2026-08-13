@@ -30,6 +30,7 @@ import {
 } from "./workspaceFiles";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
+import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
 
 let root: string;
 
@@ -51,26 +52,39 @@ const rejectingTrash = async () => {
 
 describe("createFile", () => {
   it("creates nested files through validated paths", async () => {
-    const path = await createFile(root, "notes/./today.md");
+    const path = await createFile(root, "notes/./today.md", "initial text");
     expect(path).toBe("notes/today.md");
-    expect(await readFile(join(root, "notes/today.md"), "utf8")).toBe("");
+    expect(await readFile(join(root, "notes/today.md"), "utf8")).toBe(
+      "initial text",
+    );
   });
 
   it("rejects traversal and reserved paths", async () => {
-    await expect(createFile(root, "../escape.md")).rejects.toThrow(/traversal/);
-    await expect(createFile(root, ".dohc/x.md")).rejects.toThrow(/reserved/);
+    await expect(createFile(root, "../escape.md", "")).rejects.toThrow(/traversal/);
+    await expect(createFile(root, ".dohc/x.md", "")).rejects.toThrow(/reserved/);
   });
 
   it("never overwrites an existing file", async () => {
     await writeFile(join(root, "keep.md"), "original");
-    await createFile(root, "keep.md");
+    await createFile(root, "keep.md", "");
     expect(await readFile(join(root, "keep.md"), "utf8")).toBe("original");
+  });
+
+  it("rejects initial text above the editor byte limit before creating a file", async () => {
+    const initialText = `\ud83d\udca1`.repeat(
+      WORKSPACE_TEXT_EDITOR_MAX_BYTES / 4 + 1,
+    );
+    await expect(createFile(root, "large.md", initialText)).rejects.toThrow(
+      "Workspace text exceeds WORKSPACE_TEXT_EDITOR_MAX_BYTES: " +
+        `limit ${WORKSPACE_TEXT_EDITOR_MAX_BYTES} bytes, observed ${WORKSPACE_TEXT_EDITOR_MAX_BYTES + 4} bytes`,
+    );
+    expect(existsSync(join(root, "large.md"))).toBe(false);
   });
 
   it("refuses to write through a symlinked directory that escapes the workspace", async () => {
     const outside = await createTestScratch("dohc-outside-");
     await symlink(outside, join(root, "link"), "dir");
-    await expect(createFile(root, "link/evil.md")).rejects.toThrow(/escapes the workspace/);
+    await expect(createFile(root, "link/evil.md", "")).rejects.toThrow(/escapes the workspace/);
     expect(existsSync(join(outside, "evil.md"))).toBe(false);
   });
 });

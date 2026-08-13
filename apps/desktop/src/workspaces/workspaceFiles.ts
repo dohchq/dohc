@@ -36,6 +36,11 @@ import {
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
+import {
+  utf8ByteLength,
+  WORKSPACE_TEXT_EDITOR_MAX_BYTES,
+  workspaceTextLimitReason,
+} from "./workspaceTextLimits";
 import type { ZipEntry } from "./zipWriter";
 
 // Deepest already-existing ancestor of a (possibly not-yet-created) path —
@@ -224,10 +229,15 @@ export async function listFiles(
 export async function createFile(
   rootPath: string,
   relativePath: string,
+  initialText: string,
 ): Promise<string> {
   const validated = validateUserMaterializePath(relativePath);
   if (!validated.ok) {
     throw new Error(`Invalid file path (${validated.reason}): ${relativePath}`);
+  }
+  const observedBytes = utf8ByteLength(initialText);
+  if (observedBytes > WORKSPACE_TEXT_EDITOR_MAX_BYTES) {
+    throw new Error(workspaceTextLimitReason(observedBytes));
   }
   const absolute = join(rootPath, validated.normalized);
   // Lexical validation can't see symlinks, and it read the path as SPELLED.
@@ -251,7 +261,7 @@ export async function createFile(
   if (!isInside(realRoot, await realpath(dirname(target)))) {
     throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
   }
-  await writeFile(target, "", { flag: "wx" }).catch((error: unknown) => {
+  await writeFile(target, initialText, { flag: "wx" }).catch((error: unknown) => {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   });
   return validated.normalized;

@@ -12042,13 +12042,14 @@ mod tests {
             })
         );
         let projection = map_runtime(RuntimeError::Sync(SyncError::ProjectionTooLarge {
+            constraint: "MAX_PROJECTION_BYTES",
             actual_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES + 1,
             limit_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES,
         }));
         assert_eq!(projection.code, ErrorCode::PayloadTooLarge);
         assert_eq!(
             projection.message,
-            "Y.Doc projection is at least 16777217 bytes, over MAX_PROJECTION_BYTES (16777216 bytes)"
+            "Y.Doc projection exceeds MAX_PROJECTION_BYTES: limit 16777216 bytes, observed at least 16777217 bytes"
         );
     }
 

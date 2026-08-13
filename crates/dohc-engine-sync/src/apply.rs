@@ -113,7 +113,7 @@ enum Admission<T> {
 
 pub(crate) enum MutationOutcome<T> {
     Applied(T),
-    RefusedRetainingMutation { reason: &'static str },
+    RefusedRetainingMutation { reason: String },
 }
 
 /// Validate and atomically handle one imported coordinate. Ordinary
@@ -204,7 +204,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                     origin_seq: envelope.origin_seq,
                     op_kind: envelope.op_kind.clone(),
                     reason: RefusalReason::InvalidInput {
-                        reason: reason.to_owned(),
+                        reason,
                     },
                 })
             }

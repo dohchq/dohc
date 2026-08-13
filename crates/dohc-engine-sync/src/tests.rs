@@ -1142,7 +1142,7 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
     seed_replication_version(&mut engine, "main", "main");
 
     let source = dohc_engine_collab::Ydoc::wire();
-    source.plaintext_insert(0, &"a".repeat(MAX_TEXT_BYTES + 1));
+    source.plaintext_insert(0, "seed");
     let base = source.encode_full_state();
     assert!(
         base.len() < dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES,
@@ -1150,7 +1150,7 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
         base.len()
     );
     let base_sha = engine.put_binary_blob(&base).expect("base blob");
-    let over_cap = envelope(
+    let base_op = envelope(
         "over-cap-projection-peer",
         0,
         "ydoc.update",
@@ -1163,18 +1163,90 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
             "isBaseState": true
         }),
     );
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(_))
+    ));
 
-    assert_invalid_refusal!(apply_ydoc_envelope(
-        &mut engine,
-        &over_cap,
-        &NoFaults,
-        &NoLiveLeases
+    let delta = source.plaintext_insert(4, &"a".repeat(MAX_TEXT_BYTES));
+    assert!(
+        delta.len() < dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES,
+        "the premise is an update UNDER the update cap, at {} bytes",
+        delta.len()
+    );
+    let delta_sha = engine.put_binary_blob(&delta).expect("delta blob");
+    let over_cap = envelope(
+        "over-cap-projection-peer",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-over-cap-projection",
+            "path": "notes/over-cap-projection.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": delta_sha,
+            "isBaseState": false
+        }),
+    );
+
+    let refusal = apply_ydoc_envelope(&mut engine, &over_cap, &NoFaults, &NoLiveLeases)
+        .expect("oversized projection is an acknowledged refusal");
+    let expected_reason = format!(
+        "plaintext projection exceeds MAX_TEXT_BYTES: limit {MAX_TEXT_BYTES} bytes, observed at least {} bytes",
+        MAX_TEXT_BYTES + 4
+    );
+    assert!(matches!(
+        refusal,
+        ApplyOutcome::Refused(ReplicationRefusal {
+            reason: RefusalReason::InvalidInput { ref reason },
+            ..
+        }) if reason == &expected_reason
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "over-cap-projection-peer").expect("ack"),
-        0,
+        1,
         "an unACKed coordinate is redelivered forever"
     );
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-over-cap-projection")
+        .expect("doc key");
+    let projected = dohc_engine_collab::load_persisted(&engine, &key)
+        .expect("load retained Y.Doc")
+        .expect("persisted Y.Doc")
+        .doc
+        .project(dohc_engine_collab::ContentKind::Plaintext)
+        .expect("the Y.Doc stays under the projection cap");
+    assert_eq!(
+        projected.content.len(),
+        MAX_TEXT_BYTES + 4,
+        "the refused incremental mutation remains canonical"
+    );
+    let (head_text, persisted_reason): (String, String) = engine
+        .read_with(|conn| {
+            let head_text = conn
+                .query_row(
+                    "SELECT b.text FROM path_aliases a \
+                 JOIN snapshots s ON s.workspace_id = a.workspace_id AND s.object_id = a.object_id \
+                 JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE a.workspace_id = 'ws' AND a.version_id = 'main' \
+                   AND a.path = 'notes/over-cap-projection.md'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            let persisted_reason = conn
+                .query_row(
+                    "SELECT reason_message FROM replication_pending_refusals \
+                 WHERE workspace_id = 'ws' AND origin_id = 'over-cap-projection-peer' \
+                   AND origin_seq = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            Ok::<_, SyncError>((head_text, persisted_reason))
+        })
+        .expect("head and persisted refusal");
+    assert_eq!(head_text, "seed", "the oversized artifact is not written");
+    assert_eq!(persisted_reason, expected_reason);
 }
 
 /// The relay pull checks the ceiling on the undecoded response, before it
@@ -8228,13 +8300,19 @@ fn oversized_hydrated_scene_base_is_refused_without_storing_the_projection() {
             project_ydoc_with_store(conn, &key, &doc, dohc_engine_collab::ContentKind::Scene)
         })
         .expect_err("the shared runtime/sync projector must enforce the cap");
-    assert!(matches!(
-        projection_error,
+    let (actual_bytes, limit_bytes) = match projection_error {
         SyncError::ProjectionTooLarge {
+            constraint: "MAX_PROJECTION_BYTES",
             actual_bytes,
-            limit_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES,
-        } if actual_bytes > dohc_engine_collab::limits::MAX_PROJECTION_BYTES
-    ));
+            limit_bytes,
+        } => (actual_bytes, limit_bytes),
+        other => panic!("unexpected projection error: {other}"),
+    };
+    assert_eq!(
+        limit_bytes,
+        dohc_engine_collab::limits::MAX_PROJECTION_BYTES
+    );
+    assert!(actual_bytes > limit_bytes);
     let update_sha = engine
         .put_binary_blob(&doc.encode_full_state())
         .expect("scene update blob");
@@ -8259,7 +8337,9 @@ fn oversized_hydrated_scene_base_is_refused_without_storing_the_projection() {
         ApplyOutcome::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput { ref reason },
             ..
-        }) if reason == "scene projection exceeds MAX_PROJECTION_BYTES (16777216 bytes)"
+        }) if reason == &format!(
+            "scene projection exceeds MAX_PROJECTION_BYTES: limit {limit_bytes} bytes, observed at least {actual_bytes} bytes"
+        )
     ));
     assert!(
         dohc_engine_collab::read_marker(&engine, &key)

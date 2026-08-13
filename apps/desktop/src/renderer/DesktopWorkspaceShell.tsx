@@ -49,6 +49,7 @@ import { buildChatCollaboration } from "./collab/chatCollaboration";
 import type { SearchResultsEventEntry } from "../ipc/channels";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
+import { EMPTY_EXCALIDRAW_DOCUMENT } from "./excalidrawDocument";
 import { useSnapshotLane } from "./snapshotLane";
 import { momentDiffSides } from "./workbench/momentDiffSides";
 import { CloudLogin } from "./CloudLogin";
@@ -3261,6 +3262,7 @@ export function DesktopWorkspaceShell(props: {
       const result = await bridge().createWorkspaceFile({
         workspaceId,
         relativePath: uniqueUntitledPath(files, folders, "txt"),
+        initialText: "",
       });
       await refreshFiles();
       openFile(result.path);
@@ -3273,6 +3275,7 @@ export function DesktopWorkspaceShell(props: {
       const result = await bridge().createWorkspaceFile({
         workspaceId,
         relativePath: uniqueUntitledPath(files, folders, "excalidraw"),
+        initialText: EMPTY_EXCALIDRAW_DOCUMENT,
       });
       await refreshFiles();
       openFile(result.path);

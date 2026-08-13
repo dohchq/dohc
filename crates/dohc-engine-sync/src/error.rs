@@ -34,9 +34,10 @@ pub enum SyncError {
     #[error("replication state is not ready: {reason}")]
     RetryableState { reason: &'static str },
     #[error(
-        "Y.Doc projection is at least {actual_bytes} bytes, over MAX_PROJECTION_BYTES ({limit_bytes} bytes)"
+        "Y.Doc projection exceeds {constraint}: limit {limit_bytes} bytes, observed at least {actual_bytes} bytes"
     )]
     ProjectionTooLarge {
+        constraint: &'static str,
         actual_bytes: usize,
         limit_bytes: usize,
     },

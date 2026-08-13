@@ -3528,7 +3528,11 @@ function registerIpcHandlers(
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
     return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async () => {
-      const path = await createFile(workspace.rootPath, input.relativePath);
+      const path = await createFile(
+        workspace.rootPath,
+        input.relativePath,
+        input.initialText,
+      );
       return CreateWorkspaceFileResult.parse({ path });
     });
   });
