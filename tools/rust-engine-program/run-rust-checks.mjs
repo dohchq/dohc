@@ -107,6 +107,12 @@ if (budget) {
   process.env.RUST_TEST_THREADS ??= String(budget.jobs);
   process.env.NEXTEST_TEST_THREADS ??= String(budget.jobs);
 }
+// A caller's libtest cap carries to nextest unless the caller split them
+// deliberately: the evidence line must never claim a cap the child does
+// not actually have.
+if (process.env.RUST_TEST_THREADS !== undefined) {
+  process.env.NEXTEST_TEST_THREADS ??= process.env.RUST_TEST_THREADS;
+}
 // One value covers both runners unless the caller split them. A divergent
 // nextest cap governs the heavy test steps, so the evidence names both
 // values rather than reporting a share nextest is not using.

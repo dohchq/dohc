@@ -181,7 +181,7 @@ const withPath = (dir) => ({
   PATH: dir ? `${dir}${platform() === "win32" ? ";" : ":"}${process.env.PATH}` : process.env.PATH,
 });
 
-function runGate(stubDir) {
+function runGate(stubDir, extraEnv = {}) {
   // The gate takes a build slot before its first step (build-slot.mjs). A
   // private root keeps a suite run from holding a real lane's slot, and a
   // zero disk floor keeps the suite runnable on a low-disk machine.
@@ -194,6 +194,7 @@ function runGate(stubDir) {
         ...withPath(stubDir),
         DOHC_BUILD_SLOT_ROOT: slotRoot,
         DOHC_GATE_DISK_FLOOR_GB: "0",
+        ...extraEnv,
       },
     });
     const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
@@ -268,6 +269,22 @@ test("the caps and the scratch root reach every cargo child", () => {
 
     // And the evidence line records caps, ahead of the head stamp.
     assert.match(run.evidence, /, jobs \d+, test-threads \d+, head /);
+  } finally {
+    rmSync(stub, { recursive: true, force: true });
+  }
+});
+
+test("split thread caps are both exported and both reported", () => {
+  const stub = stubToolchain();
+  try {
+    // A caller caps libtest while the budget caps nextest: the child must
+    // receive both values, and the evidence must name both instead of
+    // claiming a share one runner is not using.
+    const run = runGate(stub, { RUST_TEST_THREADS: "2" });
+    const child = readFileSync(join(stub, "envdump.txt"), "utf8");
+    assert.match(child, /RUST_TEST_THREADS=2/);
+    assert.match(child, /NEXTEST_TEST_THREADS=\d+/);
+    assert.match(run.evidence, /, test-threads \d+ \(doctests 2\), head /);
   } finally {
     rmSync(stub, { recursive: true, force: true });
   }
