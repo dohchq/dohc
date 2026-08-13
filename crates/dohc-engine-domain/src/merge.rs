@@ -1170,6 +1170,7 @@ fn conflict_side(path: &str, side: &Option<ComparisonSide>) -> ConflictFileState
             side.byte_length,
             side.snapshot.object_id.clone(),
             side.snapshot.latest_moment_id.clone(),
+            side.snapshot.updated_at_ms,
         ),
         Some(side) => ConflictFileState::text(path.to_owned(), Some(side.snapshot.clone())),
         None => ConflictFileState::text(path.to_owned(), None),

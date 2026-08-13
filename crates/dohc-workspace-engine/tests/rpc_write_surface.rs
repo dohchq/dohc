@@ -6561,54 +6561,117 @@ async fn read_blob_canonicalizes_digests_and_rejects_broken_or_length_mismatched
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_conflict_rpc_retries_replay_the_persisted_refusal() {
-    let (_scratch, transport, handle) = fixture("conflict-refusal-replay").await;
-    let workspace = "ws-rpcd-conflict-refusal-replay";
+async fn replicated_conflict_open_rpc_retries_replay_the_persisted_refusal() {
+    let (_scratch, transport, handle) = fixture("conflict-open-refusal-replay").await;
+    let workspace = "ws-rpcd-conflict-open-refusal-replay";
+    let envelope = json!({
+        "workspaceId": workspace,
+        "originId": "direct-open-refusal",
+        "originSeq": 0,
+        "opKind": "conflict.open",
+        "payload": {},
+        "recordedAtMs": 2_000,
+    });
+    let first = call(
+        &transport,
+        &handle,
+        2,
+        "conflicts.open",
+        json!({ "envelope": envelope }),
+    )
+    .await;
+    let replay = call(
+        &transport,
+        &handle,
+        3,
+        "conflicts.open",
+        json!({ "envelope": envelope }),
+    )
+    .await;
 
-    for (index, (method, op_kind)) in [
-        ("conflicts.open", "conflict.open"),
-        ("conflicts.resolve", "conflict.resolve"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let envelope = json!({
-            "workspaceId": workspace,
-            "originId": format!("direct-refusal-{index}"),
-            "originSeq": 0,
-            "opKind": op_kind,
-            "payload": {},
-            "recordedAtMs": 2_000,
-        });
-        let first = call(
-            &transport,
-            &handle,
-            2 + (index as u64 * 2),
-            method,
-            json!({ "envelope": envelope }),
-        )
-        .await;
-        let replay = call(
-            &transport,
-            &handle,
-            3 + (index as u64 * 2),
-            method,
-            json!({ "envelope": envelope }),
-        )
-        .await;
+    assert_eq!(first["status"], "refused");
+    assert_eq!(first["code"], "invalid-input");
+    assert_eq!(first["reason"], "conflict.open payload is malformed");
+    assert_eq!(
+        replay, first,
+        "an acknowledged replay must return its durable refusal"
+    );
+}
 
-        assert_eq!(first["status"], "refused");
-        assert_eq!(first["code"], "invalid-input");
-        assert_eq!(
-            first["reason"],
-            format!("{op_kind} payload is malformed"),
-            "MUTATION ({method}): the direct RPC must preserve the rejection explanation"
-        );
-        assert_eq!(
-            replay, first,
-            "MUTATION ({method}): formatting the ACKed replay as a bare skip loses the durable refusal"
-        );
-    }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unversioned_conflict_resolve_rpc_is_rejected_before_import_bookkeeping() {
+    let (scratch, transport, handle) = fixture("unversioned-conflict-resolve").await;
+    let workspace = "ws-rpcd-unversioned-conflict-resolve";
+    let envelope = json!({
+        "workspaceId": workspace,
+        "originId": "legacy-resolve-origin",
+        "originSeq": 0,
+        "opKind": "conflict.resolve",
+        "payload": {
+            "conflictId": "legacy-resolve",
+            "status": "resolved",
+            "chosenFrom": "current",
+            "resolution": "kept-current",
+            "updatedAtMs": 2_000,
+            "targetVersionId": "main"
+        },
+        "recordedAtMs": 2_000,
+    });
+    let store = dohc_engine_storage::EngineStore::open(
+        &scratch.engine_db_path().expect("engine db"),
+        6_564,
+    )
+    .expect("open mutation witness");
+    let import_state = || {
+        store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row("SELECT COUNT(*) FROM replication_log", [], |row| row.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM replication_peers", [], |row| {
+                        row.get(0)
+                    })?,
+                    conn.query_row("SELECT COUNT(*) FROM conflicts", [], |row| row.get(0))?,
+                ))
+            })
+            .expect("read import state")
+    };
+    let before = import_state();
+
+    let first = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                2,
+                "conflicts.resolve",
+                Some(handle.clone()),
+                json!({ "envelope": envelope }),
+            ),
+        )
+        .await
+        .expect_err("unversioned conflict.resolve must be rejected");
+    let replay = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                3,
+                "conflicts.resolve",
+                Some(handle),
+                json!({ "envelope": envelope }),
+            ),
+        )
+        .await
+        .expect_err("retrying unversioned conflict.resolve must be rejected");
+
+    assert_eq!(first.code, ErrorCode::InvalidParams);
+    assert_eq!(replay.code, first.code);
+    assert_eq!(replay.message, first.message);
+    assert_eq!(replay.retry, first.retry);
+    assert_eq!(
+        import_state(),
+        before,
+        "neither refusal may write a log row, peer acknowledgement, or conflict"
+    );
+    assert_eq!(before, (0, 0, 0));
 }
 
 /// A resolution can remove a BINARY head. Its preimage must reach the wire as

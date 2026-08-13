@@ -34,12 +34,11 @@ function pullResult(
     applied: 0,
     skipped: 0,
     conflictsOpened: 0,
-    pendingConflictResolves: 0,
-    pendingResolves: [],
     fastForwardedPaths: [],
     nextCursor: 0,
     commitFetchCursor: vi.fn(async () => {}),
     ...overrides,
+    sharingDeclined: overrides.sharingDeclined ?? [],
   };
 }
 
@@ -108,7 +107,11 @@ beforeEach(() => {
   pushMock.mockReset();
   pullMock.mockReset();
   recoverMock.mockReset();
-  pushMock.mockImplementation(async () => ({ pushed: 0, originsPushed: [] }));
+  pushMock.mockImplementation(async () => ({
+    pushed: 0,
+    originsPushed: [],
+    sharingDeclined: [],
+  }));
   pullMock.mockImplementation(async () => pullResult());
   recoverMock.mockImplementation(async () => ({
     oldOriginId: "origin_old",
@@ -125,7 +128,11 @@ afterEach(() => {
 describe("relaySyncEngine", () => {
   it("never invokes legacy TypeScript relay operations for a rooted daemon operation set", async () => {
     const operations: RelaySyncOperations = {
-      push: vi.fn(async () => ({ pushed: 1, originsPushed: [] })),
+      push: vi.fn(async () => ({
+        pushed: 1,
+        originsPushed: [],
+        sharingDeclined: [],
+      })),
       pull: vi.fn(async () => pullResult()),
       recoverOrigin: vi.fn(async () => ({
         oldOriginId: "old",
@@ -151,7 +158,11 @@ describe("relaySyncEngine", () => {
       push: vi
         .fn()
         .mockRejectedValueOnce(new RelayOriginDivergedError())
-        .mockResolvedValue({ pushed: 1, originsPushed: [] }),
+        .mockResolvedValue({
+          pushed: 1,
+          originsPushed: [],
+          sharingDeclined: [],
+        }),
       pull: vi.fn(async () => pullResult()),
       recoverOrigin: vi.fn(async () => ({
         oldOriginId: "old",
@@ -284,6 +295,44 @@ describe("relaySyncEngine", () => {
     expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
   });
 
+  it("keeps every sharing decline in the workspace snapshot", async () => {
+    const result = pullResult();
+    result.sharingDeclined = [
+      {
+        path: "notes/first.md",
+        constraint: "MAX_YDOC_UPDATE_BYTES",
+        limitBytes: 20,
+        observedBytes: 21,
+      },
+      {
+        path: "notes/second.md",
+        constraint: "MAX_YDOC_UPDATE_BYTES",
+        limitBytes: 20,
+        observedBytes: 21,
+      },
+    ];
+    pullMock
+      .mockResolvedValueOnce(result)
+      .mockResolvedValueOnce(result)
+      .mockResolvedValueOnce(pullResult());
+    const sync = engine({ capture: capture() });
+
+    await sync.start();
+
+    expect(sync.snapshot().sharingDeclined).toEqual(result.sharingDeclined);
+
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(pullMock).toHaveBeenCalledTimes(2);
+    expect(sync.snapshot().sharingDeclined).toEqual(result.sharingDeclined);
+
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(pullMock).toHaveBeenCalledTimes(3);
+    expect(sync.snapshot().sharingDeclined).toEqual([]);
+    await sync.stop();
+  });
+
   // 0P sync-hardening item 3: a RelayOriginDivergedError (restored/cloned
   // engine.db) is not a dead end — the pass recovers onto a fresh origin,
   // re-pushes, and completes normally instead of failing the pass.
@@ -291,7 +340,11 @@ describe("relaySyncEngine", () => {
     const cap = capture();
     pushMock
       .mockRejectedValueOnce(new RelayOriginDivergedError())
-      .mockResolvedValue({ pushed: 1, originsPushed: ["origin_new"] });
+      .mockResolvedValue({
+        pushed: 1,
+        originsPushed: ["origin_new"],
+        sharingDeclined: [],
+      });
     const sync = engine({ capture: cap });
     await sync.start();
 
@@ -437,127 +490,6 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(100);
     await vi.runAllTimersAsync();
     expect(sync.snapshot().conflictCount).toBe(0);
-  });
-
-  it("counts unmatched remote conflict resolutions instead of swallowing them", async () => {
-    pullMock.mockImplementationOnce(async () =>
-      pullResult({
-        pendingConflictResolves: 1,
-        pendingResolves: [
-          { remoteConflictId: "peer-conflict-1", localConflictId: null, path: "x.md" },
-        ],
-      }),
-    );
-    const sync = engine({ capture: capture() });
-    await sync.start();
-    expect(sync.snapshot().unmatchedRemoteResolves).toBe(1);
-  });
-
-  // 0P-C gate fix: unmatchedRemoteResolves is a LIFECYCLED set of pending
-  // resolve identities, not a session-sticky monotone counter. The same
-  // remote resolution re-reported across passes never double-counts, and it
-  // clears when its local conflict closes (local resolution or a later sync
-  // pass converging it).
-  it("clears a pending remote resolve once its local conflict is no longer open", async () => {
-    let openConflictIds: string[] = ["conflict-local-1"];
-    pullMock
-      .mockImplementationOnce(async () =>
-        pullResult({
-          pendingConflictResolves: 1,
-          pendingResolves: [
-            {
-              remoteConflictId: "peer-conflict-1",
-              localConflictId: "conflict-local-1",
-              path: "notes/x.md",
-            },
-          ],
-        }),
-      )
-      .mockImplementationOnce(async () =>
-        // The peer retries the same resolve on the next pass (idempotent
-        // re-report): identity dedupe keeps the count at 1, not 2.
-        pullResult({
-          pendingConflictResolves: 1,
-          pendingResolves: [
-            {
-              remoteConflictId: "peer-conflict-1",
-              localConflictId: "conflict-local-1",
-              path: "notes/x.md",
-            },
-          ],
-        }),
-      )
-      .mockImplementation(async () => pullResult());
-    const sync = createRelaySyncEngine({
-      rootDir: "/tmp/workspace",
-      remoteWorkspaceId: "workspace-a",
-      relay: { baseUrl: "http://relay.test", token: "token" },
-      operations: mockOperations(),
-      capture: capture(),
-      onChange: vi.fn(),
-      listOpenConflictIds: async () => openConflictIds,
-      debounceMs: 100,
-      nowMs: () => 12345,
-    });
-    await sync.start();
-    expect(sync.snapshot().unmatchedRemoteResolves).toBe(1);
-    expect(sync.snapshot().conflictCount).toBe(1);
-
-    sync.queueSync();
-    await vi.advanceTimersByTimeAsync(100);
-    await vi.runAllTimersAsync();
-    expect(sync.snapshot().unmatchedRemoteResolves).toBe(1);
-
-    // The user resolves the conflict locally (or a later pull converges it):
-    // the next pass drops the pending resolve along with the conflict.
-    openConflictIds = [];
-    sync.queueSync();
-    await vi.advanceTimersByTimeAsync(100);
-    await vi.runAllTimersAsync();
-    expect(sync.snapshot().unmatchedRemoteResolves).toBe(0);
-    expect(sync.snapshot().conflictCount).toBe(0);
-  });
-
-  it("a pending resolve that matched no local conflict persists until explicitly dismissed", async () => {
-    const changes = vi.fn();
-    pullMock
-      .mockImplementationOnce(async () =>
-        pullResult({
-          pendingConflictResolves: 1,
-          pendingResolves: [
-            { remoteConflictId: "peer-orphan-1", localConflictId: null, path: "gone.md" },
-          ],
-        }),
-      )
-      .mockImplementation(async () => pullResult());
-    const sync = createRelaySyncEngine({
-      rootDir: "/tmp/workspace",
-      remoteWorkspaceId: "workspace-a",
-      relay: { baseUrl: "http://relay.test", token: "token" },
-      operations: mockOperations(),
-      capture: capture(),
-      onChange: changes,
-      listOpenConflictIds: async () => [],
-      debounceMs: 100,
-      nowMs: () => 12345,
-    });
-    await sync.start();
-    expect(sync.snapshot().unmatchedRemoteResolves).toBe(1);
-
-    // No local conflict can ever clear it — later passes keep it visible.
-    sync.queueSync();
-    await vi.advanceTimersByTimeAsync(100);
-    await vi.runAllTimersAsync();
-    expect(sync.snapshot().unmatchedRemoteResolves).toBe(1);
-
-    // The explicit dismissal is the release valve.
-    const changesBefore = changes.mock.calls.length;
-    sync.dismissUnmatchedResolves();
-    expect(sync.snapshot().unmatchedRemoteResolves).toBe(0);
-    expect(changes.mock.calls.length).toBeGreaterThan(changesBefore);
-    // Dismissing an empty set is a no-op (no notify spam).
-    sync.dismissUnmatchedResolves();
-    expect(changes.mock.calls.length).toBe(changesBefore + 1);
   });
 
   // 0P-C gate fix (High): a joining machine must NEVER append ops to the

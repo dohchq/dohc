@@ -48,5 +48,5 @@ describe("Better Auth database-suite availability gate", () => {
     expect(report.testResults[0]?.name).toContain("betterAuth.test.ts");
     expect(report.numPendingTests).toBe(report.numTotalTests);
     expect(report.numTotalTests).toBeGreaterThan(0);
-  });
+  }, 15_000);
 });

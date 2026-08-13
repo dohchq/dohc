@@ -31,14 +31,16 @@ pub mod replication;
 pub mod ydoc;
 
 pub use durable::{
-    claim_base, claim_base_in_tx, close_session, encode_origination_base_in_tx, ensure_marker,
-    load_doc_in_tx, load_persisted, maybe_compact, read_last_settled_sha, read_marker,
-    read_marker_in_tx, record_local_update, record_local_update_creating_marker,
-    record_local_update_creating_marker_guarded, record_local_update_creating_marker_with_hook,
-    record_local_update_with_origin, record_local_update_with_origin_and_hook, record_update_in_tx,
-    rewrite_bare_marker_content_kind, settle, validate_remote_update_for,
-    validate_remote_update_with_pending, AppendOutcome, ClaimOutcome, CloseOutcome, CompactOutcome,
-    Marker, OriginationBase, PersistedDoc, Regime, SettleOutcome,
+    archive_active_lineage_in_tx, claim_base, claim_base_in_tx, close_session,
+    encode_origination_base_in_tx, ensure_marker, load_doc_in_tx, load_persisted, maybe_compact,
+    read_last_settled_sha, read_marker, read_marker_in_tx, record_local_update,
+    record_local_update_creating_marker, record_local_update_creating_marker_guarded,
+    record_local_update_creating_marker_with_hook, record_local_update_with_origin,
+    record_local_update_with_origin_and_hook, record_update_in_tx, replace_lineage_with_successor,
+    replace_lineage_with_successor_in_tx, rewrite_bare_marker_content_kind, settle,
+    validate_remote_update_for, validate_remote_update_with_pending, AppendOutcome, ClaimOutcome,
+    CloseOutcome, CompactOutcome, LineageClaimStatus, Marker, OriginationBase, PersistedDoc,
+    Regime, SettleOutcome, SuccessorInstallOutcome, SuccessorReplacement,
 };
 pub use error::CollabError;
 pub use lease::{Lease, LeaseRegistry};
@@ -48,8 +50,9 @@ pub use replication::{
     UpdateOrigin,
 };
 pub use ydoc::{
-    merge_updates, ContentKind, OffsetMode, Projection, Ydoc, ROOT_BODY, ROOT_FRONTMATTER,
-    ROOT_META, ROOT_PLAINTEXT,
+    fresh_successor_base, merge_updates, ContentKind, OffsetMode, Projection, SuccessorBase,
+    SuccessorIdentity, SuccessorIdentityInput, Ydoc, LINEAGE_EPOCH_META_KEY, ROOT_BODY,
+    ROOT_FRONTMATTER, ROOT_META, ROOT_PLAINTEXT,
 };
 
 // The content-addressing primitive is shared with the storage layer so a

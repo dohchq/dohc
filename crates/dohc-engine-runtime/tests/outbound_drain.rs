@@ -12,7 +12,7 @@ use dohc_engine_runtime::{
 use dohc_engine_storage::{EngineStore, StorageError, hex_sha256};
 use dohc_engine_sync::{
     ApplyOutcome, MAX_PAYLOAD_JSON_BYTES, ReplicationEnvelope, apply_moment_envelope_detailed,
-    apply_secret_envelope, apply_version_envelope,
+    apply_replication_envelope, apply_secret_envelope, apply_version_envelope,
 };
 use dohc_engine_testkit::ScratchDir;
 use rusqlite::params;
@@ -248,7 +248,7 @@ fn secret_file_content_rows(
 }
 
 fn copy_op_blobs(source: &EngineStore, peer: &mut EngineStore, op: &LoggedOp) {
-    let shas = if op.op_kind == "moment.append" {
+    let mut shas = if op.op_kind == "moment.append" {
         vec![(
             op.payload["payloadAfterBlobSha256"]
                 .as_str()
@@ -291,6 +291,33 @@ fn copy_op_blobs(source: &EngineStore, peer: &mut EngineStore, op: &LoggedOp) {
     } else {
         Vec::new()
     };
+    if op.op_kind == "conflict.resolve" {
+        for side in ["current", "incoming", "result"] {
+            let head = &op.payload["transition"][side];
+            if head["present"].as_bool() == Some(true) {
+                shas.push((
+                    head["blobSha256"].as_str().expect("conflict head blob sha"),
+                    head["contentKind"].as_str() == Some("binary"),
+                ));
+            }
+        }
+        if let Some(successor) = op.payload["lineageTransition"]["successor"].as_object() {
+            shas.push((
+                successor["updateBlobSha256"]
+                    .as_str()
+                    .expect("successor update sha"),
+                true,
+            ));
+            shas.push((
+                successor["stateVectorBlobSha256"]
+                    .as_str()
+                    .expect("successor state-vector sha"),
+                true,
+            ));
+        }
+    }
+    shas.sort_unstable();
+    shas.dedup();
     for (sha, binary) in shas {
         if binary {
             let bytes = source
@@ -323,14 +350,29 @@ fn apply_logged_op(peer: &mut EngineStore, workspace_id: &str, op: &LoggedOp) {
     let envelope = op.envelope(workspace_id);
     match op.op_kind.as_str() {
         "moment.append" => {
-            let outcome = apply_moment_envelope_detailed(peer, &envelope, &NoFaults)
-                .unwrap_or_else(|error| {
-                    panic!("apply moment envelope {error:?}: {:?}", op.payload)
-                });
+            let outcome = apply_moment_envelope_detailed(
+                peer,
+                &envelope,
+                &NoFaults,
+                &dohc_engine_sync::NoLiveLeases,
+            )
+            .unwrap_or_else(|error| panic!("apply moment envelope {error:?}: {:?}", op.payload));
             let ApplyOutcome::Applied(result) = outcome else {
                 panic!("originated moment outcome {outcome:?}: {:?}", op.payload);
             };
             assert_eq!(result.conflicts_opened, 0, "{:?}", op.payload);
+        }
+        "conflict.resolve" => {
+            assert!(matches!(
+                apply_replication_envelope(
+                    peer,
+                    &envelope,
+                    &NoFaults,
+                    &dohc_engine_sync::NoLiveLeases,
+                )
+                .expect("apply conflict.resolve envelope"),
+                ApplyOutcome::Applied(_)
+            ));
         }
         "version.create" => {
             assert!(matches!(
@@ -564,8 +606,13 @@ async fn moment_append_sheds_oversized_before_metadata_without_truncating_the_wr
             Ok::<_, StorageError>(())
         })
         .expect("prime peer sequence");
-    apply_moment_envelope_detailed(&mut peer_store, &op.envelope(workspace_id), &NoFaults)
-        .expect("apply trimmed moment envelope");
+    apply_moment_envelope_detailed(
+        &mut peer_store,
+        &op.envelope(workspace_id),
+        &NoFaults,
+        &dohc_engine_sync::NoLiveLeases,
+    )
+    .expect("apply trimmed moment envelope");
 }
 
 #[tokio::test]
@@ -875,6 +922,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 request_id: None,
                 claim_foreign_head: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -895,6 +943,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 request_id: None,
                 claim_foreign_head: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -914,6 +963,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 only_if_capture_origin: false,
                 allow_ydoc_origin: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1366,8 +1416,10 @@ async fn conflict_resolution_moment_replays_to_the_resolved_text_on_a_clean_peer
     let ops = local_ops(&source_db);
     assert_eq!(
         ops.iter().map(|op| op.op_kind.as_str()).collect::<Vec<_>>(),
-        ["moment.append", "moment.append"]
+        ["moment.append", "conflict.resolve", "moment.append"]
     );
+    assert_eq!(ops[1].payload["effects"][0]["momentId"], "moment-resolved");
+    assert_eq!(ops[2].payload["conflictId"], "conflict-resolve-outbound");
     let peer = ScratchDir::new().expect("peer scratch");
     let peer_db = peer.engine_db_path().expect("peer db");
     initialize_workspace(&peer_db, workspace_id, false);
@@ -1467,10 +1519,14 @@ async fn conflict_resolution_delete_replays_to_an_absent_head_on_a_clean_peer() 
     let ops = local_ops(&source_db);
     assert_eq!(
         ops.iter().map(|op| op.op_kind.as_str()).collect::<Vec<_>>(),
-        ["moment.append", "moment.append"]
+        ["moment.append", "conflict.resolve", "moment.append"]
     );
-    assert_eq!(ops[1].payload["momentId"], "moment-resolved-delete");
-    assert_eq!(ops[1].payload["operation"], "delete");
+    assert_eq!(
+        ops[1].payload["effects"][0]["momentId"],
+        "moment-resolved-delete"
+    );
+    assert_eq!(ops[2].payload["momentId"], "moment-resolved-delete");
+    assert_eq!(ops[2].payload["operation"], "delete");
     let peer = ScratchDir::new().expect("peer scratch");
     let peer_db = peer.engine_db_path().expect("peer db");
     initialize_workspace(&peer_db, workspace_id, false);
@@ -1540,7 +1596,14 @@ async fn conflict_resolution_binary_write_replays_to_the_incoming_bytes_on_a_cle
                 metadata: ConflictMetadata::origin("api"),
                 base: ConflictFileState::text(path, None),
                 current: ConflictFileState::text(path, Some(current)),
-                incoming: ConflictFileState::binary(path, incoming_sha.clone()),
+                incoming: ConflictFileState::binary_head(
+                    path,
+                    incoming_sha.clone(),
+                    incoming_bytes.len() as i64,
+                    "incoming-binary-object",
+                    "incoming-binary-moment",
+                    20,
+                ),
             }),
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -1576,10 +1639,14 @@ async fn conflict_resolution_binary_write_replays_to_the_incoming_bytes_on_a_cle
     let ops = local_ops(&source_db);
     assert_eq!(
         ops.iter().map(|op| op.op_kind.as_str()).collect::<Vec<_>>(),
-        ["moment.append", "moment.append"]
+        ["moment.append", "conflict.resolve", "moment.append"]
     );
-    assert_eq!(ops[1].payload["momentId"], "moment-resolved-binary");
-    assert_eq!(ops[1].payload["payloadAfterContentKind"], "binary");
+    assert_eq!(
+        ops[1].payload["effects"][0]["momentId"],
+        "moment-resolved-binary"
+    );
+    assert_eq!(ops[2].payload["momentId"], "moment-resolved-binary");
+    assert_eq!(ops[2].payload["payloadAfterContentKind"], "binary");
     let peer = ScratchDir::new().expect("peer scratch");
     let peer_db = peer.engine_db_path().expect("peer db");
     initialize_workspace(&peer_db, workspace_id, false);

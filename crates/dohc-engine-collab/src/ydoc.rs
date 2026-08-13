@@ -32,6 +32,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use yrs::types::text::YChange;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
@@ -49,6 +50,8 @@ use crate::limits::{MAX_PROJECTION_BYTES, MAX_PROJECTION_DEPTH, MAX_PROJECTION_N
 pub const ROOT_FRONTMATTER: &str = "frontmatter";
 /// Secondary map root (engine metadata).
 pub const ROOT_META: &str = "meta";
+/// Reserved engine metadata that identifies one immutable lineage epoch.
+pub const LINEAGE_EPOCH_META_KEY: &str = "dohcLineageEpoch";
 /// The rich-document body: a ProseMirror `XmlFragment`.
 pub const ROOT_BODY: &str = "body";
 /// The plaintext-document body: a single `Y.Text`.
@@ -92,6 +95,154 @@ impl ContentKind {
             ContentKind::Richdoc
         }
     }
+}
+
+const SUCCESSOR_EPOCH_DOMAIN: &[u8] = b"dohc:ydoc-successor-epoch:v1";
+const SUCCESSOR_CLIENT_DOMAIN: &[u8] = b"dohc:ydoc-successor-client:v1";
+
+/// The deterministic identity of one fresh successor lineage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuccessorIdentity {
+    epoch_tag: String,
+    client_id: u64,
+    content_kind: ContentKind,
+    predecessor_state_vector_sha256: String,
+    artifact_preimage_sha256: String,
+    result_sha256: String,
+}
+
+/// Every durable value that defines one deterministic successor identity.
+#[derive(Debug, Clone, Copy)]
+pub struct SuccessorIdentityInput<'a> {
+    pub key: &'a crate::DocKey,
+    pub predecessor_claim_id: &'a str,
+    pub predecessor_state_vector_sha256: &'a str,
+    pub artifact_op_kind: &'a str,
+    pub artifact_id: &'a str,
+    pub artifact_preimage_sha256: &'a str,
+    pub content_kind: ContentKind,
+    pub result_sha256: &'a str,
+}
+
+impl SuccessorIdentity {
+    /// Bind a successor to its predecessor, artifact, object, and exact result.
+    pub fn derive(input: SuccessorIdentityInput<'_>) -> Self {
+        let SuccessorIdentityInput {
+            key,
+            predecessor_claim_id,
+            predecessor_state_vector_sha256,
+            artifact_op_kind,
+            artifact_id,
+            artifact_preimage_sha256,
+            content_kind,
+            result_sha256,
+        } = input;
+        let mut identity = Vec::new();
+        identity.extend_from_slice(SUCCESSOR_EPOCH_DOMAIN);
+        for field in [
+            key.workspace_id.as_str(),
+            key.version_id.as_str(),
+            key.object_id.as_str(),
+            predecessor_claim_id,
+            predecessor_state_vector_sha256,
+            artifact_op_kind,
+            artifact_id,
+            artifact_preimage_sha256,
+            content_kind.as_str(),
+            result_sha256,
+        ] {
+            let length = u64::try_from(field.len()).unwrap_or(u64::MAX);
+            identity.extend_from_slice(&length.to_be_bytes());
+            identity.extend_from_slice(field.as_bytes());
+        }
+        let epoch_tag = crate::hex_sha256(&identity);
+        let mut client_hash = Sha256::new();
+        client_hash.update(SUCCESSOR_CLIENT_DOMAIN);
+        client_hash.update(epoch_tag.as_bytes());
+        let digest = client_hash.finalize();
+        let mut client_bytes = [0_u8; 8];
+        client_bytes.copy_from_slice(&digest[..8]);
+        let client_id = (u64::from_be_bytes(client_bytes) & ((1_u64 << 53) - 1)).max(1);
+        Self {
+            epoch_tag,
+            client_id,
+            content_kind,
+            predecessor_state_vector_sha256: predecessor_state_vector_sha256.to_owned(),
+            artifact_preimage_sha256: artifact_preimage_sha256.to_owned(),
+            result_sha256: result_sha256.to_owned(),
+        }
+    }
+
+    /// The immutable tag stored in the successor's engine metadata root.
+    pub fn epoch_tag(&self) -> &str {
+        &self.epoch_tag
+    }
+}
+
+/// The encoded base and claim for one fresh successor lineage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuccessorBase {
+    pub lineage_claim_id: String,
+    pub epoch_tag: String,
+    pub content_kind: ContentKind,
+    pub predecessor_state_vector_sha256: String,
+    pub artifact_preimage_sha256: String,
+    pub result_sha256: String,
+    pub update: Vec<u8>,
+    pub state_vector: Vec<u8>,
+}
+
+/// Build a fresh Y.Doc from canonical text without merging predecessor items.
+pub fn fresh_successor_base(
+    identity: &SuccessorIdentity,
+    markdown: &str,
+) -> Result<SuccessorBase, CollabError> {
+    let observed_result = crate::hex_sha256(markdown.as_bytes());
+    if observed_result != identity.result_sha256 {
+        return Err(CollabError::SuccessorResultMismatch {
+            expected: identity.result_sha256.clone(),
+            observed: observed_result,
+        });
+    }
+    let doc = Ydoc {
+        doc: Doc::with_options(Options {
+            client_id: yrs::ClientID::new(identity.client_id),
+            offset_kind: yrs::OffsetKind::Utf16,
+            ..Options::default()
+        }),
+    };
+    let meta = doc.doc.get_or_insert_map(ROOT_META);
+    {
+        let mut txn = doc.doc.transact_mut();
+        meta.insert(&mut txn, "schemaVersion", Any::Number(1.0));
+        if identity.content_kind == ContentKind::Plaintext {
+            meta.insert(&mut txn, "contentKind", "plain-text");
+        }
+        meta.insert(
+            &mut txn,
+            LINEAGE_EPOCH_META_KEY,
+            identity.epoch_tag.as_str(),
+        );
+    }
+    doc.rewrite_content_to_markdown(identity.content_kind, markdown);
+    let projected = doc.project(identity.content_kind)?.markdown;
+    if projected != markdown {
+        return Err(CollabError::SuccessorProjectionMismatch {
+            expected_sha256: crate::hex_sha256(markdown.as_bytes()),
+            observed_sha256: crate::hex_sha256(projected.as_bytes()),
+        });
+    }
+    let update = doc.encode_full_state();
+    Ok(SuccessorBase {
+        lineage_claim_id: crate::hex_sha256(&update),
+        epoch_tag: identity.epoch_tag.clone(),
+        content_kind: identity.content_kind,
+        predecessor_state_vector_sha256: identity.predecessor_state_vector_sha256.clone(),
+        artifact_preimage_sha256: identity.artifact_preimage_sha256.clone(),
+        result_sha256: identity.result_sha256.clone(),
+        state_vector: doc.encode_state_vector(),
+        update,
+    })
 }
 
 /// A markdown projection of a durable Y.Doc with its provenance. Constraint 4:
@@ -197,6 +348,48 @@ impl Ydoc {
                 reason: e.to_string(),
             })?;
         Ok(())
+    }
+
+    /// Apply an update only when a complete scratch replay keeps the epoch tag.
+    pub fn apply_preserving_lineage_epoch(
+        &self,
+        bytes: &[u8],
+        expected_epoch_tag: &str,
+    ) -> Result<(), CollabError> {
+        let observed = self.lineage_epoch_tag();
+        if observed.as_deref() != Some(expected_epoch_tag) {
+            return Err(CollabError::LineageEpochChanged {
+                expected: expected_epoch_tag.to_owned(),
+                observed: observed.unwrap_or_else(|| "<missing>".to_owned()),
+            });
+        }
+        let scratch = Ydoc::wire();
+        scratch.apply(&self.encode_full_state())?;
+        if scratch.has_pending_dependencies() {
+            return Err(CollabError::MissingDependencies);
+        }
+        scratch.apply(bytes)?;
+        if scratch.has_pending_dependencies() {
+            return Err(CollabError::MissingDependencies);
+        }
+        let observed = scratch.lineage_epoch_tag();
+        if observed.as_deref() != Some(expected_epoch_tag) {
+            return Err(CollabError::LineageEpochChanged {
+                expected: expected_epoch_tag.to_owned(),
+                observed: observed.unwrap_or_else(|| "<missing>".to_owned()),
+            });
+        }
+        self.apply(bytes)
+    }
+
+    /// Read the reserved lineage epoch from the engine metadata root.
+    pub fn lineage_epoch_tag(&self) -> Option<String> {
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let txn = self.doc.transact();
+        match meta.get(&txn, LINEAGE_EPOCH_META_KEY) {
+            Some(Out::Any(Any::String(value))) => Some(value.to_string()),
+            _ => None,
+        }
     }
 
     pub(crate) fn has_missing_updates(&self) -> bool {
@@ -3977,6 +4170,211 @@ mod projection_tests {
                 max_nodes: MAX_PROJECTION_NODES
             })
         ));
+    }
+
+    #[test]
+    fn a_full_body_rewrite_cannot_erase_an_unseen_concurrent_edit() {
+        const RESOLVED: &str = "resolved";
+
+        let base = Ydoc::wire();
+        base.richdoc_append_paragraph("base");
+        let base_state = base.encode_full_state();
+
+        let origin = Ydoc::wire();
+        origin.apply(&base_state).expect("origin accepts base");
+        let peer = Ydoc::wire();
+        peer.apply(&base_state).expect("peer accepts base");
+        peer.richdoc_append_paragraph("peer unseen edit");
+
+        let rewrite = origin.rewrite_content_to_markdown(ContentKind::Richdoc, RESOLVED);
+        peer.apply(&rewrite).expect("peer accepts rewrite");
+        origin
+            .apply(&peer.encode_full_state())
+            .expect("origin accepts peer union");
+        peer.apply(&origin.encode_full_state())
+            .expect("peer accepts origin union");
+
+        let projection = peer
+            .project(ContentKind::Richdoc)
+            .expect("peer projection")
+            .markdown;
+        assert_ne!(projection, RESOLVED);
+        assert!(projection.contains("peer unseen edit"));
+    }
+
+    #[test]
+    fn a_fresh_successor_is_stable_distinct_and_keeps_its_epoch_immutable() {
+        let key = crate::DocKey::new("ws", "main", "object-one").expect("valid key");
+        let chosen = "# Chosen\n\nExact body";
+        let chosen_sha = crate::hex_sha256(chosen.as_bytes());
+        let predecessor_state_vector_sha = "b".repeat(64);
+        let artifact_preimage_sha = "c".repeat(64);
+        let predecessor_claim_id = "a".repeat(64);
+        let first_identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &predecessor_claim_id,
+            predecessor_state_vector_sha256: &predecessor_state_vector_sha,
+            artifact_op_kind: "moment.append",
+            artifact_id: "moment-one",
+            artifact_preimage_sha256: &artifact_preimage_sha,
+            content_kind: ContentKind::Richdoc,
+            result_sha256: &chosen_sha,
+        });
+        let same_identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &predecessor_claim_id,
+            predecessor_state_vector_sha256: &predecessor_state_vector_sha,
+            artifact_op_kind: "moment.append",
+            artifact_id: "moment-one",
+            artifact_preimage_sha256: &artifact_preimage_sha,
+            content_kind: ContentKind::Richdoc,
+            result_sha256: &chosen_sha,
+        });
+        let next_identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &predecessor_claim_id,
+            predecessor_state_vector_sha256: &predecessor_state_vector_sha,
+            artifact_op_kind: "moment.append",
+            artifact_id: "moment-two",
+            artifact_preimage_sha256: &artifact_preimage_sha,
+            content_kind: ContentKind::Richdoc,
+            result_sha256: &chosen_sha,
+        });
+        let other_vector = "d".repeat(64);
+        let other_vector_identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &predecessor_claim_id,
+            predecessor_state_vector_sha256: &other_vector,
+            artifact_op_kind: "moment.append",
+            artifact_id: "moment-one",
+            artifact_preimage_sha256: &artifact_preimage_sha,
+            content_kind: ContentKind::Richdoc,
+            result_sha256: &chosen_sha,
+        });
+        let other_preimage = "e".repeat(64);
+        let other_preimage_identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &predecessor_claim_id,
+            predecessor_state_vector_sha256: &predecessor_state_vector_sha,
+            artifact_op_kind: "moment.append",
+            artifact_id: "moment-one",
+            artifact_preimage_sha256: &other_preimage,
+            content_kind: ContentKind::Richdoc,
+            result_sha256: &chosen_sha,
+        });
+
+        let first = fresh_successor_base(&first_identity, chosen).expect("first successor");
+        let replay = fresh_successor_base(&same_identity, chosen).expect("same successor");
+        let next = fresh_successor_base(&next_identity, chosen).expect("next successor");
+        let other_vector =
+            fresh_successor_base(&other_vector_identity, chosen).expect("other vector successor");
+        let other_preimage = fresh_successor_base(&other_preimage_identity, chosen)
+            .expect("other preimage successor");
+
+        assert_eq!(first, replay, "the same identity has one byte-stable base");
+        assert_ne!(
+            first.lineage_claim_id, next.lineage_claim_id,
+            "distinct epochs with equal text have distinct claims"
+        );
+        assert_ne!(
+            first.lineage_claim_id, other_vector.lineage_claim_id,
+            "the predecessor state vector is part of successor identity"
+        );
+        assert_ne!(
+            first.lineage_claim_id, other_preimage.lineage_claim_id,
+            "the artifact preimage is part of successor identity"
+        );
+        let loaded = Ydoc::wire();
+        loaded.apply(&first.update).expect("load successor base");
+        assert_eq!(
+            loaded
+                .project(ContentKind::Richdoc)
+                .expect("projection")
+                .markdown,
+            chosen
+        );
+        assert_eq!(
+            loaded.lineage_epoch_tag().as_deref(),
+            Some(first.epoch_tag.as_str())
+        );
+
+        let plain_predecessor = "c".repeat(64);
+        let plain_vector = "d".repeat(64);
+        let plain_preimage = "e".repeat(64);
+        let plain_result = crate::hex_sha256(b"plain text\nwith an exact second line");
+        let plain_identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &plain_predecessor,
+            predecessor_state_vector_sha256: &plain_vector,
+            artifact_op_kind: "moment.append",
+            artifact_id: "moment-plain",
+            artifact_preimage_sha256: &plain_preimage,
+            content_kind: ContentKind::Plaintext,
+            result_sha256: &plain_result,
+        });
+        let plain_text = "plain text\nwith an exact second line";
+        let plain = fresh_successor_base(&plain_identity, plain_text).expect("plain successor");
+        let plain_replay =
+            fresh_successor_base(&plain_identity, plain_text).expect("plain successor replay");
+        assert_eq!(plain, plain_replay);
+        let loaded_plain = Ydoc::wire();
+        loaded_plain
+            .apply(&plain.update)
+            .expect("load plain successor base");
+        assert_eq!(
+            loaded_plain
+                .project(ContentKind::Plaintext)
+                .expect("plain projection")
+                .markdown,
+            plain_text
+        );
+
+        let mismatched_result = "0".repeat(64);
+        let mismatched_identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &predecessor_claim_id,
+            predecessor_state_vector_sha256: &predecessor_state_vector_sha,
+            artifact_op_kind: "moment.append",
+            artifact_id: "moment-mismatched",
+            artifact_preimage_sha256: &artifact_preimage_sha,
+            content_kind: ContentKind::Richdoc,
+            result_sha256: &mismatched_result,
+        });
+        let error = fresh_successor_base(&mismatched_identity, chosen)
+            .expect_err("the artifact result digest must match the canonical text");
+        assert!(matches!(
+            error,
+            CollabError::SuccessorResultMismatch { expected, observed }
+                if expected == "0".repeat(64) && observed == chosen_sha
+        ));
+
+        let changer = Ydoc::wire();
+        changer.apply(&first.update).expect("load changer base");
+        let change_meta = changer.doc.get_or_insert_map(ROOT_META);
+        let changed = changer.with_delta(|txn| {
+            change_meta.insert(txn, LINEAGE_EPOCH_META_KEY, "forged-epoch");
+        });
+        let remover = Ydoc::wire();
+        remover.apply(&first.update).expect("load remover base");
+        let remove_meta = remover.doc.get_or_insert_map(ROOT_META);
+        let removed = remover.with_delta(|txn| {
+            remove_meta.remove(txn, LINEAGE_EPOCH_META_KEY);
+        });
+
+        for update in [changed, removed] {
+            let victim = Ydoc::wire();
+            victim.apply(&first.update).expect("load victim base");
+            let before = victim.encode_full_state();
+            let error = victim
+                .apply_preserving_lineage_epoch(&update, &first.epoch_tag)
+                .expect_err("a delta cannot change or remove the lineage epoch");
+            assert_eq!(error.code(), "lineage-epoch-changed");
+            assert_eq!(
+                victim.encode_full_state(),
+                before,
+                "the refusal is state-unchanged"
+            );
+        }
     }
 
     #[test]

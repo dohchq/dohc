@@ -1329,8 +1329,18 @@ describe("sync status IPC contract (#505, #540)", () => {
       lastSyncedAtMs: null,
       historyRecordingUnavailable: false,
       historyShareView: false,
+      sharingDeclined: [
+        {
+          path: "notes/large.md",
+          constraint: "MAX_YDOC_UPDATE_BYTES",
+          limitBytes: 262_144,
+          observedBytes: 280_001,
+        },
+      ],
     };
-    expect(SyncStatusResult.safeParse(status).success).toBe(true);
+    expect(SyncStatusResult.parse(status).sharingDeclined).toEqual(
+      status.sharingDeclined,
+    );
     // Both cause fields are REQUIRED where their neighbours are optional: an
     // omitted boolean would read as "the user chose this", which is the false
     // cause #505 (build failure) and #540 (shared view) exist to kill.

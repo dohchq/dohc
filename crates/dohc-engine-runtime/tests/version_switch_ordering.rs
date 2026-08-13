@@ -1,4 +1,4 @@
-use dohc_engine_collab::{ContentKind, Regime, Ydoc};
+use dohc_engine_collab::{ContentKind, Regime, Ydoc, read_marker};
 use dohc_engine_crypto::create_key_file;
 use dohc_engine_domain::{
     CreateNamedVersion, SecretDelete, SecretDiskIntent, SecretWrite, WriteText,
@@ -7,7 +7,7 @@ use dohc_engine_runtime::{
     ActiveVersionSwitch, CancellationToken, CaptureIngestBinary, NoFaults, RuntimeError,
     SelfWriteRecorder, WorkspaceSupervisor,
 };
-use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
+use dohc_engine_storage::{EngineStore, FaultAction, FaultInjector, FaultPoint};
 use dohc_engine_testkit::{EngineDbScan, ScratchDir, ScriptedFaults};
 use rusqlite::Connection;
 use std::path::PathBuf;
@@ -52,7 +52,7 @@ fn write_for(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn binary_head_is_reported_as_unsettled_instead_of_failing_internally() {
+async fn binary_head_retires_its_ydoc_lineage_before_the_unsettled_scan() {
     const WS: &str = "ws-binary-unsettled";
     const PATH: &str = "notes/binary.md";
     let scratch = ScratchDir::new().expect("scratch");
@@ -112,6 +112,7 @@ async fn binary_head_is_reported_as_unsettled_instead_of_failing_internally() {
                 request_id: None,
                 claim_foreign_head: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -127,8 +128,17 @@ async fn binary_head_is_reported_as_unsettled_instead_of_failing_internally() {
         )
         .await
         .expect("binary head must produce an honest unsettled result");
-    assert_eq!(content_kind, Some(ContentKind::Plaintext));
+    assert_eq!(
+        content_kind, None,
+        "a binary artifact has no live text lineage to block a version operation"
+    );
     supervisor.close(&database).expect("close actor");
+    let store = EngineStore::open(&database, 5).expect("inspect retired lineage");
+    assert_eq!(
+        read_marker(&store, &open.key).expect("read Y.Doc marker"),
+        None,
+        "the binary capture and lineage retirement must commit together"
+    );
 }
 
 struct RewriteAtJobStart {

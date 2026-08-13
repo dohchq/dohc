@@ -74,7 +74,7 @@ class MockDaemon implements EngineDaemonClient {
             nextCursor: null,
             pendingCursor: null,
             changedPaths: [],
-            pendingResolves: [],
+            sharingDeclined: [],
           };
         case "sync.pull":
           return {
@@ -94,17 +94,10 @@ class MockDaemon implements EngineDaemonClient {
                 contentKind: "text",
               },
             ],
-            pendingResolves: [
-              {
-                remoteConflictId: "remote-conflict",
-                localConflictId: "local-conflict",
-                path: "notes/plan.md",
-                reason: "stale-head",
-              },
-            ],
+            sharingDeclined: [],
           };
         case "sync.commitCursor":
-          return { committed: true };
+          return { committed: true, sharingDeclined: [] };
         case "sync.recoverOrigin":
           return {
             oldOriginId: "origin-old",
@@ -213,6 +206,7 @@ describe("EngineRelayClient", () => {
     await expect(client.push()).resolves.toEqual({
       pushed: 3,
       originsPushed: [],
+      sharingDeclined: [],
     });
     const pull = await client.pull();
     expect(pull).toMatchObject({
@@ -226,12 +220,6 @@ describe("EngineRelayClient", () => {
           path: "notes/plan.md",
           operation: "write",
           contentKind: "text",
-        },
-      ],
-      pendingResolves: [
-        {
-          remoteConflictId: "remote-conflict",
-          localConflictId: "local-conflict",
         },
       ],
     });
@@ -286,6 +274,161 @@ describe("EngineRelayClient", () => {
       },
       { method: "sync.claim", params: { workspaceId: "workspace-a" } },
       { method: "sync.probe", params: { workspaceId: "workspace-a" } },
+    ]);
+    await sessions.closeAll();
+  });
+
+  it("carries sharing declines from every workspace pull page", async () => {
+    let pulls = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "sync.pull") return undefined;
+      pulls += 1;
+      return {
+        status: "complete",
+        pushed: 0,
+        fetched: 1,
+        applied: 1,
+        skipped: 0,
+        conflictsOpened: 0,
+        hasMore: pulls === 1,
+        nextCursor: pulls,
+        pendingCursor: { kind: "relay", token: `cursor-${pulls}` },
+        changedPaths: [],
+        refusals: [],
+        sharingDeclined: [
+          {
+            path: pulls === 1 ? "notes/first.md" : "notes/second.md",
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limitBytes: 20,
+            observedBytes: 20 + pulls,
+          },
+        ],
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+
+    const pull = await client.pull();
+
+    expect(
+      pull.sharingDeclined,
+      "the desktop client must not discard the engine's actionable declines",
+    ).toEqual([
+      {
+        path: "notes/first.md",
+        constraint: "MAX_YDOC_UPDATE_BYTES",
+        limitBytes: 20,
+        observedBytes: 21,
+      },
+      {
+        path: "notes/second.md",
+        constraint: "MAX_YDOC_UPDATE_BYTES",
+        limitBytes: 20,
+        observedBytes: 22,
+      },
+    ]);
+    await sessions.closeAll();
+  });
+
+  it("carries the canonical path for an empty-probe push enrollment decline", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "sync.push") return undefined;
+      return {
+        status: "complete",
+        pushed: 0,
+        sharingDeclined: [
+          {
+            path: "notes/oversized.md",
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limitBytes: 20,
+            observedBytes: 21,
+          },
+        ],
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+
+    await expect(client.push()).resolves.toEqual({
+      pushed: 0,
+      originsPushed: [],
+      sharingDeclined: [
+        {
+          path: "notes/oversized.md",
+          constraint: "MAX_YDOC_UPDATE_BYTES",
+          limitBytes: 20,
+          observedBytes: 21,
+        },
+      ],
+    });
+    await sessions.closeAll();
+  });
+
+  it("rejects a sharing decline without a canonical path", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "sync.push") return undefined;
+      return {
+        status: "complete",
+        pushed: 0,
+        sharingDeclined: [
+          {
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limitBytes: 20,
+            observedBytes: 21,
+          },
+        ],
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+
+    await expect(client.push()).rejects.toThrow(
+      "Rust engine sync.push.sharingDeclined[0].path must be a string.",
+    );
+    await sessions.closeAll();
+  });
+
+  it("adds a cursor-commit enrollment decline to the completed pull", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "sync.pull") {
+        return {
+          status: "complete",
+          pushed: 0,
+          fetched: 0,
+          applied: 0,
+          skipped: 0,
+          conflictsOpened: 0,
+          hasMore: false,
+          nextCursor: 0,
+          pendingCursor: { kind: "relay", token: "cursor-enrollment" },
+          changedPaths: [],
+          sharingDeclined: [],
+        };
+      }
+      if (request.method === "sync.commitCursor") {
+        return {
+          committed: true,
+          sharingDeclined: [
+            {
+              path: "notes/commit.md",
+              constraint: "MAX_YDOC_UPDATE_BYTES",
+              limitBytes: 20,
+              observedBytes: 22,
+            },
+          ],
+        };
+      }
+      return undefined;
+    });
+    const { sessions, client } = await harness(daemon);
+
+    const pull = await client.pull();
+    await pull.commitFetchCursor();
+
+    expect(pull.sharingDeclined).toEqual([
+      {
+        path: "notes/commit.md",
+        constraint: "MAX_YDOC_UPDATE_BYTES",
+        limitBytes: 20,
+        observedBytes: 22,
+      },
     ]);
     await sessions.closeAll();
   });
@@ -965,7 +1108,7 @@ describe("EngineRelayClient", () => {
               contentKind: "text",
             },
           ],
-          pendingResolves: [],
+          sharingDeclined: [],
         };
       }
       if (request.method === "share.channel.pull") {

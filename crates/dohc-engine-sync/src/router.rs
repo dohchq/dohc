@@ -2,13 +2,9 @@ use dohc_engine_storage::{EngineStore, FaultInjector};
 
 use crate::{ApplyOutcome, ConflictApplyResult, LeaseProbe, ReplicationEnvelope, SyncError};
 
-/// What one routed envelope produced beyond "it applied". Appliers that fail
-/// closed into a pending decision must reach the caller intact: a conflict
-/// resolve the receiver could not safely apply is acked and the relay cursor
-/// advances, so a count-only result would drop that decision permanently.
-///
-/// A Y.Doc update parked behind a live lease is different: its exact
-/// coordinate is committed to `ydoc_deferred_updates` with the ack, and lease
+/// What one routed envelope produced beyond "it applied". A Y.Doc update
+/// parked behind a live lease has its exact coordinate committed to
+/// `ydoc_deferred_updates` with the ack, and lease
 /// teardown/open (or the next non-leased update) replays it through
 /// `drain_deferred_ydoc_for_key`. It requires no caller action, so the router
 /// deliberately does not carry its transient `YdocApplyResult`. A terminal
@@ -19,15 +15,6 @@ pub struct RoutedApply {
     pub conflict: Option<ConflictApplyResult>,
     pub conflicts_opened: i64,
     pub materialization_changes: Vec<crate::MomentMaterializationChange>,
-}
-
-impl RoutedApply {
-    /// The pending resolution this envelope surfaced, if any.
-    pub fn pending_resolve(&self) -> Option<&crate::PendingResolve> {
-        self.conflict
-            .as_ref()
-            .and_then(|result| result.pending_resolve.as_ref())
-    }
 }
 
 pub(crate) fn redelivered_materialization_changes(
@@ -135,7 +122,7 @@ pub fn apply_replication_envelope(
             },
         ),
         OwnedRoute::Conflict => map_applied(
-            crate::apply_conflict_envelope(store, envelope, faults),
+            crate::apply_conflict_envelope(store, envelope, faults, leases),
             |conflict| {
                 let conflicts_opened = i64::from(conflict.inserted == Some(true));
                 RoutedApply {
@@ -152,7 +139,7 @@ pub fn apply_replication_envelope(
             store, envelope, faults,
         )),
         OwnedRoute::Moment => map_applied(
-            crate::moment_apply::apply_moment_envelope_detailed(store, envelope, faults),
+            crate::moment_apply::apply_moment_envelope_detailed(store, envelope, faults, leases),
             |moment| RoutedApply {
                 conflicts_opened: moment.conflicts_opened,
                 materialization_changes: moment.materialization_changes,
@@ -173,14 +160,16 @@ fn map_applied<T>(
     wrap: impl FnOnce(T) -> RoutedApply,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
     result.map(|outcome| {
-        let (primary, refusals) = outcome.into_primary_and_refusals();
+        let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
         let mapped = match primary {
             ApplyOutcome::Applied(value) => ApplyOutcome::Applied(wrap(value)),
             ApplyOutcome::Refused(refusal) => ApplyOutcome::Refused(refusal),
             ApplyOutcome::Skipped => ApplyOutcome::Skipped,
             ApplyOutcome::Crashed { committed } => ApplyOutcome::Crashed { committed },
-            ApplyOutcome::WithRefusals { .. } => unreachable!("refusals were flattened"),
+            ApplyOutcome::WithDiagnostics { .. } => unreachable!("diagnostics were flattened"),
         };
-        mapped.with_refusals(refusals)
+        mapped
+            .with_refusals(refusals)
+            .with_sharing_declined(sharing_declined)
     })
 }

@@ -63,8 +63,9 @@ pub use materialize::{
     probe_projection_target, run_pending_jobs,
 };
 pub use policy::{
-    PathClassification, classify_engine_file_path, classify_engine_file_path_for_read,
-    classify_engine_file_path_normalized,
+    MAX_CANONICAL_WORKSPACE_PATH_BYTES, PathClassification,
+    canonical_workspace_path_meets_shared_bounds, classify_engine_file_path,
+    classify_engine_file_path_for_read, classify_engine_file_path_normalized,
 };
 pub use reconcile::{
     AbsenceProbe, CaptureOp, DEGRADED_RESCAN_BACKOFF, IngestReason, MAX_QUARANTINED_PATHS,

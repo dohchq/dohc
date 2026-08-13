@@ -5,10 +5,11 @@ use crate::records::{
     DeleteResult, DeleteTextFile, RenameResult, TextSnapshot, WriteResult, WriteText,
 };
 use crate::store::{
-    VersionedTextStore, delete_text_in_tx, hash_fields, lookup_request, moment_exists,
-    next_moment_order, record_request, validate_delete_input, validate_identifier,
-    validate_moment_id, validate_moment_metadata, validate_path, validate_write_input,
-    version_is_active, write_text_in_tx,
+    VersionedTextStore, delete_text_in_tx_without_diagnostic_journal, hash_author_fields,
+    hash_fields, hash_optional_text_fields, lookup_request, moment_exists, next_moment_order,
+    record_request, validate_delete_input, validate_identifier, validate_moment_id,
+    validate_moment_metadata, validate_path, validate_write_input, version_is_active,
+    write_text_in_tx_without_diagnostic_journal,
 };
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
@@ -199,7 +200,7 @@ impl ConflictMetadata {
 /// meaningful destination.
 ///
 /// A binary head carries its own IDENTITY (`binary_object_id` +
-/// `binary_latest_moment_id`) so the exact-head stale gate is as strict for
+/// `binary_latest_moment_id` + `binary_updated_at_ms`) so the exact-head stale gate is as strict for
 /// binary as it is for text (a text side keeps identity inside its
 /// `TextSnapshot`). Without it, any later binary head sharing the same bytes at
 /// the same path would spuriously match the recorded current head and let a
@@ -212,6 +213,7 @@ pub struct ConflictFileState {
     pub binary_byte_length: Option<i64>,
     pub binary_object_id: Option<String>,
     pub binary_latest_moment_id: Option<String>,
+    pub binary_updated_at_ms: Option<i64>,
     pub content_kind: ConflictContentKind,
     pub metadata_summary: Option<String>,
     pub metadata_correlation_id: Option<String>,
@@ -226,6 +228,7 @@ impl ConflictFileState {
             binary_byte_length: None,
             binary_object_id: None,
             binary_latest_moment_id: None,
+            binary_updated_at_ms: None,
             content_kind: ConflictContentKind::Text,
             metadata_summary: None,
             metadata_correlation_id: None,
@@ -242,6 +245,7 @@ impl ConflictFileState {
             binary_byte_length: None,
             binary_object_id: None,
             binary_latest_moment_id: None,
+            binary_updated_at_ms: None,
             content_kind: ConflictContentKind::Binary,
             metadata_summary: None,
             metadata_correlation_id: None,
@@ -262,6 +266,7 @@ impl ConflictFileState {
         byte_length: i64,
         object_id: impl Into<String>,
         latest_moment_id: impl Into<String>,
+        updated_at_ms: i64,
     ) -> Self {
         ConflictFileState {
             path: path.into(),
@@ -270,6 +275,7 @@ impl ConflictFileState {
             binary_byte_length: Some(byte_length),
             binary_object_id: Some(object_id.into()),
             binary_latest_moment_id: Some(latest_moment_id.into()),
+            binary_updated_at_ms: Some(updated_at_ms),
             content_kind: ConflictContentKind::Binary,
             metadata_summary: None,
             metadata_correlation_id: None,
@@ -501,27 +507,27 @@ pub fn live_state_matches_conflict_current(
             match (
                 &recorded.binary_object_id,
                 &recorded.binary_latest_moment_id,
+                recorded.binary_updated_at_ms,
             ) {
                 // The recorded side carries head identity (the M2 no-clobber
                 // path). As strict as text: require the SAME object + latest
                 // moment, so a same-bytes-but-recreated binary head does NOT
                 // match and cannot be clobbered by a mirrored resolve.
-                (Some(_), Some(_)) => {
+                (Some(_), Some(_), Some(_)) => {
                     live.binary_object_id == recorded.binary_object_id
                         && live.binary_latest_moment_id == recorded.binary_latest_moment_id
+                        && live.binary_updated_at_ms == recorded.binary_updated_at_ms
                 }
                 // Legacy NULL-identity side (`ConflictFileState::binary()` or a
                 // v9-era binary conflict row) has no identity to compare. Fall
                 // back to the pre-M2 path+sha match (already satisfied above)
                 // rather than mismatching Some(..) != None and deferring the
                 // resolve FOREVER as StaleHead.
-                (None, None) => true,
-                // Partially-populated identity (Some,None)/(None,Some) can only
-                // come from corruption — a real binary head always carries BOTH
-                // object + latest moment together (`binary_head`), and a legacy
-                // side carries NEITHER. Fail closed (defer as StaleHead) rather
-                // than let a half-identity side bypass the exact-head check and
-                // match a recreated same-bytes head.
+                (None, None, None) => true,
+                // Partially-populated identity can only come from corruption —
+                // a real binary head carries object + latest moment + update
+                // time together (`binary_head`), and a legacy side carries none.
+                // Fail closed rather than match a recreated same-bytes head.
                 _ => false,
             }
         }
@@ -763,18 +769,21 @@ impl VersionedTextStore<'_> {
         input: &ResolveTextConflict,
         faults: &dyn FaultInjector,
     ) -> Result<ResolveTextConflictResult, DomainError> {
-        self.resolve_text_conflict_with(input, faults, |_, _| Ok(()))
+        self.resolve_text_conflict_with(input, faults, |_, _, _| Ok(()), |_, _, ()| Ok(()))
     }
 
-    /// Resolve a conflict with a caller-supplied same-transaction side effect.
-    pub fn resolve_text_conflict_with<F>(
+    /// Resolve a conflict with caller-supplied same-transaction checks and
+    /// side effects.
+    pub fn resolve_text_conflict_with<T, B, A>(
         &mut self,
         input: &ResolveTextConflict,
         faults: &dyn FaultInjector,
-        after: F,
+        before: B,
+        after: A,
     ) -> Result<ResolveTextConflictResult, DomainError>
     where
-        F: FnOnce(&Transaction<'_>, &ResolveTextConflictResult) -> Result<(), DomainError>,
+        B: FnOnce(&Transaction<'_>, &TextConflict, &ConflictFileState) -> Result<T, DomainError>,
+        A: FnOnce(&Transaction<'_>, &ResolveTextConflictResult, T) -> Result<(), DomainError>,
     {
         // Non-empty only. What this request contributes to its own answer is
         // bounded by the reservation the caller passes in
@@ -790,13 +799,25 @@ impl VersionedTextStore<'_> {
             ResolveConflictKind::ApplyIncoming => ("apply-incoming", ""),
             ResolveConflictKind::ApplyMerged { text } => ("apply-merged", text.as_str()),
         };
+        let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
+        let (correlation_kind, correlation_id) =
+            hash_optional_text_fields(input.metadata_correlation_id.as_deref());
+        let (author_kind, author_json) = hash_author_fields(input.author_json.as_deref());
         let payload_hash = hash_fields(&[
             input.workspace_id.as_bytes(),
             input.conflict_id.as_bytes(),
             resolution_kind.as_bytes(),
             merged_text.as_bytes(),
+            input.object_id.as_bytes(),
             input.write_moment_id.as_bytes(),
             input.delete_moment_id.as_bytes(),
+            input.metadata_origin.as_bytes(),
+            summary_kind,
+            summary,
+            correlation_kind,
+            correlation_id,
+            author_kind,
+            author_json,
         ]);
         let outcome = self.store.write_with(faults, |tx| {
             if let Some(request_id) = &input.request_id
@@ -818,6 +839,11 @@ impl VersionedTextStore<'_> {
             let mut conflict =
                 load_text_conflict_in_tx(tx, &input.workspace_id, &input.conflict_id)?
                     .ok_or(DomainError::ConflictNotFound)?;
+            if conflict.status != ConflictStatus::Open {
+                return Err(DomainError::InvalidInput {
+                    reason: "conflict is not open",
+                });
+            }
             // BEFORE any write. The caller's answer carries this conflict, one
             // control frame has to hold that answer, and withholding removes
             // only BODIES — so a conflict whose remaining strings cannot fit
@@ -866,6 +892,7 @@ impl VersionedTextStore<'_> {
             if !live_state_matches_conflict_current(&live, &conflict.current) {
                 return Err(DomainError::ConflictStaleTarget);
             }
+            let prepared = before(tx, &conflict, &live)?;
 
             let mut write = None;
             let mut deletion = None;
@@ -908,7 +935,10 @@ impl VersionedTextStore<'_> {
                                     &conflict.path,
                                 );
                                 validate_delete_input(&delete_input)?;
-                                let result = delete_text_in_tx(tx, &delete_input)?;
+                                let result = delete_text_in_tx_without_diagnostic_journal(
+                                    tx,
+                                    &delete_input,
+                                )?;
                                 enqueue_delete(tx, &result, "resolve")?;
                                 deletion = Some(result);
                             }
@@ -928,7 +958,7 @@ impl VersionedTextStore<'_> {
                                 materialize: Some(conflict_state_preimage(&conflict.current)),
                                 now_ms: input.now_ms,
                             };
-                            write_binary_file_in_tx(tx, &binary_input)?;
+                            write_binary_file_in_tx_without_diagnostic_journal(tx, &binary_input)?;
                             binary_write = Some(BinaryResolveWrite {
                                 path: destination,
                                 binary_sha256,
@@ -943,7 +973,8 @@ impl VersionedTextStore<'_> {
                                 &input.write_moment_id,
                             );
                             validate_write_input(&write_input)?;
-                            let result = write_text_in_tx(tx, &write_input)?;
+                            let result =
+                                write_text_in_tx_without_diagnostic_journal(tx, &write_input)?;
                             let preimage = if destination == conflict.path {
                                 conflict_state_preimage(&conflict.current)
                             } else {
@@ -956,7 +987,8 @@ impl VersionedTextStore<'_> {
                         let delete_input =
                             delete_input(input, &conflict.target_version_id, &conflict.path);
                         validate_delete_input(&delete_input)?;
-                        let result = delete_text_in_tx(tx, &delete_input)?;
+                        let result =
+                            delete_text_in_tx_without_diagnostic_journal(tx, &delete_input)?;
                         // A binary head's removal carries its own preimage and
                         // job id; the text enqueue would hash an empty body.
                         if !enqueue_binary_delete(tx, &result)? {
@@ -978,7 +1010,7 @@ impl VersionedTextStore<'_> {
                         &input.write_moment_id,
                     );
                     validate_write_input(&write_input)?;
-                    let result = write_text_in_tx(tx, &write_input)?;
+                    let result = write_text_in_tx_without_diagnostic_journal(tx, &write_input)?;
                     let preimage = conflict
                         .current
                         .snapshot
@@ -1001,12 +1033,6 @@ impl VersionedTextStore<'_> {
             if !update_text_conflict_row(tx, &input.workspace_id, &input.conflict_id, &update)? {
                 return Err(DomainError::ConflictNotFound);
             }
-            tx.execute(
-                "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-                 VALUES (?1, 'conflict.resolve', ?2)",
-                params![conflict.conflict_id, input.now_ms],
-            )
-            .map_err(DomainError::sql_persist)?;
             record_request(
                 tx,
                 input.request_id.as_deref(),
@@ -1024,7 +1050,7 @@ impl VersionedTextStore<'_> {
                 delete: deletion,
                 binary_write,
             };
-            after(tx, &result)?;
+            after(tx, &result, prepared)?;
             Ok::<_, DomainError>(result)
         })?;
         committed(outcome)
@@ -1188,6 +1214,23 @@ pub fn write_binary_file_in_tx(
     tx: &Transaction<'_>,
     input: &WriteBinaryFile,
 ) -> Result<(), DomainError> {
+    write_binary_file_in_tx_with_journal(tx, input, true)
+}
+
+/// Apply a binary write inside a caller-owned compound replication
+/// transaction without appending the legacy payload-free journal row.
+fn write_binary_file_in_tx_without_diagnostic_journal(
+    tx: &Transaction<'_>,
+    input: &WriteBinaryFile,
+) -> Result<(), DomainError> {
+    write_binary_file_in_tx_with_journal(tx, input, false)
+}
+
+fn write_binary_file_in_tx_with_journal(
+    tx: &Transaction<'_>,
+    input: &WriteBinaryFile,
+    journal: bool,
+) -> Result<(), DomainError> {
     validate_moment_metadata(
         input.metadata_origin.as_str(),
         input.metadata_summary.as_deref(),
@@ -1317,7 +1360,7 @@ pub fn write_binary_file_in_tx(
         (input.object_id.clone(), None)
     };
 
-    let moment_order = persist_binary_head_in_tx(
+    let moment_order = persist_binary_head_in_tx_with_journal(
         tx,
         &PersistBinaryHead {
             workspace_id: &input.workspace_id,
@@ -1333,6 +1376,7 @@ pub fn write_binary_file_in_tx(
             now_ms: input.now_ms,
         },
         before,
+        journal,
     )?;
     if let Some(preimage) = &input.materialize
         && version_is_active(tx, &input.workspace_id, &input.version_id)?
@@ -1379,6 +1423,15 @@ pub fn persist_binary_head_in_tx(
     tx: &Transaction<'_>,
     head: &PersistBinaryHead<'_>,
     before: Option<(String, Option<String>, Option<String>, String)>,
+) -> Result<i64, DomainError> {
+    persist_binary_head_in_tx_with_journal(tx, head, before, true)
+}
+
+fn persist_binary_head_in_tx_with_journal(
+    tx: &Transaction<'_>,
+    head: &PersistBinaryHead<'_>,
+    before: Option<(String, Option<String>, Option<String>, String)>,
+    journal: bool,
 ) -> Result<i64, DomainError> {
     let moment_order = next_moment_order(tx)?;
     let (
@@ -1466,12 +1519,14 @@ pub fn persist_binary_head_in_tx(
         ],
     )
     .map_err(DomainError::sql_persist)?;
-    tx.execute(
-        "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-         VALUES (?1, 'moment.append', ?2)",
-        params![head.object_id, head.now_ms],
-    )
-    .map_err(DomainError::sql_persist)?;
+    if journal {
+        tx.execute(
+            "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
+             VALUES (?1, 'moment.append', ?2)",
+            params![head.object_id, head.now_ms],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
     Ok(moment_order)
 }
 
@@ -1564,7 +1619,8 @@ fn side_bindings(side: &ConflictFileState) -> SideBindings<'_> {
         updated_at_ms: side
             .snapshot
             .as_ref()
-            .map(|snapshot| snapshot.updated_at_ms),
+            .map(|snapshot| snapshot.updated_at_ms)
+            .or(side.binary_updated_at_ms),
         latest_moment_id: side
             .snapshot
             .as_ref()
@@ -1823,6 +1879,11 @@ fn map_side(
         binary_byte_length,
         binary_object_id,
         binary_latest_moment_id,
+        binary_updated_at_ms: (content_kind == ConflictContentKind::Binary && exists != 0)
+            .then(|| row.get::<_, Option<i64>>(column("updated_at_ms").as_str()))
+            .transpose()
+            .map_err(DomainError::sql_corrupt)?
+            .flatten(),
         content_kind,
         metadata_summary: row
             .get(column("metadata_summary").as_str())
@@ -1984,6 +2045,7 @@ pub fn select_snapshot_by_path_in_tx(
                 binary_byte_length,
                 object_id,
                 latest_moment_id,
+                updated_at_ms,
             ))
         }
         _ => Err(DomainError::StateCorrupt {
@@ -1997,6 +2059,7 @@ mod tests {
     use super::*;
     use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256};
     use dohc_engine_testkit::ScratchDir;
+    use std::cell::Cell;
 
     const WORKSPACE_ID: &str = "binary-conflict-tests";
 
@@ -2056,6 +2119,69 @@ mod tests {
             metadata_summary: None,
             metadata_correlation_id: None,
         }
+    }
+
+    fn seed_main_and_current(store: &mut EngineStore, path: &str) -> TextSnapshot {
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO versions \
+                     (workspace_id,version_id,kind,name,created_at_ms) \
+                     VALUES (?1,'main','main','Main',1)",
+                    [WORKSPACE_ID],
+                )
+                .map_err(DomainError::sql_persist)?;
+                Ok::<_, DomainError>(())
+            })
+            .expect("seed main version");
+        VersionedTextStore::new(store)
+            .write_text(
+                &WriteText {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-current".to_owned(),
+                    path: path.to_owned(),
+                    text: "current".to_owned(),
+                    moment_id: "moment-current".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("write current head")
+            .snapshot
+    }
+
+    fn resolve_input(conflict_id: &str, resolution: ResolveConflictKind) -> ResolveTextConflict {
+        ResolveTextConflict {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            conflict_id: conflict_id.to_owned(),
+            resolution,
+            object_id: format!("object-result-{conflict_id}"),
+            write_moment_id: format!("moment-write-{conflict_id}"),
+            delete_moment_id: format!("moment-delete-{conflict_id}"),
+            metadata_origin: "api".to_owned(),
+            metadata_summary: Some("reviewed conflict".to_owned()),
+            metadata_correlation_id: Some("correlation-resolve".to_owned()),
+            author_json: None,
+            now_ms: 20,
+            request_id: None,
+            conflict_answer_budget_bytes: usize::MAX,
+        }
+    }
+
+    fn diagnostic_journal_count(store: &EngineStore) -> i64 {
+        store
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM replication_journal", [], |row| {
+                    row.get(0)
+                })
+            })
+            .expect("count diagnostic journal")
     }
 
     #[test]
@@ -2361,5 +2487,387 @@ mod tests {
             )
             .expect("write next text moment");
         assert_eq!(text.moment.moment_order, moment_order + 1);
+    }
+
+    #[test]
+    fn resolved_conflict_replays_exact_request_but_refuses_a_new_request() {
+        let (_scratch, mut store) = open_store();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO versions \
+                     (workspace_id,version_id,kind,name,created_at_ms) \
+                     VALUES (?1,'main','main','Main',1)",
+                    [WORKSPACE_ID],
+                )
+                .map_err(DomainError::sql_persist)?;
+                Ok::<_, DomainError>(())
+            })
+            .expect("seed main version");
+        let current = VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-current".to_owned(),
+                    path: "doc.md".to_owned(),
+                    text: "current".to_owned(),
+                    moment_id: "moment-current".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("write current head")
+            .snapshot;
+        let open = conflict(
+            "conflict-replay-gate",
+            ConflictFileState::text("doc.md", None),
+            ConflictFileState::text("doc.md", Some(current)),
+            ConflictFileState::text("doc.md", None),
+        );
+        store
+            .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &open))
+            .expect("insert open conflict");
+
+        let callback_count = Cell::new(0);
+        let mut input = ResolveTextConflict {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            conflict_id: open.conflict_id.clone(),
+            resolution: ResolveConflictKind::KeepCurrent,
+            object_id: "object-unused".to_owned(),
+            write_moment_id: "moment-write-unused".to_owned(),
+            delete_moment_id: "moment-delete-unused".to_owned(),
+            metadata_origin: "api".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 20,
+            request_id: Some("request-first".to_owned()),
+            conflict_answer_budget_bytes: usize::MAX,
+        };
+        VersionedTextStore::new(&mut store)
+            .resolve_text_conflict_with(
+                &input,
+                &NoFaults,
+                |_, _, _| Ok(()),
+                |_, _, ()| {
+                    callback_count.set(callback_count.get() + 1);
+                    Ok(())
+                },
+            )
+            .expect("resolve the open conflict");
+        assert_eq!(callback_count.get(), 1);
+        let fingerprint = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    Ok::<_, rusqlite::Error>((
+                        conn.query_row(
+                            "SELECT status,chosen_from,resolution,updated_at_ms FROM conflicts \
+                             WHERE workspace_id=?1 AND conflict_id='conflict-replay-gate'",
+                            [WORKSPACE_ID],
+                            |row| {
+                                Ok((
+                                    row.get::<_, String>(0)?,
+                                    row.get::<_, String>(1)?,
+                                    row.get::<_, String>(2)?,
+                                    row.get::<_, i64>(3)?,
+                                ))
+                            },
+                        )?,
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM replication_journal \
+                             WHERE doc_id='conflict-replay-gate' AND op_kind='conflict.resolve'",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )?,
+                        conn.query_row("SELECT COUNT(*) FROM engine_requests", [], |row| {
+                            row.get::<_, i64>(0)
+                        })?,
+                        conn.query_row("SELECT COUNT(*) FROM moments", [], |row| {
+                            row.get::<_, i64>(0)
+                        })?,
+                    ))
+                })
+                .expect("resolution fingerprint")
+        };
+        let after_commit = fingerprint(&store);
+
+        let replay = VersionedTextStore::new(&mut store)
+            .resolve_text_conflict_with(
+                &input,
+                &NoFaults,
+                |_, _, _| Ok(()),
+                |_, _, ()| {
+                    callback_count.set(callback_count.get() + 1);
+                    Ok(())
+                },
+            )
+            .expect("replay exact request");
+        assert_eq!(replay.conflict.status, ConflictStatus::Resolved);
+        assert_eq!(
+            callback_count.get(),
+            1,
+            "an exact replay skips the callback"
+        );
+        assert_eq!(fingerprint(&store), after_commit);
+
+        let mut later_clock = input.clone();
+        later_clock.now_ms = 999;
+        VersionedTextStore::new(&mut store)
+            .resolve_text_conflict_with(
+                &later_clock,
+                &NoFaults,
+                |_, _, _| Ok(()),
+                |_, _, ()| {
+                    callback_count.set(callback_count.get() + 1);
+                    Ok(())
+                },
+            )
+            .expect("transport time is not part of request identity");
+        assert_eq!(callback_count.get(), 1);
+        assert_eq!(fingerprint(&store), after_commit);
+
+        let changed_requests = [
+            {
+                let mut changed = input.clone();
+                changed.object_id = "different-object".to_owned();
+                changed
+            },
+            {
+                let mut changed = input.clone();
+                changed.metadata_origin = "restore".to_owned();
+                changed
+            },
+            {
+                let mut changed = input.clone();
+                changed.metadata_summary = Some("different summary".to_owned());
+                changed
+            },
+            {
+                let mut changed = input.clone();
+                changed.metadata_correlation_id = Some("different-correlation".to_owned());
+                changed
+            },
+            {
+                let mut changed = input.clone();
+                changed.author_json = Some(
+                    r#"{"kind":"agent","agentId":"agent-1","onBehalfOf":"user-1"}"#.to_owned(),
+                );
+                changed
+            },
+        ];
+        for changed in changed_requests {
+            let error = VersionedTextStore::new(&mut store)
+                .resolve_text_conflict_with(
+                    &changed,
+                    &NoFaults,
+                    |_, _, _| Ok(()),
+                    |_, _, ()| {
+                        callback_count.set(callback_count.get() + 1);
+                        Ok(())
+                    },
+                )
+                .expect_err("request identity must bind every mutation and provenance field");
+            assert!(matches!(error, DomainError::IdempotencyKeyReuseMismatch));
+            assert_eq!(callback_count.get(), 1);
+            assert_eq!(fingerprint(&store), after_commit);
+        }
+
+        input.request_id = Some("request-second".to_owned());
+        input.now_ms = 21;
+        let error = VersionedTextStore::new(&mut store)
+            .resolve_text_conflict_with(
+                &input,
+                &NoFaults,
+                |_, _, _| Ok(()),
+                |_, _, ()| {
+                    callback_count.set(callback_count.get() + 1);
+                    Ok(())
+                },
+            )
+            .expect_err("a new request cannot resolve a closed conflict again");
+        assert!(matches!(
+            error,
+            DomainError::InvalidInput {
+                reason: "conflict is not open"
+            }
+        ));
+        assert_eq!(callback_count.get(), 1);
+        assert_eq!(fingerprint(&store), after_commit);
+    }
+
+    #[test]
+    fn compound_resolution_effects_leave_no_payload_free_journal_rows() {
+        let mut deltas = Vec::new();
+
+        for (conflict_id, incoming, resolution) in [
+            (
+                "same-path-text",
+                ConflictFileState::text("doc.md", Some(text_snapshot("doc.md", "incoming"))),
+                ResolveConflictKind::ApplyIncoming,
+            ),
+            (
+                "same-path-delete",
+                ConflictFileState::text("doc.md", None),
+                ResolveConflictKind::ApplyIncoming,
+            ),
+            (
+                "moved-text",
+                ConflictFileState::text(
+                    "moved.md",
+                    Some(text_snapshot("moved.md", "incoming move")),
+                ),
+                ResolveConflictKind::ApplyIncoming,
+            ),
+        ] {
+            let (_scratch, mut store) = open_store();
+            let current = seed_main_and_current(&mut store, "doc.md");
+            let open = conflict(
+                conflict_id,
+                ConflictFileState::text("doc.md", None),
+                ConflictFileState::text("doc.md", Some(current)),
+                incoming,
+            );
+            store
+                .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &open))
+                .expect("insert conflict");
+            let before = diagnostic_journal_count(&store);
+            VersionedTextStore::new(&mut store)
+                .resolve_text_conflict(&resolve_input(conflict_id, resolution), &NoFaults)
+                .expect("resolve conflict");
+            deltas.push((conflict_id, diagnostic_journal_count(&store) - before));
+        }
+
+        let (_scratch, mut store) = open_store();
+        let current = seed_main_and_current(&mut store, "asset.bin");
+        let incoming_bytes = b"incoming binary";
+        let incoming_sha = store
+            .put_binary_blob(incoming_bytes)
+            .expect("store incoming binary");
+        let open = conflict(
+            "same-path-binary",
+            ConflictFileState::text("asset.bin", None),
+            ConflictFileState::text("asset.bin", Some(current)),
+            ConflictFileState::binary_head(
+                "asset.bin",
+                incoming_sha,
+                incoming_bytes.len() as i64,
+                "incoming-binary-object",
+                "incoming-binary-moment",
+                19,
+            ),
+        );
+        store
+            .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &open))
+            .expect("insert binary conflict");
+        let before = diagnostic_journal_count(&store);
+        VersionedTextStore::new(&mut store)
+            .resolve_text_conflict(
+                &resolve_input("same-path-binary", ResolveConflictKind::ApplyIncoming),
+                &NoFaults,
+            )
+            .expect("resolve binary conflict");
+        deltas.push((
+            "same-path-binary",
+            diagnostic_journal_count(&store) - before,
+        ));
+
+        assert_eq!(
+            deltas,
+            [
+                ("same-path-text", 0),
+                ("same-path-delete", 0),
+                ("moved-text", 0),
+                ("same-path-binary", 0),
+            ],
+            "the compound carrier owns every resolution effect; the payload-free journal owns none"
+        );
+    }
+
+    #[test]
+    fn compound_after_hook_failure_rolls_back_the_resolution() {
+        let (_scratch, mut store) = open_store();
+        let current = seed_main_and_current(&mut store, "doc.md");
+        let open = conflict(
+            "after-hook-rollback",
+            ConflictFileState::text("doc.md", None),
+            ConflictFileState::text("doc.md", Some(current)),
+            ConflictFileState::text("doc.md", Some(text_snapshot("doc.md", "incoming"))),
+        );
+        store
+            .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &open))
+            .expect("insert conflict");
+        let fingerprint = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    Ok::<_, rusqlite::Error>((
+                        conn.query_row(
+                            "SELECT status,chosen_from,resolution,updated_at_ms FROM conflicts \
+                             WHERE workspace_id=?1 AND conflict_id='after-hook-rollback'",
+                            [WORKSPACE_ID],
+                            |row| {
+                                Ok((
+                                    row.get::<_, String>(0)?,
+                                    row.get::<_, String>(1)?,
+                                    row.get::<_, Option<String>>(2)?,
+                                    row.get::<_, i64>(3)?,
+                                ))
+                            },
+                        )?,
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM moments WHERE workspace_id=?1",
+                            [WORKSPACE_ID],
+                            |row| row.get::<_, i64>(0),
+                        )?,
+                        conn.query_row(
+                            "SELECT path,blob_sha256,latest_moment_id,updated_at_ms FROM snapshots \
+                             WHERE workspace_id=?1 AND version_id='main' AND object_id='object-current'",
+                            [WORKSPACE_ID],
+                            |row| {
+                                Ok((
+                                    row.get::<_, String>(0)?,
+                                    row.get::<_, String>(1)?,
+                                    row.get::<_, String>(2)?,
+                                    row.get::<_, i64>(3)?,
+                                ))
+                            },
+                        )?,
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM replication_journal",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )?,
+                        conn.query_row("SELECT COUNT(*) FROM engine_requests", [], |row| {
+                            row.get::<_, i64>(0)
+                        })?,
+                    ))
+                })
+                .expect("resolution fingerprint")
+        };
+        let before = fingerprint(&store);
+        let error = VersionedTextStore::new(&mut store)
+            .resolve_text_conflict_with(
+                &resolve_input("after-hook-rollback", ResolveConflictKind::ApplyIncoming),
+                &NoFaults,
+                |_, _, _| Ok(()),
+                |_, _, ()| {
+                    Err(DomainError::InvalidInput {
+                        reason: "injected compound after-hook failure",
+                    })
+                },
+            )
+            .expect_err("the after hook must abort the compound transaction");
+        assert!(matches!(
+            error,
+            DomainError::InvalidInput {
+                reason: "injected compound after-hook failure"
+            }
+        ));
+        assert_eq!(fingerprint(&store), before);
     }
 }
