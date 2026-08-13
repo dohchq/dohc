@@ -10919,10 +10919,22 @@ fn delete_owned_scene_assets_in_tx(
             .prepare(
                 "SELECT a.path, s.binary_sha256 FROM path_aliases a JOIN snapshots s \
                  ON s.workspace_id = a.workspace_id AND s.version_id = a.version_id \
-                 AND s.object_id = a.object_id WHERE a.workspace_id = ?1 \
+                 AND s.object_id = a.object_id LEFT JOIN moments producer \
+                 ON producer.workspace_id = s.workspace_id \
+                 AND producer.moment_id = s.latest_moment_id WHERE a.workspace_id = ?1 \
                  AND a.version_id = ?2 AND a.path GLOB ?3 \
                  AND COALESCE(s.content_kind, 'text') = 'binary' \
-                 AND s.metadata_origin IN ('ydoc','local-file') ORDER BY a.path",
+                 AND (s.metadata_origin IN ('ydoc','local-file') \
+                   OR (s.metadata_origin = 'sync' \
+                     AND producer.version_id = s.version_id \
+                     AND producer.object_id = s.object_id \
+                     AND producer.operation = 'write' \
+                     AND producer.after_content_kind = 'binary' \
+                     AND producer.after_binary_sha256 = s.binary_sha256 \
+                     AND producer.path = a.path \
+                     AND producer.payload_after_path = a.path \
+                     AND producer.metadata_origin = 'local-file')) \
+                 ORDER BY a.path",
             )
             .map_err(|error| {
                 RuntimeError::Domain(DomainError::Storage(StorageError::corrupt_public(error)))

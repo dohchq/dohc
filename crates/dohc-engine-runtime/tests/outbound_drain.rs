@@ -2225,6 +2225,398 @@ async fn replicated_scene_delete_carries_its_owned_asset_delete_to_a_clean_peer(
 }
 
 #[tokio::test]
+async fn peer_local_scene_delete_retires_a_live_synced_asset_and_rollback_restores_it() {
+    let source = ScratchDir::new().expect("source scratch");
+    let source_db = source.engine_db_path().expect("source db");
+    let workspace_id = "ws-live-synced-scene-delete";
+    let drawing_path = "drawings/live-board.excalidraw";
+    let drawing_text = serde_json::json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "https://excalidraw.com",
+        "elements": [{
+            "id": "image-element",
+            "type": "image",
+            "version": 1,
+            "versionNonce": 1,
+            "isDeleted": false,
+            "index": "a0",
+            "fileId": "image-file"
+        }],
+        "appState": {},
+        "files": { "image-file": {
+            "id": "image-file",
+            "mimeType": "image/png",
+            "created": 4,
+            "dataURL": format!("data:image/png;base64,{ONE_PIXEL_PNG_BASE64}")
+        }}
+    })
+    .to_string();
+    initialize_workspace(&source_db, workspace_id, true);
+    let source_supervisor = WorkspaceSupervisor::new();
+    let source_actor = source_supervisor
+        .open(&source_db, 2)
+        .expect("open source actor")
+        .actor;
+    let drawing = source_actor
+        .versioned_text_write(
+            WriteText {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "live-drawing-object".to_owned(),
+                path: drawing_path.to_owned(),
+                text: drawing_text.clone(),
+                moment_id: "live-drawing-write".to_owned(),
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("write source drawing");
+    let asset_bytes = ONE_PIXEL_PNG.to_vec();
+    let asset_path = scene_asset_ref(
+        workspace_id,
+        "main",
+        &drawing.object.object_id,
+        &hex_sha256(&asset_bytes),
+        "image/png",
+    )
+    .expect("owned asset path");
+    source_actor
+        .versioned_binary_write(
+            WriteBinary {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "live-drawing-asset-object".to_owned(),
+                path: asset_path.clone(),
+                bytes: asset_bytes.clone(),
+                moment_id: "live-drawing-asset-write".to_owned(),
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: Some("Imported drawing asset".to_owned()),
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 3,
+                request_id: None,
+            },
+            source.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("write source drawing asset");
+    let forged_bytes = b"forged provider-neighbor".to_vec();
+    let forged_path = scene_asset_ref(
+        workspace_id,
+        "main",
+        &drawing.object.object_id,
+        &hex_sha256(&forged_bytes),
+        "image/png",
+    )
+    .expect("forged canonical neighbor path");
+    source_actor
+        .versioned_binary_write(
+            WriteBinary {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "forged-provider-neighbor-object".to_owned(),
+                path: forged_path.clone(),
+                bytes: forged_bytes.clone(),
+                moment_id: "forged-provider-neighbor-write".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4,
+                request_id: None,
+            },
+            source.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("write forged provider neighbor");
+    let adjacent_path = "assets/user-photo.png";
+    let adjacent_bytes = b"adjacent user-owned image".to_vec();
+    source_actor
+        .versioned_binary_write(
+            WriteBinary {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "adjacent-user-asset-object".to_owned(),
+                path: adjacent_path.to_owned(),
+                bytes: adjacent_bytes.clone(),
+                moment_id: "adjacent-user-asset-write".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 5,
+                request_id: None,
+            },
+            source.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("write adjacent user asset");
+    source_supervisor
+        .close(&source_db)
+        .expect("close source actor");
+
+    let source_ops = local_ops(&source_db);
+    assert_eq!(source_ops.len(), 4);
+    assert!(
+        source_ops
+            .iter()
+            .all(|op| op.payload["operation"] == "write")
+    );
+    let peer = ScratchDir::new().expect("peer scratch");
+    let peer_db = peer.engine_db_path().expect("peer db");
+    initialize_workspace(&peer_db, workspace_id, false);
+    EngineStore::open(&peer_db, 6)
+        .expect("open peer identity store")
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE sync_identity SET origin_id = 'origin-live-peer', \
+                 replication_epoch = 'epoch-live-peer', \
+                 stream_identity = 'stream-live-peer' WHERE workspace_id = ?1",
+                [workspace_id],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq) \
+                 VALUES (?1, 'origin-live-peer', 0)",
+                [workspace_id],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("enable peer relay identity");
+    let source_store = EngineStore::open(&source_db, 6).expect("open source store");
+    let mut peer_store = EngineStore::open(&peer_db, 7).expect("open peer store");
+    for op in &source_ops {
+        copy_op_blobs(&source_store, &mut peer_store, op);
+        apply_logged_op(&mut peer_store, workspace_id, op);
+    }
+    let replicated_heads: Vec<(String, String)> = peer_store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT path,metadata_origin FROM snapshots WHERE workspace_id = ?1 \
+                 AND version_id = 'main' ORDER BY path",
+            )?;
+            statement
+                .query_map([workspace_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("read replicated heads");
+    assert_eq!(replicated_heads.len(), 4);
+    assert!(replicated_heads.iter().all(|(_, origin)| origin == "sync"));
+    let provider_origin: String = peer_store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT metadata_origin FROM moments WHERE workspace_id = ?1 AND path = ?2 \
+                 AND operation = 'write'",
+                params![workspace_id, asset_path],
+                |row| row.get(0),
+            )
+        })
+        .expect("read replicated provider origin");
+    assert_eq!(provider_origin, "local-file");
+    let forged_origin: String = peer_store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT metadata_origin FROM moments WHERE workspace_id = ?1 AND path = ?2 \
+                 AND operation = 'write'",
+                params![workspace_id, forged_path],
+                |row| row.get(0),
+            )
+        })
+        .expect("read forged producer origin");
+    assert_eq!(forged_origin, "api");
+    drop(peer_store);
+
+    for (path, bytes) in [
+        (drawing_path, drawing_text.as_bytes()),
+        (asset_path.as_str(), asset_bytes.as_slice()),
+        (forged_path.as_str(), forged_bytes.as_slice()),
+        (adjacent_path, adjacent_bytes.as_slice()),
+    ] {
+        let absolute = peer.path().join(path);
+        std::fs::create_dir_all(absolute.parent().expect("materialized parent"))
+            .expect("create materialized parent");
+        std::fs::write(absolute, bytes).expect("materialize replicated head");
+    }
+
+    let peer_supervisor = WorkspaceSupervisor::new();
+    let peer_actor = peer_supervisor
+        .open(&peer_db, 8)
+        .expect("open peer actor")
+        .actor;
+    let before_delete_ops = local_ops(&peer_db).len();
+    peer_actor
+        .versioned_text_delete(
+            DeleteTextFile {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                path: drawing_path.to_owned(),
+                moment_id: "peer-live-drawing-delete".to_owned(),
+                request_id: None,
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 9,
+            },
+            peer.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("delete live replicated drawing on peer");
+    assert!(!peer.path().join(&asset_path).exists());
+    assert_eq!(
+        std::fs::read(peer.path().join(&forged_path)).expect("forged neighbor survives delete"),
+        forged_bytes
+    );
+    assert_eq!(
+        std::fs::read(peer.path().join(adjacent_path)).expect("adjacent asset survives delete"),
+        adjacent_bytes
+    );
+    let delete_ops = local_ops(&peer_db)
+        .into_iter()
+        .skip(before_delete_ops)
+        .collect::<Vec<_>>();
+    assert_eq!(delete_ops.len(), 2);
+    assert!(delete_ops.iter().any(|op| {
+        op.payload["path"] == drawing_path
+            && op.payload["operation"] == "delete"
+            && op.payload["payloadBeforeContentKind"] == "text"
+    }));
+    assert!(delete_ops.iter().any(|op| {
+        op.payload["path"] == asset_path
+            && op.payload["operation"] == "delete"
+            && op.payload["payloadBeforeContentKind"] == "binary"
+            && op.payload["metadata"]["origin"] == "local-file"
+            && op.payload["metadata"]["correlationId"] == "peer-live-drawing-delete"
+    }));
+    let mut deleted_store = EngineStore::open(&peer_db, 9).expect("inspect deleted peer");
+    assert!(
+        VersionedTextStore::new(&mut deleted_store)
+            .read_binary(workspace_id, "main", &asset_path)
+            .expect("read deleted owned asset")
+            .is_none()
+    );
+    assert!(
+        VersionedTextStore::new(&mut deleted_store)
+            .read_binary(workspace_id, "main", &forged_path)
+            .expect("read surviving forged neighbor")
+            .is_some()
+    );
+    assert!(
+        VersionedTextStore::new(&mut deleted_store)
+            .read_binary(workspace_id, "main", adjacent_path)
+            .expect("read surviving adjacent asset")
+            .is_some()
+    );
+    drop(deleted_store);
+
+    let before_rollback_ops = local_ops(&peer_db).len();
+    let rollback = peer_actor
+        .versioned_text_rollback(
+            RollbackTextFileMutation {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                path: drawing_path.to_owned(),
+                mutation_moment_id: "peer-live-drawing-delete".to_owned(),
+                request_id: Some("rollback-peer-live-drawing-delete".to_owned()),
+                legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
+            },
+            peer.path().to_path_buf(),
+            Arc::new(NoRecorder),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("rollback peer-local drawing delete");
+    assert!(rollback.materialized);
+    peer_supervisor.close(&peer_db).expect("close peer actor");
+
+    let restore_ops = local_ops(&peer_db)
+        .into_iter()
+        .skip(before_rollback_ops)
+        .collect::<Vec<_>>();
+    assert_eq!(restore_ops.len(), 2);
+    assert!(restore_ops.iter().any(|op| {
+        op.payload["path"] == drawing_path
+            && op.payload["operation"] == "write"
+            && op.payload["payloadAfterContentKind"] == "text"
+            && op.payload["metadata"]["origin"] == "restore"
+    }));
+    assert!(restore_ops.iter().any(|op| {
+        op.payload["path"] == asset_path
+            && op.payload["operation"] == "write"
+            && op.payload["payloadAfterContentKind"] == "binary"
+            && op.payload["metadata"]["origin"] == "local-file"
+    }));
+    assert_eq!(
+        std::fs::read(peer.path().join(&asset_path)).expect("restored exact image bytes"),
+        asset_bytes
+    );
+    assert_eq!(
+        std::fs::read(peer.path().join(&forged_path)).expect("forged neighbor remains"),
+        forged_bytes
+    );
+    assert_eq!(
+        std::fs::read(peer.path().join(adjacent_path)).expect("adjacent asset remains"),
+        adjacent_bytes
+    );
+    let mut peer_store = EngineStore::open(&peer_db, 10).expect("inspect restored peer");
+    let restored_drawing = VersionedTextStore::new(&mut peer_store)
+        .read_text(workspace_id, "main", drawing_path)
+        .expect("read restored drawing")
+        .expect("restored drawing head");
+    assert_eq!(restored_drawing.text, drawing_text);
+    let restored_json: serde_json::Value =
+        serde_json::from_str(&restored_drawing.text).expect("parse restored drawing");
+    assert_eq!(
+        restored_json["files"]["image-file"]["dataURL"],
+        serde_json::json!(format!("data:image/png;base64,{ONE_PIXEL_PNG_BASE64}"))
+    );
+    assert_eq!(
+        VersionedTextStore::new(&mut peer_store)
+            .read_binary(workspace_id, "main", &asset_path)
+            .expect("read restored image")
+            .expect("restored image head")
+            .bytes,
+        ONE_PIXEL_PNG
+    );
+    assert!(
+        VersionedTextStore::new(&mut peer_store)
+            .read_binary(workspace_id, "main", &forged_path)
+            .expect("read forged neighbor")
+            .is_some()
+    );
+    assert!(
+        VersionedTextStore::new(&mut peer_store)
+            .read_binary(workspace_id, "main", adjacent_path)
+            .expect("read adjacent asset")
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
