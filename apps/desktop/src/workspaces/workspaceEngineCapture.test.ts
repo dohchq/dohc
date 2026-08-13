@@ -45,6 +45,7 @@ import {
   type CaptureVersionedTextStore,
 } from "./workspaceEngineCaptureLiveStore";
 import * as Y from "yjs";
+import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
 
 const roots: string[] = [];
 
@@ -2764,18 +2765,18 @@ describe("workspaceEngineCapture agent attribution", () => {
     await expect(
       engine.writeAuthoredTextFile(
         join(root, "at-limit.txt"),
-        "x".repeat(MAX_ENGINE_CAPTURE_TEXT_BYTES),
+        "x".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES),
         author,
       ),
     ).resolves.toBeUndefined();
     await expect(
       engine.writeAuthoredTextFile(
         join(root, "over-limit.txt"),
-        "x".repeat(MAX_ENGINE_CAPTURE_TEXT_BYTES + 1),
+        "x".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES + 1),
         author,
       ),
     ).rejects.toThrow(
-      `Authored text exceeds the capture limit: limit ${MAX_ENGINE_CAPTURE_TEXT_BYTES} bytes, observed ${MAX_ENGINE_CAPTURE_TEXT_BYTES + 1} bytes.`,
+      `Authored text exceeds the in-band write limit: limit ${MAX_DESKTOP_CAPTURE_TEXT_BYTES} bytes, observed ${MAX_DESKTOP_CAPTURE_TEXT_BYTES + 1} bytes.`,
     );
     await engine.stop();
   });

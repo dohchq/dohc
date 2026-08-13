@@ -44,6 +44,7 @@ import {
   type ArtifactAssetDescriptor,
   type YdocContentKind,
 } from "@dohc/workspace-engine-client";
+import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
 import * as Y from "yjs";
 import {
   isTextMediaType,
@@ -3360,9 +3361,9 @@ export function createWorkspaceEngineCapture(
           throw new Error("Plugin panel is no longer active.");
         }
         const observedBytes = Buffer.byteLength(text, "utf8");
-        if (observedBytes > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
+        if (observedBytes > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
           throw new Error(
-            `Authored text exceeds the capture limit: limit ${MAX_ENGINE_CAPTURE_TEXT_BYTES} bytes, observed ${observedBytes} bytes.`,
+            `Authored text exceeds the in-band write limit: limit ${MAX_DESKTOP_CAPTURE_TEXT_BYTES} bytes, observed ${observedBytes} bytes.`,
           );
         }
         const { relative: resolvedRelative, resolvedAbsolute } =
@@ -5695,8 +5696,11 @@ export function createWorkspaceEngineCapture(
     writeGeneratedTextFile(input) {
       return enqueueResult("write generated text", async () => {
         const path = assertGeneratedMarkdownPath(input.path);
-        if (Buffer.byteLength(input.text, "utf8") > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
-          throw new Error(`Generated Markdown is too large to track: ${path}`);
+        const observedBytes = Buffer.byteLength(input.text, "utf8");
+        if (observedBytes > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
+          throw new Error(
+            `Generated Markdown exceeds the in-band write limit: limit ${MAX_DESKTOP_CAPTURE_TEXT_BYTES} bytes, observed ${observedBytes} bytes: ${path}.`,
+          );
         }
         if (input.recoverExistingText) {
           // Recovery may only replace an owned projection with another text
