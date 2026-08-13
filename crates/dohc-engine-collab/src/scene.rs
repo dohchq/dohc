@@ -528,7 +528,7 @@ fn repair_imported_element_indices(elements: &mut [Value]) -> Result<(), SceneIm
             element
                 .get("index")
                 .and_then(Value::as_str)
-                .filter(|index| !index.is_empty())
+                .filter(|index| validate_order_key(index).is_ok())
                 .map(str::to_owned)
         })
         .collect::<Vec<_>>();
@@ -1836,6 +1836,8 @@ mod tests {
             "a-duplicate",
             "later-lower",
             "last",
+            "invalid-syntax",
+            "last-anchor",
         ];
         let content = canonical(json!({
             "type":"excalidraw",
@@ -1845,7 +1847,9 @@ mod tests {
                 element(source_order[2], Some(json!("a1"))),
                 element(source_order[3], Some(json!("a1"))),
                 element(source_order[4], Some(json!("a0"))),
-                element(source_order[5], Some(json!("a2")))
+                element(source_order[5], Some(json!("a2"))),
+                element(source_order[6], Some(json!("bad!"))),
+                element(source_order[7], Some(json!("c000")))
             ]
         }));
 
@@ -1867,7 +1871,7 @@ mod tests {
                 .iter()
                 .filter_map(|element| element["index"].as_str())
                 .collect::<Vec<_>>(),
-            ["Zz", "a0", "a1", "a1G", "a1V", "a2"]
+            ["Zz", "a0", "a1", "a1G", "a1V", "a2", "a3", "c000"]
         );
         assert_eq!(
             generate_n_keys_between(None, Some("a0"), 5).expect("keys before a0"),

@@ -1214,6 +1214,8 @@ async fn legacy_scene_indices_keep_source_z_order_through_seed_settle_and_reopen
         "a-duplicate",
         "later-lower",
         "last",
+        "invalid-syntax",
+        "last-anchor",
     ];
     let artifact = serde_json::to_string(&json!({
         "type": "excalidraw",
@@ -1226,6 +1228,8 @@ async fn legacy_scene_indices_keep_source_z_order_through_seed_settle_and_reopen
             element(source_order[3], Some(json!("a1"))),
             element(source_order[4], Some(json!("a0"))),
             element(source_order[5], Some(json!("a2"))),
+            element(source_order[6], Some(json!("bad!"))),
+            element(source_order[7], Some(json!("c000"))),
         ],
         "appState": {},
         "files": {}
@@ -1302,6 +1306,10 @@ async fn legacy_scene_indices_keep_source_z_order_through_seed_settle_and_reopen
         .iter()
         .map(|element| element["index"].as_str().expect("repaired index"))
         .collect::<Vec<_>>();
+    assert_eq!(
+        settled_indices,
+        ["Zz", "a0", "a1", "a1G", "a1V", "a2", "a3", "c000"]
+    );
     assert!(
         settled_indices.windows(2).all(|pair| pair[0] < pair[1]),
         "repaired indices must encode source order: {settled_indices:?}"
