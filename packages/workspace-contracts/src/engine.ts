@@ -1,7 +1,7 @@
 /**
  * Engine contract rename mapping
  *
- * Type-only extraction for this slice; zod schema mirrors are a follow-up
+ * Type-only extraction for this slice; runtime schema mirrors are a follow-up
  * if/when contracts need runtime validation here.
  *
  * | Plan / matrix symbol | Shipped engine contract symbol | Status | Notes |

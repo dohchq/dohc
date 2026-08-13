@@ -1,5 +1,8 @@
+import * as Schema from "effect/Schema";
 import { WorkspaceError } from "./errors";
 import { WorkspacePath } from "./domain";
+
+const decodeWorkspacePath = Schema.decodeUnknownSync(WorkspacePath);
 
 export function composeRenamedPath(fromPath: string, toName: string) {
   const folderPath = fromPath.includes("/")
@@ -11,6 +14,6 @@ export function composeRenamedPath(fromPath: string, toName: string) {
     throw new WorkspaceError("invalid_path", "Filename must not contain path segments");
   }
   const result = folderPath ? `${folderPath}/${cleanName}` : cleanName;
-  WorkspacePath.parse(result);
+  decodeWorkspacePath(result);
   return result;
 }

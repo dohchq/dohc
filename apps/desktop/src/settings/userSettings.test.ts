@@ -96,6 +96,17 @@ describe("desktop user settings model", () => {
         profile: { preferredName: "Ice\u0000Admin" },
       }).success,
     ).toBe(false);
+
+    const tooLong = DesktopUserSettings.safeParse({
+      ...DEFAULT_USER_SETTINGS,
+      profile: { preferredName: "x".repeat(81) },
+    });
+    expect(tooLong.success).toBe(false);
+    if (!tooLong.success) {
+      expect(tooLong.error.issues[0]?.message).toBe(
+        "Names must contain 80 characters or fewer.",
+      );
+    }
   });
 
   it("merges runner fields independently and validates timeout bounds", () => {
