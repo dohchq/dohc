@@ -32,7 +32,8 @@ const passVerdict =
   "(rust cfg x86_64/linux/gnu, head 1f47af31 clean, 11 reads) | PASS | " +
   "tree provenance=PASS " +
   "native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS " +
-  "build --workspace=PASS test --workspace=PASS test collab crash tier=PASS " +
+  "build --workspace=PASS test --workspace=PASS doctests=PASS " +
+  "test collab crash tier=PASS " +
   "cargo-deny=PASS cargo-audit=PASS";
 
 test("canonical CI verdict requires every mandatory gate step to report PASS", () => {

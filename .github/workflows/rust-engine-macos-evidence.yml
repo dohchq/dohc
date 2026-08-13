@@ -62,6 +62,7 @@ env:
   # Pinned so gate results cannot drift between runs; matches the version behind
   # the canonical Windows gate cited in GATE6_PACKET.md.
   CARGO_DENY_VERSION: "0.20.2"
+  CARGO_NEXTEST_VERSION: "0.9.143"
 
 jobs:
   macos-evidence:
@@ -147,6 +148,17 @@ jobs:
           fi
           printf '%s\n' "$RESOLVED_CARGO_DENY_VERSION" | tee -a macos-toolversions.log
           node --version | tee -a macos-toolversions.log
+
+      - name: Install pinned cargo-nextest (the gate's test rows run through it)
+        run: |
+          set -euo pipefail
+          cargo install cargo-nextest --locked --force --version "$CARGO_NEXTEST_VERSION"
+          RESOLVED_CARGO_NEXTEST_VERSION="$(cargo nextest --version | head -n 1 | awk '{print $2}')"
+          if [ "$RESOLVED_CARGO_NEXTEST_VERSION" != "$CARGO_NEXTEST_VERSION" ]; then
+            echo "::error::expected cargo-nextest $CARGO_NEXTEST_VERSION, got $RESOLVED_CARGO_NEXTEST_VERSION"
+            exit 1
+          fi
+          printf 'cargo-nextest %s\n' "$RESOLVED_CARGO_NEXTEST_VERSION" | tee -a macos-toolversions.log
 
       - name: Full-workspace gate (fmt/clippy -D warnings/build/test/cargo-deny)
         run: |

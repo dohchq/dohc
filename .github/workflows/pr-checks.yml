@@ -67,6 +67,7 @@ permissions:
 env:
   CARGO_DENY_VERSION: "0.20.2"
   CARGO_AUDIT_VERSION: "0.22.2"
+  CARGO_NEXTEST_VERSION: "0.9.143"
 
 jobs:
   # ~30 seconds on the smallest runner. For pull_request events dorny reads
@@ -274,7 +275,7 @@ jobs:
       # fact rather than an intention.
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
-          tool: cargo-deny@0.20.2,cargo-audit@0.22.2
+          tool: cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-nextest@0.9.143
 
       - name: Verify pinned cargo-deny
         run: |
@@ -282,6 +283,15 @@ jobs:
           RESOLVED_CARGO_DENY_VERSION="$(cargo-deny --version)"
           if [ "$RESOLVED_CARGO_DENY_VERSION" != "cargo-deny $CARGO_DENY_VERSION" ]; then
             echo "::error::expected cargo-deny $CARGO_DENY_VERSION, got $RESOLVED_CARGO_DENY_VERSION"
+            exit 1
+          fi
+
+      - name: Verify pinned cargo-nextest
+        run: |
+          set -euo pipefail
+          RESOLVED_CARGO_NEXTEST_VERSION="$(cargo nextest --version | head -n 1 | awk '{print $2}')"
+          if [ "$RESOLVED_CARGO_NEXTEST_VERSION" != "$CARGO_NEXTEST_VERSION" ]; then
+            echo "::error::expected cargo-nextest $CARGO_NEXTEST_VERSION, got $RESOLVED_CARGO_NEXTEST_VERSION"
             exit 1
           fi
 

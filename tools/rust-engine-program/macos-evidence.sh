@@ -23,6 +23,7 @@ set -euo pipefail
 # Pinned so gate results cannot drift; matches the version behind the canonical
 # Windows gate cited in GATE6_PACKET.md.
 CARGO_DENY_VERSION="0.20.2"
+CARGO_NEXTEST_VERSION="0.9.143"
 
 MODE="${1:-full}"
 case "$MODE" in
@@ -77,8 +78,13 @@ if ! command -v cargo-deny >/dev/null 2>&1 \
   echo "== installing pinned cargo-deny $CARGO_DENY_VERSION =="
   cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"
 fi
+if ! command -v cargo-nextest >/dev/null 2>&1 \
+   || ! cargo nextest --version 2>/dev/null | head -n 1 | grep -q "$CARGO_NEXTEST_VERSION"; then
+  echo "== installing pinned cargo-nextest $CARGO_NEXTEST_VERSION (the gate's test rows run through it) =="
+  cargo install cargo-nextest --locked --version "$CARGO_NEXTEST_VERSION"
+fi
 rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
-{ rustc --version; cargo --version; cargo-deny --version; node --version; } \
+{ rustc --version; cargo --version; cargo-deny --version; cargo nextest --version | head -n 1; node --version; } \
   | tee macos-toolversions.log
 
 echo "== full-workspace gate =="
