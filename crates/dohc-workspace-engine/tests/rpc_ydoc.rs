@@ -352,6 +352,134 @@ async fn scene_open_seeds_large_embedded_assets_in_the_engine_and_rehydrates_on_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scene_open_claims_an_empty_artifact_after_capture_wins() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    const PATH: &str = "drawings/untitled.excalidraw";
+    write_file(scratch.path(), PATH, b"");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-empty-scene", 31).await;
+    let captured = call(
+        &transport,
+        &handle,
+        32,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": PATH }),
+    )
+    .await;
+    assert_eq!(captured["text"], json!(""), "capture must win before open");
+
+    let opened = call(
+        &transport,
+        &handle,
+        33,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": PATH,
+            "contentKind": "scene",
+            "seedFromArtifact": true
+        }),
+    )
+    .await;
+    assert_eq!(opened["head"], json!("present"));
+    assert_eq!(opened["lineage"], json!("existing"));
+    assert_eq!(opened["contentKind"], json!("scene"));
+    let initial = base64::engine::general_purpose::STANDARD
+        .decode(
+            opened["initialUpdateBase64"]
+                .as_str()
+                .expect("initial update"),
+        )
+        .expect("base64 update");
+    let doc = Ydoc::wire();
+    doc.apply(&initial).expect("empty scene applies");
+    assert!(doc.fold_scene().elements.is_empty());
+
+    let settled = call(
+        &transport,
+        &handle,
+        34,
+        "ydoc.settle",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    assert_eq!(settled["materialized"], json!(true));
+    let portable: Value =
+        serde_json::from_slice(&std::fs::read(scratch.path().join(PATH)).expect("settled scene"))
+            .expect("portable scene JSON");
+    assert_eq!(portable["type"], json!("excalidraw"));
+    assert_eq!(portable["elements"], json!([]));
+
+    call(
+        &transport,
+        &handle,
+        35,
+        "ydoc.evict",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    let reopened = call(
+        &transport,
+        &handle,
+        36,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": PATH,
+            "contentKind": "scene",
+            "seedFromArtifact": true
+        }),
+    )
+    .await;
+    assert_eq!(reopened["lineage"], json!("existing"));
+    assert_eq!(reopened["contentKind"], json!("scene"));
+    call(
+        &transport,
+        &handle,
+        37,
+        "ydoc.evict",
+        json!({ "sessionId": reopened["sessionId"] }),
+    )
+    .await;
+    call(&transport, &handle, 38, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scene_open_still_refuses_a_nonempty_invalid_artifact() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    const PATH: &str = "drawings/invalid.excalidraw";
+    write_file(scratch.path(), PATH, b"not JSON");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-invalid-scene", 41).await;
+    let refused = call_error(
+        &transport,
+        &handle,
+        42,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": PATH,
+            "contentKind": "scene",
+            "seedFromArtifact": true
+        }),
+    )
+    .await;
+    assert_eq!(refused.code, ErrorCode::InvalidParams);
+    assert_eq!(refused.message, "invalid-input");
+    assert_eq!(
+        std::fs::read(scratch.path().join(PATH)).expect("invalid artifact"),
+        b"not JSON"
+    );
+    call(&transport, &handle, 43, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scene_open_seeds_legacy_elements_and_repairs_a_dangling_image() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");

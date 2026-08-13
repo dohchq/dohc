@@ -9190,7 +9190,13 @@ fn seed_scene_from_artifact_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<Vec<String>, RuntimeError> {
-    let imported = import_portable_scene(artifact).map_err(|error| match error {
+    const EMPTY_SCENE: &str = r#"{"type":"excalidraw","version":2,"source":"https://excalidraw.com","elements":[],"appState":{},"files":{}}"#;
+    let imported = import_portable_scene(if artifact.is_empty() {
+        EMPTY_SCENE
+    } else {
+        artifact
+    })
+    .map_err(|error| match error {
         dohc_engine_collab::SceneImportError::Invalid { reason } => {
             RuntimeError::Domain(DomainError::InvalidInput { reason })
         }
