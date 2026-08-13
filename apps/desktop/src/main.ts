@@ -24,6 +24,7 @@ import {
   nativeTheme,
   protocol,
   safeStorage,
+  session,
   shell,
   Tray,
   utilityProcess,
@@ -543,6 +544,7 @@ import { invokeSiteSdkHost } from "./workspaces/siteSdkHost";
 import { createSitePreviewSdkAuthorityRegistry } from "./workspaces/sitePreviewSdkAuthority";
 import { PluginHost } from "./plugins/PluginHost";
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
+import { stopPluginPanelPreview } from "./plugins/pluginPanelLifecycle";
 import { invokePluginSdkHost } from "./plugins/pluginSdkHost";
 import { createPluginPanelSdkAuthorityRegistry } from "./plugins/pluginPanelSdkAuthority";
 import {
@@ -2719,6 +2721,26 @@ async function ensurePluginStarted(
   }
 }
 
+async function stopRunningPluginPanelPreview(input: {
+  handle: StaticSitePreview;
+  releaseOrigin: () => void;
+}): Promise<void> {
+  await stopPluginPanelPreview(
+    {
+      url: input.handle.url,
+      stop: () => input.handle.stop(),
+      releaseOrigin: input.releaseOrigin,
+    },
+    (options) => session.defaultSession.clearStorageData(options),
+    (error) => {
+      console.warn(
+        `[desktop] failed to clear plugin panel storage for ${input.handle.url}`,
+        error,
+      );
+    },
+  );
+}
+
 async function stopPluginPanel(
   workspaceId: string,
   pluginId: string,
@@ -2730,11 +2752,7 @@ async function stopPluginPanel(
     const panel = runningPluginPanels.get(key);
     runningPluginPanels.delete(key);
     if (!panel) return;
-    try {
-      await panel.handle.stop();
-    } finally {
-      panel.releaseOrigin();
-    }
+    await stopRunningPluginPanelPreview(panel);
   });
 }
 
@@ -6040,11 +6058,7 @@ function registerIpcHandlers(
       const previous = runningPluginPanels.get(key);
       runningPluginPanels.delete(key);
       if (previous) {
-        try {
-          await previous.handle.stop();
-        } finally {
-          previous.releaseOrigin();
-        }
+        await stopRunningPluginPanelPreview(previous);
       }
 
       const entryPath = join(plugin.pluginRoot, panel.entry);
@@ -6054,7 +6068,10 @@ function registerIpcHandlers(
         entryLabel: "plugin panel entry",
       });
       if (!isCurrent()) {
-        await handle.stop();
+        await stopRunningPluginPanelPreview({
+          handle,
+          releaseOrigin: () => undefined,
+        });
         throw new Error(
           "Plugin panel start was cancelled because the renderer changed.",
         );
