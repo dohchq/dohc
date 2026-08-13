@@ -71,6 +71,14 @@ const repoRoot = resolve(scriptDir, "../..");
 const budget = resolveBuildBudget();
 if (budget) {
   const free = freeDiskGb(repoRoot);
+  if (free === null) {
+    // Not fail-closed on purpose: the floor guards a failure cargo reports
+    // loudly itself (ENOSPC fails the gate), so an unreadable measurement
+    // is worth a warning, not an outage of the canonical gate.
+    console.warn(
+      `disk preflight skipped: free space on ${repoRoot}'s volume could not be read; the ${budget.diskFloorGb} GB floor is unverified for this run`,
+    );
+  }
   if (free !== null && free < budget.diskFloorGb) {
     console.error(
       `refusing to run the gate: ${free.toFixed(1)} GB free on the worktree ` +
