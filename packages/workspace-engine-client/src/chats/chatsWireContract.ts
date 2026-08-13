@@ -1282,14 +1282,3 @@ export function decodeChatsResult<M extends ChatsMethod>(
   }
   return result as ChatsMethodResultMap[M];
 }
-
-export const decodeChatChannelGetWireIdResult = (value: JsonValue): ChatWireIdResult =>
-  decodeChatsResult(CHATS_METHOD.channelGetWireId, value);
-export const decodeChatThreadStartResult = (value: JsonValue): ChatThreadStartResult =>
-  decodeChatsResult(CHATS_METHOD.threadStart, value);
-export const decodeChatProjectionResult = (value: JsonValue): ChatProjection =>
-  decodeChatsResult(CHATS_METHOD.threadGetProjection, value);
-export const decodeChatFeedPage = (value: JsonValue): ChatFeedPage =>
-  decodeChatsResult(CHATS_METHOD.feedListPersonal, value);
-export const decodeChatBookmarkTransition = (value: JsonValue): ChatBookmarkTransition =>
-  decodeChatsResult(CHATS_METHOD.bookmarkMarkFailed, value);
