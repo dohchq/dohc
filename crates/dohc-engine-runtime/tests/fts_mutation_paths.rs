@@ -68,6 +68,7 @@ async fn capture_text_ingest_and_retire_update_certified_search_index() {
     actor
         .capture_ingest(
             capture_text(WS, "notes/baseline.md", "baseline", 10),
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -89,6 +90,7 @@ async fn capture_text_ingest_and_retire_update_certified_search_index() {
         .capture_ingest_indexed(
             capture_text(WS, PATH, NEEDLE, 30),
             scratch.path().to_path_buf(),
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -118,6 +120,7 @@ async fn capture_text_ingest_and_retire_update_certified_search_index() {
                 only_if_capture_origin: true,
                 allow_ydoc_origin: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -148,6 +151,7 @@ async fn excalidraw_capture_indexes_only_live_text_and_invalid_update_clears_it(
     actor
         .capture_ingest(
             capture_text(WS, "notes/baseline.md", "baseline", 10),
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -180,6 +184,7 @@ async fn excalidraw_capture_indexes_only_live_text_and_invalid_update_clears_it(
         .capture_ingest_indexed(
             capture_text(WS, PATH, &scene, 30),
             scratch.path().to_path_buf(),
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -208,6 +213,7 @@ async fn excalidraw_capture_indexes_only_live_text_and_invalid_update_clears_it(
         .capture_ingest_indexed(
             capture_text(WS, PATH, &invalid, 50),
             scratch.path().to_path_buf(),
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -263,6 +269,7 @@ async fn aliased_database_capture_uses_session_root_and_indexes() {
         .capture_ingest_indexed(
             capture_text(WS, PATH, NEEDLE, 20),
             scratch.path().to_path_buf(),
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -298,6 +305,7 @@ async fn ydoc_settle_replaces_old_search_content_with_projected_text() {
     actor
         .capture_ingest(
             capture_text(WS, PATH, OLD, 10),
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -396,6 +404,7 @@ async fn binary_capture_matches_rpc_binary_write_search_index_behavior() {
     let capture_head = actor
         .capture_ingest(
             capture_text(WS, CAPTURE_PATH, NEEDLE, 10),
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -404,6 +413,7 @@ async fn binary_capture_matches_rpc_binary_write_search_index_behavior() {
     let rpc_head = actor
         .capture_ingest(
             capture_text(WS, RPC_PATH, NEEDLE, 11),
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -442,6 +452,7 @@ async fn binary_capture_matches_rpc_binary_write_search_index_behavior() {
                 request_id: None,
                 claim_foreign_head: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )

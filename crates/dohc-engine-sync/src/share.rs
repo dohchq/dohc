@@ -149,7 +149,7 @@ pub fn apply_shared_envelope(
     let advance_source = match &outcome {
         ApplyOutcome::Applied(_) | ApplyOutcome::Crashed { .. } => false,
         ApplyOutcome::Refused(_) | ApplyOutcome::Skipped => true,
-        ApplyOutcome::WithRefusals { .. } => unreachable!("refusals are attached below"),
+        ApplyOutcome::WithDiagnostics { .. } => unreachable!("diagnostics are attached below"),
     };
     if advance_source {
         match store.write_with(faults, |tx| {

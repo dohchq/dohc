@@ -1,4 +1,4 @@
-import { SITE_SOURCE_CODE_EXT_RE } from "@dohc/workspace-contracts/domain";
+import { SITE_SOURCE_CODE_EXT_RE } from "@dohc/workspace-contracts/domain-values";
 
 export function defaultWorkspaceRoot(homeDir: string): string {
   return `${homeDir.replace(/\/+$/, "")}/dohc`;

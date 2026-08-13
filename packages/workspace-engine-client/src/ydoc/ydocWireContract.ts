@@ -1,3 +1,7 @@
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as SchemaIssue from "effect/SchemaIssue";
+import * as Struct from "effect/Struct";
 import type { JsonValue } from "./generated/serde_json/JsonValue";
 
 export const YDOC_METHOD = {
@@ -23,9 +27,6 @@ export const YDOC_EVENT = {
 export type YdocContentKind = "richdoc" | "plaintext" | "scene";
 export type JsonObject = { [key: string]: JsonValue | undefined };
 
-// Format-neutral metadata for bytes owned by an artifact. The provider owns
-// `id`; core owns the workspace/version/path authority behind `ref` and binds
-// the descriptor to the session's entered version.
 export interface ArtifactAssetDescriptor extends JsonObject {
   id: string;
   mimeType: string;
@@ -40,10 +41,6 @@ export type YdocOpenParams = JsonObject & {
   versionId: string;
   path: string;
   contentKind?: YdocContentKind;
-  // Scene-only admission intent. On the first generation the engine may
-  // import a portable .excalidraw artifact into the canonical Y.Doc before
-  // replying. Replacement generations replay the renderer's canonical state
-  // instead and must send false.
   seedFromArtifact?: boolean;
 };
 
@@ -63,12 +60,7 @@ export type YdocOpenResult = JsonObject & {
   // daemon resurrects is lineage-existing and head-absent. Only both absent
   // means the session is bound to an EMPTY doc over nothing.
   lineage: "existing" | "absent";
-  // Metadata only. Asset bytes stay in the versioned binary store and are
-  // hydrated through its workspace-authorized read contract.
   artifactAssets?: ArtifactAssetDescriptor[];
-  // Present only when the engine opened captured text without durable CRDT
-  // lineage. The client records this content as the lineage's first update.
-  // Scene opens return their seed in initialUpdateBase64 instead.
   seedContent?: string;
 };
 
@@ -147,152 +139,107 @@ export class YdocProtocolShapeError extends Error {
   }
 }
 
-function objectValue(value: JsonValue, label: string): JsonObject {
-  if (value === null || Array.isArray(value) || typeof value !== "object") {
-    throw new YdocProtocolShapeError(`${label} must be a JSON object.`);
-  }
-  return value;
+function mutableStruct<const Fields extends Schema.Struct.Fields>(fields: Fields) {
+  return Schema.Struct(fields).mapFields(Struct.map(Schema.mutableKey));
 }
 
-function stringValue(object: JsonObject, key: string, label: string): string {
-  const value = object[key];
-  if (typeof value !== "string") {
-    throw new YdocProtocolShapeError(`${label}.${key} must be a string.`);
-  }
-  return value;
-}
-
-// A field the engine answers with the value OR with an explicit null (never
-// absent, never an empty-string stand-in): null MEANS something, so an absent
-// key is still a protocol violation.
-function nullableStringValue(
-  object: JsonObject,
-  key: string,
+function decodeYdocSchema<S extends Schema.ConstraintDecoder<unknown>>(
+  schema: S,
+  value: JsonValue,
   label: string,
-): string | null {
-  const value = object[key];
-  if (value === null) return null;
-  if (typeof value !== "string") {
+): S["Type"] {
+  const decoded = Schema.decodeUnknownResult(schema)(value);
+  if (Result.isFailure(decoded)) {
+    const issue = SchemaIssue.makeFormatterStandardSchemaV1()(
+      decoded.failure.issue,
+    ).issues[0];
+    const path = issue?.path?.map((part) =>
+      typeof part === "number" ? `[${part}]` : `.${String(part)}`,
+    ).join("") ?? "";
     throw new YdocProtocolShapeError(
-      `${label}.${key} must be a string or null.`,
+      `${label}${path}: ${issue?.message ?? decoded.failure.message}`,
     );
   }
-  return value;
+  return decoded.success;
 }
 
-function booleanValue(object: JsonObject, key: string, label: string): boolean {
-  const value = object[key];
-  if (typeof value !== "boolean") {
-    throw new YdocProtocolShapeError(`${label}.${key} must be a boolean.`);
-  }
-  return value;
-}
-
-function numberValue(object: JsonObject, key: string, label: string): number {
-  const value = object[key];
-  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
-    throw new YdocProtocolShapeError(`${label}.${key} must be a safe integer.`);
-  }
-  return value;
-}
-
-function contentKindValue(
-  object: JsonObject,
-  key: string,
-  label: string,
-): YdocContentKind {
-  const value = object[key];
-  if (value !== "richdoc" && value !== "plaintext" && value !== "scene") {
-    throw new YdocProtocolShapeError(
-      `${label}.${key} must be richdoc, plaintext, or scene.`,
-    );
-  }
-  return value;
-}
+const YdocContentKindSchema = Schema.Literals(["richdoc", "plaintext", "scene"]);
+const ArtifactAssetDescriptorSchema = mutableStruct({
+  id: Schema.String,
+  mimeType: Schema.String,
+  created: Schema.Int,
+  ref: Schema.String,
+  sha256: Schema.String,
+  lastRetrieved: Schema.optionalKey(Schema.Int),
+  version: Schema.optionalKey(Schema.Int),
+});
+const OpenResultSchema = mutableStruct({
+  sessionId: Schema.String,
+  objectId: Schema.String,
+  path: Schema.String,
+  contentKind: YdocContentKindSchema,
+  initialUpdateBase64: Schema.String,
+  head: Schema.Literals(["present", "absent"]),
+  lineage: Schema.Literals(["existing", "absent"]),
+  artifactAssets: Schema.optionalKey(Schema.Array(ArtifactAssetDescriptorSchema)),
+  seedContent: Schema.optionalKey(Schema.String),
+});
+const RecordUpdateResultSchema = mutableStruct({ seq: Schema.Int });
+const ProjectionProvenanceSchema = mutableStruct({
+  contentKind: YdocContentKindSchema,
+  sourceStateVectorSha256: Schema.String,
+  destructive: Schema.Boolean,
+});
+const SettleResultSchema = mutableStruct({
+  momentId: Schema.String,
+  path: Schema.String,
+  content: Schema.NullOr(Schema.String),
+  sha256: Schema.String,
+  materialized: Schema.Boolean,
+  projection: ProjectionProvenanceSchema,
+});
+const ExternalEditResultSchema = Schema.Union([
+  mutableStruct({ kind: Schema.Literal("merged"), markdown: Schema.String }),
+  mutableStruct({
+    kind: Schema.Literal("conflict"),
+    conflictPath: Schema.String,
+  }),
+]);
+const CloseResultSchema = mutableStruct({ closed: Schema.Literal(true) });
+const EvictResultSchema = mutableStruct({ evicted: Schema.Literal(true) });
+const RemoteUpdatePayloadSchema = mutableStruct({
+  sessionId: Schema.String,
+  updateBase64: Schema.String,
+});
 
 export function decodeYdocOpenResult(value: JsonValue): YdocOpenResult {
-  const object = objectValue(value, "ydoc.open result");
-  return {
-    sessionId: stringValue(object, "sessionId", "ydoc.open result"),
-    objectId: stringValue(object, "objectId", "ydoc.open result"),
-    path: stringValue(object, "path", "ydoc.open result"),
-    contentKind: contentKindValue(object, "contentKind", "ydoc.open result"),
-    initialUpdateBase64: stringValue(
-      object,
-      "initialUpdateBase64",
-      "ydoc.open result",
-    ),
-    head: headValue(object, "head", "ydoc.open result"),
-    lineage: lineageValue(object, "lineage", "ydoc.open result"),
-    ...(object.artifactAssets === undefined
-      ? {}
-      : { artifactAssets: artifactAssetsValue(object.artifactAssets) }),
-    ...(object.seedContent === undefined
-      ? {}
-      : {
-          seedContent: stringValue(
-            object,
-            "seedContent",
-            "ydoc.open result",
-          ),
-        }),
-  };
-}
-
-function artifactAssetsValue(value: JsonValue): ArtifactAssetDescriptor[] {
-  if (!Array.isArray(value)) {
-    throw new YdocProtocolShapeError(
-      "ydoc.open result.artifactAssets must be an array.",
-    );
-  }
-  return value.map((item, index) => {
-    const label = `ydoc.open result.artifactAssets[${index}]`;
-    const object = objectValue(item, label);
-    const id = stringValue(object, "id", label);
-    const mimeType = stringValue(object, "mimeType", label);
-    const ref = stringValue(object, "ref", label);
-    const sha256 = stringValue(object, "sha256", label);
-    const created = nonnegativeIntegerValue(object, "created", label);
+  const decoded = decodeYdocSchema(
+    OpenResultSchema,
+    value,
+    "ydoc.open result",
+  ) as YdocOpenResult;
+  decoded.artifactAssets?.forEach((asset, index) => {
     if (
-      id.length === 0 ||
-      mimeType.length === 0 ||
-      !isNormalizedWorkspaceRef(ref) ||
-      !/^[0-9a-f]{64}$/.test(sha256)
+      asset.id.length === 0 ||
+      asset.mimeType.length === 0 ||
+      !isNonnegativeSafeInteger(asset.created) ||
+      (asset.lastRetrieved !== undefined &&
+        !isNonnegativeSafeInteger(asset.lastRetrieved)) ||
+      (asset.version !== undefined &&
+        !isNonnegativeSafeInteger(asset.version)) ||
+      !isNormalizedWorkspaceRef(asset.ref) ||
+      !/^[0-9a-f]{64}$/.test(asset.sha256)
     ) {
-      throw new YdocProtocolShapeError(`${label} is not a valid asset descriptor.`);
+      throw new YdocProtocolShapeError(
+        `ydoc.open result.artifactAssets[${index}] is not a valid asset descriptor.`,
+      );
     }
-    return {
-      id,
-      mimeType,
-      created,
-      ref,
-      sha256,
-      ...(object.lastRetrieved === undefined
-        ? {}
-        : {
-            lastRetrieved: nonnegativeIntegerValue(
-              object,
-              "lastRetrieved",
-              label,
-            ),
-          }),
-      ...(object.version === undefined
-        ? {}
-        : { version: nonnegativeIntegerValue(object, "version", label) }),
-    };
   });
+  return decoded;
 }
 
-function nonnegativeIntegerValue(
-  object: JsonObject,
-  key: string,
-  label: string,
-): number {
-  const value = numberValue(object, key, label);
-  if (value < 0) {
-    throw new YdocProtocolShapeError(`${label}.${key} must be nonnegative.`);
-  }
-  return value;
+function isNonnegativeSafeInteger(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0;
 }
 
 function isNormalizedWorkspaceRef(ref: string): boolean {
@@ -324,133 +271,56 @@ function hasWellFormedSurrogates(value: string): boolean {
   return true;
 }
 
-// Both fields gate a REFUSAL, so neither may be inferred. A decoder that
-// defaulted a missing or garbled value to the permissive side would silently
-// turn the refusal off — the same hole the field exists to close.
-function headValue(
-  object: JsonObject,
-  key: string,
-  label: string,
-): "present" | "absent" {
-  const value = object[key];
-  if (value !== "present" && value !== "absent") {
-    throw new YdocProtocolShapeError(
-      `${label}.${key} must be present or absent.`,
-    );
-  }
-  return value;
-}
-
-function lineageValue(
-  object: JsonObject,
-  key: string,
-  label: string,
-): "existing" | "absent" {
-  const value = object[key];
-  if (value !== "existing" && value !== "absent") {
-    throw new YdocProtocolShapeError(
-      `${label}.${key} must be existing or absent.`,
-    );
-  }
-  return value;
-}
-
 export function decodeYdocRecordUpdateResult(
   value: JsonValue,
 ): YdocRecordUpdateResult {
-  const object = objectValue(value, "ydoc.recordUpdate result");
-  return { seq: numberValue(object, "seq", "ydoc.recordUpdate result") };
+  return decodeYdocSchema(
+    RecordUpdateResultSchema,
+    value,
+    "ydoc.recordUpdate result",
+  ) as YdocRecordUpdateResult;
 }
 
 export function decodeYdocSettleResult(value: JsonValue): YdocSettleResult {
-  const object = objectValue(value, "ydoc.settle result");
-  const projection = objectValue(
-    object.projection ?? null,
-    "ydoc.settle result.projection",
-  );
-  const destructive = projection.destructive;
-  if (typeof destructive !== "boolean") {
-    throw new YdocProtocolShapeError(
-      "ydoc.settle result.projection.destructive must be a boolean.",
-    );
-  }
-  return {
-    momentId: stringValue(object, "momentId", "ydoc.settle result"),
-    path: stringValue(object, "path", "ydoc.settle result"),
-    content: nullableStringValue(object, "content", "ydoc.settle result"),
-    sha256: stringValue(object, "sha256", "ydoc.settle result"),
-    materialized: booleanValue(object, "materialized", "ydoc.settle result"),
-    projection: {
-      contentKind: contentKindValue(
-        projection,
-        "contentKind",
-        "ydoc.settle result.projection",
-      ),
-      sourceStateVectorSha256: stringValue(
-        projection,
-        "sourceStateVectorSha256",
-        "ydoc.settle result.projection",
-      ),
-      destructive,
-    },
-  };
+  return decodeYdocSchema(
+    SettleResultSchema,
+    value,
+    "ydoc.settle result",
+  ) as YdocSettleResult;
 }
 
 export function decodeYdocExternalEditResult(
   value: JsonValue,
 ): YdocApplyExternalMarkdownEditResult {
-  const object = objectValue(value, "ydoc.applyExternalMarkdownEdit result");
-  if (object.kind === "merged") {
-    return {
-      kind: "merged",
-      markdown: stringValue(
-        object,
-        "markdown",
-        "ydoc.applyExternalMarkdownEdit result",
-      ),
-    };
-  }
-  if (object.kind === "conflict") {
-    return {
-      kind: "conflict",
-      conflictPath: stringValue(
-        object,
-        "conflictPath",
-        "ydoc.applyExternalMarkdownEdit result",
-      ),
-    };
-  }
-  throw new YdocProtocolShapeError(
-    "ydoc.applyExternalMarkdownEdit result.kind is invalid.",
-  );
+  return decodeYdocSchema(
+    ExternalEditResultSchema,
+    value,
+    "ydoc.applyExternalMarkdownEdit result",
+  ) as YdocApplyExternalMarkdownEditResult;
 }
 
 export function decodeYdocCloseResult(value: JsonValue): YdocCloseResult {
-  const object = objectValue(value, "ydoc.close result");
-  if (object.closed !== true) {
-    throw new YdocProtocolShapeError("ydoc.close result.closed must be true.");
-  }
-  return { closed: true };
+  return decodeYdocSchema(
+    CloseResultSchema,
+    value,
+    "ydoc.close result",
+  ) as YdocCloseResult;
 }
 
 export function decodeYdocEvictResult(value: JsonValue): YdocEvictResult {
-  const object = objectValue(value, "ydoc.evict result");
-  if (object.evicted !== true) {
-    throw new YdocProtocolShapeError("ydoc.evict result.evicted must be true.");
-  }
-  return { evicted: true };
+  return decodeYdocSchema(
+    EvictResultSchema,
+    value,
+    "ydoc.evict result",
+  ) as YdocEvictResult;
 }
 
 export function decodeYdocRemoteUpdatePayload(
   value: JsonValue,
 ): YdocRemoteUpdatePayload {
-  const object = objectValue(value, "ydoc.remoteUpdate payload");
-  return {
-    sessionId: stringValue(object, "sessionId", "ydoc.remoteUpdate payload"),
-    updateBase64: stringValue(
-      object,
-      "updateBase64",
-      "ydoc.remoteUpdate payload",
-    ),
-  };
+  return decodeYdocSchema(
+    RemoteUpdatePayloadSchema,
+    value,
+    "ydoc.remoteUpdate payload",
+  ) as YdocRemoteUpdatePayload;
 }

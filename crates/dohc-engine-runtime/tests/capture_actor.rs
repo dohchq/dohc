@@ -27,6 +27,7 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
                 request_id: Some("actor-capture-request".to_owned()),
                 claim_foreign_head: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
         )
         .expect("blocking capture");
@@ -48,6 +49,7 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
                 only_if_capture_origin: false,
                 allow_ydoc_origin: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
         )
         .expect("blocking retire");
@@ -77,6 +79,7 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
                 request_id: Some("actor-async-capture-request".to_owned()),
                 claim_foreign_head: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -98,6 +101,7 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
                 only_if_capture_origin: false,
                 allow_ydoc_origin: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -120,6 +124,7 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
                 request_id: None,
                 claim_foreign_head: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -143,6 +148,7 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
                 request_id: None,
                 claim_foreign_head: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             cancelled,
         )
@@ -177,6 +183,7 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
                 only_if_capture_origin: false,
                 allow_ydoc_origin: true,
             },
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             cancelled,
         )
@@ -263,6 +270,7 @@ async fn binary_capture_round_trips_through_the_actor_both_ways() {
     let written = handle
         .capture_ingest_binary(
             input(&[0xff, 0x00], 10),
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -276,6 +284,7 @@ async fn binary_capture_round_trips_through_the_actor_both_ways() {
     let deduped = handle
         .capture_ingest_binary(
             input(&[0xff, 0x00], 20),
+            dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -287,10 +296,289 @@ async fn binary_capture_round_trips_through_the_actor_both_ways() {
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     let err = handle
-        .capture_ingest_binary(input(&[1], 30), Arc::new(NoFaults), cancelled)
+        .capture_ingest_binary(
+            input(&[1], 30),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            cancelled,
+        )
         .await
         .expect_err("pre-cancelled binary capture is refused");
     assert!(matches!(err, RuntimeError::Cancelled));
+
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test]
+async fn live_lease_blocks_text_and_binary_capture_without_mutation_until_retry() {
+    use dohc_engine_runtime::CaptureIngestBinary;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let workspace_id = "ws-live-capture";
+    let path = "notes/live.md";
+    let object_id = dohc_engine_domain::derive_capture_object_id(workspace_id, "main", path);
+    let key = dohc_engine_collab::DocKey::new(workspace_id, "main", &object_id)
+        .expect("capture Y.Doc key");
+    let leases = dohc_engine_collab::LeaseRegistry::new();
+    let state = || {
+        let store = EngineStore::open(&db, 100).expect("inspect capture state");
+        store
+            .read_with(|conn| {
+                let count = |table: &str| -> rusqlite::Result<i64> {
+                    conn.query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE workspace_id=?1"),
+                        [workspace_id],
+                        |row| row.get(0),
+                    )
+                };
+                let request_count =
+                    conn.query_row("SELECT COUNT(*) FROM engine_requests", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?;
+                Ok::<_, rusqlite::Error>((
+                    count("snapshots")?,
+                    count("moments")?,
+                    count("replication_log")?,
+                    count("engine_search_files_fts")?,
+                    count("materialization_jobs")?,
+                    count("ydoc_docs")?,
+                    count("ydoc_updates")?,
+                    count("ydoc_snapshots")?,
+                    count("ydoc_deferred_updates")?,
+                    request_count,
+                ))
+            })
+            .expect("capture state")
+    };
+    let durable_state = || {
+        let store = EngineStore::open(&db, 100).expect("inspect exact capture state");
+        store
+            .read_with(|conn| {
+                let rows = |table: &str, workspace_scoped: bool| {
+                    let sql = if workspace_scoped {
+                        format!("SELECT * FROM {table} WHERE workspace_id=?1 ORDER BY rowid")
+                    } else {
+                        format!("SELECT * FROM {table} ORDER BY rowid")
+                    };
+                    let mut statement = conn.prepare(&sql)?;
+                    let column_count = statement.column_count();
+                    let mut query = if workspace_scoped {
+                        statement.query([workspace_id])?
+                    } else {
+                        statement.query([])?
+                    };
+                    let mut result = Vec::new();
+                    while let Some(row) = query.next()? {
+                        let mut values = Vec::with_capacity(column_count);
+                        for column in 0..column_count {
+                            let value = match row.get_ref(column)? {
+                                rusqlite::types::ValueRef::Null => "null".to_owned(),
+                                rusqlite::types::ValueRef::Integer(value) => {
+                                    format!("integer:{value}")
+                                }
+                                rusqlite::types::ValueRef::Real(value) => {
+                                    format!("real:{value}")
+                                }
+                                rusqlite::types::ValueRef::Text(value) => {
+                                    format!("text:{}", String::from_utf8_lossy(value))
+                                }
+                                rusqlite::types::ValueRef::Blob(value) => {
+                                    format!("blob:{value:?}")
+                                }
+                            };
+                            values.push(value);
+                        }
+                        result.push(values);
+                    }
+                    Ok::<_, rusqlite::Error>(result)
+                };
+                [
+                    ("file_objects", true),
+                    ("path_aliases", true),
+                    ("blobs", false),
+                    ("binary_blobs", false),
+                    ("snapshots", true),
+                    ("moments", true),
+                    ("replication_log", true),
+                    ("engine_search_files_fts", true),
+                    ("materialization_jobs", true),
+                    ("engine_requests", false),
+                    ("ydoc_docs", true),
+                    ("ydoc_updates", true),
+                    ("ydoc_snapshots", true),
+                    ("ydoc_deferred_updates", true),
+                ]
+                .into_iter()
+                .map(|(table, scoped)| Ok((table, rows(table, scoped)?)))
+                .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .expect("exact capture state")
+    };
+    let text_input = |request_id: &str| CaptureIngest {
+        workspace_id: workspace_id.to_owned(),
+        version_id: "main".to_owned(),
+        path: path.to_owned(),
+        text: "captured text".to_owned(),
+        metadata_origin: "capture".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 10,
+        request_id: Some(request_id.to_owned()),
+        claim_foreign_head: true,
+    };
+    let binary_input = |request_id: &str| CaptureIngestBinary {
+        workspace_id: workspace_id.to_owned(),
+        version_id: "main".to_owned(),
+        path: path.to_owned(),
+        bytes: b"binary replacement".to_vec(),
+        metadata_origin: "capture".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 20,
+        request_id: Some(request_id.to_owned()),
+        claim_foreign_head: true,
+    };
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+
+    let text_lease = leases.acquire(&key).expect("hold absent text path live");
+    let before_text = durable_state();
+    let refused = handle
+        .capture_ingest_indexed(
+            text_input("text-capture"),
+            scratch.path().to_path_buf(),
+            leases.clone(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("live lease must block text capture");
+    assert!(matches!(
+        refused,
+        RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
+            reason: "ydoc-session-live"
+        })
+    ));
+    assert_eq!(state(), (0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+    assert_eq!(durable_state(), before_text);
+    drop(text_lease);
+    handle
+        .capture_ingest_indexed(
+            text_input("text-capture"),
+            scratch.path().to_path_buf(),
+            leases.clone(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("text capture retries after lease release");
+    let after_text = state();
+    assert_eq!(after_text, (1, 1, 0, 1, 0, 0, 0, 0, 0, 1));
+
+    let text_lease = leases.acquire(&key).expect("hold recorded text head live");
+    let before_text_replay = durable_state();
+    let replay = handle
+        .capture_ingest_indexed(
+            text_input("text-capture"),
+            scratch.path().to_path_buf(),
+            leases.clone(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("a committed text request replays while its lease is live");
+    assert!(replay.deduped);
+    assert_eq!(state(), after_text);
+    assert_eq!(durable_state(), before_text_replay);
+    let refused = handle
+        .capture_ingest_indexed(
+            text_input("text-new"),
+            scratch.path().to_path_buf(),
+            leases.clone(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a new equal-text request must not bypass the live lease");
+    assert!(matches!(
+        refused,
+        RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
+            reason: "ydoc-session-live"
+        })
+    ));
+    assert_eq!(state(), after_text);
+    assert_eq!(durable_state(), before_text_replay);
+    drop(text_lease);
+
+    let binary_lease = leases.acquire(&key).expect("hold text head live");
+    let before_binary = durable_state();
+    let refused = handle
+        .capture_ingest_binary(
+            binary_input("binary-capture"),
+            leases.clone(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("live lease must block binary capture");
+    assert!(matches!(
+        refused,
+        RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
+            reason: "ydoc-session-live"
+        })
+    ));
+    assert_eq!(state(), after_text);
+    assert_eq!(durable_state(), before_binary);
+    drop(binary_lease);
+    handle
+        .capture_ingest_binary(
+            binary_input("binary-capture"),
+            leases.clone(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("binary capture retries after lease release");
+    let after_binary = state();
+    assert_eq!(after_binary, (1, 2, 0, 0, 1, 0, 0, 0, 0, 2));
+
+    let binary_lease = leases
+        .acquire(&key)
+        .expect("hold recorded binary head live");
+    let before_binary_replay = durable_state();
+    let replay = handle
+        .capture_ingest_binary(
+            binary_input("binary-capture"),
+            leases.clone(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("a committed binary request replays while its lease is live");
+    assert!(replay.deduped);
+    assert_eq!(state(), after_binary);
+    assert_eq!(durable_state(), before_binary_replay);
+    let refused = handle
+        .capture_ingest_binary(
+            binary_input("binary-new"),
+            leases,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a new equal-binary request must not bypass the live lease");
+    assert!(matches!(
+        refused,
+        RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
+            reason: "ydoc-session-live"
+        })
+    ));
+    assert_eq!(state(), after_binary);
+    assert_eq!(durable_state(), before_binary_replay);
+    drop(binary_lease);
 
     supervisor.close(&db).expect("close actor");
 }

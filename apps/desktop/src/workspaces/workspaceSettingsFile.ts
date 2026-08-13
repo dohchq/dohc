@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { lstat, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { WorkspaceSettings as WorkspaceSettingsContract } from "@dohc/workspace-contracts/workspace-settings";
+import * as Schema from "effect/Schema";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
   mergeWorkspaceSettings,
@@ -13,6 +15,8 @@ import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
 export const WORKSPACE_SETTINGS_FILE = "settings.local.json";
 export const MAX_WORKSPACE_SETTINGS_FILE_BYTES = 256 * 1024;
+
+const decodeWorkspaceSettings = Schema.decodeUnknownSync(WorkspaceSettingsContract);
 
 // A settings file that EXISTS but cannot be read may hold the engine opt-out.
 // Reading it as defaults would turn recording back on for a workspace that
@@ -73,11 +77,7 @@ export async function readWorkspaceSettingsFile(
       return unreadableSettings("Workspace settings are too large to read.", path);
     }
     const raw = JSON.parse(await readFile(path, "utf8"));
-    const parsed = WorkspaceSettings.safeParse(raw);
-    if (!parsed.success) {
-      return unreadableSettings("Workspace settings could not be read.", path);
-    }
-    return { settings: parsed.data, source: "stored" };
+    return { settings: decodeWorkspaceSettings(raw), source: "stored" };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return { settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" };
@@ -193,7 +193,8 @@ export async function writeWorkspaceSettingsFile(
   const path = await workspaceSettingsPath(rootPath);
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
-    await writeFile(tmp, `${JSON.stringify(WorkspaceSettings.parse(settings), null, 2)}\n`);
+    const decoded = decodeWorkspaceSettings(settings);
+    await writeFile(tmp, `${JSON.stringify(decoded, null, 2)}\n`);
     // A directory or a link at the settings path reads as unreadable, and
     // Reset is what the refusal tells the user to reach for — but the atomic
     // rename cannot land on either, so the advertised way out would fail.

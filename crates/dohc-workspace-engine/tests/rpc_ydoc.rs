@@ -3,6 +3,7 @@
 
 use base64::Engine as _;
 use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc, ensure_marker};
+use dohc_engine_files::MAX_CAPTURE_TEXT_BYTES;
 use dohc_engine_protocol::{
     error::ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
@@ -1671,6 +1672,35 @@ async fn scene_seed_names_the_existing_binary_ceiling_before_commit() {
     assert!(refused.message.contains("5242881 bytes"));
 }
 
+#[tokio::test]
+async fn ydoc_apply_is_not_a_public_method() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-no-legacy-apply", 1).await;
+
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                2,
+                "ydoc.apply",
+                Some(handle),
+                json!({
+                    "versionId": "main",
+                    "objectId": "object-legacy",
+                    "contentKind": "plaintext",
+                    "updateBase64": plaintext_update("legacy")
+                }),
+            ),
+        )
+        .await
+        .expect_err("the legacy append RPC must not be exposed");
+
+    assert_eq!(error.code, ErrorCode::MethodNotFound);
+}
+
 /// Stage the #346 interleaving: a 0-byte artifact on disk that capture has NOT
 /// yet ingested, with a live session opened over it. Returns the path it
 /// staged and the open result.
@@ -1733,6 +1763,31 @@ async fn stage_headless_session_over_an_empty_artifact(
     panic!("could not open a session before capture ingested the empty artifact in 8 attempts");
 }
 
+/// Wait until capture has observed a disk change but cannot apply it because
+/// this test still holds the document lease.
+async fn wait_for_capture_to_defer_under_live_session(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id_base: u64,
+) {
+    let mut last_flush = Value::Null;
+    for attempt in 0..40 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        last_flush = call(
+            transport,
+            handle,
+            id_base + attempt,
+            "capture.flush",
+            json!({}),
+        )
+        .await;
+        if last_flush["settled"] == json!(false) && last_flush["degraded"] == json!(true) {
+            return;
+        }
+    }
+    panic!("capture did not report its deferred live-session write: {last_flush}");
+}
+
 async fn moment_count_for_object(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
@@ -1750,6 +1805,82 @@ async fn moment_count_for_object(
         .as_array()
         .expect("moments")
         .len()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TableFingerprint {
+    name: &'static str,
+    rows: Vec<Vec<String>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SettleFingerprint(Vec<TableFingerprint>);
+
+fn settle_fingerprint(scratch: &ScratchDir, workspace_id: &str) -> SettleFingerprint {
+    let connection =
+        rusqlite::Connection::open(scratch.engine_db_path().expect("engine database path"))
+            .expect("open engine database");
+    let rows = |table: &'static str, workspace_scoped: bool| {
+        let sql = if workspace_scoped {
+            format!("SELECT * FROM {table} WHERE workspace_id=?1 ORDER BY rowid")
+        } else {
+            format!("SELECT * FROM {table} ORDER BY rowid")
+        };
+        let mut statement = connection.prepare(&sql).expect("prepare fingerprint query");
+        let column_count = statement.column_count();
+        let mut query = if workspace_scoped {
+            statement
+                .query([workspace_id])
+                .expect("query workspace rows")
+        } else {
+            statement.query([]).expect("query global rows")
+        };
+        let mut result = Vec::new();
+        while let Some(row) = query.next().expect("read fingerprint row") {
+            let mut values = Vec::with_capacity(column_count);
+            for column in 0..column_count {
+                let value = match row.get_ref(column).expect("read fingerprint value") {
+                    rusqlite::types::ValueRef::Null => "null".to_owned(),
+                    rusqlite::types::ValueRef::Integer(value) => format!("integer:{value}"),
+                    rusqlite::types::ValueRef::Real(value) => format!("real:{value}"),
+                    rusqlite::types::ValueRef::Text(value) => {
+                        format!("text:{}", String::from_utf8_lossy(value))
+                    }
+                    rusqlite::types::ValueRef::Blob(value) => format!("blob:{value:?}"),
+                };
+                values.push(value);
+            }
+            result.push(values);
+        }
+        TableFingerprint {
+            name: table,
+            rows: result,
+        }
+    };
+
+    SettleFingerprint(
+        [
+            ("file_objects", true),
+            ("path_aliases", true),
+            ("blobs", false),
+            ("binary_blobs", false),
+            ("snapshots", true),
+            ("moments", true),
+            ("replication_journal", false),
+            ("replication_log", true),
+            ("engine_search_files_fts", true),
+            ("materialization_jobs", true),
+            ("engine_requests", false),
+            ("ydoc_docs", true),
+            ("ydoc_updates", true),
+            ("ydoc_snapshots", true),
+            ("ydoc_deferred_updates", true),
+            ("ydoc_inactive_lineages", true),
+        ]
+        .into_iter()
+        .map(|(table, scoped)| rows(table, scoped))
+        .collect(),
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2175,85 +2306,6 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         .expect_err("binary heads cannot open as Y.Doc text");
     assert_eq!(binary.code, ErrorCode::InvalidParams);
 
-    let race = call(
-        &transport,
-        &handle,
-        19,
-        "ydoc.open",
-        json!({ "versionId": "main", "path": "notes/race.md" }),
-    )
-    .await;
-    assert_eq!(race["lineage"], json!("absent"));
-    let race_session = race["sessionId"].as_str().expect("race session");
-    // The legacy append path cannot advance the CRDT behind a live editor:
-    // the session's lease is single-writer, so the old raced-seed scenario
-    // (apply a durable head under an open absent session) is refused at the
-    // door. The recordUpdate seed guard stays as actor-level defense-in-depth.
-    let busy_apply = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                20,
-                "ydoc.apply",
-                Some(handle.clone()),
-                json!({
-                    "versionId": "main",
-                    "objectId": race["objectId"],
-                    "contentKind": "plaintext",
-                    "updateBase64": plaintext_update("winner")
-                }),
-            ),
-        )
-        .await
-        .expect_err("a leased doc refuses legacy appends");
-    assert_eq!(busy_apply.message, "ydoc-session-busy");
-    // An untouched absent session closes without settling (nothing durable
-    // exists to project) and releases the lease.
-    call(
-        &transport,
-        &handle,
-        21,
-        "ydoc.close",
-        json!({ "sessionId": race_session }),
-    )
-    .await;
-    call(
-        &transport,
-        &handle,
-        22,
-        "ydoc.apply",
-        json!({
-            "versionId": "main",
-            "objectId": race["objectId"],
-            "contentKind": "plaintext",
-            "updateBase64": plaintext_update("winner")
-        }),
-    )
-    .await;
-    let reraced = call(
-        &transport,
-        &handle,
-        33,
-        "ydoc.open",
-        json!({ "versionId": "main", "path": "notes/race.md" }),
-    )
-    .await;
-    assert_eq!(
-        reraced["lineage"],
-        json!("existing"),
-        "a lineage created after the lease released is existing on reopen"
-    );
-    // Default close settles the raced winner over its captured base and
-    // prunes cleanly.
-    call(
-        &transport,
-        &handle,
-        34,
-        "ydoc.close",
-        json!({ "sessionId": reraced["sessionId"] }),
-    )
-    .await;
-
     let isolated = call(
         &transport,
         &handle,
@@ -2570,14 +2622,14 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn capture_must_not_retire_the_settled_head_of_an_over_cap_ydoc() {
+async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
     // AUDIT-SILENTSAVE round 5. This is the race that made
     // `a_settle_past_the_inband_cap…` fail under `cargo test --workspace`
     // while passing in isolation — the capture pass only gets scheduled
     // between the settle and the close under load.
     //
-    // A settled Y.Doc past MAX_CAPTURE_TEXT_BYTES (10 MiB) reads as
-    // "no longer engine-ownable" to the capture sink, which retires the head.
+    // A settled Y.Doc at MAX_CAPTURE_TEXT_BYTES (10 MiB) remains
+    // engine-ownable and must not be retired by capture.
     // Self-write suppression cannot help: it matches a WRITE by sha, and this
     // is a retire taken on a size classification. The next settle — including
     // the one ydoc.close performs by default — then sees a changed target and
@@ -2602,12 +2654,8 @@ async fn capture_must_not_retire_the_settled_head_of_an_over_cap_ydoc() {
     .await;
     let session_id = opened["sessionId"].as_str().expect("session id");
 
-    // Past the capture text cap, like the dogfood journey's 131,442 bytes.
-    let huge = "pasted load-test paragraph.\n".repeat(5_000);
-    assert!(
-        huge.len() > 128 * 1024,
-        "fixture must exceed the capture cap"
-    );
+    let huge = "x".repeat(MAX_CAPTURE_TEXT_BYTES as usize);
+    assert_eq!(huge.len() as u64, MAX_CAPTURE_TEXT_BYTES);
     call(
         &transport,
         &handle,
@@ -2629,7 +2677,11 @@ async fn capture_must_not_retire_the_settled_head_of_an_over_cap_ydoc() {
     // its batch — exactly what happens under load between settle and close.
     tokio::time::sleep(Duration::from_millis(800)).await;
     let flushed = call(&transport, &handle, 5, "capture.flush", json!({})).await;
-    assert_eq!(flushed["settled"], json!(true));
+    assert_eq!(
+        flushed["settled"],
+        json!(false),
+        "the settle's self-write is suppressed instead of becoming capture work"
+    );
 
     // THE load-bearing assertion: the head survived, still owned by the
     // Y.Doc. Before the fix this listing came back EMPTY — capture had
@@ -2654,7 +2706,7 @@ async fn capture_must_not_retire_the_settled_head_of_an_over_cap_ydoc() {
     );
     let head = head.expect("head");
     assert_eq!(head["metadataOrigin"], json!("ydoc"));
-    assert_eq!(head["byteLength"], json!(140_000));
+    assert_eq!(head["byteLength"], json!(MAX_CAPTURE_TEXT_BYTES));
 
     // And the close — which settles by default — succeeds instead of failing
     // ConflictStaleTarget against a head capture moved underneath it.
@@ -2774,45 +2826,21 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
             .await;
     let session_id = opened["sessionId"].as_str().expect("session id");
 
-    // Step 4: capture ingests the empty artifact under the open session.
-    // POLL until the empty head is provably there. It is what the settle must
-    // adopt, so without the proof a flush that ingested nothing would leave
-    // the expectation matching an absent head and every assertion below would
-    // pass with the adoption path never running. One sleep plus a single
-    // flush cannot carry that proof either way: a watcher that has not yet
-    // queued the create makes the flush report quiescence, and the read then
-    // returns null and FALSE-FAILS a correct implementation.
-    let mut ingested = Value::Null;
-    for attempt in 0..40 {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        call(
-            &transport,
-            &handle,
-            100 + attempt,
-            "capture.flush",
-            json!({}),
-        )
-        .await;
-        ingested = call(
-            &transport,
-            &handle,
-            200 + attempt,
-            "versionedText.read",
-            json!({ "versionId": "main", "path": path }),
-        )
-        .await;
-        if ingested["text"] == json!("") {
-            break;
-        }
-    }
+    // Capture sees the empty artifact, but the live Y.Doc is canonical. The
+    // lease keeps capture from minting a competing head under this session.
+    wait_for_capture_to_defer_under_live_session(&transport, &handle, 100).await;
+    let ingested = call(
+        &transport,
+        &handle,
+        200,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": path }),
+    )
+    .await;
     assert_eq!(
         ingested["text"],
-        json!(""),
-        "capture must mint an EMPTY head"
-    );
-    assert_eq!(
-        ingested["objectId"], opened["objectId"],
-        "and mint it on the object the session holds"
+        Value::Null,
+        "capture must leave the head absent while the session lease is live"
     );
 
     // Step 5: the first typed edit must still reach disk.
@@ -2837,6 +2865,7 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
     )
     .await;
     assert_eq!(settled["content"], json!(typed));
+    assert_eq!(settled["materialized"], json!(true));
     assert_eq!(
         std::fs::read_to_string(scratch.path().join(&path)).expect("settled"),
         typed,
@@ -2910,40 +2939,22 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
         stage_headless_session_over_an_empty_artifact(&transport, &handle, &scratch, "rival").await;
     let session_id = opened["sessionId"].as_str().expect("session id");
 
-    // Content the session never saw lands on the path, and capture ingests it.
+    // Content the session never saw lands on the path. Capture observes it,
+    // but the live lease keeps the head unchanged until the session ends.
     write_file(scratch.path(), &path, b"written by something else\n");
-    // POLL until the rival content is provably the head. One sleep plus a
-    // flush is not enough: a watcher that has not yet queued the write makes
-    // the flush report quiescence with no head minted, and the settle below
-    // then refuses through the materialization preimage instead — passing
-    // without ever reaching the predicate this test exists to hold.
-    let mut ingested = Value::Null;
-    for attempt in 0..40 {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        call(
-            &transport,
-            &handle,
-            100 + attempt,
-            "capture.flush",
-            json!({}),
-        )
-        .await;
-        ingested = call(
-            &transport,
-            &handle,
-            200 + attempt,
-            "versionedText.read",
-            json!({ "versionId": "main", "path": path }),
-        )
-        .await;
-        if ingested["text"] == json!("written by something else\n") {
-            break;
-        }
-    }
+    wait_for_capture_to_defer_under_live_session(&transport, &handle, 100).await;
+    let ingested = call(
+        &transport,
+        &handle,
+        200,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": path }),
+    )
+    .await;
     assert_eq!(
         ingested["text"],
-        json!("written by something else\n"),
-        "capture must mint the RIVAL head before the settle is meaningful"
+        Value::Null,
+        "capture must not advance the head under a live session"
     );
 
     call(
@@ -2957,6 +2968,7 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
         }),
     )
     .await;
+    let before_refusal = settle_fingerprint(&scratch, "ws-rpc-ydoc-rival");
     let refused = transport
         .call(
             RequestContext::unbounded(),
@@ -2971,15 +2983,37 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
         .expect_err("a settle over ingested content must refuse");
     assert_eq!(refused.message, "conflict-stale-target");
     assert_eq!(
+        settle_fingerprint(&scratch, "ws-rpc-ydoc-rival"),
+        before_refusal,
+        "a stale disk preimage must refuse before any domain, Y.Doc, outbox, or request row changes"
+    );
+    assert_eq!(
         std::fs::read_to_string(scratch.path().join(&path)).expect("intact"),
         "written by something else\n",
         "the refused settle must leave the ingested bytes intact"
     );
 
-    // No ydoc.close: a wedged draft cannot be pruned (`ydoc-unsettled-close`)
-    // and settling it is what this test just refused. The workspace teardown
-    // takes the session down with it.
-    call(&transport, &handle, 6, "workspace.close", json!({})).await;
+    // Release the lease without settling the stale draft. The queued capture
+    // can now ingest the rival bytes it already observed.
+    call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.evict",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    let captured = wait_for_captured_head(
+        &transport,
+        &handle,
+        &path,
+        "written by something else\n",
+        300,
+    )
+    .await;
+    assert_eq!(captured["metadataOrigin"], json!("capture"));
+
+    call(&transport, &handle, 7, "workspace.close", json!({})).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3863,7 +3897,7 @@ async fn wait_for_captured_head(
 ///
 /// This is the same sequence with the answers a working discharge gives.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_captured_head_discharges_a_dirty_local_only_session() {
+async fn a_live_lease_defers_capture_until_the_dirty_session_settles() {
     const PATH: &str = "notes/converge.md";
     const TYPED: &str = "what the user typed";
 
@@ -3901,22 +3935,54 @@ async fn a_captured_head_discharges_a_dirty_local_only_session() {
     )
     .await;
 
-    // A CAPTURE, not a settle, carries the content: the disk gets the doc's
-    // exact projection and the watcher ingests it.
+    // The disk gets the doc's exact projection. Capture observes it, but the
+    // live lease keeps the head at the session's base.
     write_file(scratch.path(), PATH, TYPED.as_bytes());
-    let captured = wait_for_captured_head(&transport, &handle, PATH, TYPED, 2_000).await;
+    wait_for_capture_to_defer_under_live_session(&transport, &handle, 2_000).await;
+    let captured = call(
+        &transport,
+        &handle,
+        2_100,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": PATH }),
+    )
+    .await;
     assert_eq!(
-        captured["objectId"], opened["objectId"],
-        "the capture must mint the head on the object the session holds"
+        captured["text"],
+        json!("base"),
+        "capture must leave the session's open head unchanged"
     );
 
-    // MUTATION: drop the head comparison from the prune guard in
-    // `crates/dohc-engine-collab/src/durable.rs` — this close refuses
-    // `ydoc-unsettled-close` and the call below panics.
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "ydoc.close",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id, "settle": false }),
+            ),
+        )
+        .await
+        .expect_err("an unsettled live session must not prune its lineage");
+    assert_eq!(refused.message, "ydoc-unsettled-close");
+
+    // The projected disk bytes already match the document. Settlement adopts
+    // that materialized state, after which a prune-close is safe.
+    let settled = call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.settle",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    assert_eq!(settled["content"], json!(TYPED));
+    assert_eq!(settled["materialized"], json!(true));
     call(
         &transport,
         &handle,
-        4,
+        6,
         "ydoc.close",
         json!({ "sessionId": session_id, "settle": false }),
     )
@@ -3928,7 +3994,7 @@ async fn a_captured_head_discharges_a_dirty_local_only_session() {
     let reopened = call(
         &transport,
         &handle,
-        5,
+        7,
         "ydoc.open",
         json!({ "versionId": "main", "path": PATH, "contentKind": "plaintext" }),
     )
@@ -3944,7 +4010,7 @@ async fn a_captured_head_discharges_a_dirty_local_only_session() {
     call(
         &transport,
         &handle,
-        6,
+        8,
         "ydoc.close",
         json!({
             "sessionId": reopened["sessionId"].as_str().expect("session id"),
@@ -3952,7 +4018,7 @@ async fn a_captured_head_discharges_a_dirty_local_only_session() {
         }),
     )
     .await;
-    call(&transport, &handle, 7, "workspace.close", json!({})).await;
+    call(&transport, &handle, 9, "workspace.close", json!({})).await;
 }
 
 /// #665, part B: a session that can neither settle nor prune EVICTS, and the

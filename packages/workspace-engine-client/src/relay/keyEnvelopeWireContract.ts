@@ -4,6 +4,9 @@ import type {
   KeyEnvelopeUploadParams,
   KeyEnvelopeUploadResult,
 } from "@dohc/workspace-contracts";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
 import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 
 export type {
@@ -38,48 +41,31 @@ export class KeyEnvelopeProtocolShapeError extends Error {
   }
 }
 
-function resultRecord(
-  value: JsonValue,
-  label: string,
-): Record<string, JsonValue | undefined> {
-  if (value === null || Array.isArray(value) || typeof value !== "object") {
-    throw new KeyEnvelopeProtocolShapeError(`${label} must be an object.`);
-  }
-  return value;
-}
-
-function stringField(
-  record: Record<string, JsonValue | undefined>,
-  field: string,
-  label: string,
-): string {
-  const value = record[field];
-  if (typeof value !== "string") {
-    throw new KeyEnvelopeProtocolShapeError(
-      `${label}.${field} must be a string.`,
-    );
-  }
-  return value;
-}
+const KeyEnvelopeResultSchemas = {
+  [KEY_ENVELOPE_METHOD.upload]: Schema.Struct({
+    etag: Schema.String,
+  }).mapFields(Struct.map(Schema.mutableKey)),
+  [KEY_ENVELOPE_METHOD.download]: Schema.Struct({
+    envelopeJson: Schema.String,
+    etag: Schema.String,
+  }).mapFields(Struct.map(Schema.mutableKey)),
+} as const;
 
 export function decodeKeyEnvelopeResult<M extends KeyEnvelopeMethod>(
   method: M,
   value: JsonValue,
 ): KeyEnvelopeMethodResultMap[M] {
-  const result = resultRecord(value, `${method} result`);
-  switch (method) {
-    case KEY_ENVELOPE_METHOD.upload:
-      return {
-        etag: stringField(result, "etag", `${method} result`),
-      } as KeyEnvelopeMethodResultMap[M];
-    case KEY_ENVELOPE_METHOD.download:
-      return {
-        envelopeJson: stringField(
-          result,
-          "envelopeJson",
-          `${method} result`,
-        ),
-        etag: stringField(result, "etag", `${method} result`),
-      } as KeyEnvelopeMethodResultMap[M];
+  const schema = KeyEnvelopeResultSchemas[method];
+  if (schema === undefined) {
+    throw new KeyEnvelopeProtocolShapeError(
+      `Unsupported key-envelope method: ${method}`,
+    );
   }
+  const decoded = Schema.decodeUnknownResult(schema)(value);
+  if (Result.isFailure(decoded)) {
+    throw new KeyEnvelopeProtocolShapeError(
+      `${method} result: ${decoded.failure.message}`,
+    );
+  }
+  return decoded.success as KeyEnvelopeMethodResultMap[M];
 }

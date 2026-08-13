@@ -8,9 +8,12 @@ mod common;
 use common::*;
 use dohc_engine_collab::ContentKind;
 use dohc_engine_collab::{
-    apply_remote_update, claim_base, close_session, ensure_marker, load_persisted, read_marker,
-    record_local_update, settle, ClaimOutcome, CloseOutcome, CollabError, DocKey, LeaseRegistry,
-    Regime, RemoteUpdate, ReplicationApplyOutcome, SettleOutcome, Ydoc,
+    apply_remote_update, claim_base, close_session, ensure_marker, fresh_successor_base,
+    load_persisted, read_marker, record_local_update, record_local_update_creating_marker_guarded,
+    replace_lineage_with_successor, settle, ClaimOutcome, CloseOutcome, CollabError, DocKey,
+    LeaseRegistry, LineageClaimStatus, Regime, RemoteUpdate, ReplicationApplyOutcome,
+    SettleOutcome, SuccessorIdentity, SuccessorIdentityInput, SuccessorInstallOutcome,
+    SuccessorReplacement, Ydoc,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 
@@ -50,6 +53,211 @@ fn plaintext_base_and_delta() -> (Vec<u8>, Vec<u8>) {
     peer.apply(&base).expect("peer base");
     let delta = peer.plaintext_insert(6, "world");
     (base, delta)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LineageStorageFingerprint {
+    active_claim: Option<String>,
+    base: Option<(String, String)>,
+    updates: i64,
+    snapshots: i64,
+    inactive_lineages: i64,
+    blobs: i64,
+}
+
+fn lineage_storage_fingerprint(store: &EngineStore, key: &DocKey) -> LineageStorageFingerprint {
+    store
+        .read_with(|conn| -> Result<_, CollabError> {
+            let active_claim = conn
+                .query_row(
+                    "SELECT lineage_claim_id FROM ydoc_docs \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?;
+            let count = |table: &str| -> Result<i64, CollabError> {
+                conn.query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {table} \
+                         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3"
+                    ),
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })
+            };
+            let snapshot: (Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT MAX(snapshot_blob_sha256), MAX(state_vector_blob_sha256) \
+                     FROM ydoc_snapshots \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+                       AND up_to_seq=0",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?;
+            let blob_count = conn
+                .query_row("SELECT COUNT(*) FROM binary_blobs", [], |row| row.get(0))
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?;
+            Ok(LineageStorageFingerprint {
+                active_claim,
+                base: snapshot.0.zip(snapshot.1),
+                updates: count("ydoc_updates")?,
+                snapshots: count("ydoc_snapshots")?,
+                inactive_lineages: count("ydoc_inactive_lineages")?,
+                blobs: blob_count,
+            })
+        })
+        .expect("lineage storage fingerprint")
+}
+
+fn record_update_transaction_fingerprint(store: &EngineStore, key: &DocKey) -> Vec<String> {
+    store
+        .read_with(|conn| -> Result<Vec<String>, CollabError> {
+            let mut statement = conn
+                .prepare(
+                    "SELECT row_state FROM ( \
+                     SELECT 'doc|' || quote(path) || '|' || content_kind || '|' || regime || '|' || \
+                            head_update_seq || '|' || head_snapshot_seq || '|' || \
+                            lineage_claim_status || '|' || quote(lineage_claim_id) || '|' || \
+                            updated_at_ms AS row_state \
+                     FROM ydoc_docs \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+                     UNION ALL \
+                     SELECT 'update|' || seq || '|' || update_blob_sha256 || '|' || \
+                            quote(actor_origin_id) || '|' || recorded_at_ms \
+                     FROM ydoc_updates \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+                     UNION ALL \
+                     SELECT 'snapshot|' || up_to_seq || '|' || snapshot_blob_sha256 || '|' || \
+                            state_vector_blob_sha256 || '|' || recorded_at_ms \
+                     FROM ydoc_snapshots \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+                     UNION ALL \
+                     SELECT 'request|' || request_id || '|' || payload_hash || '|' || \
+                            result_seq || '|' || committed_at || '|' || kind \
+                     FROM engine_requests \
+                     UNION ALL \
+                     SELECT 'binary|' || sha256 || '|' || byte_length || '|' || hex(bytes) \
+                     FROM binary_blobs \
+                     UNION ALL \
+                     SELECT 'log|' || workspace_id || '|' || origin_id || '|' || origin_seq || '|' || \
+                            op_kind || '|' || payload_json || '|' || recorded_at_ms || '|' || imported \
+                     FROM replication_log \
+                     ) ORDER BY row_state",
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?;
+            let rows = statement
+                .query_map(
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?;
+            Ok(rows)
+        })
+        .expect("recordUpdate transaction fingerprint")
+}
+
+#[test]
+fn record_update_request_identity_binds_path_before_any_mutation() {
+    const FIRST_PATH: &str = "notes/first.md";
+    const OTHER_PATH: &str = "notes/other.md";
+    const REQUEST_ID: &str = "ydoc-record-path-bound";
+
+    let mut ts = fresh_store("record-update-path-bound");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    let update = Ydoc::wire().plaintext_insert(0, "hello");
+
+    let first = committed(
+        record_local_update_creating_marker_guarded(
+            &mut ts.store,
+            &key,
+            Some(FIRST_PATH),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &update,
+            None,
+            false,
+            true,
+            Some(REQUEST_ID),
+            &NoFaults,
+            1_100,
+            |_tx, _outcome| Ok(()),
+        )
+        .expect("first recordUpdate"),
+    );
+    assert!(!first.deduped);
+    let committed_state = record_update_transaction_fingerprint(&ts.store, &key);
+
+    let replay = committed(
+        record_local_update_creating_marker_guarded(
+            &mut ts.store,
+            &key,
+            Some(FIRST_PATH),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &update,
+            None,
+            false,
+            true,
+            Some(REQUEST_ID),
+            &NoFaults,
+            1_200,
+            |_tx, _outcome| Ok(()),
+        )
+        .expect("exact recordUpdate replay"),
+    );
+    assert!(replay.deduped);
+    assert_eq!(
+        record_update_transaction_fingerprint(&ts.store, &key),
+        committed_state,
+        "an exact same-path replay must not mutate durable state"
+    );
+
+    let error = record_local_update_creating_marker_guarded(
+        &mut ts.store,
+        &key,
+        Some(OTHER_PATH),
+        ContentKind::Plaintext,
+        Regime::LocalOnly,
+        &update,
+        None,
+        false,
+        true,
+        Some(REQUEST_ID),
+        &NoFaults,
+        1_300,
+        |_tx, _outcome| Ok(()),
+    )
+    .expect_err("a request id cannot be reused for another path");
+    assert!(matches!(
+        error,
+        CollabError::Corrupt { reason }
+            if reason == "idempotency key reused with different content"
+    ));
+    assert_eq!(
+        record_update_transaction_fingerprint(&ts.store, &key),
+        committed_state,
+        "a path-mismatched replay must roll back every durable mutation"
+    );
 }
 
 // ---- regimes ----------------------------------------------------------------
@@ -930,7 +1138,7 @@ fn base_is_claimed_exactly_once() {
     let mut ts = fresh_store("base-once");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
-    let (base, _) = plaintext_base_and_delta();
+    let (base, delta) = plaintext_base_and_delta();
 
     let first = committed(
         claim_base(
@@ -947,11 +1155,12 @@ fn base_is_claimed_exactly_once() {
         ClaimOutcome::Claimed { base_snapshot_sha } => base_snapshot_sha,
         ClaimOutcome::Resumed => panic!("first claim must mint the base"),
     };
-    assert!(
+    assert_eq!(
         read_marker(&ts.store, &key)
             .expect("m")
             .expect("marker")
-            .base_claimed
+            .lineage_claim_status,
+        LineageClaimStatus::Exact
     );
     assert_eq!(
         count(&ts.store, "ydoc_snapshots", &key),
@@ -974,6 +1183,45 @@ fn base_is_claimed_exactly_once() {
     assert!(
         matches!(second, ClaimOutcome::Resumed),
         "identical base retry → resume"
+    );
+    committed(
+        apply_remote_update(
+            &mut ts.store,
+            &key,
+            &RemoteUpdate {
+                origin_id: "peer-compact-base".to_owned(),
+                origin_seq: 1,
+                bytes: delta,
+            },
+            &NoFaults,
+            1_450,
+        )
+        .expect("append before base-proof compaction"),
+    );
+    let compacted = committed(
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 1_475)
+            .expect("compact claimed lineage"),
+    );
+    assert!(matches!(compacted, CloseOutcome::Compacted(_)));
+    assert_eq!(
+        count(&ts.store, "ydoc_snapshots", &key),
+        2,
+        "compaction keeps seq 0 beside the folded head"
+    );
+    let after_compaction = committed(
+        claim_base(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &base,
+            &NoFaults,
+            1_480,
+        )
+        .expect("retry the base after compaction"),
+    );
+    assert!(
+        matches!(after_compaction, ClaimOutcome::Resumed),
+        "the permanent seq-0 proof survives compaction"
     );
     // A claim with DIFFERENT base bytes must REFUSE — silently resuming (and
     // acking) a divergent base would drop that lineage while the relay
@@ -998,8 +1246,8 @@ fn base_is_claimed_exactly_once() {
     );
     assert_eq!(
         count(&ts.store, "ydoc_snapshots", &key),
-        1,
-        "still exactly one base"
+        2,
+        "the rejected claim changes neither proof nor folded head"
     );
     // The surviving base is the FIRST one (byte-intact).
     let base_sha_now = ts
@@ -1017,6 +1265,538 @@ fn base_is_claimed_exactly_once() {
         })
         .expect("sha");
     assert_eq!(base_sha_now, first_sha, "first base survives");
+}
+
+#[test]
+fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
+    let scratch = unique_dir("successor-cas");
+    let mut store = open_at(&scratch, 1_000);
+    let key = test_key();
+    seed_parents(&mut store, &key, 1_000);
+    let (base, delta) = plaintext_base_and_delta();
+    let predecessor_claim_id = match committed(
+        claim_base(
+            &mut store,
+            &key,
+            ContentKind::Plaintext,
+            &base,
+            &NoFaults,
+            1_000,
+        )
+        .expect("claim predecessor"),
+    ) {
+        ClaimOutcome::Claimed { base_snapshot_sha } => base_snapshot_sha,
+        ClaimOutcome::Resumed => panic!("the first base must be claimed"),
+    };
+    committed(
+        apply_remote_update(
+            &mut store,
+            &key,
+            &RemoteUpdate {
+                origin_id: "peer-a".to_owned(),
+                origin_seq: 1,
+                bytes: delta,
+            },
+            &NoFaults,
+            1_100,
+        )
+        .expect("extend predecessor"),
+    );
+    committed(
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_docs SET path='notes/a.txt' \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .expect("set predecessor path"),
+    );
+    let predecessor = load_persisted(&store, &key)
+        .expect("load predecessor")
+        .expect("predecessor marker");
+    assert_eq!(
+        predecessor
+            .doc
+            .project(ContentKind::Plaintext)
+            .expect("project predecessor")
+            .content,
+        "hello world"
+    );
+    let predecessor_state_vector_sha256 =
+        dohc_engine_collab::hex_sha256(&predecessor.doc.encode_state_vector());
+    assert_eq!(
+        predecessor.marker.lineage_claim_id.as_deref(),
+        Some(predecessor_claim_id.as_str())
+    );
+
+    let successor_text = "the reviewed result\n";
+    let predecessor_preimage = dohc_engine_collab::hex_sha256(b"hello world");
+    let successor_result = dohc_engine_collab::hex_sha256(successor_text.as_bytes());
+    let successor_identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+        key: &key,
+        predecessor_claim_id: &predecessor_claim_id,
+        predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
+        artifact_op_kind: "moment.append",
+        artifact_id: "moment-successor",
+        artifact_preimage_sha256: &predecessor_preimage,
+        content_kind: ContentKind::Plaintext,
+        result_sha256: &successor_result,
+    });
+    let successor = fresh_successor_base(&successor_identity, successor_text)
+        .expect("construct successor base");
+    let cross_bound_state_vector = "0".repeat(64);
+    assert_ne!(cross_bound_state_vector, predecessor_state_vector_sha256);
+    let cross_bound_text = "descriptor belongs to another predecessor state\n";
+    let cross_bound_result = dohc_engine_collab::hex_sha256(cross_bound_text.as_bytes());
+    let cross_bound_identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+        key: &key,
+        predecessor_claim_id: &predecessor_claim_id,
+        predecessor_state_vector_sha256: &cross_bound_state_vector,
+        artifact_op_kind: "moment.append",
+        artifact_id: "moment-cross-bound-successor",
+        artifact_preimage_sha256: &predecessor_preimage,
+        content_kind: ContentKind::Plaintext,
+        result_sha256: &cross_bound_result,
+    });
+    let cross_bound = fresh_successor_base(&cross_bound_identity, cross_bound_text)
+        .expect("construct cross-bound successor");
+    let before_cross_bound = lineage_storage_fingerprint(&store, &key);
+    let cross_bound_error = replace_lineage_with_successor(
+        &mut store,
+        SuccessorReplacement {
+            key: &key,
+            expected_predecessor_claim_id: &predecessor_claim_id,
+            expected_predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
+            path: "notes/a.txt",
+            successor: &cross_bound,
+            now_ms: 1_150,
+        },
+        &NoFaults,
+    )
+    .expect_err("the successor descriptor must bind the same predecessor vector as the CAS");
+    assert!(
+        matches!(
+            &cross_bound_error,
+            CollabError::InvalidSuccessorBase {
+                constraint: "predecessor state vector matches the successor CAS",
+                expected,
+                observed,
+            } if expected == &predecessor_state_vector_sha256
+                && observed == &cross_bound_state_vector
+        ),
+        "unexpected cross-binding error: {cross_bound_error:?}"
+    );
+    assert_eq!(
+        lineage_storage_fingerprint(&store, &key),
+        before_cross_bound,
+        "a cross-bound descriptor must not mutate any lineage row"
+    );
+    let installed = committed(
+        replace_lineage_with_successor(
+            &mut store,
+            SuccessorReplacement {
+                key: &key,
+                expected_predecessor_claim_id: &predecessor_claim_id,
+                expected_predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
+                path: "notes/a.txt",
+                successor: &successor,
+                now_ms: 1_200,
+            },
+            &NoFaults,
+        )
+        .expect("install successor"),
+    );
+    assert_eq!(
+        installed,
+        SuccessorInstallOutcome::Installed {
+            predecessor_claim_id: predecessor_claim_id.clone(),
+            successor_claim_id: successor.lineage_claim_id.clone(),
+        }
+    );
+    let active = read_marker(&store, &key)
+        .expect("read active marker")
+        .expect("active marker");
+    assert_eq!(
+        active.lineage_claim_id.as_deref(),
+        Some(successor.lineage_claim_id.as_str())
+    );
+    assert_eq!(
+        active.lineage_parent_claim_id.as_deref(),
+        Some(predecessor_claim_id.as_str())
+    );
+    assert_eq!(
+        active.lineage_epoch_tag.as_deref(),
+        Some(successor.epoch_tag.as_str())
+    );
+    assert_eq!(active.path.as_deref(), Some("notes/a.txt"));
+    assert_eq!(count(&store, "ydoc_updates", &key), 0);
+    assert_eq!(count(&store, "ydoc_snapshots", &key), 1);
+    assert_eq!(count(&store, "ydoc_inactive_lineages", &key), 1);
+    assert_eq!(
+        load_persisted(&store, &key)
+            .expect("load successor")
+            .expect("successor marker")
+            .doc
+            .project(ContentKind::Plaintext)
+            .expect("project successor")
+            .content,
+        successor_text
+    );
+
+    let successor_peer = Ydoc::wire();
+    successor_peer
+        .apply(&successor.update)
+        .expect("load the installed successor base");
+    let successor_delta =
+        successor_peer.plaintext_insert(successor_text.chars().count() as u32, "after install\n");
+    committed(
+        apply_remote_update(
+            &mut store,
+            &key,
+            &RemoteUpdate {
+                origin_id: "peer-successor".to_owned(),
+                origin_seq: 2,
+                bytes: successor_delta,
+            },
+            &NoFaults,
+            1_225,
+        )
+        .expect("append to the successor"),
+    );
+    let compacted = committed(
+        close_session(&mut store, &key, false, None, &NoFaults, 1_250)
+            .expect("compact the successor"),
+    );
+    assert!(matches!(compacted, CloseOutcome::Compacted(_)));
+    let snapshot_shape: (i64, i64, i64) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*), MIN(up_to_seq), MAX(up_to_seq) \
+                 FROM ydoc_snapshots \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)
+        })
+        .expect("read compacted successor snapshots");
+    assert_eq!(
+        snapshot_shape,
+        (2, 0, 1),
+        "successor compaction retains its permanent seq-0 replay proof"
+    );
+
+    drop(store);
+    let mut store = reopen(&scratch);
+    struct ArchivedLineageRow {
+        claim_id: String,
+        parent_claim_id: Option<String>,
+        disposition: String,
+        content_kind: String,
+        path: Option<String>,
+        epoch_tag: Option<String>,
+        full_state_blob_sha256: String,
+        state_vector_blob_sha256: String,
+    }
+    let archived = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT lineage_claim_id, parent_claim_id, disposition, content_kind, path, \
+                        epoch_tag, full_state_blob_sha256, state_vector_blob_sha256 \
+                 FROM ydoc_inactive_lineages \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| {
+                    Ok(ArchivedLineageRow {
+                        claim_id: row.get(0)?,
+                        parent_claim_id: row.get(1)?,
+                        disposition: row.get(2)?,
+                        content_kind: row.get(3)?,
+                        path: row.get(4)?,
+                        epoch_tag: row.get(5)?,
+                        full_state_blob_sha256: row.get(6)?,
+                        state_vector_blob_sha256: row.get(7)?,
+                    })
+                },
+            )
+            .map_err(|error| CollabError::Corrupt {
+                reason: error.to_string(),
+            })
+        })
+        .expect("read archived lineage after reopen");
+    assert_eq!(archived.claim_id, predecessor_claim_id);
+    assert_eq!(
+        archived.parent_claim_id, None,
+        "a root predecessor has no parent"
+    );
+    assert_eq!(archived.disposition, "superseded-predecessor");
+    assert_eq!(archived.content_kind, "plaintext");
+    assert_eq!(archived.path.as_deref(), Some("notes/a.txt"));
+    assert_eq!(
+        archived.epoch_tag, None,
+        "a root predecessor has no epoch tag"
+    );
+    let archived_full_state = store
+        .get_binary_blob(&archived.full_state_blob_sha256)
+        .expect("read archived full state")
+        .expect("archived full state blob");
+    let archived_state_vector = store
+        .get_binary_blob(&archived.state_vector_blob_sha256)
+        .expect("read archived state vector")
+        .expect("archived state vector blob");
+    let archived_doc = Ydoc::wire();
+    archived_doc
+        .apply(&archived_full_state)
+        .expect("replay archived full state");
+    assert_eq!(
+        archived_doc
+            .project(ContentKind::Plaintext)
+            .expect("project archived predecessor")
+            .content,
+        "hello world"
+    );
+    assert_eq!(archived_doc.encode_state_vector(), archived_state_vector);
+
+    let successor_state_vector_sha256 = dohc_engine_collab::hex_sha256(&successor.state_vector);
+    assert_ne!(archived.full_state_blob_sha256, successor.lineage_claim_id);
+    committed(
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_snapshots SET snapshot_blob_sha256=?4 \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+                       AND up_to_seq=0",
+                    rusqlite::params![
+                        key.workspace_id,
+                        key.version_id,
+                        key.object_id,
+                        archived.full_state_blob_sha256,
+                    ],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .expect("corrupt replay base digest fixture"),
+    );
+    let before_wrong_base_replay = lineage_storage_fingerprint(&store, &key);
+    let wrong_base_replay = replace_lineage_with_successor(
+        &mut store,
+        SuccessorReplacement {
+            key: &key,
+            expected_predecessor_claim_id: &predecessor_claim_id,
+            expected_predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
+            path: "notes/a.txt",
+            successor: &successor,
+            now_ms: 1_275,
+        },
+        &NoFaults,
+    )
+    .expect_err("marker-only replay must not accept a different seq-0 base");
+    assert!(matches!(wrong_base_replay, CollabError::Corrupt { .. }));
+    assert_eq!(
+        lineage_storage_fingerprint(&store, &key),
+        before_wrong_base_replay,
+        "replay validation must not rewrite the divergent snapshot"
+    );
+    committed(
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_snapshots SET snapshot_blob_sha256=?4 \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+                       AND up_to_seq=0",
+                    rusqlite::params![
+                        key.workspace_id,
+                        key.version_id,
+                        key.object_id,
+                        successor.lineage_claim_id,
+                    ],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .expect("restore replay base digest"),
+    );
+    assert_ne!(
+        archived.state_vector_blob_sha256,
+        successor_state_vector_sha256
+    );
+    committed(
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_snapshots SET state_vector_blob_sha256=?4 \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+                       AND up_to_seq=0",
+                    rusqlite::params![
+                        key.workspace_id,
+                        key.version_id,
+                        key.object_id,
+                        archived.state_vector_blob_sha256,
+                    ],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .expect("corrupt replay state-vector fixture"),
+    );
+    let before_wrong_vector_replay = lineage_storage_fingerprint(&store, &key);
+    let wrong_vector_replay = replace_lineage_with_successor(
+        &mut store,
+        SuccessorReplacement {
+            key: &key,
+            expected_predecessor_claim_id: &predecessor_claim_id,
+            expected_predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
+            path: "notes/a.txt",
+            successor: &successor,
+            now_ms: 1_280,
+        },
+        &NoFaults,
+    )
+    .expect_err("marker-only replay must not accept a different seq-0 state vector");
+    assert!(matches!(wrong_vector_replay, CollabError::Corrupt { .. }));
+    assert_eq!(
+        lineage_storage_fingerprint(&store, &key),
+        before_wrong_vector_replay,
+        "replay validation must not rewrite the divergent state vector"
+    );
+    committed(
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_snapshots SET state_vector_blob_sha256=?4 \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+                       AND up_to_seq=0",
+                    rusqlite::params![
+                        key.workspace_id,
+                        key.version_id,
+                        key.object_id,
+                        successor_state_vector_sha256,
+                    ],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .expect("restore replay state-vector digest"),
+    );
+
+    let before_replay = lineage_storage_fingerprint(&store, &key);
+    let replay = committed(
+        replace_lineage_with_successor(
+            &mut store,
+            SuccessorReplacement {
+                key: &key,
+                expected_predecessor_claim_id: &predecessor_claim_id,
+                expected_predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
+                path: "notes/a.txt",
+                successor: &successor,
+                now_ms: 1_300,
+            },
+            &NoFaults,
+        )
+        .expect("replay successor"),
+    );
+    assert_eq!(
+        replay,
+        SuccessorInstallOutcome::Replayed {
+            successor_claim_id: successor.lineage_claim_id.clone(),
+        }
+    );
+    assert_eq!(lineage_storage_fingerprint(&store, &key), before_replay);
+
+    let next_text = "must wait for the exact predecessor state\n";
+    let wrong_state_vector = "0".repeat(64);
+    let next_result = dohc_engine_collab::hex_sha256(next_text.as_bytes());
+    let next_identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+        key: &key,
+        predecessor_claim_id: &successor.lineage_claim_id,
+        predecessor_state_vector_sha256: &wrong_state_vector,
+        artifact_op_kind: "moment.append",
+        artifact_id: "moment-wrong-state-vector",
+        artifact_preimage_sha256: &successor.result_sha256,
+        content_kind: ContentKind::Plaintext,
+        result_sha256: &next_result,
+    });
+    let next = fresh_successor_base(&next_identity, next_text).expect("construct next base");
+    let actual_state_vector = dohc_engine_collab::hex_sha256(
+        &load_persisted(&store, &key)
+            .expect("load current predecessor")
+            .expect("current predecessor marker")
+            .doc
+            .encode_state_vector(),
+    );
+    assert_ne!(wrong_state_vector, actual_state_vector);
+    let before_state_mismatch = lineage_storage_fingerprint(&store, &key);
+    let state_mismatch = replace_lineage_with_successor(
+        &mut store,
+        SuccessorReplacement {
+            key: &key,
+            expected_predecessor_claim_id: &successor.lineage_claim_id,
+            expected_predecessor_state_vector_sha256: &wrong_state_vector,
+            path: "notes/a.txt",
+            successor: &next,
+            now_ms: 1_350,
+        },
+        &NoFaults,
+    )
+    .expect_err("a wrong predecessor state vector must not mutate storage");
+    assert!(
+        matches!(
+            &state_mismatch,
+            CollabError::LineageStateVectorMismatch { expected, observed }
+                if expected == &wrong_state_vector && observed == &actual_state_vector
+        ),
+        "unexpected state-vector mismatch: {state_mismatch:?}"
+    );
+    assert_eq!(
+        lineage_storage_fingerprint(&store, &key),
+        before_state_mismatch
+    );
+
+    let wrong_predecessor = "f".repeat(64);
+    let other_text = "must not land\n";
+    let unmatched_preimage = dohc_engine_collab::hex_sha256(b"unmatched preimage");
+    let other_result = dohc_engine_collab::hex_sha256(other_text.as_bytes());
+    let other_identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+        key: &key,
+        predecessor_claim_id: &wrong_predecessor,
+        predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
+        artifact_op_kind: "moment.append",
+        artifact_id: "moment-wrong-predecessor",
+        artifact_preimage_sha256: &unmatched_preimage,
+        content_kind: ContentKind::Plaintext,
+        result_sha256: &other_result,
+    });
+    let other = fresh_successor_base(&other_identity, other_text).expect("construct other base");
+    let before_mismatch = lineage_storage_fingerprint(&store, &key);
+    let mismatch = replace_lineage_with_successor(
+        &mut store,
+        SuccessorReplacement {
+            key: &key,
+            expected_predecessor_claim_id: &wrong_predecessor,
+            expected_predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
+            path: "notes/a.txt",
+            successor: &other,
+            now_ms: 1_400,
+        },
+        &NoFaults,
+    )
+    .expect_err("a wrong predecessor claim must not mutate storage");
+    assert!(
+        matches!(
+            &mismatch,
+            CollabError::LineagePredecessorMismatch {
+                expected,
+                observed: Some(observed),
+            } if expected == &wrong_predecessor && observed == &successor.lineage_claim_id
+        ),
+        "unexpected predecessor mismatch: {mismatch:?}"
+    );
+    assert_eq!(lineage_storage_fingerprint(&store, &key), before_mismatch);
 }
 
 // ---- replication: idempotent + echo-suppressed ------------------------------

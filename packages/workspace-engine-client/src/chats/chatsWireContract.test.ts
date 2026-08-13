@@ -1708,4 +1708,18 @@ describe("chats result decoder rejection", () => {
       }),
     ).toThrow(ChatsProtocolShapeError);
   });
+
+  it("rejects unknown fields in nested result objects", () => {
+    expect(() =>
+      decodeChatMessage({
+        id: "m",
+        workspaceId: "w",
+        threadId: "t",
+        author: { kind: "human", displayName: "Ada", surprise: true },
+        body: "body",
+        createdAtMs: 1,
+        attachments: [],
+      }),
+    ).toThrow(ChatsProtocolShapeError);
+  });
 });

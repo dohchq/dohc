@@ -36,9 +36,9 @@ use crate::search::{
 };
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
-    AppendOutcome, CloseOutcome, CollabError, ContentKind, DocKey, LeaseRegistry, Projection,
-    Regime, Ydoc, canonical_json::canonical_json_string, encode_scene_asset_records,
-    import_portable_scene,
+    AppendOutcome, CloseOutcome, CollabError, ContentKind, DocKey, LeaseRegistry,
+    LineageClaimStatus, Projection, Regime, Ydoc, canonical_json::canonical_json_string,
+    encode_scene_asset_records, import_portable_scene,
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -61,8 +61,9 @@ use dohc_engine_domain::{
     TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
     VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
     apply_secret_file_from_version_with, binary_delete_job_id, binary_rename_delete_job_id,
-    binary_rename_write_job_id, binary_rollback_job_identity, capture_ingest_binary_in_tx,
-    capture_ingest_in_tx, capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
+    binary_rename_write_job_id, binary_rollback_job_identity,
+    capture_ingest_binary_with_admission_in_tx, capture_ingest_with_admission_in_tx,
+    capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
     compare_secret_files_page_keyless, decode_binary_rollback_job_identity,
     delete_secret_file_keyless_with, derive_capture_object_id, enqueue_binary_delete,
     enqueue_binary_rename, enqueue_write, fork_version_keyless_with, get_secret_moment_keyless,
@@ -93,6 +94,7 @@ use dohc_engine_sync::{
     ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRequest,
     SharedChannelResponse, SyncPassOutcome, adopt_join_identity, apply_conflict_envelope,
     read_replayed_refusal, read_sync_identity, retain_refusal_for_direct_retry,
+    ydoc_update_payload,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use rusqlite::{OptionalExtension, params};
@@ -106,6 +108,8 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, OwnedPermit};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+
+pub use dohc_engine_sync::SharingDeclined;
 
 /// Bound on the actor's command queue. Backpressure blocks the sender rather
 /// than growing an unbounded queue (`plan §Rust policy`: bounded everything).
@@ -295,13 +299,16 @@ impl std::fmt::Debug for RelayConfiguration {
 pub enum RelayOperation {
     Push {
         workspace_id: String,
+        now_ms: i64,
     },
     Pull {
         workspace_id: String,
+        now_ms: i64,
     },
     CommitCursor {
         workspace_id: String,
         cursor: RelayCursor,
+        now_ms: i64,
     },
     Probe {
         workspace_id: String,
@@ -792,13 +799,20 @@ mod deferred_relay_tests {
 #[derive(Debug)]
 pub enum RelayOperationOutcome {
     Sync(SyncPassOutcome),
-    CursorCommitted,
+    CursorCommitted {
+        sharing_declined: Vec<dohc_engine_sync::SharingDeclined>,
+    },
     Probe(bool),
     Claimed,
     JoinIdentityAdopted,
     Recovered(RecoverResponse),
-    KeyEnvelopeUploaded { etag: String },
-    KeyEnvelopeDownloaded { envelope_json: String, etag: String },
+    KeyEnvelopeUploaded {
+        etag: String,
+    },
+    KeyEnvelopeDownloaded {
+        envelope_json: String,
+        etag: String,
+    },
     SharedChannelPulled(SharedChannelPullOutcome),
     SharedChannelPushed(SharedChannelPushOutcome),
     ShareViewPulled(ShareViewPullOutcome),
@@ -903,12 +917,14 @@ enum Command {
     CaptureIngest {
         input: CaptureIngest,
         root_dir: Option<PathBuf>,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<WriteResult, RuntimeError>>,
     },
     CaptureIngestBinary {
         input: CaptureIngestBinary,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<CaptureIngestBinaryResult, RuntimeError>>,
@@ -935,6 +951,7 @@ enum Command {
         input: CaptureRetire,
         root_dir: Option<PathBuf>,
         self_writes: Option<Arc<dyn SelfWriteRecorder>>,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<CaptureRetireResult, RuntimeError>>,
@@ -1165,15 +1182,6 @@ enum Command {
         version_id: String,
         reply: oneshot::Sender<Result<Vec<CaptureManifestSeedEntry>, RuntimeError>>,
     },
-    YdocApply {
-        key: DocKey,
-        content_kind: ContentKind,
-        update: Vec<u8>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<AppendOutcome, RuntimeError>>,
-    },
     YdocOpenState {
         workspace_id: String,
         now_ms: i64,
@@ -1277,6 +1285,7 @@ enum Command {
     ConflictApplyReplicated {
         envelope: ReplicationEnvelope,
         faults: Arc<dyn FaultInjector>,
+        leases: LeaseRegistry,
         token: CancellationToken,
         reply: oneshot::Sender<Result<ApplyOutcome<ConflictApplyResult>, RuntimeError>>,
     },
@@ -2011,9 +2020,10 @@ impl ActorHandle {
     pub fn capture_ingest_blocking(
         &self,
         input: CaptureIngest,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_blocking_with_root(input, None, faults)
+        self.capture_ingest_blocking_with_root(input, None, leases, faults)
     }
 
     /// Capture and index a text file when the owning workspace session can
@@ -2022,15 +2032,17 @@ impl ActorHandle {
         &self,
         input: CaptureIngest,
         root_dir: PathBuf,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_blocking_with_root(input, Some(root_dir), faults)
+        self.capture_ingest_blocking_with_root(input, Some(root_dir), leases, faults)
     }
 
     fn capture_ingest_blocking_with_root(
         &self,
         input: CaptureIngest,
         root_dir: Option<PathBuf>,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
         debug_assert_sync_context();
@@ -2039,6 +2051,7 @@ impl ActorHandle {
             .blocking_send(Command::CaptureIngest {
                 input,
                 root_dir,
+                leases,
                 faults,
                 token: CancellationToken::new(),
                 reply,
@@ -2053,6 +2066,7 @@ impl ActorHandle {
     pub fn capture_ingest_binary_blocking(
         &self,
         input: CaptureIngestBinary,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
         debug_assert_sync_context();
@@ -2060,6 +2074,7 @@ impl ActorHandle {
         self.tx
             .blocking_send(Command::CaptureIngestBinary {
                 input,
+                leases,
                 faults,
                 token: CancellationToken::new(),
                 reply,
@@ -2153,6 +2168,7 @@ impl ActorHandle {
     pub fn capture_retire_blocking(
         &self,
         input: CaptureRetire,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<CaptureRetireResult, RuntimeError> {
         debug_assert_sync_context();
@@ -2162,6 +2178,7 @@ impl ActorHandle {
                 input,
                 root_dir: None,
                 self_writes: None,
+                leases,
                 faults,
                 token: CancellationToken::new(),
                 reply,
@@ -2179,6 +2196,7 @@ impl ActorHandle {
         input: CaptureRetire,
         root_dir: PathBuf,
         self_writes: Arc<dyn SelfWriteRecorder>,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<CaptureRetireResult, RuntimeError> {
         debug_assert_sync_context();
@@ -2188,6 +2206,7 @@ impl ActorHandle {
                 input,
                 root_dir: Some(root_dir),
                 self_writes: Some(self_writes),
+                leases,
                 faults,
                 token: CancellationToken::new(),
                 reply,
@@ -2451,10 +2470,11 @@ impl ActorHandle {
     pub async fn capture_ingest(
         &self,
         input: CaptureIngest,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_with_root(input, None, faults, token)
+        self.capture_ingest_with_root(input, None, leases, faults, token)
             .await
     }
 
@@ -2464,10 +2484,11 @@ impl ActorHandle {
         &self,
         input: CaptureIngest,
         root_dir: PathBuf,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_with_root(input, Some(root_dir), faults, token)
+        self.capture_ingest_with_root(input, Some(root_dir), leases, faults, token)
             .await
     }
 
@@ -2475,6 +2496,7 @@ impl ActorHandle {
         &self,
         input: CaptureIngest,
         root_dir: Option<PathBuf>,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
@@ -2483,6 +2505,7 @@ impl ActorHandle {
             .send(Command::CaptureIngest {
                 input,
                 root_dir,
+                leases,
                 faults,
                 token,
                 reply,
@@ -2496,6 +2519,7 @@ impl ActorHandle {
     pub async fn capture_ingest_binary(
         &self,
         input: CaptureIngestBinary,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
@@ -2503,6 +2527,7 @@ impl ActorHandle {
         self.tx
             .send(Command::CaptureIngestBinary {
                 input,
+                leases,
                 faults,
                 token,
                 reply,
@@ -3230,6 +3255,7 @@ impl ActorHandle {
     pub async fn capture_retire(
         &self,
         input: CaptureRetire,
+        leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<CaptureRetireResult, RuntimeError> {
@@ -3239,6 +3265,7 @@ impl ActorHandle {
                 input,
                 root_dir: None,
                 self_writes: None,
+                leases,
                 faults,
                 token,
                 reply,
@@ -3282,33 +3309,6 @@ impl ActorHandle {
                 workspace_id,
                 version_id,
                 path,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
-    }
-
-    /// Validate and append one local Y.Doc update. Marker creation and append
-    /// are separate bounded transactions with a cancellation point between.
-    pub async fn ydoc_apply(
-        &self,
-        key: DocKey,
-        content_kind: ContentKind,
-        update: Vec<u8>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-    ) -> Result<AppendOutcome, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocApply {
-                key,
-                content_kind,
-                update,
-                now_ms,
-                faults,
-                token,
                 reply,
             })
             .await
@@ -3662,15 +3662,15 @@ impl ActorHandle {
         &self,
         envelope: ReplicationEnvelope,
         faults: Arc<dyn FaultInjector>,
+        leases: LeaseRegistry,
         token: CancellationToken,
     ) -> Result<ApplyOutcome<ConflictApplyResult>, RuntimeError> {
-        // Keep the complete typed result on the actor boundary: callers need
-        // the structured `pending_resolve`, not only its derived boolean view.
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::ConflictApplyReplicated {
                 envelope,
                 faults,
+                leases,
                 token,
                 reply,
             })
@@ -6461,19 +6461,28 @@ fn execute_relay_operation(
 ) -> Result<RelayOperationOutcome, RuntimeError> {
     let client = RelaySyncClient::new(transport);
     match operation {
-        RelayOperation::Push { workspace_id } => client
-            .push_workspace(store, &workspace_id, &NoFaults)
+        RelayOperation::Push {
+            workspace_id,
+            now_ms,
+        } => client
+            .push_workspace(store, &workspace_id, &NoFaults, now_ms)
             .map(RelayOperationOutcome::Sync)
             .map_err(RuntimeError::from),
-        RelayOperation::Pull { workspace_id } => client
-            .pull_chat_workspace(store, &workspace_id, &NoFaults, leases)
+        RelayOperation::Pull {
+            workspace_id,
+            now_ms,
+        } => client
+            .pull_chat_workspace(store, &workspace_id, &NoFaults, leases, now_ms)
             .map(RelayOperationOutcome::Sync)
             .map_err(RuntimeError::from),
         RelayOperation::CommitCursor {
             workspace_id,
             cursor,
-        } => match client.commit_pull_cursor(store, &workspace_id, &cursor, &NoFaults)? {
-            TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted),
+            now_ms,
+        } => match client.commit_pull_cursor(store, &workspace_id, &cursor, &NoFaults, now_ms)? {
+            TxnOutcome::Committed(sharing_declined) => {
+                Ok(RelayOperationOutcome::CursorCommitted { sharing_declined })
+            }
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
         RelayOperation::Probe { workspace_id } => {
@@ -6611,7 +6620,9 @@ fn execute_relay_operation(
             workspace_id,
             cursor,
         } => match client.commit_share_view_cursor(store, &workspace_id, &cursor, &NoFaults)? {
-            TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted),
+            TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted {
+                sharing_declined: Vec::new(),
+            }),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
     }
@@ -6823,6 +6834,7 @@ fn worker_main(
             Command::CaptureIngest {
                 input,
                 root_dir,
+                leases,
                 faults,
                 token,
                 reply,
@@ -6831,6 +6843,7 @@ fn worker_main(
                     &mut store,
                     &input,
                     root_dir.as_deref(),
+                    &leases,
                     faults.as_ref(),
                     &token,
                 );
@@ -6838,12 +6851,18 @@ fn worker_main(
             }
             Command::CaptureIngestBinary {
                 input,
+                leases,
                 faults,
                 token,
                 reply,
             } => {
-                let outcome =
-                    capture_ingest_binary_on_store(&mut store, &input, faults.as_ref(), &token);
+                let outcome = capture_ingest_binary_on_store(
+                    &mut store,
+                    &input,
+                    &leases,
+                    faults.as_ref(),
+                    &token,
+                );
                 let _ = reply.send(outcome);
             }
             Command::CaptureSecret {
@@ -7378,6 +7397,7 @@ fn worker_main(
                 input,
                 root_dir,
                 self_writes,
+                leases,
                 faults,
                 token,
                 reply,
@@ -7387,6 +7407,7 @@ fn worker_main(
                     &input,
                     root_dir.as_deref(),
                     self_writes.as_deref(),
+                    &leases,
                     faults.as_ref(),
                     &token,
                 );
@@ -7417,26 +7438,6 @@ fn worker_main(
                 let outcome = VersionedTextStore::new(&mut store)
                     .object_id_for_path(&workspace_id, &version_id, &path)
                     .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::YdocApply {
-                key,
-                content_kind,
-                update,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = ydoc_apply_on_store(
-                    &mut store,
-                    &key,
-                    content_kind,
-                    &update,
-                    now_ms,
-                    faults.as_ref(),
-                    &token,
-                );
                 let _ = reply.send(outcome);
             }
             Command::YdocOpenState {
@@ -7701,13 +7702,14 @@ fn worker_main(
             Command::ConflictApplyReplicated {
                 envelope,
                 faults,
+                leases,
                 token,
                 reply,
             } => {
                 let outcome = if token.is_cancelled() {
                     Err(RuntimeError::Cancelled)
                 } else {
-                    match apply_conflict_envelope(&mut store, &envelope, faults.as_ref()) {
+                    match apply_conflict_envelope(&mut store, &envelope, faults.as_ref(), &leases) {
                         Ok(outcome @ ApplyOutcome::Refused(_)) => {
                             retain_refusal_for_direct_retry(&mut store, &envelope, faults.as_ref())
                                 .map(|()| outcome)
@@ -8861,43 +8863,18 @@ fn reconcile_scene_asset_materialization_conflicts(
     Ok(invalid_jobs)
 }
 
-fn ydoc_apply_on_store(
-    store: &mut EngineStore,
-    key: &DocKey,
-    content_kind: ContentKind,
-    update: &[u8],
-    now_ms: i64,
-    faults: &dyn FaultInjector,
-    token: &CancellationToken,
-) -> Result<AppendOutcome, RuntimeError> {
-    if token.is_cancelled() {
-        return Err(RuntimeError::Cancelled);
-    }
-    match dohc_engine_collab::record_local_update_creating_marker(
-        store,
-        key,
-        content_kind,
-        Regime::Replicated,
-        update,
-        None,
-        faults,
-        now_ms,
-    )? {
-        TxnOutcome::Committed(outcome) => Ok(outcome),
-        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
-    }
-}
-
 /// Durable Y.Doc state exists when the lineage holds updates OR snapshots.
 /// A pruned local-only marker (both zero) has NO durable state: opens report
 /// it absent and settles refuse it (an empty projection must never clobber
 /// the artifact).
 fn ydoc_marker_has_durable_state(marker: &dohc_engine_collab::Marker) -> bool {
-    // base_claimed covers the replicated base-only lineage: claim_base inserts
+    // The claim status covers the replicated base-only lineage: claim_base inserts
     // the base snapshot at up_to_seq 0 WITHOUT advancing head_snapshot_seq, so
     // the seq pair alone would misread a claimed base as absent (double-seed +
     // NoMarker settle refusals on a valid lineage).
-    marker.head_update_seq > 0 || marker.head_snapshot_seq > 0 || marker.base_claimed
+    marker.head_update_seq > 0
+        || marker.head_snapshot_seq > 0
+        || marker.lineage_claim_status.has_claimed_base()
 }
 
 fn ydoc_version_unsettled_content_kind_on_store(
@@ -8922,7 +8899,7 @@ fn ydoc_version_unsettled_content_kind_on_store(
                   FROM ydoc_docs AS docs \
                   WHERE docs.workspace_id = ?1 AND docs.version_id = ?2 \
                     AND (docs.head_update_seq > 0 OR docs.head_snapshot_seq > 0 \
-                         OR docs.base_claimed = 1 OR EXISTS ( \
+                         OR docs.lineage_claim_status <> 'unclaimed' OR EXISTS ( \
                             SELECT 1 FROM ydoc_deferred_updates AS deferred \
                             WHERE deferred.workspace_id = docs.workspace_id \
                               AND deferred.version_id = docs.version_id \
@@ -9244,6 +9221,7 @@ fn seed_scene_from_artifact_on_store(
     let outcome = dohc_engine_collab::record_local_update_creating_marker_guarded(
         store,
         key,
+        Some(path),
         ContentKind::Scene,
         Regime::LocalOnly,
         &seed_update,
@@ -9449,7 +9427,7 @@ fn ydoc_open_state_on_store(
         // Only the POST-LEASE read drains: a pre-lease probe mutating the
         // lineage while another session holds the lease would advance state
         // behind the active editor with no event or resync signal.
-        dohc_engine_sync::drain_deferred_ydoc_for_key(store, &key, &NoFaults)?;
+        drain_deferred_ydoc_for_local_rpc(store, &key, &NoFaults)?;
     }
     // An open sync conflict on this object freezes the OPEN as well as the
     // settle: the claimed lineage may be a peer's unreviewed base, and
@@ -9533,7 +9511,7 @@ fn ydoc_open_state_on_store(
                     && requested != marker.content_kind
                     && !lineage_existing
                     && marker.regime == Regime::LocalOnly
-                    && !marker.base_claimed
+                    && marker.lineage_claim_status == LineageClaimStatus::Unclaimed
                 {
                     match dohc_engine_collab::rewrite_bare_marker_content_kind(
                         store, &key, requested, &NoFaults, now_ms,
@@ -9646,10 +9624,10 @@ fn ydoc_record_update_on_store(
     // after it commits, so a decline reported to the caller is one that
     // actually survived the commit.
     let mut sharing_declined: Option<SharingDeclined> = None;
-    // A replicated, base-claimed lineage journals the ydoc.update DELTA in
-    // the SAME transaction as the append (blob-before-log holds; TS parity:
-    // ydocEngineDriver journals inside the recordUpdate write). Local-only
-    // lineages journal nothing because the workspace file is the artifact.
+    // An exact replicated lineage journals the ydoc.update delta in the same
+    // transaction as the append. This keeps blob-before-log order and TS
+    // parity. Local-only lineages journal nothing; their workspace file is the
+    // artifact.
     let update_sha = dohc_engine_storage::hex_sha256(update);
     let journal_key = key.clone();
     let journal_path = path.to_owned();
@@ -9657,6 +9635,7 @@ fn ydoc_record_update_on_store(
     match dohc_engine_collab::record_local_update_creating_marker_guarded(
         store,
         key,
+        Some(path),
         content_kind,
         regime,
         update,
@@ -9676,49 +9655,38 @@ fn ydoc_record_update_on_store(
             // full state, so it already carries this append and every row the
             // lineage held before it — a delta beside it would be redundant.
             // Everything else journals its delta.
-            let base_sha = match ydoc_originate_base_in_tx(tx, &journal_key, now_ms)? {
-                BaseOrigination::Originated { base_snapshot_sha } => Some(base_snapshot_sha),
-                BaseOrigination::Declined(reason) => {
+            let base_originated = match dohc_engine_sync::originate_ydoc_base_in_tx(
+                tx,
+                &journal_key,
+                &journal_path,
+                now_ms,
+            )
+            .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+                reason: format!("outbound ydoc.update base origination failed: {error}"),
+            })? {
+                dohc_engine_sync::BaseOrigination::Originated { .. } => true,
+                dohc_engine_sync::BaseOrigination::Declined(reason) => {
                     sharing_declined = Some(reason);
-                    None
+                    false
                 }
-                BaseOrigination::NothingToDo => None,
+                dohc_engine_sync::BaseOrigination::NothingToDo => false,
             };
-            if let Some(base_sha) = base_sha {
+            if !base_originated && outcome.emit_outbound {
                 dohc_engine_sync::journal_local_op_in_tx(
                     tx,
                     &journal_key.workspace_id,
                     "ydoc.update",
-                    &serde_json::json!({
-                        "versionId": journal_key.version_id,
-                        "objectId": journal_key.object_id,
-                        "path": journal_path,
-                        "contentKind": journal_kind.as_str(),
-                        "updateBlobSha256": base_sha,
-                        "isBaseState": true,
-                    }),
+                    &ydoc_update_payload(
+                        &journal_key,
+                        &journal_path,
+                        journal_kind,
+                        &update_sha,
+                        false,
+                    ),
                     now_ms,
                 )
                 .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
-                    reason: format!("outbound ydoc.update base journal append failed: {error}"),
-                })?;
-            } else if outcome.emit_outbound {
-                dohc_engine_sync::journal_local_op_in_tx(
-                    tx,
-                    &journal_key.workspace_id,
-                    "ydoc.update",
-                    &serde_json::json!({
-                        "versionId": journal_key.version_id,
-                        "objectId": journal_key.object_id,
-                        "path": journal_path,
-                        "contentKind": journal_kind.as_str(),
-                        "updateBlobSha256": update_sha,
-                        "isBaseState": false,
-                    }),
-                    now_ms,
-                )
-                .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
-                    // Named explicitly: a base-claimed replicated lineage
+                    // Named explicitly: an exact replicated lineage
                     // with NO sync identity is a half-initialized state
                     // (every real replicated flow runs sync init first —
                     // pulls require the identity and the TS driver creates
@@ -9749,125 +9717,39 @@ fn ydoc_record_update_on_store(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YdocAppend {
     pub outcome: AppendOutcome,
-    pub sharing_declined: Option<SharingDeclined>,
+    pub sharing_declined: Option<dohc_engine_sync::SharingDeclined>,
 }
 
-/// Why a lineage that could otherwise share does not: it is too large to
-/// encode as a base. Names the constraint, the configured limit, the unit and
-/// the observed size, because the caller cannot act on "it did not happen".
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SharingDeclined {
-    pub constraint: &'static str,
-    pub limit_bytes: usize,
-    pub observed_bytes: usize,
-}
-
-impl std::fmt::Display for SharingDeclined {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "document too large to share: {} allows {} bytes, observed {} bytes of encoded base \
-             state. The edit is saved, and the workspace file remains this document's artifact.",
-            self.constraint, self.limit_bytes, self.observed_bytes
-        )
-    }
-}
-
-/// What an origination attempt decided.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum BaseOrigination {
-    /// The lineage originated. Journal this base.
-    Originated { base_snapshot_sha: String },
-    /// Nothing to originate, and nothing to report: no marker, a base already
-    /// claimed, a workspace that does not replicate, or a dependency a later
-    /// append will resolve. All four are ordinary and stay silent.
-    NothingToDo,
-    /// The lineage could have originated and did not. The edit still commits.
-    Declined(SharingDeclined),
-}
-
-/// Claim the base that ORIGINATES `key`'s replicated lineage, inside the
-/// append transaction that triggered it.
-///
-/// Encoding inside the claim transaction is what makes the claim race-free.
-/// SQLite serializes writers, so no append can land between the encode and the
-/// claim, and the marker read here is that same transaction's view. A design
-/// that pre-read the marker on another connection would need the legacy
-/// driver's `onBeforeBaseClaimForTest` seam to prove the window closed; this
-/// one has no window.
-fn ydoc_originate_base_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    key: &DocKey,
-    now_ms: i64,
-) -> Result<BaseOrigination, dohc_engine_collab::CollabError> {
-    let Some(marker) = dohc_engine_collab::read_marker_in_tx(tx, key)? else {
-        return Ok(BaseOrigination::NothingToDo);
-    };
-    // Base-once. A claimed lineage journals deltas, never a second base.
-    if marker.base_claimed {
-        return Ok(BaseOrigination::NothingToDo);
-    }
-    // This workspace does not replicate with a relay, so nothing here has a
-    // peer: the lineage stays local-only, keeps the workspace file as its
-    // artifact, and
-    // prunes on close. A private document must never be promoted to a shared
-    // lineage — promotion is irreversible in the log it starts writing.
-    //
-    // Checked BEFORE the claim because `journal_local_op_in_tx` refuses
-    // without an identity, and that refusal would roll back the user's edit.
-    if !dohc_engine_sync::workspace_replicates_with_relay_in_tx(tx, &key.workspace_id).map_err(
-        |error| dohc_engine_collab::CollabError::Corrupt {
-            reason: format!("relay replication probe failed: {error}"),
-        },
-    )? {
-        return Ok(BaseOrigination::NothingToDo);
-    }
-    let Some(encoded) = dohc_engine_collab::encode_origination_base_in_tx(tx, key)? else {
-        // An unresolved dependency: a full-state encode would drop the pending
-        // row. A later append retries once the predecessor lands.
-        return Ok(BaseOrigination::NothingToDo);
-    };
-    // `claim_base_in_tx` measures the base against MAX_YDOC_UPDATE_BYTES, a cap
-    // written for ONE update. A base is a full state, so a lineage that grew
-    // local-only past 5 MiB and then reached a synced workspace would fail its
-    // promoting edit — and the claim runs inside the append transaction, so the
-    // refusal would roll that valid edit back, and every later one with it.
-    //
-    // Decline to originate instead. The edit commits, the lineage stays
-    // local-only, and the workspace file remains its artifact. #549 owns the
-    // measured
-    // base-specific bound that replaces this check.
-    //
-    // The decline is REPORTED, not silent (#632): it is the one branch here a
-    // user could act on, and it is indistinguishable from the four benign ones
-    // unless it says so.
-    if encoded.base.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
-        return Ok(BaseOrigination::Declined(SharingDeclined {
-            constraint: "MAX_YDOC_UPDATE_BYTES",
-            limit_bytes: dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES,
-            observed_bytes: encoded.base.len(),
-        }));
-    }
-    // The marker's OWN kind, never the caller's: the kind belongs to the
-    // lineage, and `claim_base_in_tx` upserts whatever it is handed. The append
-    // this rides already refused a caller whose kind disagreed, so the two
-    // always match here — reading it from the marker keeps that true even if
-    // the append's guard ever moves.
-    match dohc_engine_collab::claim_base_in_tx(
-        tx,
-        key,
-        marker.content_kind,
-        &encoded.base,
-        &encoded.state_vector,
-        now_ms,
-    )? {
-        dohc_engine_collab::ClaimOutcome::Claimed { base_snapshot_sha } => {
-            Ok(BaseOrigination::Originated { base_snapshot_sha })
+fn ydoc_settle_disk_preimage(
+    root_dir: &std::path::Path,
+    path: &str,
+    expected_sha256: Option<&str>,
+    projected_sha256: &str,
+) -> Result<Option<Preimage>, RuntimeError> {
+    let state = probe_projection_target(root_dir, path, ProjectionTargetKind::Plaintext);
+    match state {
+        ProjectionTargetState::Absent if expected_sha256.is_none() => Ok(Some(Preimage::Absent)),
+        ProjectionTargetState::Text { sha256 }
+            if sha256 == projected_sha256 || expected_sha256 == Some(sha256.as_str()) =>
+        {
+            Ok(Some(Preimage::Present(sha256)))
         }
-        // Unreachable: `base_claimed` was false in this same transaction and
-        // no other writer can interleave. Harmless if it ever is — the lineage
-        // has its base, and base-once forbids a second.
-        dohc_engine_collab::ClaimOutcome::Resumed => Ok(BaseOrigination::NothingToDo),
+        // New File creates an empty artifact without a domain head. It is the
+        // only untracked file a headless session can adopt without losing data.
+        ProjectionTargetState::Text { sha256 }
+            if expected_sha256.is_none() && sha256 == dohc_engine_storage::hex_sha256(b"") =>
+        {
+            Ok(Some(Preimage::Present(sha256)))
+        }
+        // Containment and transient-read failures retain the durable pending
+        // job contract. Materialization classifies them without following an
+        // unsafe path; a later settle replays the same committed job.
+        ProjectionTargetState::UntrackedContent | ProjectionTargetState::Unreadable => Ok(None),
+        ProjectionTargetState::Absent
+        | ProjectionTargetState::Text { .. }
+        | ProjectionTargetState::Binary { .. } => {
+            Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into())
+        }
     }
 }
 
@@ -9928,13 +9810,14 @@ fn ydoc_settle_on_store(
             // not seen them: settling would materialize content the user
             // never saw while they keep editing stale state. Refuse; the
             // client resyncs (which also drains) and settles again.
-            if marker.regime == Regime::Replicated
-                && dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?.drained > 0
-            {
-                return Err(dohc_engine_domain::DomainError::InvalidInput {
-                    reason: "ydoc-remote-updates-pending",
+            if marker.regime == Regime::Replicated {
+                let drained = drain_deferred_ydoc_for_local_rpc(store, key, faults)?;
+                if drained.drained > 0 {
+                    return Err(dohc_engine_domain::DomainError::InvalidInput {
+                        reason: "ydoc-remote-updates-pending",
+                    }
+                    .into());
                 }
-                .into());
             }
         }
     }
@@ -10092,13 +9975,19 @@ fn ydoc_settle_on_store(
             }
         }
     }
+    let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
+    // Classify the exact disk preimage through the same contained projection
+    // probe that materialization uses. This must precede the settle transaction:
+    // compensating only the marker after a rival is found would leave the new
+    // head, moment, search row, and materialization job committed.
+    let disk_preimage =
+        ydoc_settle_disk_preimage(root_dir, path, expected_head_sha.as_deref(), &projected_sha)?;
     // Idempotent no-op: when the lineage's last settled content is exactly
     // this projection, re-settling would mint a duplicate moment (the
     // fingerprint's previous-moment input changed) and a redundant
     // materialization job — the TS driver only settles when the projection
     // differs. Answer with the current head instead (its pending job, if
     // any, was replayed above).
-    let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
     if dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
         == Some(projected_sha.as_str())
     {
@@ -10141,12 +10030,10 @@ fn ydoc_settle_on_store(
         if current_sha != expected_head_sha {
             return Err(dohc_engine_domain::DomainError::ConflictStaleTarget);
         }
-        let preimage = current
-            .snapshot
-            .as_ref()
-            .map_or(Preimage::Absent, |snapshot| {
-                Preimage::Present(snapshot.blob_sha256.clone())
-            });
+        let preimage = current.snapshot.as_ref().map_or_else(
+            || disk_preimage.clone().unwrap_or(Preimage::Absent),
+            |snapshot| Preimage::Present(snapshot.blob_sha256.clone()),
+        );
         let previous_moment = current
             .snapshot
             .as_ref()
@@ -10364,7 +10251,7 @@ fn ydoc_resync_on_store(
     if dohc_engine_collab::read_marker(store, key)?
         .is_some_and(|marker| marker.regime == Regime::Replicated)
     {
-        dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, &NoFaults)?;
+        drain_deferred_ydoc_for_local_rpc(store, key, &NoFaults)?;
     }
     Ok(match dohc_engine_collab::load_persisted(store, key)? {
         Some(persisted) => persisted.doc.encode_full_state(),
@@ -10416,9 +10303,23 @@ fn ydoc_close_session_on_store(
         // The drain PROJECTS internally now (idempotent-by-sha, dependency-
         // gated): drained remote content reaches the visible head with no
         // session left to settle it.
-        dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?;
+        drain_deferred_ydoc_for_local_rpc(store, key, faults)?;
     }
     Ok(Some(outcome))
+}
+
+/// Local Y.Doc RPCs have no sync-pass result. Keep an actionable origination
+/// decline visible at this boundary, matching the existing #632 diagnostic.
+fn drain_deferred_ydoc_for_local_rpc(
+    store: &mut EngineStore,
+    key: &DocKey,
+    faults: &dyn FaultInjector,
+) -> Result<dohc_engine_sync::YdocDrainResult, RuntimeError> {
+    let drained = dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?;
+    for declined in &drained.sharing_declined {
+        eprintln!("engine: {declined}");
+    }
+    Ok(drained)
 }
 
 fn versioned_text_write_on_store(
@@ -10444,6 +10345,19 @@ fn versioned_text_write_on_store(
     dohc_engine_domain::validate_write_input(input).map_err(RuntimeError::from)?;
     let outcome = store.write_with(faults, |tx| {
         let result = write_text_in_tx(tx, input).map_err(RuntimeError::from)?;
+        if !result.deduped {
+            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.snapshot.object_id,
+                dohc_engine_sync::ResultingHead::Text {
+                    path: &result.snapshot.path,
+                    text: &result.snapshot.text,
+                },
+                input.now_ms,
+            )?;
+        }
         if !result.deduped
             && let Some(root_dir) = root_dir
         {
@@ -10494,6 +10408,14 @@ fn versioned_binary_write_on_store(
     let outcome = store.write_with(faults, |tx| {
         let result = write_binary_in_tx(tx, input).map_err(RuntimeError::from)?;
         if !result.deduped {
+            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.object_id,
+                dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                input.now_ms,
+            )?;
             delete_file_search_index(
                 tx,
                 &input.workspace_id,
@@ -10760,6 +10682,25 @@ fn versioned_text_rename_on_store(
     }
     let result = VersionedTextStore::new(store)
         .rename_text_file_with(input, faults, |tx, result| {
+            if !result.deduped {
+                let resulting = if result.moment.after_content_kind == "text" {
+                    dohc_engine_sync::ResultingHead::Text {
+                        path: &result.after.path,
+                        text: &result.after.text,
+                    }
+                } else {
+                    dohc_engine_sync::ResultingHead::BinaryOrAbsent
+                };
+                dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &input.version_id,
+                    &result.object.object_id,
+                    resulting,
+                    input.now_ms,
+                )
+                .map_err(map_fold_error)?;
+            }
             delete_file_search_index(
                 tx,
                 &input.workspace_id,
@@ -10839,7 +10780,15 @@ fn versioned_text_delete_on_store(
             enqueue_binary_delete(tx, &result).map_err(RuntimeError::from)?;
             journal_moment_outbound_in_tx(tx, &input.workspace_id, &result.moment.moment_id, false)
                 .map_err(RuntimeError::from)?;
-            delete_owned_scene_assets_in_tx(tx, &result)?
+            let asset_jobs = delete_owned_scene_assets_in_tx(tx, &result)?;
+            dohc_engine_sync::retire_ydoc_lineage_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.object.object_id,
+            )
+            .map_err(RuntimeError::from)?;
+            asset_jobs
         } else {
             journal_moment_outbound_in_tx(tx, &input.workspace_id, &result.moment.moment_id, true)
                 .map_err(RuntimeError::from)?;
@@ -11228,7 +11177,7 @@ fn versioned_text_rollback_on_store(
     let deduped = VersionedTextStore::new(store).rollback_text_file_mutation_with(
         input,
         faults,
-        |tx, object_id, restored_text, compensating_moment_id| {
+        |tx, object_id, restored_text, compensating_moment_id, recorded_at_ms| {
             restored_asset_jobs = restore_deleted_scene_assets_in_tx(
                 tx,
                 &input.workspace_id,
@@ -11238,6 +11187,19 @@ fn versioned_text_rollback_on_store(
                 compensating_moment_id,
                 input.author_json.as_deref(),
             )?;
+            let resulting = restored_text.map_or(
+                dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                |(path, text)| dohc_engine_sync::ResultingHead::Text { path, text },
+            );
+            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                object_id,
+                resulting,
+                recorded_at_ms,
+            )
+            .map_err(map_fold_error)?;
             delete_file_search_index(tx, &input.workspace_id, &input.version_id, object_id)
                 .map_err(search_domain)?;
             if let Some((path, text)) = restored_text {
@@ -11841,30 +11803,70 @@ fn versioned_text_merge_on_store(
     let result = VersionedTextStore::new(store)
         .merge_text_file_from_version_with(input, faults, |tx, result| {
             match result {
-                MergeTextFileResult::Write { write, .. } => upsert_file_search_index(
-                    tx,
-                    root_dir,
-                    &input.workspace_id,
-                    &input.target_version_id,
-                    &write.object.object_id,
-                    &write.snapshot.path,
-                    &write.snapshot.text,
-                )
-                .map_err(search_domain)?,
-                MergeTextFileResult::Delete { delete, .. } => delete_file_search_index(
-                    tx,
-                    &input.workspace_id,
-                    &input.target_version_id,
-                    &delete.object.object_id,
-                )
-                .map_err(search_domain)?,
+                MergeTextFileResult::Write { write, .. } => {
+                    if !write.deduped {
+                        dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                            tx,
+                            &input.workspace_id,
+                            &input.target_version_id,
+                            &write.object.object_id,
+                            dohc_engine_sync::ResultingHead::Text {
+                                path: &write.snapshot.path,
+                                text: &write.snapshot.text,
+                            },
+                            input.now_ms,
+                        )
+                        .map_err(map_fold_error)?;
+                    }
+                    upsert_file_search_index(
+                        tx,
+                        root_dir,
+                        &input.workspace_id,
+                        &input.target_version_id,
+                        &write.object.object_id,
+                        &write.snapshot.path,
+                        &write.snapshot.text,
+                    )
+                    .map_err(search_domain)?;
+                }
+                MergeTextFileResult::Delete { delete, .. } => {
+                    delete_file_search_index(
+                        tx,
+                        &input.workspace_id,
+                        &input.target_version_id,
+                        &delete.object.object_id,
+                    )
+                    .map_err(search_domain)?;
+                    if !delete.deduped {
+                        dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                            tx,
+                            &input.workspace_id,
+                            &input.target_version_id,
+                            &delete.object.object_id,
+                            dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                            input.now_ms,
+                        )
+                        .map_err(map_fold_error)?;
+                    }
+                }
                 // A fast-forwarded BINARY head needs no index work: the file
                 // search reader drops any candidate whose live head is binary
                 // (`search::query::live_head_is_binary`), so the text this path
                 // used to hold is already unreachable.
-                MergeTextFileResult::BinaryWrite { .. }
-                | MergeTextFileResult::Unchanged { .. }
-                | MergeTextFileResult::Conflict { .. } => {}
+                MergeTextFileResult::BinaryWrite { write, .. } => {
+                    if !write.deduped {
+                        dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                            tx,
+                            &input.workspace_id,
+                            &input.target_version_id,
+                            &write.object.object_id,
+                            dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                            input.now_ms,
+                        )
+                        .map_err(map_fold_error)?;
+                    }
+                }
+                MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => {}
             }
             let Some((moment_id, deduped)) = merge_moment_outbound_identity(result) else {
                 return Ok(());
@@ -11970,6 +11972,7 @@ fn capture_ingest_on_store(
     store: &mut EngineStore,
     input: &CaptureIngest,
     root_dir: Option<&std::path::Path>,
+    leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
@@ -11987,7 +11990,29 @@ fn capture_ingest_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let outcome = store.write_with(faults, |tx| {
-        let result = capture_ingest_in_tx(tx, input).map_err(RuntimeError::from)?;
+        let mut admitted = false;
+        let result = capture_ingest_with_admission_in_tx(
+            tx,
+            input,
+            |workspace_id, version_id, object_id| {
+                ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
+                admitted = true;
+                Ok::<_, RuntimeError>(())
+            },
+        )?;
+        if admitted {
+            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.snapshot.object_id,
+                dohc_engine_sync::ResultingHead::Text {
+                    path: &result.snapshot.path,
+                    text: &result.snapshot.text,
+                },
+                input.now_ms,
+            )?;
+        }
         if !result.deduped
             && let Some(root_dir) = root_dir
         {
@@ -12020,6 +12045,7 @@ fn capture_ingest_on_store(
 fn capture_ingest_binary_on_store(
     store: &mut EngineStore,
     input: &CaptureIngestBinary,
+    leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
@@ -12037,7 +12063,26 @@ fn capture_ingest_binary_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let outcome = store.write_with(faults, |tx| {
-        let result = capture_ingest_binary_in_tx(tx, input).map_err(RuntimeError::from)?;
+        let mut admitted = false;
+        let result = capture_ingest_binary_with_admission_in_tx(
+            tx,
+            input,
+            |workspace_id, version_id, object_id| {
+                ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
+                admitted = true;
+                Ok::<_, RuntimeError>(())
+            },
+        )?;
+        if admitted {
+            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.object_id,
+                dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                input.now_ms,
+            )?;
+        }
         if !result.deduped {
             delete_file_search_index(
                 tx,
@@ -12055,6 +12100,23 @@ fn capture_ingest_binary_on_store(
         TxnOutcome::Committed(result) => Ok(result),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
+}
+
+fn ensure_capture_target_not_leased(
+    leases: &LeaseRegistry,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<(), RuntimeError> {
+    let key = DocKey::new(workspace_id, version_id, object_id)?;
+    if leases.is_held(&key) {
+        return Err(RuntimeError::Sync(
+            dohc_engine_sync::SyncError::RetryableState {
+                reason: "ydoc-session-live",
+            },
+        ));
+    }
+    Ok(())
 }
 
 fn capture_secret_on_store(
@@ -12112,6 +12174,7 @@ fn capture_retire_on_store(
     input: &CaptureRetire,
     root_dir: Option<&std::path::Path>,
     self_writes: Option<&dyn SelfWriteRecorder>,
+    leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<CaptureRetireResult, RuntimeError> {
@@ -12134,6 +12197,18 @@ fn capture_retire_on_store(
         if !result.deduped
             && let Some(retired) = result.retired.as_ref()
         {
+            let key = DocKey::new(
+                &input.workspace_id,
+                &input.version_id,
+                &retired.object.object_id,
+            )?;
+            if leases.is_held(&key) {
+                return Err(RuntimeError::Sync(
+                    dohc_engine_sync::SyncError::RetryableState {
+                        reason: "ydoc-session-live",
+                    },
+                ));
+            }
             delete_file_search_index(
                 tx,
                 &input.workspace_id,
@@ -12152,6 +12227,13 @@ fn capture_retire_on_store(
                 )
                 .map_err(RuntimeError::from)?;
                 asset_jobs = delete_owned_scene_assets_in_tx(tx, retired)?;
+                dohc_engine_sync::retire_ydoc_lineage_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &input.version_id,
+                    &retired.object.object_id,
+                )
+                .map_err(RuntimeError::from)?;
             } else {
                 journal_moment_outbound_in_tx(
                     tx,
@@ -12222,179 +12304,49 @@ fn conflict_resolve_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    // A LIVE editor holds the document this resolution would rewrite. The
-    // fold commits a full-document update to the durable Y.Doc, and the
-    // client keeps editing the copy it already has: its next update merges
-    // from pre-resolution state, so the reviewed choice is reversed or the
-    // live edits are lost — the same property the open/settle freeze
-    // protects, breached from the other side (the session is already
-    // holding the document rather than trying to acquire it).
-    //
-    // Refuse rather than mutate underneath it. The caller closes or resyncs
-    // the session and resolves again; `ydoc_resync_on_store` is the door
-    // that makes that recoverable.
-    // `status='open'` is what stops this guard outranking the idempotency
-    // contract. A resolution that COMMITTED and lost its response is retried
-    // with the same `request_id`; the domain's request ledger replays the
-    // recorded result and rewrites nothing, so refusing that retry for a live
-    // lease would turn a lost response into a different answer. Only a
-    // resolution that has not committed can still rewrite a held document,
-    // and only that one is refused.
-    let held_object: Option<(String, String)> = store.read_with(|conn| {
-        conn.query_row(
-            "SELECT target_version_id, current_object_id FROM conflicts              WHERE workspace_id=?1 AND conflict_id=?2 AND status='open'",
-            params![input.workspace_id, input.conflict_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-        )
-        .optional()
-        .map(|row| row.and_then(|(version, object)| object.map(|object| (version, object))))
-        .map_err(StorageError::corrupt_public)
-    })?;
-    if let Some((version_id, object_id)) = held_object
-        && let Ok(key) = DocKey::new(input.workspace_id.clone(), version_id, object_id)
-        && leases.is_held(&key)
-    {
-        return Err(dohc_engine_domain::DomainError::InvalidInput {
-            reason: "ydoc-session-live",
-        }
-        .into());
-    }
-    let result = VersionedTextStore::new(store)
-        .resolve_text_conflict_with(input, faults, |tx, result| {
-            if let Some(delete) = result.delete.as_ref() {
-                delete_file_search_index(
-                    tx,
-                    &input.workspace_id,
-                    &delete.before.version_id,
-                    &delete.object.object_id,
-                )
-                .map_err(search_domain)?;
-                // A deletion is a reviewed outcome carrying no bytes to
-                // fold, so the write path skipped it and the canonical rows
-                // survived — the next `ydoc.update` found the path absent,
-                // accepted it, and projected the retained lineage back into
-                // a snapshot, reversing the deletion the user approved.
-                // Retire the lineage so the reviewed outcome is what remains.
-                dohc_engine_sync::retire_ydoc_lineage_in_tx(
-                    tx,
-                    &input.workspace_id,
-                    &delete.before.version_id,
-                    &delete.object.object_id,
-                )
-                .map_err(map_fold_error)?;
-            }
-            if let Some(write) = result.write.as_ref()
-                && let Some(root_dir) = root_dir
-            {
-                upsert_file_search_index(
-                    tx,
-                    root_dir,
-                    &input.workspace_id,
-                    &write.snapshot.version_id,
-                    &write.snapshot.object_id,
-                    &write.snapshot.path,
-                    &write.snapshot.text,
-                )
-                .map_err(search_domain)?;
-            }
-            if let Some(delete) = result.delete.as_ref() {
-                journal_moment_outbound_in_tx(
-                    tx,
-                    &input.workspace_id,
-                    &delete.moment.moment_id,
-                    delete.deduped,
-                )?;
-            }
-            if let Some(write) = result.write.as_ref() {
-                journal_moment_outbound_in_tx(
-                    tx,
-                    &input.workspace_id,
-                    &write.moment.moment_id,
-                    write.deduped,
-                )?;
-            }
-            if let Some(write) = result.binary_write.as_ref() {
-                journal_moment_outbound_in_tx(tx, &input.workspace_id, &write.moment_id, false)?;
-            }
-            // A resolution onto BYTES needs no index work here. The write
-            // reuses the object already aliased to the path, and the search
-            // READER drops any candidate whose live head is binary
-            // (`search::query::live_head_is_binary`), which is the same
-            // freeze-then-filter contract every other binary overwrite uses.
-            //
-            // A TEXT resolution on a Y.Doc-backed object must also become
-            // canonical in the lineage, in this same transaction, or the
-            // next inbound delta silently reverses the user's choice.
-            // Keep-current writes nothing, so its chosen text is the
-            // conflict's own current side. A delete resolution is not
-            // folded: deleting a replicated Y.Doc path is its own machinery,
-            // and the projection guard plus the settle freeze already keep
-            // an open conflict's head safe.
-            if let Some(write) = result.write.as_ref() {
-                dohc_engine_sync::fold_resolution_into_ydoc_in_tx(
-                    tx,
-                    &input.workspace_id,
-                    &write.snapshot.version_id,
-                    &write.snapshot.object_id,
-                    &write.snapshot.path,
-                    &write.snapshot.text,
-                    input.now_ms,
-                )
-                .map_err(map_fold_error)?;
-            } else if matches!(
-                result.conflict.resolution,
-                Some(dohc_engine_domain::ConflictResolution::KeptCurrent)
-            ) && let Some(snapshot) = result.conflict.current.snapshot.as_ref()
-            {
-                dohc_engine_sync::fold_resolution_into_ydoc_in_tx(
-                    tx,
-                    &input.workspace_id,
-                    &result.conflict.target_version_id,
-                    &snapshot.object_id,
-                    &snapshot.path,
-                    &snapshot.text,
-                    input.now_ms,
-                )
-                .map_err(map_fold_error)?;
-            }
-            Ok(())
-        })
-        .map_err(RuntimeError::from)?;
-    // The fold appends full-document rewrites; give it the append path's
-    // self-bounding (`self_bound_log`), or repeated conflicts grow
-    // `ydoc_updates` without bound. Best-effort exactly like the append: the
-    // fold is already durable, a skipped or crashed compaction folds next
-    // time, and `maybe_compact` no-ops below threshold and while updates are
-    // pending.
-    let folded_object = result.write.as_ref().map_or_else(
-        || {
-            result.conflict.current.snapshot.as_ref().map(|snapshot| {
-                (
-                    result.conflict.target_version_id.clone(),
-                    snapshot.object_id.clone(),
-                )
-            })
-        },
-        |write| {
-            Some((
-                write.snapshot.version_id.clone(),
-                write.snapshot.object_id.clone(),
-            ))
-        },
-    );
-    if let Some((version_id, object_id)) = folded_object
-        && let Ok(key) = DocKey::new(input.workspace_id.clone(), version_id, object_id)
-        && dohc_engine_collab::read_marker(store, &key)?.is_some()
-    {
-        let _ = dohc_engine_collab::maybe_compact(
-            store,
-            &key,
-            dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD,
+    VersionedTextStore::new(store)
+        .resolve_text_conflict_with(
+            input,
             faults,
-            input.now_ms,
-        )?;
-    }
-    Ok(result)
+            |tx, conflict, _live| {
+                let prepared =
+                    dohc_engine_sync::prepare_local_conflict_resolve_v1_in_tx(tx, input, conflict)
+                        .map_err(map_fold_error)?;
+                prepared
+                    .ensure_no_live_ydoc_session(leases)
+                    .map_err(map_fold_error)?;
+                Ok(prepared)
+            },
+            |tx, result, plan| {
+                if let Some(delete) = result.delete.as_ref() {
+                    delete_file_search_index(
+                        tx,
+                        &input.workspace_id,
+                        &delete.before.version_id,
+                        &delete.object.object_id,
+                    )
+                    .map_err(search_domain)?;
+                }
+                if let Some(write) = result.write.as_ref()
+                    && let Some(root_dir) = root_dir
+                {
+                    upsert_file_search_index(
+                        tx,
+                        root_dir,
+                        &input.workspace_id,
+                        &write.snapshot.version_id,
+                        &write.snapshot.object_id,
+                        &write.snapshot.path,
+                        &write.snapshot.text,
+                    )
+                    .map_err(search_domain)?;
+                }
+                dohc_engine_sync::commit_local_conflict_resolve_v1_in_tx(tx, &plan, result)
+                    .map_err(map_fold_error)?;
+                Ok(())
+            },
+        )
+        .map_err(RuntimeError::from)
 }
 
 /// Map a resolution-fold failure into the resolving transaction's error
@@ -12404,6 +12356,15 @@ fn map_fold_error(error: dohc_engine_sync::SyncError) -> dohc_engine_domain::Dom
         dohc_engine_sync::SyncError::InvalidInput { reason } => {
             dohc_engine_domain::DomainError::InvalidInput { reason }
         }
+        dohc_engine_sync::SyncError::InputTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes,
+        } => dohc_engine_domain::DomainError::PayloadTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes,
+        },
         // The fold's size refusal carries its measurements; wrapping it as
         // state-corrupt would throw them away and misreport a bounded input
         // as corruption.
@@ -12418,6 +12379,9 @@ fn map_fold_error(error: dohc_engine_sync::SyncError) -> dohc_engine_domain::Dom
         },
         dohc_engine_sync::SyncError::Storage(storage) => {
             dohc_engine_domain::DomainError::Storage(storage)
+        }
+        dohc_engine_sync::SyncError::RetryableState { reason } => {
+            dohc_engine_domain::DomainError::InvalidInput { reason }
         }
         other => dohc_engine_domain::DomainError::Storage(
             dohc_engine_storage::StorageError::corrupt_public(other),

@@ -73,6 +73,64 @@ pub enum CollabError {
     #[error("incoming base state diverges from the claimed base")]
     BaseStateDiverged,
 
+    /// A successor base could not reproduce its canonical text exactly.
+    #[error(
+        "successor projection mismatch: expected text {expected_sha256}, observed {observed_sha256}"
+    )]
+    SuccessorProjectionMismatch {
+        expected_sha256: String,
+        observed_sha256: String,
+    },
+
+    /// The artifact's claimed result digest does not match its canonical text.
+    #[error("successor result digest mismatch: expected {expected}, observed {observed}")]
+    SuccessorResultMismatch { expected: String, observed: String },
+
+    /// A delta changed or removed the reserved lineage epoch metadata.
+    #[error(
+        "Y.Doc lineage epoch changed: expected {expected}, observed {observed}; start a successor lineage instead"
+    )]
+    LineageEpochChanged { expected: String, observed: String },
+
+    /// Successor installation requires an exact predecessor claim. A compacted
+    /// legacy lineage has no recoverable claim until semantic repair inspects
+    /// its Yrs state.
+    #[error(
+        "Y.Doc lineage claim status is {status}; successor replacement requires lineage_claim_status=exact"
+    )]
+    LineageClaimUnresolved { status: String },
+
+    /// The active claim changed after the successor artifact was prepared.
+    #[error(
+        "Y.Doc successor predecessor mismatch: expected {expected}, observed {observed:?}; reload the active lineage and retry"
+    )]
+    LineagePredecessorMismatch {
+        expected: String,
+        observed: Option<String>,
+    },
+
+    /// The active lineage gained or lost state after the successor artifact was
+    /// prepared, even though its base claim stayed the same.
+    #[error(
+        "Y.Doc successor state-vector mismatch: expected {expected}, observed {observed}; reload the active lineage and retry"
+    )]
+    LineageStateVectorMismatch { expected: String, observed: String },
+
+    /// A successor descriptor disagrees with its hydrated base bytes.
+    #[error(
+        "invalid Y.Doc successor base ({constraint}): expected {expected}, observed {observed}"
+    )]
+    InvalidSuccessorBase {
+        constraint: &'static str,
+        expected: String,
+        observed: String,
+    },
+
+    /// A successor cannot archive a lineage while queued or unintegrated
+    /// updates could still change its state.
+    #[error("Y.Doc lineage is incomplete: {reason}; drain dependencies and retry")]
+    LineageIncomplete { reason: &'static str },
+
     /// A lease for this doc key is already held by another open session
     /// (single-writer per document).
     #[error("a lease for this document is already held")]
@@ -134,6 +192,14 @@ impl CollabError {
             CollabError::MarkdownRewriteUnsupported { .. } => "markdown-rewrite-unsupported",
             CollabError::BaseAlreadyClaimed => "base-already-claimed",
             CollabError::BaseStateDiverged => "base-state-diverged",
+            CollabError::SuccessorProjectionMismatch { .. } => "successor-projection-mismatch",
+            CollabError::SuccessorResultMismatch { .. } => "successor-result-mismatch",
+            CollabError::LineageEpochChanged { .. } => "lineage-epoch-changed",
+            CollabError::LineageClaimUnresolved { .. } => "lineage-claim-unresolved",
+            CollabError::LineagePredecessorMismatch { .. } => "lineage-predecessor-mismatch",
+            CollabError::LineageStateVectorMismatch { .. } => "lineage-state-vector-mismatch",
+            CollabError::InvalidSuccessorBase { .. } => "invalid-successor-base",
+            CollabError::LineageIncomplete { .. } => "lineage-incomplete",
             CollabError::LeaseHeld => "lease-held",
             CollabError::NoMarker => "no-marker",
             CollabError::MissingDependencies => "ydoc-missing-remote-dependencies",

@@ -218,7 +218,7 @@ fn canonical_scene_assets(
         if marker.content_kind != ContentKind::Scene
             || (marker.head_update_seq == 0
                 && marker.head_snapshot_seq == 0
-                && !marker.base_claimed)
+                && !marker.lineage_claim_status.has_claimed_base())
         {
             continue;
         }

@@ -1,3 +1,4 @@
+use dohc_engine_collab::DocKey;
 use dohc_engine_files::{
     PathClassification, classify_engine_file_path_normalized, search_policy::SearchPolicySnapshot,
 };
@@ -10,7 +11,7 @@ use std::cmp::Ordering;
 use crate::file_search::{
     delete_file_search_index, search_policy_for_store, upsert_file_search_index,
 };
-use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with};
+use crate::{ApplyOutcome, LeaseProbe, ReplicationEnvelope, SyncError, apply_envelope_with};
 
 /// The stored origin for every replicated snapshot head.
 ///
@@ -21,7 +22,11 @@ pub(crate) const REPLICATED_SNAPSHOT_ORIGIN: &str = "sync";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct MomentAppendPayload {
+pub(crate) struct MomentAppendPayload {
+    #[serde(default)]
+    conflict_id: Option<String>,
+    #[serde(default)]
+    conflict_effect_index: Option<usize>,
     moment_id: String,
     version_id: String,
     object_id: String,
@@ -49,6 +54,18 @@ struct MomentAppendPayload {
     before_updated_at_ms: Option<i64>,
     before_latest_moment_id: Option<String>,
     before_metadata: Option<Metadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConflictEffectOwner {
+    pub(crate) conflict_id: String,
+    pub(crate) effect_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MomentApplyMode {
+    Ordinary,
+    ConflictParent,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -189,8 +206,9 @@ pub fn apply_moment_envelope(
     store: &mut EngineStore,
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
+    leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<i64>, SyncError> {
-    apply_moment_envelope_detailed(store, envelope, faults)
+    apply_moment_envelope_detailed(store, envelope, faults, leases)
         .map(|outcome| outcome.map(|result| result.conflicts_opened))
 }
 
@@ -198,6 +216,7 @@ pub fn apply_moment_envelope_detailed(
     store: &mut EngineStore,
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
+    leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<MomentApplyResult>, SyncError> {
     if envelope.op_kind != "moment.append" {
         return Err(SyncError::UnsupportedOperation);
@@ -210,7 +229,30 @@ pub fn apply_moment_envelope_detailed(
                 reason: "moment.append payload is malformed",
             })?;
         validate_payload_bounds(&payload)?;
-        apply_moment_append(tx, envelope, &payload, search_policy.as_ref())
+        validate_payload(&payload)?;
+        if payload.conflict_id.is_some() || payload.conflict_effect_index.is_some() {
+            return crate::conflict_resolve_v1::verify_imported_conflict_effect_in_tx(tx, envelope);
+        }
+        let key = DocKey::new(
+            &envelope.workspace_id,
+            &payload.version_id,
+            &payload.object_id,
+        )
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "moment.append Y.Doc coordinates are invalid",
+        })?;
+        if leases.is_live(&key) {
+            return Err(SyncError::RetryableState {
+                reason: "ydoc-session-live",
+            });
+        }
+        apply_moment_append(
+            tx,
+            envelope,
+            &payload,
+            search_policy.as_ref(),
+            MomentApplyMode::Ordinary,
+        )
     })
 }
 
@@ -221,6 +263,13 @@ pub(crate) fn redelivered_materialization_changes(
     if envelope.op_kind != "moment.append" {
         return Ok(Vec::new());
     }
+    stored_materialization_changes(store, envelope)
+}
+
+pub(crate) fn stored_materialization_changes(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<Vec<MomentMaterializationChange>, SyncError> {
     let decision_id = materialization_decision_id(envelope);
     let encoded = store.read_with(|conn| {
         conn.query_row(
@@ -275,7 +324,7 @@ fn materialization_decision_id(envelope: &ReplicationEnvelope) -> String {
     )
 }
 
-fn record_materialization_changes(
+pub(crate) fn record_materialization_changes(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
     changes: &[MomentMaterializationChange],
@@ -343,8 +392,8 @@ fn apply_moment_append(
     envelope: &ReplicationEnvelope,
     payload: &MomentAppendPayload,
     search_policy: Option<&SearchPolicySnapshot>,
+    mode: MomentApplyMode,
 ) -> Result<MomentApplyResult, SyncError> {
-    validate_payload(payload)?;
     require_version(tx, &envelope.workspace_id, &payload.version_id)?;
 
     let duplicate: bool = tx
@@ -415,9 +464,35 @@ fn apply_moment_append(
     validate_payload_sides(tx, payload)?;
     let remote_before = moment_before_from_payload(tx, payload)?;
 
+    if mode == MomentApplyMode::Ordinary && payload.operation == "delete" && local.is_none() {
+        let key = DocKey::new(
+            &envelope.workspace_id,
+            &payload.version_id,
+            &payload.object_id,
+        )
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "moment.append Y.Doc coordinates are invalid",
+        })?;
+        if crate::ydoc_apply::ydoc_lineage_has_durable_state_in_tx(tx, &key)? {
+            return Err(SyncError::RetryableState {
+                reason: "ydoc-lineage-unsettled",
+            });
+        }
+    }
+
     if content_fast_forward && payload.operation == "delete" {
         ensure_file_object(tx, &envelope.workspace_id, payload)?;
         insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
+        // No durable CRDT state remains; remove a possible empty marker so a
+        // later base starts a fresh lineage.
+        if mode == MomentApplyMode::Ordinary {
+            crate::retire_ydoc_lineage_in_tx(
+                tx,
+                &envelope.workspace_id,
+                &payload.version_id,
+                &payload.object_id,
+            )?;
+        }
         return Ok(MomentApplyResult {
             conflicts_opened: 0,
             materialization_changes: Vec::new(),
@@ -436,7 +511,9 @@ fn apply_moment_append(
         ensure_file_object(tx, &envelope.workspace_id, payload)?;
         insert_moment(tx, &envelope.workspace_id, payload, &adopted_before, false)?;
         if payload.operation == "delete" {
-            freeze_incoming_scene_delete_authority(tx, envelope, payload)?;
+            if mode == MomentApplyMode::Ordinary {
+                freeze_incoming_scene_delete_authority(tx, envelope, payload)?;
+            }
             let alias_path = local
                 .as_ref()
                 .map_or(payload.path.as_str(), |snapshot| snapshot.path.as_str());
@@ -456,6 +533,14 @@ fn apply_moment_append(
                 params![envelope.workspace_id, payload.version_id, payload.object_id],
             )
             .map_err(SyncError::persist)?;
+            if mode == MomentApplyMode::Ordinary {
+                crate::retire_ydoc_lineage_in_tx(
+                    tx,
+                    &envelope.workspace_id,
+                    &payload.version_id,
+                    &payload.object_id,
+                )?;
+            }
             delete_file_search_index(
                 tx,
                 &envelope.workspace_id,
@@ -470,7 +555,9 @@ fn apply_moment_append(
                 })
                 .into_iter()
                 .collect::<Vec<_>>();
-            record_materialization_changes(tx, envelope, &materialization_changes)?;
+            if mode == MomentApplyMode::Ordinary {
+                record_materialization_changes(tx, envelope, &materialization_changes)?;
+            }
             return Ok(MomentApplyResult {
                 conflicts_opened: 0,
                 materialization_changes,
@@ -518,6 +605,23 @@ fn apply_moment_append(
                 .unwrap_or(require_binary_blob(tx, &payload.payload_after_blob_sha256)?),
         };
         upsert_snapshot(tx, &envelope.workspace_id, payload, after_kind, byte_length)?;
+        let resulting = match after_kind {
+            ContentKind::Text => crate::ResultingHead::Text {
+                path: &payload.payload_after_path,
+                text: after_text.as_deref().ok_or(SyncError::BlobInvalid)?,
+            },
+            ContentKind::Binary => crate::ResultingHead::BinaryOrAbsent,
+        };
+        if mode == MomentApplyMode::Ordinary {
+            crate::reconcile_imported_resulting_head_in_tx(
+                tx,
+                &envelope.workspace_id,
+                &payload.version_id,
+                &payload.object_id,
+                resulting,
+                envelope.recorded_at_ms,
+            )?;
+        }
         upsert_search_row(
             tx,
             &envelope.workspace_id,
@@ -544,7 +648,9 @@ fn apply_moment_append(
                 content_kind: after_kind.as_str(),
             });
         }
-        record_materialization_changes(tx, envelope, &materialization_changes)?;
+        if mode == MomentApplyMode::Ordinary {
+            record_materialization_changes(tx, envelope, &materialization_changes)?;
+        }
         return Ok(MomentApplyResult {
             conflicts_opened: 0,
             materialization_changes,
@@ -663,6 +769,119 @@ fn freeze_incoming_scene_delete_authority(
             },
             _ => SyncError::CoordinateDiverged,
         })
+}
+
+pub(crate) fn conflict_effect_owner(
+    payload: &MomentAppendPayload,
+) -> Result<Option<ConflictEffectOwner>, SyncError> {
+    match (&payload.conflict_id, payload.conflict_effect_index) {
+        (None, None) => Ok(None),
+        (Some(conflict_id), Some(effect_index)) if !conflict_id.is_empty() => {
+            Ok(Some(ConflictEffectOwner {
+                conflict_id: conflict_id.clone(),
+                effect_index,
+            }))
+        }
+        _ => Err(SyncError::InvalidInput {
+            reason: "moment.append conflict owner tag is incomplete",
+        }),
+    }
+}
+
+pub(crate) fn apply_conflict_parent_shadow_in_tx(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    shadow: &serde_json::Value,
+    search_policy: Option<&SearchPolicySnapshot>,
+) -> Result<MomentApplyResult, SyncError> {
+    let (payload, _) = parse_tagged_shadow(
+        shadow,
+        "conflict.resolve moment shadow is malformed",
+        "conflict.resolve moment shadow has no owner",
+    )?;
+    apply_moment_append(
+        tx,
+        envelope,
+        &payload,
+        search_policy,
+        MomentApplyMode::ConflictParent,
+    )
+}
+
+pub(crate) fn record_conflict_parent_shadow_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    shadow: &serde_json::Value,
+) -> Result<(), SyncError> {
+    let (payload, owner) = parse_tagged_shadow(
+        shadow,
+        "conflict.resolve moment shadow is malformed",
+        "conflict.resolve moment shadow has no owner",
+    )?;
+    require_version(tx, workspace_id, &payload.version_id)?;
+    let duplicate: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND moment_id=?2) \
+             OR EXISTS(SELECT 1 FROM secret_moments WHERE workspace_id=?1 AND moment_id=?2)",
+            params![workspace_id, payload.moment_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if duplicate {
+        let stored_moment: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND moment_id=?2)",
+                params![workspace_id, payload.moment_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        if !stored_moment {
+            return Err(SyncError::CoordinateDiverged);
+        }
+        let durable = crate::conflict_resolve_v1::durable_effect_shadow_in_tx(
+            tx,
+            workspace_id,
+            &payload.moment_id,
+            &owner.conflict_id,
+            owner.effect_index,
+        )?;
+        if durable == *shadow {
+            return Ok(());
+        }
+        return Err(SyncError::CoordinateDiverged);
+    }
+    validate_payload_sides(tx, &payload)?;
+    let remote_before = moment_before_from_payload(tx, &payload)?;
+    ensure_file_object(tx, workspace_id, &payload)?;
+    insert_moment(tx, workspace_id, &payload, &remote_before, true)
+}
+
+pub(crate) fn validate_tagged_shadow_payload(
+    value: &serde_json::Value,
+) -> Result<ConflictEffectOwner, SyncError> {
+    parse_tagged_shadow(
+        value,
+        "moment.append payload is malformed",
+        "moment.append has no conflict owner tag",
+    )
+    .map(|(_, owner)| owner)
+}
+
+fn parse_tagged_shadow(
+    value: &serde_json::Value,
+    malformed_reason: &'static str,
+    missing_owner_reason: &'static str,
+) -> Result<(MomentAppendPayload, ConflictEffectOwner), SyncError> {
+    let payload: MomentAppendPayload =
+        serde_json::from_value(value.clone()).map_err(|_| SyncError::InvalidInput {
+            reason: malformed_reason,
+        })?;
+    validate_payload_bounds(&payload)?;
+    validate_payload(&payload)?;
+    let owner = conflict_effect_owner(&payload)?.ok_or(SyncError::InvalidInput {
+        reason: missing_owner_reason,
+    })?;
+    Ok((payload, owner))
 }
 
 fn equivalent_ydoc_settlement_preimage(snapshot: &Snapshot, payload: &MomentAppendPayload) -> bool {
@@ -799,6 +1018,8 @@ fn validate_every_path_field(payload: &MomentAppendPayload) -> Result<(), SyncEr
         before_updated_at_ms: _,
         before_latest_moment_id: _,
         before_metadata: _,
+        conflict_id: _,
+        conflict_effect_index: _,
     } = payload;
 
     [

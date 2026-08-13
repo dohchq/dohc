@@ -12,6 +12,7 @@ allowBuilds:
   electron: true
   electron-winstaller: true
   esbuild: true
+  msgpackr-extract: false
 
 # TipTap packages share parser contracts but declare broad transitive ranges.
 # Keep every parser and editor package on the same release.

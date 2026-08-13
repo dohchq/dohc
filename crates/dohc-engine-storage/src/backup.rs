@@ -64,6 +64,16 @@ const COMPARED_TABLES: &[&str] = &[
     "scene_asset_delete_authorities",
     "scene_asset_delete_authority_items",
     "materialization_jobs",
+    "ydoc_docs",
+    "ydoc_updates",
+    "ydoc_snapshots",
+    "ydoc_deferred_updates",
+    "ydoc_inactive_lineages",
+    "replication_pending_conflict_bundles",
+    "replication_pending_conflict_ops",
+    "replication_pending_conflict_moments",
+    "replication_pending_conflict_text_blobs",
+    "replication_pending_conflict_binary_blobs",
     // R08 secret-backed-file tables: their ciphertext tips / fork bases /
     // history moments are durable state, so a backup missing or truncating them
     // must fail the restore-test row-count compare (never mark a lossy copy
@@ -449,4 +459,25 @@ fn write_manifest_atomic(
     std::fs::write(&tmp, manifest.to_json().as_bytes()).map_err(StorageError::classify_io)?;
     std::fs::rename(&tmp, manifest_path).map_err(StorageError::classify_io)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::COMPARED_TABLES;
+
+    #[test]
+    fn backup_compares_pending_conflict_bundle_tables() {
+        for table in [
+            "replication_pending_conflict_bundles",
+            "replication_pending_conflict_ops",
+            "replication_pending_conflict_moments",
+            "replication_pending_conflict_text_blobs",
+            "replication_pending_conflict_binary_blobs",
+        ] {
+            assert!(
+                COMPARED_TABLES.contains(&table),
+                "backup restore verification must compare {table}"
+            );
+        }
+    }
 }

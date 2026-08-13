@@ -1312,19 +1312,31 @@ async fn scenario_editor_cycle(daemon: &Daemon, root: &Path, n: u64) {
             }),
         )
         .await;
+    let opened = daemon
+        .call(
+            "ydoc.open",
+            Some(handle.clone()),
+            json!({
+                "versionId": "main",
+                "path": format!("editor-{slot}.md"),
+                "contentKind": "plaintext",
+            }),
+        )
+        .await;
+    let session_id = opened["sessionId"]
+        .as_str()
+        .expect("editor session id")
+        .to_owned();
     let doc = Ydoc::wire();
     for edit in 0..5 {
         let update = doc.plaintext_insert(0, &format!("edit {n}-{edit} "));
         daemon
             .call(
-                "ydoc.apply",
+                "ydoc.recordUpdate",
                 Some(handle.clone()),
                 json!({
-                    "versionId": "main",
-                    "objectId": format!("soak-editor-object-{slot}"),
-                    "contentKind": "plaintext",
+                    "sessionId": session_id,
                     "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
-                    "nowMs": 1
                 }),
             )
             .await;

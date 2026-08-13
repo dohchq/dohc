@@ -11,7 +11,10 @@
 
 mod apply;
 mod conflict_apply;
+mod conflict_outbox;
+mod conflict_resolve_v1;
 mod cursor;
+mod enrolment;
 mod error;
 mod file_search;
 mod hydration;
@@ -26,20 +29,23 @@ mod secret_apply;
 mod share;
 mod version_apply;
 mod ydoc_apply;
+mod ydoc_origination;
 
 pub use apply::{
     ApplyOutcome, RefusalReason, ReplicationRefusal, apply_chat_envelope, apply_envelope_with,
     read_replayed_refusal, retain_refusal_for_direct_retry,
 };
-pub use conflict_apply::{
-    ConflictApplyResult, PendingResolve, PendingResolveReason, apply_conflict_envelope,
+pub use conflict_apply::{ConflictApplyResult, apply_conflict_envelope};
+pub use conflict_resolve_v1::{
+    PreparedLocalConflictResolveV1, commit_local_conflict_resolve_v1_in_tx,
+    prepare_local_conflict_resolve_v1_in_tx,
 };
 pub use cursor::{
     CursorKind, RelayCursor, ShareCursor, SharedPeerPosition, commit_relay_cursor,
     commit_share_cursor, read_pushed_seq, read_relay_cursor, read_share_cursor,
     read_shared_peer_position,
 };
-pub(crate) use error::ShareDisposition;
+use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
 pub use hydration::{
     BlobContent, BlobHydration, BlobKind, MAX_INGEST_BLOB_BYTES, blob_ceiling, hydrate_blob_content,
@@ -58,8 +64,8 @@ pub use moment_apply::{
     apply_moment_envelope_detailed,
 };
 pub use outbound::{
-    journal_moment_append_in_tx, journal_secret_delete_in_tx, journal_secret_put_in_tx,
-    journal_secret_version_fork_in_tx, journal_version_create_in_tx,
+    journal_moment_append_in_tx, journal_secret_delete_in_tx, journal_secret_put_from_moment_in_tx,
+    journal_secret_put_in_tx, journal_secret_version_fork_in_tx, journal_version_create_in_tx,
 };
 pub use path_policy::{PathClass, classify_share_path};
 pub use relay::{
@@ -80,9 +86,13 @@ pub use share::{
 };
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{
-    LeaseProbe, NoLiveLeases, YdocApplyResult, YdocDrainResult, apply_ydoc_envelope,
+    LeaseProbe, NoLiveLeases, ResultingHead, YdocApplyResult, YdocDrainResult, apply_ydoc_envelope,
     drain_deferred_ydoc_for_key, fold_resolution_into_ydoc_in_tx, open_sync_conflict_for_object,
-    project_and_write_in_tx, project_ydoc_with_store, retire_ydoc_lineage_in_tx,
+    project_and_write_in_tx, project_ydoc_with_store, reconcile_imported_resulting_head_in_tx,
+    reconcile_local_resulting_head_in_tx, retire_ydoc_lineage_in_tx,
+};
+pub use ydoc_origination::{
+    BaseOrigination, SharingDeclined, originate_ydoc_base_in_tx, ydoc_update_payload,
 };
 
 pub use dohc_engine_storage::{FaultInjector, FaultPoint, NoFaults};

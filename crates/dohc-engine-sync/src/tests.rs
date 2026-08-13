@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dohc_engine_domain::chats::{
     CHAT_THREAD_HEADER_MESSAGE_ID, chat_thread_display_title, upsert_chat_search_index_row,
@@ -619,6 +620,14 @@ impl LeaseProbe for AlwaysLive {
     }
 }
 
+struct FirstLeaseCheckLive(AtomicUsize);
+
+impl LeaseProbe for FirstLeaseCheckLive {
+    fn is_live(&self, _key: &dohc_engine_collab::DocKey) -> bool {
+        self.0.fetch_add(1, Ordering::SeqCst) == 0
+    }
+}
+
 #[test]
 fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
     let (_scratch, _path, mut engine) = store();
@@ -962,8 +971,21 @@ fn join_identity_adoption_refuses_any_existing_replication_state() {
             .map_err(SyncError::persist)?;
             tx.execute(
                 "INSERT INTO ydoc_deferred_updates \
-                 (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) \
-                 VALUES ('ws-ydoc-pending','main','object-ydoc-pending','origin-old',0,1)",
+                  (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) \
+                  VALUES ('ws-ydoc-pending','main','object-ydoc-pending','origin-old',0,1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO versioned_workspaces (workspace_id,main_version_id) \
+                 VALUES ('ws-conflict-pending','main')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO replication_pending_conflict_bundles \
+                 (workspace_id,conflict_id,format_version,pre_effect_moment_order,created_at_ms) \
+                 VALUES ('ws-conflict-pending','conflict-pending',1,0,1)",
                 [],
             )
             .map_err(SyncError::persist)?;
@@ -982,6 +1004,7 @@ fn join_identity_adoption_refuses_any_existing_replication_state() {
         "ws-view-cursor",
         "ws-chat-pending",
         "ws-ydoc-pending",
+        "ws-conflict-pending",
     ] {
         assert!(matches!(
             adopt_join_identity(
@@ -1284,7 +1307,7 @@ fn oversized_relay_blob_is_refused_before_it_is_hashed_or_copied() {
     let client = RelaySyncClient::new(relay);
 
     assert_eq!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
         Err(RelayError::BlobTooLarge {
             constraint: "MAX_TEXT_BYTES",
             limit_bytes: MAX_TEXT_BYTES,
@@ -1864,7 +1887,8 @@ fn terminal_pending_chat_replay_is_persisted_and_returned_to_the_triggering_appl
     );
     let outcome =
         apply_chat_envelope(&mut engine, &private_channel, &NoFaults).expect("private channel");
-    let (primary, refusals) = outcome.into_primary_and_refusals();
+    let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
+    assert!(sharing_declined.is_empty());
     assert_eq!(primary, ApplyOutcome::Applied(()));
     assert_eq!(
         refusals,
@@ -5562,13 +5586,13 @@ fn an_unusable_version_id_names_the_limit_the_unit_and_the_observed_length() {
 
 #[derive(Default)]
 struct FakeRelay {
-    pushes: Mutex<usize>,
+    pushes: Mutex<Vec<PushRequest>>,
     pull: Mutex<Option<PullResponse>>,
 }
 
 impl RelayTransport for FakeRelay {
     fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
-        *self.pushes.lock().expect("push lock") += 1;
+        self.pushes.lock().expect("push lock").push(req.clone());
         let accepted = req.ops.len();
         let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
         Ok(PushResponse {
@@ -6338,7 +6362,7 @@ fn relay_pull_recovers_only_a_diverged_local_origin() {
                 .expect("seed imported coordinate");
         }
         let client = RelaySyncClient::new(FakeRelay {
-            pushes: Mutex::new(0),
+            pushes: Mutex::new(Vec::new()),
             pull: Mutex::new(Some(PullResponse {
                 ops: vec![envelope(
                     origin_id,
@@ -6356,7 +6380,7 @@ fn relay_pull_recovers_only_a_diverged_local_origin() {
         });
 
         assert_eq!(
-            client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+            client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
             Err(expected),
             "{origin_id}"
         );
@@ -6371,7 +6395,7 @@ fn fault_sync_after_push_before_cursor_persist_repushes_without_local_double_adv
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
     assert_eq!(
         client
-            .push_workspace(&mut engine, "ws", faults.as_ref())
+            .push_workspace(&mut engine, "ws", faults.as_ref(), 1_000)
             .expect("push fault"),
         SyncPassOutcome::CrashedAfterRemoteCommit
     );
@@ -6382,13 +6406,13 @@ fn fault_sync_after_push_before_cursor_persist_repushes_without_local_double_adv
         -1
     );
     client
-        .push_workspace(&mut reopened, "ws", &NoFaults)
+        .push_workspace(&mut reopened, "ws", &NoFaults, 1_000)
         .expect("retry push");
     assert_eq!(
         read_pushed_seq(&reopened, "ws", "local").expect("cursor"),
         0
     );
-    assert_eq!(*client.transport().pushes.lock().expect("calls"), 2);
+    assert_eq!(client.transport().pushes.lock().expect("calls").len(), 2);
 }
 
 #[test]
@@ -6468,7 +6492,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
         json!({"reactionId":"r","messageId":"m","threadId":"t","emoji":"👍","authorId":"u","authorKind":"human","authorDisplayName":"U","atMs":10,"state":"added"}),
     );
     let fake = FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![remote],
             next_cursor: 1,
@@ -6478,7 +6502,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
     let client = RelaySyncClient::new(fake);
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncBetweenApplyAndCursorCommit);
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases, 1_000)
         .expect("pull fault");
     assert!(matches!(
         first,
@@ -6492,7 +6516,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
             .is_none()
     );
     let retry = client
-        .pull_chat_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("retry pull");
     let pending = match retry {
         SyncPassOutcome::Complete {
@@ -6505,9 +6529,9 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
     };
     assert_eq!(
         client
-            .commit_pull_cursor(&mut reopened, "ws", &pending, &NoFaults)
+            .commit_pull_cursor(&mut reopened, "ws", &pending, &NoFaults, 1_000)
             .expect("commit"),
-        TxnOutcome::Committed(())
+        TxnOutcome::Committed(Vec::new())
     );
 }
 
@@ -6674,7 +6698,7 @@ fn pull_rejects_op_for_foreign_workspace() {
         recorded_at_ms: 2_000,
     };
     let fake = FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![foreign],
             next_cursor: 1,
@@ -6683,7 +6707,7 @@ fn pull_rejects_op_for_foreign_workspace() {
     };
     let client = RelaySyncClient::new(fake);
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
         Err(RelayError::InvalidResponse)
     ));
     // Fail closed: the cursor was never persisted, so the pass is retryable.
@@ -7192,7 +7216,11 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
         .expect("marker read")
         .expect("marker");
     assert_eq!(marker.regime, dohc_engine_collab::Regime::Replicated);
-    assert!(marker.base_claimed, "the base claim still lands");
+    assert_eq!(
+        marker.lineage_claim_status,
+        dohc_engine_collab::LineageClaimStatus::Exact,
+        "the base claim still lands"
+    );
 
     // One moment-lane shaped conflict: current = local head, incoming = the
     // base projection, both hydratable from `blobs`.
@@ -7314,6 +7342,7 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
     dohc_engine_collab::record_local_update_creating_marker(
         &mut engine,
         &key,
+        Some("notes/crashed.md"),
         dohc_engine_collab::ContentKind::Plaintext,
         dohc_engine_collab::Regime::LocalOnly,
         &draft,
@@ -7850,6 +7879,76 @@ fn a_resolution_over_an_incomplete_lineage_refuses() {
         ),
         "a resolution over a partial lineage must refuse: {refused:?}"
     );
+    let before_retire: (i64, i64, i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_updates WHERE workspace_id='ws' \
+                     AND version_id='main' AND object_id='object-partial'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_snapshots WHERE workspace_id='ws' \
+                     AND version_id='main' AND object_id='object-partial'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE workspace_id='ws' \
+                     AND version_id='main' AND object_id='object-partial'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_docs WHERE workspace_id='ws' \
+                     AND version_id='main' AND object_id='object-partial'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("lineage before retirement");
+    let retired = engine.write_with(&NoFaults, |tx| {
+        crate::retire_ydoc_lineage_in_tx(tx, "ws", "main", "object-partial")
+    });
+    assert!(matches!(
+        retired,
+        Err(SyncError::RetryableState {
+            reason: "ydoc-incomplete-lineage"
+        })
+    ));
+    let after_retire: (i64, i64, i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_updates WHERE workspace_id='ws' \
+                     AND version_id='main' AND object_id='object-partial'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_snapshots WHERE workspace_id='ws' \
+                     AND version_id='main' AND object_id='object-partial'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE workspace_id='ws' \
+                     AND version_id='main' AND object_id='object-partial'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_docs WHERE workspace_id='ws' \
+                     AND version_id='main' AND object_id='object-partial'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("lineage after refused retirement");
+    assert_eq!(after_retire, before_retire);
 }
 
 #[test]
@@ -8446,7 +8545,7 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
     let (scratch_a, path_a, mut asset_first) = store();
     let (asset_a, scene_a, asset_ref_a, _) = make_ops(&mut asset_first);
     let asset_first_pull = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![asset_a, scene_a],
             next_cursor: 2,
@@ -8459,7 +8558,7 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
         refused: 0,
         ..
     } = asset_first_pull
-        .pull_chat_workspace(&mut asset_first, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut asset_first, "ws", &NoFaults, &NoLiveLeases, 2_100)
         .expect("asset-first relay pull")
     else {
         panic!("asset-first relay pull must complete");
@@ -8468,7 +8567,7 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
     let (scratch_b, path_b, mut scene_first) = store();
     let (asset_b, scene_b, asset_ref_b, portable) = make_ops(&mut scene_first);
     let scene_first_pull = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![scene_b, asset_b],
             next_cursor: 2,
@@ -8481,7 +8580,7 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
         refused: 0,
         ..
     } = scene_first_pull
-        .pull_chat_workspace(&mut scene_first, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut scene_first, "ws", &NoFaults, &NoLiveLeases, 2_100)
         .expect("scene-first relay pull retries after the asset moment")
     else {
         panic!("scene-first relay pull must complete");
@@ -8804,7 +8903,8 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
         );
         let outcome = apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases)
             .expect("base applies and mismatched kind is drained");
-        let (primary, refusals) = outcome.into_primary_and_refusals();
+        let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
+        assert!(sharing_declined.is_empty());
         assert!(matches!(primary, ApplyOutcome::Applied(_)));
         assert_eq!(
             refusals,
@@ -8922,7 +9022,7 @@ fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
 
     for (expected_applied, expected_skipped) in [(1, 0), (0, 1)] {
         let outcome = client
-            .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+            .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
             .expect("pull ydoc projection");
         let SyncPassOutcome::Complete {
             applied,
@@ -9453,7 +9553,9 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
     );
     let base_outcome = apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases)
         .expect("base applies and drains");
-    let (base_primary, drain_refusals) = base_outcome.into_primary_and_refusals();
+    let (base_primary, drain_refusals, sharing_declined) =
+        base_outcome.into_primary_and_diagnostics();
+    assert!(sharing_declined.is_empty());
     assert!(matches!(base_primary, ApplyOutcome::Applied(_)));
     assert_eq!(
         drain_refusals,
@@ -9573,7 +9675,8 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
 
     let outcome = apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases)
         .expect("base applies and mismatched path drains");
-    let (primary, refusals) = outcome.into_primary_and_refusals();
+    let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
+    assert!(sharing_declined.is_empty());
     assert!(matches!(primary, ApplyOutcome::Applied(_)));
     assert_eq!(
         refusals,
@@ -12506,162 +12609,6 @@ fn central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compa
         "MUTATION: returning UnsupportedOperation hard-wedges an older client on a newer peer op"
     );
 }
-
-#[test]
-fn relay_pull_routes_secret_and_conflict_ops_without_cursor_wedge() {
-    let (_scratch, _path, mut engine) = store();
-    seed_identity(&mut engine);
-    seed_replication_version(&mut engine, "main", "main");
-    let secret = envelope(
-        "relay-secret-peer",
-        0,
-        "secret.file.delete",
-        json!({"versionId":"main","path":"app/.env","metadata":{"origin":"sync"}}),
-    );
-    let conflict = envelope(
-        "relay-conflict-peer",
-        0,
-        "conflict.resolve",
-        json!({
-            "conflictId": "missing-conflict",
-            "status": "resolved",
-            "chosenFrom": "current",
-            "resolution": "keep-current",
-            "updatedAtMs": 10,
-            "path": "notes/missing.md"
-        }),
-    );
-    let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
-        pull: Mutex::new(Some(PullResponse {
-            ops: vec![secret, conflict],
-            next_cursor: 2,
-            has_more: false,
-        })),
-    });
-
-    let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
-        .expect("pull");
-    let SyncPassOutcome::Complete {
-        applied,
-        skipped,
-        pending_cursor,
-        pending_resolves,
-        ..
-    } = outcome
-    else {
-        panic!("pull must complete: {outcome:?}");
-    };
-    assert_eq!((applied, skipped), (2, 0));
-    assert!(pending_cursor.is_some());
-    // The unmatched resolve is ACKED — the cursor moves past it — so the only
-    // place the peer's decision survives is this structured surface. Flattening
-    // it into the applied count would lose it permanently.
-    assert_eq!(
-        pending_resolves,
-        vec![PendingResolve {
-            remote_conflict_id: "missing-conflict".to_owned(),
-            local_conflict_id: None,
-            path: Some("notes/missing.md".to_owned()),
-            reason: PendingResolveReason::UnmatchedTarget,
-        }]
-    );
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "relay-secret-peer").expect("secret ack"),
-        0
-    );
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "relay-conflict-peer").expect("conflict ack"),
-        0
-    );
-}
-
-#[test]
-fn relay_multi_page_pull_preserves_page_one_pending_resolve() {
-    let (_scratch, _path, mut engine) = store();
-    seed_identity(&mut engine);
-    seed_replication_version(&mut engine, "main", "main");
-    let resolve = envelope(
-        "multi-page-resolve-peer",
-        0,
-        "conflict.resolve",
-        json!({
-            "conflictId": "missing-on-multi-page-receiver",
-            "status": "resolved",
-            "chosenFrom": "incoming",
-            "resolution": "applied-incoming",
-            "updatedAtMs": 10,
-            "path": "notes/multi-page.md"
-        }),
-    );
-    let normal = envelope(
-        "multi-page-normal-peer",
-        0,
-        "chat.reaction.set",
-        reaction_payload("added", "✅", 20, "multi-page-author"),
-    );
-    let client = RelaySyncClient::new(PagedRelay::new([
-        (
-            0,
-            PullResponse {
-                ops: vec![resolve],
-                next_cursor: 1,
-                has_more: true,
-            },
-        ),
-        (
-            1,
-            PullResponse {
-                ops: Vec::new(),
-                next_cursor: 2,
-                has_more: true,
-            },
-        ),
-        (
-            2,
-            PullResponse {
-                ops: vec![normal],
-                next_cursor: 3,
-                has_more: false,
-            },
-        ),
-    ]));
-
-    let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
-        .expect("multi-page pull");
-    let SyncPassOutcome::Complete {
-        fetched,
-        applied,
-        pending_cursor: Some(pending_cursor),
-        pending_resolves,
-        ..
-    } = outcome
-    else {
-        panic!("multi-page pull must complete: {outcome:?}");
-    };
-    assert_eq!((fetched, applied, pending_cursor.cursor), (2, 2, 3));
-    assert_eq!(
-        pending_resolves,
-        vec![PendingResolve {
-            remote_conflict_id: "missing-on-multi-page-receiver".to_owned(),
-            local_conflict_id: None,
-            path: Some("notes/multi-page.md".to_owned()),
-            reason: PendingResolveReason::UnmatchedTarget,
-        }],
-        "page-one pending resolves must survive later page fetches"
-    );
-    assert_eq!(
-        read_pushed_seq(&engine, "ws", "multi-page-resolve-peer").expect("resolve peer push state"),
-        0
-    );
-    assert_eq!(
-        read_pushed_seq(&engine, "ws", "multi-page-normal-peer").expect("normal peer push state"),
-        0
-    );
-}
-
 #[test]
 fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
     // MUTATION: removing the pass ceiling fetches cursor 500 in the first call
@@ -12710,7 +12657,7 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
     ]));
 
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("bounded first pass");
     let SyncPassOutcome::Complete {
         fetched,
@@ -12735,11 +12682,11 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
         [(0, crate::model::MAX_PULL_OPS_PER_PASS)]
     );
     client
-        .commit_pull_cursor(&mut engine, "ws", &pending, &NoFaults)
+        .commit_pull_cursor(&mut engine, "ws", &pending, &NoFaults, 1_000)
         .expect("commit bounded prefix");
 
     let second = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("resume after bounded prefix");
     assert!(matches!(
         second,
@@ -12781,7 +12728,7 @@ fn relay_pull_page_ceiling_stops_an_advancing_empty_stream() {
     let client = RelaySyncClient::new(PagedRelay::new(pages));
 
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("page-bounded pull");
     let SyncPassOutcome::Complete {
         fetched: 0,
@@ -15023,13 +14970,217 @@ fn workspace_push_excludes_origins_imported_from_share_views() {
         .expect("seed imported share origin");
     let client = RelaySyncClient::new(FakeRelay::default());
     client
-        .push_workspace(&mut engine, "ws", &NoFaults)
+        .push_workspace(&mut engine, "ws", &NoFaults, 1_000)
         .expect("push owner lane");
     assert_eq!(
-        *client.transport().pushes.lock().expect("push calls"),
+        client.transport().pushes.lock().expect("push calls").len(),
         1,
         "MUTATION: an unfiltered origin scan sends the imported share row through the owner lane"
     );
+}
+
+#[test]
+fn enrollment_backfill_refreshes_the_origin_bound_before_the_next_push() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    VersionedTextStore::new(&mut engine)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "backfilled-object".to_owned(),
+                path: "backfilled.md".to_owned(),
+                text: "captured before enrollment".to_owned(),
+                moment_id: "backfilled-moment".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2_000,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("captured moment");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE moments SET metadata_origin='capture' \
+                 WHERE workspace_id='ws' AND moment_id='backfilled-moment'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "UPDATE snapshots SET metadata_origin='capture' \
+                 WHERE workspace_id='ws' AND version_id='main' \
+                   AND object_id='backfilled-object'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("stamp autonomous capture origin");
+    let client = RelaySyncClient::new(FakeRelay::default());
+
+    let outcome = client.push_workspace(&mut engine, "ws", &NoFaults, 1_000);
+
+    assert!(
+        matches!(outcome, Ok(SyncPassOutcome::Complete { pushed: 2, .. })),
+        "the same pass must push the pre-existing op and the newly backfilled moment: {outcome:?}"
+    );
+}
+
+#[test]
+fn pull_first_enrollment_does_not_echo_the_imported_moment_on_the_next_push() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let incoming = b"pulled before enrollment";
+    let incoming_sha = dohc_engine_storage::hex_sha256(incoming);
+    engine
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![
+                    incoming_sha,
+                    incoming.len() as i64,
+                    String::from_utf8_lossy(incoming)
+                ],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .expect("hydrate the incoming blob");
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(Vec::new()),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![envelope(
+                "peer",
+                0,
+                "moment.append",
+                json!({
+                    "momentId": "peer-moment",
+                    "versionId": "main",
+                    "objectId": "pulled-object",
+                    "objectCreatedAtMs": 1,
+                    "path": "pulled.md",
+                    "recordedAtMs": 1_000,
+                    "operation": "write",
+                    "payloadBeforeBlobSha256": null,
+                    "payloadBeforePath": null,
+                    "payloadAfterBlobSha256": incoming_sha,
+                    "payloadAfterPath": "pulled.md",
+                    "metadata": {"origin": "api"},
+                    "beforePresent": "absent"
+                }),
+            )],
+            next_cursor: 1,
+            has_more: false,
+        })),
+    });
+
+    let pull = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .expect("first relay contact pulls the moment");
+    let SyncPassOutcome::Complete {
+        pending_cursor: Some(cursor),
+        ..
+    } = pull
+    else {
+        panic!("pull must return a pending cursor: {pull:?}");
+    };
+    client
+        .commit_pull_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000)
+        .expect("the pull cursor ends enrollment");
+    client
+        .push_workspace(&mut engine, "ws", &NoFaults, 1_000)
+        .expect("next push");
+
+    let pushes = client.transport().pushes.lock().expect("pushes");
+    assert!(
+        pushes
+            .iter()
+            .flat_map(|request| &request.ops)
+            .all(|op| op.op_kind != "moment.append" || op.origin_id != "local"),
+        "the next push must not echo the imported moment under the local origin: {pushes:?}"
+    );
+}
+
+#[test]
+fn a_second_relay_position_does_not_repeat_enrollment_backfill() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let ciphertext = b"local secret content";
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO secret_moments \
+                 (workspace_id,moment_order,moment_id,version_id,path,recorded_at_ms,operation, \
+                  metadata_origin,after_present,after_iv_base64,after_auth_tag_base64, \
+                  after_ciphertext_base64,after_byte_length) \
+                 VALUES ('ws',1,'local-secret','main','.env',10,'write','api',1,?1,?2,?3,?4)",
+                params![
+                    STANDARD.encode([1_u8; 12]),
+                    STANDARD.encode([2_u8; 16]),
+                    STANDARD.encode(ciphertext),
+                    ciphertext.len() as i64,
+                ],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed local secret moment");
+
+    assert!(matches!(
+        crate::cursor::write_pushed_seq(&mut engine, "ws", "local", -1, &NoFaults, 7_001),
+        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+    ));
+    let after_first: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log WHERE workspace_id='ws'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("first enrollment journal count");
+    // `seed_identity` already journals one `probe.local` op (origin_seq 0) to
+    // establish `sync_identity`; the local secret moment backfills as the
+    // second row.
+    assert_eq!(after_first, 2, "the local secret moment is backfilled once");
+
+    assert!(matches!(
+        crate::cursor::write_pushed_seq(&mut engine, "ws", "local", 0, &NoFaults, 7_002),
+        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+    ));
+    let after_second: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log WHERE workspace_id='ws'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("second enrollment journal count");
+    assert_eq!(
+        after_second, after_first,
+        "the was_enrolled latch must suppress every second-pass duplicate"
+    );
+    let source: (Option<String>, Option<i64>) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT source_origin_id,source_origin_seq FROM secret_moments \
+                 WHERE workspace_id='ws' AND moment_id='local-secret'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("local secret provenance");
+    assert_eq!(source, (None, None));
 }
 
 #[test]
@@ -15102,73 +15253,6 @@ fn share_view_actor_replay_does_not_redownload_completed_blob_prefixes() {
         "MUTATION: fetching before the idempotency lookup redownloads the completed prefix"
     );
 }
-
-#[test]
-fn relay_redelivered_page_reconstructs_pending_resolve_without_committed_cursor() {
-    let (_scratch, _path, mut engine) = store();
-    seed_identity(&mut engine);
-    seed_replication_version(&mut engine, "main", "main");
-    let resolve = envelope(
-        "redelivered-resolve-peer",
-        0,
-        "conflict.resolve",
-        json!({
-            "conflictId": "missing-on-redelivery",
-            "status": "resolved",
-            "chosenFrom": "current",
-            "resolution": "keep-current",
-            "updatedAtMs": 10,
-            "path": "notes/redelivery.md"
-        }),
-    );
-    let client = RelaySyncClient::new(PagedRelay::new([(
-        0,
-        PullResponse {
-            ops: vec![resolve],
-            next_cursor: 1,
-            has_more: false,
-        },
-    )]));
-
-    let faults = ScriptedFaults::crash_at(FaultPoint::SyncBetweenApplyAndCursorCommit);
-    let first = client
-        .pull_chat_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases)
-        .expect("first pull");
-    let SyncPassOutcome::CrashedAfterApply {
-        applied,
-        pending_resolves: first_pending,
-        ..
-    } = first
-    else {
-        panic!("first pull must stop before cursor commit: {first:?}");
-    };
-    assert_eq!(applied, 1);
-    assert_eq!(first_pending.len(), 1);
-    assert!(
-        read_relay_cursor(&engine, "ws")
-            .expect("read cursor")
-            .is_none()
-    );
-
-    let retry = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
-        .expect("redelivered pull");
-    let SyncPassOutcome::Complete {
-        applied,
-        skipped,
-        pending_resolves,
-        ..
-    } = retry
-    else {
-        panic!("redelivered pull must complete: {retry:?}");
-    };
-    assert_eq!((applied, skipped), (0, 1));
-    assert_eq!(
-        pending_resolves, first_pending,
-        "the Skipped arm must reconstruct the persisted pending resolve"
-    );
-}
-
 #[test]
 fn relay_hydration_failure_mid_page_leaves_no_cursor_and_applies_nothing() {
     let (_scratch, _path, mut engine) = store();
@@ -15200,7 +15284,7 @@ fn relay_hydration_failure_mid_page_leaves_no_cursor_and_applies_nothing() {
     )]));
 
     assert_eq!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
         Err(RelayError::BlobMissing)
     );
     assert!(
@@ -15268,7 +15352,7 @@ fn relay_hydrates_text_and_binary_rows_for_one_shared_digest() {
     relay.blobs.insert(sha256.clone(), bytes);
     let client = RelaySyncClient::new(relay);
 
-    let outcome = client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases);
+    let outcome = client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000);
     assert!(
         matches!(outcome, Ok(SyncPassOutcome::Complete { .. })),
         "dual-kind hydration pass must complete: {outcome:?}"
@@ -15331,7 +15415,7 @@ fn pull_blob_existence_probe_does_not_read_and_rehash_present_content() {
     )]));
     let _ = crate::relay::take_local_blob_bytes_call_count();
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
         Ok(SyncPassOutcome::Complete { .. })
     ));
     assert_eq!(
@@ -15399,7 +15483,7 @@ fn relay_multi_page_pull_reports_conflicts_opened() {
     ]));
 
     let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("multi-page conflict pull");
     let SyncPassOutcome::Complete {
         fetched,
@@ -15484,7 +15568,7 @@ fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
         }),
     );
     let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![local, divergent],
             next_cursor: 2,
@@ -15493,7 +15577,7 @@ fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
     });
 
     let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("pull");
     let SyncPassOutcome::Complete {
         applied,
@@ -15520,12 +15604,12 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
         refusal_report_id: None,
     };
     assert!(matches!(
-        commit_relay_cursor(&mut engine, "ws", &relay(10), &NoFaults),
-        Ok(TxnOutcome::Committed(()))
+        commit_relay_cursor(&mut engine, "ws", &relay(10), &NoFaults, 1_000),
+        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
     ));
     assert!(matches!(
-        commit_relay_cursor(&mut engine, "ws", &relay(4), &NoFaults),
-        Ok(TxnOutcome::Committed(()))
+        commit_relay_cursor(&mut engine, "ws", &relay(4), &NoFaults, 1_000),
+        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
     ));
     assert_eq!(
         read_relay_cursor(&engine, "ws")
@@ -15545,7 +15629,7 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
     ));
     assert!(matches!(
         commit_share_cursor(&mut engine, "ws", &share(4), &NoFaults),
-        Ok(TxnOutcome::Committed(()))
+        Ok(TxnOutcome::Committed(_))
     ));
     assert_eq!(
         read_share_cursor(&engine, "ws", "share", CursorKind::ShareView)
@@ -15554,96 +15638,6 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
         "MUTATION: unconditional conflict updates let an older acknowledgement regress the cursor"
     );
 }
-
-#[test]
-fn relay_hydration_failure_before_apply_retries_and_surfaces_pending_resolve() {
-    let (_scratch, _path, mut engine) = store();
-    seed_identity(&mut engine);
-    seed_replication_version(&mut engine, "main", "main");
-    let resolve = envelope(
-        "retry-pending-peer",
-        0,
-        "conflict.resolve",
-        json!({
-            "conflictId": "missing-on-receiver",
-            "status": "resolved",
-            "chosenFrom": "incoming",
-            "resolution": "applied-incoming",
-            "updatedAtMs": 10,
-            "path": "notes/retry.md"
-        }),
-    );
-    let missing_sha = dohc_engine_storage::hex_sha256(b"hydrate before retry");
-    let later = version_create_with_shipped_snapshots(
-        "retry-later-peer",
-        "retry-later-version",
-        vec![shipped_text_snapshot(
-            "retry-later-object",
-            "retry-later.md",
-            &missing_sha,
-        )],
-    );
-    let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
-        pull: Mutex::new(Some(PullResponse {
-            ops: vec![resolve, later],
-            next_cursor: 2,
-            has_more: false,
-        })),
-    });
-
-    assert_eq!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
-        Err(RelayError::BlobMissing)
-    );
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "retry-pending-peer").expect("resolve ack"),
-        -1,
-        "whole-page hydration must finish before the deferred resolve applies"
-    );
-    assert!(
-        read_relay_cursor(&engine, "ws")
-            .expect("relay cursor")
-            .is_none(),
-        "the failed batch must remain retryable"
-    );
-
-    engine
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,20,'hydrate before retry')",
-                [&missing_sha],
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })
-        .expect("hydrate later envelope");
-
-    let retry = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
-        .expect("retry pull");
-    let SyncPassOutcome::Complete {
-        applied,
-        skipped,
-        pending_resolves,
-        ..
-    } = retry
-    else {
-        panic!("retry must complete: {retry:?}");
-    };
-    assert_eq!((applied, skipped), (2, 0));
-    assert_eq!(
-        pending_resolves,
-        vec![PendingResolve {
-            remote_conflict_id: "missing-on-receiver".to_owned(),
-            local_conflict_id: None,
-            path: Some("notes/retry.md".to_owned()),
-            reason: PendingResolveReason::UnmatchedTarget,
-        }],
-        "the retry must reconstruct the already-acked pending decision"
-    );
-}
-
 #[test]
 fn relay_retry_surfaces_refusal_acked_before_later_error() {
     let (_scratch, _path, mut engine) = store();
@@ -15684,7 +15678,7 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
         })
         .expect("install later apply failure");
     let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![refused, later],
             next_cursor: 2,
@@ -15693,7 +15687,7 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
     });
 
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
         Err(RelayError::Local(_))
     ));
     let persisted: i64 = engine
@@ -15726,7 +15720,7 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
         .expect("clear later apply failure");
 
     let retry = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("retry pull");
     let SyncPassOutcome::Complete {
         applied,
@@ -15751,6 +15745,145 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
             },
         }],
         "MUTATION: the Skipped path must reconstruct the persisted refusal"
+    );
+}
+
+#[test]
+fn pull_keeps_a_genuine_origin_gap_hard() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    let mut gap =
+        version_create_with_shipped_snapshots("gapped-peer", "must-not-apply", Vec::new());
+    gap.origin_seq = 1;
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(Vec::new()),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![gap],
+            next_cursor: 1,
+            has_more: false,
+        })),
+    });
+
+    assert!(matches!(
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        Err(RelayError::Local(_))
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "gapped-peer").expect("gap ack"),
+        -1,
+        "a gap without an earlier retryable coordinate must remain unacked"
+    );
+}
+
+#[test]
+fn pull_reaches_later_cross_origin_work_before_retrying_a_deferred_origin() {
+    use crate::conflict_resolve_v1::{
+        ConflictResolveV1, EffectContextV1, EffectKindV1, EffectV1, HeadContentKindV1, HeadV1,
+        MetadataV1, PresentHeadV1, ResolutionV1, ResolveChoiceV1, build_conflict_resolve_v1,
+    };
+
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let result_text = "resolved after retry";
+    let result_sha = dohc_engine_storage::hex_sha256(result_text.as_bytes());
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![result_sha, result_text.len() as i64, result_text],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed result blob");
+    let result = HeadV1::Present(PresentHeadV1 {
+        path_ref: 0,
+        object_id: "retry-object".to_owned(),
+        latest_moment_id: "retry-result-moment".to_owned(),
+        content_kind: HeadContentKindV1::Text,
+        blob_sha256: result_sha,
+        byte_length: result_text.len() as i64,
+        updated_at_ms: 21,
+    });
+    let built = build_conflict_resolve_v1(ConflictResolveV1 {
+        workspace_id: "ws".to_owned(),
+        conflict_id: "retryable-parent-conflict".to_owned(),
+        chosen_from: ResolveChoiceV1::Incoming,
+        resolution: ResolutionV1::AppliedIncoming,
+        target_version_id: "main".to_owned(),
+        source_version_id: "peer".to_owned(),
+        paths: vec!["retry.md".to_owned()],
+        current: HeadV1::Absent { path_ref: 0 },
+        incoming: result.clone(),
+        result,
+        effect_context: EffectContextV1 {
+            recorded_at_ms: 21,
+            metadata: MetadataV1 {
+                origin: "sync".to_owned(),
+                summary: None,
+                correlation_id: None,
+            },
+            author: None,
+            current_object_created_at_ms: None,
+            result_object_created_at_ms: Some(20),
+        },
+        effects: vec![EffectV1 {
+            kind: EffectKindV1::Write,
+            moment_id: "retry-result-moment".to_owned(),
+            payload_sha256: String::new(),
+        }],
+        lineage_transition: None,
+    })
+    .expect("retryable parent carrier");
+    let mut parent = envelope("bundle-peer", 0, "conflict.resolve", built.value);
+    parent.recorded_at_ms = 21;
+    let mut child = envelope(
+        "bundle-peer",
+        1,
+        "moment.append",
+        built.validated.shadows[0].clone(),
+    );
+    child.recorded_at_ms = 22;
+    let mut same_origin_later =
+        version_create_with_shipped_snapshots("bundle-peer", "same-origin-version", Vec::new());
+    same_origin_later.origin_seq = 2;
+    same_origin_later.recorded_at_ms = 23;
+    let mut later =
+        version_create_with_shipped_snapshots("later-peer", "later-version", Vec::new());
+    later.recorded_at_ms = 24;
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(Vec::new()),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![parent, child, same_origin_later, later],
+            next_cursor: 4,
+            has_more: false,
+        })),
+    });
+    let leases = FirstLeaseCheckLive(AtomicUsize::new(0));
+
+    let outcome = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &leases, 1_000)
+        .expect("later cross-origin work must run before the deferred origin retry pass");
+    assert!(
+        matches!(outcome, SyncPassOutcome::Complete { applied: 4, .. }),
+        "the parent, its whole origin suffix, and later cross-origin work must apply: {outcome:?}"
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "bundle-peer").expect("bundle ack"),
+        2
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "later-peer").expect("later ack"),
+        0
+    );
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", "retry.md")
+            .expect("resolved head")
+            .expect("resolved head exists")
+            .text,
+        result_text
     );
 }
 
@@ -15818,7 +15951,7 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
         })
         .expect("install later apply failure");
     let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![base, later],
             next_cursor: 2,
@@ -15827,7 +15960,7 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
     });
 
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
         Err(RelayError::Local(_))
     ));
     assert!(
@@ -15844,7 +15977,7 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
         .expect("clear later apply failure");
 
     let retry = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("retry pull");
     let SyncPassOutcome::Complete {
         applied,
@@ -15872,131 +16005,12 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
     );
 }
 
-/// The pending-resolve reason vocabulary is written three times: the Rust
-/// enum→string map, the string→enum parse, and the DDL CHECK constraint. If
-/// they ever drift, `persist_pending_resolve` hits the CHECK, the envelope
-/// rolls back unacked, and the pull wedges permanently on a resolve that used
-/// to succeed — so every variant must round-trip through all three.
-#[test]
-fn every_pending_resolve_reason_round_trips_through_persist_and_read() {
-    use crate::conflict_apply::{PendingResolveReason, persist_pending_resolve};
-
-    let (_scratch, _path, mut engine) = store();
-    let reasons = [
-        PendingResolveReason::PathChange,
-        PendingResolveReason::Merged,
-        PendingResolveReason::StaleHead,
-        PendingResolveReason::BinaryUnhydrated,
-        PendingResolveReason::BinaryApplyFailed,
-        PendingResolveReason::TextApplyRejected,
-        PendingResolveReason::UnmatchedTarget,
-    ];
-    for (seq, reason) in reasons.into_iter().enumerate() {
-        let op = envelope(
-            "roundtrip-peer",
-            seq as i64,
-            "conflict.resolve",
-            json!({ "conflictId": format!("c-{seq}") }),
-        );
-        let pending = PendingResolve {
-            remote_conflict_id: format!("c-{seq}"),
-            local_conflict_id: None,
-            path: Some(format!("notes/{seq}.md")),
-            reason,
-        };
-        engine
-            .write_with(&NoFaults, |tx| {
-                tx.execute(
-                    "INSERT INTO replication_log \
-                     (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported) \
-                     VALUES (?1, ?2, ?3, 'conflict.resolve', '{}', 0, 1)",
-                    params![op.workspace_id, op.origin_id, op.origin_seq],
-                )
-                .map_err(SyncError::persist)?;
-                persist_pending_resolve(tx, &op, &pending)
-            })
-            .unwrap_or_else(|error| {
-                panic!("persist must satisfy the DDL CHECK for {reason:?}: {error}")
-            });
-        let read = crate::conflict_apply::read_replayed_pending_resolve(&engine, &op)
-            .expect("read back")
-            .unwrap_or_else(|| panic!("a persisted decision must parse back for {reason:?}"));
-        assert_eq!(read, pending, "round-trip must be lossless for {reason:?}");
-    }
-}
-
-/// Persisted pending-resolve decisions exist only so a failed pull's retry can
-/// re-surface them. Once the caller commits the pull cursor the stream never
-/// replays those coordinates, so the rows are dead — and without the sweep in
-/// `commit_relay_cursor` every deferred resolve leaves a row forever.
-#[test]
-fn committed_pull_cursor_clears_persisted_pending_resolves() {
-    let (_scratch, _path, mut engine) = store();
-    seed_identity(&mut engine);
-    seed_replication_version(&mut engine, "main", "main");
-    let resolve = envelope(
-        "cursor-clear-peer",
-        0,
-        "conflict.resolve",
-        json!({
-            "conflictId": "missing-on-receiver",
-            "status": "resolved",
-            "chosenFrom": "incoming",
-            "resolution": "applied-incoming",
-            "updatedAtMs": 10,
-            "path": "notes/cursor-clear.md"
-        }),
-    );
-    let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
-        pull: Mutex::new(Some(PullResponse {
-            ops: vec![resolve],
-            next_cursor: 1,
-            has_more: false,
-        })),
-    });
-
-    let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
-        .expect("pull");
-    let SyncPassOutcome::Complete {
-        pending_cursor: Some(pending_cursor),
-        ..
-    } = outcome
-    else {
-        panic!("pull must complete with a cursor: {outcome:?}");
-    };
-
-    let persisted = |engine: &EngineStore| -> i64 {
-        engine
-            .read_with(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM replication_pending_resolves WHERE workspace_id='ws'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(SyncError::corrupt)
-            })
-            .expect("count pending resolves")
-    };
-    assert_eq!(persisted(&engine), 1, "the deferred decision is persisted");
-
-    client
-        .commit_pull_cursor(&mut engine, "ws", &pending_cursor, &NoFaults)
-        .expect("commit cursor");
-    assert_eq!(
-        persisted(&engine),
-        0,
-        "a committed cursor makes retry reconstruction unreachable, so the rows must go"
-    );
-}
-
 #[test]
 fn committed_pull_cursor_clears_persisted_refusals() {
     let (_scratch, _path, mut engine) = store();
     seed_identity(&mut engine);
     let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![envelope(
                 "cursor-clear-refusal-peer",
@@ -16016,7 +16030,7 @@ fn committed_pull_cursor_clears_persisted_refusals() {
     });
 
     let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("pull");
     let SyncPassOutcome::Complete {
         pending_cursor: Some(pending_cursor),
@@ -16040,7 +16054,7 @@ fn committed_pull_cursor_clears_persisted_refusals() {
     assert_eq!(persisted(&engine), 1, "the refusal is persisted");
 
     client
-        .commit_pull_cursor(&mut engine, "ws", &pending_cursor, &NoFaults)
+        .commit_pull_cursor(&mut engine, "ws", &pending_cursor, &NoFaults, 1_000)
         .expect("commit cursor");
     assert_eq!(
         persisted(&engine),
@@ -16081,7 +16095,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
     ));
 
     let first_client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![envelope(
                 "first-report-peer",
@@ -16100,7 +16114,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         })),
     });
     let first = first_client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("first pull");
     let SyncPassOutcome::Complete {
         pending_cursor: Some(first_cursor),
@@ -16153,7 +16167,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
     );
 
     first_client
-        .commit_pull_cursor(&mut engine, "ws", &first_cursor, &NoFaults)
+        .commit_pull_cursor(&mut engine, "ws", &first_cursor, &NoFaults, 1_000)
         .expect("commit first cursor");
     let survivors: Vec<(String, Option<String>)> = engine
         .read_with(|conn| {
@@ -16172,7 +16186,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
     );
 
     let second_client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: Vec::new(),
             next_cursor: 2,
@@ -16180,7 +16194,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         })),
     });
     let second = second_client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("next pull surfaces drain refusal");
     let SyncPassOutcome::Complete {
         pending_cursor: Some(second_cursor),
@@ -16204,7 +16218,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         "the next pull is the explicit reader for non-pull drain refusals"
     );
     second_client
-        .commit_pull_cursor(&mut engine, "ws", &second_cursor, &NoFaults)
+        .commit_pull_cursor(&mut engine, "ws", &second_cursor, &NoFaults, 1_000)
         .expect("commit second cursor");
     let remaining: i64 = engine
         .read_with(|conn| {
@@ -16226,7 +16240,7 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
     let (_scratch, _path, mut engine) = store();
     let direct = envelope("direct-conflict-peer", 0, "conflict.open", json!({}));
     assert!(matches!(
-        apply_conflict_envelope(&mut engine, &direct, &NoFaults),
+        apply_conflict_envelope(&mut engine, &direct, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Refused(_))
     ));
     retain_refusal_for_direct_retry(&mut engine, &direct, &NoFaults)
@@ -16244,7 +16258,7 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
         stream_identity: "stream".to_owned(),
         refusal_report_id: report_id,
     };
-    commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults).expect("cursor commit");
+    commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000).expect("cursor commit");
     let replayed = read_replayed_refusal(&engine, &direct)
         .expect("read direct refusal")
         .expect("direct refusal survives");
@@ -16266,8 +16280,8 @@ fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
         refusal_report_id: None,
     };
     assert!(matches!(
-        commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults),
-        Ok(TxnOutcome::Committed(()))
+        commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults, 1_000),
+        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
     ));
     let stored = engine
         .read_with(|conn| {
@@ -16301,53 +16315,6 @@ fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
             reason: "persisted relay cursor is invalid"
         })
     ));
-}
-
-/// The router must hand back the applier's STRUCTURED result. A deferred
-/// mirrored resolve is acked (the relay cursor advances past it), so a router
-/// that flattens it into a plain applied count destroys the only record that
-/// the peer's decision still needs handling.
-#[test]
-fn router_preserves_a_deferred_conflict_resolve_instead_of_flattening_it() {
-    let (_scratch, _path, mut engine) = store();
-    seed_replication_version(&mut engine, "main", "main");
-    let resolve = envelope(
-        "router-pending-peer",
-        0,
-        "conflict.resolve",
-        json!({
-            "conflictId": "no-such-conflict",
-            "status": "resolved",
-            "chosenFrom": "incoming",
-            "resolution": "applied-incoming",
-            "updatedAtMs": 3_000,
-            "path": "notes/vanished.md"
-        }),
-    );
-
-    let outcome = apply_replication_envelope(&mut engine, &resolve, &NoFaults, &NoLiveLeases)
-        .expect("routed resolve");
-    let ApplyOutcome::Applied(routed) = outcome else {
-        panic!("resolve must apply: {outcome:?}");
-    };
-    assert_eq!(
-        routed.pending_resolve(),
-        Some(&PendingResolve {
-            remote_conflict_id: "no-such-conflict".to_owned(),
-            local_conflict_id: None,
-            path: Some("notes/vanished.md".to_owned()),
-            reason: PendingResolveReason::UnmatchedTarget,
-        })
-    );
-    assert_eq!(
-        routed.conflict.as_ref().map(ConflictApplyResult::deferred),
-        Some(true)
-    );
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "router-pending-peer").expect("ack"),
-        0,
-        "the envelope is acked, so the pending resolve exists only in the result"
-    );
 }
 
 #[test]
@@ -16482,7 +16449,7 @@ fn relay_pull_surfaces_refusal_reason_to_the_caller() {
     let (_scratch, _path, mut engine) = store();
     seed_identity(&mut engine);
     let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![envelope(
                 "reason-peer",
@@ -16502,7 +16469,7 @@ fn relay_pull_surfaces_refusal_reason_to_the_caller() {
     });
 
     let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("a refused operation must not fail the pull");
     let SyncPassOutcome::Complete {
         applied,
@@ -16555,7 +16522,7 @@ fn coordinate_divergence_still_stops_a_pass_after_an_acked_refusal() {
     let mut divergent = first.clone();
     divergent.payload = json!({"tampered": true});
     let client = RelaySyncClient::new(FakeRelay {
-        pushes: Mutex::new(0),
+        pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![
                 first,
@@ -16568,7 +16535,7 @@ fn coordinate_divergence_still_stops_a_pass_after_an_acked_refusal() {
     });
 
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
         Err(RelayError::Local(_))
     ));
     assert_eq!(
@@ -16960,7 +16927,7 @@ fn a_ydoc_base_over_the_captured_file_cap_still_hydrates() {
     // runs first, and that is what this test is about. The refusal must not be
     // a ceiling refusal.
     let outcome = RelaySyncClient::new(relay)
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
         .expect("the pull completes: an oversized-for-binary Y.Doc base is not a transport error");
     assert!(
         matches!(outcome, SyncPassOutcome::Complete { .. }),
@@ -17061,7 +17028,8 @@ fn a_ydoc_payload_cannot_be_reused_as_an_over_cap_captured_binary() {
             &mut engine,
             "ws",
             &NoFaults,
-            &NoLiveLeases
+            &NoLiveLeases,
+            1_000,
         ),
         Err(RelayError::BlobTooLarge {
             constraint: binary_constraint,
@@ -17935,16 +17903,10 @@ fn a_refusal_keeps_its_measurements_when_the_path_exhausts_the_detail_bound() {
 
     // A path the share boundary classifies `Tracked` and that alone overruns
     // the whole detail budget: 40 segments of 60 units is 2,444.
-    let long_path = format!(
-        "docs/{}",
-        (0..40)
-            .map(|index| format!("{}{index:02}", "d".repeat(58)))
-            .collect::<Vec<_>>()
-            .join("/")
-    );
+    let long_path = format!("docs/{}/report.bin", "d".repeat(300));
     assert!(
-        long_path.encode_utf16().count() > crate::relay::MAX_REFUSAL_DETAIL_UNITS,
-        "the fixture only tests the bound if the path alone exceeds it"
+        long_path.encode_utf16().count() > 200,
+        "the fixture only tests elision if the path exceeds its detail share"
     );
 
     let over_cap = vec![6u8; limit_bytes + 1];

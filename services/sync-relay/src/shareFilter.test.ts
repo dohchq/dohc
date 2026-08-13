@@ -160,6 +160,8 @@ describe("share op filter", () => {
       momentPayload({
         momentId: "LEAK-moment-id",
         objectId: "LEAK-object-id",
+        conflictId: "LEAK-conflict-id",
+        conflictEffectIndex: 0,
         recordedAtMs: 1234567,
         payloadBeforePath: "docs/a.md",
         payloadBeforeBlobSha256: "b".repeat(64),
@@ -182,6 +184,7 @@ describe("share op filter", () => {
     for (const leak of [
       "LEAK-moment-id",
       "LEAK-object-id",
+      "LEAK-conflict-id",
       "LEAK-summary",
       "LEAK-correlation-id",
       "LEAK-author",
@@ -334,6 +337,52 @@ describe("share op filter", () => {
         JSON.stringify({ path: "docs/a.md", versionId: "main", ciphertextSha256: "b".repeat(64) }),
       );
       expect(decision.allowed, opKind).toBe(false);
+    }
+  });
+
+  it("never exposes conflict.resolve nested effects or successor roots to path shares", () => {
+    const privateSha = "e".repeat(64);
+    const successorSha = "f".repeat(64);
+    const payload = JSON.stringify({
+      formatVersion: 1,
+      workspaceId: "workspace-a",
+      conflictId: "conflict-1",
+      status: "resolved",
+      chosenFrom: "incoming",
+      resolution: "applied-incoming",
+      updatedAtMs: 2,
+      targetVersionId: "main",
+      sourceVersionId: "main",
+      path: "docs/a.md",
+      current: {},
+      incoming: {},
+      result: {},
+      effects: [
+        {
+          opKind: "moment.append",
+          payload: {
+            versionId: "main",
+            path: "private/hidden.md",
+            payloadAfterPath: "private/hidden.md",
+            payloadAfterBlobSha256: privateSha,
+          },
+        },
+      ],
+      lineageTransition: {
+        successor: {
+          updateBlobSha256: successorSha,
+          stateVectorBlobSha256: privateSha,
+        },
+      },
+    });
+    const versionShare: ShareSelector = { paths: [], versionId: "main" };
+
+    for (const selector of [pathShare, versionShare]) {
+      const decision = filterOpForShare(selector, "conflict.resolve", payload);
+      expect(decision).toEqual({ allowed: false });
+      expect(JSON.stringify(decision)).not.toContain("private/hidden.md");
+      expect(JSON.stringify(decision)).not.toContain(privateSha);
+      expect(JSON.stringify(decision)).not.toContain(successorSha);
     }
   });
 

@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 
 use crate::apply::apply_chat_lww_projection_tx;
 use crate::cursor::{
-    RelayCursor, commit_relay_cursor, read_pushed_seq, rewind_pushed_seq, write_pushed_seq,
+    RelayCursor, commit_relay_cursor, has_relay_position, read_pushed_seq, rewind_pushed_seq,
+    write_pushed_seq,
 };
 use crate::error::GENERIC_REPLAY_REFUSAL_CODE;
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
@@ -445,14 +446,12 @@ pub enum SyncPassOutcome {
         conflicts_opened: i64,
         pending_cursor: Option<RelayCursor>,
         changed_paths: Vec<crate::MomentMaterializationChange>,
-        /// Replicated resolutions acked in this pass that the receiver
-        /// deliberately did not apply. The cursor advances past them, so they
-        /// only exist here — a caller that drops this loses them.
-        pending_resolves: Vec<crate::PendingResolve>,
         /// Per-operation validation failures that were journaled and acked.
         /// The rejected mutations were rolled back before those coordinates
         /// were retired.
         refusals: Vec<crate::ReplicationRefusal>,
+        /// Local Y.Doc bases that could not be shared during enrollment.
+        sharing_declined: Vec<crate::SharingDeclined>,
     },
     CrashedAfterRemoteCommit,
     CrashedAfterApply {
@@ -462,8 +461,8 @@ pub enum SyncPassOutcome {
         conflicts_opened: i64,
         pending_cursor: RelayCursor,
         changed_paths: Vec<crate::MomentMaterializationChange>,
-        pending_resolves: Vec<crate::PendingResolve>,
         refusals: Vec<crate::ReplicationRefusal>,
+        sharing_declined: Vec<crate::SharingDeclined>,
     },
 }
 
@@ -485,15 +484,51 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         store: &mut EngineStore,
         workspace_id: &str,
         faults: &dyn FaultInjector,
+        now_ms: i64,
     ) -> Result<SyncPassOutcome, RelayError> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
-        let origins = list_workspace_origins(store, workspace_id).map_err(local)?;
+        let mut origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         let mut pushed = 0_usize;
+        let mut sharing_declined = Vec::new();
+
+        let has_position = store
+            .read_with(|conn| has_relay_position(conn, workspace_id))
+            .map_err(local)?;
+        if origins.is_empty() && !has_position {
+            let response = self.transport.push(push_probe_request(
+                workspace_id,
+                &identity,
+                &identity.origin_id,
+                -1,
+            ))?;
+            validate_probe_response(&response)?;
+            if response.current_max_origin_seq != -1 {
+                return Err(RelayError::OriginDiverged);
+            }
+            match write_pushed_seq(
+                store,
+                workspace_id,
+                &identity.origin_id,
+                response.current_max_origin_seq,
+                faults,
+                now_ms,
+            )
+            .map_err(local)?
+            {
+                TxnOutcome::Committed(declined) => sharing_declined.extend(declined),
+                TxnOutcome::Crashed { .. } => {
+                    return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
+                }
+            }
+            // Re-read so the probe's same-transaction backfill enters the push loop.
+            origins = list_workspace_origins(store, workspace_id).map_err(local)?;
+        }
 
         for origin_id in origins {
-            let local_max = local_max_origin_seq(store, workspace_id, &origin_id).map_err(local)?;
+            let mut local_max =
+                local_max_origin_seq(store, workspace_id, &origin_id).map_err(local)?;
             let mut cursor = read_pushed_seq(store, workspace_id, &origin_id).map_err(local)?;
             let mut attempt = 0_u8;
 
@@ -541,14 +576,17 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         &origin_id,
                         response.current_max_origin_seq,
                         faults,
+                        now_ms,
                     )
                     .map_err(local)?
                     {
-                        TxnOutcome::Committed(()) => {}
+                        TxnOutcome::Committed(declined) => sharing_declined.extend(declined),
                         TxnOutcome::Crashed { .. } => {
                             return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
                         }
                     }
+                    local_max =
+                        local_max_origin_seq(store, workspace_id, &origin_id).map_err(local)?;
                     pushed = pushed
                         .checked_add(response.inserted)
                         .ok_or(RelayError::InvalidResponse)?;
@@ -558,14 +596,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     continue;
                 }
 
-                let probe = self.transport.push(PushRequest {
-                    workspace_id: workspace_id.to_owned(),
-                    replication_epoch: identity.replication_epoch.clone(),
-                    stream_identity: identity.stream_identity.clone(),
-                    origin_id: origin_id.clone(),
-                    after_seq: cursor,
-                    ops: Vec::new(),
-                })?;
+                let probe = self.transport.push(push_probe_request(
+                    workspace_id,
+                    &identity,
+                    &origin_id,
+                    cursor,
+                ))?;
                 validate_probe_response(&probe)?;
                 if probe.current_max_origin_seq > local_max
                     || probe.current_max_origin_seq >= cursor
@@ -601,8 +637,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             conflicts_opened: 0,
             pending_cursor: None,
             changed_paths: Vec::new(),
-            pending_resolves: Vec::new(),
             refusals: Vec::new(),
+            sharing_declined,
         })
     }
 
@@ -614,6 +650,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         workspace_id: &str,
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
+        now_ms: i64,
     ) -> Result<SyncPassOutcome, RelayError> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
@@ -668,13 +705,20 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut refused = 0_usize;
         let mut skipped = 0_usize;
         let mut conflicts_opened = 0_i64;
-        let mut pending_resolves = Vec::new();
         let mut refusals = Vec::new();
+        let mut sharing_declined = Vec::new();
         let mut changed_paths = BTreeMap::new();
         let mut retryable = Vec::new();
+        let mut deferred_origins = BTreeSet::new();
         for op in &ordered {
             match crate::apply_replication_envelope(store, op, faults, leases) {
-                Err(SyncError::RetryableState { .. }) => retryable.push(op),
+                Err(SyncError::RetryableState { .. }) => {
+                    deferred_origins.insert(op.origin_id.clone());
+                    retryable.push(op);
+                }
+                Err(SyncError::SequenceGap) if deferred_origins.contains(&op.origin_id) => {
+                    retryable.push(op);
+                }
                 Err(error) => return Err(local(error)),
                 Ok(outcome) => accumulate_pull_outcome(
                     store,
@@ -684,18 +728,27 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     &mut refused,
                     &mut skipped,
                     &mut conflicts_opened,
-                    &mut pending_resolves,
                     &mut changed_paths,
                     &mut refusals,
+                    &mut sharing_declined,
                 )?,
             }
         }
         while !retryable.is_empty() {
             let mut still_retryable = Vec::new();
+            let mut still_deferred_origins = BTreeSet::new();
             let mut made_progress = false;
             for op in retryable {
                 match crate::apply_replication_envelope(store, op, faults, leases) {
-                    Err(SyncError::RetryableState { .. }) => still_retryable.push(op),
+                    Err(SyncError::RetryableState { .. }) => {
+                        still_deferred_origins.insert(op.origin_id.clone());
+                        still_retryable.push(op);
+                    }
+                    Err(SyncError::SequenceGap)
+                        if still_deferred_origins.contains(&op.origin_id) =>
+                    {
+                        still_retryable.push(op);
+                    }
                     Err(error) => return Err(local(error)),
                     Ok(outcome) => {
                         made_progress = true;
@@ -707,9 +760,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             &mut refused,
                             &mut skipped,
                             &mut conflicts_opened,
-                            &mut pending_resolves,
                             &mut changed_paths,
                             &mut refusals,
+                            &mut sharing_declined,
                         )?;
                     }
                 }
@@ -745,10 +798,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         for (origin_id, max_seq) in pulled_foreign_max {
             if max_seq > read_pushed_seq(store, workspace_id, &origin_id).map_err(local)? {
-                match write_pushed_seq(store, workspace_id, &origin_id, max_seq, faults)
+                match write_pushed_seq(store, workspace_id, &origin_id, max_seq, faults, now_ms)
                     .map_err(local)?
                 {
-                    TxnOutcome::Committed(()) => {}
+                    TxnOutcome::Committed(declined) => sharing_declined.extend(declined),
                     TxnOutcome::Crashed { .. } => {
                         return Err(RelayError::Local("injected-crash".to_owned()));
                     }
@@ -770,8 +823,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 conflicts_opened,
                 pending_cursor,
                 changed_paths: changed_paths.into_values().collect(),
-                pending_resolves,
                 refusals,
+                sharing_declined,
             });
         }
         Ok(SyncPassOutcome::Complete {
@@ -784,8 +837,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             conflicts_opened,
             pending_cursor: Some(pending_cursor),
             changed_paths: changed_paths.into_values().collect(),
-            pending_resolves,
             refusals,
+            sharing_declined,
         })
     }
 
@@ -795,8 +848,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         workspace_id: &str,
         cursor: &RelayCursor,
         faults: &dyn FaultInjector,
-    ) -> Result<TxnOutcome<()>, RelayError> {
-        commit_relay_cursor(store, workspace_id, cursor, faults).map_err(local)
+        now_ms: i64,
+    ) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, RelayError> {
+        commit_relay_cursor(store, workspace_id, cursor, faults, now_ms).map_err(local)
     }
 
     pub fn probe(&self, req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
@@ -1091,7 +1145,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             };
             match crate::apply_shared_envelope(store, &boundary, &envelope, faults) {
                 Ok(outcome) => {
-                    let (primary, nested_refusals) = outcome.into_primary_and_refusals();
+                    let (primary, nested_refusals, sharing_declined) =
+                        outcome.into_primary_and_diagnostics();
+                    debug_assert!(sharing_declined.is_empty());
                     for refusal in nested_refusals {
                         push_shared_channel_rejection(&mut refused, &mut rejections, refusal)?;
                     }
@@ -1104,8 +1160,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         ApplyOutcome::Crashed { .. } => {
                             return Err(RelayError::Local("injected-crash".to_owned()));
                         }
-                        ApplyOutcome::WithRefusals { .. } => {
-                            unreachable!("refusals were flattened")
+                        ApplyOutcome::WithDiagnostics { .. } => {
+                            unreachable!("diagnostics were flattened")
                         }
                     }
                 }
@@ -1361,11 +1417,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
             match crate::apply_shared_envelope(store, &boundary, &envelope, faults) {
                 Ok(outcome) => {
-                    let (primary, nested_refusals) = outcome.into_primary_and_refusals();
+                    let (primary, nested_refusals, sharing_declined) =
+                        outcome.into_primary_and_diagnostics();
                     debug_assert!(
                         nested_refusals.is_empty(),
                         "share-view boundary application does not mutate chat dependencies"
                     );
+                    debug_assert!(sharing_declined.is_empty());
                     match primary {
                         ApplyOutcome::Applied(_) => {}
                         ApplyOutcome::Refused(_) | ApplyOutcome::Skipped => {
@@ -1375,8 +1433,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         ApplyOutcome::Crashed { .. } => {
                             return Err(RelayError::Local("injected-crash".to_owned()));
                         }
-                        ApplyOutcome::WithRefusals { .. } => {
-                            unreachable!("refusals were flattened")
+                        ApplyOutcome::WithDiagnostics { .. } => {
+                            unreachable!("diagnostics were flattened")
                         }
                     }
                 }
@@ -1624,6 +1682,25 @@ fn collect_blob_refs(
                     {
                         insert_optional_ref(&mut refs, state.get("sha256"), BlobKind::Binary)?;
                     }
+                }
+            }
+            "conflict.resolve" => {
+                let validated = crate::conflict_resolve_v1::validate_conflict_resolve_v1(
+                    &op.payload,
+                    crate::conflict_resolve_v1::ConflictResolveEnvelopeContext {
+                        workspace_id: &op.workspace_id,
+                        recorded_at_ms: op.recorded_at_ms,
+                    },
+                )
+                .map_err(local)?;
+                for sha256 in validated.text_blob_sha256s {
+                    refs.entry(sha256).or_default().insert(BlobKind::Text);
+                }
+                for sha256 in validated.binary_blob_sha256s {
+                    refs.entry(sha256).or_default().insert(BlobKind::Binary);
+                }
+                for sha256 in validated.ydoc_blob_sha256s {
+                    refs.entry(sha256).or_default().insert(BlobKind::Ydoc);
                 }
             }
             "version.create" => {
@@ -2260,6 +2337,22 @@ fn validate_probe_response(response: &PushResponse) -> Result<(), RelayError> {
         return Err(RelayError::InvalidResponse);
     }
     Ok(())
+}
+
+fn push_probe_request(
+    workspace_id: &str,
+    identity: &crate::SyncIdentity,
+    origin_id: &str,
+    after_seq: i64,
+) -> PushRequest {
+    PushRequest {
+        workspace_id: workspace_id.to_owned(),
+        replication_epoch: identity.replication_epoch.clone(),
+        stream_identity: identity.stream_identity.clone(),
+        origin_id: origin_id.to_owned(),
+        after_seq,
+        ops: Vec::new(),
+    }
 }
 
 fn validate_pull_page(
@@ -3273,19 +3366,19 @@ fn accumulate_pull_outcome(
     refused: &mut usize,
     skipped: &mut usize,
     conflicts_opened: &mut i64,
-    pending_resolves: &mut Vec<crate::PendingResolve>,
     changed_paths: &mut BTreeMap<String, crate::MomentMaterializationChange>,
     refusals: &mut Vec<crate::ReplicationRefusal>,
+    sharing_declined: &mut Vec<crate::SharingDeclined>,
 ) -> Result<(), RelayError> {
-    let (primary, drain_refusals) = outcome.into_primary_and_refusals();
+    let (primary, drain_refusals, drain_declines) = outcome.into_primary_and_diagnostics();
     for refusal in drain_refusals {
         push_refusal_once(refusals, refusal);
     }
+    for declined in drain_declines {
+        push_sharing_declined_once(sharing_declined, declined);
+    }
     match primary {
         ApplyOutcome::Applied(routed) => {
-            if let Some(pending) = routed.pending_resolve() {
-                pending_resolves.push(pending.clone());
-            }
             *conflicts_opened = conflicts_opened
                 .checked_add(routed.conflicts_opened)
                 .ok_or(RelayError::InvalidResponse)?;
@@ -3310,11 +3403,6 @@ fn accumulate_pull_outcome(
             if let Some(refusal) = crate::apply::read_replayed_refusal(store, op).map_err(local)? {
                 push_refusal_once(refusals, refusal);
             }
-            if let Some(pending) =
-                crate::conflict_apply::read_replayed_pending_resolve(store, op).map_err(local)?
-            {
-                pending_resolves.push(pending);
-            }
             for change in
                 crate::router::redelivered_materialization_changes(store, op).map_err(local)?
             {
@@ -3325,7 +3413,7 @@ fn accumulate_pull_outcome(
         ApplyOutcome::Crashed { .. } => {
             return Err(RelayError::Local("injected-crash".to_owned()));
         }
-        ApplyOutcome::WithRefusals { .. } => unreachable!("refusals were flattened"),
+        ApplyOutcome::WithDiagnostics { .. } => unreachable!("diagnostics were flattened"),
     }
     Ok(())
 }
@@ -3340,6 +3428,15 @@ fn push_refusal_once(
             && existing.origin_seq == refusal.origin_seq
     }) {
         refusals.push(refusal);
+    }
+}
+
+fn push_sharing_declined_once(
+    declines: &mut Vec<crate::SharingDeclined>,
+    declined: crate::SharingDeclined,
+) {
+    if !declines.contains(&declined) {
+        declines.push(declined);
     }
 }
 
@@ -3374,4 +3471,132 @@ fn local(error: SyncError) -> RelayError {
         return RelayError::StoreBusy;
     }
     RelayError::Local(error.code().to_owned())
+}
+
+#[cfg(test)]
+mod sharing_decline_tests {
+    use super::push_sharing_declined_once;
+
+    fn decline(path: &str) -> crate::SharingDeclined {
+        crate::SharingDeclined {
+            path: path.to_owned(),
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limit_bytes: 20,
+            observed_bytes: 21,
+        }
+    }
+
+    #[test]
+    fn equal_sized_declines_for_distinct_paths_do_not_collapse() {
+        let mut declines = Vec::new();
+
+        push_sharing_declined_once(&mut declines, decline("notes/first.md"));
+        push_sharing_declined_once(&mut declines, decline("notes/second.md"));
+        push_sharing_declined_once(&mut declines, decline("notes/first.md"));
+
+        assert_eq!(
+            declines
+                .iter()
+                .map(|declined| declined.path.as_str())
+                .collect::<Vec<_>>(),
+            ["notes/first.md", "notes/second.md"]
+        );
+    }
+}
+
+#[cfg(test)]
+mod conflict_resolve_blob_ref_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::{BlobKind, ReplicationEnvelope, collect_blob_refs};
+    use crate::conflict_resolve_v1::{
+        ConflictResolveV1, EffectContextV1, HeadContentKindV1, HeadV1, LineageTransitionV1,
+        MetadataV1, PresentHeadV1, ResolutionV1, ResolveChoiceV1, SuccessorContentKindV1,
+        SuccessorV1, build_conflict_resolve_v1,
+    };
+
+    #[test]
+    fn conflict_resolve_collects_text_binary_and_successor_roots() {
+        let text_sha = dohc_engine_storage::hex_sha256(b"current text");
+        let binary_sha = dohc_engine_storage::hex_sha256(b"incoming binary");
+        let successor_sha = dohc_engine_storage::hex_sha256(b"successor base");
+        let state_vector_sha = dohc_engine_storage::hex_sha256(b"successor state vector");
+        let current = HeadV1::Present(PresentHeadV1 {
+            path_ref: 0,
+            object_id: "object-current".to_owned(),
+            latest_moment_id: "moment-current".to_owned(),
+            content_kind: HeadContentKindV1::Text,
+            blob_sha256: text_sha.clone(),
+            byte_length: 12,
+            updated_at_ms: 10,
+        });
+        let built = build_conflict_resolve_v1(ConflictResolveV1 {
+            workspace_id: "workspace-carrier-roots".to_owned(),
+            conflict_id: "conflict-carrier-roots".to_owned(),
+            chosen_from: ResolveChoiceV1::Current,
+            resolution: ResolutionV1::KeptCurrent,
+            target_version_id: "main".to_owned(),
+            source_version_id: "peer-main".to_owned(),
+            paths: vec![
+                "notes/current.md".to_owned(),
+                "notes/incoming.bin".to_owned(),
+            ],
+            current: current.clone(),
+            incoming: HeadV1::Present(PresentHeadV1 {
+                path_ref: 1,
+                object_id: "object-incoming".to_owned(),
+                latest_moment_id: "moment-incoming".to_owned(),
+                content_kind: HeadContentKindV1::Binary,
+                blob_sha256: binary_sha.clone(),
+                byte_length: 15,
+                updated_at_ms: 11,
+            }),
+            result: current,
+            effect_context: EffectContextV1 {
+                recorded_at_ms: 12,
+                metadata: MetadataV1 {
+                    origin: "api".to_owned(),
+                    summary: None,
+                    correlation_id: None,
+                },
+                author: None,
+                current_object_created_at_ms: Some(1),
+                result_object_created_at_ms: Some(1),
+            },
+            effects: Vec::new(),
+            lineage_transition: Some(LineageTransitionV1 {
+                predecessor_claim_id: dohc_engine_storage::hex_sha256(b"predecessor"),
+                predecessor_state_vector_sha256: dohc_engine_storage::hex_sha256(
+                    b"predecessor state vector",
+                ),
+                artifact_preimage_sha256: text_sha.clone(),
+                successor: Some(SuccessorV1 {
+                    lineage_claim_id: successor_sha.clone(),
+                    epoch_tag: dohc_engine_storage::hex_sha256(b"successor epoch"),
+                    content_kind: SuccessorContentKindV1::Plaintext,
+                    result_sha256: text_sha.clone(),
+                    update_blob_sha256: successor_sha.clone(),
+                    state_vector_blob_sha256: state_vector_sha.clone(),
+                }),
+            }),
+        })
+        .expect("valid conflict.resolve carrier");
+        let envelope = ReplicationEnvelope {
+            workspace_id: "workspace-carrier-roots".to_owned(),
+            origin_id: "origin-a".to_owned(),
+            origin_seq: 0,
+            op_kind: "conflict.resolve".to_owned(),
+            payload: built.value,
+            recorded_at_ms: 12,
+        };
+
+        let refs = collect_blob_refs(&[envelope]).expect("collect carrier roots");
+        let expected = BTreeMap::from([
+            (text_sha, BTreeSet::from([BlobKind::Text])),
+            (binary_sha, BTreeSet::from([BlobKind::Binary])),
+            (successor_sha, BTreeSet::from([BlobKind::Ydoc])),
+            (state_vector_sha, BTreeSet::from([BlobKind::Ydoc])),
+        ]);
+        assert_eq!(refs, expected);
+    }
 }

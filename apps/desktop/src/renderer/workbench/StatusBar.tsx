@@ -35,7 +35,6 @@ export function StatusBar(props: {
   onConnectCloud: () => void;
   onOpenHistory: () => void;
   onOpenConflicts: () => void;
-  onDismissSyncReview?: () => void;
   onOpenSettings: () => void;
   onToggleTheme: () => void;
   onContextMenu: () => void;
@@ -91,9 +90,6 @@ export function StatusBar(props: {
           onOpenHistory={props.onOpenHistory}
           onOpenSettings={props.onOpenSettings}
           onOpenConflicts={props.onOpenConflicts}
-          {...(props.onDismissSyncReview
-            ? { onDismissSyncReview: props.onDismissSyncReview }
-            : {})}
           {...(props.agentNotifications ? { agentNotifications: props.agentNotifications } : {})}
           {...(props.onDismissAgentNotification
             ? { onDismissAgentNotification: props.onDismissAgentNotification }

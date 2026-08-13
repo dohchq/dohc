@@ -349,9 +349,15 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // pending replication refusals (ordinal 22), the parked
     // chat-message-before-thread coordinates (ordinal 23), the
     // materialization-workspace migration (ordinal 24), the bootstrap
-    // main-version name backfill (ordinal 25, #325), and scene asset delete
-    // authority (ordinal 26).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 27);
+    // main-version name backfill (ordinal 25, #325), the secret fork-base
+    // timestamp migration (ordinal 26), the Y.Doc path migration
+    // (`ydoc_docs.path`) (ordinal 27), the secret-moment source-origin
+    // provenance migration (ordinal 28), Y.Doc lineage claims with compact
+    // inactive epochs (ordinal 29), and removal of the obsolete replicated
+    // pending-resolution sidecar (ordinal 30), and the durable replication-log
+    // apply disposition used by compound-shadow replay (ordinal 31), and scene
+    // asset delete authority (ordinal 32).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 33);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(

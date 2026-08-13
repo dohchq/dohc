@@ -5,20 +5,23 @@
   "exports": {
     ".": "./src/index.ts",
     "./chat-identity": "./src/chatIdentity.ts",
+    "./chat-identity-values": "./src/chatIdentityValues.ts",
     "./chat-mentions": "./src/chatMentions.ts",
     "./domain": "./src/domain.ts",
+    "./domain-values": "./src/domainValues.ts",
     "./engine": "./src/engine.ts",
     "./live-documents": "./src/liveDocuments.ts",
     "./relay": "./src/relay.ts",
     "./conformance": "./src/conformance.ts",
-    "./workspace-settings": "./src/workspaceSettings.ts"
+    "./workspace-settings": "./src/workspaceSettings.ts",
+    "./workspace-settings-values": "./src/workspaceSettingsValues.ts"
   },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "zod": "^4.4.3"
+    "effect": "4.0.0-beta.107"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
