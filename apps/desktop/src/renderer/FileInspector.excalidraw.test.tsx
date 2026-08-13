@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useEffect } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -15,11 +16,18 @@ import { resetOrphanedDrafts } from "./orphanedDrafts";
 
 const canvas = vi.hoisted(() => ({
   props: null as null | Record<string, unknown>,
+  autoHydrate: false,
+  hydrateInvocations: vi.fn(),
 }));
 
 vi.mock("./ExcalidrawCanvas", () => ({
   default: (props: ExcalidrawCanvasProps) => {
     canvas.props = props as unknown as Record<string, unknown>;
+    useEffect(() => {
+      if (!canvas.autoHydrate || !props.sceneDoc || !props.hydrateAssets) return;
+      canvas.hydrateInvocations(props.hydrateAssets);
+      void props.hydrateAssets();
+    }, [props.hydrateAssets, props.sceneDoc]);
     return (
       <div
         data-testid="mock-excalidraw-canvas"
@@ -200,6 +208,7 @@ describe("FileInspector Excalidraw view", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     canvas.props = null;
+    canvas.autoHydrate = false;
     resetOrphanedDrafts();
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -539,7 +548,7 @@ describe("FileInspector Excalidraw view", () => {
     expect(file?.dataURL).toBe(`data:${mimeType};base64,AQID`);
   });
 
-  it("keeps the drawing editable and retries when an artifact asset cannot load", async () => {
+  it("retries asset hydration and hydrates a rebound drawing once", async () => {
     const scene = new Y.Doc();
     declareSceneRoots(scene);
     putSceneAsset(scene, ARTIFACT_DESCRIPTOR);
@@ -552,17 +561,23 @@ describe("FileInspector Excalidraw view", () => {
     bridge.readEngineYDocArtifactAsset = vi
       .fn()
       .mockRejectedValueOnce(new Error("missing asset"))
-      .mockResolvedValueOnce({
+      .mockResolvedValue({
         descriptor: ARTIFACT_DESCRIPTOR,
         bytes: new Uint8Array([1, 2, 3]),
       });
+    canvas.autoHydrate = true;
     vi.stubGlobal("dohcDesktop", bridge);
-    render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
+    const rendered = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="drawing.excalidraw"
+        engineVersionKey={0}
+      />,
+    );
 
-    const view = await screen.findByTestId("mock-excalidraw-canvas");
+    const canvasView = await screen.findByTestId("mock-excalidraw-canvas");
     const props = canvas.props as unknown as ExcalidrawCanvasProps;
-    await expect(props.hydrateAssets!()).resolves.toEqual([]);
-    expect(view.dataset.readOnly).toBe("false");
+    expect(canvasView.dataset.readOnly).toBe("false");
     expect(
       (await screen.findByTestId("drawing-asset-hydration-error")).textContent,
     ).toContain("dohc could not load 1 image.");
@@ -573,13 +588,32 @@ describe("FileInspector Excalidraw view", () => {
         (canvas.props as unknown as ExcalidrawCanvasProps).hydrateAssets,
       ).not.toBe(props.hydrateAssets),
     );
-    const retried = await (canvas.props as unknown as ExcalidrawCanvasProps).hydrateAssets!();
-    expect(retried).toEqual([
-      expect.objectContaining({ id: ARTIFACT_DESCRIPTOR.id }),
-    ]);
     await waitFor(() =>
       expect(screen.queryByTestId("drawing-asset-hydration-error")).toBeNull(),
     );
+    await waitFor(() =>
+      expect(canvas.hydrateInvocations).toHaveBeenCalledTimes(2),
+    );
+
+    rendered.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="drawing.excalidraw"
+        engineVersionKey={1}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(canvas.hydrateInvocations).toHaveBeenCalledTimes(3),
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(canvas.hydrateInvocations).toHaveBeenCalledTimes(3);
+    expect(bridge.readEngineYDocArtifactAsset).toHaveBeenCalledTimes(3);
   });
 
   it("drops an asset read that resolves after the drawing session changes", async () => {

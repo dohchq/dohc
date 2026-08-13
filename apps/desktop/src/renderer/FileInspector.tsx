@@ -3527,7 +3527,6 @@ function DrawingView({
   useEffect(() => {
     setAssetRefused(false);
     setAssetHydrationFailures(0);
-    setAssetHydrationAttempt(0);
   }, [path, engine.doc]);
   useEffect(() => {
     if (!blankFile || readOnly || truncated || engine.opening) return;
@@ -3647,7 +3646,6 @@ function DrawingView({
         setAssetHydrationFailures(0);
       }
       for (const descriptor of hydrationSession.descriptors) {
-        if (activeHydrationSession.current !== hydrationSession) return [];
         try {
           const loaded = await hydrationSession.read(descriptor.id);
           if (activeHydrationSession.current !== hydrationSession) continue;
