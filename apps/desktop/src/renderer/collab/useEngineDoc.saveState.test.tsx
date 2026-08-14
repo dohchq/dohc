@@ -533,7 +533,10 @@ it("keeps a failed lineage handoff visible and read-only", async () => {
 });
 
 it("clears a permanent refusal when an independent lineage wins", async () => {
-  await mountBound();
+  const view = render(<Harness workspaceId="ws-1" path="notes/big.md" />);
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
   harness.rejectNextApplyAsTooLarge();
 
   act(() => screen.getByTestId("type").click());
@@ -541,6 +544,9 @@ it("clears a permanent refusal when an independent lineage wins", async () => {
   expect(
     screen.getByTestId("permanent-failure-transition").textContent,
   ).toBe("true");
+  await waitFor(() =>
+    expect(screen.getByTestId("draft").textContent).toBe("seed!"),
+  );
 
   harness.emitLineageReplacement("winner");
   await waitFor(() =>
@@ -554,6 +560,14 @@ it("clears a permanent refusal when an independent lineage wins", async () => {
   await flushLocalBatch();
   expect(harness.applied).toHaveLength(1);
   expect(screen.getByTestId("state").textContent).toBe("saving");
+
+  view.rerender(
+    <Harness workspaceId="ws-1" path="notes/big.md" enabled={false} />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("false"),
+  );
+  expect(screen.getByTestId("draft").textContent).toBe("seed!");
 });
 
 it("recovers a dirty replaced scene immediately and hydrates its image", async () => {

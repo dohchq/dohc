@@ -550,21 +550,30 @@ export function useEngineDoc(input: {
     // The last recovery snapshot (for change dedup) and the draft it produced.
     // Terminal deletion, read-only transitions, and permanently refused local
     // updates share this path because the mirror holds the user's latest work.
-    let recoverySnapshotBytes: Uint8Array | null = null;
-    let recoveryDraftId: number | null = null;
+    type RecoverySlot = {
+      snapshotBytes: Uint8Array | null;
+      draftId: number | null;
+      transition:
+        | "deletion"
+        | "read-only"
+        | "permanent-failure"
+        | null;
+      revision: number;
+    };
+    const newRecoverySlot = (): RecoverySlot => ({
+      snapshotBytes: null,
+      draftId: null,
+      transition: null,
+      revision: 0,
+    });
+    let recovery = newRecoverySlot();
     // Serializes recovery snapshots in the order they were taken: a later
     // snapshot's capture must never be overwritten by an earlier one that
     // resolves late (the projection import, and each markdown conversion,
     // are async now).
     let recoveryQueue: Promise<void> = Promise.resolve();
-    let recoveryTransition:
-      | "deletion"
-      | "read-only"
-      | "permanent-failure"
-      | null = null;
     let deletionPending = false;
     let releaseStarted = false;
-    let recoveryRevision = 0;
     let recoveryStatusRevision = 0;
     const recoveryAssetReads = new Map<
       string,
@@ -685,7 +694,8 @@ export function useEngineDoc(input: {
       transition: "deletion" | "read-only" | "permanent-failure" | null,
       sceneRecovery: SceneRecoveryWork | null = null,
     ): void => {
-      const revision = ++recoveryRevision;
+      const slot = recovery;
+      const revision = ++slot.revision;
       const statusRevision = transition && sceneRecovery
         ? ++recoveryStatusRevision
         : null;
@@ -705,30 +715,30 @@ export function useEngineDoc(input: {
           const text =
             sceneRecovery?.immediateText ??
             (await recoveryTextFromSnapshot(documentKind, bytes));
-          if (recoveryDraftId === null) {
+          if (slot.draftId === null) {
             if (!forceCreate) return;
-            recoveryDraftId = captureOrphanedDraft(workspaceId, path, text);
+            slot.draftId = captureOrphanedDraft(workspaceId, path, text);
           } else {
-            replaceOrphanedDraft(workspaceId, path, recoveryDraftId, text);
+            replaceOrphanedDraft(workspaceId, path, slot.draftId, text);
           }
           // Only the LOCAL render state is guarded by the open token — the
           // draft itself is already durable in the module-level store above,
           // unmount or not.
           if (transition === "deletion" && token === openTokenRef.current) {
-            setDeletion({ token, draftId: recoveryDraftId });
+            setDeletion({ token, draftId: slot.draftId });
           }
           if (!sceneRecovery) return;
           // Asset I/O must not hold the recovery queue. A later scene update
           // must replace the immediate draft now, even if this older image
           // read is slow. Only the newest snapshot may apply its async result.
           void sceneRecovery.completed.then((recovered) => {
-            if (revision !== recoveryRevision || recoveryDraftId === null) {
+            if (revision !== slot.revision || slot.draftId === null) {
               return;
             }
             replaceOrphanedDraft(
               workspaceId,
               path,
-              recoveryDraftId,
+              slot.draftId,
               recovered.text,
             );
             if (
@@ -760,12 +770,12 @@ export function useEngineDoc(input: {
 
     const captureDeletion = (doc: Y.Doc): void => {
       writesRefused.current = true;
-      recoveryTransition = "deletion";
+      recovery.transition = "deletion";
       // Snapshot NOW, synchronously: the doc can be destroyed (unmount) or
       // the caller's reference can go stale before a lazily-loaded
       // serializer would otherwise get to read it.
       const bytes = Y.encodeStateAsUpdate(doc);
-      recoverySnapshotBytes = bytes;
+      recovery.snapshotBytes = bytes;
       const forceCreate = saveStateRef.current !== "saved";
       const sceneRecovery =
         forceCreate && documentKind === "scene" && binding
@@ -778,64 +788,64 @@ export function useEngineDoc(input: {
         // closure, with the file already gone and no draft for the recovery
         // close guard to find. The queue below upgrades this row to the
         // faithful markdown a microtask later; it never creates a second one.
-        recoveryDraftId = captureOrphanedDraft(
+        recovery.draftId = captureOrphanedDraft(
           workspaceId,
           path,
           sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc),
         );
       }
-      setDeletion({ token, draftId: recoveryDraftId });
+      setDeletion({ token, draftId: recovery.draftId });
       reportSaveState("deleted");
       enqueueRecoverySnapshot(
         bytes,
         forceCreate,
-        recoveryTransition,
+        recovery.transition,
         sceneRecovery,
       );
     };
 
     const captureReadOnlyTransition = (doc: Y.Doc): void => {
       writesRefused.current = true;
-      recoveryTransition = "read-only";
+      recovery.transition = "read-only";
       const bytes = Y.encodeStateAsUpdate(doc);
-      recoverySnapshotBytes = bytes;
+      recovery.snapshotBytes = bytes;
       const sceneRecovery =
         documentKind === "scene" && binding
           ? prepareSceneRecovery(bytes, binding)
           : null;
       // Main sends this state only after it has discarded a local update.
       // Persist the rejected document synchronously before the session closes.
-      recoveryDraftId = captureOrphanedDraft(
+      recovery.draftId = captureOrphanedDraft(
         workspaceId,
         path,
         sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc),
       );
       setReadOnlyTransition({ token });
       reportSaveState("read-only");
-      enqueueRecoverySnapshot(bytes, true, recoveryTransition, sceneRecovery);
+      enqueueRecoverySnapshot(bytes, true, recovery.transition, sceneRecovery);
     };
 
     const refreshRecoveryDraft = (doc: Y.Doc): void => {
-      if (recoverySnapshotBytes === null) return;
+      if (recovery.snapshotBytes === null) return;
       const bytes = Y.encodeStateAsUpdate(doc);
-      if (snapshotsEqual(bytes, recoverySnapshotBytes)) return;
-      recoverySnapshotBytes = bytes;
+      if (snapshotsEqual(bytes, recovery.snapshotBytes)) return;
+      recovery.snapshotBytes = bytes;
       const sceneRecovery =
         documentKind === "scene" && binding
           ? prepareSceneRecovery(bytes, binding)
           : null;
-      if (sceneRecovery && recoveryDraftId !== null) {
+      if (sceneRecovery && recovery.draftId !== null) {
         replaceOrphanedDraft(
           workspaceId,
           path,
-          recoveryDraftId,
+          recovery.draftId,
           sceneRecovery.immediateText,
         );
       }
       enqueueRecoverySnapshot(
         bytes,
         true,
-        recoveryTransition,
+        recovery.transition,
         sceneRecovery,
       );
     };
@@ -845,14 +855,14 @@ export function useEngineDoc(input: {
       doc: Y.Doc,
     ): void => {
       writesRefused.current = true;
-      recoveryTransition = "permanent-failure";
+      recovery.transition = "permanent-failure";
       const bytes = Y.encodeStateAsUpdate(doc);
-      recoverySnapshotBytes = bytes;
+      recovery.snapshotBytes = bytes;
       const sceneRecovery =
         documentKind === "scene" && binding
           ? prepareSceneRecovery(bytes, binding)
           : null;
-      recoveryDraftId = captureOrphanedDraft(
+      recovery.draftId = captureOrphanedDraft(
         workspaceId,
         path,
         sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc),
@@ -861,7 +871,7 @@ export function useEngineDoc(input: {
         setPermanentFailure({ token });
         reportSaveState("error", error.message);
       }
-      enqueueRecoverySnapshot(bytes, true, recoveryTransition, sceneRecovery);
+      enqueueRecoverySnapshot(bytes, true, recovery.transition, sceneRecovery);
     };
 
     const captureLineageReplacementFailure = (
@@ -911,10 +921,10 @@ export function useEngineDoc(input: {
           writesRefused.current = true;
           return;
         }
-        if (recoverySnapshotBytes !== null) {
+        if (recovery.snapshotBytes !== null) {
           deletionPending = true;
-          recoveryTransition = "deletion";
-          setDeletion({ token, draftId: recoveryDraftId });
+          recovery.transition = "deletion";
+          setDeletion({ token, draftId: recovery.draftId });
           reportSaveState("deleted");
           refreshRecoveryDraft(doc);
           return;
@@ -1108,7 +1118,12 @@ export function useEngineDoc(input: {
         }
         bound.onDocumentReplaced((replacement) => {
           if (cancelled || token !== openTokenRef.current) return;
+          // The losing slot owns its recovery draft and any pending image
+          // reads. The winner starts a fresh slot so later delete/unmount work
+          // cannot rewrite that draft with an independent lineage.
+          recovery = newRecoverySlot();
           writesRefused.current = false;
+          setDeletion(null);
           setReadOnlyTransition(null);
           setPermanentFailure(null);
           reportSaveState("saved");
