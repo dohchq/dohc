@@ -15,6 +15,7 @@ import {
   lazy,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -4223,6 +4224,11 @@ function DrawingView({
 
   const canvasReadOnly = readOnly || engineReadOnly;
   const drawingReady = engineMode || document.value !== null;
+  // Two panes of one drawing share a session but must NOT share a relay
+  // presence entry: entries are keyed by client id, so a shared id makes one
+  // pane's leave erase the user while the other pane is still open. Each
+  // pane derives its own client id; peers merge the awareness states.
+  const presencePaneId = useId();
   const presence = useMemo(() => {
     if (
       !engineMode ||
@@ -4243,7 +4249,7 @@ function DrawingView({
           versionId: engine.versionId,
           objectId: engine.objectId,
         }),
-        clientId: presenceFactory.clientId,
+        clientId: `${presenceFactory.clientId}#${presencePaneId}`,
         displayName: presenceFactory.displayName,
       };
     } catch {
@@ -4255,6 +4261,7 @@ function DrawingView({
     engine.versionId,
     engineMode,
     presenceFactory,
+    presencePaneId,
     workspaceId,
   ]);
   const hydrationSession = useMemo(() => {

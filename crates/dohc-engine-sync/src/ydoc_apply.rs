@@ -1181,6 +1181,16 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
                 let projection =
                     project_ydoc_with_store(tx, &complete.key, doc, marker.content_kind)?;
                 if projection.content != text {
+                    if marker.content_kind == ContentKind::Scene {
+                        // The origin of an external scene edit RETIRES its
+                        // lineage instead of emitting a Markdown rewrite (a
+                        // scene has no fold), so the rewrite this pending
+                        // state would wait for is never coming. Converge the
+                        // same way the origin did: the replicated file moment
+                        // is canonical, the lineage retires, and the next
+                        // open seeds a fresh scene from the artifact.
+                        return retire_complete_ydoc_lineage_in_tx(tx, complete);
+                    }
                     return Err(SyncError::RetryableState {
                         reason: "ydoc-resulting-head-pending",
                     });
