@@ -72,6 +72,10 @@ type SceneRecoveryWork = {
   completed: Promise<{ text: string; missingAssetCount: number }>;
 };
 
+type ArtifactAssetRead = Awaited<
+  ReturnType<EngineYDocBinding["readArtifactAsset"]>
+>;
+
 function portableSceneRecovery(
   snapshot: Uint8Array,
   files: Readonly<Record<string, BinaryFileData>>,
@@ -545,6 +549,7 @@ export function useEngineDoc(input: {
     setSceneRecoveryAssets(null);
     let cancelled = false;
     let binding: EngineYDocBinding | null = null;
+    let retiredBinding: EngineYDocBinding | null = null;
     let detachSaveObserver: (() => void) | null = null;
     let unsubscribeSaveState: (() => void) | null = null;
     // The last recovery snapshot (for change dedup) and the draft it produced.
@@ -577,7 +582,7 @@ export function useEngineDoc(input: {
     let recoveryStatusRevision = 0;
     const recoveryAssetReads = new Map<
       string,
-      Promise<BinaryFileData | null>
+      Promise<ArtifactAssetRead | null>
     >();
     const retiredDraftObservers = new Map<Y.Doc, () => void>();
 
@@ -632,6 +637,13 @@ export function useEngineDoc(input: {
           : JSON.stringify([assetId, null]);
         const read = descriptor && bound
           ? readSceneAsset(cacheKey, descriptor, bound)
+              .catch(() => readSceneAsset(cacheKey, descriptor, bound))
+              .then((loaded) =>
+                loaded
+                  ? binaryFileDataFromArtifact(descriptor, loaded)
+                  : null,
+              )
+              .catch(() => null)
           : Promise.resolve(null);
         return read.then((file) => [assetId, file] as const);
       });
@@ -657,22 +669,23 @@ export function useEngineDoc(input: {
       cacheKey: string,
       descriptor: EngineYDocBinding["artifactAssets"][number],
       bound: EngineYDocBinding,
-    ): Promise<BinaryFileData | null> => {
+    ): Promise<ArtifactAssetRead | null> => {
       const cached = recoveryAssetReads.get(cacheKey);
       if (cached) return cached;
-      let read: Promise<BinaryFileData | null>;
+      let read: Promise<ArtifactAssetRead | null>;
       read = bound
         .readArtifactAsset(descriptor.id)
-        .then((loaded) => binaryFileDataFromArtifact(descriptor, loaded))
-        .catch(() => {
-          // A transient read failure must not poison later recovery. Keep
-          // successful bytes cached, but let deletion/replacement retry a
-          // descriptor whose eager prewarm failed.
-          if (recoveryAssetReads.get(cacheKey) === read) {
-            recoveryAssetReads.delete(cacheKey);
-          }
-          return null;
-        });
+        .then((loaded) =>
+          binaryFileDataFromArtifact(descriptor, loaded) ? loaded : null,
+        );
+      void read.catch(() => {
+        // A transient read failure must not poison later recovery. Keep
+        // successful bytes cached, but let deletion/replacement retry a
+        // descriptor whose eager prewarm failed.
+        if (recoveryAssetReads.get(cacheKey) === read) {
+          recoveryAssetReads.delete(cacheKey);
+        }
+      });
       recoveryAssetReads.set(cacheKey, read);
       return read;
     };
@@ -681,7 +694,11 @@ export function useEngineDoc(input: {
       descriptor: EngineYDocBinding["artifactAssets"][number],
       bound: EngineYDocBinding,
     ): void => {
-      void readSceneAsset(sceneAssetCacheKey(descriptor), descriptor, bound);
+      void readSceneAsset(
+        sceneAssetCacheKey(descriptor),
+        descriptor,
+        bound,
+      ).catch(() => undefined);
     };
 
     // `forceCreate` false means: nothing was unsettled at the moment this
@@ -885,7 +902,7 @@ export function useEngineDoc(input: {
       writesRefused.current = true;
       if (cancelled || token !== openTokenRef.current) return;
       setReadOnlyTransition({ token });
-      const bound = binding;
+      const bound = retiredBinding ?? binding;
       if (bound) {
         setOutcome({
           key,
@@ -986,10 +1003,35 @@ export function useEngineDoc(input: {
       let draftId: number | null = null;
       let retiredRecoveryRevision = 0;
       let projectionQueue: Promise<void> = Promise.resolve();
-      const retiredBinding = binding
+      const activeBinding = binding;
+      const retiredAssets = activeBinding
+        ? [...activeBinding.artifactAssets]
+        : [];
+      retiredBinding = activeBinding
         ? {
-            ...binding,
-            artifactAssets: [...binding.artifactAssets],
+            ...activeBinding,
+            artifactAssets: retiredAssets,
+            readArtifactAsset: async (assetId) => {
+              const descriptor = retiredAssets.find(
+                (candidate) => candidate.id === assetId,
+              );
+              if (!descriptor) {
+                throw new Error(
+                  `Artifact asset ${assetId} does not belong to the retired document.`,
+                );
+              }
+              const loaded = await readSceneAsset(
+                sceneAssetCacheKey(descriptor),
+                descriptor,
+                activeBinding,
+              );
+              if (!loaded) {
+                throw new Error(
+                  `Artifact asset ${assetId} is invalid for the retired document.`,
+                );
+              }
+              return loaded;
+            },
           }
         : null;
       if (documentKind === "scene" && binding && retiredBinding) {
@@ -1126,6 +1168,7 @@ export function useEngineDoc(input: {
           // reads. The winner starts a fresh slot so later delete/unmount work
           // cannot rewrite that draft with an independent lineage.
           recovery = newRecoverySlot();
+          retiredBinding = null;
           writesRefused.current = false;
           setDeletion(null);
           setReadOnlyTransition(null);

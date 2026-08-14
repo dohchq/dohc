@@ -560,6 +560,59 @@ it("keeps a failed lineage handoff visible and read-only", async () => {
   expect(harness.applyAttempts).toHaveLength(attemptsBefore);
 });
 
+it("restores a failed scene handoff with the losing asset authority", async () => {
+  harness = harnessBridge("scene");
+  const loser = {
+    ...IMAGE_DESCRIPTOR,
+    id: "loser-image",
+    ref: "assets/loser.png",
+    sha256: "a".repeat(64),
+  };
+  const winner = {
+    ...IMAGE_DESCRIPTOR,
+    id: "winner-image",
+    ref: "assets/winner.png",
+    sha256: "b".repeat(64),
+  };
+  let winnerOwnsReader = false;
+  const readAsset = vi.fn(async () => ({
+    descriptor: winnerOwnsReader ? winner : loser,
+    bytes: winnerOwnsReader
+      ? new Uint8Array([4, 5, 6])
+      : new Uint8Array([1, 2, 3]),
+  }));
+  harness.setArtifactReader([loser], readAsset);
+  putSceneAsset(harness.sourceDoc, loser);
+  insertElementRevision(harness.sourceDoc, {
+    id: "loser-image-element",
+    type: "image",
+    fileId: loser.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    index: "a1",
+  });
+  harness.setLineageReplacementFailure(new Error("acknowledgement refused"));
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() => expect(readAsset).toHaveBeenCalledOnce());
+
+  act(() => screen.getByTestId("type").click());
+  winnerOwnsReader = true;
+  harness.emitLineageReplacement("unused", [winner]);
+
+  await waitFor(() =>
+    expect(screen.getByTestId("read-only-transition").textContent).toBe("true"),
+  );
+  expect(screen.getByTestId("artifact-asset-ids").textContent).toBe(loser.id);
+  act(() => screen.getByTestId("hydrate-assets").click());
+  await waitFor(() =>
+    expect(screen.getByTestId("hydrated-assets").textContent).toBe(loser.id),
+  );
+});
+
 it("clears a permanent refusal when an independent lineage wins", async () => {
   const view = render(<Harness workspaceId="ws-1" path="notes/big.md" />);
   await waitFor(() =>
@@ -747,7 +800,7 @@ it("hydrates winner-only scene assets after lineage replacement without reopenin
   expect(readAsset).toHaveBeenCalledTimes(3);
 });
 
-it("retries a failed prewarm before writing an image recovery draft", async () => {
+it("retries an overlapping failed prewarm before writing an image recovery draft", async () => {
   harness = harnessBridge("scene");
   putSceneAsset(harness.sourceDoc, IMAGE_DESCRIPTOR);
   insertElementRevision(harness.sourceDoc, {
@@ -759,9 +812,13 @@ it("retries a failed prewarm before writing an image recovery draft", async () =
     isDeleted: false,
     index: "a1",
   });
+  let rejectPrewarm!: (error: Error) => void;
+  const prewarm = new Promise<never>((_resolve, reject) => {
+    rejectPrewarm = reject;
+  });
   const readAsset = vi
     .fn()
-    .mockRejectedValueOnce(new Error("temporary read failure"))
+    .mockImplementationOnce(() => prewarm)
     .mockResolvedValue({
       descriptor: IMAGE_DESCRIPTOR,
       bytes: new Uint8Array([1, 2, 3]),
@@ -775,6 +832,10 @@ it("retries a failed prewarm before writing an image recovery draft", async () =
 
   act(() => screen.getByTestId("type").click());
   harness.emit("deleted", 0);
+  await act(async () => {
+    rejectPrewarm(new Error("temporary read failure"));
+    await prewarm.catch(() => undefined);
+  });
 
   await waitFor(() => expect(readAsset).toHaveBeenCalledTimes(2));
   await waitFor(() => {
