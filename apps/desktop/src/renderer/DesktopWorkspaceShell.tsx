@@ -185,6 +185,28 @@ import {
 // refuses every write to the reserved prefix regardless — but it uses the
 // same alias-normalizing predicate as main so a case-variant path arriving
 // from an agent/open flow ("Shared-With-Me/…") renders read-only too.
+// What a removed mount does to path-keyed UI state.
+//
+// A folder that went takes its tabs, pins and drafts with it — the same
+// reprojection an Explorer folder delete makes. A folder that STAYED must
+// take nothing: record cleanup left the files exactly where they were, and
+// projecting a delete over them would discard state for files the user still
+// has open.
+export function shareUnmountProjection(input: {
+  shareId: string;
+  label: string;
+  folderLeft: boolean;
+}): Array<{ id: string; kind: "delete-folder"; path: string }> {
+  if (input.folderLeft) return [];
+  return [
+    {
+      id: `unmount-${input.shareId}`,
+      kind: "delete-folder",
+      path: `shared-with-me/${input.label}`,
+    },
+  ];
+}
+
 function isMountedSharePath(path: string | null): boolean {
   return !!path && isSharedWithMePath(path);
 }
@@ -3115,6 +3137,10 @@ export function DesktopWorkspaceShell(props: {
   // slower, earlier-started reload must never clobber a fresher one — a
   // stale registry snapshot could resurrect a just-removed mount or fire a
   // spurious delete-folder projection against a still-valid one.
+  // Shares this shell removed whose FOLDER stayed on disk. Their records are
+  // gone, so the next reload sees them vanish; without this it would project
+  // a folder delete over files that are still there.
+  const foldersLeftBehind = useRef(new Set<string>());
   const shareMountsToken = useRef(0);
   const reloadShareMounts = useCallback(async () => {
     const token = ++shareMountsToken.current;
@@ -3129,7 +3155,11 @@ export function DesktopWorkspaceShell(props: {
       // reprojects tabs/pins exactly like the Explorer unmount path — open
       // tabs under the deleted folder must not linger with stale content.
       const gone = shareMountsRef.current.filter(
-        (mount) => !next.some((candidate) => candidate.shareId === mount.shareId),
+        (mount) =>
+          !next.some((candidate) => candidate.shareId === mount.shareId) &&
+          // Removed with its folder left behind: the files are still there,
+          // so their tabs, pins and drafts stay too.
+          !foldersLeftBehind.current.delete(mount.shareId),
       );
       if (gone.length > 0) {
         onExplorerPathsChanged(
@@ -3218,14 +3248,19 @@ export function DesktopWorkspaceShell(props: {
         reportShellError("Couldn't remove the share.", error);
         return;
       }
-      // Reproject tabs/pins exactly like a folder delete, then re-list.
-      onExplorerPathsChanged([
-        {
-          id: `unmount-${mount.shareId}`,
-          kind: "delete-folder",
-          path: `shared-with-me/${label}`,
-        },
-      ]);
+      // Reproject tabs/pins exactly like a folder delete — but ONLY when the
+      // folder actually went. When removal could clean up the record alone,
+      // the files are still on disk, and projecting a delete would throw away
+      // path-keyed state (tabs, pins, drafts) for files the user still has.
+      if (folderLeft) {
+        // The record is gone, so the next mount reload sees this share vanish
+        // and would project the delete this branch just refused. Remembered
+        // until that reload consumes it.
+        foldersLeftBehind.current.add(mount.shareId);
+      }
+      onExplorerPathsChanged(
+        shareUnmountProjection({ shareId: mount.shareId, label, folderLeft }),
+      );
       await refreshFiles().catch(() => undefined);
       void reloadShareMounts();
       // The record went but its folder stayed, because its label is not one

@@ -73,6 +73,7 @@ import {
   pendingHeadingTargetForOpen,
   resolveCanonicalDm,
   runCanonicalDmNavigation,
+  shareUnmountProjection,
   versionCompareOffCopy,
   type Workspace,
 } from "./DesktopWorkspaceShell";
@@ -3779,6 +3780,38 @@ describe("active file sharing", () => {
 // same at every level (#646). The per-level sentences the design specifies
 // ship with the rights they describe — PR2 for chat, PR3 for edits — because
 // a banner that promised chat now would lie until PR2 opens the append gate.
+// Removing a mount reprojects path-keyed UI state only when the folder
+// actually went. Record-only cleanup leaves the files exactly where they
+// were, so their tabs, pins and drafts must survive it.
+describe("share unmount projection", () => {
+  it("reprojects like a folder delete when the folder went", () => {
+    expect(
+      shareUnmountProjection({
+        shareId: "share-1",
+        label: "alex",
+        folderLeft: false,
+      }),
+    ).toEqual([
+      {
+        id: "unmount-share-1",
+        kind: "delete-folder",
+        path: "shared-with-me/alex",
+      },
+    ]);
+  });
+
+  it("projects nothing when the folder stayed", () => {
+    expect(
+      shareUnmountProjection({
+        shareId: "share-1",
+        label: "alex",
+        folderLeft: true,
+      }),
+      "MUTATION: deleting path-keyed state for files that are still on disk",
+    ).toEqual([]);
+  });
+});
+
 describe("shared view banner", () => {
   for (const access of ["view", "comment", "edit"] as const) {
     it(`tells a ${access} recipient the view is read-only, because in PR1 it is`, async () => {

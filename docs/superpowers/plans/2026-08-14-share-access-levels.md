@@ -697,9 +697,10 @@ words: `This shared file is read-only for you.`
 
 6. `crates/dohc-engine-sync/src/share.rs`: add
    `enum ShareAccess { View, Comment, Edit }` and `access: ShareAccess` to
-   `ShareGrant` (line 85-97). `ShareGrant` derives `Default`; make the default
-   `View` and comment that `Default` is a test convenience, never a grant
-   source.
+   `ShareGrant` (line 85-97). NEITHER type derives `Default`. A default level
+   is a level nobody granted, and "never a grant source" written in a comment
+   is a rule asking to be believed; with no derive the compiler enforces it,
+   and every construction — tests included — states its level.
 7. Parse the level where the recipient pins the selector, and refuse an
    unparseable one — a grant whose level cannot be read is not a narrower
    grant, it is an unreadable one.
