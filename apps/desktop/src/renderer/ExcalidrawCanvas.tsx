@@ -225,7 +225,14 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
         aiEnabled={false}
         validateEmbeddable={false}
         onLinkOpen={(element, event) => {
-          if (!element.link || !/^https?:\/\//iu.test(element.link)) return;
+          // The audited bridge allowlists exactly http(s) and mailto; other
+          // schemes stay refused by the shell's window handler.
+          if (
+            !element.link ||
+            !/^(?:https?:\/\/|mailto:)/iu.test(element.link)
+          ) {
+            return;
+          }
           // Excalidraw otherwise calls window.open, which the desktop shell
           // denies. Keep navigation inside dohc's audited URL bridge.
           event.preventDefault();

@@ -13,8 +13,12 @@ const MAX_POINTER_COORDINATE = 10_000_000;
 // This shape leaves room for the wrapper and user/pointer fields even under
 // the IPC boundary's conservative six-bytes-per-character estimator.
 const MAX_SELECTED_ELEMENT_IDS = 16;
-const MAX_ELEMENT_ID_CHARS = 24;
-const UNSAFE_ELEMENT_ID = /[\u0000-\u001f\u007f-\u009f\ud800-\udfff]/;
+// A TOTAL across the selection, not a per-id cap: the scene codec accepts
+// any nonempty well-formed id, so a long imported id is valid work and
+// must not be silently dropped from peers' view. Same envelope math as
+// the old 16 ids x 24 chars shape.
+const MAX_SELECTION_ID_CHARS_TOTAL = 384;
+const UNSAFE_ELEMENT_ID = /[\u0000-\u001f\u007f-\u009f]/;
 
 type CleanSelection = Record<string, true>;
 
@@ -93,10 +97,17 @@ function colorFor(value: string | number): (typeof COLORS)[number] {
 
 function cleanName(value: unknown): string {
   if (typeof value !== "string") return "Someone";
-  const cleaned = value
-    .replace(/[\u0000-\u001f\u007f-\u009f\ud800-\udfff]/g, "")
-    .trim()
-    .slice(0, 64);
+  // Repair lone surrogates and strip controls without deleting well-formed
+  // astral characters — emoji and CJK extension names are valid names. The
+  // length bound slices by code point so it cannot mint a lone surrogate.
+  const cleaned = [
+    ...value
+      .toWellFormed()
+      .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+      .trim(),
+  ]
+    .slice(0, 64)
+    .join("");
   return cleaned || "Someone";
 }
 
@@ -128,14 +139,20 @@ function cleanSelection(value: unknown): CleanSelection | undefined {
       ([id, isSelected]) =>
         isSelected === true &&
         id.length > 0 &&
-        id.length <= MAX_ELEMENT_ID_CHARS &&
         id !== "__proto__" &&
         id !== "constructor" &&
         id !== "prototype" &&
-        !UNSAFE_ELEMENT_ID.test(id),
+        !UNSAFE_ELEMENT_ID.test(id) &&
+        id.isWellFormed(),
     )
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
-  for (const [id] of entries.slice(0, MAX_SELECTED_ELEMENT_IDS)) {
+  let usedChars = 0;
+  let kept = 0;
+  for (const [id] of entries) {
+    if (kept >= MAX_SELECTED_ELEMENT_IDS) break;
+    if (usedChars + id.length > MAX_SELECTION_ID_CHARS_TOTAL) continue;
+    usedChars += id.length;
+    kept += 1;
     selected[id] = true;
   }
   return selected;
