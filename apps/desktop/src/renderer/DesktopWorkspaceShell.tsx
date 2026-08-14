@@ -232,6 +232,36 @@ export function goneMountProjections(input: {
     );
 }
 
+// The one closing line a manual "Refresh shares" leaves behind.
+//
+// ONE line, because a second call replaces the first: damage reported before
+// the summary was overwritten by it, and the user saw only "Shares
+// refreshed", which is exactly the wrong half. Damage is carried INTO the
+// summary, and the instruction that fixes it survives.
+export function shareRefreshSummary(
+  results: ReadonlyArray<{
+    label: string;
+    status: "updated" | "unchanged" | "ended" | "damaged";
+    changedPaths: number;
+  }>,
+): string {
+  if (results.length === 0) return "No shares are added to this workspace.";
+  const changed = results.reduce((sum, row) => sum + row.changedPaths, 0);
+  const ended = results.filter((row) => row.status === "ended");
+  const damaged = results.filter((row) => row.status === "damaged");
+  const refreshed = `Shares refreshed — ${changed} ${
+    changed === 1 ? "file" : "files"
+  } updated${
+    ended.length > 0 ? `; ${ended.map((row) => row.label).join(", ")} ended` : ""
+  }.`;
+  if (damaged.length === 0) return refreshed;
+  return `${refreshed} dohc can't read what ${damaged
+    .map((row) => row.label)
+    .join(", ")} grants. Remove ${
+    damaged.length === 1 ? "it" : "them"
+  } and add the share again.`;
+}
+
 function isMountedSharePath(path: string | null): boolean {
   return !!path && isSharedWithMePath(path);
 }
@@ -3213,30 +3243,7 @@ export function DesktopWorkspaceShell(props: {
         await refreshFiles().catch(() => undefined);
       }
       if (results.some((row) => row.status === "ended")) void reloadShareMounts();
-      if (announce) {
-        const ended = results.filter((row) => row.status === "ended");
-        // A damaged mount will never refresh again, so say so every time the
-        // user asks — and name the one thing that fixes it.
-        const damaged = results.filter((row) => row.status === "damaged");
-        if (damaged.length > 0) {
-          showShellNotice(
-            `dohc can't read what ${damaged
-              .map((row) => row.label)
-              .join(", ")} grants. Remove ${
-              damaged.length === 1 ? "it" : "them"
-            } and add the share again.`,
-          );
-        }
-        showShellNotice(
-          results.length === 0
-            ? "No shares are added to this workspace."
-            : `Shares refreshed — ${changed} ${changed === 1 ? "file" : "files"} updated${
-                ended.length > 0
-                  ? `; ${ended.map((row) => row.label).join(", ")} ended`
-                  : ""
-              }.`,
-        );
-      }
+      if (announce) showShellNotice(shareRefreshSummary(results));
     },
     [workspaceId, refreshFiles, reportShellError, showShellNotice, reloadShareMounts],
   );

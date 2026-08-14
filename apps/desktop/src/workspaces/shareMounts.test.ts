@@ -1,4 +1,5 @@
 import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
+import { RefreshShareMountsResult } from "../ipc/bridgeContract";
 import { SharePinInvalidError } from "./sharedView";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -687,6 +688,52 @@ describe("share mount refresh failures", () => {
         kind: "row",
         status: "unchanged",
       });
+    }
+  });
+});
+
+// The wire schema is the seam a status has to survive, and it is where the
+// mount handler bug hid too: main built a value the schema could not carry,
+// unit suites tested each side alone, and nothing drove one through the
+// other. A status main can emit but the result cannot parse is containment
+// that defeats itself at the boundary.
+describe("refresh result wire shape", () => {
+  const row = (status: string) => ({
+    shareId: "share-1",
+    label: "alex",
+    status,
+    changedPaths: 0,
+  });
+
+  it("carries every status the refresh loop can emit", () => {
+    for (const status of ["updated", "unchanged", "ended", "damaged"]) {
+      expect(
+        RefreshShareMountsResult.safeParse({ results: [row(status)] }).success,
+        `MUTATION: main emits ${status} but the wire schema drops the whole result`,
+      ).toBe(true);
+    }
+  });
+
+  it("still refuses a status nothing emits", () => {
+    expect(RefreshShareMountsResult.safeParse({ results: [row("invented")] }).success).toBe(
+      false,
+    );
+  });
+
+  // The classifier and the schema must agree: whatever the classifier can
+  // return as a row status has to be a status the result can carry.
+  it("carries whatever the classifier decides a row is", () => {
+    for (const error of [
+      new SharePinInvalidError("s"),
+      new Error("offline"),
+      null,
+    ]) {
+      const verdict = classifyShareMountRefreshError(error);
+      if (verdict.kind !== "row") continue;
+      expect(
+        RefreshShareMountsResult.safeParse({ results: [row(verdict.status)] }).success,
+        `MUTATION: the classifier returns ${verdict.status}, which the wire cannot carry`,
+      ).toBe(true);
     }
   });
 });

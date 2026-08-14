@@ -74,6 +74,7 @@ import {
   resolveCanonicalDm,
   goneMountProjections,
   runCanonicalDmNavigation,
+  shareRefreshSummary,
   shareUnmountProjection,
   versionCompareOffCopy,
   type Workspace,
@@ -3784,6 +3785,50 @@ describe("active file sharing", () => {
 // Removing a mount reprojects path-keyed UI state only when the folder
 // actually went. Record-only cleanup leaves the files exactly where they
 // were, so their tabs, pins and drafts must survive it.
+// The closing line a manual refresh leaves behind. Damage has to reach it:
+// reporting damage in a separate notice meant the summary replaced it, and
+// the user was left with "Shares refreshed" — the wrong half.
+describe("share refresh summary", () => {
+  const row = (over: Partial<{ label: string; status: string; changedPaths: number }>) => ({
+    label: "alex",
+    status: "updated" as const,
+    changedPaths: 0,
+    ...over,
+  }) as Parameters<typeof shareRefreshSummary>[0][number];
+
+  it("states damage and how to fix it, alongside the refresh result", () => {
+    const summary = shareRefreshSummary([
+      row({ label: "kim", changedPaths: 2 }),
+      row({ label: "alex", status: "damaged" }),
+    ]);
+    expect(summary).toContain("Shares refreshed — 2 files updated.");
+    expect(
+      summary,
+      "MUTATION: the summary replaces the damage notice and the fix is lost",
+    ).toContain("dohc can't read what alex grants. Remove it and add the share again.");
+  });
+
+  it("says nothing about damage when every mount is healthy", () => {
+    const summary = shareRefreshSummary([row({ changedPaths: 1 })]);
+    expect(summary).toBe("Shares refreshed — 1 file updated.");
+    expect(summary).not.toContain("can't read");
+  });
+
+  it("keeps the ended report when damage is present too", () => {
+    const summary = shareRefreshSummary([
+      row({ label: "kim", status: "ended" }),
+      row({ label: "alex", status: "damaged" }),
+      row({ label: "sam", status: "damaged" }),
+    ]);
+    expect(summary).toContain("kim ended");
+    expect(summary).toContain("what alex, sam grants. Remove them");
+  });
+
+  it("says so when there is nothing to refresh", () => {
+    expect(shareRefreshSummary([])).toBe("No shares are added to this workspace.");
+  });
+});
+
 describe("share unmount projection", () => {
   it("reprojects like a folder delete when the folder went", () => {
     expect(

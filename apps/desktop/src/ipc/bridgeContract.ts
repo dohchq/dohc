@@ -2853,10 +2853,7 @@ export type DismissShareSkipsPayload = z.infer<typeof DismissShareSkipsPayload>;
 export const RefreshSharedViewResult = z.object({
   // "ended" means the granter revoked the share: the local view stays
   // readable but stops refreshing, and the UI says so honestly.
-  // "damaged": this mount's stored pin cannot be read, so it will never
-  // refresh again. Permanent, like an ended share, and reported per ROW so
-  // one damaged record cannot stop the other mounts refreshing.
-  status: z.enum(["updated", "unchanged", "ended", "damaged"]),
+  status: z.enum(["updated", "unchanged", "ended"]),
   changedPaths: z.number().int().nonnegative(),
   // Ops the pull refused. It skips them and keeps going, so a view that
   // quietly stopped carrying part of the share is invisible without this.
@@ -2883,7 +2880,11 @@ export type MountSharePayload = z.infer<typeof MountSharePayload>;
 export const ShareMountStatusRow = z.object({
   shareId: SHARE_ID,
   label: z.string().min(1).max(64),
-  status: z.enum(["updated", "unchanged", "ended"]),
+  // "damaged": this mount's stored pin cannot be read, so it will never
+  // refresh again. Permanent, like an ended share, and reported per ROW so
+  // one damaged record cannot stop the other mounts refreshing — which it
+  // could not do at all until this schema carried the word.
+  status: z.enum(["updated", "unchanged", "ended", "damaged"]),
   changedPaths: z.number().int().nonnegative(),
 });
 export type ShareMountStatusRow = z.infer<typeof ShareMountStatusRow>;
