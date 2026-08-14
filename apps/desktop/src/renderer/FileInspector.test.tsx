@@ -6271,6 +6271,16 @@ describe("engine markdown source view", () => {
     await user.type(screen.getByTestId("page-title"), " Retitled");
     await waitFor(() => expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled());
     act(() => pushSaveState("saved", 999));
+    // The premise is "the last edit SETTLED FIRST": wait until the settle has
+    // actually landed as Saved (a settle racing an unacknowledged delivery is
+    // deferred by design) before the deletion arrives.
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId("markdown-save-state")
+          .some((state) => state.dataset.state === "saved"),
+      ).toBe(true),
+    );
     act(() => pushSaveState("deleted", 999));
 
     expect(
