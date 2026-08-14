@@ -1,0 +1,10 @@
+{
+  "name": "t3-code",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.20.0",
+  "dependencies": {
+    "t3": "0.0.33"
+  }
+}

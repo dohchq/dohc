@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "name": "t3-code",
+  "displayName": "T3 Code",
+  "entry": "src/main.ts",
+  "webApps": [{ "id": "app", "title": "T3 Code" }],
+  "allowSkippedScripts": [
+    "content-type",
+    "eventsource",
+    "express-rate-limit",
+    "ip-address",
+    "msgpackr",
+    "msgpackr-extract",
+    "node-pty",
+    "path-to-regexp",
+    "regex-utilities",
+    "standardwebhooks",
+    "undici",
+    "uuid"
+  ]
+}
