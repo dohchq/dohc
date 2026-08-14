@@ -206,12 +206,22 @@ export const WorkspaceSummary = z.object({
   shareMounts: z
     .array(
       z.object({
+        // Both REQUIRED, damaged or not: they are what the Remove action is
+        // addressed by (`shareId`) and what names the folder on disk
+        // (`label`). A row that cannot supply them cannot be acted on, so it
+        // is the one shape that is dropped instead of kept.
         shareId: z.string().min(1).max(200),
         label: z.string().min(1).max(64),
         granterEmail: z.string().min(3).max(320).nullable(),
         // The pinned level (#646), so a mount the relay no longer lists can
-        // still say what it grants.
-        access: SHARE_ACCESS,
+        // still say what it grants. Absent ONLY when `damaged` says the
+        // stored grant could not be read.
+        access: SHARE_ACCESS.optional(),
+        // The stored grant is unreadable. The row is KEPT so the mount stays
+        // removable: its folder is on disk, and dropping the row would strand
+        // it with no way back through the UI. It shows no level, refreshes
+        // nothing, and says what happened.
+        damaged: z.literal(true).optional(),
         ended: z.boolean().optional(),
         skippedOps: ShareSkippedOpsSummary.optional(),
       }),
@@ -2557,7 +2567,11 @@ export const RelayShareGrantedRow = z.object({
   // account yet); the recipientEmail carries who it was shared with (PR 18).
   recipientUserId: z.string().min(1).max(256).nullable(),
   recipientEmail: EMAIL_STRING.nullable(),
-  selector: RelayShareSelector,
+  // null when the relay could not read this row's stored selector. The row
+  // stays listed so ending the share remains possible; it states the damage
+  // rather than a level nobody granted (#646).
+  selector: RelayShareSelector.nullable(),
+  damaged: z.literal(true).optional(),
   createdAtMs: z.number().int().nonnegative(),
   revokedAtMs: z.number().int().nonnegative().nullable(),
   shareCode: z.string().min(1).max(4096),
@@ -2570,7 +2584,9 @@ export type RelayShareGrantedRow = z.infer<typeof RelayShareGrantedRow>;
 export const RelayShareReceivedRow = z.object({
   shareId: SHARE_ID,
   granterEmail: EMAIL_STRING.nullable(),
-  selector: RelayShareSelector,
+  // null when the relay could not read this row's stored selector (#646).
+  selector: RelayShareSelector.nullable(),
+  damaged: z.literal(true).optional(),
   createdAtMs: z.number().int().nonnegative(),
   shareCode: z.string().min(1).max(4096),
 });

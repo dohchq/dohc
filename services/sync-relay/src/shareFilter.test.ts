@@ -66,6 +66,29 @@ describe("share selector validation", () => {
     ).toMatchObject({ ok: false, code: "invalid_access" });
   });
 
+  // The level is checked FIRST, so a caller that names no level always hears
+  // the same thing — whatever else is also wrong. Otherwise a bad path
+  // decided which of two refusals a caller saw, and a caller fixing paths
+  // would only then discover the level was missing too.
+  it("answers invalid_access even when the paths are wrong as well", () => {
+    for (const paths of [
+      [".env"],
+      ["../escape.md"],
+      [""],
+      Array.from({ length: MAX_SHARE_PATHS + 1 }, (_, i) => `f${i}.md`),
+      "not-an-array",
+    ]) {
+      const result = validateShareSelector({ paths });
+      expect(result.ok, JSON.stringify(paths).slice(0, 30)).toBe(false);
+      if (!result.ok) {
+        expect(
+          result.code,
+          `MUTATION: a bad path decided the refusal for ${JSON.stringify(paths).slice(0, 30)}`,
+        ).toBe("invalid_access");
+      }
+    }
+  });
+
   it("refuses every access value that is not exactly view, comment, or edit", () => {
     for (const access of ["View", "COMMENT", " view", "view ", "viewer", "read-write", 42, null]) {
       const result = validateShareSelector({ paths: ["docs"], access });
@@ -76,7 +99,7 @@ describe("share selector validation", () => {
 
   it("refuses secret-classified paths at grant time, including encoded disguises", () => {
     for (const path of [".env", "config/.env", "app.env", ".env.local", "secrets%2eenv"]) {
-      const result = validateShareSelector({ paths: [path] });
+      const result = validateShareSelector({ paths: [path], access: "view" });
       expect(result.ok, path).toBe(false);
       if (!result.ok) expect(result.code).toBe("secret_path");
     }
@@ -84,7 +107,7 @@ describe("share selector validation", () => {
 
   it("refuses traversal, absolute, and reserved paths", () => {
     for (const path of ["../outside.md", "/etc/passwd", "..%2f..%2fescape", ".dohc/engine/engine.db", "a/../../b"]) {
-      const result = validateShareSelector({ paths: [path] });
+      const result = validateShareSelector({ paths: [path], access: "view" });
       expect(result.ok, path).toBe(false);
       if (!result.ok) expect(["invalid_path", "secret_path"]).toContain(result.code);
     }
@@ -92,22 +115,25 @@ describe("share selector validation", () => {
 
   it("refuses shared-with-me selector paths (no transitive sharing of mounted shares)", () => {
     for (const path of ["shared-with-me/alex/brief.md", "Shared-With-Me/alex", "shared-with-me"]) {
-      const result = validateShareSelector({ paths: [path] });
+      const result = validateShareSelector({ paths: [path], access: "view" });
       expect(result.ok, path).toBe(false);
       if (!result.ok) expect(result.code).toBe("invalid_path");
     }
   });
 
   it("requires at least one path or a version and caps the path count", () => {
-    expect(validateShareSelector({})).toMatchObject({ ok: false, code: "empty_selector" });
-    expect(validateShareSelector({ paths: [] })).toMatchObject({ ok: false, code: "empty_selector" });
+    expect(validateShareSelector({ access: "view" })).toMatchObject({ ok: false, code: "empty_selector" });
+    expect(validateShareSelector({ paths: [], access: "view" })).toMatchObject({ ok: false, code: "empty_selector" });
     expect(
-      validateShareSelector({ paths: Array.from({ length: MAX_SHARE_PATHS + 1 }, (_, i) => `f${i}.md`) }),
+      validateShareSelector({
+        paths: Array.from({ length: MAX_SHARE_PATHS + 1 }, (_, i) => `f${i}.md`),
+        access: "view",
+      }),
     ).toMatchObject({ ok: false, code: "too_many_paths" });
     expect(
       validateShareSelector({ versionId: "version-1", access: "view" }),
     ).toMatchObject({ ok: true });
-    expect(validateShareSelector({ versionId: "  padded " })).toMatchObject({
+    expect(validateShareSelector({ versionId: "  padded ", access: "view" })).toMatchObject({
       ok: false,
       code: "invalid_version",
     });
@@ -121,7 +147,7 @@ describe("share selector validation", () => {
   it("refuses every version id the shared rule refuses", () => {
     for (const versionId of ["", "   ", " v1", "v1 ", "v".repeat(MAX_SHARE_VERSION_ID_CHARS + 1)]) {
       expect(
-        validateShareSelector({ versionId }),
+        validateShareSelector({ versionId, access: "view" }),
         `MUTATION: accepting ${JSON.stringify(versionId)} makes a no-paths selector a whole-workspace grant`,
       ).toMatchObject({ ok: false, code: "invalid_version" });
       expect(isValidShareVersionId(versionId)).toBe(false);
@@ -142,9 +168,11 @@ describe("share selector validation", () => {
   it("names the observed length when a version id is too long", () => {
     const barelyOver = validateShareSelector({
       versionId: "v".repeat(MAX_SHARE_VERSION_ID_CHARS + 1),
+      access: "view",
     });
     const wildlyOver = validateShareSelector({
       versionId: "v".repeat(10_000),
+      access: "view",
     });
     if (barelyOver.ok || wildlyOver.ok) throw new Error("both must be refused");
 

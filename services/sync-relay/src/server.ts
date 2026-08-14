@@ -248,9 +248,14 @@ export function createSyncRelayHandler({
     const selector = parseAnyShareSelectorJson(share.selectorJson);
     const base = {
       shareId: share.shareId,
-      // An unreadable row still needs a displayable shape: this listing has
-      // no 404 to answer with. Selects nothing, at the narrowest level.
-      selector: selector ?? { paths: [], versionId: null, access: "view" as const },
+      // An unreadable row says so. It does NOT get a stand-in selector: a
+      // fabricated `view` would state a level nobody granted, on a row whose
+      // own reads answer 404. The row stays listed because it is the
+      // caller's own share and ending it must remain possible — the reverse
+      // path is the invariant here, and listing it reveals nothing the
+      // caller did not already have.
+      selector,
+      ...(selector ? {} : { damaged: true as const }),
       createdAtMs: share.createdAtMs,
     };
     if (side === "granted") {

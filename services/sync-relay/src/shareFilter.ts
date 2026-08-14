@@ -178,6 +178,19 @@ export function validateShareSelector(input: {
   versionId?: unknown;
   access?: unknown;
 }): ShareSelectorValidation {
+  const access = input.access;
+  if (!isShareAccessValue(access)) {
+    return {
+      ok: false,
+      code: RELAY_ERRORS.invalid_access.code,
+      message: 'access must be "view", "comment", or "edit"',
+    };
+  }
+  // FIRST, before paths or version. A share is minted here and the level is
+  // required (#646, decision G at the minting boundary): a caller that names
+  // no level has not chosen `view`, it has failed to say what it grants. It
+  // is checked first so that answer is the SAME whatever else is wrong —
+  // otherwise a bad path decided which of two refusals a caller saw.
   const rawPaths = input.paths ?? [];
   if (!Array.isArray(rawPaths)) {
     return {
@@ -255,18 +268,6 @@ export function validateShareSelector(input: {
       ok: false,
       code: RELAY_ERRORS.empty_selector.code,
       message: "a share must select at least one path or a version",
-    };
-  }
-  // Required, with no default (#646). A share is minted here, and decision G
-  // — the level is required where it lives — applies at the minting boundary
-  // too. A caller that sends nothing has not chosen `view`, it has failed to
-  // say what it grants, and the relay refuses rather than choosing for it.
-  const access = input.access;
-  if (!isShareAccessValue(access)) {
-    return {
-      ok: false,
-      code: RELAY_ERRORS.invalid_access.code,
-      message: 'access must be "view", "comment", or "edit"',
     };
   }
   const deduped = [...new Set(paths)].sort();

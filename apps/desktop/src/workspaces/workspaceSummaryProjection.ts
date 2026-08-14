@@ -23,10 +23,15 @@ import {
 //   keeps its marker, loses only its level, and carries `damaged` so the
 //   shell can say what happened.
 //
-//   A share MOUNT row is DESCRIPTIVE. Read-only enforcement for
-//   `shared-with-me/` is path-based and independent of these records, so an
-//   unreadable row is dropped from the listing. Nothing about the mount's
-//   restrictions depends on it.
+//   A share MOUNT row carries no RESTRICTION — read-only enforcement for
+//   `shared-with-me/` is path-based and independent of these records — but it
+//   does carry MANAGEABILITY. The mount's folder is on disk, and the row is
+//   what the Remove action is addressed by, so an unreadable row is kept and
+//   marked rather than dropped. Dropping it would strand a folder the user
+//   can no longer remove.
+//
+//   The one mount shape still dropped is a row that cannot name itself: with
+//   no readable `shareId` or `label` there is nothing to remove or render.
 //
 // Damage to the WORKSPACE itself still throws, which is the behaviour the
 // refusal screen already exists for (see `nativeWorkspaceSummaries`). Hiding
@@ -37,12 +42,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// Every field carried into a DAMAGED shape has to satisfy the schema that
+// shape is parsed against. Twice now, a value the schema refused turned the
+// fallback into the failure it was written to prevent — so damaged shapes are
+// built from bounded reads, never from raw ones.
+function boundedString(value: unknown, min: number, max: number): string | null {
+  return typeof value === "string" && value.length >= min && value.length <= max
+    ? value
+    : null;
+}
+
 /**
  * Project one registry entry for the renderer.
  *
- * A share view keeps its marker even when its grant is unreadable. Unreadable
- * mount rows are dropped. Anything still unreadable after that is the
- * workspace itself, and throws.
+ * A share view keeps its marker even when its grant is unreadable, and a
+ * mount row keeps its identity so it stays removable. Anything still
+ * unreadable after that is the workspace itself, and throws.
  */
 export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
   const shareViewShape = WorkspaceSummary.shape.shareView;
@@ -66,11 +81,11 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
     // load. Bounded to the schema's own limits for the same reason the
     // granter email is: an out-of-range value carried into the damaged shape
     // would fail the summary parse and throw out of the whole projection.
-    const rawId = isRecord(rawShareView) ? rawShareView.shareId : undefined;
-    const shareId =
-      typeof rawId === "string" && rawId.length >= 1 && rawId.length <= 200
-        ? rawId
-        : null;
+    const shareId = boundedString(
+      isRecord(rawShareView) ? rawShareView.shareId : undefined,
+      1,
+      200,
+    );
     const readable =
       shareId !== null && level !== null && shareViewShape.safeParse(withLevel).success;
     // The degraded marker keeps the stance and drops only the level. It is
@@ -91,11 +106,24 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
   const rawMounts: unknown = entry.shareMounts;
   const shareMounts = Array.isArray(rawMounts)
     ? rawMounts
-        .map((row: unknown) =>
-          isRecord(row)
-            ? { ...row, access: readableShareLevel(row.grantedSelector) ?? undefined }
-            : row,
-        )
+        .map((row: unknown) => {
+          if (!isRecord(row)) return row;
+          const level = readableShareLevel(row.grantedSelector);
+          const healthy = { ...row, access: level ?? undefined };
+          if (level !== null && shareMountsShape.safeParse([healthy]).success) {
+            return healthy;
+          }
+          // Damaged, but KEPT: the mount's folder is on disk, and the Remove
+          // action is the only way back. Every field is bounded to the wire
+          // schema here, because a value it refuses would drop the row and
+          // strand the folder — the failure this branch exists to prevent.
+          return {
+            shareId: boundedString(row.shareId, 1, 200),
+            label: boundedString(row.label, 1, 64),
+            granterEmail: boundedString(row.granterEmail, 3, 320),
+            damaged: true as const,
+          };
+        })
         .filter((row) => shareMountsShape.safeParse([row]).success)
     : undefined;
 

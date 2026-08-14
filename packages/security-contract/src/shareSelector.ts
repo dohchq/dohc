@@ -1,3 +1,6 @@
+import { validateUserWritePath } from "@dohc/workspace-core";
+import { classifyEngineFilePath } from "./enginePathFloor";
+
 // The share selector's VERSION and ACCESS dimensions, as one rule in one
 // place.
 //
@@ -36,6 +39,27 @@ export function isValidShareVersionId(value: unknown): value is string {
     value.trim() === value &&
     value.length <= MAX_SHARE_VERSION_ID_CHARS
   );
+}
+
+/**
+ * Whether `value` is a path the relay could have issued in a share selector.
+ *
+ * The relay accepts a path only if it is a non-empty string that validates,
+ * normalizes to itself, and classifies as tracked — it stores the NORMALIZED
+ * form, so anything else is a path it never wrote (`validateShareSelector` in
+ * `services/sync-relay/src/shareFilter.ts`, which expands the same rule into
+ * separate branches because it owes distinct error codes at create time).
+ *
+ * Every surface that reads a selector BACK applies this, for the same reason
+ * the version rule lives here: a reader that accepts more than the writer
+ * issues will accept damage, and `""` is the path-shaped version of the empty
+ * version id that got through once already.
+ */
+export function isShareablePath(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0) return false;
+  const validated = validateUserWritePath(value);
+  if (!validated.ok || validated.normalized !== value) return false;
+  return classifyEngineFilePath(validated.normalized).kind === "tracked";
 }
 
 /**

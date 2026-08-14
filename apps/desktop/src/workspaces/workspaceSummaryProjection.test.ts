@@ -92,7 +92,7 @@ describe("workspace summary projection", () => {
     expect(summary.shareView?.access).toBe("view");
   });
 
-  it("omits only the unreadable mount and keeps the readable ones", () => {
+  it("marks the unreadable mount and leaves the readable ones alone", () => {
     const summary = workspaceSummaryFor(
       entry({
         shareMounts: [
@@ -104,7 +104,13 @@ describe("workspace summary projection", () => {
     );
     expect(summary.shareMounts?.map((m) => m.shareId)).toEqual([
       "m-good",
+      "m-stale",
       "m-good-2",
+    ]);
+    expect(summary.shareMounts?.map((m) => m.access)).toEqual([
+      "view",
+      undefined,
+      "edit",
     ]);
   });
 
@@ -178,6 +184,33 @@ describe("workspace summary projection", () => {
     }
   });
 
+  // The mount and open handlers used to parse the RAW registry record. A
+  // record nests each level under its pinned grant, so the wire schema could
+  // not be satisfied: every mount threw at the end and rolled back, and a
+  // freshly opened share view reached the renderer with no level. The unit
+  // suites missed it because they never drove a handler with a real record.
+  it("projects a RAW registry record, level and all", () => {
+    const summary = workspaceSummaryFor(
+      entry({
+        shareView: shareView({ ...goodSelector, access: "comment" }),
+        shareMounts: [
+          {
+            shareId: "m-1",
+            label: "alex",
+            granterEmail: "alex@dohc.test",
+            relayUrl: "http://relay.test",
+            grantedSelector: goodSelector,
+          },
+        ],
+      }),
+    );
+    expect(
+      summary.shareMounts?.[0]?.access,
+      "MUTATION: a raw parse cannot carry the level; it lives under grantedSelector",
+    ).toBe("view");
+    expect(summary.shareView?.access).toBe("comment");
+  });
+
   it("treats an ABSENT share view as an ordinary workspace", () => {
     expect(workspaceSummaryFor(entry()).shareView).toBeUndefined();
     expect(workspaceSummaryFor(entry({ shareView: undefined })).shareView).toBeUndefined();
@@ -204,7 +237,59 @@ describe("workspace summary projection", () => {
     }
   });
 
-  it("drops a mount whose pinned grant the pull would refuse", () => {
+  // A mount's folder is on disk, and this row is what the Remove action is
+  // addressed by. Dropping it would strand a folder the user can no longer
+  // remove, so the row is kept, marked, and stripped of its level.
+  it("keeps a damaged mount removable, with no level and a bounded shape", () => {
+    const summary = workspaceSummaryFor(
+      entry({
+        shareMounts: [
+          mount("m-good", "alex", goodSelector),
+          mount("m-stale", "sam", staleSelector),
+          // Fields the schema would refuse must not ride into the damaged
+          // row: an unbounded email here would drop the row and strand it.
+          {
+            shareId: "m-bademail",
+            label: "kim",
+            granterEmail: "x",
+            grantedSelector: staleSelector,
+          },
+        ],
+      }),
+    );
+    expect(
+      summary.shareMounts?.map((m) => m.shareId),
+      "MUTATION: dropping a damaged mount strands its folder with no way to remove it",
+    ).toEqual(["m-good", "m-stale", "m-bademail"]);
+    const stale = summary.shareMounts?.find((m) => m.shareId === "m-stale");
+    expect(stale?.damaged).toBe(true);
+    expect(stale?.access).toBeUndefined();
+    expect(stale?.label).toBe("sam");
+    // The out-of-range email is dropped to null rather than taking the row.
+    expect(
+      summary.shareMounts?.find((m) => m.shareId === "m-bademail")?.granterEmail,
+    ).toBeNull();
+  });
+
+  // The one mount shape with nothing to act on: no id, or no label, means
+  // nothing to remove and nothing to name.
+  it("drops only a mount that cannot name itself", () => {
+    const summary = workspaceSummaryFor(
+      entry({
+        shareMounts: [
+          mount("m-good", "alex", goodSelector),
+          { label: "no-id", granterEmail: null, grantedSelector: goodSelector },
+          { shareId: "no-label", granterEmail: null, grantedSelector: goodSelector },
+        ],
+      }),
+    );
+    expect(summary.shareMounts?.map((m) => m.shareId)).toEqual(["m-good"]);
+  });
+
+  // Same completeness rule as the share view, same verdict as the pull: a
+  // selector the pull refuses shows no level here. The row still stays, so
+  // the mount stays removable.
+  it("marks a mount whose pinned grant the pull would refuse", () => {
     const summary = workspaceSummaryFor(
       entry({
         shareMounts: [
@@ -218,7 +303,15 @@ describe("workspace summary projection", () => {
         ],
       }),
     );
-    expect(summary.shareMounts?.map((m) => m.shareId)).toEqual(["m-good"]);
+    expect(summary.shareMounts?.map((m) => m.shareId)).toEqual([
+      "m-good",
+      "m-empty",
+      "m-badversion",
+    ]);
+    expect(summary.shareMounts?.filter((m) => m.damaged).map((m) => m.shareId)).toEqual(
+      ["m-empty", "m-badversion"],
+    );
+    expect(summary.shareMounts?.[0]?.access).toBe("view");
   });
 
   // Damage to the WORKSPACE is not share-sized and must not be swallowed:

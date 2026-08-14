@@ -300,7 +300,11 @@ describe("share grants", () => {
       request(
         GRANTER,
         `/sync/${WORKSPACE}/shares`,
-        jsonBody({ recipientUserId: RECIPIENT, paths: ["config/secrets%2eenv"] }),
+        jsonBody({
+          recipientUserId: RECIPIENT,
+          paths: ["config/secrets%2eenv"],
+          access: "view",
+        }),
       ),
     );
     expect(encodedSecret.status).toBe(400);
@@ -310,7 +314,11 @@ describe("share grants", () => {
       request(
         GRANTER,
         `/sync/${WORKSPACE}/shares`,
-        jsonBody({ recipientUserId: RECIPIENT, paths: ["../other-workspace/file.md"] }),
+        jsonBody({
+          recipientUserId: RECIPIENT,
+          paths: ["../other-workspace/file.md"],
+          access: "view",
+        }),
       ),
     );
     expect(traversal.status).toBe(400);

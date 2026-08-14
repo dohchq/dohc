@@ -19,6 +19,8 @@ function errorMessage(cause: unknown): string {
 }
 
 function selectorLabel(share: RelayShareGrantedRow): string {
+  // A row the relay could not read still lists, so ending it stays possible.
+  if (!share.selector) return "Unreadable share";
   if (share.selector.versionId) {
     const suffix = share.selector.paths.length > 0
       ? ` (${share.selector.paths.join(", ")})`
@@ -105,12 +107,15 @@ export function SharedByMeList() {
               <span className="truncate font-mono text-[11px] text-ink">
                 {selectorLabel(share)}
               </span>
-              <ShareAccessBadge access={share.selector.access} />
+              {share.selector ? (
+                <ShareAccessBadge access={share.selector.access} />
+              ) : null}
             </div>
             <div className="truncate text-[11px] text-subtle">
               {share.revokedAtMs !== null
                 ? `Ended — was shared with ${share.recipientEmail ?? share.recipientUserId}`
                 : `Shared with ${share.recipientEmail ?? share.recipientUserId}`}
+              {share.selector ? "" : " — dohc can't read what this share grants"}
             </div>
           </div>
           {share.revokedAtMs === null ? (

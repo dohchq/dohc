@@ -21,8 +21,11 @@ type MountInfo = {
   label: string;
   granterEmail?: string | null;
   // The pinned level (#646), so a mount the relay no longer lists still says
-  // what it grants.
-  access: ShareAccess;
+  // what it grants. Absent when `damaged` says the grant could not be read.
+  access?: ShareAccess;
+  // The stored grant is unreadable. The row stays so the mount can still be
+  // removed; it shows no level and says what happened instead.
+  damaged?: true;
   ended?: boolean;
   // Ops this mount's pulls skipped. Durable: the cursor committed past them.
   skippedOps?: {
@@ -45,6 +48,7 @@ function errorMessage(cause: unknown): string {
 }
 
 function selectorLabel(share: RelayShareReceivedRow): string {
+  if (!share.selector) return "Unreadable share";
   if (share.selector.versionId) {
     const suffix =
       share.selector.paths.length > 0 ? ` (${share.selector.paths.join(", ")})` : "";
@@ -316,13 +320,15 @@ export function SharedWithMeList(props: {
               <span className="truncate font-mono text-[11px] text-ink">
                 {`shared-with-me/${mount.label}`}
               </span>
-              <ShareAccessBadge access={mount.access} />
+              {mount.access ? <ShareAccessBadge access={mount.access} /> : null}
             </div>
             <div className="truncate text-[11px] text-subtle">
               {`From ${mount.granterEmail ?? "another dohc user"}`}
-              {mount.ended
-                ? " — ended; your copy stays readable but won't update"
-                : " — not listed by the relay right now"}
+              {mount.damaged
+                ? " — dohc can't read what this share grants"
+                : mount.ended
+                  ? " — ended; your copy stays readable but won't update"
+                  : " — not listed by the relay right now"}
             </div>
             <SkippedLine mount={mount} onDismiss={dismissSkips} />
           </div>
@@ -351,19 +357,31 @@ export function SharedWithMeList(props: {
                 <span className="truncate font-mono text-[11px] text-ink">
                   {selectorLabel(share)}
                 </span>
-                {/* The PINNED level wins whenever this share is mounted.
-                    The pin is what the recipient's own pulls enforce, so a
-                    relay restating a wider level must not get to announce
-                    itself here. Unmounted rows have no pin yet, so the relay's
-                    statement is all there is. */}
-                <ShareAccessBadge
-                  access={mounted?.access ?? share.selector.access}
-                />
+                {/* The PINNED level wins whenever this share is mounted. The
+                    pin is what the recipient's own pulls enforce, so a relay
+                    restating a wider level must not get to announce itself
+                    here — including by standing in for a pin that could not be
+                    read. A mounted row shows the pin or nothing. Unmounted
+                    rows have no pin yet, so the relay's statement is all there
+                    is. */}
+                {mounted ? (
+                  mounted.access ? (
+                    <ShareAccessBadge access={mounted.access} />
+                  ) : null
+                ) : share.selector ? (
+                  <ShareAccessBadge access={share.selector.access} />
+                ) : null}
               </div>
               <div className="truncate text-[11px] text-subtle">
                 {`From ${share.granterEmail ?? "another dohc user"}`}
                 {mounted
-                  ? ` — in this workspace as shared-with-me/${mounted.label}${mounted.ended ? " (ended)" : ""}`
+                  ? ` — in this workspace as shared-with-me/${mounted.label}${
+                      mounted.damaged
+                        ? "; dohc can't read what this share grants"
+                        : mounted.ended
+                          ? " (ended)"
+                          : ""
+                    }`
                   : ""}
               </div>
               {mounted ? (
@@ -384,7 +402,9 @@ export function SharedWithMeList(props: {
               <button
                 type="button"
                 data-testid="shared-with-me-mount"
-                disabled={busyShareId === share.shareId}
+                // A share whose grant the relay cannot read cannot be
+                // mounted: the pin would have nothing to enforce.
+                disabled={busyShareId === share.shareId || !share.selector}
                 onClick={() => void mount(share)}
                 className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
               >

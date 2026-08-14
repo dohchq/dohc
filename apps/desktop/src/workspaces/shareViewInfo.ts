@@ -1,6 +1,7 @@
 import {
   type ShareAccess,
   isShareAccessValue,
+  isShareablePath,
   isValidShareVersionId,
 } from "@dohc/security-contract/share-selector";
 import {
@@ -87,9 +88,9 @@ function parseSelector(
   };
   if (record.kind === "chat-channel") return null;
   if (!Array.isArray(record.paths)) throw new ShareSelectorInvalidError(shareId);
-  if (
-    !record.paths.every((path) => typeof path === "string" && path.length > 0)
-  ) {
+  // Same shared rule as the registry read-back: a path the relay could not
+  // have issued is a response this client cannot enforce.
+  if (!record.paths.every((path) => isShareablePath(path))) {
     throw new ShareSelectorInvalidError(shareId);
   }
   // The version dimension is held to the relay's OWN rule, from the one

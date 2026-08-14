@@ -64,6 +64,13 @@ describe("share-view pinned level", () => {
       { paths: ["docs"], versionId: "", access: "view" },
       { paths: ["docs"], versionId: " v1 ", access: "view" },
       { paths: "docs", versionId: null, access: "view" },
+      // Paths the relay could never have issued. `""` is the path-shaped
+      // version of the empty version id that got through a reader once.
+      { paths: [""], versionId: null, access: "view" },
+      { paths: ["../escape.md"], versionId: null, access: "view" },
+      { paths: [".env"], versionId: null, access: "view" },
+      { paths: ["docs/"], versionId: null, access: "view" },
+      { paths: ["docs//notes.md"], versionId: null, access: "view" },
     ]) {
       expect(readableShareLevel(selector), JSON.stringify(selector)).toBeNull();
     }

@@ -340,7 +340,10 @@ import {
   shareViewGranterEmail,
   shareViewIsPresent,
 } from "./workspaces/shareViewMarker";
-import { workspaceSummariesFrom } from "./workspaces/workspaceSummaryProjection";
+import {
+  workspaceSummariesFrom,
+  workspaceSummaryFor,
+} from "./workspaces/workspaceSummaryProjection";
 import {
   assertSharedChannelWritable,
   createKeyedSerializer,
@@ -1771,7 +1774,9 @@ async function mcpRuntimeConfigFor(rootPath: string): Promise<{
   // Defense in depth: managed agent runs are already refused on shared views,
   // but if a runtime MCP is ever spawned for one it must be the read-only
   // profile — never the write-capable server.
-  const config = mcpConfigFor(rootPath, { readOnly: !!workspace?.shareView });
+  const config = mcpConfigFor(rootPath, {
+    readOnly: shareViewIsPresent(workspace?.shareView),
+  });
   const env = mcpCloudEnvironment({
     workspace,
     credentials: cachedCredentials,
@@ -1887,7 +1892,9 @@ const activity = createWorkspaceActivity(notifyRenderer, {
       {
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
-        shareView: !!findWorkspace(workspace.workspaceId)?.shareView,
+        shareView: shareViewIsPresent(
+          findWorkspace(workspace.workspaceId)?.shareView,
+        ),
       },
       hooks,
       requireEngineSessions(),
@@ -4118,7 +4125,7 @@ function registerIpcHandlers(
       // the renderer. Sharing itself is offered only on synced, non-shared
       // workspaces (a share needs a relay-side workspace to grant from).
       const registryEntry = findWorkspace(input.workspaceId);
-      const isSharedView = !!registryEntry?.shareView;
+      const isSharedView = shareViewIsPresent(registryEntry?.shareView);
       // Share-mount paths (shared-with-me/…) are a read-only projection of
       // someone else's files: no create/rename/delete/import/share — main
       // owns the menu, so the reduction cannot be bypassed by the renderer.
@@ -4942,7 +4949,7 @@ function registerIpcHandlers(
       );
     }
     const entry = requireWorkspace(input.workspaceId);
-    if (entry.shareView) {
+    if (shareViewIsPresent(entry.shareView)) {
       throw new Error("This is a shared view — only the original workspace can be shared.");
     }
     const { remote } = await remoteForWorkspace(input.workspaceId);
@@ -5235,7 +5242,7 @@ function registerIpcHandlers(
       "Chats",
     );
     const entry = requireWorkspace(input.workspaceId);
-    if (entry.shareView) {
+    if (shareViewIsPresent(entry.shareView)) {
       throw new Error("Shared views are read-only — join channels from a workspace you own.");
     }
     await warmCredentialCache();
@@ -5311,7 +5318,7 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = DismissShareSkipsPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    if (input.shareId === undefined && !workspace.shareView) {
+    if (input.shareId === undefined && !shareViewIsPresent(workspace.shareView)) {
       throw new Error("This workspace is not a shared view.");
     }
     if (
@@ -5492,7 +5499,10 @@ function registerIpcHandlers(
       );
     }
     notifyRenderer();
-    const summary = WorkspaceSummary.parse(findWorkspace(created.workspaceId));
+    // Through the PROJECTION, not a raw parse: the level lives under the
+    // record's pinned grant, and a raw parse would strip it and hand the
+    // renderer a fresh share view with no level to state.
+    const summary = workspaceSummaryFor(requireWorkspace(created.workspaceId));
     return OpenSharedViewResult.parse({ workspace: summary });
   });
 
@@ -5714,7 +5724,10 @@ function registerIpcHandlers(
       refreshNativeWorkspaceSurfaces();
       notifyRenderer();
       return MountShareResult.parse({
-        workspace: WorkspaceSummary.parse(findWorkspace(workspace.workspaceId)),
+        // Through the PROJECTION: a raw registry record nests each mount's
+        // level under its pinned grant, so a raw parse cannot satisfy the
+        // wire schema and every mount would fail here and roll back.
+        workspace: workspaceSummaryFor(requireWorkspace(workspace.workspaceId)),
         mount: {
           shareId: mount.shareId,
           label: mount.label,
@@ -7964,7 +7977,7 @@ function registerIpcHandlers(
     const input = AcceptDmPayload.parse(payload);
     const { workspace } = await requireEngineCapture(input.workspaceId, "Chats");
     const entry = requireWorkspace(input.workspaceId);
-    if (entry.shareView) {
+    if (shareViewIsPresent(entry.shareView)) {
       throw new Error(
         "Shared views are read-only — add this conversation to a workspace you own.",
       );
