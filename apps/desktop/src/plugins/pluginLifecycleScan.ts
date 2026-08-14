@@ -19,6 +19,16 @@ import {
   type DohcPluginManifest,
 } from "./pluginManifestSchema";
 
+// `prepublish` is deliberately absent. Measured against the pinned
+// pnpm@11.20.0 on 2026-08-14, with `postinstall` as the control in every
+// fixture:
+//   - Root project, `pnpm install`: the postinstall marker appeared, the
+//     prepublish marker did not.
+//   - Dependency (single-hook tarball fixtures, `pnpm install`): the
+//     postinstall-only dependency raised ERR_PNPM_IGNORED_BUILDS, while the
+//     prepublish-only dependency installed clean with no such notice.
+// pnpm never runs it on install, so listing it here would block packages that
+// legitimately use `prepublish` for publish-time work.
 const ROOT_HOOKS = [
   "pnpm:devPreinstall",
   "preinstall",

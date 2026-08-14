@@ -169,10 +169,15 @@ function canEnable(plugin: PluginStatusRecord): boolean {
   );
 }
 
+// Deliberately does not require disabledReason === "approval". An out-of-band
+// edit to a plugin the user had already disabled holds for approval carrying
+// the prior "user" reason, and that combination matched no other predicate —
+// the row offered no action at all and the user could only recover by
+// restoring the old bytes. Approving from here keeps the disabled bit:
+// PluginPipeline.approve reads the same reason and rebuilds without starting.
 function canApprove(plugin: PluginStatusRecord): boolean {
   return (
     plugin.status === "disabled-pending-approval" &&
-    plugin.disabledReason === "approval" &&
     plugin.approvedHash !== null &&
     plugin.sourceHash !== null &&
     plugin.sourceHash !== plugin.approvedHash

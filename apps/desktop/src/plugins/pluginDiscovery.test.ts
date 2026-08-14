@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ListPluginsResult } from "../ipc/bridgeContract";
 import { PLUGIN_MANIFEST_FILE_NAME } from "./pluginManifest";
 
 // A pure JS-level interception (never real filesystem permissions, which
@@ -209,5 +210,49 @@ describe("discoverInstalledPlugins", () => {
     expect(records[1]).toMatchObject({ directoryName: "broken", manifest: null, valid: false });
     expect(records[1]?.diagnostics[0]).toContain("could not be fully inspected");
     expect(records[1]?.diagnostics[0]).toContain(brokenRoot);
+  });
+
+  it("bounds the fallback id so one over-long directory cannot reject the whole list", async () => {
+    const root = await createWorkspace();
+    await writeManifest(root, "alpha");
+    // A directory name may be 255 characters; a plugin id may be 214. With no
+    // manifest to name the plugin, the unbounded fallback made
+    // ListPluginsResult.parse reject every record, including this one's own
+    // diagnostics.
+    const overLongName = "b".repeat(255);
+    await mkdir(join(root, "plugins", overLongName));
+
+    const records = await discoverInstalledPlugins(root);
+
+    expect(records.map((record) => record.directoryName)).toEqual([
+      "alpha",
+      overLongName,
+    ]);
+    const invalid = records[1];
+    expect(invalid).toMatchObject({ manifest: null, valid: false });
+    expect(invalid?.id).toBe("b".repeat(214));
+    expect(invalid?.directoryName).toBe(overLongName);
+    expect(invalid?.diagnostics.join(" ")).toContain("at most 214 characters");
+
+    const parsed = ListPluginsResult.safeParse({
+      ok: true,
+      plugins: records.map((record) => ({
+        id: record.id,
+        directoryName: record.directoryName,
+        rootPath: record.rootPath,
+        valid: record.valid,
+        status: "discovered",
+        disabledReason: null,
+        runtimeStatus: null,
+        sourceHash: null,
+        approvedHash: null,
+        installedBaselineHash: null,
+        diagnostics: record.diagnostics,
+        warnings: [],
+        error: null,
+      })),
+    });
+
+    expect(parsed.success).toBe(true);
   });
 });

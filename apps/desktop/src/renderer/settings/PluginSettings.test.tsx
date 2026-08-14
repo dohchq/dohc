@@ -270,6 +270,29 @@ describe("PluginSettings", () => {
     expect(screen.getByTestId("plugin-approve").textContent).toBe("Approve");
   });
 
+  it("offers Approve for an out-of-band edit to an already user-disabled plugin", async () => {
+    // holdForApproval keeps the prior "user" reason for a plugin the user had
+    // already turned off. That combination matched no action predicate, so
+    // the row offered nothing and the only way back was restoring old bytes.
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [
+        plugin("user-disabled-plugin", {
+          status: "disabled-pending-approval",
+          disabledReason: "user",
+          runtimeStatus: "disabled",
+          sourceHash: HASH_B,
+        }),
+      ],
+    });
+
+    render(<PluginSettings workspaceId="ws-1" />);
+
+    expect((await screen.findByTestId("plugin-approve")).textContent).toBe(
+      "Approve",
+    );
+  });
+
   it("shows uninstall warnings and names files history cannot recover", async () => {
     const installed = plugin("edited-plugin");
     bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [installed] });

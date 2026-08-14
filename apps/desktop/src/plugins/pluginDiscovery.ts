@@ -29,6 +29,12 @@ export interface InstalledPluginRecord {
   valid: boolean;
 }
 
+// Mirrors PLUGIN_ID in ipc/bridgeContract.ts. A directory name may be up to
+// 255 characters, so a record with no manifest to name it would otherwise
+// carry an id that ListPluginsResult.parse rejects — taking the whole list
+// down with it, including the diagnostics needed to find the directory.
+const PLUGIN_ID_MAX_LENGTH = 214;
+
 function lexicalCompare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -37,8 +43,17 @@ function recordFromCandidate(candidate: PluginDiscoveryCandidate): InstalledPlug
   const manifest = candidate.manifestResult?.ok
     ? candidate.manifestResult.manifest
     : null;
+  const overLongDirectoryName = manifest === null &&
+    candidate.directoryName.length > PLUGIN_ID_MAX_LENGTH;
   const diagnostics = [
     ...candidate.diagnostics,
+    ...(overLongDirectoryName
+      ? [
+        `plugin directory name is ${candidate.directoryName.length} characters; ` +
+        `a plugin id is at most ${PLUGIN_ID_MAX_LENGTH} characters, so this ` +
+        "record reports a truncated id until its manifest names the plugin",
+      ]
+      : []),
     ...(candidate.manifestResult && !candidate.manifestResult.ok
       ? candidate.manifestResult.diagnostics
       : []),
@@ -48,7 +63,8 @@ function recordFromCandidate(candidate: PluginDiscoveryCandidate): InstalledPlug
       .map((path) => `nested manifest ignored at ${path}`),
   ];
   return {
-    id: manifest?.name ?? candidate.directoryName,
+    id: manifest?.name ??
+      candidate.directoryName.slice(0, PLUGIN_ID_MAX_LENGTH),
     directoryName: candidate.directoryName,
     rootPath: candidate.rootPath,
     manifest,
