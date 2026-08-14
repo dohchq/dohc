@@ -12,6 +12,19 @@ import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { formatZodIssues } from "./zodDiagnostics";
 
+/**
+ * The one bound on this file, enforced on both sides: a read refuses a file
+ * larger than this before parsing it, and a write refuses to produce one.
+ *
+ * A 500-record count cap used to sit in the schema as well. It rejected
+ * otherwise valid work — 501 ordinary plugins serialize to about 222 KB, well
+ * inside this limit — on size arithmetic rather than measurement, and it did
+ * not bound what it claimed to: a few records with long, heavily escaped
+ * plugin ids pass the count and still exceed the byte limit, which then made
+ * the file unreadable and took every plugin's state with it. Bounding the
+ * bytes directly bounds the thing that actually matters and rejects nothing
+ * that fits (#779 round 9 B4).
+ */
 export const MAX_PLUGIN_LOCAL_STATE_FILE_BYTES = 256 * 1024;
 
 const PluginSourceHash = z.string().regex(
@@ -29,31 +42,24 @@ export const PluginRecord = z.object({
   // source tree that never runs; a tampered bundle.mjs with an unchanged
   // source tree previously loaded without detection).
   approvedBundleHash: PluginSourceHash.optional(),
+  // The plugins/ directory this record was installed from. Discovery names a
+  // plugin from its manifest, so a plugin whose manifest breaks falls back to
+  // its directory name and no longer matches the key this record is stored
+  // under — "foo" against a record keyed "@scope/bar". That lost the
+  // installation, and with it the Uninstall action. The directory is the one
+  // identity a broken manifest cannot take away (#779 round 9 B3).
+  directoryName: z.string().min(1).max(255).optional(),
 }).strict();
 export type PluginRecordShape = z.infer<typeof PluginRecord>;
 
 export const PluginLocalState = z.object({
   version: z.literal(1),
-  // For ordinary UTF-8 plugin ids, indented JSON at these bounds is
-  // 221,538 bytes with every optional field present, 40,606 below
-  // MAX_PLUGIN_LOCAL_STATE_FILE_BYTES (262,144).
-  // A plugin id built almost entirely from characters JSON must escape can
-  // inflate past that on paper; the read/write byte-size gate — not this
-  // schema — is the actual backstop against an oversize file either way.
   plugins: z.record(
     // Plugin ids are manifest names, whose schema allows at most 214 characters.
     z.string().min(1).max(214, "plugin id must be 214 characters or fewer"),
     PluginRecord,
   ),
-}).strict().superRefine((state, ctx) => {
-  if (Object.keys(state.plugins).length > 500) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["plugins"],
-      message: "plugins: at most 500 entries allowed",
-    });
-  }
-});
+}).strict();
 export type PluginLocalState = z.infer<typeof PluginLocalState>;
 
 export const DEFAULT_PLUGIN_LOCAL_STATE: PluginLocalState = {
@@ -163,13 +169,20 @@ async function writePluginLocalState(
   state: PluginLocalState,
 ): Promise<void> {
   const path = pluginLocalStatePath(stateDir, workspaceRoot);
+  const body = `${JSON.stringify(PluginLocalState.parse(state), null, 2)}\n`;
+  const bytes = Buffer.byteLength(body, "utf8");
+  if (bytes > MAX_PLUGIN_LOCAL_STATE_FILE_BYTES) {
+    throw new Error(
+      `Plugin local state for ${path} is ${bytes} bytes with ` +
+        `${Object.keys(state.plugins).length} plugin records; the configured ` +
+        `limit is ${MAX_PLUGIN_LOCAL_STATE_FILE_BYTES} bytes. Uninstall ` +
+        "plugins in this workspace to get back under it.",
+    );
+  }
   const temporaryPath = `${path}.tmp-${process.pid}-${randomUUID()}`;
   await mkdir(dirname(path), { recursive: true });
   try {
-    await writeFile(
-      temporaryPath,
-      `${JSON.stringify(PluginLocalState.parse(state), null, 2)}\n`,
-    );
+    await writeFile(temporaryPath, body);
     await rename(temporaryPath, path);
   } finally {
     await unlink(temporaryPath).catch(() => undefined);

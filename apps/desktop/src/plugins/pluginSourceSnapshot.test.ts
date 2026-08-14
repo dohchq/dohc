@@ -10,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   DohcPluginManifest,
@@ -119,7 +119,7 @@ async function createPluginFixture(
   };
 }
 
-function runSnapshot(
+function stageSnapshot(
   fixture: PluginFixture,
 ): Promise<PluginSourceSnapshotResult> {
   return snapshotPluginSource({
@@ -130,6 +130,35 @@ function runSnapshot(
     pluginRoot: fixture.pluginRoot,
     manifest: fixture.manifest,
   });
+}
+
+/** Stages and publishes, the way an approved install does. */
+async function runSnapshot(
+  fixture: PluginFixture,
+): Promise<PluginSourceSnapshotResult> {
+  const result = await stageSnapshot(fixture);
+  if (result.ok) await result.publish();
+  return result;
+}
+
+function pluginDataRootFor(fixture: PluginFixture): string {
+  return join(
+    fixture.dohcDir,
+    "plugins",
+    pluginIdToSafePath(fixture.manifest.name),
+  );
+}
+
+/** Where a published snapshot lives, whatever path staging used. */
+function liveSnapshotRoot(fixture: PluginFixture): string {
+  return join(pluginDataRootFor(fixture), "snapshot");
+}
+
+/** Staged trees are siblings of the live root, so this is where they land. */
+async function stagingLeftovers(fixture: PluginFixture): Promise<string[]> {
+  const parent = join(fixture.dohcDir, "plugins");
+  const prefix = `${pluginIdToSafePath(fixture.manifest.name)}.snap-staging-`;
+  return (await readdir(parent)).filter((name) => name.startsWith(prefix));
 }
 
 function requireSuccess(
@@ -271,14 +300,15 @@ describe("snapshotPluginSource containment", () => {
 
     const result = requireSuccess(await runSnapshot(fixture));
 
-    expect(result.snapshotRoot).toBe(
+    const snapshotRoot = liveSnapshotRoot(fixture);
+    expect(snapshotRoot).toBe(
       join(fixture.dohcDir, "plugins", "@scope%2Fexample-plugin", "snapshot"),
     );
-    await expectMissing(join(result.snapshotRoot, "node_modules"));
-    await expectMissing(join(result.snapshotRoot, ".dohc"));
-    await expectMissing(join(result.snapshotRoot, "nested", ".dohc"));
+    await expectMissing(join(snapshotRoot, "node_modules"));
+    await expectMissing(join(snapshotRoot, ".dohc"));
+    await expectMissing(join(snapshotRoot, "nested", ".dohc"));
     await expect(readFile(
-      join(result.snapshotRoot, "nested", "included.txt"),
+      join(snapshotRoot, "nested", "included.txt"),
       "utf8",
     )).resolves.toBe("included\n");
     expect(result.pnpmPaths).toEqual({
@@ -290,6 +320,61 @@ describe("snapshotPluginSource containment", () => {
     await Promise.all(Object.values(result.pnpmPaths).map(async (path) => {
       expect((await lstat(path)).isDirectory()).toBe(true);
     }));
+  });
+});
+
+describe("snapshotPluginSource package-manager configuration", () => {
+  it.each([
+    [".npmrc", "@evil:registry=http://127.0.0.1:9/\n"],
+    [".pnpmfile.cjs", "module.exports = { hooks: {} };\n"],
+    [".pnpmfile.mjs", "export const hooks = {};\n"],
+    ["pnpm-workspace.yaml", "trust-lockfile: true\n"],
+  ])("rejects a plugin-authored %s", async (name, body) => {
+    const fixture = await createPluginFixture();
+    await writeFile(join(fixture.pluginRoot, name), body);
+
+    const failure = requireFailure(await stageSnapshot(fixture));
+
+    expect(failure.error.code).toBe("unsupported-package-manager-config");
+    expect(failure.error.message).toContain(name);
+    expect(failure.error.message).toContain("dohc's own pnpm configuration");
+    expect(failure.error.path).toBe(join(fixture.pluginRoot, name));
+    await expectMissing(liveSnapshotRoot(fixture));
+    expect(await stagingLeftovers(fixture)).toEqual([]);
+  });
+
+  it("rejects the scoped-registry attack before pnpm can read it (CERT779H)", async () => {
+    const fixture = await createPluginFixture();
+    // PNPM_CONFIG_REGISTRY pins only the default registry, so this file chose
+    // where every @evil-scoped dependency's bytes came from — and the install
+    // that fetched them ran before any approval gate.
+    await writeFile(
+      join(fixture.pluginRoot, ".npmrc"),
+      "@evil:registry=http://127.0.0.1:9/\nstrict-ssl=false\n",
+    );
+    await writeFile(
+      join(fixture.pluginRoot, "package.json"),
+      `${JSON.stringify({
+        name: fixture.manifest.name,
+        dependencies: { "@evil/pkg": "1.0.0" },
+      }, null, 2)}\n`,
+    );
+
+    const failure = requireFailure(await stageSnapshot(fixture));
+
+    expect(failure.error.code).toBe("unsupported-package-manager-config");
+    await expectMissing(liveSnapshotRoot(fixture));
+  });
+
+  it("still snapshots a plugin that ships no package-manager configuration", async () => {
+    const fixture = await createPluginFixture();
+    await writeFile(join(fixture.pluginRoot, "npmrc.md"), "docs about npmrc\n");
+    await writeFile(join(fixture.pluginRoot, "src", "pnpmfile.ts"), "export {};\n");
+
+    requireSuccess(await runSnapshot(fixture));
+
+    await expect(readFile(join(liveSnapshotRoot(fixture), "npmrc.md"), "utf8"))
+      .resolves.toBe("docs about npmrc\n");
   });
 });
 
@@ -490,9 +575,9 @@ describe("snapshotPluginSource canonical hash and replacement", () => {
 
   it("keeps the previous snapshot and removes staging after validation fails", async () => {
     const fixture = await createPluginFixture();
-    const first = requireSuccess(await runSnapshot(fixture));
+    requireSuccess(await runSnapshot(fixture));
     const originalPackageJson = await readFile(
-      join(first.snapshotRoot, "package.json"),
+      join(liveSnapshotRoot(fixture), "package.json"),
       "utf8",
     );
     await writeFile(
@@ -506,15 +591,67 @@ describe("snapshotPluginSource canonical hash and replacement", () => {
     const failure = requireFailure(await runSnapshot(fixture));
 
     expect(failure.error.code).toBe("unsupported-package-manager");
-    await expect(readFile(join(first.snapshotRoot, "package.json"), "utf8"))
+    await expect(readFile(join(liveSnapshotRoot(fixture), "package.json"), "utf8"))
       .resolves.toBe(originalPackageJson);
-    const pluginDataRoot = join(
-      fixture.dohcDir,
-      "plugins",
-      pluginIdToSafePath(fixture.manifest.name),
-    );
-    expect((await readdir(pluginDataRoot)).filter((name) =>
-      name.startsWith(".snap-staging-"))).toEqual([]);
+    expect(await stagingLeftovers(fixture)).toEqual([]);
+  });
+
+  it("leaves no staged tree behind after a discard", async () => {
+    const fixture = await createPluginFixture();
+    const staged = requireSuccess(await stageSnapshot(fixture));
+    expect(await stagingLeftovers(fixture)).toHaveLength(1);
+
+    await staged.discard();
+
+    expect(await stagingLeftovers(fixture)).toEqual([]);
+    await expectMissing(liveSnapshotRoot(fixture));
+  });
+
+  it("refuses to publish or discard a staged tree twice", async () => {
+    const fixture = await createPluginFixture();
+    const staged = requireSuccess(await stageSnapshot(fixture));
+
+    await staged.publish();
+
+    await expect(staged.publish()).rejects.toThrow(/already published or discarded/);
+    await expect(staged.discard()).rejects.toThrow(/already published or discarded/);
+    await expect(readFile(join(liveSnapshotRoot(fixture), "package.json"), "utf8"))
+      .resolves.toContain(fixture.manifest.name);
+  });
+
+  it("keeps the live snapshot untouched until publish", async () => {
+    const fixture = await createPluginFixture();
+    await writeFile(join(fixture.pluginRoot, "payload.txt"), "approved");
+    requireSuccess(await runSnapshot(fixture));
+    const livePayload = join(liveSnapshotRoot(fixture), "payload.txt");
+
+    await writeFile(join(fixture.pluginRoot, "payload.txt"), "unapproved");
+    const staged = requireSuccess(await stageSnapshot(fixture));
+
+    // The changed bytes are staged and hashed, and the live snapshot — the
+    // tree a panel and a brokered child both read — still serves the
+    // approved payload (#779 round 9 B1).
+    await expect(readFile(livePayload, "utf8")).resolves.toBe("approved");
+    await expect(readFile(join(staged.snapshotRoot, "payload.txt"), "utf8"))
+      .resolves.toBe("unapproved");
+
+    await staged.publish();
+
+    await expect(readFile(livePayload, "utf8")).resolves.toBe("unapproved");
+    expect(await stagingLeftovers(fixture)).toEqual([]);
+  });
+
+  it("stages beside the live root, never inside it", async () => {
+    const fixture = await createPluginFixture();
+    const staged = requireSuccess(await stageSnapshot(fixture));
+
+    // The child-process broker's containment is rooted at the live root, so
+    // unpublished bytes parked inside it would be reachable (#779 round 7
+    // A1, round 9 B1).
+    expect(staged.snapshotRoot.startsWith(pluginDataRootFor(fixture) + sep))
+      .toBe(false);
+    expect(await stagingLeftovers(fixture)).toHaveLength(1);
+    await staged.discard();
   });
 
   it("preserves an installed node_modules across a hash-check reconcile that finds no change (fixround Section B item 11)", async () => {
@@ -523,8 +660,8 @@ describe("snapshotPluginSource canonical hash and replacement", () => {
     // Stands in for a real pnpm install's node_modules living inside the
     // snapshot — excluded from the source copy itself, so only a
     // destructive replace (not a source change) can remove it.
-    const installedMarker = join(first.snapshotRoot, "node_modules", ".marker");
-    await mkdir(join(first.snapshotRoot, "node_modules"));
+    const installedMarker = join(liveSnapshotRoot(fixture), "node_modules", ".marker");
+    await mkdir(join(liveSnapshotRoot(fixture), "node_modules"));
     await writeFile(installedMarker, "installed\n");
 
     const reconciled = requireSuccess(await snapshotPluginSource({
@@ -538,7 +675,8 @@ describe("snapshotPluginSource canonical hash and replacement", () => {
     }));
 
     expect(reconciled.sourceHash).toBe(first.sourceHash);
-    expect(reconciled.snapshotRoot).toBe(first.snapshotRoot);
+    expect(reconciled.snapshotRoot).toBe(liveSnapshotRoot(fixture));
+    expect(await stagingLeftovers(fixture)).toEqual([]);
     await expect(readFile(installedMarker, "utf8")).resolves.toBe("installed\n");
   });
 
@@ -546,7 +684,7 @@ describe("snapshotPluginSource canonical hash and replacement", () => {
     const fixture = await createPluginFixture();
     await writeFile(join(fixture.pluginRoot, "payload.txt"), "a");
     const first = requireSuccess(await runSnapshot(fixture));
-    await rm(first.snapshotRoot, { recursive: true, force: true });
+    await rm(liveSnapshotRoot(fixture), { recursive: true, force: true });
 
     const reconciled = requireSuccess(await snapshotPluginSource({
       workspaceRoot: fixture.root,
@@ -558,9 +696,9 @@ describe("snapshotPluginSource canonical hash and replacement", () => {
       preserveIfHashMatches: first.sourceHash,
     }));
 
-    expect(reconciled.snapshotRoot).toBe(first.snapshotRoot);
     expect(reconciled.sourceHash).toBe(first.sourceHash);
-    await expect(readFile(join(reconciled.snapshotRoot, "payload.txt"), "utf8"))
+    await reconciled.publish();
+    await expect(readFile(join(liveSnapshotRoot(fixture), "payload.txt"), "utf8"))
       .resolves.toBe("a");
   });
 
@@ -568,7 +706,7 @@ describe("snapshotPluginSource canonical hash and replacement", () => {
     const fixture = await createPluginFixture();
     await writeFile(join(fixture.pluginRoot, "payload.txt"), "a");
     const first = requireSuccess(await runSnapshot(fixture));
-    await writeFile(join(first.snapshotRoot, "payload.txt"), "corrupted");
+    await writeFile(join(liveSnapshotRoot(fixture), "payload.txt"), "corrupted");
 
     const reconciled = requireSuccess(await snapshotPluginSource({
       workspaceRoot: fixture.root,
@@ -581,7 +719,8 @@ describe("snapshotPluginSource canonical hash and replacement", () => {
     }));
 
     expect(reconciled.sourceHash).toBe(first.sourceHash);
-    await expect(readFile(join(reconciled.snapshotRoot, "payload.txt"), "utf8"))
+    await reconciled.publish();
+    await expect(readFile(join(liveSnapshotRoot(fixture), "payload.txt"), "utf8"))
       .resolves.toBe("a");
   });
 });

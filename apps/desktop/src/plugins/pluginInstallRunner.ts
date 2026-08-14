@@ -69,6 +69,26 @@ function buildPluginInstallEnv(pnpmPaths: PluginPnpmPaths): NodeJS.ProcessEnv {
   return env;
 }
 
+// Two pnpm behaviors this command does not control, read from pnpm/pnpm at
+// ebc48abdc5510fa9bf9c0d3bc3be93ae2580d13c (subtree `pnpm11/`) and recorded
+// so a later change does not have to rediscover them (CERT779H):
+//
+// A lockfile that points a package at an attacker's tarball URL is stopped
+// upstream, not here: pnpm re-fetches the registry's packument and rejects
+// any entry whose `tarball` disagrees with it, with
+// ERR_PNPM_TARBALL_URL_MISMATCH
+// (resolving/npm-resolver/src/createNpmResolutionVerifier.ts:230-233,401-428).
+// dohc adds nothing to that check, and `trust-lockfile` — the one setting
+// that skips it (installing/deps-installer/src/install/index.ts:437) — is
+// readable only from pnpm-workspace.yaml, which --ignore-workspace ignores
+// and the snapshot rejects outright.
+//
+// `pnpm patch` application is NOT gated by --ignore-scripts: patches are
+// applied and only the postinstall hooks after them are skipped
+// (building/during-install/src/index.ts:241-250). It is unreachable today
+// because patchedDependencies lives in pnpm-workspace.yaml only
+// (config/reader/src/getOptionsFromRootManifest.ts:62-68). Anything that
+// makes that file readable again makes patches reachable again.
 export const PLUGIN_INSTALL_ARGS = [
   "install",
   "--ignore-scripts",

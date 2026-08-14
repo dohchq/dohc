@@ -23,7 +23,9 @@ import {
   type DohcPluginManifest,
 } from "./pluginManifestSchema";
 import {
+  isPluginSourceRoot,
   PLUGIN_BUNDLE_TIMEOUT_MS,
+  PLUGIN_SNAPSHOT_DIR_NAME,
   pluginIdToSafePath,
 } from "./pluginSourceSnapshot";
 
@@ -108,9 +110,9 @@ interface BuildPaths {
   liveRoot: string;
   snapshotRoot: string;
   /** The manifest entry, already resolved and proven to be a regular file
-   * inside the installed snapshot. esbuild reads it straight out of the live
-   * snapshot: the build never moves the live root's own contents (#779 round
-   * 7 A1). */
+   * inside the installed snapshot. esbuild reads it straight out of that
+   * snapshot — live or staged — and the build never moves the live root's
+   * own contents (#779 round 7 A1). */
   entryPath: string;
 }
 
@@ -259,13 +261,15 @@ async function inspectBuildPaths(
 
   const dohcDir = resolve(input.dohcDir);
   const liveRoot = join(dohcDir, "plugins", safeId);
-  const expectedSnapshotRoot = join(liveRoot, "snapshot");
   const snapshotRoot = resolve(input.snapshotRoot);
-  if (relative(expectedSnapshotRoot, snapshotRoot) !== "") {
+  // The source this build reads is the published snapshot for a rebuild, or
+  // the staged snapshot beside the live root when the tree it builds is not
+  // approved yet (#779 round 9 B1). isPluginSourceRoot names that family.
+  if (!isPluginSourceRoot(liveRoot, snapshotRoot)) {
     throw new PluginBuildRunnerError(
       "invalid-snapshot",
-      `Installed snapshot root must be ${expectedSnapshotRoot}; received ` +
-        `${snapshotRoot}.`,
+      `Installed snapshot root must be ${join(liveRoot, PLUGIN_SNAPSHOT_DIR_NAME)} ` +
+        `or a staged snapshot beside ${liveRoot}; received ${snapshotRoot}.`,
       snapshotRoot,
     );
   }
@@ -325,11 +329,11 @@ async function inspectBuildPaths(
       liveRoot,
     );
   }
-  if (!isInside(realLiveRoot, realSnapshotRoot)) {
+  if (!isInside(realDohcDir, realSnapshotRoot)) {
     throw new PluginBuildRunnerError(
       "invalid-snapshot",
-      `Installed snapshot at ${snapshotRoot} resolves outside the real plugin ` +
-        `build root at ${realLiveRoot}.`,
+      `Installed snapshot at ${snapshotRoot} resolves outside the real ` +
+        `plugin-data directory at ${realDohcDir}.`,
       snapshotRoot,
     );
   }
@@ -458,10 +462,10 @@ function removeStaging(stagingRoot: string): Promise<void> {
  * Swaps the staged tree in, the same way pluginSourceSnapshot's
  * replaceSnapshot swaps a snapshot in: move the old directory aside, move the
  * new one into place, remove the old. The installed snapshot is the one part
- * of the live root the build did not rebuild, so it rides across here — three
- * renames, not the whole build, is the entire window in which the live root is
- * anything other than its complete previous or complete next contents (#779
- * round 7 A1).
+ * of the live root the build did not rebuild — the source publish put it
+ * there already — so it rides across here. Three renames, not the whole
+ * build, is the entire window in which the live root is anything other than
+ * its complete previous or complete next contents (#779 round 7 A1).
  */
 async function publishStaging(
   liveRoot: string,

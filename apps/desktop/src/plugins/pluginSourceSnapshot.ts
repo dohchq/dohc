@@ -11,7 +11,7 @@ import {
   rename,
   rm,
 } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { load } from "js-yaml";
 import {
@@ -30,6 +30,17 @@ import { workspaceStateKey } from "./pluginLocalState";
 // to a clean value with comfortable headroom over that measured maximum.
 export const MAX_PLUGIN_PACKAGE_JSON_BYTES = 262_144;
 export const MAX_PLUGIN_LOCKFILE_BYTES = 1_048_576;
+
+/** The published source tree's directory name inside a plugin's live root. */
+export const PLUGIN_SNAPSHOT_DIR_NAME = "snapshot";
+/**
+ * A staged source tree is a sibling of the live root, never a directory
+ * inside it — the same placement the build's own staging uses, and for the
+ * same reason: the child-process broker's containment is rooted at the live
+ * root, so unpublished bytes parked inside it are reachable (#779 round 7 A1,
+ * round 9 B1).
+ */
+const SNAPSHOT_STAGING_SUFFIX = ".snap-staging-";
 
 export const PINNED_PLUGIN_PNPM_VERSION = "11.20.0";
 export const PINNED_PLUGIN_PACKAGE_MANAGER =
@@ -56,6 +67,47 @@ const DEPENDENCY_FIELDS = [
 // Shared with pluginDiscovery.ts's nested-manifest walk (CodeRabbit #779
 // R11/R12): one excluded-name list, so the two can never drift apart.
 export const EXCLUDED_SOURCE_NAMES = new Set(["node_modules", ".dohc"]);
+
+/**
+ * Package-manager configuration a plugin author must not supply. The install
+ * runs pnpm with dohc's own registry, store, and output settings; every file
+ * here is a second place pnpm would read those settings from, inside a tree
+ * the plugin author writes (CERT779H).
+ *
+ * Verified against pnpm/pnpm at ebc48abdc5510fa9bf9c0d3bc3be93ae2580d13c,
+ * subtree `pnpm11/`.
+ *
+ * `.npmrc` was the live hole: `PNPM_CONFIG_REGISTRY` writes only
+ * `registries.default` (config/reader/src/index.ts:564-570), and no env var
+ * can express `@scope:registry` at all (config/reader/src/env.ts:42-55), so a
+ * snapshot `.npmrc` still chose the registry every scoped dependency came
+ * from (config/pick-registry-for-package/src/index.ts:3-6) and still chose
+ * `proxy`, `https-proxy`, and `strict-ssl` for all of them
+ * (config/reader/src/localConfig.ts:17-24).
+ *
+ * `.pnpmfile.mjs` and `.pnpmfile.cjs` execute on require, before any hook
+ * runs (hooks/pnpmfile/src/requirePnpmfile.ts:52-55). Only
+ * `--ignore-pnpmfile` stops the load; `--ignore-scripts` does not, and
+ * `--ignore-workspace` moves the lookup to the install directory itself
+ * (pnpm/src/getConfig.ts:86-93, cli/parse-cli-args/src/index.ts:307). The
+ * install passes `--ignore-pnpmfile`, which stays as depth.
+ *
+ * `pnpm-workspace.yaml` is inert under `--ignore-workspace`
+ * (config/reader/src/index.ts:474-489), but it is where pnpm 11 reads
+ * `trust-lockfile`, which switches the lockfile tarball-URL verifier off
+ * entirely (installing/deps-installer/src/install/index.ts:437), and
+ * `patchedDependencies`, which applies whatever `--ignore-scripts` says
+ * (building/during-install/src/index.ts:241-250).
+ *
+ * `npmrc` and `pnpmfile.cjs` are absent because pnpm 11 does not read them
+ * from this directory: rejecting them would be policy about nothing.
+ */
+export const REJECTED_PACKAGE_MANAGER_CONFIG_NAMES = new Set([
+  ".npmrc",
+  ".pnpmfile.cjs",
+  ".pnpmfile.mjs",
+  "pnpm-workspace.yaml",
+]);
 const WINDOWS_RENAME_RETRY_DELAYS_MS = [100, 150, 200, 250, 300] as const;
 const READ_NO_FOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 
@@ -69,6 +121,7 @@ export type PluginSourceSnapshotFailureCode =
   | "invalid-package-json"
   | "invalid-lockfile"
   | "unsupported-package-manager"
+  | "unsupported-package-manager-config"
   | "unsupported-local-dependency"
   | "snapshot-locked"
   | "snapshot-io";
@@ -125,6 +178,13 @@ export interface PluginSourceDigest {
 export type PluginSourceSnapshotResult =
   | {
     ok: true;
+    /**
+     * Where this validated source tree is right now: a staged directory
+     * beside the live root until `publish()`, or the live snapshot itself
+     * when an already-matching one was preserved. Install, scan, and build
+     * all read from here, so a tree held for approval is never the tree a
+     * panel or a brokered child can reach (#779 round 9 B1).
+     */
     snapshotRoot: string;
     sourceHash: string;
     /** The full digest already computed to produce sourceHash — callers
@@ -133,6 +193,20 @@ export type PluginSourceSnapshotResult =
      * C F1). */
     digest: PluginSourceDigest;
     pnpmPaths: PluginPnpmPaths;
+    /**
+     * Swaps the staged tree into the live snapshot. Call it only once the
+     * record approving `sourceHash` is durable: everything the live snapshot
+     * serves — panel assets, and the `snapshot/server.mjs` a brokered child
+     * runs — executes without any further gate. A preserved snapshot is
+     * already live, so this does nothing.
+     */
+    publish: () => Promise<void>;
+    /**
+     * Drops the staged tree. The live snapshot was never touched, so there
+     * is nothing to restore — and nothing to delete when the existing
+     * snapshot was preserved.
+     */
+    discard: () => Promise<void>;
   }
   | {
     ok: false;
@@ -686,6 +760,24 @@ export function assertSafeSnapshotEntryName(name: string, path: string): void {
   );
 }
 
+/**
+ * Rejects package-manager configuration anywhere in the plugin source tree.
+ * See REJECTED_PACKAGE_MANAGER_CONFIG_NAMES. pnpm reads these files from the
+ * tree root only, but one rule for the whole tree needs no depth bookkeeping
+ * and leaves no dead config for a later pnpm to start reading.
+ */
+export function assertNoPackageManagerConfig(name: string, path: string): void {
+  if (!REJECTED_PACKAGE_MANAGER_CONFIG_NAMES.has(name)) return;
+  throw new SnapshotError(
+    "unsupported-package-manager-config",
+    `Plugin source entry at ${path} is package-manager configuration ` +
+      `("${name}"). A plugin install uses dohc's own pnpm configuration — ` +
+      "registry, store, and output paths — so a plugin cannot supply its " +
+      "own. Remove this file.",
+    path,
+  );
+}
+
 async function copySourceTree(
   sourceDirectory: string,
   destinationDirectory: string,
@@ -696,6 +788,7 @@ async function copySourceTree(
   for (const entry of entries) {
     const sourcePath = join(sourceDirectory, entry.name);
     assertSafeSnapshotEntryName(entry.name, sourcePath);
+    assertNoPackageManagerConfig(entry.name, sourcePath);
     const stats = await lstat(sourcePath);
     if (stats.isSymbolicLink()) {
       throw new SnapshotError(
@@ -865,6 +958,33 @@ async function renameWithWindowsRetry(
   }
 }
 
+function removeStaging(stagingRoot: string): Promise<void> {
+  return rm(stagingRoot, {
+    recursive: true,
+    force: true,
+    maxRetries: WINDOWS_RENAME_RETRY_DELAYS_MS.length,
+    retryDelay: 200,
+  });
+}
+
+/**
+ * Publishing and discarding are the two ways a staged tree ends, and both
+ * consume it. A second call would rename or delete a path that is no longer
+ * this snapshot's, so it fails loudly instead — the same guard the build
+ * runner puts on its own staged tree.
+ */
+function settleOnce(stagingRoot: string): () => void {
+  let settled = false;
+  return () => {
+    if (settled) {
+      throw new Error(
+        `Plugin source snapshot at ${stagingRoot} was already published or discarded.`,
+      );
+    }
+    settled = true;
+  };
+}
+
 async function existingPathStats(
   path: string,
 ): Promise<Awaited<ReturnType<typeof lstat>> | null> {
@@ -938,6 +1058,27 @@ function resultError(error: unknown): PluginSourceSnapshotError {
   };
 }
 
+/**
+ * The two places a plugin's validated source tree is allowed to be: the
+ * published snapshot inside its live root, and a staged snapshot beside that
+ * root which no approval has published yet. The build reads from whichever
+ * one the pipeline handed it, so it checks membership of this family rather
+ * than a single fixed path (#779 round 9 B1).
+ */
+export function isPluginSourceRoot(liveRoot: string, sourceRoot: string): boolean {
+  const resolvedLiveRoot = resolve(liveRoot);
+  const resolvedSourceRoot = resolve(sourceRoot);
+  if (resolvedSourceRoot === join(resolvedLiveRoot, PLUGIN_SNAPSHOT_DIR_NAME)) {
+    return true;
+  }
+  return (
+    dirname(resolvedSourceRoot) === dirname(resolvedLiveRoot) &&
+    basename(resolvedSourceRoot).startsWith(
+      `${basename(resolvedLiveRoot)}${SNAPSHOT_STAGING_SUFFIX}`,
+    )
+  );
+}
+
 export function pluginIdToSafePath(pluginId: string): string {
   if (!NPM_PACKAGE_NAME.test(pluginId)) {
     throw new SnapshotError(
@@ -1004,7 +1145,7 @@ export async function snapshotPluginSource(
       safeId,
     );
     Object.assign(pnpmPaths, output.pnpmPaths);
-    stagingRoot = join(output.pluginDataRoot, `.snap-staging-${randomUUID()}`);
+    stagingRoot = `${output.pluginDataRoot}${SNAPSHOT_STAGING_SUFFIX}${randomUUID()}`;
     await mkdir(stagingRoot);
 
     await copySourceTree(realPluginRoot, stagingRoot, realPluginRoot);
@@ -1012,37 +1153,52 @@ export async function snapshotPluginSource(
     await readAndValidatePnpmLockfile(stagingRoot);
     const digest = await hashPluginSourceFiles(stagingRoot);
     const { sourceHash } = digest;
-    const snapshotRoot = join(output.pluginDataRoot, "snapshot");
+    const liveSnapshotRoot = join(output.pluginDataRoot, PLUGIN_SNAPSHOT_DIR_NAME);
     // Preserving is only safe when the snapshot it preserves is actually
     // there and actually matches. A snapshot deleted or corrupted out of band
     // would otherwise be handed back as a live root that nothing rebuilds.
     // Staging already holds a fresh valid copy, so recovery costs nothing.
     if (
       sourceHash === input.preserveIfHashMatches &&
-      await snapshotMatchesHash(snapshotRoot, sourceHash)
+      await snapshotMatchesHash(liveSnapshotRoot, sourceHash)
     ) {
-      await rm(stagingRoot, {
-        recursive: true,
-        force: true,
-        maxRetries: WINDOWS_RENAME_RETRY_DELAYS_MS.length,
-        retryDelay: 200,
-      });
+      await removeStaging(stagingRoot);
       stagingRoot = null;
-      return { ok: true, snapshotRoot, sourceHash, digest, pnpmPaths };
+      return {
+        ok: true,
+        snapshotRoot: liveSnapshotRoot,
+        sourceHash,
+        digest,
+        pnpmPaths,
+        publish: () => Promise.resolve(),
+        discard: () => Promise.resolve(),
+      };
     }
-    await replaceSnapshot(stagingRoot, snapshotRoot);
+    const stagedRoot = stagingRoot;
+    // Ownership of the staged tree passes to the caller, so the catch below
+    // must no longer remove it.
     stagingRoot = null;
-    return { ok: true, snapshotRoot, sourceHash, digest, pnpmPaths };
+    const settle = settleOnce(stagedRoot);
+    return {
+      ok: true,
+      snapshotRoot: stagedRoot,
+      sourceHash,
+      digest,
+      pnpmPaths,
+      publish: async () => {
+        settle();
+        await replaceSnapshot(stagedRoot, liveSnapshotRoot);
+      },
+      discard: async () => {
+        settle();
+        await removeStaging(stagedRoot);
+      },
+    };
   } catch (error) {
     let failure = resultError(error);
     if (stagingRoot) {
       try {
-        await rm(stagingRoot, {
-          recursive: true,
-          force: true,
-          maxRetries: WINDOWS_RENAME_RETRY_DELAYS_MS.length,
-          retryDelay: 200,
-        });
+        await removeStaging(stagingRoot);
       } catch (cleanupError) {
         failure = {
           code: "snapshot-io",

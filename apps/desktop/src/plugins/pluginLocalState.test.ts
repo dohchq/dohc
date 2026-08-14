@@ -362,7 +362,7 @@ describe("plugin local state", () => {
     expect(await readFile(path)).toEqual(before);
   });
 
-  it("does not write a 501st plugin entry", async () => {
+  it("writes a 501st plugin entry, which fits the file limit", async () => {
     const root = await workspaceRoot();
     const localStateDir = await stateDir();
     const path = statePath(localStateDir, root);
@@ -372,15 +372,39 @@ describe("plugin local state", () => {
         { disabled: false },
       ]),
     );
-    const body = JSON.stringify({ version: 1, plugins });
     await mkdir(dirname(path));
-    await writeFile(path, body);
+    await writeFile(path, JSON.stringify({ version: 1, plugins }));
+
+    await mutateDisabledState(localStateDir, root, "one-more-plugin", true);
 
     const readResult = await readPluginLocalState(localStateDir, root);
     expect(readResult.ok).toBe(true);
-    if (!readResult.ok) throw new Error("expected 500 plugin entries to be valid");
-    expect(Object.keys(readResult.state.plugins)).toHaveLength(500);
+    if (!readResult.ok) throw new Error("expected 501 plugin entries to be valid");
+    expect(Object.keys(readResult.state.plugins)).toHaveLength(501);
+    expect((await readFile(path)).byteLength)
+      .toBeLessThan(MAX_PLUGIN_LOCAL_STATE_FILE_BYTES);
+  });
+
+  it("refuses to write a state file the read gate could not read back", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const path = statePath(localStateDir, root);
+    // Fewer records than the deleted count cap allowed, and already over the
+    // byte limit — the count was never what bounded this file (#779 round 9
+    // B4).
+    const plugins = Object.fromEntries(
+      Array.from({ length: 800 }, (_, index) => [
+        `plugin-${index}`.padEnd(214, "x"),
+        { disabled: false, approvedHash: "a".repeat(64) },
+      ]),
+    );
+    await mkdir(dirname(path));
+    await writeFile(path, JSON.stringify({ version: 1, plugins }));
     const before = await readFile(path);
+    // Readable as written, and over the limit once rewritten: the read gate
+    // alone cannot stop the write that bricks it.
+    expect(before.byteLength).toBeLessThan(MAX_PLUGIN_LOCAL_STATE_FILE_BYTES);
+
     let thrown: unknown;
     try {
       await mutateDisabledState(localStateDir, root, "one-more-plugin", true);
@@ -390,7 +414,8 @@ describe("plugin local state", () => {
 
     expect(thrown).toBeInstanceOf(Error);
     if (!(thrown instanceof Error)) throw new Error("expected an Error");
-    expect(thrown.message).toContain("plugins: at most 500 entries allowed");
+    expect(thrown.message).toContain("plugin records");
+    expect(thrown.message).toContain(`${MAX_PLUGIN_LOCAL_STATE_FILE_BYTES} bytes`);
     expect(await readFile(path)).toEqual(before);
   });
 

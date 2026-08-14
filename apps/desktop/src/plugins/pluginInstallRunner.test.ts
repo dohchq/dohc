@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
-  copyFile,
+  cp,
   mkdir,
   mkdtemp,
+  readFile,
   readdir,
   rm,
   symlink,
@@ -12,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { killProcessTreePosix } from "../process/posixSpawn";
 import {
   INSTALL_TREE_STOP_GRACE_MS,
@@ -26,7 +27,10 @@ import {
   type PluginInstallProcessHandle,
   type PluginInstallResult,
 } from "./pluginInstallRunner";
-import { PLUGIN_INSTALL_TIMEOUT_MS } from "./pluginSourceSnapshot";
+import {
+  PINNED_PLUGIN_PNPM_VERSION,
+  PLUGIN_INSTALL_TIMEOUT_MS,
+} from "./pluginSourceSnapshot";
 
 interface InstallFixture {
   root: string;
@@ -562,36 +566,114 @@ describe("installPluginDependencies", () => {
   });
 });
 
-const stagedResources = resolve(import.meta.dirname, "../../resources");
-const stagedPnpmEntry = resolvePluginPnpmEntry(stagedResources);
-const measuredFixture = resolve(
-  import.meta.dirname,
-  "../../../../.agent-artifacts/references/measure-lockfiles/small",
-);
-const realInstallAvailable =
-  existsSync(stagedPnpmEntry) &&
-  existsSync(join(measuredFixture, "package.json")) &&
-  existsSync(join(measuredFixture, "pnpm-lock.yaml"));
+// These three tests are the only measured evidence behind every install pin
+// above, and they used to gate on two paths that exist in no fresh checkout:
+// apps/desktop/resources/plugin-tools (a build output) and a gitignored
+// reference fixture. Both were absent, so all three skipped green — the
+// pins looked proven and nothing had run them (#779 round 9 A2).
+//
+// Now the only precondition is the pinned pnpm this repo already installs as
+// a devDependency, which the setup below stages the same way
+// PluginPipeline.test.ts does, and the fixture is right here in the file.
+export const REQUIRE_PLUGIN_INSTALL_E2E_ENV_VAR = "DOHC_REQUIRE_PLUGIN_INSTALL_E2E";
+
+const desktopRoot = resolve(import.meta.dirname, "../..");
+const pnpmPackageRoot = join(desktopRoot, "node_modules", "pnpm");
+const realInstallAvailable = existsSync(join(pnpmPackageRoot, "bin", "pnpm.mjs"));
+
+if (!realInstallAvailable && process.env[REQUIRE_PLUGIN_INSTALL_E2E_ENV_VAR] === "1") {
+  throw new Error(
+    `The pinned pnpm was not found at ${pnpmPackageRoot}. Run pnpm install in ` +
+      `apps/desktop. ${REQUIRE_PLUGIN_INSTALL_E2E_ENV_VAR}=1 makes this a ` +
+      "failure rather than a skip.",
+  );
+}
+
+// The measured "small" reference fixture, in the file so a fresh checkout has
+// it. pnpm@11.20.0 resolved this lockfile; one dependency keeps the proofs
+// fast while still exercising a real registry fetch.
+const FIXTURE_PACKAGE_JSON = `${JSON.stringify({
+  name: "pr2-lock-small",
+  private: true,
+  version: "1.0.0",
+  dependencies: { zod: "4.4.3" },
+}, null, 2)}\n`;
+
+const FIXTURE_LOCKFILE = [
+  "lockfileVersion: '9.0'",
+  "",
+  "settings:",
+  "  autoInstallPeers: true",
+  "  excludeLinksFromLockfile: false",
+  "",
+  "importers:",
+  "",
+  "  .:",
+  "    dependencies:",
+  "      zod:",
+  "        specifier: 4.4.3",
+  "        version: 4.4.3",
+  "",
+  "packages:",
+  "",
+  "  zod@4.4.3:",
+  "    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}",
+  "",
+  "snapshots:",
+  "",
+  "  zod@4.4.3: {}",
+  "",
+].join("\n");
+
+let stagedResources = "";
+let stagedResourcesParent = "";
+
+async function writeFixtureProject(snapshotRoot: string): Promise<void> {
+  await Promise.all([
+    writeFile(join(snapshotRoot, "package.json"), FIXTURE_PACKAGE_JSON),
+    writeFile(join(snapshotRoot, "pnpm-lock.yaml"), FIXTURE_LOCKFILE),
+  ]);
+}
+
+beforeAll(async () => {
+  if (!realInstallAvailable) return;
+  stagedResourcesParent = await mkdtemp(join(tmpdir(), "dohc-install-tools-"));
+  stagedResources = join(stagedResourcesParent, "resources");
+  await cp(
+    pnpmPackageRoot,
+    join(stagedResources, "plugin-tools", "pnpm"),
+    { recursive: true },
+  );
+  const staged = JSON.parse(
+    await readFile(join(pnpmPackageRoot, "package.json"), "utf8"),
+  ) as { version?: string };
+  // The pins these proofs measure are pins on one pnpm release.
+  expect(staged.version).toBe(PINNED_PLUGIN_PNPM_VERSION);
+  expect(existsSync(resolvePluginPnpmEntry(stagedResources))).toBe(true);
+}, 120_000);
+
+afterAll(async () => {
+  if (!stagedResourcesParent) return;
+  await rm(stagedResourcesParent, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  });
+});
 
 it.skipIf(!realInstallAvailable)(
   "runs actual staged pnpm and ignores a plugin-authored .npmrc registry (#779 round 8 D1)",
   async () => {
     const fixture = await createInstallFixture({ pluginId: "npmrc-plugin" });
-    await Promise.all([
-      copyFile(
-        join(measuredFixture, "package.json"),
-        join(fixture.snapshotRoot, "package.json"),
-      ),
-      copyFile(
-        join(measuredFixture, "pnpm-lock.yaml"),
-        join(fixture.snapshotRoot, "pnpm-lock.yaml"),
-      ),
-      // The plugin author controls this file: copySourceTree stages it with
-      // the rest of the source, and pnpm reads a project .npmrc for registry
-      // and auth settings. A registry it chooses would serve every dependency
-      // byte this install resolves, before any approval gate runs.
-      writeFile(join(fixture.snapshotRoot, ".npmrc"), "registry=http://127.0.0.1:9/\n"),
-    ]);
+    await writeFixtureProject(fixture.snapshotRoot);
+    // The snapshot now rejects this file outright (#779 round 9 A1), so it
+    // can only reach pnpm's cwd if that rejection is ever removed. This is
+    // the depth behind it: even then, the pinned registry wins.
+    await writeFile(
+      join(fixture.snapshotRoot, ".npmrc"),
+      "registry=http://127.0.0.1:9/\n",
+    );
     const pnpmRoot = join(fixture.root, "pnpm");
 
     const installed = await installPluginDependencies({
@@ -621,16 +703,7 @@ it.skipIf(!realInstallAvailable)(
     const fixture = await createInstallFixture({ pluginId: "path-settings-plugin" });
     const outside = join(fixture.root, "outside");
     await mkdir(outside, { recursive: true });
-    await Promise.all([
-      copyFile(
-        join(measuredFixture, "package.json"),
-        join(fixture.snapshotRoot, "package.json"),
-      ),
-      copyFile(
-        join(measuredFixture, "pnpm-lock.yaml"),
-        join(fixture.snapshotRoot, "pnpm-lock.yaml"),
-      ),
-    ]);
+    await writeFixtureProject(fixture.snapshotRoot);
     const pnpmRoot = join(fixture.root, "pnpm");
     const input: InstallPluginDependenciesInput = {
       ...fixture.input,
@@ -683,16 +756,7 @@ it.skipIf(!realInstallAvailable)(
   "runs actual staged pnpm and rejects a mutated stale lockfile",
   async () => {
     const fixture = await createInstallFixture({ pluginId: "integration-plugin" });
-    await Promise.all([
-      copyFile(
-        join(measuredFixture, "package.json"),
-        join(fixture.snapshotRoot, "package.json"),
-      ),
-      copyFile(
-        join(measuredFixture, "pnpm-lock.yaml"),
-        join(fixture.snapshotRoot, "pnpm-lock.yaml"),
-      ),
-    ]);
+    await writeFixtureProject(fixture.snapshotRoot);
     const pnpmRoot = join(fixture.root, "pnpm");
     const input: InstallPluginDependenciesInput = {
       ...fixture.input,

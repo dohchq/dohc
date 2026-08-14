@@ -18,6 +18,7 @@ import {
   mutatePluginRecord,
   pluginDataDir,
   readPluginLocalState,
+  type PluginLocalState,
   type PluginRecordShape,
 } from "./pluginLocalState";
 import { readPluginManifestFile } from "./pluginManifest";
@@ -141,6 +142,17 @@ interface FullBuildOptions {
   disabledReasonAfterBuild: PluginPipelinePluginStatus["disabledReason"];
   resetCrashAccounting: boolean;
   freshInstall: boolean;
+  /**
+   * The source hash this build is allowed to approve. A caller that already
+   * decided this content is approvable — the door write, which compared the
+   * tree it wrote against the tree on disk — passes what it compared. The
+   * build takes its own fresh snapshot, so without this an out-of-band change
+   * landing between that comparison and the snapshot rode the door write
+   * straight to auto-approval (#779 round 9 B2, the second window of the same
+   * shape as round 3 finding 1). Callers with no such expectation (install,
+   * approve, reconcile) leave it unset and approve whatever they snapshot.
+   */
+  expectedHash?: string;
 }
 
 class PipelineFailure extends Error {
@@ -271,13 +283,13 @@ export class PluginPipeline {
         // A seeded status for this same root means the plugin was installed
         // before its manifest broke. Report that installation identity so
         // Settings still offers Uninstall (#779 round 8 D2).
-        const installed = this.statuses.get(candidate.id);
+        const installed = this.statusForCandidate(candidate);
         if (
           installed && !installed.valid &&
           resolve(installed.rootPath) === resolve(candidate.rootPath)
         ) {
           listed.push(cloneStatus(installed));
-          included.add(candidate.id);
+          included.add(installed.id);
           continue;
         }
         listed.push({
@@ -385,10 +397,10 @@ export class PluginPipeline {
         );
       }
 
-      const snapshot = await this.snapshot(candidate, state.approvedHash);
-      if (!snapshot.ok) return snapshot.result;
-      if (snapshot.value.sourceHash !== state.approvedHash) {
-        return this.holdForApproval(candidate, snapshot.value.sourceHash);
+      const verified = await this.verifyApprovedSource(candidate, state.approvedHash);
+      if (verified.kind === "failed") return verified.result;
+      if (verified.kind === "changed") {
+        return this.holdForApproval(candidate, verified.sourceHash);
       }
 
       const current = this.statuses.get(pluginId);
@@ -443,10 +455,10 @@ export class PluginPipeline {
         });
       }
 
-      const snapshot = await this.snapshot(candidate, state.approvedHash);
-      if (!snapshot.ok) return snapshot.result;
-      if (snapshot.value.sourceHash !== state.approvedHash) {
-        return this.holdForApproval(candidate, snapshot.value.sourceHash);
+      const verified = await this.verifyApprovedSource(candidate, state.approvedHash);
+      if (verified.kind === "failed") return verified.result;
+      if (verified.kind === "changed") {
+        return this.holdForApproval(candidate, verified.sourceHash);
       }
 
       return this.startVerified(candidate, state, {
@@ -526,6 +538,11 @@ export class PluginPipeline {
         disabledReasonAfterBuild: disabled ? "user" : null,
         resetCrashAccounting: !disabled,
         freshInstall: false,
+        // The build snapshots the tree again, and this comparison is already
+        // stale by then. Binding the build to the hash this check passed on
+        // is what stops a change landing in that window from riding the door
+        // write to approval (#779 round 9 B2).
+        expectedHash,
       });
     });
   }
@@ -725,8 +742,11 @@ export class PluginPipeline {
           () => undefined,
         );
         this.statuses.delete(pluginId);
+        // One directory is one discovery entry, so the deleted root — not the
+        // id, which an invalid candidate does not share with its record — is
+        // what identifies the entry that just went away.
         this.discovery = this.discovery.filter((entry) =>
-          entry.id !== pluginId || resolve(entry.rootPath) !== resolve(candidate.rootPath)
+          resolve(entry.rootPath) !== resolve(candidate.rootPath)
         );
         this.emit({ kind: "removed", pluginId });
         return {
@@ -789,18 +809,52 @@ export class PluginPipeline {
   }
 
   private async seedStatuses(): Promise<void> {
-    const stateResult = await this.operations.readLocalState(
-      this.options.stateDir,
-      this.workspaceRoot,
-    );
-    if (!stateResult.ok) {
-      throw new PipelineFailure(
-        pipelineError("state", "local-state-unreadable", stateResult.warning),
-      );
-    }
+    const state = await this.localState();
     for (const candidate of this.discovery) {
-      this.seedCandidateStatus(candidate, stateResult.state.plugins[candidate.id]);
+      this.seedCandidateStatus(state, candidate);
     }
+  }
+
+  /**
+   * The persisted installation a discovered candidate belongs to. A valid
+   * candidate is named by its manifest, which is the key its record was
+   * written under. An invalid one has no manifest to name it, so discovery
+   * falls back to the directory name — "foo" against a record keyed
+   * "@scope/bar" — and the id lookup misses. Every path uninstall deletes is
+   * derived from that key, so the join has to survive the manifest: the
+   * record carries the directory it was installed from (#779 round 9 B3).
+   */
+  private installedRecord(
+    state: PluginLocalState,
+    candidate: InstalledPluginRecord,
+  ): { pluginId: string; record: PluginRecordShape } | null {
+    const byId = state.plugins[candidate.id];
+    if (byId) return { pluginId: candidate.id, record: byId };
+    if (candidate.valid && candidate.manifest) return null;
+    for (const [pluginId, record] of Object.entries(state.plugins)) {
+      if (record.directoryName === candidate.directoryName) {
+        return { pluginId, record };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The seeded status that belongs to a discovered candidate. An invalid
+   * candidate's status is keyed by its installed plugin id, which its
+   * fallback id does not match, so the root path — the one identity both
+   * always agree on — is what joins them.
+   */
+  private statusForCandidate(
+    candidate: InstalledPluginRecord,
+  ): PluginPipelinePluginStatus | undefined {
+    const byId = this.statuses.get(candidate.id);
+    if (byId) return byId;
+    const root = resolve(candidate.rootPath);
+    for (const status of this.statuses.values()) {
+      if (!status.valid && resolve(status.rootPath) === root) return status;
+    }
+    return undefined;
   }
 
   /**
@@ -813,12 +867,17 @@ export class PluginPipeline {
    * and the app's own plugin data by hand (#779 round 8 D2).
    */
   private seedCandidateStatus(
+    state: PluginLocalState,
     candidate: InstalledPluginRecord,
-    record: PluginRecordShape | undefined,
   ): void {
+    const installed = this.installedRecord(state, candidate);
     if (!candidate.valid || !candidate.manifest) {
-      if (!record?.approvedHash) return;
-      this.setStatus(candidate, {
+      if (!installed?.record.approvedHash) return;
+      const { record } = installed;
+      // Seeded under the installed plugin id, not the manifest-less fallback
+      // id, so the record, the live root, and the plugin data this status
+      // acts on are the ones this installation actually owns.
+      this.setStatus({ ...candidate, id: installed.pluginId }, {
         status: "invalid",
         disabledReason: null,
         runtimeStatus: null,
@@ -830,6 +889,7 @@ export class PluginPipeline {
       });
       return;
     }
+    const record = installed?.record;
     this.setStatus(candidate, {
       status: record?.approvedHash
         ? record.disabled === true
@@ -932,9 +992,10 @@ export class PluginPipeline {
   private async seedStatusesForNewCandidates(
     candidates: readonly InstalledPluginRecord[],
   ): Promise<void> {
+    const state = await this.localState();
     for (const candidate of candidates) {
-      if (this.statuses.has(candidate.id)) continue;
-      this.seedCandidateStatus(candidate, await this.localRecord(candidate.id));
+      if (this.statusForCandidate(candidate)) continue;
+      this.seedCandidateStatus(state, candidate);
     }
   }
 
@@ -949,9 +1010,9 @@ export class PluginPipeline {
       this.setStatus(candidate, { status: "discovered" });
       return;
     }
-    const snapshot = await this.snapshot(candidate, record.approvedHash);
-    if (!snapshot.ok) return;
-    if (snapshot.value.sourceHash !== record.approvedHash) {
+    const verified = await this.verifyApprovedSource(candidate, record.approvedHash);
+    if (verified.kind === "failed") return;
+    if (verified.kind === "changed") {
       // The disabled bit is the user's own choice, orthogonal to whether
       // this content is approved — an out-of-band change landing on an
       // already-disabled plugin must not let a later approve() silently
@@ -959,11 +1020,11 @@ export class PluginPipeline {
       const priorDisabledReason = record.disabled === true
         ? this.statuses.get(pluginId)?.disabledReason ?? "user"
         : undefined;
-      await this.holdForApproval(candidate, snapshot.value.sourceHash, priorDisabledReason);
+      await this.holdForApproval(candidate, verified.sourceHash, priorDisabledReason);
       return;
     }
     this.setStatus(candidate, {
-      sourceHash: snapshot.value.sourceHash,
+      sourceHash: verified.snapshot.sourceHash,
       approvedHash: record.approvedHash,
       installedBaselineHash: record.installedBaselineHash ?? null,
     });
@@ -1035,9 +1096,28 @@ export class PluginPipeline {
     const validCandidate = { ...candidate, manifest: candidate.manifest };
     const oldRuntime = this.options.pluginHost.getStatus(candidate.id) ?? null;
     let sourceHash: string | null = null;
+    // The staged source tree, until it is published or discarded. Anything
+    // that throws below leaves it staged, so the catch has to drop it.
+    let unpublishedSource: { discard: () => Promise<void> } | null = null;
     try {
       const snapshot = await this.snapshotOrThrow(validCandidate);
+      unpublishedSource = snapshot;
       sourceHash = snapshot.sourceHash;
+      if (
+        input.expectedHash !== undefined &&
+        snapshot.sourceHash !== input.expectedHash
+      ) {
+        unpublishedSource = null;
+        await snapshot.discard();
+        const priorDisabledReason = input.disabledReasonAfterBuild === "user"
+          ? this.statuses.get(candidate.id)?.disabledReason ?? "user"
+          : undefined;
+        return await this.holdForApproval(
+          validCandidate,
+          snapshot.sourceHash,
+          priorDisabledReason,
+        );
+      }
       // snapshotOrThrow's own digest is reused for the install baseline
       // manifest below instead of re-hashing the whole tree a second time
       // (fixround Section C F1) — writePluginBaselineManifest already
@@ -1112,6 +1192,7 @@ export class PluginPipeline {
             approvedHash: snapshot.sourceHash,
             installedBaselineHash: snapshot.sourceHash,
             approvedBundleHash: built.bundleHash,
+            directoryName: candidate.directoryName,
           }),
         );
       } catch (error) {
@@ -1120,6 +1201,20 @@ export class PluginPipeline {
         // is lost.
         await built.discard().catch(() => undefined);
         throw failureFromUnknown("state", "state-write-failed", error);
+      }
+
+      // Both publishes happen only now, with the record that approves these
+      // exact bytes already durable. The source goes first because the
+      // bundle's own publish carries the live snapshot into the tree it swaps
+      // in; between the two the live root holds the new, approved source and
+      // the previous bundle, which the recorded approvedBundleHash no longer
+      // matches, so the next start rebuilds rather than trusting it.
+      unpublishedSource = null;
+      try {
+        await snapshot.publish();
+      } catch (error) {
+        await built.discard().catch(() => undefined);
+        throw failureFromUnknown("snapshot", "publish-failed", error);
       }
 
       let published: { cleanupWarning: string | null };
@@ -1170,6 +1265,7 @@ export class PluginPipeline {
         error: null,
       }));
     } catch (error) {
+      await unpublishedSource?.discard().catch(() => undefined);
       const detail = error instanceof PipelineFailure
         ? error.detail
         : pipelineError("runtime", "pipeline-failed", errorMessage(error));
@@ -1230,18 +1326,34 @@ export class PluginPipeline {
     }
   }
 
-  private async snapshot(
+  /**
+   * The source check for every caller that only verifies an already-approved
+   * hash: enable, ensureStarted, and reconcile. The snapshot is staged, never
+   * published on sight. A tree that no longer hashes to the approved value is
+   * discarded, so the live snapshot keeps serving the approved bytes while
+   * the change waits for approval — it is the tree a panel's static preview
+   * and a brokered `snapshot/server.mjs` child both read, and publishing it
+   * eagerly let a running host execute source nobody had approved (#779
+   * round 9 B1). A tree that still matches is published, which costs nothing
+   * when the existing snapshot was preserved and repairs it when it was
+   * missing or corrupt.
+   */
+  private async verifyApprovedSource(
     candidate: InstalledPluginRecord & { manifest: DohcPluginManifest },
-    preserveIfHashMatches?: string,
+    approvedHash: string,
   ): Promise<
-    | { ok: true; value: Extract<PluginSourceSnapshotResult, { ok: true }> }
-    | { ok: false; result: PluginPipelineActionResult }
+    | { kind: "verified"; snapshot: Extract<PluginSourceSnapshotResult, { ok: true }> }
+    | { kind: "changed"; sourceHash: string }
+    | { kind: "failed"; result: PluginPipelineActionResult }
   > {
     try {
-      return {
-        ok: true,
-        value: await this.snapshotOrThrow(candidate, preserveIfHashMatches),
-      };
+      const snapshot = await this.snapshotOrThrow(candidate, approvedHash);
+      if (snapshot.sourceHash !== approvedHash) {
+        await snapshot.discard();
+        return { kind: "changed", sourceHash: snapshot.sourceHash };
+      }
+      await snapshot.publish();
+      return { kind: "verified", snapshot };
     } catch (error) {
       const detail = error instanceof PipelineFailure
         ? error.detail
@@ -1256,7 +1368,7 @@ export class PluginPipeline {
         runtimeStatus: this.options.pluginHost.getStatus(candidate.id) ?? null,
         error: detail,
       });
-      return { ok: false, result: this.failure(candidate.id, detail) };
+      return { kind: "failed", result: this.failure(candidate.id, detail) };
     }
   }
 
@@ -1297,7 +1409,7 @@ export class PluginPipeline {
     return result;
   }
 
-  private async localRecord(pluginId: string): Promise<PluginRecordShape | undefined> {
+  private async localState(): Promise<PluginLocalState> {
     const result = await this.operations.readLocalState(
       this.options.stateDir,
       this.workspaceRoot,
@@ -1307,7 +1419,11 @@ export class PluginPipeline {
         pipelineError("state", "local-state-unreadable", result.warning),
       );
     }
-    return result.state.plugins[pluginId];
+    return result.state;
+  }
+
+  private async localRecord(pluginId: string): Promise<PluginRecordShape | undefined> {
+    return (await this.localState()).plugins[pluginId];
   }
 
   private validCandidate(
@@ -1351,8 +1467,14 @@ export class PluginPipeline {
   ): InstalledPluginRecord {
     const valid = this.validCandidate(pluginId);
     if (valid) return valid;
-    const installed = record?.approvedHash
-      ? this.discovery.find((entry) => entry.id === pluginId)
+    // Joined by root path, not by id: this plugin's discovery entry carries
+    // the fallback id its broken manifest left it with, which is not the id
+    // its installation is recorded under (#779 round 9 B3).
+    const status = this.statuses.get(pluginId);
+    const installed = record?.approvedHash && status
+      ? this.discovery.find((entry) =>
+        resolve(entry.rootPath) === resolve(status.rootPath)
+      )
       : undefined;
     if (installed) return installed;
     throw new PipelineFailure(
