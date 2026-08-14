@@ -4082,12 +4082,7 @@ export function DesktopWorkspaceShell(props: {
           <span className="min-w-0 flex-1 truncate">
             {shareViewEnded
               ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
-              : // Every level reads the same here in PR1, because every level
-                // grants exactly these rights in PR1 (#646). The per-level
-                // sentences ship with the rights they describe: PR2 for chat,
-                // PR3 for edits. A banner that promised chat now would lie
-                // until PR2 opens the append gate.
-                `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
+              : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
           </span>
           {shareSkipped
             ? shareSkipNoticeLines(shareSkipped, shareView.granterEmail).map(

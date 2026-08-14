@@ -36,14 +36,6 @@ export interface RefreshSharedViewOutcome {
 }
 
 /**
- * The selector the RELAY stated for a share, pinned locally the first time
- * this client could read it and enforced against every later pull (trust on
- * first use). The user never sees or chooses this scope — pinning only stops
- * the relay from restating a wider one on a later pull.
- */
-export type PinnedShareSelector = ShareViewSelector;
-
-/**
  * Raised when a share record carries no readable pinned selector, so the
  * refresh did NOT pull.
  *
@@ -69,10 +61,13 @@ export class SharePinInvalidError extends Error {
  * defensively, against the relay's OWN rules for the selector it issued.
  * Anything the relay could not have issued is damage and reads as null, which
  * fails the refresh closed rather than reaching the engine.
+ *
+ * The user never sees or chooses this scope. Pinning only stops the relay
+ * from restating a wider one on a later pull.
  */
 export function recordedShareSelector(
   value: unknown,
-): PinnedShareSelector | null {
+): ShareViewSelector | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
@@ -327,7 +322,7 @@ export async function refreshSharedViewOnce(input: {
     workspaceId: string;
     relay: SyncRelayConnection;
     shareId: string;
-    grantedSelector: PinnedShareSelector;
+    grantedSelector: ShareViewSelector;
     recordRefusals: (refusals: ShareViewRefusal[]) => Promise<void>;
   }) => Promise<PullShareViewResult>;
   // Required at the factory boundary for the same reason: every rooted caller

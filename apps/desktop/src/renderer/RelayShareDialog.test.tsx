@@ -107,8 +107,8 @@ describe("RelayShareDialog", () => {
       "Comment and Edit are not ready yet.",
     );
 
-    // A disabled option cannot become the grant, so the dialog cannot send a
-    // level it never showed.
+    // Clicking a disabled option changes nothing. The dialog holds no level
+    // state in PR1, so it cannot send a level it never showed.
     await user.click(screen.getByTestId("share-access-comment"));
     expect(screen.getByTestId("share-access-view").getAttribute("aria-checked")).toBe(
       "true",

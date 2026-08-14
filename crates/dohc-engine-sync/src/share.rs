@@ -71,9 +71,12 @@ pub enum ShareSurface {
 /// PR1 carries and pins this on every `ShareGrant`; all three values grant
 /// exactly what a share grants today. PR2 opens Comment and Edit to chat,
 /// PR3 opens Edit to document writes — neither is wired here yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// No `Default`. A level is always read from the grant the relay stated, and
+/// a default would be a level nobody granted. The compiler is what keeps one
+/// from appearing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShareAccess {
-    #[default]
     View,
     Comment,
     Edit,
@@ -113,7 +116,7 @@ pub struct ShareBoundary {
 ///
 /// Mirrors the relay's own `ShareSelector`
 /// (`services/sync-relay/src/shareFilter.ts`).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareGrant {
     /// Granted paths. Each selects itself and everything beneath it. EMPTY
     /// selects every tracked path, but ONLY together with a `version_id` —
@@ -123,10 +126,10 @@ pub struct ShareGrant {
     /// main version, which is never entitled to a `version.create`; `Some(id)`
     /// is a version share, entitled to exactly that version's create.
     pub version_id: Option<String>,
-    /// The pinned level (#646 PR1). `Default` makes this `View`, but that is
-    /// a TEST convenience only — never a grant source. A real grant is parsed
-    /// from the relay's own selector at pin time (`ShareAccess::parse`) and
-    /// refused, not defaulted, when unreadable.
+    /// The pinned level (#646). Parsed from the relay's own selector at pin
+    /// time (`ShareAccess::parse`) and refused, not defaulted, when
+    /// unreadable. Neither this type nor `ShareAccess` derives `Default`, so
+    /// every construction states a level.
     pub access: ShareAccess,
 }
 
@@ -513,13 +516,13 @@ fn enforce_granted_version(
 
 #[cfg(test)]
 mod granted_path_tests {
-    use super::{ShareGrant, path_within_grant};
+    use super::{ShareAccess, ShareGrant, path_within_grant};
 
     fn grant(paths: &[&str], version_id: Option<&str>) -> ShareGrant {
         ShareGrant {
             paths: paths.iter().map(|path| (*path).to_owned()).collect(),
             version_id: version_id.map(str::to_owned),
-            ..Default::default()
+            access: ShareAccess::View,
         }
     }
 

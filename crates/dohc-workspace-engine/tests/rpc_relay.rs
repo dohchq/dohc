@@ -1851,7 +1851,7 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
 /// 4. `access` naming a level this process cannot read (#646).
 ///
 /// A grant whose level cannot be read is not a narrower grant, it is an
-/// unreadable one — see `parse_share_access`.
+/// unreadable one — see `ShareAccess::parse`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn share_view_pull_refuses_an_unreadable_granted_selector() {
     let workspace_id = "rpc-share-view-no-selector";

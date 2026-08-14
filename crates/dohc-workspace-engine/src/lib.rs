@@ -2325,9 +2325,10 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: ShareViewParams = parse(params)?;
         // Parsed BEFORE the relay round trip: a grant whose level this
-        // process cannot read must never pin (#646 PR1) — refusing early is
-        // the same posture as every other unreadable-field refusal here.
-        let access = parse_share_access(&params.granted_selector.access)?;
+        // process cannot read must never pin (#646) — refusing early is the
+        // same posture as every other unreadable-field refusal here.
+        let access = dohc_engine_sync::ShareAccess::parse(&params.granted_selector.access)
+            .ok_or_else(|| wire(ErrorCode::InvalidParams, "unknown share access"))?;
         let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let outcome = self
@@ -10013,15 +10014,6 @@ fn parse_actor_kind(raw: &str) -> Result<ChatActorKind, WireError> {
         "agent" => Ok(ChatActorKind::Agent),
         _ => Err(wire(ErrorCode::InvalidParams, "unknown chat actor kind")),
     }
-}
-
-/// The Rust twin of the relay's `SHARE_ACCESS_VALUES`
-/// (`services/sync-relay/src/shareFilter.ts`), applied to the level a caller
-/// pins on `share.view.pull` (#646 PR1). Held to the TypeScript oracle vector
-/// by vector in `crates/dohc-engine-sync/tests/security_contract.rs`.
-fn parse_share_access(raw: &str) -> Result<dohc_engine_sync::ShareAccess, WireError> {
-    dohc_engine_sync::ShareAccess::parse(raw)
-        .ok_or_else(|| wire(ErrorCode::InvalidParams, "unknown share access"))
 }
 
 fn parse_follow_target_kind(raw: &str) -> Result<FollowTargetKind, WireError> {
