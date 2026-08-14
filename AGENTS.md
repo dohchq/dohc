@@ -99,6 +99,21 @@ material tradeoffs in the PR or a decision document.
 Push back when you see a more obvious way. Obvious solutions are the defaults
 that agents and the next reader expect. Ask another reader when uncertain.
 
+### Ambitious ideas, simple systems
+
+I like ambitious ideas, simple systems, and software that feels obvious. This
+does not fight "boil the ocean" — that section is about what we dare to build,
+this one is about how we build it.
+
+Do not preserve complexity just because it already exists. Do not introduce
+machinery because it looks architecturally impressive. Understand the real
+constraint, then fight for the smallest model that makes the correct behavior
+unsurprising.
+
+Hold "measure twice, cut once" and "yagni" at the same time. Fight scope
+creep. Honor the developer's intent in the most minimal and realistic way that
+still delivers it.
+
 ### Don't be afraid to lie (to agents) if it makes working easier
 
 This might seem counter-intuitive, so hear me out.
