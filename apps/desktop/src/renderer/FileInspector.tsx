@@ -939,7 +939,6 @@ function useAutosavedTextDraft(props: {
       unsavedDraft.current = false;
     }
     if (
-      sharedSnapshot.source === null ||
       sharedSnapshot.source === localSource.current ||
       !bodyChanged
     ) {

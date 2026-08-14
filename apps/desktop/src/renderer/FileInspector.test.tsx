@@ -2234,6 +2234,102 @@ describe("markdown editor unmount flush", () => {
     );
   });
 
+  it("adopts a rescued later duplicate text read after an earlier clean initialization", async () => {
+    type ReadResult = {
+      text: string;
+      truncated: false;
+      contentHash: string;
+    };
+    const olderHash = "0".repeat(64);
+    const newerHash = "1".repeat(64);
+    const writtenHash = "2".repeat(64);
+    let resolveOlder!: (value: ReadResult) => void;
+    let resolveNewer!: (value: ReadResult) => void;
+    const older = new Promise<ReadResult>((resolve) => {
+      resolveOlder = resolve;
+    });
+    const newer = new Promise<ReadResult>((resolve) => {
+      resolveNewer = resolve;
+    });
+    bridgeMock.readWorkspaceText
+      .mockImplementationOnce(() => older)
+      .mockImplementationOnce(() => newer);
+    bridgeMock.writeWorkspaceText.mockResolvedValue({
+      status: "written",
+      contentHash: writtenHash,
+    });
+    let flush: DraftFlush | null = null;
+    const user = userEvent.setup();
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/rescued.txt"
+        registerDraftFlush={(next) => {
+          flush = next;
+        }}
+      />,
+    );
+    const newerView = render(
+      <FileInspector workspaceId="ws-1" path="notes/rescued.txt" />,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+
+    await act(async () => {
+      resolveOlder({
+        text: "older",
+        truncated: false,
+        contentHash: olderHash,
+      });
+      await older;
+    });
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId("view-text-editor")
+          .every((editor) => editor.textContent?.includes("older")),
+      ).toBe(true),
+    );
+
+    await act(async () => {
+      resolveNewer({
+        text: "newer",
+        truncated: false,
+        contentHash: newerHash,
+      });
+      await newer;
+      await Promise.resolve();
+      newerView.unmount();
+    });
+    const editor = await waitFor(() => {
+      const next = screen.getByTestId("view-text-editor");
+      expect(next.textContent).toContain("newer");
+      return next;
+    });
+
+    const content = editor.querySelector(".cm-content") as HTMLElement;
+    await user.click(content);
+    await user.keyboard("{Control>}a{/Control}newer saved");
+    await waitFor(() => expect(flush).not.toBeNull());
+    await flush!();
+
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.writeWorkspaceText.mock.calls[0]?.[0]).toMatchObject({
+      text: "newer saved",
+      expectedContentHash: newerHash,
+    });
+    expect(
+      getSharedLocalDocument(
+        documentVersionKey("ws-1", "notes/rescued.txt", undefined),
+      ).getSnapshot(),
+    ).toMatchObject({
+      contentHash: writtenHash,
+      dirty: false,
+      saveState: "saved",
+    });
+  });
+
   it("adopts a later duplicate Markdown read after an earlier clean initialization", async () => {
     type ReadResult = {
       text: string;
