@@ -1,5 +1,8 @@
 import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
-import { RefreshShareMountsResult } from "../ipc/bridgeContract";
+import {
+  RefreshShareMountsResult,
+  ShareMountStatusRow,
+} from "../ipc/bridgeContract";
 import { SharePinInvalidError } from "./sharedView";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -772,15 +775,63 @@ describe("share mount result rows", () => {
     }
   });
 
-  it("keeps changedPaths within what the schema accepts", () => {
-    expect(
-      shareMountResultRow({
+  // A count the schema cannot carry must not cost the mount its STATUS. The
+  // schema parse alone would drop the whole row, so the count is clamped
+  // first: the row survives, and it claims the minimum rather than a number
+  // nobody can trust.
+  it("keeps a mount's status when its changed count is unusable", () => {
+    for (const changedPaths of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      -4,
+      1.7,
+    ]) {
+      const row = shareMountResultRow({
         shareId: "s-1",
         label: "alex",
-        status: "updated",
-        changedPaths: -4,
-      })?.changedPaths,
-    ).toBe(0);
+        status: "damaged",
+        changedPaths,
+      });
+      expect(
+        row,
+        `MUTATION: ${String(changedPaths)} drops the row, losing the mount's status`,
+      ).not.toBeNull();
+      expect(row?.status).toBe("damaged");
+      // Derived from the SCHEMA, not from a restatement of its bounds.
+      expect(ShareMountStatusRow.safeParse(row).success).toBe(true);
+    }
+  });
+
+  // The bounds are the schema's, so the guard is checked against the schema
+  // rather than against numbers copied out of it.
+  it("returns only rows the wire schema accepts, for every identity shape", () => {
+    for (const identity of [
+      { shareId: "s-1", label: "alex" },
+      { shareId: "s-1", label: "x".repeat(64) },
+      { shareId: "s-1", label: "x".repeat(65) },
+      { shareId: "s".repeat(200), label: "alex" },
+      { shareId: "s".repeat(201), label: "alex" },
+      { shareId: "", label: "alex" },
+      { shareId: null, label: "alex" },
+      { shareId: "s-1", label: 7 },
+      { shareId: "s-1", label: undefined },
+    ]) {
+      const row = shareMountResultRow({
+        ...identity,
+        status: "unchanged",
+        changedPaths: 0,
+      });
+      const schemaAccepts = ShareMountStatusRow.safeParse({
+        ...identity,
+        status: "unchanged",
+        changedPaths: 0,
+      }).success;
+      expect(
+        row !== null,
+        `MUTATION: builder and schema disagree for ${JSON.stringify(identity).slice(0, 40)}`,
+      ).toBe(schemaAccepts);
+    }
   });
 
   // The seam rule: whatever this builder produces, the wire must carry.

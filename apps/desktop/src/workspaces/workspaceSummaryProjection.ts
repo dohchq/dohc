@@ -109,7 +109,7 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
           return {
             ...(shareId !== null ? { shareId } : {}),
             ...(label !== null ? { label } : {}),
-            granterEmail: boundedString(row.granterEmail, 3, 320),
+            granterEmail: shareViewGranterEmail(row),
             ...(damaged ? { damaged: true as const } : { access: level }),
             ...(row.ended === true ? { ended: true } : {}),
             ...(skipped.success ? { skippedOps: skipped.data } : {}),

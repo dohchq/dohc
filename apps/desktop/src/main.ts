@@ -340,6 +340,7 @@ import {
   shareViewGranterEmail,
   shareViewIsPresent,
 } from "./workspaces/shareViewMarker";
+import { pathShareLanes } from "./workspaces/relayShareLanes";
 import {
   workspaceSummariesFrom,
   workspaceSummaryFor,
@@ -4986,20 +4987,15 @@ function registerIpcHandlers(
       received?: Array<Record<string, unknown>>;
     }>("/sync/shares");
     const relayUrl = cachedCredentials?.relayUrl;
-    // Chat-channel grants (MU-C4) are listed through listChatChannelShares;
-    // this surface stays the path/version share manager (grant AND receive).
-    // A damaged row loses its selector, so the kind is read from the row
-    // itself when the relay could still state it. Without that, a damaged
-    // chat-channel grant surfaced here as an unreadable PATH share.
-    const notChatChannel = (row: Record<string, unknown>) =>
-      (row.selector as { kind?: unknown } | undefined)?.kind !== "chat-channel" &&
-      row.selectorKind !== "chat-channel";
     const withCode = (row: Record<string, unknown>) => ({
       ...row,
       shareCode: buildShareCode({ shareId: String(row.shareId), relayUrl: relayUrl! }),
     });
-    const granted = (result.granted ?? []).filter(notChatChannel).map(withCode);
-    const received = (result.received ?? []).filter(notChatChannel).map(withCode);
+    // The two managers split this listing; see relayShareLanes for why a
+    // damaged row stays in the granted lane.
+    const lanes = pathShareLanes(result);
+    const granted = lanes.granted.map(withCode);
+    const received = lanes.received.map(withCode);
     return ListRelaySharesResult.parse({ granted, received });
   });
 
