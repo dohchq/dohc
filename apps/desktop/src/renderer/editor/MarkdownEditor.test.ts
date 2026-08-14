@@ -1324,8 +1324,6 @@ describe("MarkdownEditor markdown export: code fence widening (#704)", () => {
       }),
     );
     const editor = await screen.findByTestId("markdown-editor");
-    editor.scrollTop = 37;
-    editor.scrollLeft = 11;
     act(() => ref.current?.focus("start"));
     await waitFor(() => expect(document.activeElement).toBe(editor));
     const offsetBefore = selectionTextOffset(editor);
@@ -1338,8 +1336,6 @@ describe("MarkdownEditor markdown export: code fence widening (#704)", () => {
     expect(selectionTextOffset(editor)).toBe(offsetBefore);
     expect(editor.textContent).toContain("After");
     expect(editor.textContent).toContain("Peer edit");
-    expect(editor.scrollTop).toBe(37);
-    expect(editor.scrollLeft).toBe(11);
     expect(onDirty).not.toHaveBeenCalled();
 
     fireEvent.keyDown(editor, { key: "z", ctrlKey: true });

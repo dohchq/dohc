@@ -1688,6 +1688,112 @@ describe("editor groups", () => {
     expect(right.dataset.active).toBe("true");
   });
 
+  it("keeps a newer duplicate-file open in an empty drag destination", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 1 / 3 },
+          { id: "middle", tabs: ["b.md"], activeTab: "b.md", size: 1 / 3 },
+          { id: "right", tabs: [], activeTab: null, size: 1 / 3 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["a.md", "b.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.readWorkspaceText = vi.fn(async () => ({
+      text: "# Doc\n\n",
+      truncated: false as const,
+      contentHash: "a".repeat(64),
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    Object.defineProperty(Element.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    Object.defineProperty(Element.prototype, "hasPointerCapture", {
+      configurable: true,
+      value: vi.fn(() => false),
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const middle = screen.getByRole("region", { name: "Editor group 2" });
+    const right = screen.getByRole("region", { name: "Editor group 3" });
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), "Left draft");
+    await user.click(within(middle).getByTestId("markdown-edit-toggle"));
+    await user.type(within(middle).getByTestId("markdown-editor"), "Middle draft");
+    await waitFor(() => {
+      expect(within(left).getByTestId("tab-dirty")).toBeTruthy();
+      expect(within(middle).getByTestId("tab-dirty")).toBeTruthy();
+    });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: vi.fn(() => right),
+    });
+
+    const source = within(left).getByTestId("tab-a.md");
+    fireEvent.pointerDown(source, {
+      button: 0,
+      pointerId: 7,
+      clientX: 10,
+      clientY: 10,
+    });
+    fireEvent.pointerMove(source, {
+      buttons: 1,
+      pointerId: 7,
+      clientX: 30,
+      clientY: 40,
+    });
+    fireEvent.pointerUp(source, {
+      pointerId: 7,
+      clientX: 30,
+      clientY: 40,
+    });
+    await waitFor(() =>
+      expect(
+        bridge.writeWorkspaceText.mock.calls.some(
+          ([payload]) => payload.relativePath === "a.md",
+        ),
+      ).toBe(true),
+    );
+
+    fireEvent.pointerDown(right);
+    await waitFor(() => expect(right.dataset.active).toBe("true"));
+    await user.click(fileTreeRow("b.md"));
+    await waitFor(() =>
+      expect(
+        bridge.writeWorkspaceText.mock.calls.some(
+          ([payload]) => payload.relativePath === "b.md",
+        ),
+      ).toBe(true),
+    );
+    expect(within(right).queryByTestId("tab-b.md")).toBeNull();
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    await waitFor(() =>
+      expect(within(right).getByTestId("tab-b.md").dataset.active).toBe("true"),
+    );
+    expect(within(right).getByTestId("tab-a.md")).toBeTruthy();
+    expect(right.dataset.active).toBe("true");
+  });
+
   it("closes an empty editor group from its visible control", async () => {
     renderShell(
       makeBridge(

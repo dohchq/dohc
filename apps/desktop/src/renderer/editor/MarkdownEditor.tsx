@@ -979,8 +979,6 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           if (!editor || collabActive) return;
           const documentBefore = editor.state.doc;
           const selection = editor.state.selection.getBookmark();
-          const scrollTop = editor.view.dom.scrollTop;
-          const scrollLeft = editor.view.dom.scrollLeft;
           editor
             .chain()
             .setContent(markdown, {
@@ -997,8 +995,6 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             .map(documentReplacementMap(documentBefore, documentAfter))
             .resolve(documentAfter);
           editor.view.dispatch(editor.state.tr.setSelection(mappedSelection));
-          editor.view.dom.scrollTop = scrollTop;
-          editor.view.dom.scrollLeft = scrollLeft;
         },
       }),
       [collabActive, editor, value],

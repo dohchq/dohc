@@ -1789,24 +1789,19 @@ export function DesktopWorkspaceShell(props: {
       const nextGroups = new Map(
         next.editorGroups.map((group) => [group.id, group] as const),
       );
-      const invalidatedGroups = new Set<string>();
       for (const groupId of new Set([...previousGroups.keys(), ...nextGroups.keys()])) {
-        if (
+        const activeDocumentChanged =
           (previousGroups.get(groupId)?.activeTab ?? null) !==
-          (nextGroups.get(groupId)?.activeTab ?? null)
+          (nextGroups.get(groupId)?.activeTab ?? null);
+        const requestSequenceIsFresh =
+          fileOpenRequests.current.sequenceByGroup.get(groupId) ===
+          requestSequencesAtIssue.get(groupId);
+        if (
+          requestSequenceIsFresh &&
+          (activeDocumentChanged || groupId === previous.activeEditorGroup)
         ) {
-          invalidatedGroups.add(groupId);
+          invalidateDeferredFileOpen(groupId);
         }
-      }
-      const activeGroupId = previous.activeEditorGroup;
-      if (
-        fileOpenRequests.current.sequenceByGroup.get(activeGroupId) ===
-        requestSequencesAtIssue.get(activeGroupId)
-      ) {
-        invalidatedGroups.add(activeGroupId);
-      }
-      for (const groupId of invalidatedGroups) {
-        invalidateDeferredFileOpen(groupId);
       }
     },
     [invalidateDeferredFileOpen],
