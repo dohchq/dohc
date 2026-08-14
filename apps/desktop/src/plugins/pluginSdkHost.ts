@@ -78,11 +78,22 @@ function waitForOperation<T>(
   });
 }
 
-function pluginCapabilities(writable: boolean) {
+function pluginCapabilities(writable: boolean, childProcessesAvailable: boolean) {
   return {
     files: { read: true, list: true, write: writable, watch: false },
     workspace: { search: true },
-    childProcesses: { spawn: true, output: true, send: true, terminate: true },
+    // Reflects whether this exact request path can actually broker child
+    // processes, not just whether the plugin's own activated code could —
+    // invokeChildProcess is absent for panel-driven SDK calls, which get a
+    // real "unavailable for this request path" error from every
+    // childProcesses.* method below regardless of what capabilities()
+    // claims (#779 round 3 finding 7).
+    childProcesses: {
+      spawn: childProcessesAvailable,
+      output: childProcessesAvailable,
+      send: childProcessesAvailable,
+      terminate: childProcessesAvailable,
+    },
     collections: { read: false },
     provenance: { record: false },
   };
@@ -109,7 +120,10 @@ export async function invokePluginSdkHost(
     case "capabilities": {
       const writeAvailable =
         context.isWritable() && (await context.writeAvailable());
-      return pluginCapabilities(writeAvailable && context.isWritable());
+      return pluginCapabilities(
+        writeAvailable && context.isWritable(),
+        context.invokeChildProcess !== undefined,
+      );
     }
     case "files.read":
     case "files.list":

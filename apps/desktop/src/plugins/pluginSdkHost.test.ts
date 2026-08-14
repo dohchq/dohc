@@ -361,4 +361,27 @@ describe("invokePluginSdkHost", () => {
 
     await expect(request).rejects.toThrow("Plugin panel is no longer active.");
   });
+
+  it("reports childProcesses honestly, and rejects every method, when invokeChildProcess is absent (#779 round 3 finding 7 / R24)", async () => {
+    // Panel-driven SDK calls never supply invokeChildProcess — only a
+    // plugin's own routeSdkRequest path may broker child processes on its
+    // behalf.
+    const root = await workspaceRoot();
+    const panelContext = context(root);
+    delete panelContext.invokeChildProcess;
+
+    await expect(
+      invokePluginSdkHost(panelContext, "capabilities"),
+    ).resolves.toMatchObject({
+      childProcesses: { spawn: false, output: false, send: false, terminate: false },
+    });
+    await expect(
+      invokePluginSdkHost(panelContext, "childProcesses.spawn", {
+        modulePath: "server.mjs",
+      }),
+    ).rejects.toThrow(/unavailable for this request path/i);
+    await expect(
+      invokePluginSdkHost(panelContext, "childProcesses.wait", { childId: "child-1" }),
+    ).rejects.toThrow(/unavailable for this request path/i);
+  });
 });
