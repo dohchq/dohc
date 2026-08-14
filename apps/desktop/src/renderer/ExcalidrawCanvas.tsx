@@ -92,10 +92,16 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
   const hydratedFileIds = useRef<Set<string>>(new Set());
   const presenceBinding = useRef<ExcalidrawPresenceBinding | null>(null);
   const boundSceneDoc = useRef(props.sceneDoc);
+  const sceneDocGeneration = useRef(0);
   if (boundSceneDoc.current !== props.sceneDoc) {
     boundSceneDoc.current = props.sceneDoc;
     remoteEchoes.current.clear();
     hydratedFileIds.current.clear();
+    // Remount the canvas below. Excalidraw's imperative API can add files but
+    // never remove them, so a replacement document that reuses a fileId would
+    // otherwise show the retired lineage's bytes until — or forever, if — its
+    // own asset read lands.
+    sceneDocGeneration.current += 1;
   }
 
   useLayoutEffect(() => {
@@ -179,6 +185,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
   return (
     <div className="absolute inset-0" data-testid="excalidraw-canvas">
       <Excalidraw
+        key={sceneDocGeneration.current}
         initialData={initial.scene}
         isCollaborating={presenceBound}
         onPointerUpdate={
