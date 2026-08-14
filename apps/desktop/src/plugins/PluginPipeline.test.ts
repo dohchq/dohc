@@ -568,4 +568,75 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.dispose();
     }
   }, 60_000);
+
+  it("keeps an explicitly disabled plugin disabled after approving an out-of-band change (#779 round 3 finding 5)", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      // The user explicitly disables it — their own, standalone choice.
+      expect((await pipeline.disable("example-plugin")).ok).toBe(true);
+      expect(pipeline.list()[0]).toMatchObject({ status: "disabled", disabledReason: "user" });
+
+      // An out-of-band (watcher-observed) source change arrives while it
+      // sits disabled — unrelated to the user's disable decision.
+      await writeFile(fixture.entryPath, [
+        'export const marker = "out-of-band";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin/src/index.ts",
+        operation: "update",
+      }]);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "disabled-pending-approval",
+        "Watcher edit on a disabled plugin did not enter disabled-pending-approval.",
+      );
+
+      const approved = await pipeline.approve("example-plugin");
+      expect(approved.ok).toBe(true);
+      // The new content is now trusted (a future enable() will work cleanly
+      // from it), but the user's own explicit disable must still hold.
+      expect(pipeline.list()[0]).toMatchObject({
+        status: "disabled",
+        disabledReason: "user",
+        runtimeStatus: null,
+      });
+      expect(host.getStatus("example-plugin")).toBeUndefined();
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
 });

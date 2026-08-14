@@ -444,10 +444,15 @@ export class PluginPipeline {
   approve(pluginId: string): Promise<PluginPipelineActionResult> {
     return this.enqueueAction(pluginId, async () => {
       const candidate = this.requireValidCandidate(pluginId);
+      // The disabled bit is the user's own choice, orthogonal to approval:
+      // approving new content trusts that content, but must never silently
+      // re-enable a plugin the user explicitly turned off before the
+      // out-of-band change arrived (#779 round 3 finding 5).
+      const staysDisabled = this.statuses.get(pluginId)?.disabledReason === "user";
       return this.runFullBuild({
         candidate,
-        startRuntime: true,
-        disabledReasonAfterBuild: null,
+        startRuntime: !staysDisabled,
+        disabledReasonAfterBuild: staysDisabled ? "user" : null,
         resetCrashAccounting: true,
         freshInstall: false,
       });
@@ -809,7 +814,14 @@ export class PluginPipeline {
     const snapshot = await this.snapshot(candidate, record.approvedHash);
     if (!snapshot.ok) return;
     if (snapshot.value.sourceHash !== record.approvedHash) {
-      await this.holdForApproval(candidate, snapshot.value.sourceHash);
+      // The disabled bit is the user's own choice, orthogonal to whether
+      // this content is approved — an out-of-band change landing on an
+      // already-disabled plugin must not let a later approve() silently
+      // re-enable it (#779 round 3 finding 5).
+      const priorDisabledReason = record.disabled === true
+        ? this.statuses.get(pluginId)?.disabledReason ?? "user"
+        : undefined;
+      await this.holdForApproval(candidate, snapshot.value.sourceHash, priorDisabledReason);
       return;
     }
     this.setStatus(candidate, {
@@ -1010,6 +1022,7 @@ export class PluginPipeline {
   private async holdForApproval(
     candidate: InstalledPluginRecord & { manifest: DohcPluginManifest },
     sourceHash: string,
+    priorDisabledReason?: PluginPipelinePluginStatus["disabledReason"],
   ): Promise<PluginPipelineActionResult> {
     try {
       await this.operations.mutateRecord(
@@ -1022,7 +1035,7 @@ export class PluginPipeline {
       const record = await this.localRecord(candidate.id);
       return this.success(this.setStatus(candidate, {
         status: "disabled-pending-approval",
-        disabledReason: "approval",
+        disabledReason: priorDisabledReason ?? "approval",
         runtimeStatus: null,
         sourceHash,
         approvedHash: record?.approvedHash ?? null,
