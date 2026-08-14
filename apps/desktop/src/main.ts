@@ -569,10 +569,18 @@ import {
 } from "./plugins/pluginPanelStartLifecycle";
 import { createPluginPanelSdkAuthorityRegistry } from "./plugins/pluginPanelSdkAuthority";
 import {
+  forgetUninstalledPlugin,
+  forgetWorkspaceRegistrations,
   loadPluginPanelRegistration,
+  pluginLifecycleKey,
   rememberPluginRegistration,
+  startPluginForPanel,
   type RegisteredPlugin,
 } from "./plugins/pluginPanelRegistration";
+import {
+  disposeWorkspacePipeline,
+  ensureWorkspacePipeline,
+} from "./plugins/pluginPipelineLifecycle";
 import type { DohcPluginManifest } from "./plugins/pluginManifestSchema";
 import {
   assertActiveWorkspaceForSitePreviewStop,
@@ -753,6 +761,7 @@ const sitePreviews = createSitePreviewLifecycle({
   revokePreview: sitePreviewSdkAuthorities.revokePreview,
 });
 const pluginPipelines = new Map<string, PluginPipeline>();
+const pluginPipelineDisposals = new Map<string, Promise<void>>();
 const sitePreviewStartLocks = new Map<string, Promise<void>>();
 const sitePreviewStartControllersBySender = new Map<
   number,
@@ -861,37 +870,23 @@ async function ensurePluginPipeline(
   workspace: CreatedWorkspace,
 ): Promise<PluginPipeline> {
   assertWritableWorkspace(workspace);
-  const existing = pluginPipelines.get(workspace.workspaceId);
-  if (existing) {
-    // start() memoizes its own promise, so a concurrent caller that lands
-    // here while startInternal() is still running must still wait for it —
-    // otherwise it can observe an empty pipeline.list() and report "no
-    // plugins" with no retry (CodeRabbit #779 R5).
-    await existing.start();
-    return existing;
-  }
-  const pipeline = createPluginPipeline(workspace);
-  pluginPipelines.set(workspace.workspaceId, pipeline);
-  try {
-    await pipeline.start();
-    if (pluginPipelines.get(workspace.workspaceId) !== pipeline) {
-      throw new Error("Plugin pipeline closed while the workspace was opening.");
-    }
-    return pipeline;
-  } catch (error) {
-    if (pluginPipelines.get(workspace.workspaceId) === pipeline) {
-      pluginPipelines.delete(workspace.workspaceId);
-    }
-    await pipeline.dispose().catch(() => undefined);
-    throw error;
-  }
+  return ensureWorkspacePipeline({
+    live: pluginPipelines,
+    disposals: pluginPipelineDisposals,
+    workspaceId: workspace.workspaceId,
+    create: () => createPluginPipeline(workspace),
+    start: (pipeline) => pipeline.start(),
+    dispose: (pipeline) => pipeline.dispose(),
+  });
 }
 
 async function stopPluginPipelineForWorkspace(workspaceId: string): Promise<void> {
-  const pipeline = pluginPipelines.get(workspaceId);
-  if (!pipeline) return;
-  pluginPipelines.delete(workspaceId);
-  await pipeline.dispose();
+  await disposeWorkspacePipeline({
+    live: pluginPipelines,
+    disposals: pluginPipelineDisposals,
+    workspaceId,
+    dispose: (pipeline) => pipeline.dispose(),
+  });
 }
 
 // Latest search per renderer: the engine-backed search path awaits (flush +
@@ -2737,10 +2732,6 @@ function pluginPanelKey(
   return `${workspaceId}\0${pluginId}\0${panelId}`;
 }
 
-function pluginLifecycleKey(workspaceId: string, pluginId: string): string {
-  return `${workspaceId}\0${pluginId}`;
-}
-
 const withPluginPanelStartLock = <T>(key: string, operation: () => Promise<T>) =>
   withKeyedStartLock(pluginPanelStartLocks, key, operation);
 
@@ -2862,20 +2853,13 @@ async function ensurePluginStarted(
   plugin: RegisteredPlugin,
 ): Promise<PluginHost> {
   const pipeline = await ensurePluginPipeline(workspace);
-  if (pipeline.host.getSpawnId(plugin.manifest.name)) return pipeline.host;
-  const result = await pipeline.ensureStarted(plugin.manifest.name);
-  if (!result.ok) {
-    throw new Error(result.error.message);
-  }
-  // Only when THIS call performed the zero-to-running transition does the
-  // panel own stopping the host later. The pipeline reports that from inside
-  // its own per-plugin queue, where a workspace reconciliation that started
-  // the host first is already visible (#779 round 10 B3).
-  if (result.startedHost) {
-    panelStartedHosts.add(
-      pluginLifecycleKey(workspace.workspaceId, plugin.manifest.name),
-    );
-  }
+  await startPluginForPanel({
+    panelStartedHosts,
+    workspaceId: workspace.workspaceId,
+    pluginId: plugin.manifest.name,
+    isHostRunning: () => Boolean(pipeline.host.getSpawnId(plugin.manifest.name)),
+    ensureStarted: () => pipeline.ensureStarted(plugin.manifest.name),
+  });
   return pipeline.host;
 }
 
@@ -2964,9 +2948,7 @@ async function stopPluginPanelsForWorkspace(workspaceId: string): Promise<void> 
 async function stopPluginWorkspace(workspaceId: string): Promise<void> {
   await stopPluginPanelsForWorkspace(workspaceId);
   await stopPluginPipelineForWorkspace(workspaceId);
-  // The registrations describe manifests read from a workspace that is no
-  // longer open. Reopening a panel re-reads them (#779 round 10 B7).
-  pluginRegistrations.delete(workspaceId);
+  forgetWorkspaceRegistrations(pluginRegistrations, workspaceId);
 }
 
 async function stopAllPluginWorkspaces(): Promise<void> {
@@ -6471,12 +6453,13 @@ function registerIpcHandlers(
       const result = PluginActionResult.parse(
         await pipeline.uninstall(input.pluginId, input.confirmationToken),
       );
-      if (result.ok) {
-        pluginRegistrations.get(input.workspaceId)?.delete(input.pluginId);
-        panelStartedHosts.delete(
-          pluginLifecycleKey(input.workspaceId, input.pluginId),
-        );
-      }
+      forgetUninstalledPlugin({
+        registrations: pluginRegistrations,
+        panelStartedHosts,
+        workspaceId: input.workspaceId,
+        pluginId: input.pluginId,
+        uninstalled: result.ok,
+      });
       return result;
     } catch (error) {
       return PluginActionResult.parse({

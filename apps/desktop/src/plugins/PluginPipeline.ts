@@ -227,6 +227,23 @@ function cloneStatus(status: PluginPipelinePluginStatus): PluginPipelinePluginSt
   };
 }
 
+/**
+ * Why a confirmed uninstall must not delete, or null when the live tree still
+ * hashes to what the confirmation covered. A null hash means preflight could
+ * not fingerprint the tree, so nothing proves the warning the user approved
+ * still describes what the recursive delete would remove (#779 round 11 A2).
+ */
+function uninstallVerificationFailure(
+  currentHash: string | null,
+  confirmedHash: string | null,
+  changed: string,
+): string | null {
+  if (currentHash === null || confirmedHash === null) {
+    return "source could not be read to confirm what uninstall would delete";
+  }
+  return currentHash === confirmedHash ? null : changed;
+}
+
 function invalidPluginError(
   candidate: InstalledPluginRecord,
 ): PluginPipelineError | null {
@@ -694,13 +711,18 @@ export class PluginPipeline {
         installedBaselineHash: record?.installedBaselineHash,
         engineCaptureAvailable: this.engineCaptureAvailable(),
       });
-      if (currentPreflight.liveHash !== confirmation.liveHash) {
+      const staleReason = uninstallVerificationFailure(
+        currentPreflight.liveHash,
+        confirmation.liveHash,
+        "changed after uninstall preflight",
+      );
+      if (staleReason !== null) {
         return this.failure(
           pluginId,
           pipelineError(
             "uninstall",
             "confirmation-stale",
-            `Plugin "${pluginId}" changed after uninstall preflight. Review it again.`,
+            `Plugin "${pluginId}" ${staleReason}. Review it again.`,
           ),
         );
       }
@@ -732,11 +754,16 @@ export class PluginPipeline {
           installedBaselineHash: record?.installedBaselineHash,
           engineCaptureAvailable: this.engineCaptureAvailable(),
         });
-        if (preDeletePreflight.liveHash !== confirmation.liveHash) {
+        const preDeleteReason = uninstallVerificationFailure(
+          preDeletePreflight.liveHash,
+          confirmation.liveHash,
+          "changed while its process was stopping",
+        );
+        if (preDeleteReason !== null) {
           const detail = pipelineError(
             "uninstall",
             "confirmation-stale",
-            `Plugin "${pluginId}" changed while its process was stopping. Review uninstall again.`,
+            `Plugin "${pluginId}" ${preDeleteReason}. Review uninstall again.`,
           );
           // Nothing was deleted, the record still says disabled, and the host
           // is stopped — but the status set above still reads "uninstalling",
@@ -825,7 +852,7 @@ export class PluginPipeline {
 
   private async startInternal(): Promise<void> {
     try {
-      this.discovery = await this.operations.discover(this.workspaceRoot);
+      this.discovery = await this.discoverCandidates();
       await this.seedStatuses();
       for (const candidate of this.discovery) {
         if (!candidate.valid || !candidate.manifest) continue;
@@ -937,7 +964,7 @@ export class PluginPipeline {
   private async processWatcherBatch(events: readonly WatcherEvent[]): Promise<void> {
     if (this.disposed) return;
     const previous = this.discovery;
-    const next = await this.operations.discover(this.workspaceRoot);
+    const next = await this.discoverCandidates();
     this.discovery = next;
     await this.seedStatusesForNewCandidates(next);
 
@@ -1468,6 +1495,24 @@ export class PluginPipeline {
 
   private async localRecord(pluginId: string): Promise<PluginRecordShape | undefined> {
     return (await this.localState()).plugins[pluginId];
+  }
+
+  /**
+   * Discovery, told which directory each installed plugin id was installed
+   * from. Without it, two roots declaring one id are resolved by lexical
+   * order, and a new directory can take an installation's id — and with it
+   * the approval and uninstall paths recorded for another root (#779 round
+   * 11 A4).
+   */
+  private async discoverCandidates(): Promise<InstalledPluginRecord[]> {
+    const state = await this.localState();
+    const installedDirectoryNames = new Map<string, string>();
+    for (const [pluginId, record] of Object.entries(state.plugins)) {
+      if (record.directoryName) {
+        installedDirectoryNames.set(pluginId, record.directoryName);
+      }
+    }
+    return this.operations.discover(this.workspaceRoot, installedDirectoryNames);
   }
 
   private validCandidate(

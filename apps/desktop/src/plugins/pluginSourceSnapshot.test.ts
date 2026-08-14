@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   lstat,
   mkdir,
@@ -23,6 +24,7 @@ import {
   PINNED_PLUGIN_PACKAGE_MANAGER,
   assertSafeSnapshotEntryName,
   hashPluginSourceFiles,
+  isPluginRootArtifact,
   isPluginSourceRoot,
   pluginIdToSafePath,
   snapshotPluginSource,
@@ -210,6 +212,41 @@ describe("pluginIdToSafePath", () => {
     },
   );
 
+  it("refuses an id shaped like another plugin's staging or swap directory (CERT779J B2)", async () => {
+    const victimUuid = randomUUID();
+    for (
+      const pluginId of [
+        `victim.previous-${victimUuid}`,
+        `victim.staging-${victimUuid}`,
+        `victim.snap-staging-${victimUuid}`,
+      ]
+    ) {
+      // These are legal manifest names: NPM_PACKAGE_NAME allows "." and "-".
+      // Installed, each one parks its live data root exactly where "victim"'s
+      // own uninstall sweep deletes it, and where the build's source-root
+      // check accepts it as a staged tree.
+      expect(NPM_PACKAGE_NAME.test(pluginId)).toBe(true);
+      expect(isPluginRootArtifact("victim", pluginId)).toBe(true);
+      expect(() => pluginIdToSafePath(pluginId)).toThrow(
+        /reserves for its own staging and swap directories/,
+      );
+      expect(() => pluginIdToSafePath(pluginId)).toThrow(/\.previous-/);
+
+      const fixture = await createPluginFixture(pluginId);
+      const failure = requireFailure(await stageSnapshot(fixture));
+      expect(failure.error.code).toBe("invalid-plugin-id");
+    }
+  });
+
+  it("keeps ids that only resemble an artifact name", () => {
+    // The uuid is what makes the name an artifact: a plugin author's own
+    // dotted, hyphenated name must still install.
+    expect(pluginIdToSafePath("victim.previous-1")).toBe("victim.previous-1");
+    expect(pluginIdToSafePath("previous-notes")).toBe("previous-notes");
+    expect(pluginIdToSafePath(`victim.previously-${randomUUID()}`))
+      .toContain("victim.previously-");
+  });
+
   it("maps two distinct ids that only differ in where the scope separator falls to distinct paths (#779 round 3 finding 4)", () => {
     const first = "@a/b__c";
     const second = "@a__b/c";
@@ -335,6 +372,12 @@ describe("snapshotPluginSource package-manager configuration", () => {
     [".pnpmfile.cjs", "module.exports = { hooks: {} };\n"],
     [".pnpmfile.mjs", "export const hooks = {};\n"],
     ["pnpm-workspace.yaml", "trust-lockfile: true\n"],
+    // Case variants (#779 round 11 A1): Windows and default macOS serve
+    // `.NPMRC` when pnpm opens `.npmrc`, so an exact-case rule rejects
+    // nothing on the platforms plugins are authored on.
+    [".NPMRC", "@evil:registry=http://127.0.0.1:9/\n"],
+    [".PnpmFile.cjs", "module.exports = { hooks: {} };\n"],
+    ["PNPM-WORKSPACE.YAML", "trust-lockfile: true\n"],
   ])("rejects a plugin-authored %s", async (name, body) => {
     const fixture = await createPluginFixture();
     await writeFile(join(fixture.pluginRoot, name), body);

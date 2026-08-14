@@ -376,6 +376,58 @@ describe("buildPluginBundle", () => {
     await expectNoStaging(fixture.liveRoot);
   });
 
+  it("refuses a source root that belongs to another plugin (CERT779J B3.1)", async () => {
+    const fixture = await createBuildFixture();
+    const neighbourRoot = join(
+      dirname(fixture.liveRoot),
+      pluginIdToSafePath("neighbour-plugin"),
+    );
+    const neighbourSnapshot = join(neighbourRoot, "snapshot");
+    await mkdir(neighbourSnapshot, { recursive: true });
+    await writeFile(
+      join(neighbourSnapshot, "index.ts"),
+      "export const neighbour = true;\n",
+    );
+
+    // Nothing else in the build stops this: the entry resolves, it is inside
+    // the plugin-data directory, and it is a real directory. Only the
+    // source-root family check says these bytes are not this plugin's.
+    const failure = requireFailure(await buildPluginBundle({
+      ...fixture.input,
+      snapshotRoot: neighbourSnapshot,
+      manifest: DohcPluginManifest.parse({
+        ...fixture.manifest,
+        entry: "index.ts",
+      }),
+    }));
+
+    expect(failure.error).toMatchObject({
+      code: "invalid-snapshot",
+      path: neighbourSnapshot,
+    });
+    expect(failure.error.message).toContain(fixture.liveRoot);
+    await expectMissing(join(fixture.liveRoot, "bundle.mjs"));
+  });
+
+  it("accepts a staged source tree beside the live root (#779 round 9 B1)", async () => {
+    const fixture = await createBuildFixture();
+    const stagedRoot = `${fixture.liveRoot}.snap-staging-${randomUUID()}`;
+    await mkdir(join(stagedRoot, "src"), { recursive: true });
+    await writeFile(
+      join(stagedRoot, "src", "index.ts"),
+      'export const marker = "staged";\nexport default { marker };\n',
+    );
+
+    const success = requireSuccess(await buildPluginBundle({
+      ...fixture.input,
+      snapshotRoot: stagedRoot,
+    }));
+    await success.publish();
+
+    expect(await readFile(join(fixture.liveRoot, "bundle.mjs"), "utf8"))
+      .toContain("staged");
+  });
+
   it("returns esbuild's named unresolved-import diagnostic verbatim", async () => {
     const fixture = await createBuildFixture({
       entrySource: [

@@ -49,6 +49,77 @@ export function rememberPluginRegistration(
   return remembered;
 }
 
+/** The key a plugin's host lifetime is tracked under, per workspace. */
+export function pluginLifecycleKey(
+  workspaceId: string,
+  pluginId: string,
+): string {
+  return `${workspaceId}\0${pluginId}`;
+}
+
+/** What `PluginPipeline.ensureStarted` reports back to a panel start. */
+export type PluginPanelHostStartResult =
+  | { ok: true; startedHost: boolean }
+  | { ok: false; error: { message: string } };
+
+/**
+ * Starts a plugin because a panel needs it, and records the panel's claim on
+ * the host's lifetime.
+ *
+ * The claim is made only when this start performed the zero-to-running
+ * transition, which the pipeline reports from inside its own per-plugin
+ * queue: a plugin the workspace enabled keeps running with no panel open, so
+ * a panel that merely rode along must not stop it on close (#779 round 4
+ * finding 3, round 10 B3).
+ */
+export async function startPluginForPanel(input: {
+  panelStartedHosts: Set<string>;
+  workspaceId: string;
+  pluginId: string;
+  isHostRunning: () => boolean;
+  ensureStarted: () => Promise<PluginPanelHostStartResult>;
+}): Promise<void> {
+  if (input.isHostRunning()) return;
+  const result = await input.ensureStarted();
+  if (!result.ok) throw new Error(result.error.message);
+  if (!result.startedHost) return;
+  input.panelStartedHosts.add(
+    pluginLifecycleKey(input.workspaceId, input.pluginId),
+  );
+}
+
+/**
+ * Forgets what the main process remembers about a plugin that is gone: the
+ * manifest its panels are served from, and any panel claim on its host. A
+ * refused uninstall changes nothing, so the plugin keeps both (#779 round 10
+ * B7).
+ */
+export function forgetUninstalledPlugin(input: {
+  registrations: Map<string, Map<string, RegisteredPlugin>>;
+  panelStartedHosts: Set<string>;
+  workspaceId: string;
+  pluginId: string;
+  uninstalled: boolean;
+}): void {
+  if (!input.uninstalled) return;
+  input.registrations.get(input.workspaceId)?.delete(input.pluginId);
+  input.panelStartedHosts.delete(
+    pluginLifecycleKey(input.workspaceId, input.pluginId),
+  );
+}
+
+/**
+ * Forgets the registrations of a workspace that is closing. They describe
+ * manifests read from a workspace that is no longer open; reopening a panel
+ * re-reads them. Every other workspace keeps its own (#779 round 10 B7).
+ */
+export function forgetWorkspaceRegistrations(
+  registrations: Map<string, Map<string, RegisteredPlugin>>,
+  workspaceId: string,
+): void {
+  registrations.delete(workspaceId);
+}
+
 function workspaceRelativePluginRoot(
   workspaceRoot: string,
   pluginRoot: string,

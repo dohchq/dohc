@@ -67,7 +67,7 @@ describe("discoverInstalledPlugins", () => {
       JSON.stringify({ version: 1, name: "ignored-panel", entry: "index.ts" }),
     );
 
-    expect(await discoverInstalledPlugins(root)).toEqual([
+    expect(await discoverInstalledPlugins(root, new Map())).toEqual([
       {
         id: "manifest-name",
         directoryName: "directory-name",
@@ -90,7 +90,7 @@ describe("discoverInstalledPlugins", () => {
     const zetaRoot = await writeManifest(root, "zeta", "shared-id");
     const alphaRoot = await writeManifest(root, "alpha", "shared-id");
 
-    const records = await discoverInstalledPlugins(root);
+    const records = await discoverInstalledPlugins(root, new Map());
 
     expect(records.map((record) => record.directoryName)).toEqual(["alpha", "zeta"]);
     expect(records[0]).toMatchObject({ id: "shared-id", rootPath: alphaRoot, valid: true });
@@ -98,6 +98,34 @@ describe("discoverInstalledPlugins", () => {
     expect(records[1]?.diagnostics).toContain(
       `duplicate plugin id "shared-id": also declared at ${alphaRoot}`,
     );
+  });
+
+  it("keeps a duplicate id with the directory it was installed from (#779 round 11 A4)", async () => {
+    const root = await createWorkspace();
+    const zetaRoot = await writeManifest(root, "zeta", "shared-id");
+    const alphaRoot = await writeManifest(root, "alpha", "shared-id");
+
+    // "shared-id" was installed from zeta/. alpha/ sorts first, but sorting
+    // first is not ownership: alpha/ must not take zeta/'s id.
+    const records = await discoverInstalledPlugins(
+      root,
+      new Map([["shared-id", "zeta"]]),
+    );
+
+    expect(records[0]).toMatchObject({
+      directoryName: "alpha",
+      rootPath: alphaRoot,
+      valid: false,
+    });
+    expect(records[0]?.diagnostics).toContain(
+      `duplicate plugin id "shared-id": also declared at ${zetaRoot}`,
+    );
+    expect(records[1]).toMatchObject({
+      directoryName: "zeta",
+      rootPath: zetaRoot,
+      valid: true,
+    });
+    expect(records[1]?.diagnostics).toEqual([]);
   });
 
   it("retains invalid and missing manifests as invalid candidates", async () => {
@@ -108,7 +136,7 @@ describe("discoverInstalledPlugins", () => {
     await mkdir(missingRoot);
     await writeFile(join(invalidRoot, PLUGIN_MANIFEST_FILE_NAME), "{not json");
 
-    const records = await discoverInstalledPlugins(root);
+    const records = await discoverInstalledPlugins(root, new Map());
 
     expect(records.map((record) => record.directoryName)).toEqual([
       "invalid-json",
@@ -131,7 +159,7 @@ describe("discoverInstalledPlugins", () => {
     const linkedRoot = join(root, "plugins", "linked-plugin");
     await symlink(targetRoot, linkedRoot, process.platform === "win32" ? "junction" : "dir");
 
-    expect(await discoverInstalledPlugins(root)).toEqual([
+    expect(await discoverInstalledPlugins(root, new Map())).toEqual([
       {
         id: "linked-plugin",
         directoryName: "linked-plugin",
@@ -152,7 +180,7 @@ describe("discoverInstalledPlugins", () => {
     await writeManifest(root, "bravo");
     await writeFile(join(root, "plugins", "not-a-plugin.json"), "{}\n");
 
-    const records = await discoverInstalledPlugins(root);
+    const records = await discoverInstalledPlugins(root, new Map());
     expect(records.map((record) => record.directoryName)).toEqual([
       "alpha",
       "bravo",
@@ -171,7 +199,7 @@ describe("discoverInstalledPlugins", () => {
     const root = await mkdtemp(join(tmpdir(), "dohc-plugin-discovery-empty-"));
     roots.push(root);
 
-    await expect(discoverInstalledPlugins(root)).resolves.toEqual([]);
+    await expect(discoverInstalledPlugins(root, new Map())).resolves.toEqual([]);
   });
 
   it("does not walk into node_modules or .dohc for nested manifests (CodeRabbit #779 R11)", async () => {
@@ -188,7 +216,7 @@ describe("discoverInstalledPlugins", () => {
       JSON.stringify({ version: 1, name: "generated-manifest", entry: "index.ts" }),
     );
 
-    const records = await discoverInstalledPlugins(root);
+    const records = await discoverInstalledPlugins(root, new Map());
 
     expect(records).toEqual([
       expect.objectContaining({ directoryName: "with-deps", diagnostics: [], valid: true }),
@@ -203,7 +231,7 @@ describe("discoverInstalledPlugins", () => {
     await mkdir(lockedDir);
     poisonedPath = lockedDir;
 
-    const records = await discoverInstalledPlugins(root);
+    const records = await discoverInstalledPlugins(root, new Map());
 
     expect(records.map((record) => record.directoryName)).toEqual(["alpha", "broken"]);
     expect(records[0]).toMatchObject({ directoryName: "alpha", valid: true });
@@ -222,7 +250,7 @@ describe("discoverInstalledPlugins", () => {
     const overLongName = "b".repeat(255);
     await mkdir(join(root, "plugins", overLongName));
 
-    const records = await discoverInstalledPlugins(root);
+    const records = await discoverInstalledPlugins(root, new Map());
 
     expect(records.map((record) => record.directoryName)).toEqual([
       "alpha",

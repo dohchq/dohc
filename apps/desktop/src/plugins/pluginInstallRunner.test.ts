@@ -17,6 +17,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { killProcessTreePosix } from "../process/posixSpawn";
 import {
   INSTALL_TREE_STOP_GRACE_MS,
+  INSTALL_TREE_TEARDOWN_CAP_MS,
   installPluginDependencies,
   PLUGIN_INSTALL_ARGS,
   resolvePluginPnpmEntry,
@@ -452,6 +453,48 @@ describe("installPluginDependencies", () => {
     ).sort()).toEqual([4_242, 4_243, 4_244]);
 
     expect(requireFailure(await install).error.code).toBe("aborted");
+  });
+
+  it("settles at the teardown cap when the force round never returns (CERT779J B3.2)", async () => {
+    vi.useFakeTimers();
+    const fixture = await createInstallFixture();
+    const child = new FakeInstallProcess();
+    const started = deferred<void>();
+    const controller = new AbortController();
+
+    let settled = false;
+    const install = installPluginDependencies({
+      ...fixture.input,
+      forkProcess: () => {
+        started.resolve();
+        return child;
+      },
+      signal: controller.signal,
+      platform: "linux",
+      // The force round is the kill seam this job waits on. A seam that never
+      // returns — a wedged /proc read, a signal that never lands — would hold
+      // the job, and the plugin, open forever without the cap.
+      killProcessTreePosix: (pid, signal) =>
+        signal === "SIGKILL"
+          ? new Promise<readonly number[]>(() => undefined)
+          : [pid],
+    }).then((result) => {
+      settled = true;
+      return result;
+    });
+    await started.promise;
+    controller.abort();
+    await flushMicrotasks();
+    child.exit(143);
+    await flushMicrotasks();
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(INSTALL_TREE_TEARDOWN_CAP_MS);
+
+    expect(requireFailure(await install).error).toMatchObject({
+      code: "aborted",
+      exitCode: 143,
+    });
   });
 
   it("resolves within a bounded grace period when terminate() reports it never sent the request (CodeRabbit #779 R20)", async () => {

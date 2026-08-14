@@ -78,24 +78,38 @@ function recordFromCandidate(candidate: PluginDiscoveryCandidate): InstalledPlug
 
 function classifyInstalledPlugins(
   candidates: readonly PluginDiscoveryCandidate[],
+  installedDirectoryNames: ReadonlyMap<string, string>,
 ): InstalledPluginRecord[] {
   const records = candidates
     .slice()
     .sort((left, right) => lexicalCompare(left.directoryName, right.directoryName))
     .map(recordFromCandidate);
-  const firstRootByPluginId = new Map<string, string>();
+  const declaringPluginId = new Map<string, InstalledPluginRecord[]>();
 
   for (const record of records) {
     if (!record.manifest) continue;
-    const firstRoot = firstRootByPluginId.get(record.id);
-    if (firstRoot === undefined) {
-      firstRootByPluginId.set(record.id, record.rootPath);
-      continue;
+    const declaring = declaringPluginId.get(record.id) ?? [];
+    declaring.push(record);
+    declaringPluginId.set(record.id, declaring);
+  }
+  for (const [pluginId, declaring] of declaringPluginId) {
+    if (declaring.length < 2) continue;
+    // The installed directory keeps the id it was installed under. Letting
+    // lexical order decide handed an installation's approval, uninstall
+    // paths, and identity to whichever new directory sorted first (#779
+    // round 11 A4). With nothing installed under this id, first-in-order is
+    // still the tiebreak.
+    const installedDirectoryName = installedDirectoryNames.get(pluginId);
+    const owner = declaring.find(
+      (record) => record.directoryName === installedDirectoryName,
+    ) ?? declaring[0];
+    for (const record of declaring) {
+      if (record === owner) continue;
+      record.valid = false;
+      record.diagnostics.push(
+        `duplicate plugin id "${pluginId}": also declared at ${owner.rootPath}`,
+      );
     }
-    record.valid = false;
-    record.diagnostics.push(
-      `duplicate plugin id "${record.id}": also declared at ${firstRoot}`,
-    );
   }
   return records;
 }
@@ -204,8 +218,14 @@ async function inspectCandidate(
   };
 }
 
+/**
+ * @param installedDirectoryNames The `plugins/` directory each installed
+ * plugin id was installed from, from the workspace's plugin local state. It
+ * decides which root keeps an id that two roots declare.
+ */
 export async function discoverInstalledPlugins(
   workspaceRoot: string,
+  installedDirectoryNames: ReadonlyMap<string, string>,
 ): Promise<InstalledPluginRecord[]> {
   const resolvedWorkspaceRoot = resolve(workspaceRoot);
   const pluginsRoot = join(resolvedWorkspaceRoot, "plugins");
@@ -226,5 +246,5 @@ export async function discoverInstalledPlugins(
       inspectCandidate(resolvedWorkspaceRoot, directoryName),
     ),
   );
-  return classifyInstalledPlugins(candidates);
+  return classifyInstalledPlugins(candidates, installedDirectoryNames);
 }

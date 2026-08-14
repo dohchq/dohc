@@ -9,6 +9,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -668,10 +669,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         // Real discovery once (to seed a real, valid status), then empty —
         // simulating the plugin's directory disappearing while its own
         // install is still in flight below.
-        discover: async (workspaceRoot) => {
+        discover: async (workspaceRoot, installedDirectoryNames) => {
           discoverCalls += 1;
           return discoverCalls === 1
-            ? await discoverInstalledPlugins(workspaceRoot)
+            ? await discoverInstalledPlugins(workspaceRoot, installedDirectoryNames)
             : [];
         },
         install: async () => {
@@ -979,6 +980,73 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(pipeline.list()[0]?.error).toMatchObject({
         code: "confirmation-stale",
       });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("refuses to delete when the source could not be fingerprinted (#779 round 11 A2)", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    // Preflight cannot hash the tree (a symlink or an unreadable entry), so
+    // every call records liveHash: null. Comparing null against null says
+    // "unchanged" while proving nothing — and the delete is irreversible.
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        uninstallPreflight: async (input) => ({
+          ...await pluginUninstallPreflight(input),
+          liveHash: null,
+        }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      const preflight = await pipeline.uninstallPreflight("example-plugin");
+      if (!preflight.ok) throw new Error(preflight.error.message);
+      const result = await pipeline.uninstall(
+        "example-plugin",
+        preflight.confirmationToken,
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("unreachable");
+      expect(result.error).toMatchObject({
+        stage: "uninstall",
+        code: "confirmation-stale",
+      });
+      expect(result.error.message).toContain(
+        "could not be read to confirm what uninstall would delete",
+      );
+      await expect(lstat(fixture.pluginRoot)).resolves.toBeDefined();
+      await expect(lstat(join(fixture.pluginRoot, "dohc-plugin.json")))
+        .resolves.toBeDefined();
     } finally {
       await pipeline.dispose();
     }
@@ -1973,6 +2041,174 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
+  it("keeps an installation with its own directory when a second root claims its id (#779 round 11 A4)", async () => {
+    const fixture = await createNamedPluginWorkspace("zeta", "shared-id");
+    let pipeline: PluginPipeline;
+    const newHost = () =>
+      new PluginHost({
+        stateDir: fixture.stateDir,
+        workspaceRoot: fixture.workspaceRoot,
+        spawnTransport: fakeSpawnTransport(),
+        routeSdkRequest: async () => ({}),
+        onStatusChange: (pluginId, status) => {
+          pipeline.noteRuntimeStatus(pluginId, status);
+        },
+      });
+    const newPipeline = (host: PluginHost) =>
+      new PluginPipeline({
+        workspaceRoot: fixture.workspaceRoot,
+        stateDir: fixture.stateDir,
+        pluginHost: host,
+        resourcesBasePath,
+        operations: {
+          install: (input) =>
+            installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        },
+      });
+
+    pipeline = newPipeline(newHost());
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("shared-id");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+    } finally {
+      await pipeline.dispose();
+    }
+
+    // Two more directories now declare the same manifest id, one on each side
+    // of "zeta" lexically. The earlier one used to take the id outright, and
+    // with it the approval, the uninstall paths, and the identity of an
+    // installation it has nothing to do with; the later one used to overwrite
+    // the installation's own status by joining its record.
+    const earlierRoot = join(fixture.workspaceRoot, "plugins", "alpha");
+    const laterRoot = join(fixture.workspaceRoot, "plugins", "zzz");
+    await cp(fixture.pluginRoot, earlierRoot, { recursive: true });
+    await cp(fixture.pluginRoot, laterRoot, { recursive: true });
+
+    pipeline = newPipeline(newHost());
+    try {
+      await pipeline.start();
+      const installedRow = () =>
+        pipeline.list().find((plugin) => plugin.directoryName === "zeta");
+      await waitFor(
+        () => installedRow()?.status === "ready",
+        "The installed plugin did not keep its identity after reopening.",
+      );
+      expect(installedRow()).toMatchObject({
+        id: "shared-id",
+        rootPath: fixture.pluginRoot,
+        valid: true,
+        approvedHash: expect.any(String),
+      });
+      // Both interlopers are listed, but only as invalid duplicates: neither
+      // holds an approval or an installation of its own.
+      for (const directoryName of ["alpha", "zzz"]) {
+        expect(pipeline.list().find((plugin) =>
+          plugin.directoryName === directoryName
+        )).toMatchObject({ valid: false, status: "invalid", approvedHash: null });
+      }
+
+      const preflight = await pipeline.uninstallPreflight("shared-id");
+      if (!preflight.ok) throw new Error(preflight.error.message);
+      const uninstalled = await pipeline.uninstall(
+        "shared-id",
+        preflight.confirmationToken,
+      );
+      expect(uninstalled.ok).toBe(true);
+      // Uninstall deleted the directory the record names, not the one that
+      // sorted first.
+      await expect(lstat(fixture.pluginRoot)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(lstat(join(earlierRoot, "dohc-plugin.json")))
+        .resolves.toBeDefined();
+      await expect(lstat(join(laterRoot, "dohc-plugin.json")))
+        .resolves.toBeDefined();
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 120_000);
+
+  it("keeps an installation when its directory is renamed (#779 round 11 A4)", async () => {
+    const fixture = await createNamedPluginWorkspace("zeta", "shared-id");
+    let pipeline: PluginPipeline;
+    const newHost = () =>
+      new PluginHost({
+        stateDir: fixture.stateDir,
+        workspaceRoot: fixture.workspaceRoot,
+        spawnTransport: fakeSpawnTransport(),
+        routeSdkRequest: async () => ({}),
+        onStatusChange: (pluginId, status) => {
+          pipeline.noteRuntimeStatus(pluginId, status);
+        },
+      });
+    const newPipeline = (host: PluginHost) =>
+      new PluginPipeline({
+        workspaceRoot: fixture.workspaceRoot,
+        stateDir: fixture.stateDir,
+        pluginHost: host,
+        resourcesBasePath,
+        operations: {
+          install: (input) =>
+            installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        },
+      });
+
+    pipeline = newPipeline(newHost());
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("shared-id");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+    } finally {
+      await pipeline.dispose();
+    }
+
+    // The manifest is intact, so the id is unchanged: this is the same
+    // installation in a renamed folder, and it keeps its record.
+    const renamedRoot = join(fixture.workspaceRoot, "plugins", "beta");
+    await rename(fixture.pluginRoot, renamedRoot);
+
+    pipeline = newPipeline(newHost());
+    try {
+      await pipeline.start();
+      const row = pipeline.list()[0];
+      expect(row).toMatchObject({
+        id: "shared-id",
+        directoryName: "beta",
+        rootPath: renamedRoot,
+        valid: true,
+      });
+      expect(row?.approvedHash).not.toBeNull();
+
+      const preflight = await pipeline.uninstallPreflight("shared-id");
+      if (!preflight.ok) throw new Error(preflight.error.message);
+      const uninstalled = await pipeline.uninstall(
+        "shared-id",
+        preflight.confirmationToken,
+      );
+      expect(uninstalled.ok).toBe(true);
+      await expect(lstat(renamedRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 120_000);
+
   it("leaves a dotted neighbour's data alone when an identity is renamed (#779 round 10 B1)", async () => {
     const fixture = await createPluginWorkspace();
     let pipeline: PluginPipeline;
@@ -2108,6 +2344,87 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // rejected discard is retried by the same job's cleanup (#779 round
       // 10 A5).
       expect(started.ok).toBe(false);
+      expect(discards).toHaveLength(2);
+      expect(await stagingLeftovers(fixture, "example-plugin")).toEqual([]);
+      expect(await readFile(
+        join(liveSnapshotRoot(fixture, "example-plugin"), "src", "index.ts"),
+        "utf8",
+      )).toContain('marker = "one"');
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("retries the build's own discard when the source moved under a door write (CERT779J B3.3)", async () => {
+    const fixture = await createPluginWorkspace();
+    let mismatchNextSnapshot = false;
+    let failNextDiscard = false;
+    const discards: string[] = [];
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        snapshot: async (input) => {
+          const result = await snapshotPluginSource(input);
+          if (!result.ok || !mismatchNextSnapshot) return result;
+          mismatchNextSnapshot = false;
+          return {
+            ...result,
+            // A disk-only change landed between the door write's hash check
+            // and this snapshot, so the build must drop the staged tree and
+            // hold for approval instead of building it (#779 round 9 B2).
+            sourceHash: "0".repeat(64),
+            discard: async () => {
+              discards.push(result.snapshotRoot);
+              if (failNextDiscard) {
+                failNextDiscard = false;
+                throw new Error("simulated: staged tree is busy");
+              }
+              await result.discard();
+            },
+          };
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      mismatchNextSnapshot = true;
+      failNextDiscard = true;
+      pipeline.handleDoorWrittenSourceChange("example-plugin");
+
+      // The rejected discard is retried by the same job's cleanup, which runs
+      // before the job reports its failure, so no staged bytes are left
+      // beside the live root.
+      await waitFor(
+        () => pipeline.list()[0]?.status === "failed",
+        "The build never reported the rejected discard.",
+      );
       expect(discards).toHaveLength(2);
       expect(await stagingLeftovers(fixture, "example-plugin")).toEqual([]);
       expect(await readFile(

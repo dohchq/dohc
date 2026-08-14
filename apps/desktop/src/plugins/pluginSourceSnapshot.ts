@@ -782,7 +782,9 @@ export function assertSafeSnapshotEntryName(name: string, path: string): void {
  * and leaves no dead config for a later pnpm to start reading.
  */
 export function assertNoPackageManagerConfig(name: string, path: string): void {
-  if (!REJECTED_PACKAGE_MANAGER_CONFIG_NAMES.has(name)) return;
+  // Case-folded on every platform: Windows and default macOS serve `.NPMRC`
+  // when pnpm opens `.npmrc`, so an exact-case rule rejects nothing there.
+  if (!REJECTED_PACKAGE_MANAGER_CONFIG_NAMES.has(name.toLowerCase())) return;
   throw new SnapshotError(
     "unsupported-package-manager-config",
     `Plugin source entry at ${path} is package-manager configuration ` +
@@ -1120,11 +1122,35 @@ export function isPluginRootArtifact(
   });
 }
 
+/**
+ * Whether a name is shaped like one of this pipeline's own artifacts for some
+ * other plugin — `<anything>.previous-<uuid>` and its siblings. A manifest
+ * name may contain "." and "-", so `<victim>.previous-<uuid>` is a legal
+ * plugin id whose live root is indistinguishable from the victim's swap
+ * directory: the victim's uninstall sweep deletes it, and the build's
+ * source-root check accepts it as a staged tree (CERT779J B2).
+ */
+function looksLikePluginRootArtifact(name: string): boolean {
+  return PLUGIN_ROOT_ARTIFACT_SUFFIXES.some((suffix) => {
+    const at = name.lastIndexOf(suffix);
+    return at > 0 && ARTIFACT_UUID.test(name.slice(at + suffix.length));
+  });
+}
+
 export function pluginIdToSafePath(pluginId: string): string {
   if (!NPM_PACKAGE_NAME.test(pluginId)) {
     throw new SnapshotError(
       "invalid-plugin-id",
       `Plugin id "${pluginId}" does not match the manifest name pattern.`,
+    );
+  }
+  if (looksLikePluginRootArtifact(pluginId)) {
+    throw new SnapshotError(
+      "invalid-plugin-id",
+      `Plugin id "${pluginId}" ends in a name dohc reserves for its own ` +
+        "staging and swap directories. A plugin id must not end in " +
+        `${PLUGIN_ROOT_ARTIFACT_SUFFIXES.join(", ")} followed by a uuid. ` +
+        "Rename the plugin.",
     );
   }
   // "/" percent-encodes to "%2F", never "__": a plain "__" substitution was
