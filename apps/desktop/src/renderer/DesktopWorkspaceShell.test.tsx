@@ -3804,6 +3804,47 @@ describe("shared view banner", () => {
   }
 });
 
+// A share view whose stored grant cannot be read keeps its RESTRICTIVE
+// marker (#646). Dropping it would present someone else's files as an
+// ordinary writable workspace — damage failing OPEN, which is the one
+// direction this must never fail in.
+describe("shared view with an unreadable grant", () => {
+  const damaged = {
+    ...SHARE_VIEW,
+    shareView: {
+      shareId: "share-1",
+      granterEmail: "sam@dohc.test",
+      damaged: true as const,
+    },
+  };
+
+  it("keeps the read-only stance and says what happened", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, damaged);
+
+    const banner = await screen.findByTestId("shared-view-banner");
+    expect(banner.textContent).toContain(
+      "dohc can't read what this share grants. Open the share again to restore it.",
+    );
+    // No level is stated, because none could be read.
+    expect(banner.textContent).not.toContain("read-only. Ask");
+  });
+
+  // There is no grant to pull with, so the refresh is skipped rather than
+  // fired and failed. Offering it would promise a recovery it cannot do.
+  it("does not offer or fire a refresh", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, damaged);
+
+    await screen.findByTestId("shared-view-banner");
+    expect(
+      screen.queryByTestId("shared-view-refresh"),
+      "MUTATION: a share with no readable grant must not offer a refresh",
+    ).toBeNull();
+    expect(bridge.refreshSharedView).not.toHaveBeenCalled();
+  });
+});
+
 describe("content search", () => {
   // Journey 1 (#337): queries arrived with their leading characters missing
   // ("MBERDRAFT-8831" for "EMBERDRAFT-8831"). The panel opened, but the input

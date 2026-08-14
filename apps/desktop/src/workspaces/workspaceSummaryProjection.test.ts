@@ -63,13 +63,33 @@ describe("workspace summary projection", () => {
     ).toEqual(["ws-healthy", "ws-stale", "ws-also-healthy"]);
   });
 
-  it("omits an unreadable share view and keeps its workspace", () => {
+  // The share-view marker is RESTRICTIVE: it is what makes the shell treat
+  // the workspace as someone else's. Dropping it would present a share view
+  // as an ordinary writable workspace — damage failing OPEN, which is the one
+  // direction this PR must never fail in.
+  it("keeps the share-view marker when its grant is unreadable, and marks it damaged", () => {
     const summary = workspaceSummaryFor(
       entry({ shareView: shareView(staleSelector) }),
     );
     expect(summary.workspaceId).toBe("ws-1");
-    // Omitted, never defaulted: a level nobody granted must not appear.
-    expect(summary.shareView).toBeUndefined();
+    expect(
+      summary.shareView,
+      "MUTATION: dropping the marker presents a share view as an ordinary workspace",
+    ).toBeDefined();
+    expect(summary.shareView?.damaged).toBe(true);
+    expect(summary.shareView?.shareId).toBe("share-1");
+    // The level is dropped, never guessed. A level nobody granted must not
+    // appear, and `damaged` is not a claim about WHY.
+    expect(summary.shareView?.access).toBeUndefined();
+    expect(summary.shareView?.ended).toBeUndefined();
+  });
+
+  it("keeps a readable share view undamaged", () => {
+    const summary = workspaceSummaryFor(
+      entry({ shareView: shareView(goodSelector) }),
+    );
+    expect(summary.shareView?.damaged).toBeUndefined();
+    expect(summary.shareView?.access).toBe("view");
   });
 
   it("omits only the unreadable mount and keeps the readable ones", () => {
@@ -93,8 +113,30 @@ describe("workspace summary projection", () => {
       const summary = workspaceSummaryFor(
         entry({ shareView: shareView({ ...goodSelector, access }) }),
       );
-      expect(summary.shareView, JSON.stringify(access)).toBeUndefined();
+      expect(summary.shareView?.damaged, JSON.stringify(access)).toBe(true);
+      expect(summary.shareView?.access, JSON.stringify(access)).toBeUndefined();
     }
+  });
+
+  // A row does not have to be an object. Reading a field off one that turned
+  // out to be `null` threw out of the whole projection, which is the same
+  // zero-workspaces defect by another door.
+  it("survives rows that are not objects at all", () => {
+    const summaries = workspaceSummariesFrom([
+      entry({ workspaceId: "ws-healthy" }),
+      entry({
+        workspaceId: "ws-null-row",
+        shareMounts: [null, mount("m-good", "alex", goodSelector), "nonsense", 7],
+      }),
+      entry({ workspaceId: "ws-null-view", shareView: null }),
+      entry({ workspaceId: "ws-scalar-view", shareView: "nonsense" }),
+    ]);
+    expect(
+      summaries.map((summary) => summary.workspaceId),
+      "MUTATION: a non-object row must not empty the workspace list",
+    ).toEqual(["ws-healthy", "ws-null-row", "ws-null-view", "ws-scalar-view"]);
+    // Only the readable mount survives the listing.
+    expect(summaries[1]?.shareMounts?.map((m) => m.shareId)).toEqual(["m-good"]);
   });
 
   // Damage to the WORKSPACE is not share-sized and must not be swallowed:

@@ -3749,6 +3749,11 @@ export function DesktopWorkspaceShell(props: {
   // shared-view placeholder's next step depends on whether the share is
   // still live (#540 — Refresh exists only while it is).
   const shareView = props.workspace.shareView ?? null;
+  // The stored grant could not be read (#646). The marker still stands — a
+  // share view must never present as an ordinary workspace — but there is no
+  // grant to pull with, so the refresh is skipped rather than failed, and the
+  // banner says so instead of showing a level nobody can read.
+  const shareViewDamaged = !!shareView?.damaged;
   const [shareViewEnded, setShareViewEnded] = useState(!!shareView?.ended);
   const [shareRefreshing, setShareRefreshing] = useState(false);
   // Ops this share's pulls skipped, read from the RECORD, not from the last
@@ -3779,7 +3784,7 @@ export function DesktopWorkspaceShell(props: {
     setShareSkipped(hasUnacknowledgedShareSkips(skipped) ? skipped : null);
   }, [workspaceId]);
   const refreshShareView = useCallback(async () => {
-    if (!shareView || shareViewEnded) return;
+    if (!shareView || shareViewEnded || shareViewDamaged) return;
     setShareRefreshing(true);
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
@@ -3808,7 +3813,7 @@ export function DesktopWorkspaceShell(props: {
   }, [shareView?.shareId, shareViewEnded, workspaceId, reloadShareSkipped]);
   useEffect(() => {
     // One automatic refresh when a shared view opens; afterwards on demand.
-    if (shareView && !shareViewEnded) void refreshShareView();
+    if (shareView && !shareViewEnded && !shareViewDamaged) void refreshShareView();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
@@ -4082,7 +4087,9 @@ export function DesktopWorkspaceShell(props: {
           <span className="min-w-0 flex-1 truncate">
             {shareViewEnded
               ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
-              : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
+              : shareViewDamaged
+                ? "dohc can't read what this share grants. Open the share again to restore it."
+                : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
           </span>
           {shareSkipped
             ? shareSkipNoticeLines(shareSkipped, shareView.granterEmail).map(
@@ -4126,7 +4133,7 @@ export function DesktopWorkspaceShell(props: {
                 ),
               )
             : null}
-          {!shareViewEnded ? (
+          {!shareViewEnded && !shareViewDamaged ? (
             <button
               type="button"
               data-testid="shared-view-refresh"

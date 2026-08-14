@@ -181,8 +181,16 @@ export const WorkspaceSummary = z.object({
     .object({
       shareId: z.string().min(1).max(200),
       granterEmail: z.string().min(3).max(320).nullable(),
-      // The pinned level (#646). The banner states it; it never decides it.
-      access: SHARE_ACCESS,
+      // The pinned level (#646). Absent ONLY when `damaged` says the stored
+      // grant could not be read. The banner states the level; it never
+      // decides anything with it.
+      access: SHARE_ACCESS.optional(),
+      // The stored grant is unreadable. The marker still stands, because a
+      // share view whose grant cannot be read must not present as an ordinary
+      // workspace: the restrictive stance is what fails closed. The shell
+      // keeps the view read-only, keeps the share surfaces hidden, skips the
+      // refresh it has no grant to pull with, and says so in the banner.
+      damaged: z.literal(true).optional(),
       ended: z.boolean().optional(),
       skippedOps: ShareSkippedOpsSummary.optional(),
     })
@@ -2576,8 +2584,10 @@ export const CreateRelaySharePayload = z.object({
   recipientEmail: EMAIL_STRING,
   paths: z.array(PATH_STRING).min(1).max(100).optional(),
   versionId: z.string().min(1).max(128).optional(),
-  // Required (#646): the dialog always states the level, so it always sends
-  // one. The relay's own default covers other callers, not this one.
+  // Required (#646). There is no default at either boundary: the relay
+  // refuses a create that names no level, and so does this one. A caller that
+  // sends nothing has not chosen `view`, it has failed to say what the share
+  // grants.
   access: SHARE_ACCESS,
 });
 export type CreateRelaySharePayload = z.infer<typeof CreateRelaySharePayload>;
