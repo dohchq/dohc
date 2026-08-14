@@ -1278,6 +1278,16 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
     }
     let projection = project_ydoc_with_store(tx, key, doc, marker.content_kind)?;
     if projection.content != chosen_text {
+        if marker.content_kind == ContentKind::Scene {
+            // A scene has no Markdown fold, and refusing here would roll
+            // back the text write that carries an external edit to a closed
+            // drawing — the edit would vanish from history and a later
+            // materialization could overwrite the file with the older
+            // scene. The durable file head is canonical: retire the lineage
+            // and let the next open seed a fresh scene from the artifact,
+            // exactly like a first open.
+            return retire_complete_ydoc_lineage_in_tx(tx, complete);
+        }
         let update = doc
             .rewrite_content_to_markdown(marker.content_kind, chosen_text)
             .map_err(|_| SyncError::InvalidInput {

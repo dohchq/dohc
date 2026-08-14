@@ -10268,6 +10268,104 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
 }
 
 #[test]
+fn external_text_write_to_a_closed_scene_retires_the_lineage_for_reseed() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let object_id = "closed-scene";
+    let path = "drawings/closed.excalidraw";
+    let imported = dohc_engine_collab::import_portable_scene(
+        &json!({
+            "type": "excalidraw",
+            "version": 2,
+            "source": "https://excalidraw.com",
+            "elements": [],
+            "appState": {},
+            "files": {}
+        })
+        .to_string(),
+    )
+    .expect("import scene");
+    let base_sha = engine
+        .put_binary_blob(&imported.initial_update)
+        .expect("store scene base");
+    let base = envelope(
+        "closed-scene-base-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": path,
+            "contentKind": "scene",
+            "updateBlobSha256": base_sha,
+            "lineageClaimId": base_sha,
+            "isBaseState": true
+        }),
+    );
+    let base_outcome = apply_replication_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases);
+    assert!(
+        matches!(base_outcome, Ok(ApplyOutcome::Applied(_))),
+        "unexpected scene base outcome: {base_outcome:?}"
+    );
+
+    // An external edit lands while the drawing is closed. A scene has no
+    // Markdown fold, so the reconcile must retire the lineage — the file is
+    // canonical and the next open seeds a fresh scene from it — instead of
+    // failing and rolling the external edit's write back.
+    let changed = json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "https://excalidraw.com",
+        "elements": [{
+            "id": "external-shape",
+            "type": "rectangle",
+            "version": 1,
+            "versionNonce": 1,
+            "isDeleted": false,
+            "index": "a0"
+        }],
+        "appState": {},
+        "files": {}
+    })
+    .to_string();
+    engine
+        .write_with(&NoFaults, |tx| {
+            crate::ydoc_apply::reconcile_local_resulting_head_in_tx(
+                tx,
+                "ws",
+                "main",
+                object_id,
+                crate::ydoc_apply::ResultingHead::Text {
+                    path,
+                    text: &changed,
+                },
+                4_000,
+            )
+        })
+        .expect("the external scene edit reconciles instead of failing");
+    let remaining: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM ydoc_docs \
+                   WHERE workspace_id='ws' AND version_id='main' AND object_id=?1) \
+                 + (SELECT COUNT(*) FROM ydoc_updates \
+                   WHERE workspace_id='ws' AND version_id='main' AND object_id=?1) \
+                 + (SELECT COUNT(*) FROM ydoc_snapshots \
+                   WHERE workspace_id='ws' AND version_id='main' AND object_id=?1)",
+                [object_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("count retired lineage rows");
+    assert_eq!(
+        remaining, 0,
+        "the retired scene lineage leaves no CRDT rows"
+    );
+}
+
+#[test]
 fn oversized_hydrated_scene_base_is_refused_without_storing_the_projection() {
     const ASSET_BYTES: usize = 3 * 1024 * 1024;
     const ASSET_IDS: [&str; 4] = ["image-a", "image-b", "image-c", "image-d"];
