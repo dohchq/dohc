@@ -7,6 +7,7 @@ export const PLUGIN_HOST_METHODS = {
   activate: "plugin.activate",
   deactivate: "plugin.deactivate",
   invokeCommand: "plugin.invokeCommand",
+  startWebApp: "plugin.startWebApp",
   sdkRequest: "sdk.request",
   sdkEvent: "sdk.event",
   log: "plugin.log",
@@ -16,6 +17,8 @@ export interface PluginActivateParams {
   pluginId: string;
   pluginRoot: string;
   workspaceRoot: string;
+  /** See PluginActivateContext.stateRoot in @dohc/sdk/node. */
+  stateRoot: string;
   manifest: DohcPluginManifest;
 }
 
@@ -25,6 +28,17 @@ export interface PluginActivateResult {
 
 export interface PluginInvokeCommandParams {
   commandId: string;
+}
+
+export interface PluginStartWebAppParams {
+  webAppId: string;
+}
+
+/** The result's `url` may carry a one-time credential in its fragment. It
+ * stays in memory between the plugin process and the main process; nothing
+ * on this path logs it. */
+export interface PluginStartWebAppResult {
+  url: string;
 }
 
 export interface SdkRequestParams {
@@ -53,6 +67,12 @@ export type PluginRuntimeStatus =
 // The t3-code spike's heaviest healthy activation took 4.5–7.4 seconds.
 // A 30-second deadline leaves real headroom above that measured range.
 export const PLUGIN_ACTIVATION_TIMEOUT_MS = 30_000;
+
+// A web app start covers a wrapper server's spawn plus its readiness poll.
+// The t3 bridge's own readiness deadline is 60 seconds (its measured healthy
+// range is 2.8–7.4 seconds); this bound sits above that whole deadline plus
+// spawn overhead, so it only fires when the plugin's own deadline failed to.
+export const PLUGIN_WEB_APP_START_TIMEOUT_MS = 90_000;
 
 // Disable a plugin after this many consecutive fast failures or crashes.
 // Each failure must occur within this window after its own spawn.

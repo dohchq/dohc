@@ -29,12 +29,16 @@ import {
   versionCompareTabPath,
   isSiteTabPath,
   isPluginPanelTabPath,
+  isPluginWebAppTabPath,
+  isSingletonEditorTabPath,
+  canonicalSingletonEditorTabPath,
   isVirtualTabPath,
   moveTab,
   openTab,
   parseHistoryDiffTabPath,
   parseSiteTabPath,
   parsePluginPanelTabPath,
+  parsePluginWebAppTabPath,
   parseUiState,
   pruneMissingRestoredTabs,
   serializeUiState,
@@ -62,6 +66,7 @@ import {
   siteTabPath,
   moveTabToGroup,
   pluginPanelTabPath,
+  pluginWebAppTabPath,
   moveTabToNewGroup,
   focusEditorGroup,
   toggleFolderExpanded,
@@ -593,6 +598,31 @@ describe("tabs", () => {
 
     const reservedRoot = "clients/site/nested?view=main#summary";
     expect(parseSiteTabPath(siteTabPath(reservedRoot))).toBe(reservedRoot);
+  });
+
+  it("recognizes plugin web apps as singleton virtual tabs with two encoded identities", () => {
+    const path = pluginWebAppTabPath("@dohc/acme plugin", "app/main");
+    expect(path).toBe("dohc://plugin-web/%40dohc%2Facme%20plugin/app%2Fmain");
+    expect(isPluginWebAppTabPath(path)).toBe(true);
+    expect(isVirtualTabPath(path)).toBe(true);
+    expect(isSingletonEditorTabPath(path)).toBe(true);
+    expect(canonicalSingletonEditorTabPath(path)).toBe(path);
+    expect(parsePluginWebAppTabPath(path)).toEqual({
+      pluginId: "@dohc/acme plugin",
+      webAppId: "app/main",
+    });
+  });
+
+  it("rejects malformed plugin web app tab paths", () => {
+    for (const path of [
+      "dohc://plugin-web/",
+      "dohc://plugin-web/plugin-only",
+      "dohc://plugin-web//app",
+      "dohc://plugin-web/plugin/app/extra",
+      null,
+    ]) {
+      expect(parsePluginWebAppTabPath(path)).toBeNull();
+    }
   });
 
   it("recognizes plugin panels as virtual tabs with two encoded identities", () => {

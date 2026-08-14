@@ -43,7 +43,7 @@ import {
   readPluginLocalState,
   workspaceStateKey,
 } from "./pluginLocalState";
-import { snapshotPluginSource } from "./pluginSourceSnapshot";
+import { pluginStateRoot, snapshotPluginSource } from "./pluginSourceSnapshot";
 import {
   pluginBaselineManifestPath,
   pluginUninstallPreflight,
@@ -512,15 +512,29 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         "Renamed identity did not reach ready after its own fresh install.",
       );
 
+      // Durable plugin state (what a wrapper like t3 stores): the preflight
+      // must name it as permanently deleted, and uninstall must delete it.
+      const stateRoot = pluginStateRoot(
+        pluginDataDir(fixture.stateDir, fixture.workspaceRoot),
+        "renamed-plugin",
+      );
+      await mkdir(join(stateRoot, "t3"), { recursive: true });
+      await writeFile(join(stateRoot, "t3", "state.sqlite"), "session-bytes");
+
       const preflight = await pipeline.uninstallPreflight("renamed-plugin");
       if (!preflight.ok) throw new Error(preflight.error.message);
-      expect(preflight.preflight.warning).toBeNull();
+      expect(preflight.preflight.warning?.kind).toBe("plugin-state");
+      expect(preflight.preflight.stateData).toMatchObject({
+        path: stateRoot,
+        fileCount: 1,
+      });
       const uninstalled = await pipeline.uninstall(
         "renamed-plugin",
         preflight.confirmationToken,
       );
       expect(uninstalled.ok).toBe(true);
       await expect(lstat(fixture.pluginRoot)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(lstat(stateRoot)).rejects.toMatchObject({ code: "ENOENT" });
       expect(pipeline.list()).toEqual([]);
       expect(spawnTransport).toHaveBeenCalledTimes(6);
     } finally {

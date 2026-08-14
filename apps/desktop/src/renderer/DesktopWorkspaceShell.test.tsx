@@ -481,6 +481,14 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
         };
       },
     ),
+    onPluginWebAppOpened: vi.fn(() => () => {}),
+    startPluginWebApp: vi.fn(async () => ({
+      status: "ok" as const,
+      title: "T3 Code",
+      origin: "http://127.0.0.1:49161",
+    })),
+    setPluginWebAppBounds: vi.fn(async () => undefined),
+    stopPluginWebApp: vi.fn(async () => undefined),
     emitMenuCommand: (command: MenuCommandId) => menuCallback?.(command),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.

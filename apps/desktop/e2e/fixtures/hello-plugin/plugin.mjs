@@ -69,6 +69,37 @@ switch (mode) {
       },
     };
     break;
+  case "web-app":
+    handler = {
+      activate() {},
+      startWebApp(webAppId) {
+        return { url: `http://127.0.0.1:43210/pair#token=fixture-${webAppId}` };
+      },
+    };
+    break;
+  case "web-app-hang":
+    handler = {
+      activate() {},
+      startWebApp: () => new Promise(() => {}),
+    };
+    break;
+  case "web-app-bad-result":
+    handler = {
+      activate() {},
+      startWebApp: () => ({ url: "" }),
+    };
+    break;
+  case "report-context":
+    handler = {
+      activate(ctx) {
+        ctx.commands.register("report.context", () => ({
+          stateRoot: ctx.stateRoot,
+          workspaceRoot: ctx.workspaceRoot,
+          pluginRoot: ctx.pluginRoot,
+        }));
+      },
+    };
+    break;
   case "grandchild-heartbeat":
     handler = {
       async activate(ctx) {

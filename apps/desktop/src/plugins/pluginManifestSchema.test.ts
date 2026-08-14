@@ -144,6 +144,50 @@ describe("DohcPluginManifest", () => {
     }).success).toBe(false);
   });
 
+  it("accepts a web app contribution and parses it", () => {
+    const result = DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      webApps: [{ id: "app", title: "T3 Code" }],
+    });
+    if (!result.success) throw new Error(result.error.message);
+    expect(result.data.webApps).toEqual([{ id: "app", title: "T3 Code" }]);
+  });
+
+  it("rejects duplicate web app ids", () => {
+    const result = DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      webApps: [
+        { id: "app", title: "One" },
+        { id: "app", title: "Two" },
+      ],
+    });
+    if (result.success) throw new Error("expected duplicate web app ids to reject");
+    expect(result.error.issues).toContainEqual(expect.objectContaining({
+      message: 'web app id "app" must be unique within webApps',
+    }));
+  });
+
+  it("rejects more than 100 web apps", () => {
+    const result = DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      webApps: Array.from({ length: 101 }, (_, index) => ({
+        id: `a${index}`,
+        title: `A${index}`,
+      })),
+    });
+    if (result.success) throw new Error("expected the web app limit to reject the manifest");
+    expect(result.error.issues).toContainEqual(expect.objectContaining({
+      message: "webApps: at most 100 entries allowed",
+    }));
+  });
+
+  it("rejects a web app with unknown keys or an entry path", () => {
+    expect(DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      webApps: [{ id: "app", title: "T3 Code", entry: "index.html" }],
+    }).success).toBe(false);
+  });
+
   it("rejects more than 200 commands", () => {
     const result = DohcPluginManifest.safeParse({
       ...minimalManifest,

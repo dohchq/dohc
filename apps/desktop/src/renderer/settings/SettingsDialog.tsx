@@ -761,7 +761,10 @@ export function SettingsDialog(props: {
       case "plugins":
         return (
           <div data-testid="settings-section-plugins">
-            <PluginSettings workspaceId={props.workspaceId} />
+            <PluginSettings
+              workspaceId={props.workspaceId}
+              onOpenedWebApp={props.onClose}
+            />
           </div>
         );
       case "privacy":

@@ -2310,6 +2310,73 @@ export type StopPluginPanelPayload = z.infer<typeof StopPluginPanelPayload>;
 export const StopPluginPanelResult = z.void();
 export type StopPluginPanelResult = z.infer<typeof StopPluginPanelResult>;
 
+// Wrapper-plugin web apps (PR3): the guest is a main-process WebContentsView,
+// so the renderer never receives the guest URL — the pairing credential in
+// its fragment stays between the plugin process and main. The renderer gets
+// the title and the credential-free origin, and reports placeholder bounds.
+const PLUGIN_WEB_APP_ID = z.string().min(1).max(120).refine(
+  (value) => !value.includes("\0"),
+  "plugin web app id must not contain NUL bytes",
+);
+
+export const OpenPluginWebAppPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginRoot: PLUGIN_ROOT,
+  pluginId: PLUGIN_ID,
+  webAppId: PLUGIN_WEB_APP_ID,
+}).strict();
+export type OpenPluginWebAppPayload = z.infer<typeof OpenPluginWebAppPayload>;
+
+export const OpenPluginWebAppResult = z.object({
+  pluginId: PLUGIN_ID,
+  webAppId: PLUGIN_WEB_APP_ID,
+}).strict();
+export type OpenPluginWebAppResult = z.infer<typeof OpenPluginWebAppResult>;
+
+export const PluginWebAppOpenedEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  webAppId: PLUGIN_WEB_APP_ID,
+}).strict();
+export type PluginWebAppOpenedEvent = z.infer<typeof PluginWebAppOpenedEvent>;
+
+export const StartPluginWebAppPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  webAppId: PLUGIN_WEB_APP_ID,
+}).strict();
+export type StartPluginWebAppPayload = z.infer<typeof StartPluginWebAppPayload>;
+
+export const StartPluginWebAppResult = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("ok"),
+    title: z.string().min(1).max(120),
+    origin: LoopbackPreviewUrl,
+  }).strict(),
+  z.object({ status: z.literal("not-registered") }).strict(),
+]);
+export type StartPluginWebAppResult = z.infer<typeof StartPluginWebAppResult>;
+
+const GUEST_BOUNDS_LIMIT = 1_000_000;
+export const SetPluginWebAppBoundsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  webAppId: PLUGIN_WEB_APP_ID,
+  bounds: z.object({
+    x: z.number().int().min(-GUEST_BOUNDS_LIMIT).max(GUEST_BOUNDS_LIMIT),
+    y: z.number().int().min(-GUEST_BOUNDS_LIMIT).max(GUEST_BOUNDS_LIMIT),
+    width: z.number().int().min(0).max(GUEST_BOUNDS_LIMIT),
+    height: z.number().int().min(0).max(GUEST_BOUNDS_LIMIT),
+  }).strict(),
+  visible: z.boolean(),
+}).strict();
+export type SetPluginWebAppBoundsPayload = z.infer<
+  typeof SetPluginWebAppBoundsPayload
+>;
+
+export const StopPluginWebAppPayload = StartPluginWebAppPayload;
+export type StopPluginWebAppPayload = z.infer<typeof StopPluginWebAppPayload>;
+
 // Workspace plugin management (PR2). Main owns one pipeline for the active
 // workspace. Every action returns a discriminated result, so expected plugin
 // failures cross as bounded data instead of opaque Electron exceptions.
@@ -2338,6 +2405,12 @@ export const PluginStatusRecord = z.object({
   sourceHash: PLUGIN_SOURCE_HASH.nullable(),
   approvedHash: PLUGIN_SOURCE_HASH.nullable(),
   installedBaselineHash: PLUGIN_SOURCE_HASH.nullable(),
+  webApps: z.array(
+    z.object({
+      id: z.string().min(1).max(120),
+      title: z.string().min(1).max(120),
+    }).strict(),
+  ).max(100),
   diagnostics: z.array(PLUGIN_DIAGNOSTIC),
   warnings: z.array(PLUGIN_DIAGNOSTIC),
   error: PluginPipelineError.nullable(),
@@ -2384,7 +2457,7 @@ const PluginUninstallCounts = z.object({
 // inventory stays in main. counts.notRecoverableFromHistory is the real
 // total, which is what the dialog counts "and N more" from.
 const PluginUninstallWarning = z.object({
-  kind: z.enum(["local-modifications", "cannot-verify-baseline"]),
+  kind: z.enum(["local-modifications", "cannot-verify-baseline", "plugin-state"]),
   summary: z.string().min(1).max(10_000),
   details: z.array(PLUGIN_DIAGNOSTIC),
   counts: PluginUninstallCounts,
@@ -2400,6 +2473,11 @@ export const PluginUninstallPreflightRecord = z.object({
   baselineManifestPath: PATH_STRING,
   summary: z.string().min(1).max(10_000),
   counts: PluginUninstallCounts,
+  stateData: z.object({
+    path: PATH_STRING,
+    fileCount: z.number().int().nonnegative(),
+    totalBytes: z.number().int().nonnegative(),
+  }).strict().nullable(),
   warning: PluginUninstallWarning.nullable(),
 }).strict();
 export type PluginUninstallPreflightRecord = z.infer<
@@ -3873,6 +3951,15 @@ export interface DohcDesktopBridge {
   invokePluginPanelSdk(
     payload: InvokePluginPanelSdkPayload,
   ): Promise<InvokePluginPanelSdkResult>;
+  openPluginWebApp(payload: OpenPluginWebAppPayload): Promise<OpenPluginWebAppResult>;
+  onPluginWebAppOpened(
+    listener: (event: PluginWebAppOpenedEvent) => void,
+  ): () => void;
+  startPluginWebApp(
+    payload: StartPluginWebAppPayload,
+  ): Promise<StartPluginWebAppResult>;
+  setPluginWebAppBounds(payload: SetPluginWebAppBoundsPayload): Promise<void>;
+  stopPluginWebApp(payload: StopPluginWebAppPayload): Promise<void>;
   listPlugins(payload: ListPluginsPayload): Promise<ListPluginsResult>;
   installPlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   disablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;

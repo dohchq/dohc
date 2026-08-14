@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   lstat,
   mkdir,
+  readdir,
   readFile,
   rename,
   unlink,
@@ -90,11 +91,23 @@ export interface PluginUninstallPreflightCounts {
 }
 
 export interface PluginUninstallWarning {
-  kind: "local-modifications" | "cannot-verify-baseline";
+  kind: "local-modifications" | "cannot-verify-baseline" | "plugin-state";
   summary: string;
   details: string[];
   counts: PluginUninstallPreflightCounts;
   notRecoverablePaths: string[];
+}
+
+/**
+ * What the plugin stored under its state root — a wrapper's sessions, logs,
+ * and secrets. It lives beside the app's userData, not in the workspace, and
+ * the engine never captures it, so uninstall deleting it is genuinely
+ * irreversible and the warning must say so (decision 7 of the t3 brief).
+ */
+export interface PluginStateData {
+  path: string;
+  fileCount: number;
+  totalBytes: number;
 }
 
 export interface PluginUninstallPreflightResult {
@@ -106,6 +119,7 @@ export interface PluginUninstallPreflightResult {
   counts: PluginUninstallPreflightCounts;
   files: PluginUninstallFileInventory[];
   notRecoverablePaths: string[];
+  stateData: PluginStateData | null;
   warning: PluginUninstallWarning | null;
 }
 
@@ -119,6 +133,7 @@ export interface PluginUninstallPreflightSummary {
   baselineManifestPath: string;
   summary: string;
   counts: PluginUninstallPreflightCounts;
+  stateData: PluginStateData | null;
   warning:
     | {
       kind: PluginUninstallWarning["kind"];
@@ -140,6 +155,7 @@ export function summarizeUninstallPreflight(
     baselineManifestPath: result.baselineManifestPath,
     summary: result.summary,
     counts: result.counts,
+    stateData: result.stateData,
     warning: result.warning
       ? {
         kind: result.warning.kind,
@@ -169,6 +185,9 @@ export interface PluginUninstallPreflightInput {
   dohcDir: string;
   pluginId: string;
   pluginRoot: string;
+  /** The plugin's durable data directory (pluginStateRoot) — inventoried so
+   * the uninstall warning can name what deleting it destroys. */
+  stateRoot: string;
   installedBaselineHash: string | undefined;
   /**
    * Whether this workspace's engine capture is running right now. It does not
@@ -379,6 +398,7 @@ function cannotVerifyResult(
     counts,
     files,
     notRecoverablePaths: unrecoverable,
+    stateData: null,
     warning,
   };
 }
@@ -403,6 +423,7 @@ function sourceAlreadyDeletedResult(
     counts: emptyCounts(),
     files: [],
     notRecoverablePaths: [],
+    stateData: null,
     warning: null,
   };
 }
@@ -434,7 +455,85 @@ function verifiedInventory(
   return files;
 }
 
+/** Counts the files and bytes under the plugin's state root, or null when
+ * nothing is stored there. Unreadable entries are skipped rather than failing
+ * the preflight: the inventory informs a warning, it does not gate. */
+async function measurePluginStateData(
+  stateRoot: string,
+): Promise<PluginStateData | null> {
+  const root = resolve(stateRoot);
+  let fileCount = 0;
+  let totalBytes = 0;
+  const pending = [root];
+  while (pending.length > 0) {
+    const directory = pending.pop()!;
+    let names: string[];
+    try {
+      names = await readdir(directory);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      const path = join(directory, name);
+      let stats: Awaited<ReturnType<typeof lstat>>;
+      try {
+        stats = await lstat(path);
+      } catch {
+        continue;
+      }
+      if (stats.isDirectory()) pending.push(path);
+      else if (stats.isFile()) {
+        fileCount += 1;
+        totalBytes += stats.size;
+      }
+    }
+  }
+  return fileCount === 0 ? null : { path: root, fileCount, totalBytes };
+}
+
+function formatMegabytes(bytes: number): string {
+  return `${Math.max(0.1, bytes / 1_048_576).toFixed(1)} MB`;
+}
+
+/**
+ * Folds the state-root inventory into the result. Plugin state is deleted by
+ * every successful uninstall, is not part of the workspace, and is never
+ * captured by the engine — so when it exists, the warning must name it as
+ * permanently deleted (the irreversible-change invariant), whether or not
+ * the source tree had its own warning.
+ */
+function withStateData(
+  result: PluginUninstallPreflightResult,
+  stateData: PluginStateData | null,
+): PluginUninstallPreflightResult {
+  if (!stateData) return result;
+  const details = [
+    `Uninstall also deletes this plugin's stored data: ${stateData.fileCount} ${plural(stateData.fileCount, "file")} (${formatMegabytes(stateData.totalBytes)}) at ${stateData.path}.`,
+    "That data is not in the workspace and history holds no copy. It cannot be restored.",
+  ];
+  const warning: PluginUninstallWarning = result.warning
+    ? { ...result.warning, details: [...result.warning.details, ...details] }
+    : {
+      kind: "plugin-state",
+      summary:
+        `Uninstall deletes this plugin's stored data: ${stateData.fileCount} ${plural(stateData.fileCount, "file")} (${formatMegabytes(stateData.totalBytes)}). It cannot be restored.`,
+      details: [...details, "Copy what you need before you uninstall."],
+      counts: result.counts,
+      notRecoverablePaths: result.notRecoverablePaths,
+    };
+  return { ...result, stateData, warning };
+}
+
 export async function pluginUninstallPreflight(
+  input: PluginUninstallPreflightInput,
+): Promise<PluginUninstallPreflightResult> {
+  return withStateData(
+    await sourceUninstallPreflight(input),
+    await measurePluginStateData(input.stateRoot),
+  );
+}
+
+async function sourceUninstallPreflight(
   input: PluginUninstallPreflightInput,
 ): Promise<PluginUninstallPreflightResult> {
   const manifestPath = pluginBaselineManifestPath(
@@ -507,6 +606,7 @@ export async function pluginUninstallPreflight(
       counts,
       files,
       notRecoverablePaths: unrecoverable,
+      stateData: null,
       warning: null,
     };
   }
@@ -541,6 +641,7 @@ export async function pluginUninstallPreflight(
     counts,
     files,
     notRecoverablePaths: unrecoverable,
+    stateData: null,
     warning,
   };
 }

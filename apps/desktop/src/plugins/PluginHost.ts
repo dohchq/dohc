@@ -2,19 +2,24 @@ import { randomUUID } from "node:crypto";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
 import {
   mutatePluginRecord,
+  pluginDataDir,
   readPluginLocalState,
 } from "./pluginLocalState";
+import { pluginStateRoot } from "./pluginSourceSnapshot";
 import {
   PLUGIN_ACTIVATION_TIMEOUT_MS,
   PLUGIN_CRASH_LOOP_THRESHOLD,
   PLUGIN_FAST_FAILURE_WINDOW_MS,
   PLUGIN_HOST_METHODS,
   PLUGIN_PROCESS_LOG_LIMIT,
+  PLUGIN_WEB_APP_START_TIMEOUT_MS,
   type PluginActivateParams,
   type PluginActivateResult,
   type PluginInvokeCommandParams,
   type PluginLogParams,
   type PluginRuntimeStatus,
+  type PluginStartWebAppParams,
+  type PluginStartWebAppResult,
   type SdkEventParams,
   type PluginTransport,
   type SdkRequestParams,
@@ -56,6 +61,7 @@ export interface PluginHostOptions {
   onStatusChange?: (pluginId: string, status: PluginRuntimeStatus) => void;
   now?: () => number;
   activationTimeoutMs?: number;
+  webAppStartTimeoutMs?: number;
 }
 
 interface PluginSpawn {
@@ -250,6 +256,62 @@ export class PluginHost {
     } satisfies PluginInvokeCommandParams);
   }
 
+  /**
+   * Asks the running plugin to start (or reuse) a manifest-declared web app
+   * and returns the loopback URL its guest view must load. The URL may carry
+   * a one-time credential in its fragment: callers keep it in memory and
+   * never log it.
+   */
+  async startWebApp(
+    pluginId: string,
+    webAppId: string,
+  ): Promise<PluginStartWebAppResult> {
+    const record = this.plugins.get(pluginId);
+    const spawn = record?.current;
+    if (!record || !spawn?.transport) {
+      throw new Error(`Plugin "${pluginId}" is not running.`);
+    }
+    if (spawn.stopping) {
+      throw new Error(`Plugin "${pluginId}" is stopping.`);
+    }
+    if (record.status === "starting") {
+      throw new Error(`Plugin "${pluginId}" is still starting.`);
+    }
+    if (!record.manifest.webApps?.some((webApp) => webApp.id === webAppId)) {
+      throw new Error(
+        `Plugin "${pluginId}" does not declare web app "${webAppId}".`,
+      );
+    }
+    const timeoutMs =
+      this.options.webAppStartTimeoutMs ?? PLUGIN_WEB_APP_START_TIMEOUT_MS;
+    const result = await raceWithTimeout(
+      spawn.transport.request(PLUGIN_HOST_METHODS.startWebApp, {
+        webAppId,
+      } satisfies PluginStartWebAppParams),
+      timeoutMs,
+      `Plugin "${pluginId}" web app "${webAppId}" did not start within ${timeoutMs} ms.`,
+    );
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("url" in result) ||
+      typeof result.url !== "string" ||
+      result.url.length === 0
+    ) {
+      throw new Error(
+        `Plugin "${pluginId}" web app "${webAppId}" returned an invalid start result: "url" must be a non-empty string.`,
+      );
+    }
+    return { url: result.url };
+  }
+
+  private pluginStateRoot(pluginId: string): string {
+    return pluginStateRoot(
+      pluginDataDir(this.options.stateDir, this.options.workspaceRoot),
+      pluginId,
+    );
+  }
+
   private async shutdown(
     record: PluginRecord,
     spawn: PluginSpawn,
@@ -351,6 +413,7 @@ export class PluginHost {
           pluginId: record.pluginId,
           pluginRoot: record.pluginRoot,
           workspaceRoot: this.options.workspaceRoot,
+          stateRoot: this.pluginStateRoot(record.pluginId),
           manifest: record.manifest,
         } satisfies PluginActivateParams,
       );

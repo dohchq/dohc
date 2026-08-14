@@ -153,6 +153,7 @@ import {
   isHistoryDiffTabPath,
   isHistoryTabPath,
   isPluginPanelTabPath,
+  isPluginWebAppTabPath,
   isSingletonEditorTabPath,
   isSiteTabPath,
   isVirtualTabPath,
@@ -164,7 +165,9 @@ import {
   moveTabToNewGroup,
   parseHistoryDiffTabPath,
   parsePluginPanelTabPath,
+  parsePluginWebAppTabPath,
   pluginPanelTabPath,
+  pluginWebAppTabPath,
   parseSiteTabPath,
   parseUiState,
   pruneMissingRestoredTabs,
@@ -659,6 +662,9 @@ const LazySitePreviewPage = lazy(() =>
 );
 const LazyPluginPanelPage = lazy(() =>
   import("./PluginPanelPage").then((mod) => ({ default: mod.PluginPanelPage })),
+);
+const LazyPluginWebAppPage = lazy(() =>
+  import("./PluginWebAppPage").then((mod) => ({ default: mod.PluginWebAppPage })),
 );
 const LazyLinkedChatsPanel = lazy(() =>
   import("./workbench/LinkedChats").then((mod) => ({
@@ -1954,6 +1960,23 @@ export function DesktopWorkspaceShell(props: {
           openTab(
             state,
             pluginPanelTabPath(event.pluginId, event.panelId),
+            targetGroupId,
+          ),
+        );
+      }),
+    [invalidateDeferredFileOpen, mutateWb, workspaceId],
+  );
+
+  useEffect(
+    () =>
+      bridge().onPluginWebAppOpened((event) => {
+        if (event.workspaceId !== workspaceId) return;
+        const targetGroupId = wbRef.current.activeEditorGroup;
+        invalidateDeferredFileOpen(targetGroupId);
+        mutateWb((state) =>
+          openTab(
+            state,
+            pluginWebAppTabPath(event.pluginId, event.webAppId),
             targetGroupId,
           ),
         );
@@ -4890,6 +4913,7 @@ export function DesktopWorkspaceShell(props: {
               const groupDocumentPath = isVirtualTabPath(tabPath) ? null : tabPath;
               const groupSiteRoot = parseSiteTabPath(tabPath);
               const groupPluginPanel = parsePluginPanelTabPath(tabPath);
+              const groupPluginWebApp = parsePluginWebAppTabPath(tabPath);
               const groupScrollTarget =
                 searchScrollTarget?.groupId === editorGroup.id &&
                 searchScrollTarget.path === tabPath
@@ -5120,6 +5144,29 @@ export function DesktopWorkspaceShell(props: {
               ) : (
                 <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
                   <span className="text-sm text-ink">Could not open plugin panel</span>
+                  <button
+                    type="button"
+                    className="text-xs text-accent hover:underline"
+                    onClick={() => {
+                      if (tabPath) closeFileTab(editorGroup.id, tabPath);
+                    }}
+                  >
+                    Close tab
+                  </button>
+                </div>
+              )
+            ) : isPluginWebAppTabPath(tabPath) ? (
+              groupPluginWebApp ? (
+                <Suspense fallback={<PanelLoading label="plugin app" />}>
+                  <LazyPluginWebAppPage
+                    workspaceId={workspaceId}
+                    pluginId={groupPluginWebApp.pluginId}
+                    webAppId={groupPluginWebApp.webAppId}
+                  />
+                </Suspense>
+              ) : (
+                <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+                  <span className="text-sm text-ink">Could not open plugin app</span>
                   <button
                     type="button"
                     className="text-xs text-accent hover:underline"

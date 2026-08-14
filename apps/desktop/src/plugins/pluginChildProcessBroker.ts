@@ -80,6 +80,10 @@ export interface PluginChildProcessBrokerOptions {
    * A brokered child's cwd/modulePath must resolve inside
    * <dohcDir>/plugins/<safeId>. */
   dohcDir: string;
+  /** The workspace root this broker serves. The one cwd a spawn may use
+   * outside the plugin's built root, and only through the explicit
+   * `{ workspaceRoot: true }` request form — never a path string. */
+  workspaceRoot: string;
   forkProcess?: (
     modulePath: string,
     args: string[],
@@ -109,7 +113,7 @@ export interface PluginChildProcessBrokerContext {
 interface SpawnRequest {
   modulePath: string;
   args: string[];
-  cwd?: string;
+  cwd?: string | { workspaceRoot: true };
   env: Record<string, string>;
 }
 
@@ -138,6 +142,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// Exactly `{ workspaceRoot: true }` — an extra key or another value is a
+// malformed request, not a fallback to plugin-relative resolution.
+function isWorkspaceRootCwd(value: unknown): value is { workspaceRoot: true } {
+  return (
+    isRecord(value) &&
+    value.workspaceRoot === true &&
+    Object.keys(value).length === 1
+  );
+}
+
 function assertRelativePluginPath(value: unknown, label: string): string {
   if (
     typeof value !== "string" ||
@@ -150,6 +164,19 @@ function assertRelativePluginPath(value: unknown, label: string): string {
     );
   }
   return value;
+}
+
+function parseSpawnCwd(
+  value: unknown,
+): string | { workspaceRoot: true } | undefined {
+  if (value === undefined) return undefined;
+  if (isWorkspaceRootCwd(value)) return value;
+  if (isRecord(value)) {
+    throw new Error(
+      "childProcesses.spawn cwd object form must be exactly { workspaceRoot: true }.",
+    );
+  }
+  return assertRelativePluginPath(value, "childProcesses.spawn cwd");
 }
 
 function parseSpawnRequest(value: unknown): SpawnRequest {
@@ -173,9 +200,7 @@ function parseSpawnRequest(value: unknown): SpawnRequest {
       `childProcesses.spawn args must contain at most ${MAX_CHILD_ARGS} strings of ${MAX_CHILD_ARG_LENGTH} characters or fewer.`,
     );
   }
-  const cwd = value.cwd === undefined
-    ? undefined
-    : assertRelativePluginPath(value.cwd, "childProcesses.spawn cwd");
+  const cwd = parseSpawnCwd(value.cwd);
   const envValue = value.env ?? {};
   if (!isRecord(envValue)) {
     throw new Error("childProcesses.spawn env must be an object of strings.");
@@ -429,18 +454,16 @@ export class PluginChildProcessBroker {
   private async spawn(
     context: PluginChildProcessBrokerContext,
     request: SpawnRequest,
-  ): Promise<{ childId: string }> {
+  ): Promise<{ childId: string; pid: number | null }> {
     const pluginRoot = await this.pluginRoot(context.pluginId);
     const modulePath = await this.containedFile(
       pluginRoot,
       request.modulePath,
       "modulePath",
     );
-    const cwd = await this.containedDirectory(
-      pluginRoot,
-      request.cwd ?? ".",
-      "cwd",
-    );
+    const cwd = isWorkspaceRootCwd(request.cwd)
+      ? await this.canonicalWorkspaceRoot()
+      : await this.containedDirectory(pluginRoot, request.cwd ?? ".", "cwd");
     if (context.signal.aborted) throw new Error("The plugin spawn has ended.");
 
     const childId = randomUUID();
@@ -521,7 +544,24 @@ export class PluginChildProcessBroker {
       }
       throw new Error("The plugin spawn ended before its child was registered.");
     }
-    return { childId };
+    return { childId, pid: child.pid ?? null };
+  }
+
+  /** The canonical (realpath) workspace root, resolved per spawn so a root
+   * that is currently unavailable fails the spawn with its own error. */
+  private async canonicalWorkspaceRoot(): Promise<string> {
+    const root = resolve(this.options.workspaceRoot);
+    const canonical = await realpath(root).catch((error: unknown) => {
+      throw new Error(
+        `childProcesses.spawn cwd workspace root is unavailable at ${root}: ${errorMessage(error)}`,
+      );
+    });
+    if (!(await stat(canonical)).isDirectory()) {
+      throw new Error(
+        `childProcesses.spawn cwd workspace root is not a directory: ${canonical}`,
+      );
+    }
+    return canonical;
   }
 
   private subscribe(

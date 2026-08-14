@@ -278,6 +278,7 @@ describe("discoverInstalledPlugins", () => {
         sourceHash: null,
         approvedHash: null,
         installedBaselineHash: null,
+        webApps: [],
         diagnostics: record.diagnostics,
         warnings: [],
         error: null,

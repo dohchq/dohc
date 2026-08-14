@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -13,6 +13,7 @@ let statusListener: ((event: PluginStatusChangedEvent) => void) | null = null;
 
 const bridgeMock = {
   listPlugins: vi.fn(),
+  openPluginWebApp: vi.fn(),
   installPlugin: vi.fn(),
   disablePlugin: vi.fn(),
   enablePlugin: vi.fn(),
@@ -51,6 +52,7 @@ function plugin(
     sourceHash: HASH_A,
     approvedHash: HASH_A,
     installedBaselineHash: HASH_A,
+    webApps: [],
     diagnostics: [],
     warnings: [],
     error: null,
@@ -64,6 +66,7 @@ const cleanPreflight: PluginUninstallPreflightRecord = {
   liveHash: HASH_A,
   baselineManifestPath: "/state/plugin-baseline.json",
   summary: "No local source modifications found.",
+  stateData: null,
   counts: {
     unchanged: 1,
     modified: 0,
@@ -146,6 +149,83 @@ describe("PluginSettings", () => {
       });
     });
     expect(screen.queryByText("old-status-plugin")).toBeNull();
+  });
+
+  it("offers Open for an installed plugin's web app and closes the dialog on success", async () => {
+    const installed = plugin("t3-code", {
+      webApps: [{ id: "app", title: "T3 Code" }],
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [installed] });
+    bridgeMock.openPluginWebApp.mockResolvedValue({
+      pluginId: "t3-code",
+      webAppId: "app",
+    });
+    const onOpenedWebApp = vi.fn();
+
+    render(
+      <PluginSettings workspaceId="ws-1" onOpenedWebApp={onOpenedWebApp} />,
+    );
+    const open = await screen.findByTestId("plugin-open-web-app");
+    expect(open.textContent).toBe("Open T3 Code");
+
+    await act(async () => {
+      fireEvent.click(open);
+      await Promise.resolve();
+    });
+
+    expect(bridgeMock.openPluginWebApp).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      pluginRoot: installed.rootPath,
+      pluginId: "t3-code",
+      webAppId: "app",
+    });
+    expect(onOpenedWebApp).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the open failure and keeps the dialog when the app cannot start", async () => {
+    const installed = plugin("t3-code", {
+      webApps: [{ id: "app", title: "T3 Code" }],
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [installed] });
+    bridgeMock.openPluginWebApp.mockRejectedValue(
+      new Error("The t3 server exited before becoming ready in 3 attempts."),
+    );
+    const onOpenedWebApp = vi.fn();
+
+    render(
+      <PluginSettings workspaceId="ws-1" onOpenedWebApp={onOpenedWebApp} />,
+    );
+    const open = await screen.findByTestId("plugin-open-web-app");
+    await act(async () => {
+      fireEvent.click(open);
+      await Promise.resolve();
+    });
+
+    const error = await screen.findByTestId("plugin-action-error");
+    expect(error.textContent).toContain("3 attempts");
+    expect(onOpenedWebApp).not.toHaveBeenCalled();
+  });
+
+  it("hides the web app control for disabled and uninstalled plugins", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [
+        plugin("disabled-plugin", {
+          status: "disabled",
+          disabledReason: "user",
+          webApps: [{ id: "app", title: "App" }],
+        }),
+        plugin("uninstalled-plugin", {
+          status: "discovered",
+          approvedHash: null,
+          webApps: [{ id: "app", title: "App" }],
+        }),
+      ],
+    });
+
+    render(<PluginSettings workspaceId="ws-1" />);
+    await screen.findByText("disabled-plugin");
+    expect(screen.queryByTestId("plugin-open-web-app")).toBeNull();
   });
 
   it("sends the workspace and plugin id for every action", async () => {

@@ -254,8 +254,9 @@ function pluginChildProcessExit(value, method) {
     return value;
 }
 export function createPluginChildProcessClient(transport) {
-    const handle = (childId) => ({
+    const handle = (childId, pid) => ({
         id: childId,
+        pid,
         async onOutput(listener, options) {
             if (typeof listener !== "function") {
                 throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Child-process output listener must be a function.");
@@ -295,10 +296,11 @@ export function createPluginChildProcessClient(transport) {
             const result = await transport.request(PLUGIN_CHILD_PROCESS_METHODS.spawn, input, options);
             if (!isRecord(result) ||
                 typeof result.childId !== "string" ||
-                result.childId.length === 0) {
+                result.childId.length === 0 ||
+                (result.pid !== null && !Number.isSafeInteger(result.pid))) {
                 throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned an invalid child-process spawn response.");
             }
-            return handle(result.childId);
+            return handle(result.childId, result.pid);
         },
     };
 }

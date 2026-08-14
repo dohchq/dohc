@@ -7,6 +7,7 @@ import {
   forgetUninstalledPlugin,
   forgetWorkspaceRegistrations,
   loadPluginPanelRegistration,
+  loadPluginWebAppRegistration,
   pluginLifecycleKey,
   rememberPluginRegistration,
   startPluginForPanel,
@@ -30,6 +31,7 @@ async function writePlugin(root: string): Promise<void> {
       name: "hello-plugin",
       entry: "plugin.mjs",
       panels: [{ id: "main", title: "Hello", entry: "panel/index.html" }],
+      webApps: [{ id: "app", title: "Hello App" }],
     }),
   );
   await writeFile(join(root, "plugin.mjs"), "export default { activate() {} };\n");
@@ -67,6 +69,40 @@ describe("plugin panel registration", () => {
         panelId: "main",
       }),
     ).resolves.toMatchObject({ pluginRoot });
+  });
+
+  it("loads a declared web app under the same root and manifest checks", async () => {
+    const workspace = await scratch("dohc-plugin-panel-workspace-");
+    const pluginRoot = join(workspace, "plugins", "hello-plugin");
+    await writePlugin(pluginRoot);
+
+    await expect(
+      loadPluginWebAppRegistration({
+        workspaceRoot: workspace,
+        pluginRoot: "plugins/hello-plugin",
+        pluginId: "hello-plugin",
+        webAppId: "app",
+      }),
+    ).resolves.toMatchObject({
+      pluginRoot,
+      webApp: { id: "app", title: "Hello App" },
+    });
+    await expect(
+      loadPluginWebAppRegistration({
+        workspaceRoot: workspace,
+        pluginRoot: "plugins/hello-plugin",
+        pluginId: "hello-plugin",
+        webAppId: "missing",
+      }),
+    ).rejects.toThrow('does not declare web app "missing"');
+    await expect(
+      loadPluginWebAppRegistration({
+        workspaceRoot: workspace,
+        pluginRoot: "../outside",
+        pluginId: "hello-plugin",
+        webAppId: "app",
+      }),
+    ).rejects.toThrow();
   });
 
   it("refuses a plugin root outside the workspace", async () => {
@@ -363,6 +399,7 @@ describe("plugin panel registration", () => {
           status: "ready",
           disabledReason: null,
           runtimeStatus: "ready",
+          webApps: [],
           sourceHash: null,
           approvedHash: null,
           installedBaselineHash: null,

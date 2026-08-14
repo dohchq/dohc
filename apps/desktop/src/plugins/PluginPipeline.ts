@@ -29,6 +29,7 @@ import {
   EXCLUDED_SOURCE_NAMES,
   isPluginRootArtifact,
   pluginIdToSafePath,
+  pluginStateRoot,
   snapshotPluginSource,
   type PluginSourceSnapshotResult,
 } from "./pluginSourceSnapshot";
@@ -65,6 +66,9 @@ export interface PluginPipelinePluginStatus {
   sourceHash: string | null;
   approvedHash: string | null;
   installedBaselineHash: string | null;
+  /** The manifest's declared web apps, so the settings surface can offer an
+   * Open control without a second manifest read. */
+  webApps: { id: string; title: string }[];
   diagnostics: string[];
   warnings: string[];
   error: PluginPipelineError | null;
@@ -260,10 +264,20 @@ function cloneError(error: PluginPipelineError | null): PluginPipelineError | nu
 function cloneStatus(status: PluginPipelinePluginStatus): PluginPipelinePluginStatus {
   return {
     ...status,
+    webApps: status.webApps.map((webApp) => ({ ...webApp })),
     diagnostics: [...status.diagnostics],
     warnings: [...status.warnings],
     error: cloneError(status.error),
   };
+}
+
+function manifestWebApps(
+  manifest: { webApps?: { id: string; title: string }[] } | null,
+): { id: string; title: string }[] {
+  return (manifest?.webApps ?? []).map((webApp) => ({
+    id: webApp.id,
+    title: webApp.title,
+  }));
 }
 
 /**
@@ -401,6 +415,7 @@ export class PluginPipeline {
           sourceHash: null,
           approvedHash: null,
           installedBaselineHash: null,
+          webApps: manifestWebApps(candidate.manifest),
           diagnostics: boundedStatusLines(candidate.diagnostics),
           warnings: [],
           error: invalidPluginError(candidate),
@@ -673,6 +688,7 @@ export class PluginPipeline {
           dohcDir: this.dohcDir,
           pluginId,
           pluginRoot,
+          stateRoot: pluginStateRoot(this.dohcDir, pluginId),
           installedBaselineHash: record?.installedBaselineHash,
           engineCaptureAvailable: this.engineCaptureAvailable(),
         });
@@ -737,6 +753,7 @@ export class PluginPipeline {
         dohcDir: this.dohcDir,
         pluginId,
         pluginRoot: candidate.rootPath,
+        stateRoot: pluginStateRoot(this.dohcDir, pluginId),
         installedBaselineHash: record?.installedBaselineHash,
         engineCaptureAvailable: this.engineCaptureAvailable(),
       });
@@ -780,6 +797,7 @@ export class PluginPipeline {
           dohcDir: this.dohcDir,
           pluginId,
           pluginRoot: candidate.rootPath,
+          stateRoot: pluginStateRoot(this.dohcDir, pluginId),
           installedBaselineHash: record?.installedBaselineHash,
           engineCaptureAvailable: this.engineCaptureAvailable(),
         });
@@ -1892,6 +1910,9 @@ export class PluginPipeline {
     });
     return [
       liveRoot,
+      // The plugin's durable data (a wrapper's sessions, logs, secrets) is
+      // deleted with the plugin; the uninstall preflight warned about it.
+      pluginStateRoot(this.dohcDir, pluginId),
       ...siblings
         .filter((name) => isPluginRootArtifact(liveRootName, name))
         .map((name) => join(parent, name)),
@@ -2021,6 +2042,7 @@ export class PluginPipeline {
       sourceHash: null,
       approvedHash: null,
       installedBaselineHash: null,
+      webApps: manifestWebApps(candidate.manifest),
       diagnostics: boundedStatusLines(candidate.diagnostics),
       warnings: [],
       error: null,
@@ -2045,6 +2067,10 @@ export class PluginPipeline {
       // still-valid plugin's discovery entry was replaced always read back
       // as invalid).
       valid: patch.valid ?? (candidate.valid && candidate.manifest !== null),
+      // Derived from the candidate like directoryName/rootPath: an approved
+      // manifest edit that adds or renames a web app must become visible on
+      // the next status change, not stay frozen at first discovery.
+      webApps: patch.webApps ?? manifestWebApps(candidate.manifest),
       diagnostics: boundedStatusLines(patch.diagnostics ?? current.diagnostics),
       warnings: boundedStatusLines(patch.warnings ?? current.warnings),
       error: patch.error === undefined ? cloneError(current.error) : cloneError(patch.error),

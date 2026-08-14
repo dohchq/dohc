@@ -59,14 +59,29 @@ const PluginCommand = z.object({
   title: z.string().min(1).max(120),
 }).strict();
 
+// A wrapper plugin's embedded web app: served by a plugin-brokered server at
+// a loopback origin and shown in a hardened main-process WebContentsView with
+// its own per-workspace-per-plugin storage partition — never a renderer
+// webview tag, never a plain iframe. The URL comes from the running plugin
+// (PluginHandler.startWebApp), not the manifest, because it exists only once
+// the plugin's server is ready.
+const PluginWebApp = z.object({
+  id: z.string().min(1).max(120).refine(
+    (value) => !value.includes("\0"),
+    "web app id must not contain NUL bytes",
+  ),
+  title: z.string().min(1).max(120),
+}).strict();
+
 export const DohcPluginManifest = z.object({
   version: z.literal(1),
   name: NpmPackageName,
   displayName: z.string().min(1).max(120).optional(),
   entry: PluginPath,
   // For ordinary UTF-8 content, compact JSON at these bounds is 77 + 214 +
-  // 120 + 1,024 + (100 × 1,295 + 99) + (200 × 260 + 199) = 183,233 bytes,
-  // 78,911 below the reader's 262,144-byte cap. The optional skipped-script
+  // 120 + 1,024 + (100 × 1,295 + 99) + (200 × 260 + 199) + (100 × 260 + 99)
+  // = 209,332 bytes, 52,812 below the reader's 262,144-byte cap. The
+  // optional skipped-script
   // override adds at most 300 package names. A string built almost
   // entirely from characters JSON must escape (e.g. `"`, `\`) can inflate
   // past that on paper; the reader's byte-size gate — not this schema — is
@@ -76,6 +91,9 @@ export const DohcPluginManifest = z.object({
     .optional(),
   commands: z.array(PluginCommand)
     .max(200, "commands: at most 200 entries allowed")
+    .optional(),
+  webApps: z.array(PluginWebApp)
+    .max(100, "webApps: at most 100 entries allowed")
     .optional(),
   allowSkippedScripts: z.union([
     z.literal(true),
@@ -107,6 +125,18 @@ export const DohcPluginManifest = z.object({
       });
     }
     commandIds.add(command.id);
+  });
+
+  const webAppIds = new Set<string>();
+  manifest.webApps?.forEach((webApp, index) => {
+    if (webAppIds.has(webApp.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["webApps", index, "id"],
+        message: `web app id "${webApp.id}" must be unique within webApps`,
+      });
+    }
+    webAppIds.add(webApp.id);
   });
 });
 export type DohcPluginManifest = z.infer<typeof DohcPluginManifest>;

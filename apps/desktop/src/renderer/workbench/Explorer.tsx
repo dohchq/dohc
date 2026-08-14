@@ -45,11 +45,13 @@ import {
   isHistoryDiffTabPath,
   isHistoryTabPath,
   isPluginPanelTabPath,
+  isPluginWebAppTabPath,
   isSiteTabPath,
   isVersionCompareTabPath,
   isVirtualTabPath,
   parseHistoryDiffTabPath,
   parsePluginPanelTabPath,
+  parsePluginWebAppTabPath,
   parseSiteTabPath,
 } from "./workbenchState";
 
@@ -185,6 +187,9 @@ export function editorTitle(path: string): string {
   }
   if (isPluginPanelTabPath(path)) {
     return `Plugin: ${parsePluginPanelTabPath(path)?.panelId ?? "panel"}`;
+  }
+  if (isPluginWebAppTabPath(path)) {
+    return `Plugin: ${parsePluginWebAppTabPath(path)?.webAppId ?? "app"}`;
   }
   if (isSiteTabPath(path)) return `Site: ${parseSiteTabPath(path) ?? "preview"}`;
   if (isVersionCompareTabPath(path)) return "Compare with Main";

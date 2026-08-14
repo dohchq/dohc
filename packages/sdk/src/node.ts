@@ -55,14 +55,24 @@ export interface PluginChildProcessSpawnOptions {
   /** Plugin-built-root-relative JavaScript entry passed to utilityProcess.fork(). */
   modulePath: string;
   args?: string[];
-  /** Plugin-built-root-relative working directory. Defaults to the built root. */
-  cwd?: string;
+  /**
+   * Plugin-built-root-relative working directory, or
+   * `{ workspaceRoot: true }` for the canonical workspace root — the one
+   * location outside the plugin's built root a wrapper's server may run in
+   * (its provider sessions work on the workspace). Defaults to the built
+   * root.
+   */
+  cwd?: string | { workspaceRoot: true };
   /** String environment overrides merged over the host environment. */
   env?: Record<string, string>;
 }
 
 export interface PluginChildProcessHandle {
   readonly id: string;
+  /** The child's OS pid at spawn time, or null if it exited before one was
+   * observed. Wrapper plugins record it beside their server's state so a
+   * later start can tell a live orphan from a stale runtime file. */
+  readonly pid: number | null;
   onOutput(
     listener: (output: PluginChildProcessOutput) => void,
     options?: DohcRequestOptions,
@@ -113,6 +123,14 @@ export interface PluginActivateContext {
   pluginId: string;
   workspaceRoot: string;
   pluginRoot: string;
+  /**
+   * The plugin's durable per-workspace data directory, under the app's own
+   * userData beside the built plugin — never inside the workspace. It
+   * survives rebuilds and reinstalls; uninstalling the plugin deletes it,
+   * and the uninstall warning names it. The host only computes the path;
+   * a plugin that wants it creates it.
+   */
+  stateRoot: string;
   client: DohcClient;
   childProcesses: PluginChildProcessClient;
   commands: {
@@ -120,8 +138,23 @@ export interface PluginActivateContext {
   };
 }
 
+/** What PluginHandler.startWebApp returns: the URL the host navigates the
+ * guest WebContentsView to. It may carry a one-time credential in its
+ * fragment, so it crosses process boundaries in memory only — never logs. */
+export interface PluginWebAppStart {
+  url: string;
+}
+
 export interface PluginHandler {
   activate(ctx: PluginActivateContext): Promise<void> | void;
+  /**
+   * Starts (or reuses) the embedded web app declared under the manifest's
+   * `webApps` and returns the loopback URL to show. Called on demand when
+   * the user opens the web app's tab, never during activate — a wrapper's
+   * server start is exactly the long-running readiness work activation must
+   * not await.
+   */
+  startWebApp?(webAppId: string): Promise<PluginWebAppStart> | PluginWebAppStart;
   deactivate?(): Promise<void> | void;
 }
 
@@ -434,8 +467,12 @@ function pluginChildProcessExit(
 export function createPluginChildProcessClient(
   transport: ProcessTransport,
 ): PluginChildProcessClient {
-  const handle = (childId: string): PluginChildProcessHandle => ({
+  const handle = (
+    childId: string,
+    pid: number | null,
+  ): PluginChildProcessHandle => ({
     id: childId,
+    pid,
     async onOutput(listener, options) {
       if (typeof listener !== "function") {
         throw new DohcSdkError(
@@ -522,14 +559,15 @@ export function createPluginChildProcessClient(
       if (
         !isRecord(result) ||
         typeof result.childId !== "string" ||
-        result.childId.length === 0
+        result.childId.length === 0 ||
+        (result.pid !== null && !Number.isSafeInteger(result.pid))
       ) {
         throw new DohcSdkError(
           DohcSdkErrorCodes.badResponse,
           "dohc host returned an invalid child-process spawn response.",
         );
       }
-      return handle(result.childId);
+      return handle(result.childId, result.pid as number | null);
     },
   };
 }

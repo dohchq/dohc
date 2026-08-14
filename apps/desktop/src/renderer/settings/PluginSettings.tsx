@@ -184,6 +184,19 @@ function canApprove(plugin: PluginStatusRecord): boolean {
   );
 }
 
+// An installed, non-disabled plugin can open its web apps. openPluginWebApp
+// re-reads and re-verifies the manifest in main, so this predicate only
+// decides whether the control is worth showing.
+function canOpenWebApps(plugin: PluginStatusRecord): boolean {
+  return (
+    plugin.valid &&
+    plugin.approvedHash !== null &&
+    plugin.webApps.length > 0 &&
+    !plugin.status.startsWith("disabled") &&
+    plugin.status !== "uninstalling"
+  );
+}
+
 // Uninstall is the one action an installed plugin keeps once its manifest
 // breaks: every other one needs the manifest the pipeline can no longer read,
 // so it would fail on click (#779 round 8 D2).
@@ -198,9 +211,15 @@ function canDisable(plugin: PluginStatusRecord): boolean {
   );
 }
 
-export function PluginSettings(props: { workspaceId: string }) {
+export function PluginSettings(props: {
+  workspaceId: string;
+  /** Called after a web app opened as a tab, so the settings dialog can get
+   * out of the way of the tab it just opened. */
+  onOpenedWebApp?: () => void;
+}) {
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [busy, setBusy] = useState<Record<string, PluginAction | undefined>>({});
+  const [openingWebApp, setOpeningWebApp] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string | undefined>>({});
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   // The request token orders list responses. The workspace epoch invalidates
@@ -359,6 +378,34 @@ export function PluginSettings(props: { workspaceId: string }) {
     }
   }
 
+  async function openWebApp(plugin: PluginStatusRecord, webAppId: string) {
+    const epoch = workspaceEpoch.current;
+    const key = `${plugin.id}\0${webAppId}`;
+    setOpeningWebApp(key);
+    setErrors((current) => ({ ...current, [plugin.id]: undefined }));
+    try {
+      await bridge().openPluginWebApp({
+        workspaceId: props.workspaceId,
+        pluginRoot: plugin.rootPath,
+        pluginId: plugin.id,
+        webAppId,
+      });
+      if (epoch !== workspaceEpoch.current) return;
+      props.onOpenedWebApp?.();
+    } catch (error) {
+      if (epoch !== workspaceEpoch.current) return;
+      const reason = error instanceof Error ? error.message : "Try again.";
+      setErrors((current) => ({
+        ...current,
+        [plugin.id]: `dohc could not open the app from ${plugin.id}. ${reason}`,
+      }));
+    } finally {
+      if (epoch === workspaceEpoch.current) {
+        setOpeningWebApp((current) => (current === key ? null : current));
+      }
+    }
+  }
+
   async function prepareUninstall(plugin: PluginStatusRecord) {
     const epoch = workspaceEpoch.current;
     setBusy((current) => ({ ...current, [plugin.id]: "preflight" }));
@@ -497,6 +544,26 @@ export function PluginSettings(props: { workspaceId: string }) {
                   </div>
                 </div>
                 <div className="flex flex-wrap justify-end gap-1.5">
+                  {canOpenWebApps(plugin)
+                    ? plugin.webApps.map((webApp) => {
+                        const key = `${plugin.id}\0${webApp.id}`;
+                        return (
+                          <button
+                            key={webApp.id}
+                            type="button"
+                            data-testid="plugin-open-web-app"
+                            data-web-app-id={webApp.id}
+                            disabled={disabled || openingWebApp !== null}
+                            onClick={() => void openWebApp(plugin, webApp.id)}
+                            className={secondaryButton}
+                          >
+                            {openingWebApp === key
+                              ? `Opening ${webApp.title}`
+                              : `Open ${webApp.title}`}
+                          </button>
+                        );
+                      })
+                    : null}
                   {canInstall(plugin) ? (
                     <button
                       type="button"

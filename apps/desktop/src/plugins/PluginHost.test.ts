@@ -16,9 +16,11 @@ import { createWorkspaceEngineCapture } from "../workspaces/workspaceEngineCaptu
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import {
   mutatePluginRecord,
+  pluginDataDir,
   pluginStateFileName,
   readPluginLocalState,
 } from "./pluginLocalState";
+import { pluginStateRoot } from "./pluginSourceSnapshot";
 import { readPluginManifestFile } from "./pluginManifest";
 import { invokePluginSdkHost } from "./pluginSdkHost";
 import { createPluginPanelSdkAuthorityRegistry } from "./pluginPanelSdkAuthority";
@@ -2074,5 +2076,116 @@ describe("PluginHost", () => {
     } finally {
       consoleError.mockRestore();
     }
+  });
+});
+
+describe("PluginHost web apps", () => {
+  async function webAppManifest(): Promise<DohcPluginManifest> {
+    return {
+      ...(await fixtureManifest()),
+      webApps: [{ id: "main-app", title: "Hello App" }],
+    };
+  }
+
+  async function startWebAppHost(options: {
+    mode: string;
+    webAppStartTimeoutMs?: number;
+  }): Promise<PluginHost> {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": options.mode },
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+      webAppStartTimeoutMs: options.webAppStartTimeoutMs,
+    });
+    await host.start(helloPluginRoot, await webAppManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+    return host;
+  }
+
+  it("routes startWebApp through the real plugin process and returns its URL in memory", async () => {
+    const host = await startWebAppHost({ mode: "web-app" });
+    await expect(host.startWebApp("hello-plugin", "main-app")).resolves.toEqual({
+      url: "http://127.0.0.1:43210/pair#token=fixture-main-app",
+    });
+  });
+
+  it("refuses a web app the manifest does not declare", async () => {
+    const host = await startWebAppHost({ mode: "web-app" });
+    await expect(host.startWebApp("hello-plugin", "other")).rejects.toThrow(
+      'does not declare web app "other"',
+    );
+  });
+
+  it("reports a handler that does not implement startWebApp", async () => {
+    const host = await startWebAppHost({ mode: "hello" });
+    await expect(host.startWebApp("hello-plugin", "main-app")).rejects.toThrow(
+      "does not implement startWebApp",
+    );
+  });
+
+  it("rejects an empty url from the plugin", async () => {
+    const host = await startWebAppHost({ mode: "web-app-bad-result" });
+    await expect(host.startWebApp("hello-plugin", "main-app")).rejects.toThrow(
+      "non-empty string url",
+    );
+  });
+
+  it("bounds a hung web app start with an error naming the limit", async () => {
+    const host = await startWebAppHost({
+      mode: "web-app-hang",
+      webAppStartTimeoutMs: 200,
+    });
+    await expect(host.startWebApp("hello-plugin", "main-app")).rejects.toThrow(
+      "did not start within 200 ms",
+    );
+  });
+
+  it("refuses when the plugin is not running", async () => {
+    const root = await workspaceRoot();
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: createProcessHarness().spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+    await expect(host.startWebApp("hello-plugin", "main-app")).rejects.toThrow(
+      'Plugin "hello-plugin" is not running.',
+    );
+  });
+
+  it("hands every activation the same durable state root uninstall deletes", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "report-context" },
+    });
+    const host = trackHost({
+      stateDir: localStateDir,
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    const reported = await host.invokeCommand(
+      "hello-plugin",
+      "report.context",
+    ) as { stateRoot: string; workspaceRoot: string };
+    expect(reported.workspaceRoot).toBe(root);
+    expect(reported.stateRoot).toBe(
+      pluginStateRoot(pluginDataDir(localStateDir, root), "hello-plugin"),
+    );
   });
 });

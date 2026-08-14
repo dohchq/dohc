@@ -7,10 +7,12 @@ import {
   isHistoryDiffTabPath,
   isHistoryTabPath,
   isPluginPanelTabPath,
+  isPluginWebAppTabPath,
   isSingletonEditorTabPath,
   isVersionCompareTabPath,
   parseHistoryDiffTabPath,
   parsePluginPanelTabPath,
+  parsePluginWebAppTabPath,
 } from "./workbenchState";
 
 function fileName(path: string): string {
@@ -19,6 +21,9 @@ function fileName(path: string): string {
   if (isChatsTabPath(path)) return "Chats";
   if (isPluginPanelTabPath(path)) {
     return parsePluginPanelTabPath(path)?.panelId ?? "Plugin panel";
+  }
+  if (isPluginWebAppTabPath(path)) {
+    return parsePluginWebAppTabPath(path)?.webAppId ?? "Plugin app";
   }
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
@@ -36,6 +41,10 @@ function tabTitle(path: string): string {
   if (isPluginPanelTabPath(path)) {
     const panel = parsePluginPanelTabPath(path);
     return panel ? `${panel.pluginId} — ${panel.panelId}` : "Plugin panel";
+  }
+  if (isPluginWebAppTabPath(path)) {
+    const webApp = parsePluginWebAppTabPath(path);
+    return webApp ? `${webApp.pluginId} — ${webApp.webAppId}` : "Plugin app";
   }
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);

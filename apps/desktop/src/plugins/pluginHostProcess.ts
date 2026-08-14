@@ -11,6 +11,8 @@ import {
   PLUGIN_HOST_METHODS,
   type PluginActivateParams,
   type PluginInvokeCommandParams,
+  type PluginStartWebAppParams,
+  type PluginStartWebAppResult,
 } from "./pluginHostProtocol.ts";
 const transport = createProcessTransport();
 const client = createDohcClient({ transport });
@@ -52,6 +54,7 @@ transport.onRequest(PLUGIN_HOST_METHODS.activate, async (rawParams) => {
     pluginId: params.pluginId,
     workspaceRoot: params.workspaceRoot,
     pluginRoot: params.pluginRoot,
+    stateRoot: params.stateRoot,
     client,
     childProcesses,
     commands: {
@@ -71,6 +74,27 @@ transport.onRequest(PLUGIN_HOST_METHODS.activate, async (rawParams) => {
 transport.onRequest(PLUGIN_HOST_METHODS.deactivate, async () => {
   await activeHandler?.deactivate?.();
   return {};
+});
+
+transport.onRequest(PLUGIN_HOST_METHODS.startWebApp, async (rawParams) => {
+  const params = rawParams as PluginStartWebAppParams;
+  if (!activeHandler?.startWebApp) {
+    throw new Error(
+      "This plugin declares web apps but its handler does not implement startWebApp(webAppId).",
+    );
+  }
+  const started = await activeHandler.startWebApp(params.webAppId);
+  if (
+    typeof started !== "object" ||
+    started === null ||
+    typeof started.url !== "string" ||
+    started.url.length === 0
+  ) {
+    throw new Error(
+      "startWebApp must return { url } with a non-empty string url.",
+    );
+  }
+  return { url: started.url } satisfies PluginStartWebAppResult;
 });
 
 transport.onRequest(PLUGIN_HOST_METHODS.invokeCommand, async (rawParams) => {

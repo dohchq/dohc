@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -77,8 +77,10 @@ async function createFixture(
   const children: FakeUtilityProcess[] = [];
   const forks: BrokerFixture["forks"] = [];
   const windowsTreeKills: number[] = [];
+  await mkdir(join(root, "workspace"), { recursive: true });
   const broker = new PluginChildProcessBroker({
     dohcDir: root,
+    workspaceRoot: join(root, "workspace"),
     platform: options.platform ?? "win32",
     forkProcess: (modulePath, args, forkOptions, lifecycle) => {
       const child = new FakeUtilityProcess(10_000 + children.length);
@@ -152,6 +154,50 @@ afterEach(async () => {
 });
 
 describe("PluginChildProcessBroker", () => {
+  it("resolves the explicit workspace-root cwd form to the canonical workspace root", async () => {
+    const fixture = await createFixture();
+    const brokerContext = context("plugin-a", "spawn-a");
+
+    await spawnChild(fixture, brokerContext, {
+      modulePath: "server.mjs",
+      cwd: { workspaceRoot: true },
+    });
+
+    expect(fixture.forks).toHaveLength(1);
+    expect(fixture.forks[0]?.options.cwd).toBe(
+      await realpath(join(fixture.root, "workspace")),
+    );
+  });
+
+  it("rejects any cwd object that is not exactly { workspaceRoot: true }", async () => {
+    const fixture = await createFixture();
+    const brokerContext = context("plugin-a", "spawn-a");
+
+    for (const cwd of [
+      { workspaceRoot: false },
+      { workspaceRoot: true, extra: 1 },
+      { root: "workspace" },
+    ]) {
+      await expect(
+        spawnChild(fixture, brokerContext, { modulePath: "server.mjs", cwd }),
+      ).rejects.toThrow("must be exactly { workspaceRoot: true }");
+    }
+    expect(fixture.forks).toHaveLength(0);
+  });
+
+  it("returns the forked child's pid from spawn", async () => {
+    const fixture = await createFixture();
+    const brokerContext = context("plugin-a", "spawn-a");
+
+    const result = await fixture.broker.invoke(
+      brokerContext,
+      PLUGIN_CHILD_PROCESS_METHODS.spawn,
+      { modulePath: "server.mjs" },
+    ) as { childId: string; pid: number | null };
+
+    expect(result.pid).toBe(fixture.children[0]?.pid);
+  });
+
   it("constructs contained utilityProcess argv, cwd, env, and stdio", async () => {
     const fixture = await createFixture();
     const brokerContext = context("plugin-a", "spawn-a");
@@ -268,6 +314,7 @@ describe("PluginChildProcessBroker", () => {
     const child = new FakeUtilityProcess(12_345);
     const broker = new PluginChildProcessBroker({
       dohcDir: root,
+      workspaceRoot: root,
       platform: "win32",
       // A fork that resolves only after the child has already exited. The
       // default Electron path leaves a one-microtask window; the seam makes

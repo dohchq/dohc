@@ -11,6 +11,12 @@ export interface PluginPanelRegistration {
   panel: NonNullable<DohcPluginManifest["panels"]>[number];
 }
 
+export interface PluginWebAppRegistration {
+  pluginRoot: string;
+  manifest: DohcPluginManifest;
+  webApp: NonNullable<DohcPluginManifest["webApps"]>[number];
+}
+
 /** What the main process serves a plugin's panels from, per workspace. */
 export interface RegisteredPlugin {
   pluginRoot: string;
@@ -28,7 +34,7 @@ export interface RegisteredPlugin {
 export function rememberPluginRegistration(
   registrations: Map<string, Map<string, RegisteredPlugin>>,
   workspaceId: string,
-  registration: PluginPanelRegistration,
+  registration: { pluginRoot: string; manifest: DohcPluginManifest },
 ): RegisteredPlugin {
   const forWorkspace = registrations.get(workspaceId) ??
     new Map<string, RegisteredPlugin>();
@@ -162,12 +168,11 @@ function workspaceRelativePluginRoot(
   return resolved.replaceAll("\\", "/");
 }
 
-export async function loadPluginPanelRegistration(input: {
+async function loadValidatedPluginManifest(input: {
   workspaceRoot: string;
   pluginRoot: string;
   pluginId: string;
-  panelId: string;
-}): Promise<PluginPanelRegistration> {
+}): Promise<{ pluginRoot: string; manifest: DohcPluginManifest }> {
   const requestedRoot = workspaceRelativePluginRoot(
     input.workspaceRoot,
     input.pluginRoot,
@@ -204,7 +209,17 @@ export async function loadPluginPanelRegistration(input: {
       `Plugin id "${input.pluginId}" does not match manifest name "${read.manifest.name}".`,
     );
   }
-  const panel = read.manifest.panels?.find(
+  return { pluginRoot, manifest: read.manifest };
+}
+
+export async function loadPluginPanelRegistration(input: {
+  workspaceRoot: string;
+  pluginRoot: string;
+  pluginId: string;
+  panelId: string;
+}): Promise<PluginPanelRegistration> {
+  const { pluginRoot, manifest } = await loadValidatedPluginManifest(input);
+  const panel = manifest.panels?.find(
     (candidate) => candidate.id === input.panelId,
   );
   if (!panel) {
@@ -212,5 +227,23 @@ export async function loadPluginPanelRegistration(input: {
       `Plugin "${input.pluginId}" does not declare panel "${input.panelId}".`,
     );
   }
-  return { pluginRoot, manifest: read.manifest, panel };
+  return { pluginRoot, manifest, panel };
+}
+
+export async function loadPluginWebAppRegistration(input: {
+  workspaceRoot: string;
+  pluginRoot: string;
+  pluginId: string;
+  webAppId: string;
+}): Promise<PluginWebAppRegistration> {
+  const { pluginRoot, manifest } = await loadValidatedPluginManifest(input);
+  const webApp = manifest.webApps?.find(
+    (candidate) => candidate.id === input.webAppId,
+  );
+  if (!webApp) {
+    throw new Error(
+      `Plugin "${input.pluginId}" does not declare web app "${input.webAppId}".`,
+    );
+  }
+  return { pluginRoot, manifest, webApp };
 }

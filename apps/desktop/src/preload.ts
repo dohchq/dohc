@@ -8,6 +8,11 @@ import type {
   MenuCommand,
   PluginPanelOpenedEvent,
   PluginStatusChangedEvent,
+  PluginWebAppOpenedEvent,
+  OpenPluginWebAppPayload,
+  SetPluginWebAppBoundsPayload,
+  StartPluginWebAppPayload,
+  StopPluginWebAppPayload,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
   SitePackagePayload,
@@ -23,9 +28,11 @@ import type {
 import {
   ListPluginsResult,
   OpenPluginPanelResult,
+  OpenPluginWebAppResult,
   PluginActionResult,
   PluginUninstallPreflightResult,
   StartPluginPanelResult,
+  StartPluginWebAppResult,
   parseInvokePluginPanelSdkPayloadForIpc,
   parseInvokeSiteSdkPayloadForIpc,
   parsePluginStatusChangedEventForIpc,
@@ -49,6 +56,9 @@ import {
 // mistyped method fails the desktop typecheck).
 const pluginPanelOpenedListeners = new Set<
   (event: PluginPanelOpenedEvent) => void
+>();
+const pluginWebAppOpenedListeners = new Set<
+  (event: PluginWebAppOpenedEvent) => void
 >();
 
 const bridge: DohcDesktopBridge = {
@@ -181,6 +191,29 @@ const bridge: DohcDesktopBridge = {
       CHANNELS.invokePluginPanelSdk,
       parseInvokePluginPanelSdkPayloadForIpc(payload),
     ),
+  openPluginWebApp: async (payload: OpenPluginWebAppPayload) => {
+    const result = OpenPluginWebAppResult.parse(
+      await ipcRenderer.invoke(CHANNELS.openPluginWebApp, payload),
+    );
+    const event: PluginWebAppOpenedEvent = {
+      workspaceId: payload.workspaceId,
+      ...result,
+    };
+    for (const listener of pluginWebAppOpenedListeners) listener(event);
+    return result;
+  },
+  onPluginWebAppOpened: (listener) => {
+    pluginWebAppOpenedListeners.add(listener);
+    return () => pluginWebAppOpenedListeners.delete(listener);
+  },
+  startPluginWebApp: async (payload: StartPluginWebAppPayload) =>
+    StartPluginWebAppResult.parse(
+      await ipcRenderer.invoke(CHANNELS.startPluginWebApp, payload),
+    ),
+  setPluginWebAppBounds: (payload: SetPluginWebAppBoundsPayload) =>
+    ipcRenderer.invoke(CHANNELS.setPluginWebAppBounds, payload),
+  stopPluginWebApp: (payload: StopPluginWebAppPayload) =>
+    ipcRenderer.invoke(CHANNELS.stopPluginWebApp, payload),
   listPlugins: async (payload) =>
     ListPluginsResult.parse(await ipcRenderer.invoke(CHANNELS.listPlugins, payload)),
   installPlugin: async (payload) =>

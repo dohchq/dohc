@@ -201,8 +201,9 @@ describe("@dohc/sdk/node", () => {
     await expect(harness.nextLine()).resolves.toBe(
       '{"jsonrpc":"2.0","id":1,"method":"sdk.request","params":{"method":"childProcesses.spawn","params":{"modulePath":"server.mjs","args":["--port","0"],"cwd":"data","env":{"PORT":"0"}}}}\n',
     );
-    harness.send({ jsonrpc: "2.0", id: 1, result: { childId: "child-1" } });
+    harness.send({ jsonrpc: "2.0", id: 1, result: { childId: "child-1", pid: 4242 } });
     const child = await spawned;
+    expect(child.pid).toBe(4242);
 
     const outputs: unknown[] = [];
     const subscribed = child.onOutput((output) => outputs.push(output));
@@ -286,7 +287,7 @@ describe("@dohc/sdk/node", () => {
     const childProcesses = createPluginChildProcessClient(harness.transport);
     const spawned = childProcesses.spawn({ modulePath: "server.mjs" });
     await harness.nextLine();
-    harness.send({ jsonrpc: "2.0", id: 1, result: { childId: "child-1" } });
+    harness.send({ jsonrpc: "2.0", id: 1, result: { childId: "child-1", pid: 4242 } });
     const child = await spawned;
     const waiting = child.wait();
     await harness.nextLine();

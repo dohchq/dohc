@@ -62,6 +62,7 @@ async function runPreflight(
     dohcDir: fixture.dohcDir,
     pluginId,
     pluginRoot: fixture.pluginRoot,
+    stateRoot: join(fixture.dohcDir, "state", pluginId),
     installedBaselineHash,
     engineCaptureAvailable,
   });
@@ -74,6 +75,62 @@ afterEach(async () => {
 });
 
 describe("plugin uninstall preflight", () => {
+  it("names stored plugin data as permanently deleted even when the source is clean", async () => {
+    const fixture = await createFixture();
+    await writeSourceFile(fixture, "dohc-plugin.json", "{}\n");
+    const baseline = await saveBaseline(fixture);
+    const stateRoot = join(fixture.dohcDir, "state", pluginId);
+    await mkdir(join(stateRoot, "t3", "userdata"), { recursive: true });
+    await writeFile(join(stateRoot, "t3", "userdata", "state.sqlite"), "x".repeat(2048));
+    await writeFile(join(stateRoot, "t3-owner.json"), "{}\n");
+
+    const result = await runPreflight(fixture, baseline);
+
+    expect(result.stateData).toEqual({
+      path: stateRoot,
+      fileCount: 2,
+      totalBytes: 2048 + 3,
+    });
+    expect(result.warning?.kind).toBe("plugin-state");
+    expect(result.warning?.summary).toContain("2 files");
+    expect(result.warning?.summary).toContain("cannot be restored");
+    expect(result.warning?.details.join("\n")).toContain(stateRoot);
+    // The renderer summary carries it too.
+    expect(summarizeUninstallPreflight(result).stateData).toEqual(result.stateData);
+  });
+
+  it("appends the stored-data facts to an existing source warning", async () => {
+    const fixture = await createFixture();
+    await writeSourceFile(fixture, "dohc-plugin.json", "{}\n");
+    const baseline = await saveBaseline(fixture);
+    await writeSourceFile(fixture, "dohc-plugin.json", '{"edited":true}\n');
+    const stateRoot = join(fixture.dohcDir, "state", pluginId);
+    await mkdir(stateRoot, { recursive: true });
+    await writeFile(join(stateRoot, "secrets.json"), "s");
+
+    const result = await runPreflight(fixture, baseline);
+
+    expect(result.warning?.kind).toBe("local-modifications");
+    expect(result.warning?.details.join("\n")).toContain("stored data");
+    expect(result.warning?.details.join("\n")).toContain(stateRoot);
+    expect(result.stateData?.fileCount).toBe(1);
+  });
+
+  it("reports no stored data when the state root is absent or empty", async () => {
+    const fixture = await createFixture();
+    await writeSourceFile(fixture, "dohc-plugin.json", "{}\n");
+    const baseline = await saveBaseline(fixture);
+
+    const absent = await runPreflight(fixture, baseline);
+    expect(absent.stateData).toBeNull();
+    expect(absent.warning).toBeNull();
+
+    await mkdir(join(fixture.dohcDir, "state", pluginId, "t3"), { recursive: true });
+    const empty = await runPreflight(fixture, baseline);
+    expect(empty.stateData).toBeNull();
+    expect(empty.warning).toBeNull();
+  });
+
   it("warns instead of reporting a clean tree when a symlink was dropped into the source", async () => {
     const fixture = await createFixture();
     await writeSourceFile(fixture, "index.ts", "export const value = 1;\n");
