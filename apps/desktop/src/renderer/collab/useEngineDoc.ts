@@ -621,18 +621,9 @@ export function useEngineDoc(input: {
         const cacheKey = descriptor
           ? sceneAssetCacheKey(descriptor)
           : JSON.stringify([assetId, null]);
-        let read = recoveryAssetReads.get(cacheKey);
-        if (!read) {
-          read = descriptor && bound
-            ? bound
-                .readArtifactAsset(assetId)
-                .then((loaded) =>
-                  binaryFileDataFromArtifact(descriptor, loaded),
-                )
-                .catch(() => null)
-            : Promise.resolve(null);
-          recoveryAssetReads.set(cacheKey, read);
-        }
+        const read = descriptor && bound
+          ? readSceneAsset(cacheKey, descriptor, bound)
+          : Promise.resolve(null);
         return read.then((file) => [assetId, file] as const);
       });
       return {
@@ -653,19 +644,35 @@ export function useEngineDoc(input: {
       };
     };
 
+    const readSceneAsset = (
+      cacheKey: string,
+      descriptor: EngineYDocBinding["artifactAssets"][number],
+      bound: EngineYDocBinding,
+    ): Promise<BinaryFileData | null> => {
+      const cached = recoveryAssetReads.get(cacheKey);
+      if (cached) return cached;
+      let read: Promise<BinaryFileData | null>;
+      read = bound
+        .readArtifactAsset(descriptor.id)
+        .then((loaded) => binaryFileDataFromArtifact(descriptor, loaded))
+        .catch(() => {
+          // A transient read failure must not poison later recovery. Keep
+          // successful bytes cached, but let deletion/replacement retry a
+          // descriptor whose eager prewarm failed.
+          if (recoveryAssetReads.get(cacheKey) === read) {
+            recoveryAssetReads.delete(cacheKey);
+          }
+          return null;
+        });
+      recoveryAssetReads.set(cacheKey, read);
+      return read;
+    };
+
     const cacheSceneAssetRead = (
       descriptor: EngineYDocBinding["artifactAssets"][number],
       bound: EngineYDocBinding,
     ): void => {
-      const cacheKey = sceneAssetCacheKey(descriptor);
-      if (recoveryAssetReads.has(cacheKey)) return;
-      recoveryAssetReads.set(
-        cacheKey,
-        bound
-          .readArtifactAsset(descriptor.id)
-          .then((loaded) => binaryFileDataFromArtifact(descriptor, loaded))
-          .catch(() => null),
-      );
+      void readSceneAsset(sceneAssetCacheKey(descriptor), descriptor, bound);
     };
 
     // `forceCreate` false means: nothing was unsettled at the moment this
@@ -857,10 +864,26 @@ export function useEngineDoc(input: {
       enqueueRecoverySnapshot(bytes, true, recoveryTransition, sceneRecovery);
     };
 
-    const captureLineageReplacementFailure = (error: unknown): void => {
+    const captureLineageReplacementFailure = (
+      error: unknown,
+      retired: Y.Doc,
+    ): void => {
       writesRefused.current = true;
       if (cancelled || token !== openTokenRef.current) return;
       setReadOnlyTransition({ token });
+      const bound = binding;
+      if (bound) {
+        setOutcome({
+          key,
+          token,
+          kind: "bound",
+          doc: retired,
+          objectId: bound.objectId,
+          versionId: bound.versionId,
+          artifactAssets: [...bound.artifactAssets],
+          readArtifactAsset: (assetId) => bound.readArtifactAsset(assetId),
+        });
+      }
       reportSaveState(
         "error",
         error instanceof Error
@@ -1086,6 +1109,8 @@ export function useEngineDoc(input: {
         bound.onDocumentReplaced((replacement) => {
           if (cancelled || token !== openTokenRef.current) return;
           writesRefused.current = false;
+          setReadOnlyTransition(null);
+          setPermanentFailure(null);
           reportSaveState("saved");
           observeSaveState(replacement);
           setOutcome({

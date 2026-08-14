@@ -455,6 +455,7 @@ export async function bindEngineYDoc(
       doc = replacement;
       lineageGeneration = input.lineageGeneration;
       artifactAssets = input.artifactAssets;
+      localUpdatesRefused = false;
       replacementInProgress = false;
       for (const listener of replacementListeners) {
         listener(replacement, input.recoveredPaths);

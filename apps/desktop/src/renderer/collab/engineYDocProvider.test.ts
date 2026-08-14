@@ -4,6 +4,7 @@ import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 import {
   bindEngineYDoc,
+  EngineYDocUpdateTooLargeError,
   mergeYDocUpdatesForTransport,
   type EngineYDocBatchScheduler,
   type EngineYDocTransport,
@@ -673,6 +674,49 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
     expect(closed).toBe(true);
     seed.destroy();
+  });
+
+  it("accepts fresh local edits after an independent lineage replaces a permanent refusal", async () => {
+    const mock = mockTransport(["Losing root."]);
+    const batches = manualBatchScheduler();
+    const baseApply = mock.transport.applyLocalUpdate.bind(mock.transport);
+    let refuseNext = true;
+    const binding = await bindEngineYDoc(
+      {
+        ...mock.transport,
+        async applyLocalUpdate(update, sequence, generation) {
+          if (refuseNext) {
+            refuseNext = false;
+            throw new EngineYDocUpdateTooLargeError(
+              ENGINE_YDOC_UPDATE_MAX_BYTES + 1,
+            );
+          }
+          await baseApply(update, sequence, generation);
+        },
+      },
+      batches.scheduler,
+    );
+
+    typeIntoBody(binding.doc!, " refused");
+    await batches.runNext();
+    expect(mock.shipped).toHaveLength(0);
+
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winner.");
+    const replacing = mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(winner),
+      recoveredPaths: [],
+      artifactAssets: [],
+      lineageGeneration: 2,
+    });
+    mock.releaseReplacement();
+    await replacing;
+
+    typeIntoBody(binding.doc!, " fresh");
+    await batches.runNext();
+    expect(mock.shippedGenerations).toEqual([2]);
+    expect(bodyText(binding.doc!)).toContain("fresh");
+    await binding.destroy();
   });
 
   it("keeps teardown pending and the session open while the head cannot be acknowledged", async () => {

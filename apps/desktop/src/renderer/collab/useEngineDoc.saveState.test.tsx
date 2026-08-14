@@ -17,6 +17,7 @@ import {
   useOrphanedDrafts,
 } from "../orphanedDrafts";
 import { useEngineDoc } from "./useEngineDoc";
+import { EngineYDocUpdateTooLargeError } from "./engineYDocProvider";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
 
 const IMAGE_DESCRIPTOR = {
@@ -82,6 +83,8 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   let emitDeletedDuringOpen = false;
   let artifactAssets: readonly typeof IMAGE_DESCRIPTOR[] = [];
   let artifactAssetsInvalid = false;
+  let lineageReplacementFailure: Error | null = null;
+  let permanentApplyFailure = false;
   let readArtifactAsset: (assetId: string) => Promise<{
     descriptor: typeof IMAGE_DESCRIPTOR;
     bytes: Uint8Array;
@@ -113,6 +116,12 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     },
     async applyEngineYDocUpdate(payload: { sessionId: string; seq: number }) {
       applyAttempts.push({ sessionId: payload.sessionId, seq: payload.seq });
+      if (permanentApplyFailure) {
+        permanentApplyFailure = false;
+        throw new EngineYDocUpdateTooLargeError(
+          ENGINE_YDOC_UPDATE_MAX_BYTES + 1,
+        );
+      }
       if (rejectedApplyAttempts > 0) {
         rejectedApplyAttempts -= 1;
         throw new Error("IPC request rejected");
@@ -136,6 +145,7 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       lineageGeneration: number;
     }) {
       acknowledgedGenerations.push(payload.lineageGeneration);
+      if (lineageReplacementFailure) throw lineageReplacementFailure;
       return { updates: [] };
     },
     onEngineYDocSaveState: (listener: SaveStateListener) => {
@@ -275,6 +285,12 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     },
     setArtifactAssetsInvalid(value: boolean) {
       artifactAssetsInvalid = value;
+    },
+    setLineageReplacementFailure(value: Error | null) {
+      lineageReplacementFailure = value;
+    },
+    rejectNextApplyAsTooLarge() {
+      permanentApplyFailure = true;
     },
   };
 }
@@ -491,6 +507,55 @@ it("persists a late edit on the losing mirror during replacement", async () => {
   expect(screen.getByTestId("available").textContent).toBe("true");
 });
 
+it("keeps a failed lineage handoff visible and read-only", async () => {
+  await mountBound();
+  const retired = lastBoundDoc!;
+  harness.setLineageReplacementFailure(new Error("acknowledgement refused"));
+
+  act(() => screen.getByTestId("type").click());
+  harness.emitLineageReplacement("winner");
+
+  await waitFor(() =>
+    expect(screen.getByTestId("state").textContent).toBe("error"),
+  );
+  expect(screen.getByTestId("available").textContent).toBe("true");
+  expect(screen.getByTestId("read-only-transition").textContent).toBe("true");
+  expect(screen.getByTestId("save-error").textContent).toContain(
+    "acknowledgement refused",
+  );
+  expect(screen.getByTestId("draft").textContent).toBe("seed!");
+  expect(lastBoundDoc).toBe(retired);
+
+  const attemptsBefore = harness.applyAttempts.length;
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  expect(harness.applyAttempts).toHaveLength(attemptsBefore);
+});
+
+it("clears a permanent refusal when an independent lineage wins", async () => {
+  await mountBound();
+  harness.rejectNextApplyAsTooLarge();
+
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  expect(
+    screen.getByTestId("permanent-failure-transition").textContent,
+  ).toBe("true");
+
+  harness.emitLineageReplacement("winner");
+  await waitFor(() =>
+    expect(
+      screen.getByTestId("permanent-failure-transition").textContent,
+    ).toBe("false"),
+  );
+  expect(screen.getByTestId("available").textContent).toBe("true");
+
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  expect(harness.applied).toHaveLength(1);
+  expect(screen.getByTestId("state").textContent).toBe("saving");
+});
+
 it("recovers a dirty replaced scene immediately and hydrates its image", async () => {
   harness = harnessBridge("scene");
   const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
@@ -612,8 +677,56 @@ it("hydrates winner-only scene assets after lineage replacement without reopenin
     expect(screen.getByTestId("hydrated-assets").textContent).toBe(winner.id),
   );
   expect(readAsset).toHaveBeenNthCalledWith(1, loser.id);
-  expect(readAsset).toHaveBeenNthCalledWith(2, winner.id);
-  expect(readAsset).toHaveBeenCalledTimes(2);
+  expect(readAsset).toHaveBeenNthCalledWith(2, loser.id);
+  expect(readAsset).toHaveBeenNthCalledWith(3, winner.id);
+  expect(readAsset).toHaveBeenCalledTimes(3);
+});
+
+it("retries a failed prewarm before writing an image recovery draft", async () => {
+  harness = harnessBridge("scene");
+  putSceneAsset(harness.sourceDoc, IMAGE_DESCRIPTOR);
+  insertElementRevision(harness.sourceDoc, {
+    id: "image-element",
+    type: "image",
+    fileId: IMAGE_DESCRIPTOR.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    index: "a1",
+  });
+  const readAsset = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("temporary read failure"))
+    .mockResolvedValue({
+      descriptor: IMAGE_DESCRIPTOR,
+      bytes: new Uint8Array([1, 2, 3]),
+    });
+  harness.setArtifactReader([IMAGE_DESCRIPTOR], readAsset);
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() => expect(readAsset).toHaveBeenCalledOnce());
+
+  act(() => screen.getByTestId("type").click());
+  harness.emit("deleted", 0);
+
+  await waitFor(() => expect(readAsset).toHaveBeenCalledTimes(2));
+  await waitFor(() => {
+    const recovered = parseExcalidrawDocument(
+      screen.getByTestId("draft").textContent!,
+    );
+    expect(recovered.elements).toContainEqual(
+      expect.objectContaining({
+        id: "image-element",
+        fileId: IMAGE_DESCRIPTOR.id,
+      }),
+    );
+    expect(recovered.files[IMAGE_DESCRIPTOR.id]).toMatchObject({
+      dataURL: "data:image/png;base64,AQID",
+    });
+  });
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("none");
 });
 
 it("does not reuse a losing lineage asset when the winner reuses its file ID", async () => {
