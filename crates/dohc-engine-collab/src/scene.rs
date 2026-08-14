@@ -465,7 +465,7 @@ pub(crate) fn parse_portable_scene(content: &str) -> Result<ParsedPortableScene,
         elements.push(element);
         element_keys.push(key);
     }
-    repair_imported_element_indices(&mut elements)?;
+    repair_imported_element_indices(&mut elements, content.len())?;
 
     let mut revisions = BTreeMap::new();
     let mut image_file_ids = BTreeSet::new();
@@ -588,7 +588,10 @@ pub(crate) fn seed_portable_scene(
     Ok(asset_bytes)
 }
 
-fn repair_imported_element_indices(elements: &mut [Value]) -> Result<(), SceneImportError> {
+fn repair_imported_element_indices(
+    elements: &mut [Value],
+    index_byte_budget: usize,
+) -> Result<(), SceneImportError> {
     // Excalidraw v0.18 restores the source array, keeps valid indices as
     // anchors, and repairs each invalid run before any index-based ordering.
     // Do the same while the portable array still exists. The revision Y.Map
@@ -605,26 +608,62 @@ fn repair_imported_element_indices(elements: &mut [Value]) -> Result<(), SceneIm
                 .map(str::to_owned)
         })
         .collect::<Vec<_>>();
+    let preserved_index_bytes = indices
+        .iter()
+        .flatten()
+        .fold(0usize, |total, index| total.saturating_add(index.len()));
+    let mut remaining_index_bytes = index_byte_budget.saturating_sub(preserved_index_bytes);
+    let mut repairs = Vec::new();
     for group in invalid_index_groups(&indices) {
         let lower = group.lower.and_then(|index| indices[index].as_deref());
         let upper = group
             .upper
             .filter(|index| *index < indices.len())
             .and_then(|index| indices[index].as_deref());
-        let repaired =
-            generate_n_keys_between(lower, upper, group.elements.len()).map_err(|()| {
-                SceneImportError::Invalid {
+        match generate_n_keys_between_bounded(
+            lower,
+            upper,
+            group.elements.len(),
+            remaining_index_bytes,
+        ) {
+            Ok((repaired, remaining)) => {
+                remaining_index_bytes = remaining;
+                repairs.extend(group.elements.into_iter().zip(repaired));
+            }
+            Err(KeyGenerationError::BudgetExceeded) => {
+                // A long valid anchor can be copied into every generated key.
+                // Rebase the whole source array before that turns bounded input
+                // into unbounded output. This normalizes valid work; it does not
+                // reject it or change the source order.
+                let compact =
+                    generate_n_keys_between(None, None, elements.len()).map_err(|()| {
+                        SceneImportError::Invalid {
+                            reason: "element indices cannot be repaired in source order",
+                        }
+                    })?;
+                return assign_imported_element_indices(elements, compact.into_iter().enumerate());
+            }
+            Err(KeyGenerationError::Invalid) => {
+                return Err(SceneImportError::Invalid {
                     reason: "element indices cannot be repaired in source order",
-                }
-            })?;
-        for (element_index, repaired_index) in group.elements.into_iter().zip(repaired) {
-            elements[element_index]
-                .as_object_mut()
-                .ok_or(SceneImportError::Invalid {
-                    reason: "each element must be an object",
-                })?
-                .insert("index".to_owned(), Value::String(repaired_index));
+                });
+            }
         }
+    }
+    assign_imported_element_indices(elements, repairs)
+}
+
+fn assign_imported_element_indices(
+    elements: &mut [Value],
+    repairs: impl IntoIterator<Item = (usize, String)>,
+) -> Result<(), SceneImportError> {
+    for (element_index, repaired_index) in repairs {
+        elements[element_index]
+            .as_object_mut()
+            .ok_or(SceneImportError::Invalid {
+                reason: "each element must be an object",
+            })?
+            .insert("index".to_owned(), Value::String(repaired_index));
     }
     Ok(())
 }
@@ -748,42 +787,76 @@ fn generate_n_keys_between(
     upper: Option<&str>,
     count: usize,
 ) -> Result<Vec<String>, ()> {
+    generate_n_keys_between_bounded(lower, upper, count, usize::MAX)
+        .map(|(keys, _remaining)| keys)
+        .map_err(|_error| ())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyGenerationError {
+    Invalid,
+    BudgetExceeded,
+}
+
+fn charge_generated_key(remaining_bytes: &mut usize, key: &str) -> Result<(), KeyGenerationError> {
+    *remaining_bytes = remaining_bytes
+        .checked_sub(key.len())
+        .ok_or(KeyGenerationError::BudgetExceeded)?;
+    Ok(())
+}
+
+fn generate_n_keys_between_bounded(
+    lower: Option<&str>,
+    upper: Option<&str>,
+    count: usize,
+    mut remaining_bytes: usize,
+) -> Result<(Vec<String>, usize), KeyGenerationError> {
     if count == 0 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), remaining_bytes));
     }
     if count == 1 {
-        return Ok(vec![generate_key_between(lower, upper)?]);
+        let key = generate_key_between(lower, upper).map_err(|()| KeyGenerationError::Invalid)?;
+        charge_generated_key(&mut remaining_bytes, &key)?;
+        return Ok((vec![key], remaining_bytes));
     }
     if upper.is_none() {
-        let mut key = generate_key_between(lower, None)?;
+        let mut key =
+            generate_key_between(lower, None).map_err(|()| KeyGenerationError::Invalid)?;
+        charge_generated_key(&mut remaining_bytes, &key)?;
         let mut keys = vec![key.clone()];
         for _ in 1..count {
-            key = generate_key_between(Some(&key), None)?;
+            key =
+                generate_key_between(Some(&key), None).map_err(|()| KeyGenerationError::Invalid)?;
+            charge_generated_key(&mut remaining_bytes, &key)?;
             keys.push(key.clone());
         }
-        return Ok(keys);
+        return Ok((keys, remaining_bytes));
     }
     if lower.is_none() {
-        let mut key = generate_key_between(None, upper)?;
+        let mut key =
+            generate_key_between(None, upper).map_err(|()| KeyGenerationError::Invalid)?;
+        charge_generated_key(&mut remaining_bytes, &key)?;
         let mut keys = vec![key.clone()];
         for _ in 1..count {
-            key = generate_key_between(None, Some(&key))?;
+            key =
+                generate_key_between(None, Some(&key)).map_err(|()| KeyGenerationError::Invalid)?;
+            charge_generated_key(&mut remaining_bytes, &key)?;
             keys.push(key.clone());
         }
         keys.reverse();
-        return Ok(keys);
+        return Ok((keys, remaining_bytes));
     }
 
     let middle = count / 2;
-    let key = generate_key_between(lower, upper)?;
-    let mut keys = generate_n_keys_between(lower, Some(&key), middle)?;
+    let key = generate_key_between(lower, upper).map_err(|()| KeyGenerationError::Invalid)?;
+    charge_generated_key(&mut remaining_bytes, &key)?;
+    let (mut keys, remaining_bytes) =
+        generate_n_keys_between_bounded(lower, Some(&key), middle, remaining_bytes)?;
     keys.push(key.clone());
-    keys.extend(generate_n_keys_between(
-        Some(&key),
-        upper,
-        count - middle - 1,
-    )?);
-    Ok(keys)
+    let (right, remaining_bytes) =
+        generate_n_keys_between_bounded(Some(&key), upper, count - middle - 1, remaining_bytes)?;
+    keys.extend(right);
+    Ok((keys, remaining_bytes))
 }
 
 fn generate_key_between(lower: Option<&str>, upper: Option<&str>) -> Result<String, ()> {
@@ -2075,6 +2148,63 @@ mod tests {
             .expect("a valid imported order key has a successor");
 
         assert_eq!(midpoint.strip_prefix(&lower), Some("V"));
+        assert_eq!(
+            generate_n_keys_between_bounded(Some(&lower), None, 2, lower.len()),
+            Err(KeyGenerationError::BudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn native_import_does_not_replicate_a_long_index_across_repairs() {
+        let element = |id: String, index: Option<String>| {
+            let mut element = Map::from_iter([
+                ("id".to_owned(), json!(id)),
+                ("isDeleted".to_owned(), json!(false)),
+                ("type".to_owned(), json!("rectangle")),
+                ("version".to_owned(), json!(1)),
+                ("versionNonce".to_owned(), json!(1)),
+            ]);
+            if let Some(index) = index {
+                element.insert("index".to_owned(), json!(index));
+            }
+            Value::Object(element)
+        };
+        let long_anchor = format!("{}{}", "z".repeat(27), "z".repeat(256 * 1024));
+        let mut expected_order = vec!["anchor".to_owned()];
+        let mut elements = vec![element("anchor".to_owned(), Some(long_anchor))];
+        for index in 0..32 {
+            let id = format!("repair-{index:02}");
+            expected_order.push(id.clone());
+            elements.push(element(id, None));
+        }
+        let content = canonical(json!({
+            "type": "excalidraw",
+            "elements": elements,
+        }));
+
+        let imported = import_portable_scene(&content).expect("indices repair within input budget");
+        let doc = crate::Ydoc::wire();
+        doc.apply(&imported.initial_update).expect("initial update");
+        let folded = doc.fold_scene();
+        let index_bytes = folded
+            .elements
+            .iter()
+            .map(|element| element["index"].as_str().expect("repaired index").len())
+            .sum::<usize>();
+
+        assert!(
+            index_bytes <= content.len(),
+            "{index_bytes} repaired index bytes exceeded {} input bytes",
+            content.len()
+        );
+        assert_eq!(
+            folded
+                .elements
+                .iter()
+                .map(|element| element["id"].as_str().expect("element id").to_owned())
+                .collect::<Vec<_>>(),
+            expected_order
+        );
     }
 
     #[test]
