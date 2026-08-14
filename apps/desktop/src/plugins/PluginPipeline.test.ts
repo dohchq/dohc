@@ -26,6 +26,7 @@ import {
 } from "./pluginInstallRunner";
 import { resolvePluginEsbuildBinary } from "./pluginBuildRunner";
 import { workspaceStateKey } from "./pluginLocalState";
+import { pluginUninstallPreflight } from "./pluginUninstallPreflight";
 
 interface Deferred {
   promise: Promise<void>;
@@ -709,6 +710,76 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         () => pipeline.list()[0]?.status === "ready",
         "Plugin did not reach ready after install.",
       );
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("refuses to delete when source changed after the last check, immediately before the delete (#779 round 3 finding 3)", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    // Real pluginUninstallPreflight, with liveHash forced to change starting
+    // on its 3rd call — the one this fix adds, running right before the
+    // actual delete, after pluginHost.stop()'s own real await window. Calls
+    // 1 and 2 (the uninstallPreflight() action, then uninstall()'s existing
+    // pre-stop check) see the real, unchanged hash, so the confirmation
+    // token itself is genuinely valid at issuance.
+    let preflightCalls = 0;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        uninstallPreflight: async (input) => {
+          preflightCalls += 1;
+          const real = await pluginUninstallPreflight(input);
+          if (preflightCalls <= 2) return real;
+          return { ...real, liveHash: "f".repeat(64) };
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      const preflight = await pipeline.uninstallPreflight("example-plugin");
+      if (!preflight.ok) throw new Error(preflight.error.message);
+      const result = await pipeline.uninstall(
+        "example-plugin",
+        preflight.confirmationToken,
+      );
+
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("unreachable");
+      expect(result.error).toMatchObject({
+        stage: "uninstall",
+        code: "confirmation-stale",
+      });
+      // Refused, not deleted.
+      await expect(lstat(fixture.pluginRoot)).resolves.toBeDefined();
+      expect(preflightCalls).toBe(3);
     } finally {
       await pipeline.dispose();
     }

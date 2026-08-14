@@ -615,6 +615,31 @@ export class PluginPipeline {
           (existing) => ({ ...existing, disabled: true }),
         );
         await this.options.pluginHost.stop(pluginId);
+
+        // Re-verify immediately before the actual delete: pluginHost.stop()
+        // can take real wall-clock time (a grace period, then signal
+        // escalation), and the earlier check above is no longer "immediately
+        // before delete" once that wait has happened — this must never
+        // delete content different from what the confirmation actually
+        // covered (#779 round 3 finding 3).
+        const preDeletePreflight = await this.operations.uninstallPreflight({
+          dohcDir: this.dohcDir,
+          pluginId,
+          pluginRoot: candidate.rootPath,
+          installedBaselineHash: record?.installedBaselineHash,
+          engineCaptureAvailable: this.engineCaptureAvailable(),
+        });
+        if (preDeletePreflight.liveHash !== confirmation.liveHash) {
+          return this.failure(
+            pluginId,
+            pipelineError(
+              "uninstall",
+              "confirmation-stale",
+              `Plugin "${pluginId}" changed while its process was stopping. Review uninstall again.`,
+            ),
+          );
+        }
+
         await this.operations.removePath(candidate.rootPath, {
           recursive: true,
           force: true,
