@@ -7,14 +7,14 @@
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "pnpm --filter @dohc/sdk build && node scripts/ensure-electron-installed.mjs && node scripts/build-cli-bin.mjs && electron-vite build",
+    "build": "pnpm --filter @dohc/sdk build && node scripts/ensure-electron-installed.mjs && node scripts/stage-plugin-tools.mjs && node scripts/build-cli-bin.mjs && electron-vite build",
     "build:cli": "node scripts/build-cli-bin.mjs",
     "build:engine": "node scripts/build-workspace-engine.mjs",
-    "package": "pnpm --filter @dohc/sdk build && node scripts/ensure-electron-installed.mjs && pnpm run build:engine && node scripts/build-cli-bin.mjs && electron-vite build && electron-builder --publish never",
+    "package": "pnpm --filter @dohc/sdk build && node scripts/ensure-electron-installed.mjs && pnpm run build:engine && node scripts/stage-plugin-tools.mjs && node scripts/build-cli-bin.mjs && electron-vite build && electron-builder --publish never",
     "smoke:package": "node scripts/package-smoke.mjs",
     "smoke:settings": "node scripts/run-playwright.mjs --config playwright.config.ts --grep @settings-smoke",
     "smoke:fuses": "node scripts/ensure-electron-installed.mjs && node scripts/fuse-smoke.mjs",
-    "test": "vitest run && node --test scripts/dev.test.mjs",
+    "test": "vitest run && node --test scripts/dev.test.mjs scripts/stage-plugin-tools.test.mjs",
     "test:e2e": "pnpm run build && node scripts/require-e2e-engine.mjs && node scripts/run-playwright.mjs --config playwright.config.ts",
     "test:sites:e2e": "pnpm run build && node scripts/run-playwright.mjs --config playwright.config.ts --grep @sites",
     "typecheck": "tsc --noEmit"
@@ -40,6 +40,7 @@
     "js-yaml": "^5.2.3",
     "jsdom": "^30.0.1",
     "playwright": "^1.62.1",
+    "pnpm": "11.20.0",
     "tailwindcss": "^4.3.3",
     "vite": "^7.3.6",
     "vitest": "^4.1.10"
@@ -83,6 +84,7 @@
     "@vscode/ripgrep": "^1.18.0",
     "electron-updater": "^6.8.9",
     "effect": "4.0.0-beta.107",
+    "esbuild": "0.28.1",
     "highlight.js": "~11.11.1",
     "katex": "^0.18.1",
     "lowlight": "^3.3.0",

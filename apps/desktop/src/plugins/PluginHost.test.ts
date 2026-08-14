@@ -15,14 +15,15 @@ import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { createWorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import {
+  mutatePluginRecord,
   pluginStateFileName,
   readPluginLocalState,
-  setPluginDisabled,
 } from "./pluginLocalState";
 import { readPluginManifestFile } from "./pluginManifest";
 import { invokePluginSdkHost } from "./pluginSdkHost";
 import { createPluginPanelSdkAuthorityRegistry } from "./pluginPanelSdkAuthority";
 import {
+  revokePluginPanelAuthorities,
   revokePluginPanelAuthoritiesForStatus,
   startPluginPanelWithLock,
   stopPluginPanelWithLock,
@@ -114,6 +115,7 @@ function createCallbackHarness(): {
           : {};
         return Promise.resolve(result as T);
       },
+      notify: () => undefined,
       dispose: () => Promise.resolve(),
     };
   });
@@ -179,6 +181,9 @@ function createProcessHarness(options: {
         }
         return request;
       },
+      notify(method: string, notifyParams?: unknown) {
+        transport.notify(method, notifyParams);
+      },
       async dispose() {
         disposedPluginIds.push(params.pluginId);
         await transport.dispose();
@@ -198,6 +203,41 @@ function createProcessHarness(options: {
   };
 }
 
+function createCrashAccountingHarness(): {
+  spawnTransport: PluginHostOptions["spawnTransport"];
+  beginFreshCode: () => void;
+} {
+  let phase: "crash-loop" | "fresh-code" = "crash-loop";
+  let freshCodeSpawns = 0;
+  const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(
+    (params) => {
+      if (phase === "fresh-code") freshCodeSpawns += 1;
+      const shouldCrash =
+        phase === "crash-loop" || freshCodeSpawns <= 2;
+      return {
+        request<T = unknown>(method: string): Promise<T> {
+          const result = method === PLUGIN_HOST_METHODS.activate
+            ? { commands: [] }
+            : {};
+          if (method === PLUGIN_HOST_METHODS.activate && shouldCrash) {
+            setTimeout(() => params.onExit({ code: 1, signal: null }), 0);
+          }
+          return Promise.resolve(result as T);
+        },
+        notify: () => undefined,
+        dispose: () => Promise.resolve(),
+      };
+    },
+  );
+  return {
+    spawnTransport,
+    beginFreshCode() {
+      phase = "fresh-code";
+      freshCodeSpawns = 0;
+    },
+  };
+}
+
 function trackHost(options: PluginHostOptions): PluginHost {
   const host = new PluginHost(options);
   hosts.push(host);
@@ -206,6 +246,20 @@ function trackHost(options: PluginHostOptions): PluginHost {
 
 function defaultRouter(): Promise<unknown> {
   return Promise.resolve({});
+}
+
+function mutateDisabledState(
+  localStateDir: string,
+  root: string,
+  pluginId: string,
+  disabled: boolean,
+): Promise<void> {
+  return mutatePluginRecord(
+    localStateDir,
+    root,
+    pluginId,
+    (record) => ({ ...record, disabled }),
+  );
 }
 
 afterEach(async () => {
@@ -243,7 +297,7 @@ describe("PluginHost", () => {
       stateDir: await stateDir(),
       workspaceRoot: root,
       spawnTransport: harness.spawnTransport,
-      routeSdkRequest: (pluginId, method, params, spawnId) =>
+      routeSdkRequest: (pluginId, method, params, spawnId, signal) =>
         invokePluginSdkHost(
           {
             pluginId,
@@ -251,6 +305,8 @@ describe("PluginHost", () => {
             spawnId,
             isWritable: () => true,
             writeAvailable: async () => true,
+            signal,
+            invokeChildProcess: async () => ({}),
             writeAuthoredText: async (path, text, options) => {
               writes.push({ path, text, author: options.author });
               return { path };
@@ -335,6 +391,7 @@ describe("PluginHost", () => {
         if (method === PLUGIN_HOST_METHODS.invokeCommand) invokeCommandCalls += 1;
         return Promise.resolve({} as T);
       },
+      notify: () => undefined,
       dispose: () => Promise.resolve(),
     }));
     const host = trackHost({
@@ -426,7 +483,7 @@ describe("PluginHost", () => {
   it("does not spawn a durably disabled plugin", async () => {
     const root = await workspaceRoot();
     const localStateDir = await stateDir();
-    await setPluginDisabled(localStateDir, root, "hello-plugin", true);
+    await mutateDisabledState(localStateDir, root, "hello-plugin", true);
     const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(() => {
       throw new Error("Disabled plugin was spawned.");
     });
@@ -515,6 +572,7 @@ describe("PluginHost", () => {
       request<T = unknown>(): Promise<T> {
         return Promise.resolve({} as T);
       },
+      notify: () => undefined,
       dispose: () => Promise.resolve(),
     }));
     const host = trackHost({
@@ -629,6 +687,254 @@ describe("PluginHost", () => {
       "Malformed sdk.request params: method must be a non-empty string.",
     );
     expect(routeSdkRequest).not.toHaveBeenCalled();
+  });
+
+  it("forwards spawn-scoped SDK subscription events to the plugin transport", async () => {
+    const root = await workspaceRoot();
+    let callbacks: SpawnTransportParams | undefined;
+    const notifications: Array<{ method: string; params: unknown }> = [];
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: (params) => {
+        callbacks = params;
+        return {
+          request<T = unknown>(method: string): Promise<T> {
+            const result = method === PLUGIN_HOST_METHODS.activate
+              ? { commands: [] }
+              : {};
+            return Promise.resolve(result as T);
+          },
+          notify: (method, notificationParams) => {
+            notifications.push({ method, params: notificationParams });
+          },
+          dispose: () => Promise.resolve(),
+        };
+      },
+      routeSdkRequest: async (
+        _pluginId,
+        _method,
+        _params,
+        _spawnId,
+        _signal,
+        emitEvent,
+      ) => {
+        emitEvent("subscription-1", "stdout", {
+          sequence: 1,
+          stream: "stdout",
+          text: "ready\n",
+        });
+        return { subscriptionId: "subscription-1" };
+      },
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    if (!callbacks) throw new Error("Plugin transport did not spawn.");
+    await callbacks.onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
+      method: "childProcesses.output.subscribe",
+      params: { childId: "child-1" },
+    });
+
+    expect(notifications).toEqual([
+      {
+        method: PLUGIN_HOST_METHODS.sdkEvent,
+        params: {
+          subscriptionId: "subscription-1",
+          event: "stdout",
+          data: {
+            sequence: 1,
+            stream: "stdout",
+            text: "ready\n",
+          },
+        },
+      },
+    ]);
+  });
+
+  it("aborts an in-flight SDK request when stop begins", async () => {
+    const root = await workspaceRoot();
+    const harness = createCallbackHarness();
+    let requestSignal: AbortSignal | undefined;
+    let observedAbort = false;
+    const routeSdkRequest = vi.fn<PluginHostOptions["routeSdkRequest"]>(
+      async (_pluginId, _method, _params, _spawnId, signal) => {
+        requestSignal = signal;
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => {
+            observedAbort = true;
+            resolve();
+          }, { once: true });
+        });
+        throw new Error("request aborted");
+      },
+    );
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest,
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    const request = Promise.resolve(
+      harness.getCallbacks().onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
+        method: "files.read",
+        params: { path: "notes/today.md" },
+      }),
+    );
+    await waitFor(() => requestSignal !== undefined, "SDK request was not routed.");
+
+    await host.stop("hello-plugin");
+
+    expect(requestSignal?.aborted).toBe(true);
+    expect(observedAbort).toBe(true);
+    await expect(request).rejects.toThrow("request aborted");
+  });
+
+  it("does not abort an SDK request that completes before stop", async () => {
+    const root = await workspaceRoot();
+    const harness = createCallbackHarness();
+    let signalAtCompletion: AbortSignal | undefined;
+    const routeSdkRequest = vi.fn<PluginHostOptions["routeSdkRequest"]>(
+      async (_pluginId, _method, _params, _spawnId, signal) => {
+        signalAtCompletion = signal;
+        return { text: "done" };
+      },
+    );
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest,
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await expect(
+      harness.getCallbacks().onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
+        method: "files.read",
+        params: { path: "notes/today.md" },
+      }),
+    ).resolves.toEqual({ text: "done" });
+    expect(signalAtCompletion?.aborted).toBe(false);
+
+    await host.stop("hello-plugin");
+  });
+
+  it("finishes spawn resource teardown before disposing the plugin transport", async () => {
+    const root = await workspaceRoot();
+    const order: string[] = [];
+    let disposed = false;
+    let finishResourceTeardown: (() => void) | undefined;
+    let routedSignal: AbortSignal | undefined;
+    let callbacks: SpawnTransportParams | undefined;
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: (params) => {
+        callbacks = params;
+        return {
+          request<T = unknown>(method: string): Promise<T> {
+            const result = method === PLUGIN_HOST_METHODS.activate
+              ? { commands: [] }
+              : {};
+            return Promise.resolve(result as T);
+          },
+          notify: () => undefined,
+          dispose: async () => {
+            if (disposed) return;
+            disposed = true;
+            order.push("transport");
+          },
+        };
+      },
+      routeSdkRequest: async (
+        _pluginId,
+        _method,
+        _params,
+        _spawnId,
+        signal,
+      ) => {
+        routedSignal = signal;
+        return {};
+      },
+      onSpawnEnd: () => new Promise<void>((resolve) => {
+        finishResourceTeardown = () => {
+          order.push("resources");
+          resolve();
+        };
+      }),
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    if (!callbacks) throw new Error("Plugin transport did not spawn.");
+    await callbacks.onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
+      method: "capabilities",
+    });
+    const stop = host.stop("hello-plugin");
+    await waitFor(
+      () => routedSignal?.aborted === true && finishResourceTeardown !== undefined,
+      "Spawn teardown did not begin.",
+    );
+    expect(order).toEqual([]);
+
+    finishResourceTeardown?.();
+    await stop;
+
+    expect(order).toEqual(["resources", "transport"]);
+  });
+
+  it("gives a respawn a fresh signal and never reuses the crashed spawn signal", async () => {
+    const root = await workspaceRoot();
+    const callbacks: SpawnTransportParams[] = [];
+    const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>((params) => {
+      callbacks.push(params);
+      return {
+        request<T = unknown>(method: string): Promise<T> {
+          const result = method === PLUGIN_HOST_METHODS.activate
+            ? { commands: [] }
+            : {};
+          return Promise.resolve(result as T);
+        },
+        notify: () => undefined,
+        dispose: () => Promise.resolve(),
+      };
+    });
+    const signals: AbortSignal[] = [];
+    const routeSdkRequest = vi.fn<PluginHostOptions["routeSdkRequest"]>(
+      async (_pluginId, _method, _params, _spawnId, signal) => {
+        signals.push(signal);
+        return {};
+      },
+    );
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport,
+      routeSdkRequest,
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await callbacks[0]?.onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
+      method: "capabilities",
+    });
+    const oldSignal = signals[0];
+    expect(oldSignal?.aborted).toBe(false);
+
+    callbacks[0]?.onExit({ code: 1, signal: null });
+    await waitFor(() => callbacks.length === 2, "Plugin did not respawn.");
+    expect(oldSignal?.aborted).toBe(true);
+
+    await callbacks[1]?.onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
+      method: "capabilities",
+    });
+    const newSignal = signals[1];
+    expect(newSignal).not.toBe(oldSignal);
+    expect(newSignal?.aborted).toBe(false);
+    expect(oldSignal?.aborted).toBe(true);
+
+    await host.stop("hello-plugin");
+    expect(newSignal?.aborted).toBe(true);
+    expect(oldSignal?.aborted).toBe(true);
   });
 
   it("records a malformed plugin.log notification as a diagnostic", async () => {
@@ -759,6 +1065,79 @@ describe("PluginHost", () => {
     expect(localState.state.plugins["hello-plugin"]?.disabled).toBe(true);
   }, 15_000);
 
+  it("lets freshly built code use a new fast-failure window after reset", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const harness = createCrashAccountingHarness();
+    const host = trackHost({
+      stateDir: localStateDir,
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+    const manifest = await fixtureManifest();
+
+    await host.start(helloPluginRoot, manifest);
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "disabled",
+      "Initial crash loop did not disable the plugin.",
+    );
+    expect(harness.spawnTransport).toHaveBeenCalledTimes(3);
+
+    await host.stop("hello-plugin");
+    await mutateDisabledState(localStateDir, root, "hello-plugin", false);
+    harness.beginFreshCode();
+    host.resetCrashAccounting("hello-plugin");
+    await host.start(helloPluginRoot, manifest);
+    await waitFor(
+      () =>
+        vi.mocked(harness.spawnTransport).mock.calls.length === 6 &&
+        host.getStatus("hello-plugin") === "ready",
+      "Fresh code did not receive a new fast-failure window.",
+    );
+    await delay(50);
+
+    expect(host.getStatus("hello-plugin")).toBe("ready");
+    expect(harness.spawnTransport).toHaveBeenCalledTimes(6);
+    const localState = await readPluginLocalState(localStateDir, root);
+    if (!localState.ok) throw new Error(localState.warning);
+    expect(localState.state.plugins["hello-plugin"]?.disabled).toBe(false);
+  });
+
+  it("keeps crash accounting across a rebuild when it is not reset", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const harness = createCrashAccountingHarness();
+    const host = trackHost({
+      stateDir: localStateDir,
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+    const manifest = await fixtureManifest();
+
+    await host.start(helloPluginRoot, manifest);
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "disabled",
+      "Initial crash loop did not disable the plugin.",
+    );
+    await host.stop("hello-plugin");
+    await mutateDisabledState(localStateDir, root, "hello-plugin", false);
+    harness.beginFreshCode();
+
+    await host.start(helloPluginRoot, manifest);
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "disabled",
+      "Preserved crash accounting did not disable the plugin.",
+    );
+    await delay(50);
+
+    expect(harness.spawnTransport).toHaveBeenCalledTimes(4);
+    const localState = await readPluginLocalState(localStateDir, root);
+    if (!localState.ok) throw new Error(localState.warning);
+    expect(localState.state.plugins["hello-plugin"]?.disabled).toBe(true);
+  });
+
   it("counts fast crashes after successful activations", async () => {
     const root = await workspaceRoot();
     const statuses: PluginRuntimeStatus[] = [];
@@ -778,6 +1157,7 @@ describe("PluginHost", () => {
             return value;
           });
         },
+        notify: () => undefined,
         dispose: () => Promise.resolve(),
       }),
     );
@@ -814,6 +1194,7 @@ describe("PluginHost", () => {
             (method === PLUGIN_HOST_METHODS.activate
               ? { commands: [] }
               : {}) as T,
+          notify: () => undefined,
           dispose: async () => undefined,
         };
       },
@@ -922,6 +1303,7 @@ describe("PluginHost", () => {
             (method === PLUGIN_HOST_METHODS.activate
               ? { commands: [] }
               : {}) as T,
+          notify: () => undefined,
           dispose: async () => undefined,
         };
       },
@@ -987,6 +1369,114 @@ describe("PluginHost", () => {
     await engine.stop();
   });
 
+  it("aborts a queued panel write when its plugin is disabled (#779 round 12 A4)", async () => {
+    const root = await workspaceRoot();
+    const entered = deferredVoid();
+    const release = deferredVoid();
+    const writeQueued = deferredVoid();
+    const loopbackTarget = new VersionedLoopbackEngine();
+    let blocked = false;
+    const loopback = new Proxy(loopbackTarget, {
+      get(target, property, receiver) {
+        if (property !== "sendRequest") {
+          return Reflect.get(target, property, receiver);
+        }
+        return async (request: Request) => {
+          if (!blocked && request.method === VERSIONED_METHOD.textWrite) {
+            blocked = true;
+            entered.resolve();
+            await release.promise;
+          }
+          return target.sendRequest(request);
+        };
+      },
+    });
+    const engine = createWorkspaceEngineCapture({
+      workspaceId: "workspace-a",
+      rootPath: root,
+      rustEngineSessions: mockLiveSessions(loopback),
+    });
+    await writeFile(join(root, "queue-blocker.txt"), "block\n", "utf8");
+    engine.captureBatch([{ path: "queue-blocker.txt", operation: "update" }]);
+    await entered.promise;
+
+    const registry = createPluginPanelSdkAuthorityRegistry();
+    const grant = registry.register({
+      senderId: 1,
+      generation: 1,
+      workspaceId: "workspace-a",
+      pluginId: "hello-plugin",
+      panelId: "main",
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: () => ({
+        request: async <T,>(method: string) =>
+          (method === PLUGIN_HOST_METHODS.activate
+            ? { commands: [] }
+            : {}) as T,
+        notify: () => undefined,
+        dispose: async () => undefined,
+      }),
+      routeSdkRequest: defaultRouter,
+    });
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+    const spawnId = host.getSpawnId("hello-plugin");
+    if (!spawnId) throw new Error("Plugin did not expose its spawn id.");
+
+    const pending = invokePluginSdkHost(
+      {
+        pluginId: "hello-plugin",
+        workspaceRoot: root,
+        spawnId,
+        isWritable: () => true,
+        writeAvailable: async () => true,
+        signal: grant.signal,
+        writeAuthoredText: (path, text, options) => {
+          writeQueued.resolve();
+          return engine
+            .writeAuthoredTextFile(
+              join(root, path),
+              text,
+              options.author,
+              { signal: grant.signal },
+            )
+            .then(() => ({ path }));
+        },
+      },
+      "files.write",
+      { path: "disabled.txt", text: "must not land\n" },
+    );
+    await writeQueued.promise;
+
+    // What the disable action site does before it stops the plugin. Stopping
+    // the process alone leaves this queued write holding a live authority.
+    revokePluginPanelAuthorities({
+      workspaceId: "workspace-a",
+      pluginId: "hello-plugin",
+      panels: [
+        {
+          workspaceId: "workspace-a",
+          pluginId: "hello-plugin",
+          panelId: "main",
+        },
+      ],
+      revokePanel: registry.revokePanel,
+    });
+    await host.stop("hello-plugin");
+    release.resolve();
+
+    await expect(pending).rejects.toThrow("Plugin panel is no longer active.");
+    expect(grant.signal.aborted).toBe(true);
+    expect(existsSync(join(root, "disabled.txt"))).toBe(false);
+    await engine.stop();
+  });
+
   it("rejects a tracked panel grant after its underlying host stops", async () => {
     const root = await workspaceRoot();
     const host = trackHost({
@@ -995,6 +1485,7 @@ describe("PluginHost", () => {
       spawnTransport: () => ({
         request: async <T,>(method: string) =>
           (method === PLUGIN_HOST_METHODS.activate ? { commands: [] } : {}) as T,
+        notify: () => undefined,
         dispose: async () => undefined,
       }),
       routeSdkRequest: defaultRouter,
@@ -1055,6 +1546,7 @@ describe("PluginHost", () => {
               ? { commands: [] }
               : {}) as T;
           },
+          notify: () => undefined,
           dispose: async () => undefined,
         };
       },
@@ -1156,6 +1648,7 @@ describe("PluginHost", () => {
               : {};
             return Promise.resolve(result as T);
           },
+          notify: () => undefined,
           dispose: () => {
             if (!disposed) {
               disposed = true;
@@ -1243,6 +1736,7 @@ describe("PluginHost", () => {
           : {};
         return Promise.resolve(result as T);
       },
+      notify: () => undefined,
       dispose: () => Promise.resolve(),
     }));
     const host = trackHost({
@@ -1542,5 +2036,43 @@ describe("PluginHost", () => {
     await host.stop("hello-plugin");
 
     expect(host.getStatus("hello-plugin")).toBeUndefined();
+  });
+
+  it("logs, instead of leaving unhandled, a spawn teardown rejection (CodeRabbit #779 R13)", async () => {
+    // Calling bumpGeneration() immediately, ahead of the harness's own
+    // async activation callback, exercises both of R13's discarded-promise
+    // call sites in one pass: bumpGeneration's own endSpawn call, and
+    // handleActivationSuccess's not-live branch once that generation bump
+    // makes the in-flight activation stale. Vitest reports an unhandled
+    // rejection separately from any expect() failure, so this only stays
+    // clean when both sites attach their own .catch().
+    const root = await workspaceRoot();
+    const harness = createCallbackHarness();
+    const teardownError = new Error("synthetic teardown failure (R13 PoC)");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+      onSpawnEnd: async () => {
+        throw teardownError;
+      },
+    });
+
+    try {
+      await host.start(helloPluginRoot, await fixtureManifest());
+      harness.getCallbacks();
+
+      host.bumpGeneration();
+      await delay(20);
+
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining("spawn teardown failed"),
+        teardownError,
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });

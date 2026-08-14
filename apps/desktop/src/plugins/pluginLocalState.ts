@@ -11,37 +11,56 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { formatZodIssues } from "./zodDiagnostics";
+import { errorMessage } from "./pluginShared";
 
+/**
+ * The one bound on this file, enforced on both sides: a read refuses a file
+ * larger than this before parsing it, and a write refuses to produce one.
+ *
+ * A 500-record count cap used to sit in the schema as well. It rejected
+ * otherwise valid work — 501 ordinary plugins serialize to about 222 KB, well
+ * inside this limit — on size arithmetic rather than measurement, and it did
+ * not bound what it claimed to: a few records with long, heavily escaped
+ * plugin ids pass the count and still exceed the byte limit, which then made
+ * the file unreadable and took every plugin's state with it. Bounding the
+ * bytes directly bounds the thing that actually matters and rejects nothing
+ * that fits (#779 round 9 B4).
+ */
 export const MAX_PLUGIN_LOCAL_STATE_FILE_BYTES = 256 * 1024;
+
+const PluginSourceHash = z.string().regex(
+  /^[0-9a-f]{64}$/,
+  "must be a 64-character lowercase hex sha256 digest",
+);
+
+export const PluginRecord = z.object({
+  disabled: z.boolean().optional(),
+  approvedHash: PluginSourceHash.optional(),
+  installedBaselineHash: PluginSourceHash.optional(),
+  // SHA-256 of bundle.mjs at the moment it was last (re)built from approved
+  // source — the EXECUTING artifact's own hash, re-checked before every
+  // start alongside approvedHash (CERT779: approvedHash alone verified a
+  // source tree that never runs; a tampered bundle.mjs with an unchanged
+  // source tree previously loaded without detection).
+  approvedBundleHash: PluginSourceHash.optional(),
+  // The plugins/ directory this record was installed from. Discovery names a
+  // plugin from its manifest, so a plugin whose manifest breaks falls back to
+  // its directory name and no longer matches the key this record is stored
+  // under — "foo" against a record keyed "@scope/bar". That lost the
+  // installation, and with it the Uninstall action. The directory is the one
+  // identity a broken manifest cannot take away (#779 round 9 B3).
+  directoryName: z.string().min(1).max(255).optional(),
+}).strict();
+export type PluginRecordShape = z.infer<typeof PluginRecord>;
 
 export const PluginLocalState = z.object({
   version: z.literal(1),
-  // For ordinary UTF-8 plugin ids, indented JSON at these bounds is
-  // 26 + 500 × 316 + 499 + 13,513 (the writer's indentation/newlines) =
-  // 172,038 bytes, 90,106 below MAX_PLUGIN_LOCAL_STATE_FILE_BYTES (262,144).
-  // A plugin id built almost entirely from characters JSON must escape can
-  // inflate past that on paper; the read/write byte-size gate — not this
-  // schema — is the actual backstop against an oversize file either way.
   plugins: z.record(
     // Plugin ids are manifest names, whose schema allows at most 214 characters.
     z.string().min(1).max(214, "plugin id must be 214 characters or fewer"),
-    z.object({
-      disabled: z.boolean().optional(),
-      approvedHash: z.string().regex(
-        /^[0-9a-f]{64}$/,
-        "must be a 64-character lowercase hex sha256 digest",
-      ).optional(),
-    }).strict(),
+    PluginRecord,
   ),
-}).strict().superRefine((state, ctx) => {
-  if (Object.keys(state.plugins).length > 500) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["plugins"],
-      message: "plugins: at most 500 entries allowed",
-    });
-  }
-});
+}).strict();
 export type PluginLocalState = z.infer<typeof PluginLocalState>;
 
 export const DEFAULT_PLUGIN_LOCAL_STATE: PluginLocalState = {
@@ -53,10 +72,6 @@ export type PluginLocalStateResult =
   | { ok: true; state: PluginLocalState }
   | { ok: false; warning: string };
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function unreadableState(path: string, problem: string): PluginLocalStateResult {
   return {
     ok: false,
@@ -64,7 +79,11 @@ function unreadableState(path: string, problem: string): PluginLocalStateResult 
   };
 }
 
-export function pluginStateFileName(workspaceRoot: string): string {
+// Shared with pluginSourceSnapshot.ts/PluginPipeline.ts: this same hash is
+// the per-workspace directory name under userData where every derived
+// plugin artifact (snapshot, node_modules, bundle) lives — one canonical
+// workspace identity, one place it's computed.
+export function workspaceStateKey(workspaceRoot: string): string {
   const resolvedRoot = resolve(workspaceRoot);
   let canonicalRoot: string;
   try {
@@ -73,8 +92,20 @@ export function pluginStateFileName(workspaceRoot: string): string {
     canonicalRoot = resolvedRoot;
   }
   if (process.platform === "win32") canonicalRoot = canonicalRoot.toLowerCase();
-  const key = createHash("sha256").update(canonicalRoot).digest("hex");
-  return `${key}.json`;
+  return createHash("sha256").update(canonicalRoot).digest("hex");
+}
+
+export function pluginStateFileName(workspaceRoot: string): string {
+  return `${workspaceStateKey(workspaceRoot)}.json`;
+}
+
+// The single computation for where every derived plugin artifact
+// (snapshot, installed node_modules, pnpm store/cache/state, built bundle)
+// lives: under the app's own userData, keyed by workspace, never inside the
+// workspace folder itself (CERT779 — a workspace-folder-resident bundle is
+// sync/mirror-writable and bypasses source hashing entirely).
+export function pluginDataDir(stateDir: string, workspaceRoot: string): string {
+  return join(resolve(stateDir), "plugin-data", workspaceStateKey(workspaceRoot));
 }
 
 function pluginLocalStatePath(stateDir: string, workspaceRoot: string): string {
@@ -135,13 +166,20 @@ async function writePluginLocalState(
   state: PluginLocalState,
 ): Promise<void> {
   const path = pluginLocalStatePath(stateDir, workspaceRoot);
+  const body = `${JSON.stringify(PluginLocalState.parse(state), null, 2)}\n`;
+  const bytes = Buffer.byteLength(body, "utf8");
+  if (bytes > MAX_PLUGIN_LOCAL_STATE_FILE_BYTES) {
+    throw new Error(
+      `Plugin local state for ${path} is ${bytes} bytes with ` +
+        `${Object.keys(state.plugins).length} plugin records; the plugin ` +
+        `local-state size limit is ${MAX_PLUGIN_LOCAL_STATE_FILE_BYTES} ` +
+        "bytes. Uninstall plugins in this workspace to get back under it.",
+    );
+  }
   const temporaryPath = `${path}.tmp-${process.pid}-${randomUUID()}`;
   await mkdir(dirname(path), { recursive: true });
   try {
-    await writeFile(
-      temporaryPath,
-      `${JSON.stringify(PluginLocalState.parse(state), null, 2)}\n`,
-    );
+    await writeFile(temporaryPath, body);
     await rename(temporaryPath, path);
   } finally {
     await unlink(temporaryPath).catch(() => undefined);
@@ -169,11 +207,13 @@ function queuePluginLocalStateWrite<T>(
   return result;
 }
 
-export function setPluginDisabled(
+export function mutatePluginRecord(
   stateDir: string,
   workspaceRoot: string,
   pluginId: string,
-  disabled: boolean,
+  updater: (
+    record: PluginRecordShape | undefined,
+  ) => PluginRecordShape | undefined,
 ): Promise<void> {
   const path = pluginLocalStatePath(stateDir, workspaceRoot);
   return queuePluginLocalStateWrite(path, async () => {
@@ -182,15 +222,16 @@ export function setPluginDisabled(
       throw new Error(result.warning);
     }
     const { state } = result;
+    const plugins = { ...state.plugins };
+    const updatedRecord = updater(plugins[pluginId]);
+    if (updatedRecord === undefined) {
+      delete plugins[pluginId];
+    } else {
+      plugins[pluginId] = updatedRecord;
+    }
     await writePluginLocalState(stateDir, workspaceRoot, {
       ...state,
-      plugins: {
-        ...state.plugins,
-        [pluginId]: {
-          ...state.plugins[pluginId],
-          disabled,
-        },
-      },
+      plugins,
     });
   });
 }

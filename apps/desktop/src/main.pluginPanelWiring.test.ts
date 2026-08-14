@@ -58,7 +58,9 @@ describe("plugin panel main-process wiring", () => {
     expect(stop).toContain("stopPluginPanelWithLock(");
     expect(stop).toContain("withPluginHostLifecycleLock,");
     expect(stop).toContain("await stopRunningPluginPanelPreview(panel);");
-    expect(stop).toContain("await pluginHosts.get(workspaceId)?.stop(pluginId);");
+    expect(stop).toContain(
+      "await pluginPipelines.get(workspaceId)?.host.stop(pluginId);",
+    );
   });
 
   it("authorizes panel SDK calls before routing them through the plugin host", () => {
@@ -67,7 +69,7 @@ describe("plugin panel main-process wiring", () => {
     const routeAt = invoke.indexOf("invokeWorkspacePluginSdk({");
     const routerStart = mainSource.indexOf("function invokeWorkspacePluginSdk");
     const routerEnd = mainSource.indexOf(
-      "\n}\n\nfunction pluginHostFor",
+      "\n}\n\nfunction registeredPlugin",
       routerStart,
     );
     expect(routerEnd).toBeGreaterThan(-1);
@@ -78,15 +80,69 @@ describe("plugin panel main-process wiring", () => {
     expect(invoke).toContain("const liveSpawnId = host?.getSpawnId(input.pluginId);");
     expect(invoke).toContain("liveSpawnId,");
     expect(router).toContain("return invokePluginSdkHost(");
-    expect(router).toContain(
-      "await capture.writeAuthoredTextFile(absolutePath, text, author, {",
+  });
+
+  it("wires the production authored-text writer with this invocation's own signal and pipeline (CERT779L D1)", () => {
+    const routerStart = mainSource.indexOf("function invokeWorkspacePluginSdk");
+    const routerEnd = mainSource.indexOf(
+      "\n}\n\nfunction registeredPlugin",
+      routerStart,
     );
+    expect(routerEnd).toBeGreaterThan(-1);
+    const router = mainSource.slice(routerStart, routerEnd);
+    const writerAt = router.indexOf(
+      "writeAuthoredText: createPluginAuthoredTextWriter({",
+    );
+    const signalAt = router.indexOf("signal: input.signal,", writerAt);
+    const captureAt = router.indexOf(
+      "await requirePluginEngineCapture(input.workspaceId);",
+      writerAt,
+    );
+    const writableAt = router.indexOf(
+      "assertWritableWorkspace(workspaceForWrite);",
+      writerAt,
+    );
+    const pipelineAt = router.indexOf(
+      "pipeline: () => pluginPipelines.get(input.workspaceId),",
+      writerAt,
+    );
+
+    // What the writer does with these — the aborted precheck, the signal
+    // handed to the capture's write, and the door-write notification into the
+    // owning plugin's pipeline — is pinned by behavior in
+    // pluginAuthoredWrite.test.ts. This asserts only that main.ts hands the
+    // factory this invocation's real signal, capture, and pipeline.
+    expect(writerAt).toBeGreaterThan(-1);
+    expect(signalAt).toBeGreaterThan(writerAt);
+    expect(captureAt).toBeGreaterThan(writerAt);
+    expect(writableAt).toBeGreaterThan(captureAt);
+    expect(pipelineAt).toBeGreaterThan(writerAt);
+  });
+
+  it("releases a removed identity's registration from the status-event path (#779 round 14 A5)", () => {
+    // What forgetRemovedPlugin does — clearing the registration and the
+    // panel host claim only for a removed event — is pinned by behavior in
+    // pluginPanelRegistration.test.ts. This asserts only that main.ts's
+    // status-event handler calls it before the schema guard that protects
+    // the renderer send, so a departed identity (a rename, not an
+    // uninstall) still releases its registration.
+    const notifyStart = mainSource.indexOf("function notifyPluginStatusChanged(");
+    const notifyEnd = mainSource.indexOf("\n}\n", notifyStart);
+    expect(notifyEnd).toBeGreaterThan(-1);
+    const notify = mainSource.slice(notifyStart, notifyEnd);
+    const forgetAt = notify.indexOf("forgetRemovedPlugin({");
+    const guardAt = notify.indexOf("PluginStatusChangedEvent.safeParse(");
+
+    expect(forgetAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeGreaterThan(forgetAt);
+    expect(notify).toContain("registrations: pluginRegistrations,");
+    expect(notify).toContain("panelStartedHosts,");
   });
 
   it("uses utilityProcess and tears plugin hosts down with their owners", () => {
-    const hostStart = mainSource.indexOf("function pluginHostFor");
+    const hostStart = mainSource.indexOf("function createPluginPipeline");
     const hostEnd = mainSource.indexOf(
-      "\n}\n\nfunction registeredPlugin",
+      "\n}\n\nasync function ensurePluginPipeline",
       hostStart,
     );
     expect(hostEnd).toBeGreaterThan(-1);
@@ -114,5 +170,92 @@ describe("plugin panel main-process wiring", () => {
 
     expect(invoke).not.toContain("writable: authority.writable");
     expect(invoke).toContain("isWritable: () => !sharedViewOf(authority.workspaceId)");
+  });
+
+  it("skips plugin-pipeline warmup when a later openWorkspace switched away first (#779 round 4 finding 1)", () => {
+    const open = handler("openWorkspace");
+    const awaitAt = open.indexOf(
+      "const status = SyncStatusResult.parse(await openWorkspaceActivity(workspace));",
+    );
+    const recheckAt = open.indexOf(
+      "const stillActive = activeWorkspaceIdBySender.get(senderId) === workspace.workspaceId;",
+      awaitAt,
+    );
+    const warmupAt = open.indexOf("await ensurePluginPipeline(workspace)", recheckAt);
+
+    // MUTATION (open race): without a recheck after the await, a sender that
+    // switched workspaces while this call's openWorkspaceActivity was still
+    // pending would warm the plugin pipeline for the workspace it just left
+    // instead of the one it is actually on now.
+    expect(awaitAt).toBeGreaterThan(-1);
+    expect(recheckAt).toBeGreaterThan(awaitAt);
+    expect(warmupAt).toBeGreaterThan(recheckAt);
+    expect(open).toContain("stillActive && !sharedViewOf(workspace.workspaceId)");
+  });
+
+  it("stops a host on last-panel-close only when a panel is the reason it's running (#779 round 4 finding 3)", () => {
+    // Claiming the host is startPluginForPanel's job and is pinned by
+    // behavior in pluginPanelRegistration.test.ts. Source-text assertions
+    // about it survived a mutation that claimed the host unconditionally
+    // (CERT779J S1), so they are gone.
+    const stopPanel = mainSource.slice(
+      mainSource.indexOf("async function stopPluginPanel("),
+      mainSource.indexOf("\n}\n\nasync function stopPluginPanelsForWorkspace"),
+    );
+    const hasAnotherAt = stopPanel.indexOf("hasAnotherPanel");
+    const deleteAt = stopPanel.indexOf(
+      "panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))",
+    );
+    const stopHostAt = stopPanel.indexOf(
+      "await pluginPipelines.get(workspaceId)?.host.stop(pluginId);",
+    );
+    // MUTATION (ownership): dropping the panelStartedHosts.delete() guard
+    // (leaving only !hasAnotherPanel) stops every plugin's host on its last
+    // panel close, including one the workspace itself enabled and expects
+    // to keep running with no panel open at all.
+    expect(hasAnotherAt).toBeGreaterThan(-1);
+    expect(deleteAt).toBeGreaterThan(hasAnotherAt);
+    expect(stopHostAt).toBeGreaterThan(deleteAt);
+
+    const pluginActionStart = mainSource.indexOf("const pluginAction = (");
+    const pluginActionEnd = mainSource.indexOf("\n  };\n\n  pluginAction(", pluginActionStart);
+    expect(pluginActionEnd).toBeGreaterThan(-1);
+    const pluginAction = mainSource.slice(pluginActionStart, pluginActionEnd);
+    expect(pluginAction).toContain("if (result.ok) {");
+    expect(pluginAction).toContain(
+      "panelStartedHosts.delete(pluginLifecycleKey(input.workspaceId, input.pluginId));",
+    );
+  });
+
+  it("revokes a plugin's panel authorities before disable and uninstall take its process (#779 round 12 A4)", () => {
+    const disableAt = mainSource.indexOf(
+      "pluginAction(CHANNELS.disablePlugin,",
+    );
+    const disableRevokeAt = mainSource.indexOf(
+      "revokePluginPanels(workspaceId, pluginId);",
+      disableAt,
+    );
+    const disableCallAt = mainSource.indexOf(
+      "return pipeline.disable(pluginId);",
+      disableAt,
+    );
+    const uninstall = handler("uninstallPlugin");
+    const uninstallRevokeAt = uninstall.indexOf(
+      "revokePluginPanels(input.workspaceId, input.pluginId);",
+    );
+    const uninstallCallAt = uninstall.indexOf(
+      "await pipeline.uninstall(input.pluginId, input.confirmationToken),",
+    );
+
+    // MUTATION (ordering): revoking after the pipeline call leaves an
+    // already-queued panel write holding a live authority for the whole time
+    // the pipeline spends stopping the process and deleting the source, which
+    // is exactly the window the write completes in. What revocation does to
+    // an in-flight write is pinned by behavior in PluginHost.test.ts.
+    expect(disableAt).toBeGreaterThan(-1);
+    expect(disableRevokeAt).toBeGreaterThan(-1);
+    expect(disableCallAt).toBeGreaterThan(disableRevokeAt);
+    expect(uninstallRevokeAt).toBeGreaterThan(-1);
+    expect(uninstallCallAt).toBeGreaterThan(uninstallRevokeAt);
   });
 });

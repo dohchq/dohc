@@ -50,6 +50,29 @@ export function stopPluginPanelWithLock(
   );
 }
 
+/**
+ * Ends every panel's SDK authority over a plugin, aborting whatever those
+ * grants are still carrying. Stopping the plugin's process is not enough on
+ * its own: a panel SDK call already in flight holds its own abort signal, and
+ * without this a queued panel `files.write` completed after disable or
+ * uninstall reported success (#779 round 12 A4).
+ */
+export function revokePluginPanelAuthorities(input: {
+  workspaceId: string;
+  pluginId: string;
+  panels: Iterable<{ workspaceId: string; pluginId: string; panelId: string }>;
+  revokePanel: (workspaceId: string, pluginId: string, panelId: string) => void;
+}): void {
+  for (const panel of input.panels) {
+    if (
+      panel.workspaceId === input.workspaceId &&
+      panel.pluginId === input.pluginId
+    ) {
+      input.revokePanel(panel.workspaceId, panel.pluginId, panel.panelId);
+    }
+  }
+}
+
 export function revokePluginPanelAuthoritiesForStatus(input: {
   workspaceId: string;
   pluginId: string;
@@ -64,12 +87,5 @@ export function revokePluginPanelAuthoritiesForStatus(input: {
   ) {
     return;
   }
-  for (const panel of input.panels) {
-    if (
-      panel.workspaceId === input.workspaceId &&
-      panel.pluginId === input.pluginId
-    ) {
-      input.revokePanel(panel.workspaceId, panel.pluginId, panel.panelId);
-    }
-  }
+  revokePluginPanelAuthorities(input);
 }

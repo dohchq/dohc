@@ -2,6 +2,15 @@ import { createInterface } from "node:readline";
 import { DohcSdkError, DohcSdkErrorCodes, createDohcClient, } from "./index.js";
 import { abortedError, assertRequestOptions } from "./requestOptions.js";
 export { createDohcClient };
+export const PLUGIN_CHILD_PROCESS_METHODS = {
+    spawn: "childProcesses.spawn",
+    subscribeOutput: "childProcesses.output.subscribe",
+    send: "childProcesses.send",
+    logs: "childProcesses.logs",
+    wait: "childProcesses.wait",
+    terminate: "childProcesses.terminate",
+    unsubscribe: "subscriptions.unsubscribe",
+};
 const DEFAULT_TIMEOUT_MS = 10_000;
 const streamBindings = new WeakMap();
 let parentPortBinding = null;
@@ -11,10 +20,37 @@ function isRecord(value) {
 function isRpcId(value) {
     return typeof value === "string" || typeof value === "number";
 }
+function isSdkSubscriptionEvent(value) {
+    return (isRecord(value) &&
+        typeof value.subscriptionId === "string" &&
+        value.subscriptionId.length > 0 &&
+        typeof value.event === "string" &&
+        value.event.length > 0 &&
+        "data" in value);
+}
 function createTransport(sendMessage, receiveMessages) {
     const handlers = new Map();
     const pending = new Map();
+    const subscriptionListeners = new Map();
+    const queuedSubscriptionEvents = new Map();
     let nextId = 1;
+    const queueSubscriptionEvent = (subscriptionId, event) => {
+        const queued = queuedSubscriptionEvents.get(subscriptionId) ?? [];
+        queued.push(event);
+        if (queued.length > 200)
+            queued.shift();
+        queuedSubscriptionEvents.set(subscriptionId, queued);
+    };
+    const handleSdkEvent = (params) => {
+        if (!isSdkSubscriptionEvent(params))
+            return;
+        const event = { event: params.event, data: params.data };
+        const listener = subscriptionListeners.get(params.subscriptionId);
+        if (listener)
+            listener(event);
+        else
+            queueSubscriptionEvent(params.subscriptionId, event);
+    };
     function send(message) {
         try {
             sendMessage(message);
@@ -63,8 +99,11 @@ function createTransport(sendMessage, receiveMessages) {
     function handleMessage(message) {
         if (!isRecord(message) || message.jsonrpc !== "2.0")
             return;
-        if (typeof message.method === "string" && isRpcId(message.id)) {
-            void handleRequest(message);
+        if (typeof message.method === "string") {
+            if (isRpcId(message.id))
+                void handleRequest(message);
+            else if (message.method === "sdk.event")
+                handleSdkEvent(message.params);
             return;
         }
         if ("method" in message || !isRpcId(message.id))
@@ -147,9 +186,121 @@ function createTransport(sendMessage, receiveMessages) {
                 ? { jsonrpc: "2.0", method }
                 : { jsonrpc: "2.0", method, params });
         },
+        async subscribe(method, params, listener, requestOptions) {
+            if (typeof listener !== "function") {
+                throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Subscription listener must be a function.");
+            }
+            const result = await transport.request(method, params, requestOptions);
+            if (!isRecord(result) ||
+                typeof result.subscriptionId !== "string" ||
+                result.subscriptionId.length === 0) {
+                throw new DohcSdkError(DohcSdkErrorCodes.badResponse, `dohc host returned an invalid subscription response for ${method}.`);
+            }
+            const subscriptionId = result.subscriptionId;
+            let active = true;
+            let remoteClosed = false;
+            let pendingClose = null;
+            const untypedListener = listener;
+            subscriptionListeners.set(subscriptionId, untypedListener);
+            for (const event of queuedSubscriptionEvents.get(subscriptionId) ?? []) {
+                untypedListener(event);
+            }
+            queuedSubscriptionEvents.delete(subscriptionId);
+            const unsubscribe = async () => {
+                if (active) {
+                    active = false;
+                    subscriptionListeners.delete(subscriptionId);
+                    queuedSubscriptionEvents.delete(subscriptionId);
+                    requestOptions?.signal?.removeEventListener("abort", onAbort);
+                }
+                if (remoteClosed)
+                    return;
+                if (pendingClose)
+                    return pendingClose;
+                pendingClose = transport
+                    .request(PLUGIN_CHILD_PROCESS_METHODS.unsubscribe, { subscriptionId })
+                    .then(() => {
+                    remoteClosed = true;
+                })
+                    .finally(() => {
+                    pendingClose = null;
+                });
+                return pendingClose;
+            };
+            const onAbort = () => {
+                void unsubscribe().catch(() => undefined);
+            };
+            requestOptions?.signal?.addEventListener("abort", onAbort, { once: true });
+            if (requestOptions?.signal?.aborted)
+                onAbort();
+            return unsubscribe;
+        },
     };
     receiveMessages(handleMessage);
     return transport;
+}
+function isPluginChildProcessOutput(value) {
+    return (isRecord(value) &&
+        Number.isSafeInteger(value.sequence) &&
+        (value.stream === "stdout" || value.stream === "stderr") &&
+        typeof value.text === "string");
+}
+function pluginChildProcessExit(value, method) {
+    if (!isRecord(value) ||
+        (value.code !== null && !Number.isSafeInteger(value.code)) ||
+        (value.reason !== "exited" && value.reason !== "terminated")) {
+        throw new DohcSdkError(DohcSdkErrorCodes.badResponse, `dohc host returned an invalid child-process response for ${method}.`);
+    }
+    return value;
+}
+export function createPluginChildProcessClient(transport) {
+    const handle = (childId) => ({
+        id: childId,
+        async onOutput(listener, options) {
+            if (typeof listener !== "function") {
+                throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Child-process output listener must be a function.");
+            }
+            if (!transport.subscribe) {
+                throw new DohcSdkError(DohcSdkErrorCodes.subscriptionsUnsupported, "This dohc host transport does not support child-process output.");
+            }
+            return transport.subscribe(PLUGIN_CHILD_PROCESS_METHODS.subscribeOutput, { childId }, (event) => {
+                if ((event.event === "stdout" || event.event === "stderr") &&
+                    isPluginChildProcessOutput(event.data)) {
+                    listener(event.data);
+                }
+            }, options);
+        },
+        async send(message, options) {
+            await transport.request(PLUGIN_CHILD_PROCESS_METHODS.send, { childId, message }, options);
+        },
+        async logs(options) {
+            const result = await transport.request(PLUGIN_CHILD_PROCESS_METHODS.logs, { childId }, options);
+            if (!Array.isArray(result) || !result.every(isPluginChildProcessOutput)) {
+                throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned invalid child-process logs.");
+            }
+            return result;
+        },
+        async wait(options) {
+            return pluginChildProcessExit(await transport.request(PLUGIN_CHILD_PROCESS_METHODS.wait, { childId }, options), PLUGIN_CHILD_PROCESS_METHODS.wait);
+        },
+        async terminate(options) {
+            return pluginChildProcessExit(await transport.request(PLUGIN_CHILD_PROCESS_METHODS.terminate, { childId }, options), PLUGIN_CHILD_PROCESS_METHODS.terminate);
+        },
+    });
+    return {
+        async spawn(input, options) {
+            if (!isRecord(input)) {
+                throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Child-process spawn input must be an object.");
+            }
+            const result = await transport.request(PLUGIN_CHILD_PROCESS_METHODS.spawn, input, options);
+            if (!isRecord(result) ||
+                typeof result.childId !== "string" ||
+                result.childId.length === 0) {
+                throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned an invalid child-process spawn response.");
+            }
+            return handle(result.childId);
+        },
+    };
 }
 function createParentPortTransport(port) {
     const transport = createTransport((message) => port.postMessage(message), (listener) => port.on("message", (event) => listener(event.data)));

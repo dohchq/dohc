@@ -42,6 +42,32 @@ const handler: PluginHandler = {
 export default handler;
 ```
 
+Plugins that need a Node child use the host-owned child-process broker:
+
+```ts
+async function startServer(ctx: PluginActivateContext) {
+  const child = await ctx.childProcesses.spawn({
+    modulePath: "snapshot/server.mjs",
+    args: ["--port", "0"],
+    cwd: "snapshot/data",
+    env: { LOG_LEVEL: "info" },
+  });
+  const unsubscribe = await child.onOutput(({ stream, text }) => {
+    console.log(`[${stream}] ${text}`);
+  });
+  await child.send({ type: "status" });
+  const exit = await child.wait();
+  await unsubscribe();
+  return exit;
+}
+```
+
+The host contains `modulePath` and `cwd` inside the plugin's built directory.
+That directory holds the built bundle at its root and the plugin's own
+installed files under `snapshot/`, so a path to a file the plugin ships starts
+with `snapshot/`.
+The host also terminates every brokered child when that plugin spawn ends.
+
 The type-only import adds no runtime dependency on `@dohc/sdk`.
 
 This contract never requires the plugin and host to share a loaded SDK module

@@ -177,6 +177,17 @@ function run() {
     "verify the Electron installation",
   );
 
+  // Plugin installs need the staged pnpm/esbuild under resources/plugin-tools
+  // just as much in a dev session as in a packaged build — this was
+  // previously wired only into the package script, so every real plugin
+  // install failed on a fresh checkout run any other way.
+  runRequired(
+    process.execPath,
+    [join(import.meta.dirname, "stage-plugin-tools.mjs")],
+    { stdio: "inherit" },
+    "stage the plugin install/build tools",
+  );
+
   buildWorkspaceEngine();
 
   const devServer = spawnSync(

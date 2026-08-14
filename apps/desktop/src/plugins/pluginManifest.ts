@@ -2,6 +2,7 @@ import { lstat, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { DohcPluginManifest } from "./pluginManifestSchema";
 import { formatZodIssues } from "./zodDiagnostics";
+import { errorMessage } from "./pluginShared";
 
 export const MAX_PLUGIN_MANIFEST_FILE_BYTES = 256 * 1024;
 export const PLUGIN_MANIFEST_FILE_NAME = "dohc-plugin.json";
@@ -12,10 +13,6 @@ export type PluginManifestReadResult =
 
 function failure(diagnostic: string): PluginManifestReadResult {
   return { ok: false, diagnostics: [diagnostic] };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export async function readPluginManifestFile(

@@ -1,21 +1,25 @@
 import { randomUUID } from "node:crypto";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
-import { readPluginLocalState, setPluginDisabled } from "./pluginLocalState";
+import {
+  mutatePluginRecord,
+  readPluginLocalState,
+} from "./pluginLocalState";
 import {
   PLUGIN_ACTIVATION_TIMEOUT_MS,
   PLUGIN_CRASH_LOOP_THRESHOLD,
   PLUGIN_FAST_FAILURE_WINDOW_MS,
   PLUGIN_HOST_METHODS,
+  PLUGIN_PROCESS_LOG_LIMIT,
   type PluginActivateParams,
   type PluginActivateResult,
   type PluginInvokeCommandParams,
   type PluginLogParams,
   type PluginRuntimeStatus,
+  type SdkEventParams,
   type PluginTransport,
   type SdkRequestParams,
 } from "./pluginHostProtocol";
 
-const STDERR_LOG_LIMIT = 200;
 const DEACTIVATION_TIMEOUT_MS = 5_000;
 
 export interface PluginHostOptions {
@@ -41,7 +45,14 @@ export interface PluginHostOptions {
     params: unknown,
     /** The requesting spawn's run id (PluginSpawn.spawnId) at request time — avoids a race against a respawn between issuing and routing the request. */
     spawnId: string,
+    /** Aborts when this exact spawn stops, crashes, or is replaced. */
+    signal: AbortSignal,
+    emitEvent: (subscriptionId: string, event: string, data: unknown) => void,
   ) => Promise<unknown>;
+  /** Releases resources that the SDK router owns for one spawn. */
+  onSpawnEnd?: (pluginId: string, spawnId: string) => Promise<void>;
+  /** Releases router resources that are not attached to a live host record. */
+  onDispose?: () => Promise<void>;
   onStatusChange?: (pluginId: string, status: PluginRuntimeStatus) => void;
   now?: () => number;
   activationTimeoutMs?: number;
@@ -59,8 +70,10 @@ interface PluginSpawn {
   spawnedAt: number;
   stopping: boolean;
   failureHandled: boolean;
+  abortController: AbortController;
   transport?: PluginTransport;
   shutdown?: Promise<void>;
+  resourceDisposal?: Promise<void>;
 }
 
 interface PluginRecord {
@@ -199,6 +212,7 @@ export class PluginHost {
     if (!record) return;
     const spawn = record.current;
     if (!spawn?.transport) {
+      if (spawn) await this.endSpawn(record, spawn);
       this.plugins.delete(pluginId);
       return;
     }
@@ -215,6 +229,7 @@ export class PluginHost {
     const pendingPluginIds = [...this.pendingStarts];
     for (const pluginId of pendingPluginIds) this.abortedStarts.add(pluginId);
     await Promise.allSettled([...this.plugins.keys()].map((id) => this.stop(id)));
+    await this.options.onDispose?.();
   }
 
   /** Runs a command the plugin registered during activation and returns its result. */
@@ -241,11 +256,20 @@ export class PluginHost {
     transport: PluginTransport,
   ): Promise<void> {
     spawn.stopping = true;
-    await raceWithTimeout(
-      transport.request(PLUGIN_HOST_METHODS.deactivate, {}),
-      DEACTIVATION_TIMEOUT_MS,
-      `Plugin "${record.pluginId}" did not deactivate within ${DEACTIVATION_TIMEOUT_MS} ms.`,
-    ).catch(() => undefined);
+    const resourceDisposal = this.endSpawn(record, spawn);
+    await Promise.all([
+      raceWithTimeout(
+        transport.request(PLUGIN_HOST_METHODS.deactivate, {}),
+        DEACTIVATION_TIMEOUT_MS,
+        `Plugin "${record.pluginId}" did not deactivate within ${DEACTIVATION_TIMEOUT_MS} ms.`,
+      ).catch(() => undefined),
+      resourceDisposal.catch((error: unknown) => {
+        this.appendLog(
+          record,
+          `Spawn resource disposal failed: ${this.errorMessage(error)}`,
+        );
+      }),
+    ]);
 
     try {
       await transport.dispose();
@@ -275,6 +299,25 @@ export class PluginHost {
 
   bumpGeneration(): void {
     this.currentGeneration += 1;
+    for (const record of this.plugins.values()) {
+      if (record.current) {
+        // endSpawn's promise is wired to the broker's disposeSpawn, which
+        // can reject (CodeRabbit #779 R13) — this call is fire-and-forget
+        // by design (bumpGeneration itself is synchronous), so an unhandled
+        // teardown failure must be logged, not left to surface as an
+        // unhandled rejection in the main process.
+        void this.endSpawn(record, record.current).catch((error: unknown) => {
+          console.error(
+            `[desktop] plugin "${record.pluginId}" spawn teardown failed:`,
+            error,
+          );
+        });
+      }
+    }
+  }
+
+  resetCrashAccounting(pluginId: string): void {
+    this.consecutiveFastFailures.delete(pluginId);
   }
 
   private spawn(record: PluginRecord): void {
@@ -284,6 +327,7 @@ export class PluginHost {
       spawnedAt: this.now(),
       stopping: false,
       failureHandled: false,
+      abortController: new AbortController(),
     };
     record.current = spawn;
     record.commands = undefined;
@@ -295,7 +339,7 @@ export class PluginHost {
         pluginRoot: record.pluginRoot,
         onStderr: (line) => this.appendLog(record, line),
         onRequest: (method, params) =>
-          this.handleRequest(record.pluginId, spawn.spawnId, method, params),
+          this.handleRequest(record, spawn, method, params),
         onNotification: (method, params) =>
           this.handleNotification(record, method, params),
         onExit: () => this.handleExit(record, spawn),
@@ -329,7 +373,16 @@ export class PluginHost {
     result: unknown,
   ): void {
     if (!this.isLive(record, spawn)) {
-      void spawn.transport?.dispose().catch(() => undefined);
+      // .finally() re-throws the original rejection, so this needs its own
+      // .catch() too (CodeRabbit #779 R13) — see bumpGeneration's comment.
+      void this.endSpawn(record, spawn)
+        .finally(() => spawn.transport?.dispose().catch(() => undefined))
+        .catch((error: unknown) => {
+          console.error(
+            `[desktop] plugin "${record.pluginId}" spawn teardown failed:`,
+            error,
+          );
+        });
       return;
     }
     if (!isPluginActivateResult(result)) {
@@ -367,6 +420,12 @@ export class PluginHost {
       return;
     }
     spawn.failureHandled = true;
+    await this.endSpawn(record, spawn).catch((resourceError: unknown) => {
+      this.appendLog(
+        record,
+        `Spawn resource disposal failed: ${this.errorMessage(resourceError)}`,
+      );
+    });
     this.appendLog(record, `Activation failed: ${this.errorMessage(error)}`);
     this.setStatus(record, "failed");
     await spawn.transport?.dispose().catch((disposeError: unknown) => {
@@ -380,8 +439,18 @@ export class PluginHost {
       return;
     }
     spawn.failureHandled = true;
+    const resourceDisposal = this.endSpawn(record, spawn);
+    void resourceDisposal.catch((error: unknown) => {
+      this.appendLog(
+        record,
+        `Spawn resource disposal failed: ${this.errorMessage(error)}`,
+      );
+    });
+    void resourceDisposal.then(
+      () => this.accountForFailure(record, spawn),
+      () => this.accountForFailure(record, spawn),
+    );
     this.setStatus(record, "crashed");
-    void this.accountForFailure(record, spawn);
   }
 
   private async accountForFailure(
@@ -401,11 +470,11 @@ export class PluginHost {
 
     if (failures >= PLUGIN_CRASH_LOOP_THRESHOLD) {
       try {
-        await setPluginDisabled(
+        await mutatePluginRecord(
           this.options.stateDir,
           this.options.workspaceRoot,
           record.pluginId,
-          true,
+          (pluginRecord) => ({ ...pluginRecord, disabled: true }),
         );
       } catch (error) {
         this.appendLog(
@@ -445,8 +514,8 @@ export class PluginHost {
   }
 
   private handleRequest(
-    pluginId: string,
-    spawnId: string,
+    record: PluginRecord,
+    spawn: PluginSpawn,
     method: string,
     params: unknown,
   ): Promise<unknown> {
@@ -460,11 +529,30 @@ export class PluginHost {
     }
     const request = params;
     return this.options.routeSdkRequest(
-      pluginId,
+      record.pluginId,
       request.method,
       request.params,
-      spawnId,
+      spawn.spawnId,
+      spawn.abortController.signal,
+      (subscriptionId, event, data) => {
+        if (!this.isLive(record, spawn)) return;
+        spawn.transport?.notify(
+          PLUGIN_HOST_METHODS.sdkEvent,
+          { subscriptionId, event, data } satisfies SdkEventParams,
+        );
+      },
     );
+  }
+
+  private endSpawn(record: PluginRecord, spawn: PluginSpawn): Promise<void> {
+    if (!spawn.abortController.signal.aborted) spawn.abortController.abort();
+    if (!spawn.resourceDisposal) {
+      spawn.resourceDisposal = this.options.onSpawnEnd?.(
+        record.pluginId,
+        spawn.spawnId,
+      ) ?? Promise.resolve();
+    }
+    return spawn.resourceDisposal;
   }
 
   private handleNotification(
@@ -492,7 +580,7 @@ export class PluginHost {
 
   private appendLog(record: PluginRecord, line: string): void {
     record.stderr.push(line);
-    if (record.stderr.length > STDERR_LOG_LIMIT) record.stderr.shift();
+    if (record.stderr.length > PLUGIN_PROCESS_LOG_LIMIT) record.stderr.shift();
   }
 
   private setStatus(record: PluginRecord, status: PluginRuntimeStatus): void {

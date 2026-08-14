@@ -2,7 +2,10 @@ import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { DohcSdkError, DohcSdkErrorCodes } from ".";
-import { createProcessTransport } from "./node";
+import {
+  createPluginChildProcessClient,
+  createProcessTransport,
+} from "./node";
 
 function createStdioHarness() {
   const input = new PassThrough();
@@ -184,6 +187,123 @@ describe("@dohc/sdk/node", () => {
     await expect(harness.nextLine()).resolves.toBe(
       '{"jsonrpc":"2.0","method":"plugin.log","params":{"level":"info","message":"Ready"}}\n',
     );
+  });
+
+  it("provides brokered child spawn, output, input, logs, wait, and terminate calls", async () => {
+    const harness = createStdioHarness();
+    const childProcesses = createPluginChildProcessClient(harness.transport);
+    const spawned = childProcesses.spawn({
+      modulePath: "server.mjs",
+      args: ["--port", "0"],
+      cwd: "data",
+      env: { PORT: "0" },
+    });
+    await expect(harness.nextLine()).resolves.toBe(
+      '{"jsonrpc":"2.0","id":1,"method":"sdk.request","params":{"method":"childProcesses.spawn","params":{"modulePath":"server.mjs","args":["--port","0"],"cwd":"data","env":{"PORT":"0"}}}}\n',
+    );
+    harness.send({ jsonrpc: "2.0", id: 1, result: { childId: "child-1" } });
+    const child = await spawned;
+
+    const outputs: unknown[] = [];
+    const subscribed = child.onOutput((output) => outputs.push(output));
+    await expect(harness.nextLine()).resolves.toBe(
+      '{"jsonrpc":"2.0","id":2,"method":"sdk.request","params":{"method":"childProcesses.output.subscribe","params":{"childId":"child-1"}}}\n',
+    );
+    harness.send({
+      jsonrpc: "2.0",
+      method: "sdk.event",
+      params: {
+        subscriptionId: "subscription-1",
+        event: "stdout",
+        data: { sequence: 1, stream: "stdout", text: "ready\n" },
+      },
+    });
+    harness.send({
+      jsonrpc: "2.0",
+      id: 2,
+      result: { subscriptionId: "subscription-1" },
+    });
+    const unsubscribe = await subscribed;
+    expect(outputs).toEqual([
+      { sequence: 1, stream: "stdout", text: "ready\n" },
+    ]);
+
+    const sent = child.send({ kind: "ping" });
+    await expect(harness.nextLine()).resolves.toBe(
+      '{"jsonrpc":"2.0","id":3,"method":"sdk.request","params":{"method":"childProcesses.send","params":{"childId":"child-1","message":{"kind":"ping"}}}}\n',
+    );
+    harness.send({ jsonrpc: "2.0", id: 3, result: {} });
+    await sent;
+
+    const logs = child.logs();
+    await expect(harness.nextLine()).resolves.toBe(
+      '{"jsonrpc":"2.0","id":4,"method":"sdk.request","params":{"method":"childProcesses.logs","params":{"childId":"child-1"}}}\n',
+    );
+    harness.send({
+      jsonrpc: "2.0",
+      id: 4,
+      result: [{ sequence: 1, stream: "stdout", text: "ready\n" }],
+    });
+    await expect(logs).resolves.toEqual([
+      { sequence: 1, stream: "stdout", text: "ready\n" },
+    ]);
+
+    const waited = child.wait();
+    await expect(harness.nextLine()).resolves.toBe(
+      '{"jsonrpc":"2.0","id":5,"method":"sdk.request","params":{"method":"childProcesses.wait","params":{"childId":"child-1"}}}\n',
+    );
+    harness.send({
+      jsonrpc: "2.0",
+      id: 5,
+      result: { code: 0, reason: "exited" },
+    });
+    await expect(waited).resolves.toEqual({ code: 0, reason: "exited" });
+
+    const terminated = child.terminate();
+    await expect(harness.nextLine()).resolves.toBe(
+      '{"jsonrpc":"2.0","id":6,"method":"sdk.request","params":{"method":"childProcesses.terminate","params":{"childId":"child-1"}}}\n',
+    );
+    harness.send({
+      jsonrpc: "2.0",
+      id: 6,
+      result: { code: null, reason: "terminated" },
+    });
+    await expect(terminated).resolves.toEqual({
+      code: null,
+      reason: "terminated",
+    });
+
+    const unsubscribed = unsubscribe();
+    await expect(harness.nextLine()).resolves.toBe(
+      '{"jsonrpc":"2.0","id":7,"method":"sdk.request","params":{"method":"subscriptions.unsubscribe","params":{"subscriptionId":"subscription-1"}}}\n',
+    );
+    harness.send({ jsonrpc: "2.0", id: 7, result: {} });
+    await unsubscribed;
+  });
+
+  it("propagates spawn cancellation returned by the host transport", async () => {
+    const harness = createStdioHarness();
+    const childProcesses = createPluginChildProcessClient(harness.transport);
+    const spawned = childProcesses.spawn({ modulePath: "server.mjs" });
+    await harness.nextLine();
+    harness.send({ jsonrpc: "2.0", id: 1, result: { childId: "child-1" } });
+    const child = await spawned;
+    const waiting = child.wait();
+    await harness.nextLine();
+
+    harness.send({
+      jsonrpc: "2.0",
+      id: 2,
+      error: {
+        code: DohcSdkErrorCodes.aborted,
+        message: "The plugin spawn ended before the SDK operation completed.",
+      },
+    });
+
+    await expect(waiting).rejects.toMatchObject({
+      code: DohcSdkErrorCodes.aborted,
+      message: "The plugin spawn ended before the SDK operation completed.",
+    });
   });
 
   it("ignores malformed input and continues with later valid lines", async () => {

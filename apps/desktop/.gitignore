@@ -7,3 +7,4 @@ release/
 # unpacked extraResources.
 resources/workspace-engine/
 resources/cli-bin/
+resources/plugin-tools/

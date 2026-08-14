@@ -24,12 +24,15 @@ async function workspaceRoot(): Promise<string> {
 }
 
 function context(root: string, writes: AuthoredWrite[] = []): PluginSdkHostContext {
+  const controller = new AbortController();
   return {
     pluginId: "hello-plugin",
     workspaceRoot: root,
     spawnId: "spawn-123",
     isWritable: () => true,
     writeAvailable: async () => true,
+    signal: controller.signal,
+    invokeChildProcess: vi.fn(async () => ({})),
     writeAuthoredText: vi.fn<PluginSdkHostContext["writeAuthoredText"]>(
       async (path, text, options) => {
         writes.push({ path, text, options });
@@ -52,6 +55,7 @@ describe("invokePluginSdkHost", () => {
     await expect(invokePluginSdkHost(context(root), "capabilities")).resolves.toEqual({
       files: { read: true, list: true, write: true, watch: false },
       workspace: { search: true },
+      childProcesses: { spawn: true, output: true, send: true, terminate: true },
       collections: { read: false },
       provenance: { record: false },
     });
@@ -103,9 +107,10 @@ describe("invokePluginSdkHost", () => {
   it("forwards host-derived attribution to authored writes", async () => {
     const root = await workspaceRoot();
     const writes: AuthoredWrite[] = [];
+    const hostContext = context(root, writes);
 
     await expect(
-      invokePluginSdkHost(context(root, writes), "files.write", {
+      invokePluginSdkHost(hostContext, "files.write", {
         path: "notes/from-plugin.txt",
         text: "hello\n",
         overwrite: false,
@@ -127,6 +132,11 @@ describe("invokePluginSdkHost", () => {
         },
       },
     ]);
+    expect(hostContext.writeAuthoredText).toHaveBeenCalledWith(
+      "notes/from-plugin.txt",
+      "hello\n",
+      expect.objectContaining({ overwrite: false }),
+    );
   });
 
   it("rejects a non-boolean overwrite before writing", async () => {
@@ -282,5 +292,100 @@ describe("invokePluginSdkHost", () => {
       }),
     ).rejects.toThrow(/read-only workspace authority/i);
     expect(hostContext.writeAuthoredText).not.toHaveBeenCalled();
+  });
+
+  it("routes child-process methods through the spawn-scoped broker context", async () => {
+    const root = await workspaceRoot();
+    const hostContext = context(root);
+    hostContext.invokeChildProcess = vi.fn(async () => ({ childId: "child-1" }));
+
+    await expect(
+      invokePluginSdkHost(hostContext, "childProcesses.spawn", {
+        modulePath: "server.mjs",
+        args: ["--port", "0"],
+      }),
+    ).resolves.toEqual({ childId: "child-1" });
+    expect(hostContext.invokeChildProcess).toHaveBeenCalledWith(
+      "childProcesses.spawn",
+      { modulePath: "server.mjs", args: ["--port", "0"] },
+    );
+  });
+
+  it("rejects an in-flight router operation when its spawn signal aborts", async () => {
+    const root = await workspaceRoot();
+    const controller = new AbortController();
+    const hostContext = context(root);
+    hostContext.signal = controller.signal;
+    hostContext.invokeChildProcess = vi.fn(
+      () => new Promise<never>(() => undefined),
+    );
+    const request = invokePluginSdkHost(
+      hostContext,
+      "childProcesses.wait",
+      { childId: "child-1" },
+    );
+
+    controller.abort();
+
+    await expect(request).rejects.toMatchObject({
+      code: "DOHC_ABORTED",
+      message: "The plugin spawn ended before the SDK operation completed.",
+    });
+  });
+
+  it("propagates writeAuthoredText's own cancellation message unmodified", async () => {
+    // No generic DOHC_ABORTED normalizing here: PluginHost.test.ts's
+    // "aborts a queued panel write when the plugin crashes" proves the real
+    // engine capture names the specific reason ("Plugin panel is no longer
+    // active.") a queued write was cancelled, and that message must reach
+    // the caller as-is, not be replaced by a generic one.
+    const root = await workspaceRoot();
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const hostContext = context(root);
+    hostContext.signal = controller.signal;
+    hostContext.writeAuthoredText = vi.fn(
+      () =>
+        new Promise<{ path: string }>((_resolve, reject) => {
+          started.resolve();
+          controller.signal.addEventListener(
+            "abort",
+            () => reject(new Error("Plugin panel is no longer active.")),
+            { once: true },
+          );
+        }),
+    );
+    const request = invokePluginSdkHost(hostContext, "files.write", {
+      path: "notes/cancelled.txt",
+      text: "not committed",
+    });
+    await started.promise;
+
+    controller.abort();
+
+    await expect(request).rejects.toThrow("Plugin panel is no longer active.");
+  });
+
+  it("reports childProcesses honestly, and rejects every method, when invokeChildProcess is absent (#779 round 3 finding 7 / R24)", async () => {
+    // Panel-driven SDK calls never supply invokeChildProcess — only a
+    // plugin's own routeSdkRequest path may broker child processes on its
+    // behalf.
+    const root = await workspaceRoot();
+    const panelContext = context(root);
+    delete panelContext.invokeChildProcess;
+
+    await expect(
+      invokePluginSdkHost(panelContext, "capabilities"),
+    ).resolves.toMatchObject({
+      childProcesses: { spawn: false, output: false, send: false, terminate: false },
+    });
+    await expect(
+      invokePluginSdkHost(panelContext, "childProcesses.spawn", {
+        modulePath: "server.mjs",
+      }),
+    ).rejects.toThrow(/unavailable for this request path/i);
+    await expect(
+      invokePluginSdkHost(panelContext, "childProcesses.wait", { childId: "child-1" }),
+    ).rejects.toThrow(/unavailable for this request path/i);
   });
 });

@@ -8,6 +8,7 @@ export const PLUGIN_HOST_METHODS = {
   deactivate: "plugin.deactivate",
   invokeCommand: "plugin.invokeCommand",
   sdkRequest: "sdk.request",
+  sdkEvent: "sdk.event",
   log: "plugin.log",
 } as const;
 
@@ -31,6 +32,12 @@ export interface SdkRequestParams {
   params?: unknown;
 }
 
+export interface SdkEventParams {
+  subscriptionId: string;
+  event: string;
+  data: unknown;
+}
+
 export interface PluginLogParams {
   level: "info" | "warn" | "error";
   message: string;
@@ -52,7 +59,14 @@ export const PLUGIN_ACTIVATION_TIMEOUT_MS = 30_000;
 export const PLUGIN_CRASH_LOOP_THRESHOLD = 3;
 export const PLUGIN_FAST_FAILURE_WINDOW_MS = 60_000;
 
+// Plugin hosts and their brokered children use the same bounded log history.
+export const PLUGIN_PROCESS_LOG_LIMIT = 200;
+
 export interface PluginTransport {
   request<T = unknown>(method: string, params?: unknown): Promise<T>;
+  // Required, not optional (CodeRabbit #779 R14): every shipping transport
+  // implements this, and an optional method here is exactly the kind of
+  // silently-no-op'd dead fallback path the repo's own rules say to remove.
+  notify(method: string, params?: unknown): void;
   dispose(): Promise<void>;
 }

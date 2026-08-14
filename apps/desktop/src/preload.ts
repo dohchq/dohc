@@ -7,6 +7,7 @@ import type {
   ListSitesPayload,
   MenuCommand,
   PluginPanelOpenedEvent,
+  PluginStatusChangedEvent,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
   SitePackagePayload,
@@ -20,10 +21,14 @@ import type {
   WriteClipboardTextPayload,
 } from "./ipc/bridgeContract";
 import {
+  ListPluginsResult,
   OpenPluginPanelResult,
+  PluginActionResult,
+  PluginUninstallPreflightResult,
   StartPluginPanelResult,
   parseInvokePluginPanelSdkPayloadForIpc,
   parseInvokeSiteSdkPayloadForIpc,
+  parsePluginStatusChangedEventForIpc,
 } from "./ipc/bridgeContract";
 import {
   CHANNELS,
@@ -176,6 +181,22 @@ const bridge: DohcDesktopBridge = {
       CHANNELS.invokePluginPanelSdk,
       parseInvokePluginPanelSdkPayloadForIpc(payload),
     ),
+  listPlugins: async (payload) =>
+    ListPluginsResult.parse(await ipcRenderer.invoke(CHANNELS.listPlugins, payload)),
+  installPlugin: async (payload) =>
+    PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.installPlugin, payload)),
+  disablePlugin: async (payload) =>
+    PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.disablePlugin, payload)),
+  enablePlugin: async (payload) =>
+    PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.enablePlugin, payload)),
+  approvePlugin: async (payload) =>
+    PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.approvePlugin, payload)),
+  pluginUninstallPreflight: async (payload) =>
+    PluginUninstallPreflightResult.parse(
+      await ipcRenderer.invoke(CHANNELS.pluginUninstallPreflight, payload),
+    ),
+  uninstallPlugin: async (payload) =>
+    PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.uninstallPlugin, payload)),
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),
   cloudLoginStart: (payload) =>
@@ -319,6 +340,14 @@ const bridge: DohcDesktopBridge = {
     const handler = () => listener();
     ipcRenderer.on(CHANNELS.workspaceActivity, handler);
     return () => ipcRenderer.removeListener(CHANNELS.workspaceActivity, handler);
+  },
+  onPluginStatusChanged: (listener: (event: PluginStatusChangedEvent) => void) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      const parsed = parsePluginStatusChangedEventForIpc(raw);
+      if (parsed) listener(parsed);
+    };
+    ipcRenderer.on(CHANNELS.pluginStatusChanged, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.pluginStatusChanged, handler);
   },
   onCloudSessionChanged: (
     listener: (event: {

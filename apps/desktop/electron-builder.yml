@@ -50,6 +50,10 @@ extraResources:
     filter:
       - "dohc"
       - "dohc.cmd"
+  - from: resources/plugin-tools
+    to: plugin-tools
+    filter:
+      - "**/*"
   # The opt-in Rust engine is staged by build-workspace-engine.mjs and kept
   # outside app.asar so the main process can execute it directly.
   - from: resources/workspace-engine

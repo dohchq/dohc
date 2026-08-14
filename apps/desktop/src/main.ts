@@ -99,6 +99,13 @@ import {
   InvokeSiteSdkResult,
   InvokePluginPanelSdkPayload,
   InvokePluginPanelSdkResult,
+  ListPluginsPayload,
+  ListPluginsResult,
+  PluginActionPayload,
+  PluginActionResult,
+  PluginUninstallPreflightResult,
+  UninstallPluginPayload,
+  PluginStatusChangedEvent,
   DesktopMarksResult,
   LaunchMarksResult,
   ListSitesPayload,
@@ -563,23 +570,42 @@ import {
   type SiteLogEntry,
 } from "./workspaces/siteRunner";
 import { invokeSiteSdkHost } from "./workspaces/siteSdkHost";
-import { createSitePreviewSdkAuthorityRegistry } from "./workspaces/sitePreviewSdkAuthority";
 import { PluginHost } from "./plugins/PluginHost";
+import {
+  PluginPipeline,
+  type PluginPipelineStatusEvent,
+} from "./plugins/PluginPipeline";
+import { createPluginAuthoredTextWriter } from "./plugins/pluginAuthoredWrite";
+import { invokePluginSdkHost } from "./plugins/pluginSdkHost";
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
+import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
+import { pluginDataDir } from "./plugins/pluginLocalState";
+import { pluginIdToSafePath } from "./plugins/pluginSourceSnapshot";
+import { createSitePreviewSdkAuthorityRegistry } from "./workspaces/sitePreviewSdkAuthority";
 import { stopPluginPanelPreview } from "./plugins/pluginPanelLifecycle";
 import {
   assertPluginPanelRequestCurrent,
   loadPluginPanelRegistrationForCurrentRenderer,
+  revokePluginPanelAuthorities,
   revokePluginPanelAuthoritiesForStatus,
   startPluginPanelWithLock,
   stopPluginPanelWithLock,
 } from "./plugins/pluginPanelStartLifecycle";
-import { invokePluginSdkHost } from "./plugins/pluginSdkHost";
 import { createPluginPanelSdkAuthorityRegistry } from "./plugins/pluginPanelSdkAuthority";
 import {
+  forgetRemovedPlugin,
+  forgetUninstalledPlugin,
+  forgetWorkspaceRegistrations,
   loadPluginPanelRegistration,
-  type PluginPanelRegistration,
+  pluginLifecycleKey,
+  rememberPluginRegistration,
+  startPluginForPanel,
+  type RegisteredPlugin,
 } from "./plugins/pluginPanelRegistration";
+import {
+  disposeWorkspacePipeline,
+  ensureWorkspacePipeline,
+} from "./plugins/pluginPipelineLifecycle";
 import type { DohcPluginManifest } from "./plugins/pluginManifestSchema";
 import {
   assertActiveWorkspaceForSitePreviewStop,
@@ -756,6 +782,8 @@ const sitePreviews = createSitePreviewLifecycle({
   allowOrigin: allowLoopbackFrameOrigin,
   revokePreview: sitePreviewSdkAuthorities.revokePreview,
 });
+const pluginPipelines = new Map<string, PluginPipeline>();
+const pluginPipelineDisposals = new Map<string, Promise<void>>();
 const sitePreviewStartLocks = new Map<string, Promise<void>>();
 const sitePreviewStartControllersBySender = new Map<
   number,
@@ -763,6 +791,144 @@ const sitePreviewStartControllersBySender = new Map<
 >();
 let autoUpdateController: AutoUpdateController | null = null;
 let applicationMenuCanInstallUpdate: boolean | null = null;
+
+function pluginResourcesBasePath(): string {
+  // app.getAppPath() is unreliable here: when Electron is launched with a
+  // direct script path (as the e2e harness does, and as a plain built binary
+  // is), it resolves to the launched script's own directory (dist/main)
+  // rather than the package root, with no upward package.json search — it
+  // silently pointed pnpm resolution at dist/main/resources and broke every
+  // plugin install (#777's e2e caught this). import.meta.dirname is the
+  // currently executing module's own directory (dist/main at runtime,
+  // exactly like createPluginPipeline's sibling plugin-host.js resolution
+  // below), so two levels up reaches apps/desktop deterministically
+  // regardless of how Electron was launched.
+  return app.isPackaged
+    ? process.resourcesPath
+    : join(import.meta.dirname, "..", "..", "resources");
+}
+
+function notifyPluginStatusChanged(
+  workspaceId: string,
+  event: PluginPipelineStatusEvent,
+): void {
+  // A removed identity releases its panel registration and any panel claim
+  // on its host — before the schema guard below, which only protects the
+  // renderer send (#779 round 14 A5).
+  forgetRemovedPlugin({
+    registrations: pluginRegistrations,
+    panelStartedHosts,
+    workspaceId,
+    event,
+  });
+  // Emitted from a queueMicrotask with no catch above it, so a payload that
+  // fails the IPC schema is dropped and logged — it must never become an
+  // uncaught main-process exception (#779 round 13 A2).
+  const payload = PluginStatusChangedEvent.safeParse({ workspaceId, ...event });
+  if (!payload.success) {
+    console.error(
+      `[desktop] dropped a plugin status event for ${workspaceId} that ` +
+        `failed the IPC schema: ${payload.error.message}`,
+    );
+    return;
+  }
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (activeWorkspaceIdBySender.get(win.webContents.id) !== workspaceId) continue;
+    win.webContents.send(CHANNELS.pluginStatusChanged, payload.data);
+  }
+}
+
+function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
+  let pipeline: PluginPipeline | null = null;
+  const dohcDir = pluginDataDir(stateDir(), workspace.rootPath);
+  const childProcessBroker = new PluginChildProcessBroker({ dohcDir });
+  const pluginHost = new PluginHost({
+    stateDir: stateDir(),
+    workspaceRoot: workspace.rootPath,
+    spawnTransport: (callbacks) => {
+      const child = utilityProcess.fork(
+        join(import.meta.dirname, "plugin-host.js"),
+        [],
+        {
+          cwd: callbacks.pluginRoot,
+          serviceName: "dohc-plugin-host",
+          stdio: ["ignore", "ignore", "pipe"],
+        },
+      );
+      return createPluginUtilityTransport(child, callbacks);
+    },
+    // Shares invokeWorkspacePluginSdk with #777's panel SDK route
+    // (invokePluginPanelSdk below) so both paths get the same isWritable /
+    // writeAvailable / MomentAuthor handling instead of a second copy. Only
+    // this, the plugin's own request path (not the panel path), supplies
+    // invokeChildProcess — a panel is renderer-driven UI, not the plugin's
+    // own activated code, so it never brokers child processes.
+    routeSdkRequest: (pluginId, method, params, spawnId, signal, emitEvent) =>
+      invokeWorkspacePluginSdk({
+        workspaceId: workspace.workspaceId,
+        pluginId,
+        spawnId,
+        isWritable: () => !sharedViewOf(workspace.workspaceId),
+        signal,
+        invokeChildProcess: (childMethod, childParams) =>
+          childProcessBroker.invoke(
+            { pluginId, spawnId, signal, emitEvent },
+            childMethod,
+            childParams,
+          ),
+        method,
+        params,
+      }),
+    onSpawnEnd: (pluginId, spawnId) =>
+      childProcessBroker.disposeSpawn(pluginId, spawnId),
+    onDispose: () => childProcessBroker.dispose(),
+    onStatusChange: (pluginId, status) => {
+      pipeline?.noteRuntimeStatus(pluginId, status);
+      revokePluginPanelAuthoritiesForStatus({
+        workspaceId: workspace.workspaceId,
+        pluginId,
+        status,
+        panels: runningPluginPanels.values(),
+        revokePanel: pluginPanelSdkAuthorities.revokePanel,
+      });
+    },
+  });
+  pipeline = new PluginPipeline({
+    workspaceRoot: workspace.rootPath,
+    stateDir: stateDir(),
+    pluginHost,
+    resourcesBasePath: pluginResourcesBasePath(),
+    pnpmRunnerEntry: join(import.meta.dirname, "pnpm-runner.js"),
+    onStatusChange: (event) =>
+      notifyPluginStatusChanged(workspace.workspaceId, event),
+    isEngineCaptureAvailable: () =>
+      activity.engineCaptureFor(workspace.workspaceId) !== null,
+  });
+  return pipeline;
+}
+
+async function ensurePluginPipeline(
+  workspace: CreatedWorkspace,
+): Promise<PluginPipeline> {
+  assertWritableWorkspace(workspace);
+  return ensureWorkspacePipeline({
+    live: pluginPipelines,
+    disposals: pluginPipelineDisposals,
+    workspaceId: workspace.workspaceId,
+    create: () => createPluginPipeline(workspace),
+    start: (pipeline) => pipeline.start(),
+    dispose: (pipeline) => pipeline.dispose(),
+  });
+}
+
+async function stopPluginPipelineForWorkspace(workspaceId: string): Promise<void> {
+  await disposeWorkspacePipeline({
+    live: pluginPipelines,
+    disposals: pluginPipelineDisposals,
+    workspaceId,
+    dispose: (pipeline) => pipeline.dispose(),
+  });
+}
 
 // Latest search per renderer: the engine-backed search path awaits (flush +
 // index query) before its mount-scoped rg pass, so an OLDER search can reach
@@ -1897,6 +2063,9 @@ const activity = createWorkspaceActivity(notifyRenderer, {
       hooks,
       requireEngineSessions(),
     ),
+  onWatcherBatch: (workspace, events) => {
+    pluginPipelines.get(workspace.workspaceId)?.handleWatcherEvents(events);
+  },
 });
 const panelAgentRunSlots = new Map<string, string>();
 // Local agent integration: owns the per-workspace MCP child + active-run slot
@@ -2576,11 +2745,6 @@ async function openWorkspaceActivity(
   return result;
 }
 
-interface RegisteredPlugin {
-  pluginRoot: string;
-  manifest: DohcPluginManifest;
-}
-
 interface RunningPluginPanel {
   handle: StaticSitePreview;
   releaseOrigin: () => void;
@@ -2591,13 +2755,19 @@ interface RunningPluginPanel {
   generation: number;
 }
 
-const pluginHosts = new Map<string, PluginHost>();
 const pluginRegistrations = new Map<string, Map<string, RegisteredPlugin>>();
-const pluginStarts = new Map<string, Promise<void>>();
 const pluginPanelSdkAuthorities = createPluginPanelSdkAuthorityRegistry();
 const runningPluginPanels = new Map<string, RunningPluginPanel>();
 const pluginPanelStartLocks = new Map<string, Promise<void>>();
 const pluginHostLifecycleLocks = new Map<string, Promise<void>>();
+// A plugin's host can be running because the workspace enabled it (install,
+// enable, approve — it should keep running with no panel open at all) or
+// because a panel's own cold start is the only reason it's alive. Only the
+// latter is this key's to stop when its last panel closes (#779 round 4
+// finding 3). ensurePluginStarted adds a key only when IT causes the
+// zero-to-running transition; any workspace-level plugin action clears it,
+// handing ownership back to the workspace.
+const panelStartedHosts = new Set<string>();
 
 function pluginPanelKey(
   workspaceId: string,
@@ -2605,10 +2775,6 @@ function pluginPanelKey(
   panelId: string,
 ): string {
   return `${workspaceId}\0${pluginId}\0${panelId}`;
-}
-
-function pluginLifecycleKey(workspaceId: string, pluginId: string): string {
-  return `${workspaceId}\0${pluginId}`;
 }
 
 const withPluginPanelStartLock = <T>(key: string, operation: () => Promise<T>) =>
@@ -2641,6 +2807,7 @@ function invokeWorkspacePluginSdk(input: {
   spawnId: string;
   isWritable: () => boolean;
   signal?: AbortSignal;
+  invokeChildProcess?: (method: string, params?: unknown) => Promise<unknown>;
   method: string;
   params?: unknown;
 }): Promise<unknown> {
@@ -2661,68 +2828,21 @@ function invokeWorkspacePluginSdk(input: {
         }
       },
       signal: input.signal,
-      writeAuthoredText: async (
-        path,
-        text,
-        { overwrite, author },
-      ) => {
-        const { workspace: workspaceForWrite, capture } =
-          await requirePluginEngineCapture(input.workspaceId);
-        assertWritableWorkspace(workspaceForWrite);
-        if (input.signal?.aborted) {
-          throw new Error("Plugin panel is no longer active.");
-        }
-        const absolutePath = join(workspaceForWrite.rootPath, path);
-        await capture.writeAuthoredTextFile(absolutePath, text, author, {
-          createOnly: !overwrite,
-          signal: input.signal,
-        });
-        return { path };
-      },
+      invokeChildProcess: input.invokeChildProcess,
+      writeAuthoredText: createPluginAuthoredTextWriter({
+        signal: input.signal,
+        requireWritableCapture: async () => {
+          const { workspace: workspaceForWrite, capture } =
+            await requirePluginEngineCapture(input.workspaceId);
+          assertWritableWorkspace(workspaceForWrite);
+          return { workspaceRoot: workspaceForWrite.rootPath, capture };
+        },
+        pipeline: () => pluginPipelines.get(input.workspaceId),
+      }),
     },
     input.method,
     input.params,
   );
-}
-
-function pluginHostFor(workspace: CreatedWorkspace): PluginHost {
-  const existing = pluginHosts.get(workspace.workspaceId);
-  if (existing) return existing;
-  const host = new PluginHost({
-    stateDir: stateDir(),
-    workspaceRoot: workspace.rootPath,
-    spawnTransport: (callbacks) => {
-      const child = utilityProcess.fork(
-        join(import.meta.dirname, "plugin-host.js"),
-        [],
-        {
-          cwd: callbacks.pluginRoot,
-          serviceName: "dohc-plugin-host",
-          stdio: ["ignore", "ignore", "pipe"],
-        },
-      );
-      return createPluginUtilityTransport(child, callbacks);
-    },
-    routeSdkRequest: (pluginId, method, params, spawnId) =>
-      invokeWorkspacePluginSdk({
-        workspaceId: workspace.workspaceId,
-        pluginId,
-        spawnId,
-        isWritable: () => !sharedViewOf(workspace.workspaceId),
-        method,
-        params,
-      }),
-    onStatusChange: (pluginId, status) =>
-      revokePluginPanelAuthoritiesForStatus({
-        workspaceId: workspace.workspaceId,
-        pluginId,
-        status,
-        panels: runningPluginPanels.values(),
-        revokePanel: pluginPanelSdkAuthorities.revokePanel,
-      }),
-  });
-  pluginHosts.set(workspace.workspaceId, host);
-  return host;
 }
 
 function registeredPlugin(
@@ -2732,52 +2852,41 @@ function registeredPlugin(
   return pluginRegistrations.get(workspaceId)?.get(pluginId);
 }
 
-function rememberPluginRegistration(
-  workspaceId: string,
-  registration: PluginPanelRegistration,
-): RegisteredPlugin {
-  const registrations = pluginRegistrations.get(workspaceId) ?? new Map();
-  const existing = registrations.get(registration.manifest.name);
-  if (
-    existing &&
-    resolve(existing.pluginRoot) !== resolve(registration.pluginRoot)
-  ) {
-    throw new Error(
-      `Plugin "${registration.manifest.name}" is already running from another root.`,
-    );
-  }
-  const remembered = existing ?? {
-    pluginRoot: registration.pluginRoot,
-    manifest: registration.manifest,
-  };
-  registrations.set(registration.manifest.name, remembered);
-  pluginRegistrations.set(workspaceId, registrations);
-  return remembered;
+// Panels serve from the approved, hash-verified snapshot — never from
+// plugin.pluginRoot (live, unverified workspace-folder source) — matching
+// ensurePluginStarted's own hash-verify-before-execute gate (CERT779: a
+// panel is code from this plugin as much as its process is, and the plan
+// doc's userData-residency rule applies the same way).
+function pluginSnapshotRoot(workspace: CreatedWorkspace, pluginId: string): string {
+  return join(
+    pluginDataDir(stateDir(), workspace.rootPath),
+    "plugins",
+    pluginIdToSafePath(pluginId),
+    "snapshot",
+  );
 }
 
+// Opening a panel must never execute code the install/build pipeline hasn't
+// verified and built. `PluginPipeline.ensureStarted()` checks the plugin is
+// enabled, its live source hash still matches its approved hash, and starts
+// it from the built bundle — never from `plugin.pluginRoot`/`plugin.manifest`
+// (the panel registration's own copy, read straight from live source; it
+// still supplies panel entry paths elsewhere, but never plugin activation).
+// The pipeline also owns per-plugin job serialization, so no separate
+// pluginStarts de-dup map is needed here.
 async function ensurePluginStarted(
   workspace: CreatedWorkspace,
   plugin: RegisteredPlugin,
 ): Promise<PluginHost> {
-  const host = pluginHostFor(workspace);
-  if (host.getSpawnId(plugin.manifest.name)) return host;
-  const key = `${workspace.workspaceId}\0${plugin.manifest.name}`;
-  const pending = pluginStarts.get(key);
-  if (pending) {
-    await pending;
-    return host;
-  }
-  if (host.getStatus(plugin.manifest.name) === "disabled") {
-    throw new Error(`Plugin "${plugin.manifest.name}" is disabled.`);
-  }
-  const start = host.start(plugin.pluginRoot, plugin.manifest);
-  pluginStarts.set(key, start);
-  try {
-    await start;
-    return host;
-  } finally {
-    if (pluginStarts.get(key) === start) pluginStarts.delete(key);
-  }
+  const pipeline = await ensurePluginPipeline(workspace);
+  await startPluginForPanel({
+    panelStartedHosts,
+    workspaceId: workspace.workspaceId,
+    pluginId: plugin.manifest.name,
+    isHostRunning: () => Boolean(pipeline.host.getSpawnId(plugin.manifest.name)),
+    ensureStarted: () => pipeline.ensureStarted(plugin.manifest.name),
+  });
+  return pipeline.host;
 }
 
 async function stopRunningPluginPanelPreview(input: {
@@ -2821,8 +2930,23 @@ async function stopPluginPanel(
           candidate.workspaceId === workspaceId &&
           candidate.pluginId === pluginId,
       );
-      if (!hasAnotherPanel) {
-        await pluginHosts.get(workspaceId)?.stop(pluginId);
+      if (
+        !hasAnotherPanel &&
+        // Only stop the host if a panel is the reason it's running at all
+        // — an enabled, workspace-started plugin has no panel to answer to
+        // (#779 round 4 finding 3).
+        panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))
+      ) {
+        // Stops the shared host directly rather than through the pipeline's
+        // disable()/enable() actions — this is "no panel needs the process
+        // right now," not a user disable, so local state (disabled,
+        // approvedHash) must not change. PluginHost.stop() does not itself
+        // emit a status change, so the pipeline's cached status can go
+        // briefly stale here until the next real status-affecting event
+        // (any action, or the next ensureStarted); the pipeline never uses
+        // that cache to decide whether to start a process, only to display
+        // status, so this cannot start a second process for the same id.
+        await pluginPipelines.get(workspaceId)?.host.stop(pluginId);
       }
     },
   );
@@ -2844,25 +2968,20 @@ async function stopPluginPanelsForWorkspace(workspaceId: string): Promise<void> 
   await Promise.all(stops);
 }
 
-async function stopPluginHostForWorkspace(workspaceId: string): Promise<void> {
-  const host = pluginHosts.get(workspaceId);
-  pluginHosts.delete(workspaceId);
-  for (const key of [...pluginStarts.keys()]) {
-    if (key.startsWith(`${workspaceId}\0`)) pluginStarts.delete(key);
-  }
-  await host?.stopAll();
-}
-
+// Stopping the shared host is the pipeline's job (stopPluginPipelineForWorkspace
+// disposes it via PluginPipeline.dispose() -> pluginHost.stopAll()); this only
+// stops the panels layered on top of it.
 async function stopPluginWorkspace(workspaceId: string): Promise<void> {
   await stopPluginPanelsForWorkspace(workspaceId);
-  await stopPluginHostForWorkspace(workspaceId);
+  await stopPluginPipelineForWorkspace(workspaceId);
+  forgetWorkspaceRegistrations(pluginRegistrations, workspaceId);
 }
 
 async function stopAllPluginWorkspaces(): Promise<void> {
   pluginPanelSdkAuthorities.revokeAll();
   await Promise.allSettled(
     [...new Set([
-      ...pluginHosts.keys(),
+      ...pluginPipelines.keys(),
       ...[...runningPluginPanels.values()].map((panel) => panel.workspaceId),
     ])].map((workspaceId) => stopPluginWorkspace(workspaceId)),
   );
@@ -3553,6 +3672,7 @@ app.on("will-quit", (event) => {
   const captureStop = engineYDocStop
       .then(() => chatDispatchStop)
       .then(() => agentIntegrationStop)
+      .then(() => pluginStop)
       .then(() => activity.stopAll());
   const rustEngineStop = Promise.all([
     captureStop.catch(() => undefined),
@@ -6185,6 +6305,7 @@ function registerIpcHandlers(
     );
     assertWritableWorkspace(workspace);
     const plugin = rememberPluginRegistration(
+      pluginRegistrations,
       workspace.workspaceId,
       registration,
     );
@@ -6261,9 +6382,10 @@ function registerIpcHandlers(
           await stopRunningPluginPanelPreview(previous);
         }
 
-        const entryPath = join(plugin.pluginRoot, panel.entry);
+        const snapshotRoot = pluginSnapshotRoot(workspace, input.pluginId);
+        const entryPath = join(snapshotRoot, panel.entry);
         const handle = await startStaticDirectoryPreview(dirname(entryPath), {
-          containmentRoot: plugin.pluginRoot,
+          containmentRoot: snapshotRoot,
           entry: basename(entryPath),
           entryLabel: "plugin panel entry",
         });
@@ -6340,7 +6462,7 @@ function registerIpcHandlers(
       input.panelId,
     );
     const panel = runningPluginPanels.get(key);
-    const host = pluginHosts.get(input.workspaceId);
+    const host = pluginPipelines.get(input.workspaceId)?.host;
     const liveSpawnId = host?.getSpawnId(input.pluginId);
     const generation = rendererGeneration(sender.id);
     const panelRunning = Boolean(
@@ -6369,6 +6491,141 @@ function registerIpcHandlers(
       params: input.params,
     });
     return InvokePluginPanelSdkResult.parse({ result });
+  });
+
+  async function activePluginPipelineFor(
+    event: IpcMainInvokeEvent,
+    workspaceId: string,
+  ): Promise<PluginPipeline> {
+    const workspace = requireWorkspace(workspaceId);
+    if (activeWorkspaceIdBySender.get(event.sender.id) !== workspace.workspaceId) {
+      throw new Error(
+        "The plugin request does not target the active workspace. Open the workspace and try again.",
+      );
+    }
+    return ensurePluginPipeline(workspace);
+  }
+
+  function pluginIpcError(error: unknown) {
+    return {
+      stage: "state" as const,
+      code: "pipeline-unavailable",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  ipcMain.handle(CHANNELS.listPlugins, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListPluginsPayload.parse(payload);
+    try {
+      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      return ListPluginsResult.parse({ ok: true, plugins: pipeline.list() });
+    } catch (error) {
+      return ListPluginsResult.parse({ ok: false, error: pluginIpcError(error) });
+    }
+  });
+
+  // Ends every panel's authority over a plugin before an action that takes
+  // its process away. A panel SDK call already in flight carries its own
+  // abort signal, so stopping the process is not what cancels it (#779 round
+  // 12 A4).
+  const revokePluginPanels = (workspaceId: string, pluginId: string): void => {
+    revokePluginPanelAuthorities({
+      workspaceId,
+      pluginId,
+      panels: runningPluginPanels.values(),
+      revokePanel: pluginPanelSdkAuthorities.revokePanel,
+    });
+  };
+
+  const pluginAction = (
+    channel: string,
+    run: (
+      pipeline: PluginPipeline,
+      pluginId: string,
+      workspaceId: string,
+    ) => Promise<unknown>,
+  ): void => {
+    ipcMain.handle(channel, async (event, payload) => {
+      assertTrustedSender(event);
+      const input = PluginActionPayload.parse(payload);
+      try {
+        const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+        const result = PluginActionResult.parse(
+          await run(pipeline, input.pluginId, input.workspaceId),
+        );
+        if (result.ok) {
+          // install/enable/approve/disable/uninstall each decide this
+          // plugin's running state on the workspace's own authority — an
+          // earlier panel's cold start no longer owns whether closing it
+          // stops the host (#779 round 4 finding 3).
+          panelStartedHosts.delete(pluginLifecycleKey(input.workspaceId, input.pluginId));
+        }
+        return result;
+      } catch (error) {
+        return PluginActionResult.parse({
+          ok: false,
+          error: pluginIpcError(error),
+          plugin: null,
+        });
+      }
+    });
+  };
+
+  pluginAction(CHANNELS.installPlugin, (pipeline, pluginId) =>
+    pipeline.install(pluginId));
+  pluginAction(CHANNELS.disablePlugin, (pipeline, pluginId, workspaceId) => {
+    revokePluginPanels(workspaceId, pluginId);
+    return pipeline.disable(pluginId);
+  });
+  pluginAction(CHANNELS.enablePlugin, (pipeline, pluginId) =>
+    pipeline.enable(pluginId));
+  pluginAction(CHANNELS.approvePlugin, (pipeline, pluginId) =>
+    pipeline.approve(pluginId));
+
+  ipcMain.handle(CHANNELS.pluginUninstallPreflight, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = PluginActionPayload.parse(payload);
+    try {
+      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      return PluginUninstallPreflightResult.parse(
+        await pipeline.uninstallPreflight(input.pluginId),
+      );
+    } catch (error) {
+      return PluginUninstallPreflightResult.parse({
+        ok: false,
+        error: pluginIpcError(error),
+      });
+    }
+  });
+
+  ipcMain.handle(CHANNELS.uninstallPlugin, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = UninstallPluginPayload.parse(payload);
+    try {
+      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      // Uninstall stops the plugin's process on its way to deleting the
+      // source, so no panel authority over it survives the attempt whether
+      // or not the delete succeeds (#779 round 12 A4).
+      revokePluginPanels(input.workspaceId, input.pluginId);
+      const result = PluginActionResult.parse(
+        await pipeline.uninstall(input.pluginId, input.confirmationToken),
+      );
+      forgetUninstalledPlugin({
+        registrations: pluginRegistrations,
+        panelStartedHosts,
+        workspaceId: input.workspaceId,
+        pluginId: input.pluginId,
+        uninstalled: result.ok,
+      });
+      return result;
+    } catch (error) {
+      return PluginActionResult.parse({
+        ok: false,
+        error: pluginIpcError(error),
+        plugin: null,
+      });
+    }
   });
 
   ipcMain.handle(CHANNELS.openWorkspace, async (event, payload) => {
@@ -6400,7 +6657,27 @@ function registerIpcHandlers(
       await stopPluginWorkspace(previousWorkspaceId);
     }
     refreshNativeWorkspaceSurfaces();
-    return SyncStatusResult.parse(await openWorkspaceActivity(workspace));
+    const status = SyncStatusResult.parse(await openWorkspaceActivity(workspace));
+    // A later openWorkspace call from this same sender can have switched to
+    // a different workspace while the await above was pending — its own
+    // handler already started stopping this workspace's plugins (the
+    // previousWorkspaceId branch above). Warming this workspace's pipeline
+    // anyway would start it right back up for a workspace this sender no
+    // longer has open (#779 round 4 finding 1).
+    const stillActive = activeWorkspaceIdBySender.get(senderId) === workspace.workspaceId;
+    if (stillActive && !sharedViewOf(workspace.workspaceId)) {
+      // A plugin-pipeline start failure must not fail the whole handler —
+      // the workspace itself already opened. listPlugins and friends
+      // separately convert a failed ensurePluginPipeline into a structured
+      // pluginIpcError (CodeRabbit #779 R6); this is best-effort warmup.
+      await ensurePluginPipeline(workspace).catch((error: unknown) => {
+        console.error(
+          `[desktop] plugin pipeline warmup failed for ${workspace.workspaceId}:`,
+          error,
+        );
+      });
+    }
+    return status;
   });
 
   // Named versions (PR 0M-4). Every handler resolves the workspace through
