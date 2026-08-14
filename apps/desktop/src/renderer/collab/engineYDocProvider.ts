@@ -60,7 +60,7 @@ export interface EngineYDocTransport {
     // the plain editor would let its autosave race that operation.
     removalInProgress?: EngineRemovalInProgress;
   }>;
-  readArtifactAsset?(assetId: string): Promise<{
+  readArtifactAsset?(descriptor: ArtifactAssetDescriptor): Promise<{
     descriptor: ArtifactAssetDescriptor;
     bytes: Uint8Array;
   }>;
@@ -206,7 +206,7 @@ export interface EngineYDocBinding {
   // document read-only and offers a fresh open after the interval ends.
   readonly removalInProgress: EngineRemovalInProgress | null;
   readonly artifactAssets: readonly ArtifactAssetDescriptor[];
-  readArtifactAsset(assetId: string): Promise<{
+  readArtifactAsset(descriptor: ArtifactAssetDescriptor): Promise<{
     descriptor: ArtifactAssetDescriptor;
     bytes: Uint8Array;
   }>;
@@ -264,10 +264,10 @@ export async function bindEngineYDoc(
       artifactAssetsInvalid: opened.artifactAssetsInvalid === true,
       removalInProgress: opened.removalInProgress ?? null,
       artifactAssets: [],
-      readArtifactAsset(assetId) {
+      readArtifactAsset(descriptor) {
         return Promise.reject(
           new Error(
-            `Artifact asset ${assetId} cannot load without a live document session.`,
+            `Artifact asset ${descriptor.id} cannot load without a live document session.`,
           ),
         );
       },
@@ -496,13 +496,13 @@ export async function bindEngineYDoc(
     get artifactAssets() {
       return artifactAssets;
     },
-    readArtifactAsset(assetId) {
+    readArtifactAsset(descriptor) {
       if (!transport.readArtifactAsset) {
         return Promise.reject(
           new Error("This document transport cannot load artifact assets."),
         );
       }
-      return transport.readArtifactAsset(assetId);
+      return transport.readArtifactAsset(descriptor);
     },
     onDocumentReplaced(listener) {
       replacementListeners.add(listener);

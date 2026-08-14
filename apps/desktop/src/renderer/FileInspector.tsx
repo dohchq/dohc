@@ -3648,7 +3648,7 @@ function DrawingView({
       for (const descriptor of hydrationSession.descriptors) {
         if (activeHydrationSession.current !== hydrationSession) return [];
         try {
-          const loaded = await hydrationSession.read(descriptor.id);
+          const loaded = await hydrationSession.read(descriptor);
           if (activeHydrationSession.current !== hydrationSession) continue;
           const file = binaryFileDataFromArtifact(descriptor, loaded);
           if (file) files.push(file);

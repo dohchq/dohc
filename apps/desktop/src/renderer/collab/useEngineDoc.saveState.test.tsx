@@ -109,7 +109,7 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   let artifactAssetsInvalid = false;
   let lineageReplacementFailure: Error | null = null;
   let permanentApplyFailure = false;
-  let readArtifactAsset: (assetId: string) => Promise<{
+  let readArtifactAsset: (descriptor: typeof IMAGE_DESCRIPTOR) => Promise<{
     descriptor: typeof IMAGE_DESCRIPTOR;
     bytes: Uint8Array;
   }> = async () => {
@@ -152,8 +152,8 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       }
       applied.push({ sessionId: payload.sessionId, seq: payload.seq });
     },
-    readEngineYDocArtifactAsset(payload: { assetId: string }) {
-      return readArtifactAsset(payload.assetId);
+    readEngineYDocArtifactAsset(payload: { descriptor: typeof IMAGE_DESCRIPTOR }) {
+      return readArtifactAsset(payload.descriptor);
     },
     onEngineYDocRemoteUpdate: (
       listener: (event: { sessionId: string; update: Uint8Array }) => void,
@@ -384,7 +384,7 @@ function Harness(props: {
         onClick={() => {
           void Promise.all(
             engine.artifactAssets.map((asset) =>
-              engine.readArtifactAsset(asset.id),
+              engine.readArtifactAsset(asset),
             ),
           ).then((loaded) => setHydratedAssets(loaded.map(({ descriptor }) => descriptor.id).join(",")));
         }}
@@ -879,8 +879,8 @@ it("hydrates winner-only scene assets after lineage replacement without reopenin
     ref: "assets/winner.png",
     sha256: "b".repeat(64),
   };
-  const readAsset = vi.fn(async (assetId: string) => {
-    if (assetId !== winner.id) throw new Error("stale asset authority");
+  const readAsset = vi.fn(async (descriptor: typeof IMAGE_DESCRIPTOR) => {
+    if (descriptor.id !== winner.id) throw new Error("stale asset authority");
     return { descriptor: winner, bytes: new Uint8Array([1, 2, 3]) };
   });
   harness.setArtifactReader([loser], readAsset);
@@ -915,8 +915,8 @@ it("hydrates winner-only scene assets after lineage replacement without reopenin
   await waitFor(() =>
     expect(screen.getByTestId("hydrated-assets").textContent).toBe(winner.id),
   );
-  expect(readAsset).toHaveBeenNthCalledWith(1, loser.id);
-  expect(readAsset).toHaveBeenNthCalledWith(2, winner.id);
+  expect(readAsset).toHaveBeenNthCalledWith(1, loser);
+  expect(readAsset).toHaveBeenNthCalledWith(2, winner);
   expect(readAsset).toHaveBeenCalledTimes(2);
 });
 
@@ -1012,10 +1012,10 @@ it("does not reuse a losing lineage asset when the winner reuses its file ID", a
   }>((resolve) => {
     resolveWinner = resolve;
   });
-  const readAsset = vi.fn((assetId: string) =>
-    assetId === loser.id && readAsset.mock.calls.length === 1
-      ? loserRead
-      : winnerRead,
+  // Routed by descriptor identity, the way main selects among its pinned
+  // descriptors: the reused id alone can no longer pick a lineage.
+  const readAsset = vi.fn((descriptor: typeof IMAGE_DESCRIPTOR) =>
+    descriptor.sha256 === loser.sha256 ? loserRead : winnerRead,
   );
   harness.setArtifactReader([loser], readAsset);
   putSceneAsset(harness.sourceDoc, loser);

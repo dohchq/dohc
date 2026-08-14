@@ -3430,7 +3430,11 @@ export type OpenEngineYDocSessionResult = z.infer<typeof OpenEngineYDocSessionRe
 
 export const ReadEngineYDocArtifactAssetPayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
-  assetId: z.string().min(1).max(4096),
+  // The full descriptor, not just the id: after a lineage replacement one id
+  // can name both the winner's asset and a retired lineage's. The descriptor
+  // SELECTS among the descriptors main has pinned for this session — main
+  // hydrates from its own pinned copy, never from these fields.
+  descriptor: ARTIFACT_ASSET_DESCRIPTOR,
 });
 export type ReadEngineYDocArtifactAssetPayload = z.infer<
   typeof ReadEngineYDocArtifactAssetPayload

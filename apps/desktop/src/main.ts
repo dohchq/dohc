@@ -9261,12 +9261,27 @@ function registerIpcHandlers(
           "The live document session is no longer available. Open the file again.",
         );
       }
-      const descriptor =
-        entry.artifactAssetsById.get(input.assetId) ??
-        entry.retiredArtifactAssetsById.get(input.assetId);
+      // The renderer's descriptor only selects among the descriptors this
+      // session has pinned; the read hydrates from the pinned copy. One id
+      // can name the winner's asset and a retired lineage's, so the match is
+      // field-exact and the current lineage is tried first.
+      const requested = input.descriptor;
+      const descriptor = [
+        entry.artifactAssetsById.get(requested.id),
+        entry.retiredArtifactAssetsById.get(requested.id),
+      ].find(
+        (candidate) =>
+          candidate !== undefined &&
+          candidate.mimeType === requested.mimeType &&
+          candidate.created === requested.created &&
+          candidate.ref === requested.ref &&
+          candidate.sha256 === requested.sha256 &&
+          candidate.lastRetrieved === requested.lastRetrieved &&
+          candidate.version === requested.version,
+      );
       if (!descriptor) {
         throw new Error(
-          `The live document does not reference artifact asset ${input.assetId}.`,
+          `The live document does not reference artifact asset ${requested.id}.`,
         );
       }
       const hydrated = await entry.session.readArtifactAsset(descriptor);

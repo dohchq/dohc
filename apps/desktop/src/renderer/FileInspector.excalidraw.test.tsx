@@ -456,7 +456,7 @@ describe("FileInspector Excalidraw view", () => {
     expect(file?.dataURL.length).toBeGreaterThan(64 * 1024);
     expect(bridge.readEngineYDocArtifactAsset).toHaveBeenCalledWith({
       sessionId: expect.any(String),
-      assetId: ARTIFACT_DESCRIPTOR.id,
+      descriptor: ARTIFACT_DESCRIPTOR,
     });
     expect(Y.encodeStateAsUpdate(doc, beforeHydration)).toHaveLength(2);
     expect(Y.encodeStateAsUpdate(doc).byteLength).toBeLessThan(4 * 1024);
@@ -514,7 +514,7 @@ describe("FileInspector Excalidraw view", () => {
     );
     expect(bridge.readEngineYDocArtifactAsset).toHaveBeenCalledWith({
       sessionId: expect.any(String),
-      assetId: ARTIFACT_DESCRIPTOR.id,
+      descriptor: ARTIFACT_DESCRIPTOR,
     });
 
     await act(async () => {

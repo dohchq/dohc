@@ -10,7 +10,10 @@ import type { BinaryFileData } from "@excalidraw/excalidraw/types";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
 import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
 import { bridge } from "../bridge";
-import { binaryFileDataFromArtifact } from "../excalidrawAssets";
+import {
+  binaryFileDataFromArtifact,
+  sameArtifactAssetDescriptor,
+} from "../excalidrawAssets";
 import {
   captureOrphanedDraft,
   replaceOrphanedDraft,
@@ -268,7 +271,7 @@ export type UseEngineDoc = {
   // the operation can still fail, so the caller stays read-only and retries.
   removalInProgress: EngineRemovalInProgress | null;
   artifactAssets: readonly ArtifactAssetDescriptor[];
-  readArtifactAsset(assetId: string): Promise<{
+  readArtifactAsset(descriptor: ArtifactAssetDescriptor): Promise<{
     descriptor: ArtifactAssetDescriptor;
     bytes: Uint8Array;
   }>;
@@ -366,8 +369,8 @@ function makeTransport(
           : {}),
       };
     },
-    readArtifactAsset(assetId) {
-      return bridge().readEngineYDocArtifactAsset({ sessionId, assetId });
+    readArtifactAsset(descriptor) {
+      return bridge().readEngineYDocArtifactAsset({ sessionId, descriptor });
     },
     stageLocalUpdate() {
       if (writesRefused.current) return null;
@@ -493,10 +496,10 @@ export function useEngineDoc(input: {
   const readArtifactAsset =
     settled?.kind === "bound"
       ? settled.readArtifactAsset
-      : (assetId: string) =>
+      : (descriptor: ArtifactAssetDescriptor) =>
           Promise.reject(
             new Error(
-              `Artifact asset ${assetId} cannot load without a live document session.`,
+              `Artifact asset ${descriptor.id} cannot load without a live document session.`,
             ),
           );
   const removalInProgress =
@@ -674,7 +677,7 @@ export function useEngineDoc(input: {
       if (cached) return cached;
       let read: Promise<ArtifactAssetRead | null>;
       read = bound
-        .readArtifactAsset(descriptor.id)
+        .readArtifactAsset(descriptor)
         .then((loaded) =>
           binaryFileDataFromArtifact(descriptor, loaded) ? loaded : null,
         );
@@ -912,7 +915,7 @@ export function useEngineDoc(input: {
           objectId: bound.objectId,
           versionId: bound.versionId,
           artifactAssets: [...bound.artifactAssets],
-          readArtifactAsset: (assetId) => bound.readArtifactAsset(assetId),
+          readArtifactAsset: (descriptor) => bound.readArtifactAsset(descriptor),
         });
       }
       reportSaveState(
@@ -1012,23 +1015,23 @@ export function useEngineDoc(input: {
         ? {
             ...activeBinding,
             artifactAssets: retiredAssets,
-            readArtifactAsset: async (assetId) => {
-              const descriptor = retiredAssets.find(
-                (candidate) => candidate.id === assetId,
+            readArtifactAsset: async (descriptor) => {
+              const retained = retiredAssets.find((candidate) =>
+                sameArtifactAssetDescriptor(candidate, descriptor),
               );
-              if (!descriptor) {
+              if (!retained) {
                 throw new Error(
-                  `Artifact asset ${assetId} does not belong to the retired document.`,
+                  `Artifact asset ${descriptor.id} does not belong to the retired document.`,
                 );
               }
               const loaded = await readSceneAsset(
-                sceneAssetCacheKey(descriptor),
-                descriptor,
+                sceneAssetCacheKey(retained),
+                retained,
                 activeBinding,
               );
               if (!loaded) {
                 throw new Error(
-                  `Artifact asset ${assetId} is invalid for the retired document.`,
+                  `Artifact asset ${descriptor.id} is invalid for the retired document.`,
                 );
               }
               return loaded;
@@ -1184,7 +1187,7 @@ export function useEngineDoc(input: {
             objectId: bound.objectId,
             versionId: bound.versionId,
             artifactAssets: bound.artifactAssets,
-            readArtifactAsset: (assetId) => bound.readArtifactAsset(assetId),
+            readArtifactAsset: (descriptor) => bound.readArtifactAsset(descriptor),
           });
         });
         // Preload, don't block: by the time any real deletion can arrive,
@@ -1231,7 +1234,7 @@ export function useEngineDoc(input: {
           objectId: bound.objectId,
           versionId: bound.versionId,
           artifactAssets: bound.artifactAssets,
-          readArtifactAsset: (assetId) => bound.readArtifactAsset(assetId),
+          readArtifactAsset: (descriptor) => bound.readArtifactAsset(descriptor),
         });
       })
       .catch(() => {
