@@ -9254,7 +9254,7 @@ function registerIpcHandlers(
           `The live document does not reference artifact asset ${input.assetId}.`,
         );
       }
-      const hydrated = await entry.session.readArtifactAsset(input.assetId);
+      const hydrated = await entry.session.readArtifactAsset(descriptor);
       if (
         hydrated.descriptor.ref !== descriptor.ref ||
         hydrated.descriptor.sha256 !== descriptor.sha256 ||

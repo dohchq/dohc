@@ -595,7 +595,6 @@ describe("FileInspector Excalidraw view", () => {
     bridge.readEngineYDocArtifactAsset = vi
       .fn()
       .mockRejectedValueOnce(new Error("missing asset"))
-      .mockRejectedValueOnce(new Error("missing asset"))
       .mockResolvedValue({
         descriptor: ARTIFACT_DESCRIPTOR,
         bytes: new Uint8Array([1, 2, 3]),
@@ -648,7 +647,7 @@ describe("FileInspector Excalidraw view", () => {
       await Promise.resolve();
     });
     expect(canvas.hydrateInvocations).toHaveBeenCalledTimes(3);
-    expect(bridge.readEngineYDocArtifactAsset).toHaveBeenCalledTimes(5);
+    expect(bridge.readEngineYDocArtifactAsset).toHaveBeenCalledTimes(3);
   });
 
   it("drops an asset read that resolves after the drawing session changes", async () => {
@@ -705,7 +704,7 @@ describe("FileInspector Excalidraw view", () => {
     resolveAsset({ descriptor: ARTIFACT_DESCRIPTOR, bytes: largeValidPng() });
 
     await expect(pendingHydration).resolves.toEqual([]);
-    expect(bridge.readEngineYDocArtifactAsset).toHaveBeenCalledTimes(3);
+    expect(bridge.readEngineYDocArtifactAsset).toHaveBeenCalledOnce();
     expect(
       (canvas.props as unknown as ExcalidrawCanvasProps).hydrateAssets,
     ).toBeUndefined();

@@ -347,7 +347,7 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // (#665) — see `RestartSafeYDocSession`.
   | "evict"
 > & {
-  readArtifactAsset(assetId: string): Promise<{
+  readArtifactAsset(descriptor: ArtifactAssetDescriptor): Promise<{
     descriptor: ArtifactAssetDescriptor;
     bytes: Uint8Array;
   }>;
@@ -1728,6 +1728,7 @@ export function createWorkspaceEngineCapture(
     const workspace = { workspaceId, rootPath };
     let canonicalDoc: Y.Doc | null = null;
     let canonicalLineageClaimId: string | null = null;
+    let artifactAssets: readonly ArtifactAssetDescriptor[] = [];
     let current: EngineYdocProviderSession | null = null;
     let releaseObligation: EngineYdocProviderSession | null = null;
     let closed = false;
@@ -1860,6 +1861,7 @@ export function createWorkspaceEngineCapture(
               const retired = canonicalDoc;
               canonicalDoc = replacement;
               canonicalLineageClaimId = opened?.lineageClaimId ?? null;
+              artifactAssets = opened?.artifactAssets ?? [];
               input.onLineageReplaced?.(
                 Y.encodeStateAsUpdate(replacement),
                 recoveredPaths,
@@ -1918,6 +1920,7 @@ export function createWorkspaceEngineCapture(
           canonicalDoc = replacement.doc;
           canonicalLineageClaimId = replacementClaimId;
           current = replacement;
+          artifactAssets = replacement.artifactAssets ?? [];
           input.onLineageReplaced?.(
             Y.encodeStateAsUpdate(replacement.doc),
             [],
@@ -1953,6 +1956,7 @@ export function createWorkspaceEngineCapture(
           onReplayArmed?.();
         }
         current = replacement;
+        artifactAssets = replacement.artifactAssets ?? [];
         if (opening) {
           opening.installed = true;
           openingRemoteUpdates.delete(replacement);
@@ -2117,7 +2121,7 @@ export function createWorkspaceEngineCapture(
     const objectId = current.objectId;
     const sessionVersionId = current.versionId;
     const contentKind = current.contentKind;
-    const artifactAssets = current.artifactAssets ?? [];
+    artifactAssets = current.artifactAssets ?? [];
     const sessionPath = current.path;
     const openedHead = current.head;
     const openedLineage = current.lineage;
@@ -2134,7 +2138,9 @@ export function createWorkspaceEngineCapture(
         return canonicalLineageClaimId;
       },
       contentKind,
-      artifactAssets,
+      get artifactAssets() {
+        return artifactAssets;
+      },
       path: sessionPath,
       readArtifactAsset(assetId) {
         return Promise.reject(
@@ -4780,30 +4786,24 @@ export function createWorkspaceEngineCapture(
             return session.lineageClaimId;
           },
           contentKind: session.contentKind,
-          artifactAssets: session.artifactAssets ?? [],
+          get artifactAssets() {
+            return session.artifactAssets ?? [];
+          },
           path: session.path,
-          async readArtifactAsset(assetId) {
-            const descriptor = (session.artifactAssets ?? []).find(
-              (asset) => asset.id === assetId,
-            );
-            if (!descriptor) {
-              throw new Error(
-                `The live document does not reference artifact asset ${assetId}.`,
-              );
-            }
+          async readArtifactAsset(descriptor) {
             const bytes = await engine.readBinaryBlob({
               workspaceId,
               sha256: descriptor.sha256,
             });
             if (!bytes) {
               throw new Error(
-                `Artifact asset ${assetId} is missing from version ${versionId}. Open the file again after sync finishes.`,
+                `Artifact asset ${descriptor.id} is missing from version ${versionId}. Open the file again after sync finishes.`,
               );
             }
             const actualSha256 = sha256Bytes(bytes);
             if (actualSha256 !== descriptor.sha256) {
               throw new Error(
-                `Artifact asset ${assetId} failed its SHA-256 check. Open the file again after sync finishes.`,
+                `Artifact asset ${descriptor.id} failed its SHA-256 check. Open the file again after sync finishes.`,
               );
             }
             return { descriptor, bytes };

@@ -1000,6 +1000,7 @@ export function useEngineDoc(input: {
 
     const preserveRetiredDocument = (retired: Y.Doc): void => {
       writesRefused.current = true;
+      const retiredRecoverySlot = recovery;
       let draftId: number | null = null;
       let retiredRecoveryRevision = 0;
       let projectionQueue: Promise<void> = Promise.resolve();
@@ -1007,7 +1008,7 @@ export function useEngineDoc(input: {
       const retiredAssets = activeBinding
         ? [...activeBinding.artifactAssets]
         : [];
-      retiredBinding = activeBinding
+      const retiredAuthority: EngineYDocBinding | null = activeBinding
         ? {
             ...activeBinding,
             artifactAssets: retiredAssets,
@@ -1034,17 +1035,19 @@ export function useEngineDoc(input: {
             },
           }
         : null;
-      if (documentKind === "scene" && binding && retiredBinding) {
-        for (const descriptor of retiredBinding.artifactAssets) {
-          cacheSceneAssetRead(descriptor, binding);
+      retiredBinding = retiredAuthority;
+      if (documentKind === "scene" && activeBinding && retiredAuthority) {
+        for (const descriptor of retiredAuthority.artifactAssets) {
+          cacheSceneAssetRead(descriptor, activeBinding);
         }
       }
       const persist = (): void => {
         const bytes = Y.encodeStateAsUpdate(retired);
         if (documentKind === "scene") {
+          const publishesRecoveryStatus = retiredRecoverySlot === recovery;
           const revision = ++retiredRecoveryRevision;
           const statusRevision = ++recoveryStatusRevision;
-          const sceneRecovery = prepareSceneRecovery(bytes, retiredBinding);
+          const sceneRecovery = prepareSceneRecovery(bytes, retiredAuthority);
           if (draftId === null) {
             draftId = captureOrphanedDraft(
               workspaceId,
@@ -1059,15 +1062,17 @@ export function useEngineDoc(input: {
               sceneRecovery.immediateText,
             );
           }
-          setSceneRecoveryAssets(
-            sceneRecovery.requiredAssetCount === 0
-              ? null
-              : {
-                  token,
-                  state: "loading",
-                  count: sceneRecovery.requiredAssetCount,
-                },
-          );
+          if (publishesRecoveryStatus) {
+            setSceneRecoveryAssets(
+              sceneRecovery.requiredAssetCount === 0
+                ? null
+                : {
+                    token,
+                    state: "loading",
+                    count: sceneRecovery.requiredAssetCount,
+                  },
+            );
+          }
           const capturedDraftId = draftId;
           void sceneRecovery.completed
             .then((recovered) => {
@@ -1079,6 +1084,7 @@ export function useEngineDoc(input: {
                 recovered.text,
               );
               if (
+                publishesRecoveryStatus &&
                 statusRevision === recoveryStatusRevision &&
                 token === openTokenRef.current
               ) {
@@ -1157,11 +1163,6 @@ export function useEngineDoc(input: {
           return;
         }
         binding = bound;
-        if (documentKind === "scene") {
-          for (const descriptor of bound.artifactAssets) {
-            cacheSceneAssetRead(descriptor, bound);
-          }
-        }
         bound.onDocumentReplaced((replacement) => {
           if (cancelled || token !== openTokenRef.current) return;
           // The losing slot owns its recovery draft and any pending image

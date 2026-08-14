@@ -597,11 +597,14 @@ it("restores a failed scene handoff with the losing asset authority", async () =
   render(
     <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
   );
-  await waitFor(() => expect(readAsset).toHaveBeenCalledOnce());
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  expect(readAsset).not.toHaveBeenCalled();
 
   act(() => screen.getByTestId("type").click());
-  winnerOwnsReader = true;
   harness.emitLineageReplacement("unused", [winner]);
+  winnerOwnsReader = true;
 
   await waitFor(() =>
     expect(screen.getByTestId("read-only-transition").textContent).toBe("true"),
@@ -708,6 +711,9 @@ it("recovers a dirty replaced scene immediately and hydrates its image", async (
   );
 
   act(() => screen.getByTestId("type").click());
+  await waitFor(() =>
+    expect(screen.getByTestId("state").textContent).toBe("saving"),
+  );
   harness.emitLineageReplacement("unused");
 
   expect(screen.getByTestId("draft-count").textContent).toBe("1");
@@ -721,9 +727,7 @@ it("recovers a dirty replaced scene immediately and hydrates its image", async (
     expect.objectContaining({ id: "image-element", fileId: null }),
   );
   expect(immediate.files).toEqual({});
-  await waitFor(() =>
-    expect(screen.getByTestId("asset-recovery").textContent).toBe("loading:1"),
-  );
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("none");
   expect(readAsset).toHaveBeenCalledOnce();
 
   await act(async () => {
@@ -747,6 +751,123 @@ it("recovers a dirty replaced scene immediately and hydrates its image", async (
   });
   expect(screen.getByTestId("asset-recovery").textContent).toBe("none");
   expect(screen.getByTestId("draft-count").textContent).toBe("1");
+});
+
+it("loads scene asset bytes only when recovery needs them", async () => {
+  harness = harnessBridge("scene");
+  const readAsset = vi.fn(async () => ({
+    descriptor: IMAGE_DESCRIPTOR,
+    bytes: new Uint8Array([1, 2, 3]),
+  }));
+  harness.setArtifactReader([IMAGE_DESCRIPTOR], readAsset);
+  putSceneAsset(harness.sourceDoc, IMAGE_DESCRIPTOR);
+  insertElementRevision(harness.sourceDoc, {
+    id: "image-element",
+    type: "image",
+    fileId: IMAGE_DESCRIPTOR.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    index: "a1",
+  });
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  expect(readAsset).not.toHaveBeenCalled();
+
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+
+  await waitFor(() => expect(readAsset).toHaveBeenCalledOnce());
+  await waitFor(() => {
+    const recovered = parseExcalidrawDocument(
+      screen.getByTestId("draft").textContent!,
+    );
+    expect(recovered.files[IMAGE_DESCRIPTOR.id]).toMatchObject({
+      dataURL: "data:image/png;base64,AQID",
+    });
+  });
+});
+
+it("keeps retired scene authority after a successful replacement", async () => {
+  harness = harnessBridge("scene");
+  let resolveAsset!: (value: {
+    descriptor: typeof IMAGE_DESCRIPTOR;
+    bytes: Uint8Array;
+  }) => void;
+  const asset = new Promise<{
+    descriptor: typeof IMAGE_DESCRIPTOR;
+    bytes: Uint8Array;
+  }>((resolve) => {
+    resolveAsset = resolve;
+  });
+  const readAsset = vi.fn(() => asset);
+  harness.setArtifactReader([IMAGE_DESCRIPTOR], readAsset);
+  putSceneAsset(harness.sourceDoc, IMAGE_DESCRIPTOR);
+  insertElementRevision(harness.sourceDoc, {
+    id: "restorable-image",
+    type: "image",
+    fileId: IMAGE_DESCRIPTOR.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: true,
+    index: "a1",
+  });
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  const retired = lastBoundDoc!;
+
+  harness.emitLineageReplacement("unused");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+
+  act(() =>
+    insertElementRevision(retired, {
+      id: "restorable-image",
+      type: "image",
+      fileId: IMAGE_DESCRIPTOR.id,
+      version: 2,
+      versionNonce: 2,
+      isDeleted: false,
+      index: "a1",
+    }),
+  );
+
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("none");
+  await act(async () => {
+    resolveAsset({
+      descriptor: IMAGE_DESCRIPTOR,
+      bytes: new Uint8Array([1, 2, 3]),
+    });
+    await asset;
+  });
+
+  await waitFor(() => {
+    const recovered = parseExcalidrawDocument(
+      screen.getByTestId("draft").textContent!,
+    );
+    expect(recovered.elements).toContainEqual(
+      expect.objectContaining({
+        id: "restorable-image",
+        fileId: IMAGE_DESCRIPTOR.id,
+      }),
+    );
+    expect(recovered.files[IMAGE_DESCRIPTOR.id]).toMatchObject({
+      dataURL: "data:image/png;base64,AQID",
+    });
+  });
+  expect(screen.getByTestId("available").textContent).toBe("true");
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("none");
 });
 
 it("hydrates winner-only scene assets after lineage replacement without reopening", async () => {
@@ -795,12 +916,11 @@ it("hydrates winner-only scene assets after lineage replacement without reopenin
     expect(screen.getByTestId("hydrated-assets").textContent).toBe(winner.id),
   );
   expect(readAsset).toHaveBeenNthCalledWith(1, loser.id);
-  expect(readAsset).toHaveBeenNthCalledWith(2, loser.id);
-  expect(readAsset).toHaveBeenNthCalledWith(3, winner.id);
-  expect(readAsset).toHaveBeenCalledTimes(3);
+  expect(readAsset).toHaveBeenNthCalledWith(2, winner.id);
+  expect(readAsset).toHaveBeenCalledTimes(2);
 });
 
-it("retries an overlapping failed prewarm before writing an image recovery draft", async () => {
+it("retries a failed retired-asset prewarm before writing a recovery draft", async () => {
   harness = harnessBridge("scene");
   putSceneAsset(harness.sourceDoc, IMAGE_DESCRIPTOR);
   insertElementRevision(harness.sourceDoc, {
@@ -828,10 +948,16 @@ it("retries an overlapping failed prewarm before writing an image recovery draft
   render(
     <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
   );
-  await waitFor(() => expect(readAsset).toHaveBeenCalledOnce());
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
 
   act(() => screen.getByTestId("type").click());
-  harness.emit("deleted", 0);
+  await waitFor(() =>
+    expect(screen.getByTestId("state").textContent).toBe("saving"),
+  );
+  harness.emitLineageReplacement("unused");
+  await waitFor(() => expect(readAsset).toHaveBeenCalledOnce());
   await act(async () => {
     rejectPrewarm(new Error("temporary read failure"));
     await prewarm.catch(() => undefined);

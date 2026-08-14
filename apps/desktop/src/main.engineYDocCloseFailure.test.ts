@@ -232,7 +232,7 @@ describe("engine Y.Doc artifact assets stay bound to one authorized session", ()
     expect(handler).toContain("entry.sender !== event.sender");
     expect(handler).toContain("entry.generation !== rendererGeneration(event.sender.id)");
     expect(handler).toContain("entry.artifactAssetsById.get(input.assetId)");
-    expect(handler).toContain("entry.session.readArtifactAsset(input.assetId)");
+    expect(handler).toContain("entry.session.readArtifactAsset(descriptor)");
     expect(handler).not.toContain("workspaceId");
     expect(handler).not.toContain("versionId");
     expect(handler).not.toContain("input.ref");

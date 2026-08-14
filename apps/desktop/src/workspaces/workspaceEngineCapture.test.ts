@@ -34,6 +34,7 @@ import {
 } from "./workspaceEngineCapture";
 import {
   DaemonRefusalError,
+  type ArtifactAssetDescriptor,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
   VERSIONED_METHOD,
@@ -3445,8 +3446,103 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
       params: { versionId: "main", path: assetPath, origin: "api" },
     });
 
-    await expect(session.readArtifactAsset("image-file")).resolves.toEqual({
-      descriptor: session.artifactAssets?.[0],
+    const descriptor = session.artifactAssets?.[0];
+    expect(descriptor).toBeDefined();
+    await expect(session.readArtifactAsset(descriptor!)).resolves.toEqual({
+      descriptor,
+      bytes,
+    });
+    await session.close({ settle: false });
+    await engine.stop();
+  });
+
+  it("exposes replacement assets after a live lineage resync", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    const path = "drawings/replaced-assets.excalidraw";
+    const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47]);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const losing: ArtifactAssetDescriptor = {
+      id: "losing-image",
+      mimeType: "image/png",
+      created: 1,
+      ref: `assets/excalidraw/${"a".repeat(64)}/${"b".repeat(64)}.png`,
+      sha256: "a".repeat(64),
+    };
+    const winning: ArtifactAssetDescriptor = {
+      id: "winning-image",
+      mimeType: "image/png",
+      created: 2,
+      ref: `assets/excalidraw/${"c".repeat(64)}/${sha256}.png`,
+      sha256,
+    };
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path,
+      text: '{"type":"excalidraw","elements":[],"appState":{},"files":{}}',
+    });
+    loopback.seedBinaryFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: winning.ref,
+      bytes: Array.from(bytes),
+      origin: "sync",
+    });
+    let replaceLineage!: () => void;
+    let activeAssets: readonly ArtifactAssetDescriptor[] = [losing];
+    let lineageClaimId = "losing-claim";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      daemonOwnsCapture: true,
+      openRustYDocProviderSession: async (options) => {
+        const doc = new Y.Doc();
+        const provider = {
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          get lineageClaimId() {
+            return lineageClaimId;
+          },
+          contentKind: "scene" as const,
+          path: options.path,
+          head: "present" as const,
+          lineage: "existing" as const,
+          get artifactAssets() {
+            return activeAssets;
+          },
+          evict: async () => undefined,
+          applyLocalUpdate: async () => undefined,
+          applyExternalMarkdownEdit: async (markdown: string) => ({
+            kind: "merged" as const,
+            markdown,
+          }),
+          settleNow: async () => ({
+            sha256: "c".repeat(64),
+            content: "",
+          }) as never,
+          close: async () => undefined,
+        } satisfies EngineYdocProviderSession;
+        replaceLineage = () => {
+          activeAssets = [winning];
+          lineageClaimId = "winning-claim";
+          options.onLineageReplaced?.(new Y.Doc(), []);
+        };
+        return provider;
+      },
+    });
+    const replacements: Uint8Array[] = [];
+    const session = await engine.openYDocSession({
+      path,
+      onRemoteUpdate: () => undefined,
+      onLineageReplaced: (update) => replacements.push(update),
+    });
+
+    replaceLineage();
+
+    expect(replacements).toHaveLength(1);
+    expect(session.artifactAssets).toEqual([winning]);
+    await expect(session.readArtifactAsset(winning)).resolves.toEqual({
+      descriptor: winning,
       bytes,
     });
     await session.close({ settle: false });
