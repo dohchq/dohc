@@ -24,18 +24,18 @@ export const LOCAL_EXCALIDRAW_ORIGIN: unique symbol = Symbol(
 export type SceneRemoteEchoes = {
   // Revision tuples of the elements the LAST remote render handed the canvas.
   elements: Set<string>;
-  // Durable app-state values recent remote renders handed the canvas, per
-  // key. Unlike elements these carry no revision identity, so a delayed
+  // Durable app-state values remote renders handed the canvas, per key.
+  // Unlike elements these carry no revision identity, so a delayed
   // callback's stale value can only be recognized by remembering the values
-  // themselves. Bounded per key; consumed on echo.
+  // themselves. Every unconsumed value is retained — evicting one would let
+  // a long enough burst of renders replay its stale value — and the each-
+  // callback consume paths plus canvas remounts keep the sets small.
   appState: Map<string, Set<string>>;
 };
 
 export function createSceneRemoteEchoes(): SceneRemoteEchoes {
   return { elements: new Set(), appState: new Map() };
 }
-
-const MAX_REMEMBERED_APP_STATE_VALUES = 8;
 
 export function sceneForCanvas(doc: Y.Doc): {
   elements: ElementSnapshot[];
@@ -66,13 +66,7 @@ export function rememberRemoteScene(
       values = new Set();
       echoes.appState.set(key, values);
     }
-    const encoded = stableJson(jsonValueOf(value));
-    values.delete(encoded);
-    values.add(encoded);
-    while (values.size > MAX_REMEMBERED_APP_STATE_VALUES) {
-      const oldest = values.values().next().value!;
-      values.delete(oldest);
-    }
+    values.add(stableJson(jsonValueOf(value)));
   }
 }
 
@@ -83,6 +77,10 @@ export function applyCanvasSceneChange(input: {
   files: Record<string, unknown>;
   remoteEchoes: SceneRemoteEchoes;
   hydratedFileIds?: ReadonlySet<string>;
+  // The transaction origin of THIS canvas. Two panes of one document share
+  // one Y.Doc; each pane must recognize only its own transactions as local,
+  // so the other pane's edits still render into it.
+  origin?: unknown;
 }): { changed: boolean; assetsRefused: boolean } {
   const current = foldScene(input.doc);
   const currentElements = new Map(
@@ -171,7 +169,7 @@ export function applyCanvasSceneChange(input: {
       setAppStateProperty(input.doc, key, jsonValue);
       changed = true;
     }
-  }, LOCAL_EXCALIDRAW_ORIGIN);
+  }, input.origin ?? LOCAL_EXCALIDRAW_ORIGIN);
   return { changed, assetsRefused };
 }
 

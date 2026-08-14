@@ -9421,6 +9421,13 @@ fn seed_scene_from_artifact_on_store(
             .as_bytes()
         )
     );
+    // Only the moment ids whose head writes were actually enqueued: a planned
+    // asset whose content-addressed path already holds matching content takes
+    // the `continue` below and creates no moment, and counting it as a
+    // materialization job would reject the open as pending forever. The
+    // guarded closure can run again after a crash retry, so it rebuilds the
+    // list from scratch each attempt.
+    let mut created_moment_ids: Vec<String> = Vec::new();
     let outcome = dohc_engine_collab::record_local_update_creating_marker_guarded(
         store,
         key,
@@ -9435,6 +9442,7 @@ fn seed_scene_from_artifact_on_store(
         faults,
         now_ms,
         |tx, _| {
+            created_moment_ids.clear();
             let version_is_active: bool = tx
                 .query_row(
                     "SELECT ?2 = COALESCE( \
@@ -9500,6 +9508,7 @@ fn seed_scene_from_artifact_on_store(
                     .map_err(|error| CollabError::Corrupt {
                         reason: format!("scene asset outbound journal failed: {error}"),
                     })?;
+                created_moment_ids.push(asset.moment_id.clone());
             }
             Ok(())
         },
@@ -9507,7 +9516,7 @@ fn seed_scene_from_artifact_on_store(
     if matches!(outcome, TxnOutcome::Crashed { .. }) {
         return Err(RuntimeError::OperationCrashed);
     }
-    Ok(assets.into_iter().map(|asset| asset.moment_id).collect())
+    Ok(created_moment_ids)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13022,6 +13031,67 @@ mod scene_seed_transaction_tests {
                 Ok::<_, StorageError>(())
             })
             .expect("inspect rolled-back transaction");
+    }
+
+    #[test]
+    fn duplicate_content_scene_assets_return_only_created_jobs() {
+        let scratch = ScratchDir::new().expect("scratch directory");
+        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
+            .expect("open engine store");
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
+            .expect("ensure main version");
+        let key = DocKey::new("workspace", "main", "drawing-object").expect("document key");
+        // Two file ids with IDENTICAL bytes and mime type resolve to one
+        // content-addressed path. Counting the skipped duplicate as a
+        // materialization job would reject the first open as
+        // ydoc-artifact-assets-pending forever.
+        let artifact = serde_json::json!({
+            "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+            "elements": [
+                {
+                    "id": "first-image", "type": "image", "version": 1,
+                    "versionNonce": 1, "isDeleted": false, "index": "a0",
+                    "fileId": "image-a"
+                },
+                {
+                    "id": "second-image", "type": "image", "version": 1,
+                    "versionNonce": 2, "isDeleted": false, "index": "a1",
+                    "fileId": "image-b"
+                }
+            ],
+            "appState": {},
+            "files": {
+                "image-a": {
+                    "id": "image-a", "mimeType": "image/png", "created": 1,
+                    "dataURL": "data:image/png;base64,AQIDBA=="
+                },
+                "image-b": {
+                    "id": "image-b", "mimeType": "image/png", "created": 2,
+                    "dataURL": "data:image/png;base64,AQIDBA=="
+                }
+            }
+        })
+        .to_string();
+        let jobs = seed_scene_from_artifact_on_store(
+            &mut store,
+            &key,
+            "drawing.excalidraw",
+            &artifact,
+            "drawing-write",
+            2,
+            &NoFaults,
+        )
+        .expect("seed scene");
+        // Every returned moment id must name a job that actually exists.
+        for job_id in &jobs {
+            assert!(
+                store
+                    .load_materialization_job(job_id)
+                    .expect("load job")
+                    .is_some(),
+                "returned moment id {job_id} has no materialization job",
+            );
+        }
     }
 
     #[test]

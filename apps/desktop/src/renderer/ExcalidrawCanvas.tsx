@@ -24,7 +24,6 @@ import { bridge } from "./bridge";
 import {
   applyCanvasSceneChange,
   createSceneRemoteEchoes,
-  LOCAL_EXCALIDRAW_ORIGIN,
   rememberRemoteScene,
   sceneForCanvas,
   type SceneRemoteEchoes,
@@ -90,6 +89,10 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
   const [readyApi, setReadyApi] = useState<ExcalidrawImperativeAPI | null>(null);
   const [presenceBound, setPresenceBound] = useState(false);
   const remoteEchoes = useRef<SceneRemoteEchoes>(createSceneRemoteEchoes());
+  // Per-canvas, not module-global: two panes of one document share one
+  // Y.Doc, and each pane must treat only ITS OWN transactions as local — the
+  // other pane's edits are remote to this one and must render here.
+  const localOrigin = useRef<symbol>(Symbol("dohc.localExcalidrawChange"));
   const hydratedFileIds = useRef<Set<string>>(new Set());
   const presenceBinding = useRef<ExcalidrawPresenceBinding | null>(null);
   const presenceHandoff = useRef<Promise<void>>(Promise.resolve());
@@ -133,7 +136,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
     const doc = props.sceneDoc;
     if (!doc) return;
     const onTransaction = (transaction: Y.Transaction) => {
-      if (transaction.origin === LOCAL_EXCALIDRAW_ORIGIN) return;
+      if (transaction.origin === localOrigin.current) return;
       renderSceneDoc();
     };
     doc.on("afterTransaction", onTransaction);
@@ -265,6 +268,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
                     files: files as unknown as Record<string, unknown>,
                     remoteEchoes: remoteEchoes.current,
                     hydratedFileIds: hydratedFileIds.current,
+                    origin: localOrigin.current,
                   });
                   if (result.assetsRefused) {
                     props.onAssetRefusedChange?.(true);
