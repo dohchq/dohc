@@ -2,6 +2,7 @@ import {
   EXCALIDRAW_EXPORTABLE_APP_STATE,
   foldScene,
   insertElementRevision,
+  revisionDominates,
   revisionKey,
   setAppStateProperty,
   stableJson,
@@ -50,10 +51,7 @@ export function applyCanvasSceneChange(input: {
 }): { changed: boolean; assetsRefused: boolean } {
   const current = foldScene(input.doc);
   const currentElements = new Map(
-    current.elements.map((element) => [
-      element.id,
-      revisionKey(element.id, element.version, element.versionNonce),
-    ]),
+    current.elements.map((element) => [element.id, element]),
   );
   let changed = false;
   let assetsRefused = false;
@@ -80,7 +78,33 @@ export function applyCanvasSceneChange(input: {
         input.remoteEchoes.delete(key);
         continue;
       }
-      if (currentElements.get(element.id) === key) continue;
+      const winner = currentElements.get(element.id);
+      if (
+        winner &&
+        revisionKey(winner.id, winner.version, winner.versionNonce) === key
+      ) {
+        continue;
+      }
+      if (
+        winner &&
+        revisionDominates(winner, element.version, element.versionNonce)
+      ) {
+        // A delayed Excalidraw callback can replay a render whose echo
+        // identity a newer remote render already replaced. The fold would
+        // discard this revision; writing it would journal and transmit a
+        // record every reader drops.
+        continue;
+      }
+      if (
+        element.type === "text" &&
+        element.isDeleted !== true &&
+        (typeof element.text !== "string" || element.text.length === 0)
+      ) {
+        // Excalidraw streams a text element while it is being typed. Both
+        // folds drop live text without content, so the revision is only
+        // written once it carries text.
+        continue;
+      }
       if (insertElementRevision(input.doc, element)) changed = true;
     }
 

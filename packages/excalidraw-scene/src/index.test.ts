@@ -145,6 +145,37 @@ describe("element revisions", () => {
   });
 });
 
+describe("live text content", () => {
+  it("drops live text without content the way the Rust fold does", () => {
+    const doc = new Y.Doc();
+    const revisions = declareSceneRoots(doc).revisions;
+    // Raw remote records bypass insertElementRevision's validation.
+    revisions.set(
+      revisionKey("empty", 1, 1),
+      stableJson(element("empty", 1, 1, { type: "text" })),
+    );
+    revisions.set(
+      revisionKey("blank", 1, 1),
+      stableJson(element("blank", 1, 1, { type: "text", text: "" })),
+    );
+    revisions.set(
+      revisionKey("gone", 1, 1),
+      stableJson(element("gone", 1, 1, { type: "text", isDeleted: true })),
+    );
+    insertElementRevision(
+      doc,
+      element("titled", 1, 1, { type: "text", text: "hi" }),
+    );
+    expect(foldScene(doc).elements.map((item) => item.id).sort()).toEqual([
+      "gone",
+      "titled",
+    ]);
+    expect(() =>
+      insertElementRevision(doc, element("live", 1, 1, { type: "text", text: "" })),
+    ).toThrow("live text element");
+  });
+});
+
 describe("portable export", () => {
   it("omits tombstones, asset references, private app state, and file bytes", () => {
     const doc = new Y.Doc();

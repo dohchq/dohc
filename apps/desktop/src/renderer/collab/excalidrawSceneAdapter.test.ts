@@ -97,6 +97,74 @@ describe("Excalidraw scene adapter", () => {
     expect(Y.encodeStateAsUpdate(doc, before)).toHaveLength(2);
   });
 
+  it("discards a delayed callback for a revision a newer remote render replaced", () => {
+    const doc = new Y.Doc();
+    const first = rectangle(1, 9, 10);
+    insertElementRevision(doc, first);
+    const echoes = new Set<string>();
+    rememberRemoteScene(sceneForCanvas(doc).elements, echoes);
+    // A second remote render replaces the echo identities before Excalidraw
+    // delivers the first render's callback.
+    insertElementRevision(doc, rectangle(2, 7, 20));
+    rememberRemoteScene(sceneForCanvas(doc).elements, echoes);
+
+    const result = applyCanvasSceneChange({
+      doc,
+      elements: [first],
+      appState: {},
+      files: {},
+      remoteEchoes: echoes,
+    });
+
+    expect(result.changed).toBe(false);
+    // The superseded revision was NOT re-added beside the winner.
+    expect([...declareSceneRoots(doc).revisions.keys()]).toEqual([
+      revisionKey("shape", 2, 7),
+    ]);
+
+    // A real local edit is strictly newer than the winner and still lands.
+    const edited = applyCanvasSceneChange({
+      doc,
+      elements: [rectangle(3, 5, 40)],
+      appState: {},
+      files: {},
+      remoteEchoes: echoes,
+    });
+    expect(edited.changed).toBe(true);
+    expect(foldScene(doc).elements[0]?.x).toBe(40);
+  });
+
+  it("keeps a typed-out text element away from the document until it has text", () => {
+    const doc = new Y.Doc();
+    const echoes = new Set<string>();
+    const emptyText = {
+      id: "note",
+      type: "text",
+      version: 1,
+      versionNonce: 4,
+      isDeleted: false,
+      index: "a2",
+      text: "",
+    };
+    const empty = applyCanvasSceneChange({
+      doc,
+      elements: [emptyText],
+      appState: {},
+      files: {},
+      remoteEchoes: echoes,
+    });
+    expect(empty.changed).toBe(false);
+    const typed = applyCanvasSceneChange({
+      doc,
+      elements: [{ ...emptyText, version: 2, versionNonce: 3, text: "hello" }],
+      appState: {},
+      files: {},
+      remoteEchoes: echoes,
+    });
+    expect(typed.changed).toBe(true);
+    expect(foldScene(doc).elements[0]?.text).toBe("hello");
+  });
+
   it("consumes a normalized callback for the same remote revision tuple", () => {
     const doc = new Y.Doc();
     const sparseRemote = {

@@ -106,7 +106,7 @@ export function insertElementRevision(doc: Y.Doc, input: unknown): boolean {
     for (const observedKey of observed) {
       try {
         const [id, version, nonce] = parseRevisionKey(observedKey);
-        if (id === element.id && dominates(element, version, nonce)) {
+        if (id === element.id && revisionDominates(element, version, nonce)) {
           revisions.delete(observedKey);
         }
       } catch {
@@ -308,6 +308,17 @@ function validateElement(input: unknown): ElementSnapshot {
     throw new SceneCodecError("A selection cannot be stored as a drawing element.");
   if (typeof input.isDeleted !== "boolean")
     throw new SceneCodecError("The element deletion flag must be a Boolean.");
+  if (
+    input.type === "text" &&
+    input.isDeleted === false &&
+    (typeof input.text !== "string" || input.text.length === 0)
+  ) {
+    // Mirrors the Rust fold's valid_restorable_element: the durable
+    // projection drops live text without content, so a revision this side
+    // accepted would render an element the artifact never keeps. Deleted
+    // snapshots may still omit their text.
+    throw new SceneCodecError("A live text element must contain text.");
+  }
   if ("index" in input && input.index !== null && typeof input.index !== "string")
     throw new SceneCodecError("The element index must be a string, null, or missing.");
   stableJson(input);
@@ -406,7 +417,14 @@ function isWorkspaceRelativeRef(ref: string): boolean {
   return parts.every((part) => part.length > 0 && part !== "." && part !== "..");
 }
 
-function dominates(element: ElementSnapshot, version: number, nonce: number): boolean {
+// The fold's revision order: a higher version wins, and the LOWER nonce wins
+// a version tie. Exported so a canvas adapter can discard a superseded
+// revision the same way the fold would.
+export function revisionDominates(
+  element: ElementSnapshot,
+  version: number,
+  nonce: number,
+): boolean {
   return element.version > version || (element.version === version && element.versionNonce < nonce);
 }
 
