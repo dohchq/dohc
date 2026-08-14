@@ -508,6 +508,53 @@ describe("LinkedChatsPanel share level", () => {
     );
   });
 
+  // A reaction is a WRITE, so a share that refuses writes offers no PICKER.
+  // The reactions already on a message are part of the CONVERSATION, though,
+  // and a reader who can see the messages must see who reacted to them —
+  // dropping the whole prop hid other people's reactions along with the
+  // affordance to add one.
+  it("shows existing reactions but no picker when the share refuses writes", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        {
+          id: "message-1",
+          threadId: "thread-1",
+          authorKind: "human",
+          authorDisplayName: "Granter",
+          body: "the comet tail",
+          createdAtMs: 1,
+          attachments: [],
+        },
+      ],
+    });
+    bridgeMock.listChatReactions.mockResolvedValue({
+      reactions: [
+        {
+          reactionId: "r1",
+          messageId: "message-1",
+          threadId: "thread-1",
+          emoji: "👍",
+          authorId: "someone@example.com",
+          authorKind: "human",
+          authorDisplayName: "someone@example.com",
+        },
+      ],
+      viewerAuthorId: "you@example.com",
+    });
+
+    render(panel({ shareReadOnly: true, initialThread: searchThread }));
+
+    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
+    expect(
+      screen.getAllByTestId("linked-chat-reaction-pill").length,
+      "MUTATION: dropping reactionControls hides other people's reactions too",
+    ).toBeGreaterThan(0);
+    expect(
+      screen.queryByTestId("linked-chat-add-reaction"),
+      "MUTATION: a share that refuses writes must not offer the picker",
+    ).toBeNull();
+  });
+
   it("keeps the composer on a workspace this machine owns", async () => {
     render(panel({ initialThread: searchThread }));
 

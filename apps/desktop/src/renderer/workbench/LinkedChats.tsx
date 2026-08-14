@@ -334,18 +334,17 @@ export function LinkedChatsPanel(props: {
           emptyLabel={`No messages yet${filePath ? ` about ${basename(filePath)}` : ""}.`}
           endRef={messagesEndRef}
           onOpenPath={props.onOpenPath}
-          {...(readOnly
-            ? {}
-            : {
-                // A reaction is a WRITE. Offering the picker on a share that
-                // refuses writes paints it optimistically and then errors
-                // with the sentence already printed under the thread.
-                reactionControls: {
-                  reactions,
-                  viewerAuthorId,
-                  onToggle: toggleReaction,
-                },
-              })}
+          reactionControls={{
+            reactions,
+            viewerAuthorId,
+            onToggle: toggleReaction,
+            // A reaction is a WRITE, so a share that refuses writes offers no
+            // PICKER — but the reactions already on a message are part of the
+            // conversation and stay readable. `readOnly` is the affordance
+            // built for exactly this; omitting the whole prop would have
+            // hidden other people's reactions too.
+            readOnly,
+          }}
         />
         {readOnly ? (
           <ReadOnlyNotice />

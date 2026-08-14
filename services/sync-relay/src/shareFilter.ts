@@ -667,16 +667,18 @@ function threadCreateBinding(record: Record<string, unknown>): ThreadFileBinding
 // a deleted one (null) both deny. Hiding the discussion about a deleted file
 // is the fail-closed answer and the simple one to state.
 //
-// Both shapes are answered from the log, and neither is taken on trust. An
-// object binding reads the object's current path. A PATH binding — the shape a
-// recipient's own create carries — is re-proved by asking which object sits at
-// that path now: returning the stored string verbatim would pin the thread to
-// a path it was created at, and the discussion would keep serving after the
-// file was renamed out of the share or deleted.
+// Both shapes are answered from the log, and neither is taken on trust.
 //
-// Residual, accepted: a NEW file later created at the same path re-attaches
-// the old discussion to it. The path is inside the selector either way, so
-// this is mis-association, not disclosure.
+// An OBJECT binding reads the object's current path, so the thread follows its
+// file through renames inside the share and stops at one that leaves it.
+// Every binding written from now on is this shape: the append route converts a
+// recipient's path to the granter's own object id at the accept door, where an
+// object is provably at that path (`server.ts`).
+//
+// A PATH binding is therefore only a row written before that conversion
+// existed. It is re-proved by asking which object sits at that path NOW, so
+// such a row still cannot outlive its file — it just cannot follow one either,
+// which is why new accepts do not produce them.
 function resolvedThreadPath(
   chat: ShareFileChatResolver,
   binding: ThreadFileBinding | null | undefined,

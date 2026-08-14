@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import {
+  assertShareChatWritable,
+  type ShareChatWriteScope,
+} from "./workspaces/shareChatGate";
 import { CHANNELS } from "./ipc/channels";
 import {
   ListChatChannelSharesResult,
@@ -1339,25 +1343,29 @@ describe("chat scope write gate (#646 PR2)", () => {
   type ShareAccess = "view" | "comment" | "edit";
   type ChatScope =
     | { kind: "workspace"; workspace: { workspaceId: string } }
-    | {
-        kind: "share";
-        workspace: { workspaceId: string };
-        access: ShareAccess | null;
-        ended?: boolean;
-      };
+    | ({ kind: "share"; workspace: { workspaceId: string } } & ShareChatWriteScope);
 
   const workspaceId = "workspace-share";
 
-  // The gate exactly as main defines it, over the scope the factory hands it.
-  // Positive recognition, and an ended share refuses whatever it granted.
+  // A share scope with every field main fills in. Defaults are the healthy
+  // case; each test overrides the one thing it is about.
+  function shareScope(over: Partial<ShareChatWriteScope>): ChatScope {
+    return {
+      kind: "share",
+      workspace: { workspaceId },
+      access: "comment",
+      ended: false,
+      authorUserId: "recipient",
+      ...over,
+    };
+  }
+
+  // THE REAL GATE, not a copy of it. A re-implementation here proves only
+  // that the copy behaves, and the copy this replaced had already drifted
+  // from main — it made `ended` optional where main makes it required.
   function assertChatWritable(scope: ChatScope): void {
     if (scope.kind !== "share") return;
-    if (scope.ended === true) {
-      throw new Error("This shared file is read-only for you.");
-    }
-    if (scope.access !== "comment" && scope.access !== "edit") {
-      throw new Error("This shared file is read-only for you.");
-    }
+    assertShareChatWritable(scope);
   }
 
   function harnessFor(scope: ChatScope) {
@@ -1388,12 +1396,7 @@ describe("chat scope write gate (#646 PR2)", () => {
     // writes — the same rule an ended chat-channel grant follows. Without
     // this the row lands durably, the panel shows it, and the push bails on
     // `ended` first thing: a write that looks sent and never is.
-    const { ipc, run, deps } = harnessFor({
-      kind: "share",
-      workspace: { workspaceId },
-      access: "comment",
-      ended: true,
-    });
+    const { ipc, run, deps } = harnessFor(shareScope({ ended: true }));
     ipc.handle(
       CHANNELS.setChatReaction,
       createSetChatReactionIpcHandler({
@@ -1412,11 +1415,7 @@ describe("chat scope write gate (#646 PR2)", () => {
     ).not.toHaveBeenCalled();
   });
   it("refuses a mutation at view level with the refusal words, before the store", async () => {
-    const { ipc, run, deps } = harnessFor({
-      kind: "share",
-      workspace: { workspaceId },
-      access: "view",
-    });
+    const { ipc, run, deps } = harnessFor(shareScope({ access: "view" }));
     ipc.handle(
       CHANNELS.setChatReaction,
       createSetChatReactionIpcHandler({
@@ -1437,11 +1436,7 @@ describe("chat scope write gate (#646 PR2)", () => {
 
   it("runs the same mutation at comment and at edit", async () => {
     for (const access of ["comment", "edit"] as const) {
-      const { ipc, run, deps } = harnessFor({
-        kind: "share",
-        workspace: { workspaceId },
-        access,
-      });
+      const { ipc, run, deps } = harnessFor(shareScope({ access }));
       ipc.handle(
         CHANNELS.setChatReaction,
         createSetChatReactionIpcHandler({
@@ -1479,11 +1474,7 @@ describe("chat scope write gate (#646 PR2)", () => {
     // Read state is the reader's own, written locally and never replicated.
     // `assertWritable: null` is the call site saying so out loud.
     for (const access of ["view", "comment", "edit"] as const) {
-      const { ipc, run, deps } = harnessFor({
-        kind: "share",
-        workspace: { workspaceId },
-        access,
-      });
+      const { ipc, run, deps } = harnessFor(shareScope({ access }));
       ipc.handle(
         CHANNELS.markChatThreadRead,
         createSharedChannelWritableChatIpcHandler({
@@ -1500,16 +1491,8 @@ describe("chat scope write gate (#646 PR2)", () => {
   });
 
   it("still refuses an untrusted sender before it ever resolves a scope", async () => {
-    const requireContext = vi.fn(async () => ({
-      kind: "share" as const,
-      workspace: { workspaceId },
-      access: "comment" as const,
-    }));
-    const { ipc, run, deps } = harnessFor({
-      kind: "share",
-      workspace: { workspaceId },
-      access: "comment",
-    });
+    const requireContext = vi.fn(async () => shareScope({}));
+    const { ipc, run, deps } = harnessFor(shareScope({}));
     ipc.handle(
       CHANNELS.setChatReaction,
       createSetChatReactionIpcHandler({

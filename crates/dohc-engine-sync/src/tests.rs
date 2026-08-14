@@ -22749,41 +22749,222 @@ fn share_view_push_offers_nothing_at_view_level() {
 }
 
 /// The allowlist and the match arms that act on it must name the same kinds.
-/// The match keeps its own `_ => Err` floor, so a kind added to one and not
-/// the other fails closed — but silently, and this is what makes it loud.
+///
+/// The previous version of this test asserted the outcome was not
+/// `UnsupportedOperation`, which BOTH the chat branch and the terminal deny
+/// satisfy — it could not fail for the mutation it was labelled with. This one
+/// makes the dispatch observable: an in-grant op of each kind must APPLY, and
+/// the terminal deny can never produce that.
 #[test]
 fn share_view_chat_kinds_and_the_boundary_match_agree() {
     use crate::share::SHARE_VIEW_CHAT_KINDS;
     let (_scratch, _path, mut engine, boundary) = share_view_chat_fixture();
+
+    // The thread and message the last three kinds hang off, applied through
+    // the same boundary so nothing is planted behind it.
+    apply_shared_envelope(
+        &mut engine,
+        &boundary,
+        &thread_create(
+            0,
+            "thread-kinds",
+            json!({ "linkedPath": "shared/docs/in.md" }),
+        ),
+        &NoFaults,
+    )
+    .expect("create applies");
+    apply_shared_envelope(
+        &mut engine,
+        &boundary,
+        &thread_message(1, "thread-kinds", "m-kinds"),
+        &NoFaults,
+    )
+    .expect("message applies");
+
+    let payload_for = |kind: &str| match kind {
+        "chat.reaction.set" => json!({
+            "reactionId": "r-kinds",
+            "messageId": "m-kinds",
+            "threadId": "thread-kinds",
+            "emoji": "👍",
+            "authorId": "u",
+            "authorKind": "human",
+            "authorDisplayName": "U",
+            "state": "added",
+            "atMs": 10,
+        }),
+        "chat.decision.set" => json!({
+            "threadId": "thread-kinds",
+            "messageId": "m-kinds",
+            "state": "open",
+            "atMs": 10,
+        }),
+        "chat.attachment.add" => json!({
+            "attachmentId": "a-kinds",
+            "threadId": "thread-kinds",
+            "messageId": "m-kinds",
+            "targetKind": "file",
+            "createdAtMs": 10,
+        }),
+        other => panic!("no payload for {other}"),
+    };
+
+    let mut seq = 2_i64;
     for kind in SHARE_VIEW_CHAT_KINDS {
-        let op = if kind == "chat.thread.create" {
-            thread_create(
-                0,
-                "thread-kinds",
-                json!({ "linkedPath": "shared/docs/in.md" }),
-            )
-        } else {
-            envelope(
-                "granter",
-                0,
-                kind,
-                json!({"threadId":"thread-kinds","messageId":"m","attachmentId":"a","reactionId":"r","emoji":"x","authorId":"u","authorKind":"human","authorDisplayName":"G","body":"b","state":"open","targetKind":"file","createdAtMs":1,"atMs":1}),
-            )
-        };
-        // Every kind on the list must reach the CHAT branch, which answers with
-        // a scope or apply verdict — never the terminal "a share does not
-        // carry this kind" deny the match's floor produces.
-        let outcome = apply_shared_envelope(&mut engine, &boundary, &op, &NoFaults);
-        let reached_chat_branch = match &outcome {
-            Ok(_) => true,
-            Err(SyncError::ShareBoundaryViolation) => true,
-            Err(SyncError::InvalidInput { .. }) => true,
-            other => panic!("{kind} produced {other:?}"),
-        };
-        assert!(reached_chat_branch, "{kind} did not reach the chat branch");
+        // The first two already applied above; the rest apply here. Every kind
+        // on the list must reach the chat branch and be APPLIED by it.
+        if kind == "chat.thread.create" || kind == "chat.message.append" {
+            continue;
+        }
+        let outcome = apply_shared_envelope(
+            &mut engine,
+            &boundary,
+            &envelope("granter", seq, kind, payload_for(kind)),
+            &NoFaults,
+        )
+        .unwrap_or_else(|error| panic!("{kind} was refused: {error:?}"));
         assert!(
-            !matches!(outcome, Err(SyncError::UnsupportedOperation)),
-            "MUTATION: {kind} is on SHARE_VIEW_CHAT_KINDS but the match does not act on it",
+            matches!(outcome, ApplyOutcome::Applied(_)),
+            "MUTATION: {kind} is on SHARE_VIEW_CHAT_KINDS but the match does not apply it",
+        );
+        seq += 1;
+    }
+}
+
+/// The other half of the accept-door conversion (#646 PR2, review): a
+/// recipient's create reaches the GRANTER naming the granter's own object,
+/// because the relay converted it. It takes the ordinary object lane — the
+/// same one the granter's own creates take — with no share context needed.
+#[test]
+fn a_recipient_thread_create_arrives_object_bound_on_the_owner_lane() {
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    seed_text_head(&mut engine, "granter-object", "shared/docs/in.md", "inside");
+    let operation = envelope(
+        "share:share-1:recipient",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "thread-from-recipient",
+            "title": "A question",
+            "createdAtMs": 1,
+            "linkedAtMs": 1,
+            "linkedObjectId": "granter-object",
+        }),
+    );
+    apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("recipient thread applies");
+    let bound: Option<String> = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT linked_object_id FROM chat_threads \
+                 WHERE workspace_id='ws' AND thread_id='thread-from-recipient'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)
+        })
+        .expect("thread row");
+    assert_eq!(bound.as_deref(), Some("granter-object"));
+}
+
+/// The same composability question on the recipient's side, at BOTH of its
+/// denial sites. `paths` and `versionId` are independent dimensions, so the
+/// paths-only rule must key on "names no paths" — never on "names a version".
+#[test]
+fn share_view_chat_composes_paths_with_a_version() {
+    for (label, version_id, expect_chat) in [
+        ("paths only", None, true),
+        ("paths AND a version", Some("v1"), true),
+        ("version only", Some("v1"), false),
+    ] {
+        let (_scratch, _path, mut engine, _default) = share_view_chat_fixture();
+        let paths = if label == "version only" {
+            Vec::new()
+        } else {
+            vec!["shared/docs".to_owned()]
+        };
+        let boundary = ShareBoundary {
+            share_id: "share-compose".to_owned(),
+            surface: ShareSurface::ShareView,
+            channel_wire_id: None,
+            granted: Some(ShareGrant {
+                paths,
+                version_id: version_id.map(str::to_owned),
+                access: crate::ShareAccess::Comment,
+            }),
+        };
+        let create = thread_create(
+            0,
+            "thread-compose",
+            json!({ "linkedPath": "shared/docs/in.md" }),
+        );
+        let applied = apply_shared_envelope(&mut engine, &boundary, &create, &NoFaults).is_ok();
+        assert_eq!(
+            applied, expect_chat,
+            "MUTATION: the inbound boundary read the wrong dimension ({label})",
+        );
+    }
+}
+
+#[test]
+fn share_view_push_composes_paths_with_a_version() {
+    for (label, paths, version_id, expect_pushed) in [
+        ("paths only", vec!["shared/docs".to_owned()], None, 1_usize),
+        (
+            "paths AND a version",
+            vec!["shared/docs".to_owned()],
+            Some("v1"),
+            1,
+        ),
+        ("version only", Vec::new(), Some("v1"), 0),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        seed_identity(&mut engine);
+        VersionedTextStore::new(&mut engine)
+            .ensure_main_version("ws", "main", 1_000, &NoFaults)
+            .expect("main version");
+        seed_text_head(&mut engine, "object-in", "shared/docs/in.md", "inside");
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO chat_threads \
+                     (workspace_id,thread_id,title,created_at_ms,updated_at_ms,linked_object_id,linked_path_hint,linked_at_ms,channel_id) \
+                     VALUES ('ws','thread-in','Thread',1,1,'object-in',NULL,1,NULL)",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<(), SyncError>(())
+            })
+            .expect("thread fixture");
+        journal_local_replication_op(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "chat.message.append",
+            &json!({"threadId":"thread-in","messageId":"m-in"}),
+            1_001,
+            &NoFaults,
+        )
+        .expect("journal");
+
+        let granted = ShareGrant {
+            paths,
+            version_id: version_id.map(str::to_owned),
+            access: crate::ShareAccess::Comment,
+        };
+        let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+        let pushed = client
+            .push_share_view(&mut engine, "ws", "share-compose", &granted, &NoFaults)
+            .expect("share view push")
+            .pushed;
+        assert_eq!(
+            pushed, expect_pushed,
+            "MUTATION: the push lane read the wrong dimension ({label})",
         );
     }
 }

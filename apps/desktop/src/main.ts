@@ -442,6 +442,7 @@ import {
   recordedShareSelector,
   refreshSharedViewOnce,
 } from "./workspaces/sharedView";
+import { assertShareChatWritable } from "./workspaces/shareChatGate";
 import {
   assertMountableSelector,
   createMountDirectory,
@@ -6525,23 +6526,11 @@ function registerIpcHandlers(
   // discussion about its files and adds nothing to it; comment and edit both
   // write. The relay refuses the push again with the same words, so the
   // renderer disabling its composer is honesty, not authorization.
+  // A local workspace is writable by definition; a share view answers to the
+  // shared rule, which the tests drive directly rather than re-implementing.
   function assertChatWritable(scope: ChatScope): void {
     if (scope.kind !== "share") return;
-    // An ENDED share is a read-only local copy, the same rule
-    // `assertSharedChannelWritable` applies to an ended channel grant. The
-    // push bails on `ended` first thing, so without this the row would land
-    // durably, show in the panel, and never be sent to anyone.
-    if (scope.ended) throw new SharedFileReadOnlyError();
-    if (scope.access !== "comment" && scope.access !== "edit") {
-      throw new SharedFileReadOnlyError();
-    }
-    // A comment on someone else's share is only a comment once it reaches
-    // them, and a chat op replicates only when its author carries a user id.
-    // Without one this write would look sent and stay on this machine, which
-    // is worse than refusing it.
-    if (!scope.authorUserId) {
-      throw new Error("Sign in to dohc Cloud to chat about a shared file.");
-    }
+    assertShareChatWritable(scope);
   }
 
   // #646 PR2: this recipient's own chat, back to the granter — the file-share

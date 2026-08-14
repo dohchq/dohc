@@ -774,6 +774,225 @@ describe("chat over a file share (#646 PR2)", () => {
     expect(chatOps(await readShareLog(h, shareId))).toHaveLength(0);
   });
 
+
+  // The asymmetry review probed for. A GRANTER's thread is bound by object, so
+  // it follows its file anywhere inside the share. A RECIPIENT's thread named
+  // its file by path, so an in-share rename used to kill it while the
+  // granter's survived — two threads on ONE file behaving differently.
+  //
+  // The accept door converts the binding, so both are object-bound now and
+  // both follow the file.
+  it("keeps BOTH threads on a file when it is renamed WITHIN the share", async () => {
+    const { storage } = await testStorage();
+    const h = handler(storage);
+    const log = await seedWorkspace(h);
+    const shareId = await createShare(h, "comment");
+
+    const push = await h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${shareId}/log`,
+        jsonBody({
+          originId: "recipient-origin",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "chat.thread.create",
+              recordedAtMs: 5000,
+              payload: {
+                threadId: "thread-recipient",
+                title: "A question",
+                createdAtMs: 5000,
+                linkedAtMs: 5000,
+                linkedPath: "docs/in.md",
+              },
+            },
+          ],
+        }),
+      ),
+    );
+    expect(push.status, await push.clone().text()).toBe(200);
+
+    // Both threads are about docs/in.md before the rename.
+    const before = chatOps(await readShareLog(h, shareId))
+      .filter((op) => op.opKind === "chat.thread.create")
+      .map((op) => op.payload.linkedPath);
+    expect(before).toEqual(["docs/in.md", "docs/in.md"]);
+
+    // A rename that stays INSIDE the shared folder.
+    await log.append(log.rename("object-in", "docs/in.md", "docs/renamed.md"));
+
+    const after = chatOps(await readShareLog(h, shareId))
+      .filter((op) => op.opKind === "chat.thread.create")
+      .map((op) => op.payload.linkedPath);
+    expect(
+      after,
+      "MUTATION: a recipient's thread must follow its file inside the share, exactly as the granter's does",
+    ).toEqual(["docs/renamed.md", "docs/renamed.md"]);
+
+    // And a further message on the recipient's thread still lands.
+    const more = await h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${shareId}/log`,
+        jsonBody({
+          originId: "recipient-origin",
+          ops: [
+            {
+              originSeq: 1,
+              opKind: "chat.message.append",
+              recordedAtMs: 5001,
+              payload: {
+                messageId: "m-after-in-share-rename",
+                threadId: "thread-recipient",
+                authorKind: "human",
+                authorDisplayName: "Recipient",
+                authorUserId: RECIPIENT,
+                body: "still here",
+                createdAtMs: 5001,
+              },
+            },
+          ],
+        }),
+      ),
+    );
+    expect(more.status, await more.clone().text()).toBe(200);
+  });
+
+  // The stored shape, asserted directly: the accept door persists the
+  // GRANTER's object id, never the recipient's path. This is what makes the
+  // granter's own apply take the ordinary object lane.
+  it("stores a recipient's create bound to the granter's object, not to a path", async () => {
+    const { storage } = await testStorage();
+    const h = handler(storage);
+    await seedWorkspace(h);
+    const shareId = await createShare(h, "comment");
+
+    await h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${shareId}/log`,
+        jsonBody({
+          originId: "recipient-origin",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "chat.thread.create",
+              recordedAtMs: 5000,
+              payload: {
+                threadId: "thread-recipient",
+                title: "A question",
+                createdAtMs: 5000,
+                linkedAtMs: 5000,
+                linkedPath: "docs/in.md",
+              },
+            },
+          ],
+        }),
+      ),
+    );
+
+    const binding = storage.findThreadCreateFileBinding(WORKSPACE, "thread-recipient");
+    expect(
+      binding,
+      "MUTATION: persisting the path leaves the thread unable to follow its file",
+    ).toEqual({ kind: "object", objectId: "object-in" });
+  });
+
+
+  // A selector can name BOTH dimensions. The paths-only rule must key on
+  // "names no paths", not on "names a version" — otherwise a share of
+  // docs/ pinned to a version would silently carry no conversation.
+  it("carries chat on the paths a selector names, even when it also pins a version", async () => {
+    const { storage } = await testStorage();
+    const h = handler(storage);
+    await seedWorkspace(h);
+
+    const created = await json(
+      await h(
+        request(
+          GRANTER,
+          `/sync/${WORKSPACE}/shares`,
+          jsonBody({
+            recipientUserId: RECIPIENT,
+            paths: ["docs"],
+            versionId: "v1",
+            access: "comment",
+          }),
+        ),
+      ),
+    );
+    const shareId = created.shareId as string;
+
+    const served = chatOps(await readShareLog(h, shareId));
+    expect(
+      served.map((op) => op.opKind),
+      "MUTATION: a paths+version share must carry its paths' chat, not fall into the version-share deny",
+    ).toEqual(["chat.thread.create", "chat.message.append"]);
+
+    // And it accepts, which the version-only share does not.
+    const push = await h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${shareId}/log`,
+        jsonBody({ originId: "recipient-origin", ops: [] }),
+      ),
+    );
+    expect(push.status).toBe(200);
+  });
+
+  // The accept door's own refusal. The filter admits a create by proving an
+  // object sits at the path, and the door then reads that object to bind the
+  // thread — so the only way to reach the refusal is for the object to leave
+  // BETWEEN the two reads. That is a real race (a delete landing mid-request),
+  // and the batch is refused whole rather than stored as a thread bound to
+  // nothing.
+  it("refuses the batch when the file leaves between the filter and the accept", async () => {
+    const { storage } = await testStorage();
+    const h = handler(storage);
+    await seedWorkspace(h);
+    const shareId = await createShare(h, "comment");
+
+    const real = storage.objectIdAtPath.bind(storage);
+    let reads = 0;
+    storage.objectIdAtPath = (workspaceId, path) => {
+      reads += 1;
+      // The filter's read answers; the accept door's finds it gone.
+      return reads === 1 ? real(workspaceId, path) : undefined;
+    };
+
+    const push = await h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${shareId}/log`,
+        jsonBody({
+          originId: "recipient-origin",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "chat.thread.create",
+              recordedAtMs: 5000,
+              payload: {
+                threadId: "thread-raced",
+                title: "A question",
+                createdAtMs: 5000,
+                linkedAtMs: 5000,
+                linkedPath: "docs/in.md",
+              },
+            },
+          ],
+        }),
+      ),
+    );
+    expect(reads).toBeGreaterThan(1);
+    expect(
+      push.status,
+      "MUTATION: without the refusal the thread stores bound to nothing",
+    ).toBe(403);
+    expect((await json(push)).code).toBe("share_op_rejected");
+    expect(storage.findThreadCreateFileBinding(WORKSPACE, "thread-raced")).toBeUndefined();
+  });
+
   it("makes no blob reachable through a chat op", async () => {
     // Chat decisions carry `blobSha256s: []`, and the share-blob route reads
     // exactly that to decide reachability. The outside file has a REAL blob on

@@ -748,24 +748,39 @@ describe("main-process chat authorization", () => {
     // Never from a renderer payload or a relay answer read at call time.
     expect(scope).not.toContain("input.access");
 
+    // main DELEGATES the share rule, so what is pinned here is that it still
+    // delegates — a re-implementation creeping back in is the drift this
+    // split exists to stop. The rule's own content is pinned against its
+    // module below, and driven behaviourally in mainChatIpcHandlers.test.ts
+    // against the REAL function.
     const gateAt = mainSource.indexOf("function assertChatWritable(");
     const gate = mainSource.slice(gateAt, mainSource.indexOf("\n  }", gateAt));
-    // Positive recognition, not `!== "view"`: the registry file is DATA,
-    // so a stored grant can name a level this process cannot read, and the
-    // one direction this must never fail is reading that as writable.
-    expect(gate).toContain('scope.access !== "comment" && scope.access !== "edit"');
-    expect(gate).toContain("throw new SharedFileReadOnlyError()");
+    expect(gate).toContain("assertShareChatWritable(scope)");
+    expect(
+      gate,
+      "MUTATION: a second copy of the rule is a copy that drifts",
+    ).not.toContain('scope.access !==');
+
+    const shareGate = readFileSync(
+      new URL("./workspaces/shareChatGate.ts", import.meta.url),
+      "utf8",
+    );
+    // Positive recognition, not `!== "view"`: the registry file is DATA, so a
+    // stored grant can name a level this process cannot read, and the one
+    // direction this must never fail is reading that as writable.
+    expect(shareGate).toContain('scope.access !== "comment" && scope.access !== "edit"');
+    expect(shareGate).toContain("throw new SharedFileReadOnlyError()");
     // An ENDED share is a read-only local copy. The push bails on `ended`
     // first thing, so a write admitted here would land durably and never be
     // sent to anyone — the same rule the joined-channel sibling applies.
     expect(
-      gate,
+      shareGate,
       "MUTATION: an ended share writes a durable row nothing will ever send",
     ).toContain("if (scope.ended)");
     // The second half of the same gate: a chat op replicates only when its
     // author carries a user id, so a share view with no resolvable relay
     // identity must be refused, not written locally and called sent.
-    expect(gate).toContain("if (!scope.authorUserId)");
+    expect(shareGate).toContain("if (!scope.authorUserId)");
     expect(scope).toContain("resolveShareViewRelayAuthorId(");
   });
 });

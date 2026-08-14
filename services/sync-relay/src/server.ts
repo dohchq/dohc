@@ -534,11 +534,7 @@ export function createSyncRelayHandler({
           op.payloadJson = JSON.stringify(decision.payload);
           if (op.opKind === "chat.thread.create") {
             // Read back from the SERVED copy assigned above, which carries the
-            // path this relay proved — never the pusher's own string. An
-            // honest client sends the canonical path anyway; a hand-crafted
-            // one would otherwise persist a spelling the granter can never
-            // resolve, leaving a conversation that keeps accepting messages
-            // and never lands.
+            // path this relay proved — never the pusher's own string.
             const created = JSON.parse(op.payloadJson) as {
               threadId?: unknown;
               linkedPath?: unknown;
@@ -551,7 +547,35 @@ export function createSyncRelayHandler({
                 typeof created.linkedPath === "string" &&
                 created.linkedPath.length > 0
               ) {
-                pendingThreadFiles.set(threadId, { kind: "path", path: created.linkedPath });
+                // THE ACCEPT DOOR converts the binding (#646 PR2, review).
+                //
+                // A recipient names its file by path because its own object
+                // ids mean nothing here. This is the one moment the relay can
+                // turn that into the granter's OWN object id: the filter just
+                // proved an object sits at this exact path. Persisting the
+                // object id instead of the path is what makes a recipient's
+                // thread behave like the granter's — it follows the file
+                // through a rename INSIDE the share, and stops at one that
+                // leaves it, because both answers come from the same
+                // object→path lookup.
+                //
+                // Rewriting a payload before persisting is what this route
+                // already does: the served copy above is a redaction, and the
+                // path in it was normalized by the filter.
+                const objectId = storage.objectIdAtPath(
+                  share.workspaceId,
+                  created.linkedPath,
+                );
+                // The filter admitted this op by proving an object is there,
+                // so this is unreachable through the filter's own path. A
+                // batch that reaches it is refused whole rather than stored as
+                // a thread bound to nothing.
+                if (!objectId) throw shareOpRejected();
+                const bound: Record<string, unknown> = { ...created };
+                delete bound.linkedPath;
+                bound.linkedObjectId = objectId;
+                op.payloadJson = JSON.stringify(bound);
+                pendingThreadFiles.set(threadId, { kind: "object", objectId });
               }
             }
           }

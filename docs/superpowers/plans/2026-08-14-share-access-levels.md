@@ -428,20 +428,39 @@ discussion a discussion rather than a set of private notes. It is recorded
 here because it is a disclosure between recipients who were never told about
 each other, and a reader deserves to find it stated rather than infer it.
 
-**Two residuals the rename rule leaves, both accepted.**
+**A recipient's thread binds to the granter's object, at the accept door.**
 
-A thread the RECIPIENT created is bound by path, and the relay re-proves that
-path against its log on every serve. That closes the rename, but leaves this:
-a NEW file later created at the same path re-attaches the old discussion to
-it. The path is inside the selector either way, so this is mis-association,
-not disclosure — the recipient sees a conversation about a file that is no
-longer the file it was about.
+A recipient names its file by PATH, because its own object ids mean nothing to
+the granter. The append route converts that at the moment it accepts the
+create: the filter has just proved an object sits at that exact path, so the
+relay persists the create carrying the granter's own `linkedObjectId` instead.
 
-And the recipient's own copy goes stale. A rename that crosses the share
-boundary is not served at all (the moment rule refuses it in both directions),
-so the recipient's store keeps the old path and its local boundary keeps
-admitting ops for it. The relay's denial is the authority: nothing further is
-served or accepted, and the stale local copy simply stops receiving.
+That makes a recipient's thread behave exactly like the granter's own, which
+is the point — both answer from one object→path lookup:
+
+- renamed INSIDE the share, the thread follows its file;
+- renamed OUT of the share, or deleted, the thread stops.
+
+Before this, a recipient's thread was pinned to its create-time path. It kept
+serving after a rename out of the share (the defect review found), and it
+DIED on a rename within the share while the granter's thread on the same file
+survived — two threads on one file, behaving differently.
+
+The refusal at that door is real but hard to reach: the filter proved the
+object was there, so only a delete landing between the two reads can find it
+gone. The batch is refused whole rather than stored as a thread bound to
+nothing.
+
+**One residual remains, accepted.** The recipient's own copy goes stale across
+a rename that crosses the share boundary: that moment is never served (the
+moment rule refuses it in both directions), so the recipient's store keeps the
+old path and its local boundary keeps admitting ops for it. The relay's denial
+is the authority — nothing further is served or accepted, and the stale local
+copy simply stops receiving.
+
+The two residuals this document listed before are gone. A thread no longer
+re-attaches to a NEW file created at the same path, because it is bound to an
+object rather than a path.
 
 **Known limitation, stated on purpose.** A file renamed out of the selector
 stops serving its threads at the moment of the rename, and the recipient keeps
