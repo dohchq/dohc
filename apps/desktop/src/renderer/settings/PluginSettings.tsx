@@ -184,8 +184,12 @@ function canApprove(plugin: PluginStatusRecord): boolean {
   );
 }
 
+// Uninstall is the one action an installed plugin keeps once its manifest
+// breaks: every other one needs the manifest the pipeline can no longer read,
+// so it would fail on click (#779 round 8 D2).
 function canDisable(plugin: PluginStatusRecord): boolean {
   return (
+    plugin.valid &&
     plugin.approvedHash !== null &&
     plugin.status !== "disabled" &&
     plugin.status !== "disabled-pending-approval" &&

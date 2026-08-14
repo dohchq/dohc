@@ -459,6 +459,47 @@ describe("PluginSettings", () => {
     });
   });
 
+  it("offers only uninstall for an installed plugin whose manifest broke (#779 round 8 D2)", async () => {
+    const broken = plugin("broken-plugin", {
+      valid: false,
+      status: "invalid",
+      runtimeStatus: null,
+      sourceHash: null,
+      diagnostics: ["dohc-plugin.json is not valid JSON"],
+      error: {
+        stage: "discovery",
+        code: "invalid-plugin",
+        message: "dohc-plugin.json is not valid JSON",
+      },
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [broken] });
+    bridgeMock.pluginUninstallPreflight.mockResolvedValue({
+      ok: true,
+      confirmationToken: "token-1",
+      preflight: cleanPreflight,
+    });
+
+    render(<PluginSettings workspaceId="ws-1" />);
+
+    // Uninstall is the reverse path this row must keep. Every other action
+    // needs a manifest this plugin no longer has, so offering one would only
+    // hand the user a control that always fails.
+    const uninstallButton = await screen.findByTestId("plugin-uninstall");
+    expect(uninstallButton.hasAttribute("disabled")).toBe(false);
+    expect(screen.queryByTestId("plugin-disable")).toBeNull();
+    expect(screen.queryByTestId("plugin-install")).toBeNull();
+    expect(screen.queryByTestId("plugin-retry-install")).toBeNull();
+    expect(screen.queryByTestId("plugin-enable")).toBeNull();
+    expect(screen.queryByTestId("plugin-approve")).toBeNull();
+
+    await userEvent.click(uninstallButton);
+
+    expect(bridgeMock.pluginUninstallPreflight).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      pluginId: "broken-plugin",
+    });
+  });
+
   it("surfaces the real reason and offers a retry when the plugin list fails to load (CodeRabbit #779 R29, R31)", async () => {
     bridgeMock.listPlugins.mockResolvedValueOnce({
       ok: false,
