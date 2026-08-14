@@ -708,7 +708,15 @@ function diffContent(
 
   const flush = () => {
     if (changedOld.length === 0 && changedNew.length === 0) return;
-    if (
+    const oldText = changedOld.every((node) => node.isText)
+      ? changedOld.map((node) => node.text ?? "").join("")
+      : null;
+    const newText = changedNew.every((node) => node.isText)
+      ? changedNew.map((node) => node.text ?? "").join("")
+      : null;
+    if (oldText !== null && oldText === newText) {
+      diffText(oldText, newText, pos, ranges, budget);
+    } else if (
       changedOld.length === changedNew.length &&
       changedOld.every((node, index) => node.sameMarkup(changedNew[index]!))
     ) {

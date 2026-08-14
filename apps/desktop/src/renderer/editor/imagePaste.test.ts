@@ -461,6 +461,22 @@ describe("documentReplacementMap", () => {
     expect(documentReplacementMap(before, after).map(12, 1)).toBe(19);
   });
 
+  it("preserves positions across mark-only child segmentation", () => {
+    const strong = schema.mark("strong");
+    const before = schema.node("doc", null, [paragraph("Before target after")]);
+    const after = schema.node("doc", null, [
+      schema.node("paragraph", null, [
+        schema.text("Before "),
+        schema.text("target", [strong]),
+        schema.text(" after"),
+      ]),
+    ]);
+    const mapping = documentReplacementMap(before, after);
+
+    expect(changedRanges(mapping)).toEqual([]);
+    expect(mapping.map(17, 1)).toBe(17);
+  });
+
   it("merges touching marked-child changes at their selection junction", () => {
     const strong = schema.mark("strong");
     const emphasis = schema.mark("emphasis");
