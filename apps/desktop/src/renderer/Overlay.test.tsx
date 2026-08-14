@@ -22,6 +22,26 @@ describe("Overlay", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("closes only the topmost of two nested overlays on Escape (#779 round 4 finding 4)", () => {
+    const onCloseOuter = vi.fn();
+    const onCloseInner = vi.fn();
+    render(
+      <>
+        <Overlay onClose={onCloseOuter}>
+          <button type="button">Outer</button>
+        </Overlay>
+        <Overlay onClose={onCloseInner}>
+          <button type="button">Inner</button>
+        </Overlay>
+      </>,
+    );
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(onCloseInner).toHaveBeenCalledTimes(1);
+    expect(onCloseOuter).not.toHaveBeenCalled();
+  });
+
   it("traps Tab focus inside the panel, wrapping both directions (CodeRabbit #779 R32)", () => {
     render(
       <Overlay onClose={() => undefined}>
