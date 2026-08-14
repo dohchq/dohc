@@ -71,6 +71,16 @@ import { documentVersionKey } from "./documentVersionKey";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
+function publishOwnedUnmountDraft(
+  buffer: SharedLocalDocument,
+  body: string,
+  source: object,
+): void {
+  const current = buffer.getSnapshot();
+  if (current.source !== null && current.source !== source) return;
+  buffer.publishDraft(body, source);
+}
+
 // The engine Y.Doc frontmatter map field name — the same key PageIdentity and
 // PropertiesPanel use for title, icon, and properties. Read it directly so
 // engine-mode export/copy reflects live frontmatter edits.
@@ -1190,7 +1200,11 @@ function useAutosavedTextDraft(props: {
         return;
       }
       if (options.textSnapshot !== undefined) {
-        props.localBuffer.publishDraft(options.textSnapshot, localSource.current);
+        publishOwnedUnmountDraft(
+          props.localBuffer,
+          options.textSnapshot,
+          localSource.current,
+        );
       }
       const issuedBaseRequestId = baseContentRequestId.current;
       unsavedDraft.current = false;
@@ -2647,7 +2661,11 @@ function MarkdownView(props: {
       // unmount snapshot is allowed to publish here because its editor is gone
       // and it has no earlier publish seam.
       if (options.textSnapshot !== undefined) {
-        props.localBuffer.publishDraft(options.textSnapshot, localSource.current);
+        publishOwnedUnmountDraft(
+          props.localBuffer,
+          options.textSnapshot,
+          localSource.current,
+        );
       }
       const issuedBaseRequestId = baseContentRequestId.current;
       // Serialized HERE, not at enqueue: a writer that waited reads the

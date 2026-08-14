@@ -3173,6 +3173,76 @@ describe("markdown editor unmount flush", () => {
     expect(buffer.getSnapshot().body).toBe("# Peer newest\n");
   });
 
+  it.each([
+    { label: "plain text", path: "queued-unmount.txt", markdown: false },
+    { label: "Markdown", path: "queued-unmount.md", markdown: true },
+  ])(
+    "does not republish a stale $label unmount snapshot over a newer peer draft",
+    async ({ path, markdown }) => {
+      const initial = markdown ? "# Hello\n\n" : "Hello";
+      bridgeMock.readWorkspaceText.mockResolvedValue({
+        text: initial,
+        truncated: false,
+        contentHash: TEST_CONTENT_HASH,
+      });
+      let resolveFirstWrite!: (value: {
+        status: "written";
+        contentHash: string;
+      }) => void;
+      const firstWrite = new Promise<{
+        status: "written";
+        contentHash: string;
+      }>((resolve) => {
+        resolveFirstWrite = resolve;
+      });
+      bridgeMock.writeWorkspaceText.mockImplementationOnce(
+        () => firstWrite,
+      );
+      const buffer = getSharedLocalDocument(
+        documentVersionKey("ws-1", path, undefined),
+      );
+      const user = userEvent.setup();
+      const view = render(
+        <FileInspector workspaceId="ws-1" path={path} />,
+      );
+      if (markdown) {
+        await screen.findByTestId("view-markdown");
+        await user.click(screen.getByTestId("markdown-edit-toggle"));
+      }
+      const surface = markdown
+        ? screen.getByTestId("markdown-editor")
+        : (await screen.findByTestId("view-text-editor")).querySelector(
+            ".cm-content",
+          )!;
+
+      await user.click(surface);
+      await user.keyboard("{End} first");
+      await waitFor(() =>
+        expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      );
+      await user.keyboard("{End} queued");
+      view.unmount();
+
+      const peerBody = markdown ? "# Peer newest\n" : "Peer newest";
+      const peerSource = {};
+      buffer.publishDraft(peerBody, peerSource);
+      resolveFirstWrite({ status: "written", contentHash: "b".repeat(64) });
+      await firstWrite;
+
+      await waitFor(() =>
+        expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+      );
+      expect(bridgeMock.writeWorkspaceText.mock.calls[1]?.[0]).toMatchObject({
+        text: peerBody,
+        expectedContentHash: "b".repeat(64),
+      });
+      expect(buffer.getSnapshot()).toMatchObject({
+        body: peerBody,
+        source: peerSource,
+      });
+    },
+  );
+
   it("retains a peer-owned Markdown draft after an older pane save succeeds", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValue({
       text: "# Hello\n",

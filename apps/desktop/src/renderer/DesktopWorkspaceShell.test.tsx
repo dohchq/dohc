@@ -1073,6 +1073,83 @@ describe("editor groups", () => {
     expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
   });
 
+  it("keeps a plugin panel selected when an older duplicate-file open finishes flushing", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const panelPath = pluginPanelTabPath("hello-plugin", "main");
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          {
+            id: "left",
+            tabs: ["race-a.md"],
+            activeTab: "race-a.md",
+            size: 0.5,
+          },
+          {
+            id: "right",
+            tabs: ["b.md"],
+            activeTab: "b.md",
+            size: 0.5,
+          },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["race-a.md", "b.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.readWorkspaceText = vi.fn(async ({ relativePath }) => ({
+      text: relativePath === "race-a.md" ? "# Race\n" : "# B\n",
+      truncated: false as const,
+      contentHash: "a".repeat(64),
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const left = await screen.findByTestId("editor-group-left");
+    const right = await screen.findByTestId("editor-group-right");
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), " dirty");
+
+    fireEvent.pointerDown(right);
+    await waitFor(() => expect(right.dataset.active).toBe("true"));
+    await user.click(fileTreeRow("race-a.md"));
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1),
+    );
+
+    act(() => {
+      bridge.emitPluginPanelOpened({
+        workspaceId: WORKSPACE.workspaceId,
+        pluginId: "hello-plugin",
+        panelId: "main",
+      });
+    });
+    await waitFor(() =>
+      expect(within(right).getByTestId(`tab-${panelPath}`).dataset.active).toBe(
+        "true",
+      ),
+    );
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    await waitFor(() =>
+      expect(within(right).getByTestId(`tab-${panelPath}`).dataset.active).toBe(
+        "true",
+      ),
+    );
+    expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
+  });
+
   it("does not offer Split Right for the singleton Chats tab", async () => {
     renderShell(
       makeBridge(

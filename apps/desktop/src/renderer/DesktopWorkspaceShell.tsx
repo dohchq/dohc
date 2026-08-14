@@ -1801,11 +1801,17 @@ export function DesktopWorkspaceShell(props: {
     () =>
       bridge().onPluginPanelOpened((event) => {
         if (event.workspaceId !== workspaceId) return;
+        const targetGroupId = wbRef.current.activeEditorGroup;
+        invalidateDeferredFileOpen(targetGroupId);
         mutateWb((state) =>
-          openTab(state, pluginPanelTabPath(event.pluginId, event.panelId)),
+          openTab(
+            state,
+            pluginPanelTabPath(event.pluginId, event.panelId),
+            targetGroupId,
+          ),
         );
       }),
-    [mutateWb, workspaceId],
+    [invalidateDeferredFileOpen, mutateWb, workspaceId],
   );
 
   useEffect(() => {
