@@ -1045,4 +1045,153 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.dispose();
     }
   }, 60_000);
+
+  it("leaves a failed uninstall in an actionable, retryable state instead of a stuck spinner (#779 round 4 finding 2)", async () => {
+    const fixture = await createPluginWorkspace();
+    let removeCalls = 0;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        removePath: async (path, options) => {
+          removeCalls += 1;
+          // The very first delete attempt fails (a locked file, a permission
+          // error) — everything after must still be recoverable.
+          if (removeCalls === 1) {
+            throw new Error("simulated: target is busy");
+          }
+          return rm(path, options);
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      const preflight = await pipeline.uninstallPreflight("example-plugin");
+      if (!preflight.ok) throw new Error(preflight.error.message);
+      const failed = await pipeline.uninstall(
+        "example-plugin",
+        preflight.confirmationToken,
+      );
+
+      expect(failed.ok).toBe(false);
+      if (failed.ok) throw new Error("unreachable");
+      expect(failed.error).toMatchObject({ stage: "uninstall", code: "delete-failed" });
+      // Actionable, not a stuck "uninstalling" spinner — and no orphan: the
+      // source directory is still exactly where it was.
+      expect(pipeline.list()[0]).toMatchObject({
+        status: "disabled-pending-repair",
+        disabledReason: "repair",
+      });
+      expect(pipeline.list()[0]?.error).not.toBeNull();
+      await expect(lstat(fixture.pluginRoot)).resolves.toBeDefined();
+
+      // The record survived, so a fresh preflight + retry succeeds once the
+      // underlying problem (here, the mocked one-shot failure) is gone.
+      const retryPreflight = await pipeline.uninstallPreflight("example-plugin");
+      if (!retryPreflight.ok) throw new Error(retryPreflight.error.message);
+      const retried = await pipeline.uninstall(
+        "example-plugin",
+        retryPreflight.confirmationToken,
+      );
+      expect(retried.ok).toBe(true);
+      await expect(lstat(fixture.pluginRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("builds from the manifest in the snapshot, not the stale copy discovery cached (#779 round 4 finding 5)", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      // A second entry file, and dohc-plugin.json repointed at it directly
+      // on disk — with no watcher event fired for either, so discovery's
+      // in-memory candidate.manifest is never refreshed and stays pinned to
+      // the original "src/index.ts" entry.
+      await writeFile(join(fixture.pluginRoot, "src", "v2-entry.ts"), [
+        'export const marker = "v2-entry";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      await writeFile(join(fixture.pluginRoot, "dohc-plugin.json"), `${JSON.stringify({
+        version: 1,
+        name: "example-plugin",
+        displayName: "Example plugin",
+        entry: "src/v2-entry.ts",
+      }, null, 2)}\n`);
+
+      // approve() rebuilds unconditionally without any prior discovery
+      // rescan, so this exercises the stale in-memory manifest directly.
+      const approved = await pipeline.approve("example-plugin");
+      expect(approved.ok).toBe(true);
+
+      const bundle = await readFile(liveBundlePath(fixture, "example-plugin"), "utf8");
+      // The snapshot taken for this very build already contains
+      // dohc-plugin.json's real, current entry ("src/v2-entry.ts") — the
+      // build must read that, not discovery's stale cached manifest, which
+      // still says "src/index.ts" (whose content has no "v2-entry" marker
+      // at all).
+      expect(bundle).toContain("v2-entry");
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
 });

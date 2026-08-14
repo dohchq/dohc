@@ -20,6 +20,7 @@ import {
   readPluginLocalState,
   type PluginRecordShape,
 } from "./pluginLocalState";
+import { readPluginManifestFile } from "./pluginManifest";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
 import type { PluginRuntimeStatus } from "./pluginHostProtocol";
 import {
@@ -675,18 +676,27 @@ export class PluginPipeline {
           );
         }
 
-        await this.operations.removePath(candidate.rootPath, {
-          recursive: true,
-          force: true,
-          maxRetries: 5,
-          retryDelay: 200,
-        });
-        await this.operations.removePath(this.liveRoot(pluginId), {
-          recursive: true,
-          force: true,
-          maxRetries: 5,
-          retryDelay: 200,
-        });
+        // Both deletes are attempted even if one rejects (round 4 finding 2)
+        // — skipping the live bundle because the source delete failed, or
+        // vice versa, would silently leave the other one behind with no
+        // record that cleanup is still owed.
+        const [rootDeleted, liveDeleted] = await Promise.allSettled([
+          this.operations.removePath(candidate.rootPath, {
+            recursive: true,
+            force: true,
+            maxRetries: 5,
+            retryDelay: 200,
+          }),
+          this.operations.removePath(this.liveRoot(pluginId), {
+            recursive: true,
+            force: true,
+            maxRetries: 5,
+            retryDelay: 200,
+          }),
+        ]);
+        if (rootDeleted.status === "rejected") throw rootDeleted.reason;
+        if (liveDeleted.status === "rejected") throw liveDeleted.reason;
+
         await this.operations.mutateRecord(
           this.options.stateDir,
           this.workspaceRoot,
@@ -707,10 +717,21 @@ export class PluginPipeline {
           },
         };
       } catch (error) {
-        return this.failure(
-          pluginId,
-          pipelineError("uninstall", "delete-failed", errorMessage(error)),
-        );
+        // A failed delete must never disappear as a stuck "uninstalling"
+        // spinner with orphaned files left behind and no way back in. The
+        // local record is left untouched (still disabled, still pointing at
+        // whatever survived) so a retry's preflight has something real to
+        // re-check, and the status becomes the same actionable
+        // disabled-pending-repair state a failed fresh install already uses
+        // (#779 round 4 finding 2).
+        const detail = pipelineError("uninstall", "delete-failed", errorMessage(error));
+        this.setStatus(candidate, {
+          status: "disabled-pending-repair",
+          disabledReason: "repair",
+          runtimeStatus: null,
+          error: detail,
+        });
+        return this.failure(pluginId, detail);
       }
     });
   }
@@ -993,6 +1014,31 @@ export class PluginPipeline {
       // invariant a second hash pass would have re-verified.
       const baselineDigest = snapshot.digest;
 
+      // candidate.manifest was parsed from the live root at an earlier
+      // discovery pass and can have drifted from what this snapshot just
+      // hash-verified. Everything from here on — the lifecycle scan, the
+      // build's entry point, and the capabilities handed to the running
+      // process — must read the manifest as it exists in the snapshot
+      // itself, never that stale copy (#779 round 4 finding 5).
+      const manifestRead = await readPluginManifestFile(snapshot.snapshotRoot);
+      if (!manifestRead.ok) {
+        throw new PipelineFailure(pipelineError(
+          "scan",
+          "invalid-manifest",
+          `Plugin manifest in the approved snapshot is invalid: ` +
+            manifestRead.diagnostics.join("; "),
+        ));
+      }
+      const manifest = manifestRead.manifest;
+      if (manifest.name !== candidate.id) {
+        throw new PipelineFailure(pipelineError(
+          "scan",
+          "invalid-manifest",
+          `Plugin manifest in the approved snapshot is named "${manifest.name}", ` +
+            `not "${candidate.id}".`,
+        ));
+      }
+
       this.setStatus(candidate, { status: "installing", error: null });
       this.unwrap("install", await this.operations.install({
         workspaceRoot: this.workspaceRoot,
@@ -1007,7 +1053,7 @@ export class PluginPipeline {
       this.setStatus(candidate, { status: "scanning" });
       const scan = this.unwrap("scan", await this.operations.scan({
         snapshotRoot: snapshot.snapshotRoot,
-        manifest: candidate.manifest,
+        manifest,
       }));
       this.setStatus(candidate, { warnings: [...scan.warningLines] });
 
@@ -1016,7 +1062,7 @@ export class PluginPipeline {
         dohcDir: this.dohcDir,
         pluginId: candidate.id,
         snapshotRoot: snapshot.snapshotRoot,
-        manifest: candidate.manifest,
+        manifest,
         resourcesBasePath: this.options.resourcesBasePath,
         signal: this.abortController.signal,
       }));
@@ -1055,7 +1101,7 @@ export class PluginPipeline {
         }
         await this.options.pluginHost.start(
           built.liveRoot,
-          generatedManifest(candidate.manifest),
+          generatedManifest(manifest),
         );
       }
 
