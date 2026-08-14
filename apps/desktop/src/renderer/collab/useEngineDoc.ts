@@ -398,15 +398,46 @@ function createEngineDocSession(
     pendingSavedSeq = null;
   };
 
+  // Refinement runs off a serial queue, so the user can capture a newer
+  // snapshot while an earlier projection is still pending. Every refinement
+  // therefore projects the NEWEST snapshot for its document, and drops a
+  // result another one has overtaken. Projecting the bytes it was queued with
+  // would roll the durable row back to text the user has already moved past —
+  // and that row is the only copy of the newer edit.
+  const newestSnapshots = new WeakMap<Y.Doc, Uint8Array>();
+  const enqueueRefinement = (
+    source: Y.Doc,
+    bytes: Uint8Array,
+    apply: (text: string) => void,
+    failure: string,
+  ): void => {
+    newestSnapshots.set(source, bytes);
+    deletionQueue = deletionQueue
+      .then(async () => {
+        const newest = newestSnapshots.get(source) ?? bytes;
+        const text = await markdownFromSnapshot(newest);
+        if (newestSnapshots.get(source) !== newest) return;
+        apply(text);
+      })
+      .catch((error: unknown) => {
+        console.error(
+          `[desktop] could not ${failure} for ${workspaceId}:${path}:`,
+          error,
+        );
+      });
+  };
+
   // forceCreate false means the file was settled when main removed it. A later
   // snapshot always creates a draft because the retained document changed.
   const enqueueDeletionSnapshot = (
+    source: Y.Doc,
     bytes: Uint8Array,
     forceCreate: boolean,
   ): void => {
-    deletionQueue = deletionQueue
-      .then(async () => {
-        const text = await markdownFromSnapshot(bytes);
+    enqueueRefinement(
+      source,
+      bytes,
+      (text) => {
         if (deletionDraftId === null) {
           if (!forceCreate) return;
           deletionDraftId = captureOrphanedDraft(workspaceId, path, text);
@@ -414,13 +445,9 @@ function createEngineDocSession(
           replaceOrphanedDraft(workspaceId, path, deletionDraftId, text);
         }
         setDeletion(deletionDraftId);
-      })
-      .catch((error: unknown) => {
-        console.error(
-          `[desktop] could not write a recovery draft for ${workspaceId}:${path} after deletion:`,
-          error,
-        );
-      });
+      },
+      "write a recovery draft after deletion",
+    );
   };
 
   const captureDeletion = (doc: Y.Doc): void => {
@@ -438,7 +465,7 @@ function createEngineDocSession(
     }
     setDeletion(deletionDraftId);
     reportSaveState("deleted");
-    enqueueDeletionSnapshot(bytes, forceCreate);
+    enqueueDeletionSnapshot(doc, bytes, forceCreate);
   };
 
   const recoveryDraftId = (source: Y.Doc): number | null => {
@@ -476,17 +503,13 @@ function createEngineDocSession(
     ) {
       reportSaveState("error");
     }
-    deletionQueue = deletionQueue
-      .then(async () => {
-        const text = await markdownFromSnapshot(bytes);
-        replaceOrphanedDraft(workspaceId, path, draftId, text);
-      })
-      .catch((error: unknown) => {
-        console.error(
-          `[desktop] could not refine the recovery draft for ${workspaceId}:${path} after update delivery failed:`,
-          error,
-        );
-      });
+    const capturedDraftId = draftId;
+    enqueueRefinement(
+      source,
+      bytes,
+      (text) => replaceOrphanedDraft(workspaceId, path, capturedDraftId, text),
+      "refine the recovery draft after update delivery failed",
+    );
   };
 
   const refreshDeletionDraft = (doc: Y.Doc): void => {
@@ -495,7 +518,7 @@ function createEngineDocSession(
     const bytes = Y.encodeStateAsUpdate(doc);
     if (snapshotsEqual(bytes, deletionSnapshotBytes)) return;
     deletionSnapshotBytes = bytes;
-    enqueueDeletionSnapshot(bytes, true);
+    enqueueDeletionSnapshot(doc, bytes, true);
   };
 
   const observeSaveState = (doc: Y.Doc): void => {
@@ -527,22 +550,13 @@ function createEngineDocSession(
         replaceOrphanedDraft(workspaceId, path, draftId, fallback);
       }
       const capturedDraftId = draftId;
-      deletionQueue = deletionQueue
-        .then(async () => {
-          const markdown = await markdownFromSnapshot(bytes);
-          replaceOrphanedDraft(
-            workspaceId,
-            path,
-            capturedDraftId,
-            markdown,
-          );
-        })
-        .catch((error: unknown) => {
-          console.error(
-            `[desktop] could not refine the recovery draft for ${workspaceId}:${path} after lineage replacement:`,
-            error,
-          );
-        });
+      enqueueRefinement(
+        retired,
+        bytes,
+        (markdown) =>
+          replaceOrphanedDraft(workspaceId, path, capturedDraftId, markdown),
+        "refine the recovery draft after lineage replacement",
+      );
     };
     if (saveStateRef.current !== "saved" || deliveryPending) persist();
     const onRetiredUpdate = () => persist();

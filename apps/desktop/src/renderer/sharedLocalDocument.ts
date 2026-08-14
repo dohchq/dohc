@@ -284,10 +284,17 @@ export class SharedLocalDocument {
         // response arrives later; the next read receives a newer ticket.
         this.latestReadTicket += 1;
         this.latestAcceptedReadTicket = this.latestReadTicket;
-        const newerDraft = this.snapshot.body !== body;
+        // A lazy draft is newer work the BODY cannot show: a WYSIWYG pane
+        // publishes into `pendingDraft` and materializes later, so the
+        // snapshot still reads as the text this write is landing. Calling that
+        // saved would let the owning pane drop its timer and its unsaved flag,
+        // and the edit would die on close with nothing written or set aside.
+        const pending = this.pendingDraft;
+        const newerBody = this.snapshot.body !== body;
+        const newerDraft = newerBody || pending !== null;
         this.replace(
           { body: this.snapshot.body, contentHash: written.contentHash },
-          newerDraft ? this.snapshot.source : source,
+          newerBody ? this.snapshot.source : (pending?.source ?? source),
           newerDraft,
           newerDraft ? "saving" : "saved",
         );

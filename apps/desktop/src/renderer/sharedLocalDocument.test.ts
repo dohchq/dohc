@@ -293,6 +293,44 @@ describe("SharedLocalDocument", () => {
     release();
   });
 
+  it("keeps a peer's lazy draft dirty when an older writer succeeds", async () => {
+    const buffer = getSharedLocalDocument(
+      documentVersionKey("ws", "lazy-peer-owner.md", 1),
+    );
+    const release = buffer.retain();
+    const writerSource = {};
+    const peerSource = {};
+    buffer.initializeRead("zero", "hash-0", buffer.beginRead());
+    buffer.publishDraft("writer", writerSource);
+    let finishWrite!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finishWrite = resolve;
+    });
+    const writing = buffer.write(writerSource, async () => {
+      await pending;
+      return { status: "written", contentHash: "hash-1" };
+    });
+    // A WYSIWYG pane publishes LAZILY: its edit lives in the pending draft,
+    // and the snapshot body is still the text this write is landing. Reading
+    // the body alone therefore cannot see this newer work.
+    buffer.setPendingDraft({
+      source: peerSource,
+      materialize: () => "writer peer",
+    });
+
+    finishWrite();
+    await writing;
+
+    expect(buffer.getSnapshot()).toMatchObject({
+      body: "writer",
+      contentHash: "hash-1",
+      dirty: true,
+      saveState: "saving",
+    });
+    expect(buffer.getSnapshot().source).toBe(peerSource);
+    release();
+  });
+
   it("rejects a read that started before a shared write completed", async () => {
     const buffer = getSharedLocalDocument(
       documentVersionKey("ws", "write-before-read.txt", 1),

@@ -2819,6 +2819,115 @@ describe("markdown editor unmount flush", () => {
     expect(write.text).toContain("Peer flush");
   });
 
+  // The supported sequence, not simultaneous typing: one pane's autosave is in
+  // flight, focus hands over, and the peer types. The peer's WYSIWYG edit is
+  // LAZY, so the shared body still reads as the text the older write is
+  // landing — and reporting that write as saved would strand the edit with no
+  // timer and no dirty flag to bring it back.
+  it("keeps a peer's lazy WYSIWYG edit alive when an older write lands", async () => {
+    const path = "shared-wysiwyg-peer-write.md";
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "# Hello\n\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    let finishWrite!: () => void;
+    const held = new Promise<void>((resolve) => {
+      finishWrite = resolve;
+    });
+    bridgeMock.writeWorkspaceText.mockImplementationOnce(async () => {
+      await held;
+      return { status: "written", contentHash: "b".repeat(64) };
+    });
+    const user = userEvent.setup();
+    render(
+      <>
+        <FileInspector workspaceId="ws-1" path={path} />
+        <FileInspector workspaceId="ws-1" path={path} />
+      </>,
+    );
+    const editors = await screen.findAllByTestId("markdown-editor");
+    await user.click(editors[0]!);
+    await user.type(editors[0]!, "First");
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+
+    await user.click(editors[1]!);
+    await user.type(editors[1]!, "Zz");
+    // The peer's own debounce must not have fired yet, or the write below
+    // proves nothing about the completing one.
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishWrite();
+      await held;
+    });
+
+    // MUTATION: report the completed write as saved while a lazy peer draft is
+    // pending. The peer pane clears its timer and its unsaved flag, no second
+    // write ever issues, and closing that pane retires the edit unwritten.
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+      { timeout: 5_000 },
+    );
+    expect(bridgeMock.writeWorkspaceText.mock.calls[1]![0].text).toContain(
+      "Zz",
+    );
+  });
+
+  // The single-pane half of the same defect: no peer, no duplicate, just one
+  // WYSIWYG editor typed into while its own autosave is on the wire. The
+  // keystroke refills the lazy draft and re-arms the timer without publishing,
+  // so the completing write must not report the document as saved.
+  it("keeps a WYSIWYG keystroke typed during its own in-flight write", async () => {
+    const path = "wysiwyg-inflight.md";
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "# Hello\n\n",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    let finishWrite!: () => void;
+    const held = new Promise<void>((resolve) => {
+      finishWrite = resolve;
+    });
+    bridgeMock.writeWorkspaceText.mockImplementationOnce(async () => {
+      await held;
+      return { status: "written", contentHash: "b".repeat(64) };
+    });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path={path} />);
+    const editor = await screen.findByTestId("markdown-editor");
+    await user.click(editor);
+    await user.type(editor, "First");
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+
+    await user.type(editor, "Zz");
+    // The re-armed debounce must not have fired yet, or the write below could
+    // be this keystroke's own rather than proof the state stayed dirty.
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishWrite();
+      await held;
+    });
+
+    // MUTATION: report the completing write as saved while the lazy draft is
+    // live. The armed timer is cleared, the chip reads Saved, and the
+    // keystroke reaches neither disk nor recovery.
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
+      { timeout: 5_000 },
+    );
+    expect(bridgeMock.writeWorkspaceText.mock.calls[1]![0].text).toContain(
+      "Zz",
+    );
+  });
+
   it("keeps a pending peer WYSIWYG body when another pane changes a property", async () => {
     const path = "shared-wysiwyg-properties.md";
     bridgeMock.readWorkspaceText.mockResolvedValue({
@@ -8515,6 +8624,105 @@ describe("engine markdown source view", () => {
       text: typedBody,
       expectedContentHash: TEST_CONTENT_HASH,
     });
+  });
+
+  // The sibling of the test above, with ONE difference that decides
+  // everything: the replacement read lands BEFORE the 800ms debounce, so the
+  // WYSIWYG draft is still LAZY when the resync runs. The 900ms wait above
+  // materializes it first, which is why that test cannot see this. A lazy
+  // draft the resync leaves armed carries the FROZEN pre-switch editor, and
+  // the next materialize — the shell's flush before an explorer op — would
+  // merge it over the new version's baseline and write it.
+  it("retires a lazy WYSIWYG draft when the switch reread lands before its debounce", async () => {
+    const firstBody = "# Old version\n\nOld paragraph.";
+    const secondBody = "# New version\n\nReplacement paragraph.";
+    const typedBody = "# Zz Old version\n\nOld paragraph.";
+    const { bridgeMock } = makeEngineBridge(firstBody);
+    let releaseSecondRead!: () => void;
+    let reads = 0;
+    bridgeMock.readWorkspaceText.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 2) {
+        await new Promise<void>((resolve) => {
+          releaseSecondRead = resolve;
+        });
+      }
+      return {
+        text: reads === 1 ? firstBody : secondBody,
+        truncated: false,
+        contentHash: TEST_CONTENT_HASH,
+      };
+    });
+    bridgeMock.openEngineYDocSession.mockResolvedValue({
+      available: false,
+      initialUpdate: new Uint8Array(),
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const user = userEvent.setup();
+
+    let flush: DraftFlush | null = null;
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerDraftFlush={(registered) => {
+          if (registered) flush = registered;
+        }}
+      />,
+    );
+    const firstEditor = await screen.findByTestId("markdown-editor");
+    expect(firstEditor).not.toBeInstanceOf(HTMLTextAreaElement);
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        refreshKey={1}
+        engineVersionKey={1}
+        registerDraftFlush={(registered) => {
+          if (registered) flush = registered;
+        }}
+      />,
+    );
+    await waitFor(() => expect(reads).toBe(2));
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
+
+    const pendingEditor = await screen.findByTestId("markdown-editor");
+    // Short on purpose: the whole test lives inside the 800ms debounce.
+    await user.type(pendingEditor, "Zz ");
+    const buffer = getSharedLocalDocument(
+      documentVersionKey("ws-1", "a.md", 1),
+    );
+    // The guard that keeps this test honest: if the debounce beat the read,
+    // the draft is already published and this test would prove nothing.
+    expect(buffer.getPendingDraftSource()).not.toBeNull();
+
+    await act(async () => {
+      releaseSecondRead();
+      await Promise.resolve();
+    });
+    await screen.findByText("Replacement paragraph.");
+
+    // The typed text is recoverable, exactly as the sibling test requires.
+    const copies = await screen.findAllByTestId("orphaned-draft-copy");
+    await user.click(copies[copies.length - 1]!);
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(typedBody),
+    );
+
+    // MUTATION: drop `clearPendingDraft` from the resync. The flush the shell
+    // runs before an explorer op materializes the pre-switch editor's body and
+    // writes it against the NEW version's hash — a silent overwrite.
+    await act(async () => {
+      await flush!();
+    });
+    expect(buffer.getPendingDraftSource()).toBeNull();
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
   it("resyncs an editable mode entered while the switch reread is pending", async () => {

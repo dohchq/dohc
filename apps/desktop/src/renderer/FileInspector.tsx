@@ -2375,6 +2375,14 @@ function MarkdownView(props: {
       }
       if (unsavedDraft.current) {
         unsavedDraft.current = false;
+        // The same retirement the `opening` capture performs. A LAZY WYSIWYG
+        // draft survives the reset below untouched, and its `materialize`
+        // closes over the editor this resync is about to replace — the next
+        // caller to materialize (the shell's flush, a mode switch, a property
+        // edit) would merge the previous version's body over the new baseline
+        // and write it. The text itself is not lost: the capture below takes
+        // it from the live editor.
+        props.localBuffer.clearPendingDraft(localSource.current);
         captureOrphanedDraft(
           props.workspaceId,
           props.path,
