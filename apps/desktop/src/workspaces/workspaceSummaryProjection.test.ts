@@ -139,6 +139,66 @@ describe("workspace summary projection", () => {
     expect(summaries[1]?.shareMounts?.map((m) => m.shareId)).toEqual(["m-good"]);
   });
 
+  // PRESENCE decides the restriction, not readability. A share-view field
+  // that lost its value is a share view that lost its value — reading it as
+  // "ordinary workspace" is the presentation failing OPEN.
+  it("keeps a present-but-unreadable share view restricted", () => {
+    for (const raw of [null, "nonsense", 7, [], true]) {
+      const summary = workspaceSummaryFor(entry({ shareView: raw }));
+      expect(
+        summary.shareView?.damaged,
+        `MUTATION: shareView ${JSON.stringify(raw)} must not present as an ordinary workspace`,
+      ).toBe(true);
+      // Nothing is invented for a marker that carried nothing.
+      expect(summary.shareView?.shareId).toBeUndefined();
+      expect(summary.shareView?.granterEmail).toBeNull();
+      expect(summary.shareView?.access).toBeUndefined();
+    }
+  });
+
+  it("treats an ABSENT share view as an ordinary workspace", () => {
+    expect(workspaceSummaryFor(entry()).shareView).toBeUndefined();
+    expect(workspaceSummaryFor(entry({ shareView: undefined })).shareView).toBeUndefined();
+  });
+
+  // The pinned grant is read back through the SAME function the refresh path
+  // uses. A selector the pull permanently refuses must read as damaged here
+  // too, or the shell presents (and retries) a share that can never load.
+  it("marks every selector the pull would refuse as damaged", () => {
+    const refusedByThePull = [
+      { paths: [], versionId: null, access: "view" }, // selects nothing
+      { paths: ["docs"], versionId: "", access: "view" }, // unissuable version
+      { paths: ["docs"], versionId: " v1 ", access: "view" }, // padded version
+      { paths: "docs", versionId: null, access: "view" }, // paths not an array
+      { paths: ["docs", 7], versionId: null, access: "view" }, // non-string path
+      { versionId: null, access: "view" }, // no paths at all
+    ];
+    for (const selector of refusedByThePull) {
+      const summary = workspaceSummaryFor(entry({ shareView: shareView(selector) }));
+      expect(
+        summary.shareView?.damaged,
+        `MUTATION: ${JSON.stringify(selector)} loads here but is refused by the pull`,
+      ).toBe(true);
+    }
+  });
+
+  it("drops a mount whose pinned grant the pull would refuse", () => {
+    const summary = workspaceSummaryFor(
+      entry({
+        shareMounts: [
+          mount("m-good", "alex", goodSelector),
+          mount("m-empty", "sam", { paths: [], versionId: null, access: "view" }),
+          mount("m-badversion", "kim", {
+            paths: ["docs"],
+            versionId: " v1 ",
+            access: "view",
+          }),
+        ],
+      }),
+    );
+    expect(summary.shareMounts?.map((m) => m.shareId)).toEqual(["m-good"]);
+  });
+
   // Damage to the WORKSPACE is not share-sized and must not be swallowed:
   // the refusal screen exists for exactly this, and silently hiding a
   // workspace would be an unrecoverable answer to a fault worth reporting.

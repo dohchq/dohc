@@ -179,7 +179,10 @@ export const WorkspaceSummary = z.object({
   // carries who shared it for honest copy. `ended` marks a revoked share.
   shareView: z
     .object({
-      shareId: z.string().min(1).max(200),
+      // Absent ONLY on a `damaged` marker whose stored record had no readable
+      // id. Never invented: a placeholder id is a lie the rest of the app
+      // could act on.
+      shareId: z.string().min(1).max(200).optional(),
       granterEmail: z.string().min(3).max(320).nullable(),
       // The pinned level (#646). Absent ONLY when `damaged` says the stored
       // grant could not be read. The banner states the level; it never

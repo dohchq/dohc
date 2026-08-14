@@ -351,7 +351,14 @@ export function SharedWithMeList(props: {
                 <span className="truncate font-mono text-[11px] text-ink">
                   {selectorLabel(share)}
                 </span>
-                <ShareAccessBadge access={share.selector.access} />
+                {/* The PINNED level wins whenever this share is mounted.
+                    The pin is what the recipient's own pulls enforce, so a
+                    relay restating a wider level must not get to announce
+                    itself here. Unmounted rows have no pin yet, so the relay's
+                    statement is all there is. */}
+                <ShareAccessBadge
+                  access={mounted?.access ?? share.selector.access}
+                />
               </div>
               <div className="truncate text-[11px] text-subtle">
                 {`From ${share.granterEmail ?? "another dohc user"}`}

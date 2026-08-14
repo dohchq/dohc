@@ -67,6 +67,46 @@ describe("SharedWithMeList", () => {
   // The level is the RECIPIENT's own right, so it belongs on the recipient's
   // surface too — on relay-listed rows and on a mount the relay no longer
   // lists, which reads its level from the pinned grant.
+  // The PIN is the authority the recipient's own pulls enforce. A relay that
+  // restates a wider level must not get to announce it here, so a mounted row
+  // shows what it pinned, not what the relay now says.
+  it("shows the pinned level, not a wider one the relay restates", async () => {
+    bridgeMock.listRelayShares.mockResolvedValue({
+      received: [
+        {
+          shareId: "share-1",
+          granterEmail: "sam@dohc.test",
+          selector: { paths: ["docs"], versionId: null, access: "edit" },
+          createdAtMs: 1,
+          shareCode: "dohc-share:share-1:http://relay.test",
+        },
+      ],
+    });
+    bridgeMock.getWorkspaceRegistry.mockResolvedValue({
+      workspaces: [
+        {
+          workspaceId: WORKSPACE_ID,
+          shareMounts: [
+            {
+              shareId: "share-1",
+              label: "alex",
+              granterEmail: "sam@dohc.test",
+              access: "view",
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<SharedWithMeList workspaceId={WORKSPACE_ID} />);
+
+    const badge = await screen.findByTestId("share-access-badge");
+    expect(
+      badge.textContent,
+      "MUTATION: the relay's wider level must not display over the pin",
+    ).toBe("View");
+  });
+
   it("shows the level on a received row and on a registry-only mount", async () => {
     bridgeMock.listRelayShares.mockResolvedValue({
       received: [

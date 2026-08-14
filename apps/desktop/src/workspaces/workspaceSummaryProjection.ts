@@ -1,5 +1,10 @@
-import { SHARE_ACCESS, WorkspaceSummary } from "../ipc/bridgeContract";
+import { WorkspaceSummary } from "../ipc/bridgeContract";
 import type { RegistryEntry } from "./registryStore";
+import {
+  readableShareLevel,
+  shareViewGranterEmail,
+  shareViewIsPresent,
+} from "./shareViewMarker";
 
 // The registry -> renderer projection. The registry file is DATA, not a
 // contract: a record can be hand-edited, half-written by a crash, or written
@@ -50,28 +55,41 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
 
   const rawShareView: unknown = entry.shareView;
   let shareView: Record<string, unknown> | undefined;
-  if (isRecord(rawShareView)) {
-    const level = levelOf(rawShareView.grantedSelector);
-    const withLevel = { ...rawShareView, access: level };
-    // The level is checked against its OWN rule, not against the marker
-    // schema. `access` is optional on the marker precisely so the degraded
-    // shape can exist, so a missing level parses there and would sail
-    // through as healthy — the damage has to be asked about directly.
+  if (shareViewIsPresent(rawShareView)) {
+    // PRESENT, so restricted — readable or not. A non-object value here is
+    // still a share view that lost its marker, never an ordinary workspace.
+    const level = isRecord(rawShareView)
+      ? readableShareLevel(rawShareView.grantedSelector)
+      : null;
+    const withLevel = isRecord(rawShareView)
+      ? { ...rawShareView, access: level ?? undefined }
+      : {};
     const readable =
-      SHARE_ACCESS.safeParse(level).success &&
-      shareViewShape.safeParse(withLevel).success;
+      level !== null && shareViewShape.safeParse(withLevel).success;
     // The degraded marker keeps the stance and drops only the level. It is
     // never a guess about WHY: `damaged` says the grant could not be read,
     // and nothing here invents a level, an end, or a reason.
-    const { access: _level, ...withoutLevel } = withLevel;
-    shareView = readable ? withLevel : { ...withoutLevel, damaged: true as const };
+    shareView = readable
+      ? withLevel
+      : {
+          // Only what could actually be read. A share id is never invented:
+          // an unreadable marker has no identity to state, and a placeholder
+          // would be a lie the rest of the app could act on.
+          ...(isRecord(rawShareView) && typeof rawShareView.shareId === "string"
+            ? { shareId: rawShareView.shareId }
+            : {}),
+          granterEmail: shareViewGranterEmail(rawShareView),
+          damaged: true as const,
+        };
   }
 
   const rawMounts: unknown = entry.shareMounts;
   const shareMounts = Array.isArray(rawMounts)
     ? rawMounts
         .map((row: unknown) =>
-          isRecord(row) ? { ...row, access: levelOf(row.grantedSelector) } : row,
+          isRecord(row)
+            ? { ...row, access: readableShareLevel(row.grantedSelector) ?? undefined }
+            : row,
         )
         .filter((row) => shareMountsShape.safeParse([row]).success)
     : undefined;

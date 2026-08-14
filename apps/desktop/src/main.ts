@@ -336,6 +336,10 @@ import {
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
 import type { JoinedSharedChannel } from "./workspaces/registryStore";
+import {
+  shareViewGranterEmail,
+  shareViewIsPresent,
+} from "./workspaces/shareViewMarker";
 import { workspaceSummariesFrom } from "./workspaces/workspaceSummaryProjection";
 import {
   assertSharedChannelWritable,
@@ -704,7 +708,15 @@ function isRichEnginePath(path: string): boolean {
 // renderer also hides its edit affordances; this main-process layer is the
 // enforcement that cannot be skipped.
 function sharedViewOf(workspaceId: string): { granterEmail: string | null } | null {
-  return findWorkspace(workspaceId)?.shareView ?? null;
+  const entry = findWorkspace(workspaceId);
+  if (!entry) return null;
+  // PRESENCE, not truthiness. A stored `shareView: null` is a share view
+  // whose marker lost its value, not a workspace that never had one, and
+  // `?? null` read the two as the same thing — which made someone else's
+  // files writable here (#646). Only an ABSENT field is an ordinary
+  // workspace; anything else stays refused, readable marker or not.
+  if (!shareViewIsPresent(entry.shareView)) return null;
+  return { granterEmail: shareViewGranterEmail(entry.shareView) };
 }
 
 function assertWritableWorkspace(workspace: { workspaceId: string }): void {
