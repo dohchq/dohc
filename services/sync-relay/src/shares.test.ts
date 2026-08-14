@@ -132,7 +132,11 @@ async function createShare(
   h: SyncRelayHandler,
   body: Record<string, unknown> = { recipientEmail: `${RECIPIENT}@dohc.test`, paths: ["docs"] },
 ): Promise<string> {
-  const response = await h(request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody(body)));
+  // The level is required at create (#646); cases that are not about levels
+  // mint at the narrowest one unless they pass their own.
+  const response = await h(
+    request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody({ access: "view", ...body })),
+  );
   expect(response.status).toBe(200);
   return (await json(response)).shareId as string;
 }
@@ -157,7 +161,7 @@ describe("share grants", () => {
       request(
         GRANTER,
         `/sync/${WORKSPACE}/shares`,
-        jsonBody({ recipientEmail: `${RECIPIENT}@dohc.test`, paths: ["docs", "notes.md"] }),
+        jsonBody({ recipientEmail: `${RECIPIENT}@dohc.test`, paths: ["docs", "notes.md"], access: "view" }),
       ),
     );
     expect(create.status).toBe(200);
@@ -287,7 +291,7 @@ describe("share grants", () => {
     await createWorkspace(h);
 
     const secret = await h(
-      request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientUserId: RECIPIENT, paths: [".env"] })),
+      request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientUserId: RECIPIENT, paths: [".env"], access: "view" })),
     );
     expect(secret.status).toBe(400);
     expect((await json(secret)).code).toBe("secret_path");
@@ -313,13 +317,13 @@ describe("share grants", () => {
     expect((await json(traversal)).code).toBe("invalid_path");
 
     const empty = await h(
-      request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientUserId: RECIPIENT, paths: [] })),
+      request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientUserId: RECIPIENT, paths: [], access: "view" })),
     );
     expect(empty.status).toBe(400);
     expect((await json(empty)).code).toBe("empty_selector");
 
     const self = await h(
-      request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientUserId: GRANTER, paths: ["docs"] })),
+      request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientUserId: GRANTER, paths: ["docs"], access: "view" })),
     );
     expect(self.status).toBe(400);
     expect((await json(self)).code).toBe("self_share");
@@ -330,7 +334,7 @@ describe("share grants", () => {
       request(
         GRANTER,
         `/sync/${WORKSPACE}/shares`,
-        jsonBody({ recipientEmail: `${GRANTER}@dohc.test`, paths: ["docs"] }),
+        jsonBody({ recipientEmail: `${GRANTER}@dohc.test`, paths: ["docs"], access: "view" }),
       ),
     );
     expect(selfByEmail.status).toBe(400);
@@ -346,14 +350,14 @@ describe("share grants", () => {
       request(
         GRANTER,
         `/sync/${WORKSPACE}/shares`,
-        jsonBody({ recipientEmail: `${RECIPIENT}@dohc.test`, paths: ["docs"] }),
+        jsonBody({ recipientEmail: `${RECIPIENT}@dohc.test`, paths: ["docs"], access: "view" }),
       ),
     );
     const unknown = await h(
       request(
         GRANTER,
         `/sync/${WORKSPACE}/shares`,
-        jsonBody({ recipientEmail: "nobody@elsewhere.example", paths: ["docs"] }),
+        jsonBody({ recipientEmail: "nobody@elsewhere.example", paths: ["docs"], access: "view" }),
       ),
     );
     expect(known.status).toBe(unknown.status);
@@ -400,7 +404,7 @@ describe("share grants", () => {
 
     // Grant to an address with no account yet: a pending invite.
     const create = await h(
-      request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientEmail: LATE_EMAIL, paths: ["docs"] })),
+      request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientEmail: LATE_EMAIL, paths: ["docs"], access: "view" })),
     );
     expect(create.status).toBe(200);
     const shareId = (await json(create)).shareId as string;
@@ -423,10 +427,10 @@ describe("share grants", () => {
     const h = handler(storage);
     await createWorkspace(h);
     const foreign = await denialBytes(
-      await h(request(STRANGER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientUserId: RECIPIENT, paths: ["docs"] }))),
+      await h(request(STRANGER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientUserId: RECIPIENT, paths: ["docs"], access: "view" }))),
     );
     const missing = await denialBytes(
-      await h(request(STRANGER, "/sync/no-such-workspace/shares", jsonBody({ recipientUserId: RECIPIENT, paths: ["docs"] }))),
+      await h(request(STRANGER, "/sync/no-such-workspace/shares", jsonBody({ recipientUserId: RECIPIENT, paths: ["docs"], access: "view" }))),
     );
     expect(foreign).toBe(missing);
   });

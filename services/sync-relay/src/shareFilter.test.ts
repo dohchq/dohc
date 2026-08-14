@@ -40,24 +40,30 @@ const pathShare: ShareSelector = { paths: ["docs"], versionId: null, access: "vi
 
 describe("share selector validation", () => {
   it("accepts explicit tracked paths and normalizes/dedupes them", () => {
-    const result = validateShareSelector({ paths: ["docs/notes.md", "docs//notes.md", "src"] });
+    const result = validateShareSelector({
+      paths: ["docs/notes.md", "docs//notes.md", "src"],
+      access: "view",
+    });
     expect(result).toEqual({
       ok: true,
       selector: { paths: ["docs/notes.md", "src"], versionId: null, access: "view" },
     });
   });
 
-  it("defaults access to view when the caller sends nothing, and accepts every level", () => {
+  it("accepts every level, and mints nothing when the caller names none", () => {
     for (const access of ["view", "comment", "edit"] as const) {
       expect(validateShareSelector({ paths: ["docs"], access })).toMatchObject({
         ok: true,
         selector: { access },
       });
     }
-    expect(validateShareSelector({ paths: ["docs"] })).toMatchObject({
-      ok: true,
-      selector: { access: "view" },
-    });
+    // No default. A share is MINTED here, so a caller that sends nothing has
+    // not chosen `view` — it has failed to say what the share grants, and
+    // the relay refuses rather than choosing on its behalf.
+    expect(
+      validateShareSelector({ paths: ["docs"] }),
+      "MUTATION: a share must never be minted at a level nobody asked for",
+    ).toMatchObject({ ok: false, code: "invalid_access" });
   });
 
   it("refuses every access value that is not exactly view, comment, or edit", () => {
@@ -98,7 +104,9 @@ describe("share selector validation", () => {
     expect(
       validateShareSelector({ paths: Array.from({ length: MAX_SHARE_PATHS + 1 }, (_, i) => `f${i}.md`) }),
     ).toMatchObject({ ok: false, code: "too_many_paths" });
-    expect(validateShareSelector({ versionId: "version-1" })).toMatchObject({ ok: true });
+    expect(
+      validateShareSelector({ versionId: "version-1", access: "view" }),
+    ).toMatchObject({ ok: true });
     expect(validateShareSelector({ versionId: "  padded " })).toMatchObject({
       ok: false,
       code: "invalid_version",
@@ -119,7 +127,10 @@ describe("share selector validation", () => {
       expect(isValidShareVersionId(versionId)).toBe(false);
     }
     expect(
-      validateShareSelector({ versionId: "v".repeat(MAX_SHARE_VERSION_ID_CHARS) }),
+      validateShareSelector({
+        versionId: "v".repeat(MAX_SHARE_VERSION_ID_CHARS),
+        access: "view",
+      }),
     ).toMatchObject({ ok: true });
   });
 

@@ -262,7 +262,14 @@ describe("presence over a share (cross-user, gated)", () => {
   async function shareFile(h: SyncRelayHandler): Promise<string> {
     await claimWorkspace(h, "owner", "w");
     const created = await json(
-      await h(post("owner", "/sync/w/shares", { paths: ["notes/a.md"], versionId: null, recipientUserId: "guest" })),
+      await h(
+        post("owner", "/sync/w/shares", {
+          paths: ["notes/a.md"],
+          versionId: null,
+          access: "view",
+          recipientUserId: "guest",
+        }),
+      ),
     );
     return created.shareId as string;
   }

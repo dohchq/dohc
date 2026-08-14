@@ -44,8 +44,24 @@ file/path share selector — relay `ShareSelector`, desktop `ShareViewSelector`,
 share summary rows, bridge contract. The chat-channel selector's binary
 `access` is untouched and out of scope.
 
-**B. Default at create is `view`** when the caller sends nothing. The UI always
-states the level explicitly anyway.
+**B. ~~Default at create is `view`~~ — REVERSED during PR1 review. The level
+is required at create; there is no default.**
+
+The original decision defaulted to `view` when a caller sent nothing, on the
+reasoning that the UI always states the level anyway. CodeRabbit's review of
+PR1 surfaced the inconsistency that argument hides: decision G already says the
+field is required where it lives, and `parseShareSelectorJson` already refuses
+a stored row that omits it. A default at create meant one boundary minted a
+level nobody asked for while the neighbouring boundary refused the same shape.
+
+Create is the MINTING boundary, so it is the one place the rule matters most. A
+caller that sends nothing has not chosen `view`; it has failed to say what the
+share grants, and the relay must not choose on its behalf. Because the UI
+always sends the level, the default defended nothing — it only widened what a
+non-UI caller could get by accident.
+
+`validateShareSelector` therefore refuses a missing `access` with
+`invalid_access`, the same code and shape as any other unrecognized value.
 
 **C. Reuse the read-only refusal vocabulary end to end.** Relay
 `share_read_only` (403, `services/sync-relay/src/errorCodes.ts:26`), the same
@@ -637,15 +653,15 @@ words: `This shared file is read-only for you.`
    `SHARE_ACCESS_VALUES = ["view", "comment", "edit"] as const` and
    `type ShareAccess`, beside the chat constants at line 48. Add
    `access: ShareAccess` to `ShareSelector` (line 33-40), required.
-2. `validateShareSelector` (line 168): accept `access?: unknown`; default to
-   `"view"` when `undefined`; refuse any other value with
-   `RELAY_ERRORS.invalid_access`. Return it on the selector.
+2. `validateShareSelector` (line 168): accept `access?: unknown` and require a
+   member of `SHARE_ACCESS_VALUES`; refuse anything else — a missing level
+   included — with `RELAY_ERRORS.invalid_access`. Return it on the selector.
+   (Amended: see decision B. There is no create-time default.)
 3. `parseShareSelectorJson` (line 255): require `access` to be a member of
-   `SHARE_ACCESS_VALUES`; return `null` otherwise. This mirrors the
-   chat-channel row rule at line 277-287 exactly, and its comment explains why:
-   a create-time default must not silently promote a tampered or older row.
-   Every stored path-share row without the field now fails closed to the
-   generic 404. That is intended (decision G) and must be said in the PR body.
+   `SHARE_ACCESS_VALUES`; return `null` otherwise — the same rule create
+   applies, so no boundary invents a level for a row that never named one.
+   Every stored path-share row without the field fails closed to the generic
+   404. That is intended (decision G) and must be said in the PR body.
 4. `services/sync-relay/src/server.ts`: the create route (line 616-726) reads
    `input.access` and passes it to `validateShareSelector`. `shareSummary`
    (line 229-264) returns `access` on granted and received rows.

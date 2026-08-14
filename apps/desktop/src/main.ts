@@ -336,6 +336,7 @@ import {
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
 import type { JoinedSharedChannel } from "./workspaces/registryStore";
+import { workspaceSummariesFrom } from "./workspaces/workspaceSummaryProjection";
 import {
   assertSharedChannelWritable,
   createKeyedSerializer,
@@ -1141,30 +1142,7 @@ function notifyCloudSessionChangedWithKey(
 }
 
 function workspaceSummaries(): WorkspaceSummary[] {
-  // The share level reaches the renderer from the PINNED grant, so there is
-  // one stored copy of it (#646). The renderer states the level in its copy;
-  // it never decides anything with it.
-  return listWorkspaces().map((workspace) =>
-    WorkspaceSummary.parse({
-      ...workspace,
-      ...(workspace.shareView
-        ? {
-            shareView: {
-              ...workspace.shareView,
-              access: workspace.shareView.grantedSelector.access,
-            },
-          }
-        : {}),
-      ...(workspace.shareMounts
-        ? {
-            shareMounts: workspace.shareMounts.map((mount) => ({
-              ...mount,
-              access: mount.grantedSelector.access,
-            })),
-          }
-        : {}),
-    }),
-  );
+  return workspaceSummariesFrom(listWorkspaces());
 }
 
 function nativeWorkspaceSummaries(): WorkspaceSummary[] {

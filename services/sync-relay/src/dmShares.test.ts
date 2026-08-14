@@ -613,7 +613,7 @@ describe("DM grants over the relay", () => {
     // learns nothing distinguishing (share_read_only, like any non-appendable).
     const pathShareId = (await json(
       await h(
-        request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientEmail: `${MEMBER}@dohc.test`, paths: ["docs"] })),
+        request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientEmail: `${MEMBER}@dohc.test`, paths: ["docs"], access: "view" })),
       ),
     )).shareId as string;
     const pathPost = await memberAppend(h, pathShareId, [memberMessage(0)]);

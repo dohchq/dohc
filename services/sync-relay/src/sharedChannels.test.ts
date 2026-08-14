@@ -386,7 +386,7 @@ describe("shared channels (MU-C4)", () => {
     const h = handler(storage);
     await seedOwnerWorkspace(h);
     const created = await h(
-      request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientUserId: MEMBER_A, paths: ["docs"] })),
+      request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientUserId: MEMBER_A, paths: ["docs"], access: "view" })),
     );
     expect(created.status).toBe(200);
     const shareId = (await json(created)).shareId as string;

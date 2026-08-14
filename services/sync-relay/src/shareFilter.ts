@@ -257,11 +257,11 @@ export function validateShareSelector(input: {
       message: "a share must select at least one path or a version",
     };
   }
-  // Default view (decision B): the UI always states the level explicitly, so
-  // this only covers a caller that sends nothing. `undefined` ONLY — an
-  // explicit `null` is not "nothing", it is a value this rule refuses, same
-  // as any other unrecognized one.
-  const access = input.access === undefined ? "view" : input.access;
+  // Required, with no default (#646). A share is minted here, and decision G
+  // — the level is required where it lives — applies at the minting boundary
+  // too. A caller that sends nothing has not chosen `view`, it has failed to
+  // say what it grants, and the relay refuses rather than choosing for it.
+  const access = input.access;
   if (!isShareAccessValue(access)) {
     return {
       ok: false,
@@ -273,12 +273,11 @@ export function validateShareSelector(input: {
   return { ok: true, selector: { paths: deduped, versionId, access } };
 }
 
-// A persisted row must carry an EXPLICIT, valid access: the create-time
-// default in validateShareSelector must not silently promote a tampered or
-// pre-#646 row into a view grant it never earned. A row missing the field, or
-// carrying a value the relay never issues, fails closed to null (the routes
-// answer that with the generic 404) — this is decision G, stated plainly:
-// no migration shim, no implicit upgrade.
+// A persisted row must carry an EXPLICIT, valid access, the same rule create
+// applies. A row missing the field, or carrying a value the relay never
+// issues, fails closed to null and the routes answer that with the generic
+// 404 — decision G, stated plainly: no migration shim, no implicit upgrade,
+// and no level invented for a row that never named one.
 export function parseShareSelectorJson(selectorJson: string): ShareSelector | null {
   try {
     const parsed = JSON.parse(selectorJson) as unknown;
