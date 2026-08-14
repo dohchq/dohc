@@ -11940,6 +11940,18 @@ fn restore_deleted_scene_assets_in_tx(
         drawing_delete_moment_id,
         drawing_object_id,
     )?;
+    // Materialization jobs write into the ACTIVE workspace directory. A
+    // rollback in a version the user has switched away from must restore the
+    // heads without enqueueing jobs, or the general pending replay would
+    // write the inactive version's asset files into the active tree and a
+    // later capture would adopt them into the wrong version.
+    let version_is_active: bool = tx
+        .query_row(
+            "SELECT ?2 = COALESCE(                  (SELECT version_id FROM active_versions WHERE workspace_id = ?1),                  (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id = ?1))",
+            params![workspace_id, version_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
     let mut jobs = Vec::with_capacity(deleted_assets.len());
     for (delete_moment_id, path, sha256, recorded_at_ms) in deleted_assets {
         let occupied: bool = tx
@@ -11984,7 +11996,7 @@ fn restore_deleted_scene_assets_in_tx(
                 metadata_summary: Some("Restored drawing asset".to_owned()),
                 metadata_correlation_id: Some(drawing_rollback_moment_id.to_owned()),
                 author_json: author_json.map(str::to_owned),
-                materialize: Some(Preimage::Absent),
+                materialize: version_is_active.then_some(Preimage::Absent),
                 now_ms: recorded_at_ms,
             },
         )?;

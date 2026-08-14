@@ -4,20 +4,28 @@ import type {
   SocketId,
 } from "@excalidraw/excalidraw/types";
 import type * as Y from "yjs";
+import { PRESENCE_STATE_MAX_BYTES } from "../../ipc/bridgeContract";
 import { bindDocPresence, type DocPresenceBinding } from "./docPresence";
 import type { PresenceScope, PresenceTransport } from "./presenceChannel";
 
 const CURSOR_PUBLISH_MS = 33;
 const MAX_POINTER_COORDINATE = 10_000_000;
-// The awareness update is base64-wrapped inside the 8 KiB presence state.
-// This shape leaves room for the wrapper and user/pointer fields even under
-// the IPC boundary's conservative six-bytes-per-character estimator.
 const MAX_SELECTED_ELEMENT_IDS = 16;
-// A TOTAL across the selection, not a per-id cap: the scene codec accepts
-// any nonempty well-formed id, so a long imported id is valid work and
-// must not be silently dropped from peers' view. Same envelope math as
-// the old 16 ids x 24 chars shape.
-const MAX_SELECTION_ID_CHARS_TOTAL = 384;
+// Budgeted against the transport's REAL envelope: the relay refuses a
+// presence state above PRESENCE_STATE_MAX_BYTES of UTF-8 JSON, and the
+// awareness update rides base64-wrapped inside that state. The selection may
+// spend the envelope minus generous headroom for the wrapper and the
+// user/pointer fields, shrunk by the base64 expansion. A TOTAL budget, not a
+// per-id cap: the scene codec accepts any nonempty well-formed id, so even a
+// single long imported id is valid work while it fits the envelope.
+const SELECTION_HEADROOM_BYTES = 2048;
+const MAX_SELECTION_ID_BYTES_TOTAL = Math.floor(
+  ((PRESENCE_STATE_MAX_BYTES - SELECTION_HEADROOM_BYTES) * 3) / 4,
+);
+const utf8ByteLength = (value: string): number =>
+  new TextEncoder().encode(value).length;
+// JSON overhead per selection entry: quotes, colon, `true`, and a comma.
+const SELECTION_ENTRY_OVERHEAD_BYTES = 8;
 const UNSAFE_ELEMENT_ID = /[\u0000-\u001f\u007f-\u009f]/;
 
 type CleanSelection = Record<string, true>;
@@ -146,12 +154,13 @@ function cleanSelection(value: unknown): CleanSelection | undefined {
         id.isWellFormed(),
     )
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
-  let usedChars = 0;
+  let usedBytes = 0;
   let kept = 0;
   for (const [id] of entries) {
     if (kept >= MAX_SELECTED_ELEMENT_IDS) break;
-    if (usedChars + id.length > MAX_SELECTION_ID_CHARS_TOTAL) continue;
-    usedChars += id.length;
+    const cost = utf8ByteLength(id) + SELECTION_ENTRY_OVERHEAD_BYTES;
+    if (usedBytes + cost > MAX_SELECTION_ID_BYTES_TOTAL) continue;
+    usedBytes += cost;
     kept += 1;
     selected[id] = true;
   }
