@@ -179,6 +179,49 @@ describe("Excalidraw scene adapter", () => {
     expect(foldScene(doc).appState.gridSize).toBe(30);
   });
 
+  it("lets a local reversion land after the remote render's own echo", () => {
+    const doc = new Y.Doc();
+    const echoes = createSceneRemoteEchoes();
+    // A remote render sets gridSize 10; its own immediate callback confirms
+    // the value and must CONSUME the echo on that equality path.
+    applyCanvasSceneChange({
+      doc,
+      elements: [],
+      appState: { gridSize: 10 },
+      files: {},
+      remoteEchoes: createSceneRemoteEchoes(),
+    });
+    rememberRemoteScene(sceneForCanvas(doc), echoes);
+    const confirming = applyCanvasSceneChange({
+      doc,
+      elements: [],
+      appState: { gridSize: 10 },
+      files: {},
+      remoteEchoes: echoes,
+    });
+    expect(confirming.changed).toBe(false);
+
+    // Another collaborator moves it to 20, then the local user intentionally
+    // reverts to 10. The reversion is a real local edit, not a replay.
+    applyCanvasSceneChange({
+      doc,
+      elements: [],
+      appState: { gridSize: 20 },
+      files: {},
+      remoteEchoes: createSceneRemoteEchoes(),
+    });
+    rememberRemoteScene(sceneForCanvas(doc), echoes);
+    const reverted = applyCanvasSceneChange({
+      doc,
+      elements: [],
+      appState: { gridSize: 10 },
+      files: {},
+      remoteEchoes: echoes,
+    });
+    expect(reverted.changed).toBe(true);
+    expect(foldScene(doc).appState.gridSize).toBe(10);
+  });
+
   it("keeps a typed-out text element away from the document until it has text", () => {
     const doc = new Y.Doc();
     const echoes = createSceneRemoteEchoes();

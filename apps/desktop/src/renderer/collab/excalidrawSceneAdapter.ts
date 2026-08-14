@@ -148,8 +148,15 @@ export function applyCanvasSceneChange(input: {
       if (value === undefined) continue;
       const jsonValue = jsonValueOf(value);
       const encoded = stableJson(jsonValue);
+      const rememberedRemote = input.remoteEchoes.appState.get(key);
+      const isRememberedRemote = rememberedRemote?.has(encoded) ?? false;
       const currentValue = current.appState[key];
       if (currentValue !== undefined && stableJson(currentValue) === encoded) {
+        // The callback confirms the value the fold already holds. If that
+        // value came from a remote render, this IS its echo — consume it now
+        // so a later intentional local reversion to the same value cannot be
+        // mistaken for a replay.
+        if (isRememberedRemote) rememberedRemote?.delete(encoded);
         continue;
       }
       // A delayed callback can replay a superseded remote render's app state
@@ -157,9 +164,8 @@ export function applyCanvasSceneChange(input: {
       // revision identity). A remembered remote value that no longer matches
       // the fold is such a replay — consume it instead of writing an old
       // gridSize or background over the newer value.
-      const rememberedRemote = input.remoteEchoes.appState.get(key);
-      if (rememberedRemote?.has(encoded)) {
-        rememberedRemote.delete(encoded);
+      if (isRememberedRemote) {
+        rememberedRemote?.delete(encoded);
         continue;
       }
       setAppStateProperty(input.doc, key, jsonValue);
