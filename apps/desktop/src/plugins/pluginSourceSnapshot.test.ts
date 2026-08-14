@@ -20,6 +20,7 @@ import {
 import {
   MAX_PLUGIN_LOCKFILE_BYTES,
   PINNED_PLUGIN_PACKAGE_MANAGER,
+  hashPluginSourceFiles,
   pluginIdToSafePath,
   snapshotPluginSource,
   type PluginSourceSnapshotResult,
@@ -513,5 +514,77 @@ describe("snapshotPluginSource canonical hash and replacement", () => {
     expect(reconciled.sourceHash).toBe(first.sourceHash);
     expect(reconciled.snapshotRoot).toBe(first.snapshotRoot);
     await expect(readFile(installedMarker, "utf8")).resolves.toBe("installed\n");
+  });
+
+  it("rebuilds a preserved snapshot that was deleted out of band", async () => {
+    const fixture = await createPluginFixture();
+    await writeFile(join(fixture.pluginRoot, "payload.txt"), "a");
+    const first = requireSuccess(await runSnapshot(fixture));
+    await rm(first.snapshotRoot, { recursive: true, force: true });
+
+    const reconciled = requireSuccess(await snapshotPluginSource({
+      workspaceRoot: fixture.root,
+      stateDir: fixture.stateDir,
+      dohcDir: fixture.dohcDir,
+      pluginId: fixture.manifest.name,
+      pluginRoot: fixture.pluginRoot,
+      manifest: fixture.manifest,
+      preserveIfHashMatches: first.sourceHash,
+    }));
+
+    expect(reconciled.snapshotRoot).toBe(first.snapshotRoot);
+    expect(reconciled.sourceHash).toBe(first.sourceHash);
+    await expect(readFile(join(reconciled.snapshotRoot, "payload.txt"), "utf8"))
+      .resolves.toBe("a");
+  });
+
+  it("rebuilds a preserved snapshot whose contents no longer match its hash", async () => {
+    const fixture = await createPluginFixture();
+    await writeFile(join(fixture.pluginRoot, "payload.txt"), "a");
+    const first = requireSuccess(await runSnapshot(fixture));
+    await writeFile(join(first.snapshotRoot, "payload.txt"), "corrupted");
+
+    const reconciled = requireSuccess(await snapshotPluginSource({
+      workspaceRoot: fixture.root,
+      stateDir: fixture.stateDir,
+      dohcDir: fixture.dohcDir,
+      pluginId: fixture.manifest.name,
+      pluginRoot: fixture.pluginRoot,
+      manifest: fixture.manifest,
+      preserveIfHashMatches: first.sourceHash,
+    }));
+
+    expect(reconciled.sourceHash).toBe(first.sourceHash);
+    await expect(readFile(join(reconciled.snapshotRoot, "payload.txt"), "utf8"))
+      .resolves.toBe("a");
+  });
+});
+
+describe("hashPluginSourceFiles entry kinds", () => {
+  it("fails closed on a symlink so it can never hash as an absent file", async () => {
+    const fixture = await createPluginFixture();
+    await writeFile(join(fixture.pluginRoot, "payload.txt"), "a");
+    const linkPath = join(fixture.pluginRoot, "linked.txt");
+    await symlink(
+      join(fixture.pluginRoot, "payload.txt"),
+      linkPath,
+      process.platform === "win32" ? "junction" : "file",
+    );
+
+    await expect(hashPluginSourceFiles(fixture.pluginRoot)).rejects.toThrow(
+      /is a symlink or junction/,
+    );
+  });
+
+  it("hashes a tree of plain files and directories", async () => {
+    const fixture = await createPluginFixture();
+    await mkdir(join(fixture.pluginRoot, "nested"));
+    await writeFile(join(fixture.pluginRoot, "nested", "payload.txt"), "a");
+
+    const digest = await hashPluginSourceFiles(fixture.pluginRoot);
+
+    expect(digest.files.map((file) => file.relPath)).toContain(
+      "nested/payload.txt",
+    );
   });
 });

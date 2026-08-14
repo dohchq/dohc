@@ -3,6 +3,7 @@ import {
   readFile,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -101,6 +102,28 @@ afterEach(async () => {
 });
 
 describe("plugin uninstall preflight", () => {
+  it("warns instead of reporting a clean tree when a symlink was dropped into the source", async () => {
+    const fixture = await createFixture();
+    await writeSourceFile(fixture, "index.ts", "export const value = 1;\n");
+    const installedBaselineHash = await saveBaseline(fixture);
+    // A symlink is invisible to a hash that records only regular files, so
+    // before this it reported "no local modifications" while recursive
+    // removal still deleted the link.
+    await symlink(
+      join(fixture.pluginRoot, "index.ts"),
+      join(fixture.pluginRoot, "linked.ts"),
+      process.platform === "win32" ? "junction" : "file",
+    );
+
+    const result = await runPreflight(fixture, installedBaselineHash);
+
+    expect(result.verification).toBe("cannot-verify");
+    expect(result.warning).not.toBeNull();
+    expect(result.warning?.kind).toBe("cannot-verify-baseline");
+    expect(result.summary).not.toContain("No local source modifications found");
+    expect(result.summary).toContain("symlink or junction");
+  });
+
   it("reports no local modifications when the live hash matches the baseline", async () => {
     const fixture = await createFixture();
     await writeSourceFile(fixture, "index.ts", "export const value = 1;\n");

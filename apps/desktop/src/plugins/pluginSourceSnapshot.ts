@@ -712,9 +712,28 @@ async function listSnapshotFiles(
     const path = join(current, entry.name);
     if (entry.isDirectory()) {
       files.push(...await listSnapshotFiles(root, path));
-    } else if (entry.isFile()) {
-      files.push(relative(root, path).replaceAll("\\", "/"));
+      continue;
     }
+    if (entry.isFile()) {
+      files.push(relative(root, path).replaceAll("\\", "/"));
+      continue;
+    }
+    // Fails closed on anything else, the same stance copySourceTree takes.
+    // Skipping these silently hid them from the hash, so a symlink dropped
+    // under an installed plugin left the uninstall preflight reporting no
+    // local modifications while recursive removal still deleted the link.
+    if (entry.isSymbolicLink()) {
+      throw new SnapshotError(
+        "unsafe-source-entry",
+        `Plugin source entry at ${path} is a symlink or junction.`,
+        path,
+      );
+    }
+    throw new SnapshotError(
+      "unsafe-source-entry",
+      `Plugin source entry at ${path} is not a regular file or directory.`,
+      path,
+    );
   }
   return files;
 }
@@ -879,6 +898,26 @@ export function pluginIdToSafePath(pluginId: string): string {
   return pluginId.replaceAll("/", "%2F");
 }
 
+/**
+ * Whether the snapshot already on disk is readable and hashes to the expected
+ * source hash. Any failure (missing directory, IO error, mismatch) answers
+ * false so the caller rebuilds instead of trusting it.
+ *
+ * node_modules stays excluded from the hash (EXCLUDED_SOURCE_NAMES): install
+ * integrity is the lifecycle scan's job, not this check's.
+ */
+async function snapshotMatchesHash(
+  snapshotRoot: string,
+  expectedHash: string,
+): Promise<boolean> {
+  try {
+    const existing = await hashPluginSourceFiles(snapshotRoot);
+    return existing.sourceHash === expectedHash;
+  } catch {
+    return false;
+  }
+}
+
 export async function snapshotPluginSource(
   input: SnapshotPluginSourceInput,
 ): Promise<PluginSourceSnapshotResult> {
@@ -919,7 +958,14 @@ export async function snapshotPluginSource(
     const digest = await hashPluginSourceFiles(stagingRoot);
     const { sourceHash } = digest;
     const snapshotRoot = join(output.pluginDataRoot, "snapshot");
-    if (sourceHash === input.preserveIfHashMatches) {
+    // Preserving is only safe when the snapshot it preserves is actually
+    // there and actually matches. A snapshot deleted or corrupted out of band
+    // would otherwise be handed back as a live root that nothing rebuilds.
+    // Staging already holds a fresh valid copy, so recovery costs nothing.
+    if (
+      sourceHash === input.preserveIfHashMatches &&
+      await snapshotMatchesHash(snapshotRoot, sourceHash)
+    ) {
       await rm(stagingRoot, {
         recursive: true,
         force: true,
