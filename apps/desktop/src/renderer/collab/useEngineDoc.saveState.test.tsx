@@ -1407,6 +1407,28 @@ it("replaces the same deletion's draft when a keystroke lands before read-only c
   expect(harness.applied).toHaveLength(appliedAtDelete);
 });
 
+it("keeps one recovery draft when deletion lands during a lineage replacement handoff", async () => {
+  await mountBound();
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  // The mirror is dirty, so the replacement's preserve persists a recovery
+  // draft synchronously; main's deletion notice for the same session lands
+  // before the handoff acknowledges. The deletion must refine the preserved
+  // draft, not capture a sibling from the same mirror.
+  act(() => {
+    harness.emitLineageReplacement("winner!");
+    harness.emitNow("deleted", 0);
+  });
+
+  await waitFor(() =>
+    expect(screen.getByTestId("state").textContent).toBe("deleted"),
+  );
+  expect(screen.getByTestId("draft-count").textContent).toBe("1");
+  expect(screen.getByTestId("draft").textContent).toContain("seed!");
+});
+
 it("freezes the deleted doc's bytes at the event, immune to a remote edit that lands before serialization resolves", async () => {
   // #697 P1-A: the boundary capture snapshots the doc SYNCHRONOUSLY at the
   // deletion event and defers only the markdown PROJECTION (the part that

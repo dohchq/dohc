@@ -12,21 +12,23 @@ const CURSOR_PUBLISH_MS = 33;
 const MAX_POINTER_COORDINATE = 10_000_000;
 // Budgeted against the transport's REAL envelope: the relay refuses a
 // presence state above PRESENCE_STATE_MAX_BYTES of UTF-8 JSON, and the
-// awareness update rides base64-wrapped inside that state. The selection may
-// spend the envelope minus generous headroom for the wrapper and the
-// user/pointer fields, shrunk by the base64 expansion. A TOTAL budget, not a
-// per-id cap: the scene codec accepts any nonempty well-formed id, so even a
-// single long imported id is valid work while it fits the envelope.
-// Half the envelope, measured: the "keeps a maximum sanitized selection
-// inside the 8 KiB presence envelope" test drives a full-budget selection
-// through the real awareness encoding, and the base64 framing plus the
-// user/pointer wrapper consume close to this much around it.
+// awareness update rides base64-wrapped inside that state, so selection
+// bytes cost 4/3 by the time the relay measures them. The headroom is a
+// conservative round number, not a measurement: the envelope test measures
+// the user/pointer wrapper plus base64 framing at ~310 bytes around a
+// full-budget selection. A TOTAL budget, not a per-id cap: the scene codec
+// accepts any nonempty well-formed id, so even a single long imported id is
+// valid work while it fits the envelope.
 const SELECTION_HEADROOM_BYTES = 4096;
 const MAX_SELECTION_ID_BYTES_TOTAL = Math.floor(
   ((PRESENCE_STATE_MAX_BYTES - SELECTION_HEADROOM_BYTES) * 3) / 4,
 );
 const utf8ByteLength = (value: string): number =>
   new TextEncoder().encode(value).length;
+// The id's exact serialized bytes inside the awareness JSON: `"` and `\`
+// escape to two bytes, which a raw UTF-8 count under-bills.
+const serializedIdBytes = (id: string): number =>
+  utf8ByteLength(JSON.stringify(id)) - 2;
 // JSON overhead per selection entry: quotes, colon, `true`, and a comma.
 const SELECTION_ENTRY_OVERHEAD_BYTES = 8;
 const UNSAFE_ELEMENT_ID = /[\u0000-\u001f\u007f-\u009f]/;
@@ -159,7 +161,7 @@ function cleanSelection(value: unknown): CleanSelection | undefined {
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
   let usedBytes = 0;
   for (const [id] of entries) {
-    const cost = utf8ByteLength(id) + SELECTION_ENTRY_OVERHEAD_BYTES;
+    const cost = serializedIdBytes(id) + SELECTION_ENTRY_OVERHEAD_BYTES;
     if (usedBytes + cost > MAX_SELECTION_ID_BYTES_TOTAL) continue;
     usedBytes += cost;
     selected[id] = true;

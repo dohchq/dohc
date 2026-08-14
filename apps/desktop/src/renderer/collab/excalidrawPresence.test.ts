@@ -165,6 +165,9 @@ describe("Excalidraw presence", () => {
     // beyond the envelope-derived byte budget is dropped.
     selectedElementIds["long".padEnd(513, "x")] = true;
     selectedElementIds["x".repeat(8192)] = true;
+    // Backslashes serialize as two bytes each: 2,000 of them fit a raw
+    // UTF-8 count but exceed the byte budget once JSON-escaped.
+    selectedElementIds["\\".repeat(2000)] = true;
     selectedElementIds.__proto__ = true;
     selectedElementIds["control\u0000id"] = true;
     selectedElementIds["surrogate\ud800id"] = true;
@@ -212,36 +215,52 @@ describe("Excalidraw presence", () => {
   });
 
   it("keeps a maximum sanitized selection inside the 8 KiB presence envelope", async () => {
+    const relay = sharedRelay();
+    const api = fakeApi();
     const states: unknown[] = [];
-    const doc = new Y.Doc();
-    const binding = bindExcalidrawPresence({
-      doc,
+    const senderDoc = new Y.Doc();
+    const receiverDoc = new Y.Doc();
+    const senderTransport = relay.make();
+    const sender = bindExcalidrawPresence({
+      doc: senderDoc,
       transport: {
-        async publish({ state }) {
-          states.push(state);
-          return { version: states.length, peers: [] };
+        ...senderTransport,
+        async publish(input) {
+          states.push(input.state);
+          return senderTransport.publish(input);
         },
-        async leave() {},
-        poll: ({ signal }) =>
-          new Promise((resolve) => {
-            signal.addEventListener(
-              "abort",
-              () => resolve({ version: states.length, peers: [] }),
-              { once: true },
-            );
-          }),
       },
       topic: "scene-1",
       clientId: "local",
       displayName: "L".repeat(64),
       getApi: () => null,
     });
+    const receiver = bindExcalidrawPresence({
+      doc: receiverDoc,
+      transport: relay.make(),
+      topic: "scene-1",
+      clientId: "receiver",
+      displayName: "R",
+      getApi: () => api.api,
+    });
     const selection = Object.create(null) as Record<string, boolean>;
     for (let index = 99; index >= 0; index -= 1) {
       selection[`id-${String(index).padStart(20, "x")}`] = true;
     }
-    binding.updateSelection(selection);
+    sender.updateSelection(selection);
     await flush();
+
+    // Each 23-byte id costs 31 with entry overhead, so exactly 99 of the
+    // 100 fit the 3,072-byte id budget. This pins the budget constant: a
+    // different headroom changes the kept count.
+    const latest = api.updateScene.mock.calls.at(-1)?.[0] as {
+      collaborators: Map<
+        string,
+        { selectedElementIds?: Record<string, boolean> }
+      >;
+    };
+    const collaborator = [...latest.collaborators.values()][0]!;
+    expect(Object.keys(collaborator.selectedElementIds!)).toHaveLength(99);
 
     const state = states.at(-1);
     expect(
@@ -252,10 +271,18 @@ describe("Excalidraw presence", () => {
         state,
       }).success,
     ).toBe(true);
-    expect(JSON.stringify(state).length).toBeLessThan(8 * 1024);
+    // The measurement the headroom comment cites: the full-budget selection
+    // serializes to ~3,070 bytes of awareness JSON, base64 expands that by
+    // 4/3 to ~4,093, and the user wrapper plus framing add only ~310 more —
+    // the 4,096-byte headroom is conservative by an order of magnitude.
+    const measured = JSON.stringify(states.at(-1)).length;
+    expect(measured).toBeGreaterThan(4093);
+    expect(measured).toBeLessThan(4093 + 512);
 
-    binding.destroy();
-    doc.destroy();
+    sender.destroy();
+    receiver.destroy();
+    senderDoc.destroy();
+    receiverDoc.destroy();
   });
 
   it("drops non-finite pointers and limits cursor publishes to 33ms", async () => {

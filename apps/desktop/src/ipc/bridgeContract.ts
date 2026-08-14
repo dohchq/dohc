@@ -1668,16 +1668,15 @@ export function presenceStateWithinCap(
         return spend(5); // up to "false"
       case "number":
         return spend(v && Number.isFinite(v) ? 24 : 4); // non-finite → "null"
-      case "string": {
-        // Upper bound: printable ASCII without quotes or backslashes
-        // serializes one byte per character; anything else may need a
-        // "\uXXXX" escape or multi-byte UTF-8, and 6 bytes covers the
-        // worst case. Without the split, a base64 payload (the presence
-        // awareness update) was charged six times its real size and
-        // healthy states hit the cap far below the relay's actual limit.
-        const perChar = SAFE_JSON_STRING_CHARS.test(v) ? 1 : 6;
-        return spend(2 + v.length * perChar);
-      }
+      case "string":
+        // Every JSON string costs at least its quotes plus one byte per
+        // UTF-16 code unit — charge that floor first so a huge string still
+        // bails without being scanned. Safe printable ASCII (the base64
+        // awareness update) serializes at exactly the floor; anything else
+        // may need a "\uXXXX" escape or multi-byte UTF-8, and 6 bytes per
+        // code unit covers the worst case.
+        if (!spend(2 + v.length)) return false;
+        return SAFE_JSON_STRING_CHARS.test(v) || spend(v.length * 5);
       case "object": {
         const obj = v as object;
         if (seen.has(obj)) return false; // cycle → reject as over-cap

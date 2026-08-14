@@ -1127,6 +1127,13 @@ function createEngineDocSession(
                 },
           );
         }
+        if (publishesRecoveryStatus) {
+          // The slot must know about this draft and snapshot: a deletion or
+          // read-only push arriving after the preserve refines this row
+          // instead of capturing a sibling from the same mirror.
+          retiredRecoverySlot.snapshotBytes = bytes;
+          retiredRecoverySlot.draftId = draftId;
+        }
         const capturedDraftId = draftId;
         void sceneRecovery.completed
           .then((recovered) => {
@@ -1165,6 +1172,13 @@ function createEngineDocSession(
         draftId = captureOrphanedDraft(workspaceId, path, crude);
       } else {
         replaceOrphanedDraft(workspaceId, path, draftId, crude);
+      }
+      if (retiredRecoverySlot === recovery) {
+        // The slot must know about this draft and snapshot: a deletion or
+        // read-only push arriving after the preserve refines this row
+        // instead of capturing a sibling from the same mirror.
+        retiredRecoverySlot.snapshotBytes = bytes;
+        retiredRecoverySlot.draftId = draftId;
       }
       const capturedDraftId = draftId;
       projectionQueue = projectionQueue
