@@ -141,6 +141,66 @@ describe("workspace plugin pipeline lifecycle", () => {
     expect(created[0]?.disposed).toBe(true);
   });
 
+  it("makes a retry wait for a failed create's own disposal (#779 round 15 A3)", async () => {
+    const live = new Map<string, FakePipeline>();
+    const disposals = new Map<string, Promise<void>>();
+    const events: string[] = [];
+    let created = 0;
+    let failNextStart = true;
+    const teardown = deferred();
+    const ensure = () =>
+      ensureWorkspacePipeline<FakePipeline>({
+        live,
+        disposals,
+        workspaceId: "workspace-1",
+        create: () => {
+          const pipeline = { id: ++created, started: false, disposed: false };
+          events.push(`create ${pipeline.id}`);
+          return pipeline;
+        },
+        start: async (pipeline) => {
+          if (failNextStart) {
+            failNextStart = false;
+            throw new Error("discovery failed");
+          }
+          pipeline.started = true;
+        },
+        dispose: async (pipeline) => {
+          events.push(`dispose start ${pipeline.id}`);
+          await teardown.promise;
+          pipeline.disposed = true;
+          events.push(`dispose end ${pipeline.id}`);
+        },
+      });
+
+    // The failed create's own teardown drains the same userData snapshot and
+    // bundle roots a second pipeline would write, so an immediate retry must
+    // wait for it exactly as a workspace switch does.
+    const failing = ensure();
+    failing.catch(() => undefined);
+    while (!events.includes("dispose start 1")) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    const retry = ensure();
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(events).toEqual(["create 1", "dispose start 1"]);
+
+    teardown.resolve();
+    await expect(failing).rejects.toThrow("discovery failed");
+    const second = await retry;
+
+    expect(events).toEqual([
+      "create 1",
+      "dispose start 1",
+      "dispose end 1",
+      "create 2",
+    ]);
+    expect(second.started).toBe(true);
+    expect(live.get("workspace-1")).toBe(second);
+    expect(disposals.size).toBe(0);
+  });
+
   it("disposes nothing for a workspace with no pipeline", async () => {
     const live = new Map<string, FakePipeline>();
     const disposals = new Map<string, Promise<void>>();

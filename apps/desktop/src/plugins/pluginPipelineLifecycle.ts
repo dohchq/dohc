@@ -45,8 +45,34 @@ export async function ensureWorkspacePipeline<T>(input: {
     if (live.get(input.workspaceId) === pipeline) {
       live.delete(input.workspaceId);
     }
-    await input.dispose(pipeline).catch(() => undefined);
+    // Registered like any other teardown: a retry landing while this failed
+    // pipeline still drains would otherwise construct a second one over the
+    // same userData roots — the exact overlap this module exists to close.
+    await trackDisposal(
+      disposals,
+      input.workspaceId,
+      input.dispose(pipeline).catch(() => undefined),
+    );
     throw error;
+  }
+}
+
+/**
+ * Publishes a teardown as this workspace's disposal for as long as it runs, so
+ * ensureWorkspacePipeline waits for it before creating the next pipeline.
+ */
+async function trackDisposal(
+  disposals: Map<string, Promise<void>>,
+  workspaceId: string,
+  disposal: Promise<void>,
+): Promise<void> {
+  disposals.set(workspaceId, disposal);
+  try {
+    await disposal;
+  } finally {
+    if (disposals.get(workspaceId) === disposal) {
+      disposals.delete(workspaceId);
+    }
   }
 }
 
@@ -60,13 +86,5 @@ export async function disposeWorkspacePipeline<T>(input: {
   const pipeline = live.get(input.workspaceId);
   if (!pipeline) return;
   live.delete(input.workspaceId);
-  const disposal = input.dispose(pipeline);
-  disposals.set(input.workspaceId, disposal);
-  try {
-    await disposal;
-  } finally {
-    if (disposals.get(input.workspaceId) === disposal) {
-      disposals.delete(input.workspaceId);
-    }
-  }
+  await trackDisposal(disposals, input.workspaceId, input.dispose(pipeline));
 }

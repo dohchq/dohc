@@ -233,6 +233,18 @@ function pipelineError(
   return { stage, code, message: boundedErrorMessage(message) };
 }
 
+/**
+ * The same cap for the diagnostics and warnings a status record carries. Their
+ * producers are as unbounded as the error producers above: a hostile
+ * dohc-plugin.json puts a whole unrecognized key name into one strict-object
+ * diagnostic, and a lifecycle warning line embeds a package's own version
+ * string. One over-cap entry failed the entire list's schema parse, denying
+ * every other plugin's Disable and Uninstall too (#779 round 15 A2).
+ */
+function boundedStatusLines(lines: readonly string[]): string[] {
+  return lines.map(boundedErrorMessage);
+}
+
 function failureFromUnknown(
   stage: PluginPipelineErrorStage,
   code: string,
@@ -389,7 +401,7 @@ export class PluginPipeline {
           sourceHash: null,
           approvedHash: null,
           installedBaselineHash: null,
-          diagnostics: [...candidate.diagnostics],
+          diagnostics: boundedStatusLines(candidate.diagnostics),
           warnings: [],
           error: invalidPluginError(candidate),
         });
@@ -1164,14 +1176,17 @@ export class PluginPipeline {
       installedBaselineHash: record.installedBaselineHash ?? null,
     });
     if (record.disabled === true) {
-      // A hold the approval path wrote (never the user's own disable) is
-      // satisfied when the live tree — here equal to the approved hash —
-      // also equals baseline plus door deltas: the door restored every
-      // interloped byte, so the plugin comes back instead of idling under
-      // a hold whose cause is gone (#779 round 14 A1 pin b).
-      const doorHash = priorDisabledReason === "user"
-        ? null
-        : await this.doorApprovedHash(pluginId, record.approvedHash);
+      // An approval hold is satisfied when the live tree — here equal to the
+      // approved hash — also equals baseline plus door deltas: the door
+      // restored every interloped byte, so the plugin comes back instead of
+      // idling under a hold whose cause is gone (#779 round 14 A1 pin b).
+      // Only that hold waits on content. A user disable, a crash loop, and a
+      // failed repair are all decisions about the plugin, so releasing them
+      // here restarted a plugin the app had turned off — and reset the crash
+      // accounting that turned it off (#779 round 15 A1).
+      const doorHash = priorDisabledReason === "approval"
+        ? await this.doorApprovedHash(pluginId, record.approvedHash)
+        : null;
       if (doorHash !== record.approvedHash) {
         this.setStatus(candidate, {
           status: "disabled",
@@ -2006,7 +2021,7 @@ export class PluginPipeline {
       sourceHash: null,
       approvedHash: null,
       installedBaselineHash: null,
-      diagnostics: [...candidate.diagnostics],
+      diagnostics: boundedStatusLines(candidate.diagnostics),
       warnings: [],
       error: null,
     };
@@ -2030,10 +2045,8 @@ export class PluginPipeline {
       // still-valid plugin's discovery entry was replaced always read back
       // as invalid).
       valid: patch.valid ?? (candidate.valid && candidate.manifest !== null),
-      diagnostics: patch.diagnostics
-        ? [...patch.diagnostics]
-        : [...current.diagnostics],
-      warnings: patch.warnings ? [...patch.warnings] : [...current.warnings],
+      diagnostics: boundedStatusLines(patch.diagnostics ?? current.diagnostics),
+      warnings: boundedStatusLines(patch.warnings ?? current.warnings),
       error: patch.error === undefined ? cloneError(current.error) : cloneError(patch.error),
     };
     this.statuses.set(candidate.id, next);

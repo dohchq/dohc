@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { stop } from "esbuild";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  ListPluginsResult,
   PluginActionResult,
   PluginStatusChangedEvent,
   PluginStatusRecord,
@@ -38,11 +39,15 @@ import {
 import { buildPluginBundle, resolvePluginEsbuildBinary } from "./pluginBuildRunner";
 import {
   mutatePluginRecord,
+  pluginDataDir,
   readPluginLocalState,
   workspaceStateKey,
 } from "./pluginLocalState";
 import { snapshotPluginSource } from "./pluginSourceSnapshot";
-import { pluginUninstallPreflight } from "./pluginUninstallPreflight";
+import {
+  pluginBaselineManifestPath,
+  pluginUninstallPreflight,
+} from "./pluginUninstallPreflight";
 
 interface Deferred {
   promise: Promise<void>;
@@ -3773,4 +3778,351 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.dispose();
     }
   }, 120_000);
+
+  it("keeps a crash-loop disabled plugin disabled through a watcher event that changes nothing (#779 round 15 A1)", async () => {
+    const fixture = await createPluginWorkspace();
+    let snapshotCalls = 0;
+    let installCalls = 0;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      // Every activation fails immediately, so the host's own crash-loop
+      // accounting reaches its threshold and writes the real disabled record.
+      spawnTransport: vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
+        request: async <T = unknown>(method: string): Promise<T> => {
+          if (method === "plugin.activate") {
+            throw new Error("plugin activation failed");
+          }
+          return {} as T;
+        },
+        notify: () => undefined,
+        dispose: async () => undefined,
+      })),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    const resetCrashAccounting = vi.spyOn(host, "resetCrashAccounting");
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) => {
+          installCalls += 1;
+          return installPluginDependencies({ ...input, forkProcess: nodeForkProcess });
+        },
+        snapshot: async (input) => {
+          snapshotCalls += 1;
+          return snapshotPluginSource(input);
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.disabledReason === "crash-loop",
+        `The plugin never crash-loop disabled; status is ` +
+          `"${pipeline.list()[0]?.status}".`,
+        60_000,
+      );
+      const disabledState = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      expect(disabledState.ok && disabledState.state.plugins["example-plugin"]?.disabled)
+        .toBe(true);
+
+      const snapshotsBefore = snapshotCalls;
+      const installsBefore = installCalls;
+      resetCrashAccounting.mockClear();
+
+      // Churn under the plugin root that leaves the source hash exactly where
+      // it was — a metadata touch, a node_modules write. Nothing about the
+      // crash loop is fixed, so nothing may rebuild, restart, or forgive the
+      // failures already counted.
+      pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin/src/index.ts",
+        operation: "update",
+      }]);
+      await waitFor(
+        () => snapshotCalls > snapshotsBefore,
+        "The watcher reconcile never ran.",
+        60_000,
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, 500));
+
+      const row = pipeline.list()[0];
+      expect(row?.status).toBe("disabled");
+      expect(row?.disabledReason).toBe("crash-loop");
+      // A rebuild would take its own second snapshot and install again.
+      expect(snapshotCalls).toBe(snapshotsBefore + 1);
+      expect(installCalls).toBe(installsBefore);
+      expect(resetCrashAccounting).not.toHaveBeenCalled();
+      const afterState = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      expect(afterState.ok && afterState.state.plugins["example-plugin"]?.disabled)
+        .toBe(true);
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 180_000);
+
+  it("bounds an enormous manifest diagnostic so the whole plugin list still crosses the bridge (#779 round 15 A2)", async () => {
+    const fixture = await createPluginWorkspace();
+    // A hostile dohc-plugin.json: every declared field is valid and the file
+    // is far under the manifest reader's 256 KiB cap, but one unrecognized
+    // key carries its whole name into the strict-object diagnostic.
+    await writeFile(join(fixture.pluginRoot, "dohc-plugin.json"), `${JSON.stringify({
+      version: 1,
+      name: "example-plugin",
+      entry: "src/index.ts",
+      [`k${"x".repeat(10_100)}`]: 1,
+    })}\n`);
+    const seededRoot = join(fixture.workspaceRoot, "plugins", "seeded-plugin");
+    await mkdir(join(seededRoot, "src"), { recursive: true });
+    await writeFile(join(seededRoot, "dohc-plugin.json"), `${JSON.stringify({
+      version: 1,
+      name: "seeded-plugin",
+      entry: "src/index.ts",
+      [`k${"x".repeat(30_000)}`]: 1,
+    })}\n`);
+    // An installed record for the second root, so its status is seeded and
+    // emitted rather than listed straight from the discovery candidate: both
+    // ways a diagnostic reaches a status record are covered.
+    await mutatePluginRecord(
+      fixture.stateDir,
+      fixture.workspaceRoot,
+      "seeded-plugin",
+      () => ({
+        disabled: false,
+        approvedHash: "ab".repeat(32),
+        installedBaselineHash: "ab".repeat(32),
+        directoryName: "seeded-plugin",
+      }),
+    );
+    const events: PluginPipelineStatusEvent[] = [];
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      onStatusChange: (event) => events.push(event),
+    });
+
+    try {
+      await pipeline.start();
+      // Status events emit through queueMicrotask; let them drain.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      const listed = pipeline.list();
+      expect(listed).toHaveLength(2);
+      for (const row of listed) {
+        expect(row.diagnostics.some((line) => line.includes("characters elided")))
+          .toBe(true);
+        for (const line of row.diagnostics) {
+          expect(line.length).toBeLessThanOrEqual(8_000);
+        }
+      }
+      // The production oracle: main.ts's listPlugins handler parses exactly
+      // this, and one over-cap entry denied the whole Plugins section —
+      // including every other plugin's Disable and Uninstall.
+      const parsed = ListPluginsResult.safeParse({ ok: true, plugins: listed });
+      expect(parsed.success, parsed.error?.message).toBe(true);
+      expect(events.length).toBeGreaterThan(0);
+      for (const event of events) {
+        const parsedEvent = PluginStatusChangedEvent.safeParse({
+          workspaceId: "workspace-a",
+          ...event,
+        });
+        expect(parsedEvent.success, parsedEvent.error?.message).toBe(true);
+      }
+    } finally {
+      await pipeline.dispose();
+    }
+  });
+
+  it("bounds an enormous lifecycle warning so the plugin list still crosses the bridge (#779 round 15 A2)", async () => {
+    const fixture = await createPluginWorkspace();
+    // A package version is free text. This one is valid semver build
+    // metadata, so the pinned pnpm installs it, and 20,000 characters long,
+    // so the scan's allowed-hook warning line carries all of it.
+    await writeFile(join(fixture.pluginRoot, "package.json"), `${JSON.stringify({
+      name: "example-plugin",
+      version: `1.0.0+${"x".repeat(20_000)}`,
+      private: true,
+      type: "module",
+      packageManager: "pnpm@11.20.0",
+      scripts: { postinstall: "node --version" },
+    }, null, 2)}\n`);
+    await writeFile(join(fixture.pluginRoot, "dohc-plugin.json"), `${JSON.stringify({
+      version: 1,
+      name: "example-plugin",
+      displayName: "Example plugin",
+      entry: "src/index.ts",
+      allowSkippedScripts: ["example-plugin"],
+    }, null, 2)}\n`);
+    const events: PluginPipelineStatusEvent[] = [];
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      onStatusChange: (event) => events.push(event),
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      const row = pipeline.list()[0];
+      expect(row?.warnings.some((line) => line.includes("characters elided")))
+        .toBe(true);
+      for (const line of row?.warnings ?? []) {
+        expect(line.length).toBeLessThanOrEqual(8_000);
+      }
+      const parsed = ListPluginsResult.safeParse({
+        ok: true,
+        plugins: pipeline.list(),
+      });
+      expect(parsed.success, parsed.error?.message).toBe(true);
+      for (const event of events) {
+        const parsedEvent = PluginStatusChangedEvent.safeParse({
+          workspaceId: "workspace-a",
+          ...event,
+        });
+        expect(parsedEvent.success, parsedEvent.error?.message).toBe(true);
+      }
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 180_000);
+
+  it("never auto-approves a door write against a baseline it cannot prove (#779 round 15 A4)", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+    const baselinePath = pluginBaselineManifestPath(
+      pluginDataDir(fixture.stateDir, fixture.workspaceRoot),
+      "example-plugin",
+    );
+    const source = (marker: string): string =>
+      [
+        `export const marker = "${marker}";`,
+        "export default { activate() {} };",
+        "",
+      ].join("\n");
+    /** One door write against the current baseline; it must hold, not run. */
+    const expectHold = async (marker: string): Promise<void> => {
+      await doorWrite(pipeline, "example-plugin", fixture.entryPath, source(marker));
+      await waitFor(
+        () => pipeline.list()[0]?.status === "disabled-pending-approval",
+        `The door write auto-approved against an unprovable baseline; status ` +
+          `is "${pipeline.list()[0]?.status}".`,
+        60_000,
+      );
+      expect(await readFile(liveBundlePath(fixture, "example-plugin"), "utf8"))
+        .not.toContain(marker);
+    };
+    const approveAndRun = async (): Promise<void> => {
+      const approved = await pipeline.approve("example-plugin");
+      if (!approved.ok) throw new Error(approved.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "The approved plugin did not come back.",
+        60_000,
+      );
+    };
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      // The baseline of the first approved tree, kept for probe 2.
+      const firstBaseline = await readFile(baselinePath, "utf8");
+
+      // Probe 1: no baseline at all. Nothing describes the approved tree, so
+      // there is no overlay to compare a door write against.
+      await rm(baselinePath);
+      await expectHold("probe-one");
+      await approveAndRun();
+
+      // Probe 2: a self-consistent baseline that describes an older approved
+      // tree. It proves nothing about the hash recorded now.
+      await writeFile(baselinePath, firstBaseline);
+      await expectHold("probe-two");
+      await approveAndRun();
+
+      // Probe 3: a baseline whose file list was forged. Its own sourceHash no
+      // longer re-derives from the files it claims.
+      const forged = JSON.parse(await readFile(baselinePath, "utf8")) as {
+        sourceHash: string;
+        files: { relPath: string; sha256: string }[];
+      };
+      forged.files.push({ relPath: "src/ghost.ts", sha256: "cd".repeat(32) });
+      await writeFile(baselinePath, `${JSON.stringify(forged, null, 2)}\n`);
+      await expectHold("probe-three");
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 240_000);
 });
