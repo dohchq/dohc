@@ -116,6 +116,23 @@ export function durableMarkdownFromSnapshot(
   )} -->`;
 }
 
+// Rebuilding the document is the only step that can fail on the DATA, so it
+// runs before the projection: that split is what separates "these bytes are
+// gone" from "the projection did not run". Null means gone.
+function recoverSnapshotDoc(encoded: string): Y.Doc | null {
+  try {
+    const binary = atob(encoded);
+    const snapshot = Uint8Array.from(binary, (character) =>
+      character.charCodeAt(0),
+    );
+    const recovered = new Y.Doc();
+    Y.applyUpdate(recovered, snapshot);
+    return recovered;
+  } catch {
+    return null;
+  }
+}
+
 // The recovery text as the user must receive it. A draft the projection never
 // refined carries the full document in the encoded comment, so the snapshot —
 // not the crude fallback beside it — is what Copy has to hand back.
@@ -124,18 +141,22 @@ export function durableMarkdownFromSnapshot(
 // the row renders, and a failed one clears its own cache — so a copy waits for
 // the lossless answer, and the copy after a transient failure retries instead
 // of serving that failure's fallback for as long as the row stays mounted.
+//
+// It REJECTS when the projection fails over intact bytes. Copy then reports
+// the failure and the next click retries, because the document is still whole
+// and the user must not be handed the lossy half — and then delete the row
+// believing they have their text.
 export async function restoreRecoveryDraftText(text: string): Promise<string> {
   const match = RECOVERY_COMMENT.exec(text);
   if (!match) return text;
+  const recovered = recoverSnapshotDoc(match[1]!);
+  // Unrecoverable bytes: the readable half beside them is all that is left,
+  // and handing it over is why both halves are stored.
+  if (recovered === null) return text.slice(0, match.index);
   try {
-    const binary = atob(match[1]!);
-    const snapshot = Uint8Array.from(binary, (character) =>
-      character.charCodeAt(0),
-    );
-    return await markdownFromSnapshot(snapshot);
-  } catch {
-    // A truncated or corrupt payload is not recoverable, and the readable
-    // half still is. Degrading is the whole point of keeping both.
-    return text.slice(0, match.index);
+    const { yDocToMarkdown } = await loadProjectionModule();
+    return yDocToMarkdown(recovered);
+  } finally {
+    recovered.destroy();
   }
 }
