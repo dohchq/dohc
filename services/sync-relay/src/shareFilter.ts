@@ -579,7 +579,9 @@ function filterChatOpForChannelShare(
     };
   }
 
-  if (opKind === "chat.message.append" || opKind === "chat.reaction.set") {
+  // The four thread-scoped kinds, all scoped the same way and all serving the
+  // same allowlists the file branch serves.
+  if (opKind in SERVED_CHAT_FIELDS) {
     const threadId = collectString(record.threadId);
     if (!threadId) return { allowed: false };
     if (chat.threadChannelWireId(threadId) !== selector.channelWireId) {
@@ -587,51 +589,7 @@ function filterChatOpForChannelShare(
     }
     return {
       allowed: true,
-      payload:
-        opKind === "chat.message.append"
-          ? pickServed(record, [
-              "messageId",
-              "threadId",
-              "authorKind",
-              "authorDisplayName",
-              "authorUserId",
-              "parentMessageId",
-              "body",
-              "createdAtMs",
-            ])
-          : pickServed(record, [
-              "reactionId",
-              "messageId",
-              "threadId",
-              "emoji",
-              "authorId",
-              "authorKind",
-              "authorDisplayName",
-              "state",
-              "atMs",
-            ]),
-      blobSha256s: [],
-    };
-  }
-
-  if (opKind === "chat.decision.set" || opKind === "chat.attachment.add") {
-    const threadId = collectString(record.threadId);
-    if (!threadId) return { allowed: false };
-    if (chat.threadChannelWireId(threadId) !== selector.channelWireId) {
-      return { allowed: false };
-    }
-    return {
-      allowed: true,
-      payload:
-        opKind === "chat.decision.set"
-          ? pickServed(record, ["threadId", "messageId", "state", "resolvedByMessageId", "atMs"])
-          : pickServed(record, [
-              "attachmentId",
-              "threadId",
-              "messageId",
-              "targetKind",
-              "createdAtMs",
-            ]),
+      payload: pickServed(record, SERVED_CHAT_FIELDS[opKind as keyof typeof SERVED_CHAT_FIELDS]),
       blobSha256s: [],
     };
   }
@@ -645,6 +603,41 @@ function filterChatOpForChannelShare(
 // (`crates/dohc-engine-sync/src/share.rs`, the same reason written for the
 // channel branch); `chat.channel.create` is a channel's bootstrap and a file
 // share has no channel.
+// The fields each chat op serves, by kind. Both the channel branch and the
+// file branch read these: a redaction list that exists twice is a list that
+// gets a field added to one copy.
+const SERVED_CHAT_FIELDS = {
+  "chat.message.append": [
+    "messageId",
+    "threadId",
+    "authorKind",
+    "authorDisplayName",
+    "authorUserId",
+    "parentMessageId",
+    "body",
+    "createdAtMs",
+  ],
+  "chat.reaction.set": [
+    "reactionId",
+    "messageId",
+    "threadId",
+    "emoji",
+    "authorId",
+    "authorKind",
+    "authorDisplayName",
+    "state",
+    "atMs",
+  ],
+  "chat.decision.set": ["threadId", "messageId", "state", "resolvedByMessageId", "atMs"],
+  "chat.attachment.add": [
+    "attachmentId",
+    "threadId",
+    "messageId",
+    "targetKind",
+    "createdAtMs",
+  ],
+} as const satisfies Record<string, readonly string[]>;
+
 const FILE_CHAT_THREAD_SCOPED_KINDS = [
   "chat.message.append",
   "chat.reaction.set",
@@ -758,64 +751,13 @@ function filterFileChatOpForPathShare(
     served.linkedPath = servedPath;
     return { allowed: true, payload: served, blobSha256s: [] };
   }
-  if (opKind === "chat.message.append") {
-    return {
-      allowed: true,
-      payload: pickServed(record, [
-        "messageId",
-        "threadId",
-        "authorKind",
-        "authorDisplayName",
-        "authorUserId",
-        "parentMessageId",
-        "body",
-        "createdAtMs",
-      ]),
-      blobSha256s: [],
-    };
-  }
-  if (opKind === "chat.reaction.set") {
-    return {
-      allowed: true,
-      payload: pickServed(record, [
-        "reactionId",
-        "messageId",
-        "threadId",
-        "emoji",
-        "authorId",
-        "authorKind",
-        "authorDisplayName",
-        "state",
-        "atMs",
-      ]),
-      blobSha256s: [],
-    };
-  }
-  if (opKind === "chat.decision.set") {
-    return {
-      allowed: true,
-      payload: pickServed(record, [
-        "threadId",
-        "messageId",
-        "state",
-        "resolvedByMessageId",
-        "atMs",
-      ]),
-      blobSha256s: [],
-    };
-  }
-  // chat.attachment.add: the opaque chip the channel branch already serves.
-  // Its objectId/pathHint could name a file outside the share, so they stay
-  // dropped and the recipient renders a chip it cannot follow.
+  // The four thread-scoped kinds serve their allowlist and nothing else. The
+  // attachment row stays the opaque chip the channel branch serves: its
+  // objectId/pathHint could name a file outside the share, so they are absent
+  // from the list and the recipient renders a chip it cannot follow.
   return {
     allowed: true,
-    payload: pickServed(record, [
-      "attachmentId",
-      "threadId",
-      "messageId",
-      "targetKind",
-      "createdAtMs",
-    ]),
+    payload: pickServed(record, SERVED_CHAT_FIELDS[opKind as keyof typeof SERVED_CHAT_FIELDS]),
     blobSha256s: [],
   };
 }

@@ -3255,17 +3255,7 @@ fn read_thread_linked_object(
     thread_id: &str,
 ) -> Result<Option<String>, RelayError> {
     store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT linked_object_id FROM chat_threads \
-                 WHERE workspace_id=?1 AND thread_id=?2",
-                params![workspace_id, thread_id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()
-            .map(Option::flatten)
-            .map_err(SyncError::corrupt)
-        })
+        .read_with(|conn| crate::share::thread_linked_object(conn, workspace_id, thread_id))
         .map_err(local)
 }
 
@@ -3275,18 +3265,7 @@ fn read_object_path(
     object_id: &str,
 ) -> Result<Option<String>, RelayError> {
     store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT path FROM path_aliases \
-                 WHERE workspace_id=?1 AND object_id=?2 \
-                   AND version_id=(SELECT main_version_id FROM versioned_workspaces \
-                                   WHERE workspace_id=?1)",
-                params![workspace_id, object_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(SyncError::corrupt)
-        })
+        .read_with(|conn| crate::share::object_main_path(conn, workspace_id, object_id))
         .map_err(local)
 }
 

@@ -474,6 +474,40 @@ describe("LinkedChatsPanel share level", () => {
     );
   });
 
+  // The seam the e2e missed. `LinkedChats` loads messages and reactions in ONE
+  // Promise.all, so a handler left on the capture gate rejects the whole
+  // thread open — the panel shows "Could not load this chat" and PR2's
+  // headline capability is unreachable, at every level, through the only
+  // surface a person uses. Driving IPC directly never sees it.
+  it("opens a thread by loading messages AND reactions together", async () => {
+    render(panel({ shareReadOnly: false, initialThread: searchThread }));
+
+    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
+    expect(bridgeMock.listChatMessages).toHaveBeenCalled();
+    expect(
+      bridgeMock.listChatReactions,
+      "MUTATION: a reactions handler that refuses a share view refuses the whole thread open",
+    ).toHaveBeenCalled();
+    expect(screen.queryByText(/Could not load this chat/i)).toBeNull();
+    expect(screen.getByTestId("linked-chat-composer")).toBeTruthy();
+  });
+
+  it("reports the thread as unloadable when either half of that load refuses", async () => {
+    // The failure this file must be able to SEE: whichever half refuses, the
+    // reader gets the same dead panel, so a test that stubs both to resolve
+    // proves nothing about either.
+    bridgeMock.listChatReactions.mockRejectedValueOnce(
+      new Error("Chats are not enabled for this workspace."),
+    );
+    const onError = vi.fn();
+    render(panel({ shareReadOnly: false, initialThread: searchThread, onError }));
+
+    await waitFor(() => expect(onError).toHaveBeenCalled());
+    expect(String(onError.mock.calls[0]?.[0])).toContain(
+      "Chats are not enabled for this workspace.",
+    );
+  });
+
   it("keeps the composer on a workspace this machine owns", async () => {
     render(panel({ initialThread: searchThread }));
 

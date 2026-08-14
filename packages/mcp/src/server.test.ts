@@ -79,13 +79,21 @@ describe("share-level tool profiles", () => {
     }
   });
 
-  it("registers the chat write tools but no document write tool for a comment profile", async () => {
+  // #646 PR2 registers NO write tool at any level, chat included. The two
+  // chat tools are CHANNEL tools, and a shared view refuses every channel
+  // write before the level is read; `comment` grants per-FILE chat, which no
+  // MCP tool writes yet. A tool the workspace always refuses is worse than an
+  // absent one — the agent spends a turn discovering the refusal.
+  it("registers no write tool at all for a comment profile, chat tools included", async () => {
     const { names } = await connectedToolNames({ ...base, shareAccess: "comment" });
-    for (const tool of CHAT_WRITE_TOOLS) {
-      expect(names, tool).toContain(tool);
+    for (const tool of [...DOCUMENT_WRITE_TOOLS, ...CHAT_WRITE_TOOLS]) {
+      expect(
+        names,
+        `${tool}: MUTATION: offering a write tool a shared view always refuses`,
+      ).not.toContain(tool);
     }
-    for (const tool of DOCUMENT_WRITE_TOOLS) {
-      expect(names, tool).not.toContain(tool);
+    for (const tool of READ_TOOLS) {
+      expect(names, tool).toContain(tool);
     }
   });
 

@@ -457,7 +457,6 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         completed_at_ms INTEGER NOT NULL
       ) STRICT;
     `);
-    seedObjectPaths(db);
     // Lazy additive migration (0P sync-hardening item 4): dbs created before the
     // blob retention window gain created_at_ms on open. Existing rows default to
     // 0, so a legacy unreferenced blob is immediately past any grace window and
@@ -519,6 +518,13 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     } catch {}
     throw error;
   }
+  // AFTER the schema transaction commits, in its own. The seed scans every
+  // moment.append the log holds, and holding the schema-init write lock for
+  // the length of that scan stalls every other opener against
+  // SYNC_RELAY_BUSY_TIMEOUT_MS on the first open after a deploy. Its own
+  // transaction still makes it atomic — a crash part-way leaves the migration
+  // unrecorded and the next open redoes it.
+  seedObjectPaths(db);
 }
 
 // Where a `moment.append` payload says its object is AFTER the op: the
@@ -563,28 +569,48 @@ function seedObjectPaths(db: SqliteDb): void {
     .prepare("SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete")
     .get(migrationId);
   if (Number(seeded?.complete ?? 0) !== 0) return;
-  const upsert = db.prepare(OBJECT_PATH_UPSERT_SQL);
-  const rows = db
-    .prepare(
-      `SELECT workspace_id, payload_json, relay_seq FROM sync_relay_log
-       WHERE op_kind = 'moment.append'
-       ORDER BY relay_seq`,
-    )
-    .all();
-  for (const row of rows) {
-    const resolved = objectPathFromMomentPayload(String(row.payload_json));
-    if (!resolved) continue;
-    upsert.run(
-      String(row.workspace_id),
-      resolved.objectId,
-      resolved.path,
-      Number(row.relay_seq),
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    // Re-read under the write lock: two processes can open the same database
+    // at once, both see the marker absent, and only one may do the work.
+    const claimed = db
+      .prepare(
+        "SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete",
+      )
+      .get(migrationId);
+    if (Number(claimed?.complete ?? 0) !== 0) {
+      db.exec("COMMIT");
+      return;
+    }
+    const upsert = db.prepare(OBJECT_PATH_UPSERT_SQL);
+    const rows = db
+      .prepare(
+        `SELECT workspace_id, payload_json, relay_seq FROM sync_relay_log
+         WHERE op_kind = 'moment.append'
+         ORDER BY relay_seq`,
+      )
+      .all();
+    for (const row of rows) {
+      const resolved = objectPathFromMomentPayload(String(row.payload_json));
+      if (!resolved) continue;
+      upsert.run(
+        String(row.workspace_id),
+        resolved.objectId,
+        resolved.path,
+        Number(row.relay_seq),
+      );
+    }
+    db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(
+      migrationId,
+      Date.now(),
     );
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw error;
   }
-  db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(
-    migrationId,
-    Date.now(),
-  );
 }
 
 // Latest-wins: a rename is a later fact about the same object, and the share

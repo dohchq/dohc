@@ -334,11 +334,18 @@ export function LinkedChatsPanel(props: {
           emptyLabel={`No messages yet${filePath ? ` about ${basename(filePath)}` : ""}.`}
           endRef={messagesEndRef}
           onOpenPath={props.onOpenPath}
-          reactionControls={{
-            reactions,
-            viewerAuthorId,
-            onToggle: toggleReaction,
-          }}
+          {...(readOnly
+            ? {}
+            : {
+                // A reaction is a WRITE. Offering the picker on a share that
+                // refuses writes paints it optimistically and then errors
+                // with the sentence already printed under the thread.
+                reactionControls: {
+                  reactions,
+                  viewerAuthorId,
+                  onToggle: toggleReaction,
+                },
+              })}
         />
         {readOnly ? (
           <ReadOnlyNotice />

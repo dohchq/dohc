@@ -1339,13 +1339,23 @@ describe("chat scope write gate (#646 PR2)", () => {
   type ShareAccess = "view" | "comment" | "edit";
   type ChatScope =
     | { kind: "workspace"; workspace: { workspaceId: string } }
-    | { kind: "share"; workspace: { workspaceId: string }; access: ShareAccess };
+    | {
+        kind: "share";
+        workspace: { workspaceId: string };
+        access: ShareAccess | null;
+        ended?: boolean;
+      };
 
   const workspaceId = "workspace-share";
 
   // The gate exactly as main defines it, over the scope the factory hands it.
+  // Positive recognition, and an ended share refuses whatever it granted.
   function assertChatWritable(scope: ChatScope): void {
-    if (scope.kind === "share" && scope.access === "view") {
+    if (scope.kind !== "share") return;
+    if (scope.ended === true) {
+      throw new Error("This shared file is read-only for you.");
+    }
+    if (scope.access !== "comment" && scope.access !== "edit") {
       throw new Error("This shared file is read-only for you.");
     }
   }
@@ -1373,6 +1383,34 @@ describe("chat scope write gate (#646 PR2)", () => {
     };
   }
 
+  it("refuses a mutation on an ENDED share, whatever level it granted", async () => {
+    // The granter ended the share. The local copy stays readable and takes no
+    // writes — the same rule an ended chat-channel grant follows. Without
+    // this the row lands durably, the panel shows it, and the push bails on
+    // `ended` first thing: a write that looks sent and never is.
+    const { ipc, run, deps } = harnessFor({
+      kind: "share",
+      workspace: { workspaceId },
+      access: "comment",
+      ended: true,
+    });
+    ipc.handle(
+      CHANNELS.setChatReaction,
+      createSetChatReactionIpcHandler({
+        ...deps,
+        assertWritable: assertChatWritable,
+        syncJoinedChannels: () => undefined,
+        queueCloudSync: () => undefined,
+      }),
+    );
+    await expect(ipc.invoke(CHANNELS.setChatReaction, { workspaceId })).rejects.toThrow(
+      "This shared file is read-only for you.",
+    );
+    expect(
+      run,
+      "MUTATION: an ended share still writes a durable row nothing will ever send",
+    ).not.toHaveBeenCalled();
+  });
   it("refuses a mutation at view level with the refusal words, before the store", async () => {
     const { ipc, run, deps } = harnessFor({
       kind: "share",

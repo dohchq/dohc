@@ -404,24 +404,29 @@ fn enforce_share_view_chat_boundary(
 /// Where the file a thread is about sits RIGHT NOW, locally. The file sibling
 /// of `thread_bound_to_wire`: `thread_id -> chat_threads.linked_object_id ->
 /// path_aliases` in the workspace's main version. `None` at any hop.
-fn thread_linked_path(
-    tx: &Transaction<'_>,
+/// The file a thread is about, as this replica records it.
+pub(crate) fn thread_linked_object(
+    conn: &rusqlite::Connection,
     workspace_id: &str,
     thread_id: &str,
 ) -> Result<Option<String>, SyncError> {
-    let object_id: Option<String> = tx
-        .query_row(
-            "SELECT linked_object_id FROM chat_threads WHERE workspace_id = ?1 AND thread_id = ?2",
-            params![workspace_id, thread_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?
-        .flatten();
-    let Some(object_id) = object_id else {
-        return Ok(None);
-    };
-    tx.query_row(
+    conn.query_row(
+        "SELECT linked_object_id FROM chat_threads WHERE workspace_id = ?1 AND thread_id = ?2",
+        params![workspace_id, thread_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(SyncError::corrupt)
+}
+
+/// Where an object sits in this workspace's main version RIGHT NOW.
+pub(crate) fn object_main_path(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<Option<String>, SyncError> {
+    conn.query_row(
         "SELECT path FROM path_aliases \
          WHERE workspace_id = ?1 AND object_id = ?2 \
            AND version_id = (SELECT main_version_id FROM versioned_workspaces \
@@ -431,6 +436,17 @@ fn thread_linked_path(
     )
     .optional()
     .map_err(SyncError::corrupt)
+}
+
+fn thread_linked_path(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<Option<String>, SyncError> {
+    let Some(object_id) = thread_linked_object(tx, workspace_id, thread_id)? else {
+        return Ok(None);
+    };
+    object_main_path(tx, workspace_id, &object_id)
 }
 
 /// Whether `thread_id` resolves to a channel carrying the granted wire id.

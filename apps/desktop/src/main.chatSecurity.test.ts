@@ -692,6 +692,9 @@ describe("main-process chat authorization", () => {
     const shareReachable = [
       "listFileChats",
       "listChatMessages",
+      // The panel loads messages and reactions TOGETHER, so this one is part
+      // of opening a thread at all, not a separate nicety.
+      "listChatReactions",
       "markChatThreadRead",
       "createFileChat",
       "sendChatMessage",
@@ -752,6 +755,13 @@ describe("main-process chat authorization", () => {
     // one direction this must never fail is reading that as writable.
     expect(gate).toContain('scope.access !== "comment" && scope.access !== "edit"');
     expect(gate).toContain("throw new SharedFileReadOnlyError()");
+    // An ENDED share is a read-only local copy. The push bails on `ended`
+    // first thing, so a write admitted here would land durably and never be
+    // sent to anyone — the same rule the joined-channel sibling applies.
+    expect(
+      gate,
+      "MUTATION: an ended share writes a durable row nothing will ever send",
+    ).toContain("if (scope.ended)");
     // The second half of the same gate: a chat op replicates only when its
     // author carries a user id, so a share view with no resolvable relay
     // identity must be refused, not written locally and called sent.

@@ -5633,6 +5633,13 @@ function registerIpcHandlers(
       relay,
     });
     let outcome;
+    // #646 PR2: the backstop this share's chat push docstring claims. A push
+    // that failed — offline, a rotated session, a relay blip — is retried
+    // here, before the pull, so a refresh drains the backlog instead of
+    // leaving it until the recipient happens to write again.
+    await pushShareViewChat(workspace).catch((error) => {
+      console.error("[desktop] share view chat push (refresh backstop):", error);
+    });
     try {
       outcome = await refreshSharedViewOnce({
         rootDir: workspace.rootPath,
@@ -6479,6 +6486,9 @@ function registerIpcHandlers(
         // `assertChatWritable`, which refuses rather than writing a comment
         // that can never leave the machine.
         authorUserId: string | undefined;
+        // The granter ended this share. The local copy stays readable and
+        // stops taking writes, exactly as an ended chat-channel grant does.
+        ended: boolean;
       };
 
   async function requireChatScope(workspaceId: string): Promise<ChatScope> {
@@ -6503,6 +6513,7 @@ function registerIpcHandlers(
       // uses, so this gate and the pull cannot disagree about what a share
       // grants.
       access: readableShareLevel(workspace.shareView?.grantedSelector),
+      ended: workspace.shareView?.ended === true,
       authorUserId: resolveShareViewRelayAuthorId(
         workspace.shareView ?? {},
         cachedCredentials,
@@ -6516,6 +6527,11 @@ function registerIpcHandlers(
   // renderer disabling its composer is honesty, not authorization.
   function assertChatWritable(scope: ChatScope): void {
     if (scope.kind !== "share") return;
+    // An ENDED share is a read-only local copy, the same rule
+    // `assertSharedChannelWritable` applies to an ended channel grant. The
+    // push bails on `ended` first thing, so without this the row would land
+    // durably, show in the panel, and never be sent to anyone.
+    if (scope.ended) throw new SharedFileReadOnlyError();
     if (scope.access !== "comment" && scope.access !== "edit") {
       throw new SharedFileReadOnlyError();
     }
@@ -7965,10 +7981,10 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.listChatReactions, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatReactionsPayload.parse(payload);
-    const { workspace } = await requireEngineCapture(
-      input.workspaceId,
-      "Chats",
-    );
+    // #646 PR2: reachable from a share view at EVERY level. The panel loads
+    // messages and reactions together, so a capture gate here refuses the
+    // whole thread open, not just its reactions.
+    const { workspace } = await requireChatScope(input.workspaceId);
     const viewerAuthorId = await chatViewerAuthorId({
       localFallbackAuthorId: localReactorFallbackId(),
       resolveReplicationAuthorId: async () =>
@@ -7999,7 +8015,8 @@ function registerIpcHandlers(
       // #646 PR2: reachable from a share view at comment and edit.
       requireContext: requireChatScope,
       assertWritable: assertChatWritable,
-      run: async ({ workspace }, input) => {
+      run: async (scope, input) => {
+        const { workspace } = scope;
         await warmCredentialCache();
         const target = { threadId: input.threadId };
         // MU-C4 (CodeRabbit security): reactions are writes too — a read-only
@@ -8030,6 +8047,10 @@ function registerIpcHandlers(
             linkedChatStoreFor(workspace).setReaction(mutation),
           state: input.state,
         });
+        // #646 PR2: a reaction is a pushable share kind, so a share scope
+        // pushes its own lane here. The joined-channel and cloud-sync nudges
+        // below are inert without an engine capture.
+        syncChatWriteFor(scope, { threadId: input.threadId });
         return SetChatReactionResult.parse({
           reaction: { ...chatReactionForIpc(reaction), state: reaction.state },
           viewerAuthorId: reaction.author.authorId,

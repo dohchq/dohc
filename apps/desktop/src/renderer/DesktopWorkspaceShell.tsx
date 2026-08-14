@@ -1204,8 +1204,6 @@ const CHATS_PANEL_TAB_LABELS: Record<ChatsPanelTab, string> = {
 };
 // Every workspace this machine owns offers both. A shared view offers the
 // file tab only: it has no workspace-wide chat listing, by design (#646).
-const ALL_CHATS_PANEL_TABS: readonly ChatsPanelTab[] = ["all", "file"];
-const SHARE_VIEW_CHATS_PANEL_TABS: readonly ChatsPanelTab[] = ["file"];
 
 // The right-hand Chats panel — dohc's secondary sidebar (VS Code grammar:
 // toggleable, resizable, persistent width, gone entirely while hidden).
@@ -2657,7 +2655,7 @@ export function DesktopWorkspaceShell(props: {
   // its "This file" tab: the per-file surface answers for a file the share
   // already served, and a workspace-wide listing would be a superset to
   // filter (decision 5, and the shape that produced #627).
-  const chatsSurfaceExists = engineSurfacesExist || isShareView;
+  const chatsSurfaceExists = engineEnabled || isShareView;
   // Whether main's capture will SERVE those surfaces. Main's status is the
   // single answer to "does anything record here", and it overrides the
   // renderer's own engine read: after a failed capture build that read still
@@ -5279,7 +5277,9 @@ export function DesktopWorkspaceShell(props: {
             width={wb.chatsWidth}
             onWidthChange={(width) => mutateWb((state) => setChatsWidth(state, width))}
             onCollapse={() => mutateWb(toggleChats)}
-            tabs={isShareView ? SHARE_VIEW_CHATS_PANEL_TABS : ALL_CHATS_PANEL_TABS}
+            // A share view gets the file tab only: a workspace-wide listing
+            // would be a superset to filter, which is the shape #627 came from.
+            tabs={isShareView ? ["file"] : ["all", "file"]}
             tab={chatsPanelActiveTab}
             onTabChange={setChatsPanelTab}
             actions={

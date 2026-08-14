@@ -111,20 +111,22 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   // — an agent pointed at a share view is offered only what it may use. Read
   // tools always register below.
   //
-  //   no level  local workspace: both tiers
-  //   view      neither tier
-  //   comment   chat writes only
-  //   edit      chat writes only (PR3 opens document writes for edit)
+  //   no level  a workspace this machine owns: every write tool
+  //   any level a shared view: NO write tool of any kind
+  //
+  // #646 PR2 deliberately registers no chat write tool at any level. The two
+  // that exist — `dohc_start_channel_chat` and `dohc_reply_to_chat` — are
+  // CHANNEL tools, and a shared view refuses every channel write before the
+  // level is consulted (`apps/desktop/src/cli/cliServer.ts`). `comment`
+  // grants per-FILE chat, and no MCP tool writes that yet. Offering an agent
+  // a tool its own workspace always refuses is a promise the surface cannot
+  // keep, so the level is carried here for the tiers PR3 adds and grants
+  // nothing today.
   const register = server.registerTool.bind(server);
   const skip = (() => undefined) as unknown as McpServer["registerTool"];
-  // dohc_write_file, dohc_create_directory, dohc_move_path, dohc_delete_path,
-  // dohc_create_site, dohc_add_sdk, dohc_import_data, dohc_publish_site,
-  // dohc_share.
+  // Every write tool, document and chat alike.
   const registerWrite: McpServer["registerTool"] =
     ctx.shareAccess === undefined ? register : skip;
-  // dohc_start_channel_chat, dohc_reply_to_chat.
-  const registerChatWrite: McpServer["registerTool"] =
-    ctx.shareAccess === "view" ? skip : register;
 
   server.registerTool(
     "dohc_list_workspaces",
@@ -427,7 +429,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async () => text(await listChannels(ctx)),
   );
 
-  registerChatWrite(
+  registerWrite(
     "dohc_start_channel_chat",
     {
       description:
@@ -441,7 +443,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await startChannelChat(ctx, args)),
   );
 
-  registerChatWrite(
+  registerWrite(
     "dohc_reply_to_chat",
     {
       description:
