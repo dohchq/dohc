@@ -2,6 +2,8 @@ import {
   DaemonRefusalError,
   isDaemonReconnectError,
   isEngineStoreBusyRefusal,
+  isYdocOpenOperationCrashedRefusal,
+  isYdocOpenStorageFailureRefusal,
   isYdocSessionBusyRefusal,
   isYdocArtifactAssetsPendingRefusal,
   isYdocArtifactAssetsInvalidRefusal,
@@ -210,7 +212,9 @@ export function isEngineWorkspaceOpenRefusedError(error: unknown): boolean {
     error instanceof YdocOpenTimedOutError ||
     isYdocSessionBusyRefusal(error) ||
     isYdocArtifactAssetsPendingRefusal(error) ||
-    isYdocArtifactAssetsInvalidRefusal(error)
+    isYdocArtifactAssetsInvalidRefusal(error) ||
+    isYdocOpenStorageFailureRefusal(error) ||
+    isYdocOpenOperationCrashedRefusal(error)
   );
 }
 

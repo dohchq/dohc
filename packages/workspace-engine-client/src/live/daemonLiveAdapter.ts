@@ -245,6 +245,18 @@ export function isYdocArtifactAssetsInvalidRefusal(error: unknown): boolean {
   return causeChainHasRefusal(error, "INTERNAL", "ydoc-artifact-assets-invalid");
 }
 
+export function isYdocOpenStorageFailureRefusal(error: unknown): boolean {
+  return causeChainHasRefusal(error, "INTERNAL", "ydoc-open-storage-failed");
+}
+
+export function isYdocOpenOperationCrashedRefusal(error: unknown): boolean {
+  return causeChainHasRefusal(
+    error,
+    "INTERNAL",
+    "ydoc-open-operation-crashed",
+  );
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }

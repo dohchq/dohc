@@ -151,6 +151,17 @@ describe("EngineWorkspaceSessions", () => {
     expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
   });
 
+  it.each([
+    "ydoc-open-storage-failed",
+    "ydoc-open-operation-crashed",
+  ])("keeps a canonical document read-only after %s", (message) => {
+    const refusal = new DaemonRefusalError(
+      { code: "INTERNAL", message, retry: "no" },
+      undefined,
+    );
+    expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
+  });
+
   it("requires the exact scene asset refusal detail delimiter", () => {
     for (const message of [
       "ydoc-artifact-assets-pending-extra",

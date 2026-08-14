@@ -8367,6 +8367,11 @@ fn map_ydoc_open_runtime(error: RuntimeError) -> WireError {
         RuntimeError::YdocArtifactAssetsInvalid => {
             wire(ErrorCode::Internal, "ydoc-artifact-assets-invalid")
         }
+        error @ RuntimeError::Storage(dohc_engine_storage::StorageError::FileLocked) => {
+            map_runtime(error)
+        }
+        RuntimeError::Storage(_) => wire(ErrorCode::Internal, "ydoc-open-storage-failed"),
+        RuntimeError::OperationCrashed => wire(ErrorCode::Internal, "ydoc-open-operation-crashed"),
         other => map_runtime(other),
     }
 }
@@ -12626,6 +12631,25 @@ mod tests {
             pending.message,
             "ydoc-artifact-assets-pending: invalid_jobs=0, incomplete_jobs=4"
         );
+    }
+
+    #[test]
+    fn ydoc_open_preserves_storage_and_crash_refusals() {
+        let storage = map_ydoc_open_runtime(RuntimeError::Storage(
+            dohc_engine_storage::StorageError::StateCorrupt { source: None },
+        ));
+        assert_eq!(storage.code, ErrorCode::Internal);
+        assert_eq!(storage.message, "ydoc-open-storage-failed");
+
+        let crashed = map_ydoc_open_runtime(RuntimeError::OperationCrashed);
+        assert_eq!(crashed.code, ErrorCode::Internal);
+        assert_eq!(crashed.message, "ydoc-open-operation-crashed");
+
+        let busy = map_ydoc_open_runtime(RuntimeError::Storage(
+            dohc_engine_storage::StorageError::FileLocked,
+        ));
+        assert_eq!(busy.code, ErrorCode::Overloaded);
+        assert_eq!(busy.message, "engine-store-busy");
     }
 
     #[test]
