@@ -1,6 +1,6 @@
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
 use dohc_engine_collab::{
-    CollabError, DocKey, RemoteUpdate, ReplicationApplyOutcome, apply_remote_update,
+    CollabError, ContentKind, DocKey, RemoteUpdate, ReplicationApplyOutcome, apply_remote_update,
     apply_remote_update_in_transaction, maybe_compact,
 };
 use dohc_engine_domain::{
@@ -69,7 +69,7 @@ pub(crate) fn is_exact_repairable_ydoc_base_claim(
         && payload.update_blob_sha256 == lineage_claim_id
         && payload.lineage_claim_id == lineage_claim_id
         && valid_lineage_claim_id(lineage_claim_id)
-        && matches!(payload.content_kind.as_str(), "plaintext" | "richdoc")
+        && ContentKind::parse(&payload.content_kind).is_ok()
         && classification == PathClassification::Tracked
         && normalized.as_deref() == Some(payload.path.as_str())
 }
@@ -578,6 +578,7 @@ fn drain_deferred_ydoc(
     let mut drained_coordinates: Vec<(String, i64)> = Vec::new();
     let mut last_coordinate: Option<(String, i64)> = None;
     let mut lineage_replacements = Vec::new();
+    let mut projection_refusal = None;
     for (origin_id, origin_seq, relay_seq, recorded_at_ms, lineage_claim_id, payload) in pending {
         if let DeferredDrainMode::Live(expected_claim_id) = mode
             && Some(lineage_claim_id.as_str()) != expected_claim_id
@@ -743,17 +744,42 @@ fn drain_deferred_ydoc(
             // retaining the marker would wedge every later drain. The CRDT
             // content is durable above; the visible path legitimately remains
             // governed by its current owner, so consume the marker.
-            Err(SyncError::InvalidInput { .. } | SyncError::ProjectionTooLarge { .. }) => {}
+            Err(SyncError::InvalidInput { .. }) => {}
+            // A measured size rejection is also terminal, but unlike an
+            // identity pin it must stay visible to the peer. Persist it against
+            // the last coordinate whose accepted bytes made this projection
+            // too large before the queue cleanup below consumes the marker.
+            Err(SyncError::ProjectionTooLarge {
+                constraint,
+                actual_bytes,
+                limit_bytes,
+            }) => {
+                projection_refusal = Some(deferred_ydoc_refusal(
+                    key,
+                    drain_origin,
+                    drain_seq,
+                    projection_too_large_reason(
+                        persisted.marker.content_kind,
+                        constraint,
+                        actual_bytes,
+                        limit_bytes,
+                    ),
+                ));
+            }
             // Anything else (storage) is retryable: keep the markers so the
             // next drain retries the projection.
             Err(other) => return Err(other),
         }
     }
-    // The durable markers clear LAST — after the projection committed. A
-    // crash anywhere above leaves the rows in place, and the retry re-runs
-    // apply (content-deduped) AND the projection; deleting first opened a
-    // window where the CRDT held the edit but nothing would ever project it.
+    // The durable markers clear LAST — after the projection committed or a
+    // terminal disposition was persisted. A crash anywhere above leaves the
+    // rows in place, and the retry re-runs apply (content-deduped) AND the
+    // projection; deleting first opened a window where the CRDT held the edit
+    // but nothing would ever project it.
     let cleared = store.write_with(faults, |tx| {
+        if let Some(refusal) = projection_refusal.as_ref() {
+            crate::apply::persist_refusal(tx, refusal)?;
+        }
         for (origin_id, origin_seq) in &drained_coordinates {
             tx.execute(
                 "DELETE FROM ydoc_deferred_updates \
@@ -766,6 +792,9 @@ fn drain_deferred_ydoc(
     })?;
     if matches!(cleared, TxnOutcome::Crashed { .. }) {
         return Err(SyncError::FaultCrash);
+    }
+    if let Some(refusal) = projection_refusal {
+        refusals.push(refusal);
     }
     // The count is DRAINED COORDINATES, not newly-applied rows: a marker
     // surviving an earlier failed drain redelivers its row as a dedupe, and
@@ -789,18 +818,10 @@ fn refuse_deferred_ydoc(
     key: &DocKey,
     origin_id: &str,
     origin_seq: i64,
-    reason: &'static str,
+    reason: impl Into<String>,
     faults: &dyn FaultInjector,
 ) -> Result<crate::ReplicationRefusal, SyncError> {
-    let refusal = crate::ReplicationRefusal {
-        workspace_id: key.workspace_id.clone(),
-        origin_id: origin_id.to_owned(),
-        origin_seq,
-        op_kind: "ydoc.update".to_owned(),
-        reason: crate::RefusalReason::InvalidInput {
-            reason: reason.to_owned(),
-        },
-    };
+    let refusal = deferred_ydoc_refusal(key, origin_id, origin_seq, reason);
     match store.write_with(faults, |tx| {
         crate::apply::persist_refusal(tx, &refusal)?;
         tx.execute(
@@ -813,6 +834,23 @@ fn refuse_deferred_ydoc(
     })? {
         TxnOutcome::Committed(()) => Ok(refusal),
         TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
+    }
+}
+
+fn deferred_ydoc_refusal(
+    key: &DocKey,
+    origin_id: &str,
+    origin_seq: i64,
+    reason: impl Into<String>,
+) -> crate::ReplicationRefusal {
+    crate::ReplicationRefusal {
+        workspace_id: key.workspace_id.clone(),
+        origin_id: origin_id.to_owned(),
+        origin_seq,
+        op_kind: "ydoc.update".to_owned(),
+        reason: crate::RefusalReason::InvalidInput {
+            reason: reason.into(),
+        },
     }
 }
 
@@ -1742,10 +1780,7 @@ pub fn apply_ydoc_envelope(
     let (classification, normalized) = classify_engine_file_path_normalized(&payload.path);
     if classification != PathClassification::Tracked
         || normalized.as_deref() != Some(payload.path.as_str())
-        || !matches!(
-            payload.content_kind.as_str(),
-            "plaintext" | "richdoc" | "scene"
-        )
+        || ContentKind::parse(&payload.content_kind).is_err()
     {
         return refuse_ydoc(
             store,

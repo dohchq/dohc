@@ -1331,6 +1331,113 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
     assert_eq!(persisted_reason, expected_reason);
 }
 
+/// A pre-base update is already ACKed when its eventual base drains it. If
+/// the combined document exceeds the text sink's measured cap, the drain must
+/// persist and return that terminal refusal before it removes the queue row.
+#[test]
+fn deferred_ydoc_projection_over_the_text_cap_is_persisted_and_returned() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+
+    let source = dohc_engine_collab::Ydoc::wire();
+    source.plaintext_insert(0, "seed");
+    let base = source.encode_full_state();
+    let base_sha = engine.put_binary_blob(&base).expect("base blob");
+    let delta = source.plaintext_insert(4, &"a".repeat(MAX_TEXT_BYTES));
+    assert!(delta.len() < dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES);
+    let delta_sha = engine.put_binary_blob(&delta).expect("delta blob");
+    let delta_op = envelope(
+        "deferred-over-cap-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-deferred-over-cap",
+            "path": "notes/deferred-over-cap.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": delta_sha,
+            "lineageClaimId": base_sha.clone(),
+            "isBaseState": false,
+        }),
+    );
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &delta_op, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(YdocApplyResult {
+            deferred: true,
+            reason: Some("ydoc-lineage-absent"),
+            ..
+        }))
+    ));
+
+    let base_op = envelope(
+        "deferred-over-cap-base-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-deferred-over-cap",
+            "path": "notes/deferred-over-cap.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha,
+            "isBaseState": true,
+        }),
+    );
+    let outcome = apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases)
+        .expect("base applies and drains the oversized update");
+    let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
+    assert!(matches!(primary, ApplyOutcome::Applied(_)));
+    assert!(sharing_declined.is_empty());
+    let expected_reason = format!(
+        "plaintext projection exceeds MAX_TEXT_BYTES: limit {MAX_TEXT_BYTES} bytes, observed at least {} bytes",
+        MAX_TEXT_BYTES + 4
+    );
+    assert_eq!(
+        refusals,
+        vec![ReplicationRefusal {
+            workspace_id: "ws".to_owned(),
+            origin_id: "deferred-over-cap-peer".to_owned(),
+            origin_seq: 0,
+            op_kind: "ydoc.update".to_owned(),
+            reason: RefusalReason::InvalidInput {
+                reason: expected_reason.clone(),
+            },
+        }],
+        "the base caller must receive the owning deferred coordinate's refusal"
+    );
+
+    let (queued, persisted_reason, head): (i64, String, String) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                    row.get(0)
+                })?,
+                conn.query_row(
+                    "SELECT reason_message FROM replication_pending_refusals \
+                     WHERE workspace_id='ws' AND origin_id='deferred-over-cap-peer' \
+                       AND origin_seq=0",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT b.text FROM snapshots AS s \
+                     JOIN blobs AS b ON b.sha256=s.blob_sha256 \
+                     WHERE s.workspace_id='ws' AND s.version_id='main' \
+                       AND s.path='notes/deferred-over-cap.md'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("deferred refusal disposition");
+    assert_eq!(queued, 0, "the terminally refused marker must be consumed");
+    assert_eq!(persisted_reason, expected_reason);
+    assert_eq!(
+        head, "seed",
+        "the oversized projection must not replace the head"
+    );
+}
+
 /// The relay pull checks the ceiling on the undecoded response, before it
 /// hashes the bytes and before it copies them into a `String`. The served
 /// bytes deliberately do NOT hash to the requested sha256, so the refusal can
@@ -6201,31 +6308,81 @@ fn seed_identity(engine: &mut EngineStore) {
 
 #[test]
 fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
-    for (label, below_floor, mismatch, expected) in [
-        ("below-floor", true, false, (Some(7), 0_i64, 0_i64)),
-        ("below-floor-mismatch", true, true, (None, 0_i64, 1_i64)),
-        ("absent", false, false, (None, 1_i64, 0_i64)),
+    for (label, content_kind, below_floor, mismatch, expected) in [
+        (
+            "below-floor",
+            dohc_engine_collab::ContentKind::Plaintext,
+            true,
+            false,
+            (Some(7), 0_i64, 0_i64),
+        ),
+        (
+            "scene-below-floor",
+            dohc_engine_collab::ContentKind::Scene,
+            true,
+            false,
+            (Some(7), 0_i64, 0_i64),
+        ),
+        (
+            "below-floor-mismatch",
+            dohc_engine_collab::ContentKind::Plaintext,
+            true,
+            true,
+            (None, 0_i64, 1_i64),
+        ),
+        (
+            "absent",
+            dohc_engine_collab::ContentKind::Plaintext,
+            false,
+            false,
+            (None, 1_i64, 0_i64),
+        ),
     ] {
         let (_scratch, _path, mut engine) = store();
         seed_identity(&mut engine);
         VersionedTextStore::new(&mut engine)
             .ensure_main_version("ws", "main", 1_000, &NoFaults)
             .expect("main version");
+        let path = match content_kind {
+            dohc_engine_collab::ContentKind::Scene => {
+                format!("drawings/{label}.excalidraw")
+            }
+            _ => format!("notes/{label}.md"),
+        };
         seed_text_head(
             &mut engine,
             &format!("object-{label}"),
-            &format!("notes/{label}.md"),
+            &path,
             "legacy base",
         );
         let key = dohc_engine_collab::DocKey::new("ws", "main", format!("object-{label}"))
             .expect("doc key");
         let doc = dohc_engine_collab::Ydoc::wire();
-        doc.plaintext_insert(0, "legacy base");
+        match content_kind {
+            dohc_engine_collab::ContentKind::Scene => {
+                let portable = json!({
+                    "type": "excalidraw",
+                    "version": 2,
+                    "source": "https://excalidraw.com",
+                    "elements": [],
+                    "appState": {},
+                    "files": {},
+                })
+                .to_string();
+                let imported = dohc_engine_collab::import_portable_scene(&portable)
+                    .expect("import legacy scene");
+                doc.apply(&imported.initial_update)
+                    .expect("apply legacy scene");
+            }
+            _ => {
+                doc.plaintext_insert(0, "legacy base");
+            }
+        }
         let base = doc.encode_full_state();
         let claim_id = match dohc_engine_collab::claim_base(
             &mut engine,
             &key,
-            dohc_engine_collab::ContentKind::Plaintext,
+            content_kind,
             &base,
             &NoFaults,
             1_100,
@@ -6240,8 +6397,8 @@ fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
         let payload = json!({
             "versionId": "main",
             "objectId": key.object_id,
-            "path": format!("notes/{label}.md"),
-            "contentKind": "plaintext",
+            "path": path,
+            "contentKind": content_kind.as_str(),
             "updateBlobSha256": &claim_id,
             "lineageClaimId": &claim_id,
             "isBaseState": true,
