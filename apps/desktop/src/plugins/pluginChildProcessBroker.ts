@@ -8,6 +8,7 @@ import {
   type PluginChildProcessOutput,
   type PluginChildProcessStream,
 } from "@dohc/sdk/node";
+import { killProcessTreePosix } from "../process/posixSpawn";
 import { pluginIdToSafePath } from "./pluginSourceSnapshot";
 import { PLUGIN_PROCESS_LOG_LIMIT } from "./pluginHostProtocol";
 
@@ -22,7 +23,7 @@ const CHILD_PROCESS_EXIT_WAIT_MS = 5_000;
 // (200): once a spawn's exited-and-still-retained children pass the cap,
 // the oldest are dropped — a plugin reading their logs immediately after
 // exit, as the API is meant to be used, never hits this.
-const EXITED_CHILD_RETENTION_LIMIT = 200;
+export const EXITED_CHILD_RETENTION_LIMIT = 200;
 const MAX_CHILD_ARGS = 256;
 const MAX_CHILD_ARG_LENGTH = 16_384;
 const MAX_CHILD_ENV_ENTRIES = 512;
@@ -72,7 +73,10 @@ export interface PluginChildProcessBrokerOptions {
     options: PluginChildProcessForkOptions,
   ) => Promise<PluginChildProcessHandle> | PluginChildProcessHandle;
   platform?: NodeJS.Platform;
-  killProcessGroup?: (pid: number, signal: NodeJS.Signals) => void;
+  killProcessTreePosix?: (
+    pid: number,
+    signal: NodeJS.Signals,
+  ) => Promise<void> | void;
   killWindowsTree?: (pid: number) => Promise<boolean>;
   stopGraceMs?: number;
   exitWaitMs?: number;
@@ -278,9 +282,10 @@ export class PluginChildProcessBroker {
   private readonly subscriptions = new Map<string, SubscriptionRecord>();
   private readonly spawnSignals = new Map<string, AbortSignal>();
   private readonly spawnTeardowns = new Map<string, Promise<void>>();
+  private readonly evictedExitedChildren = new Map<string, number>();
   private readonly forkProcess: NonNullable<PluginChildProcessBrokerOptions["forkProcess"]>;
   private readonly platform: NodeJS.Platform;
-  private readonly killProcessGroup: NonNullable<PluginChildProcessBrokerOptions["killProcessGroup"]>;
+  private readonly killProcessTreePosix: NonNullable<PluginChildProcessBrokerOptions["killProcessTreePosix"]>;
   private readonly killWindowsTree: NonNullable<PluginChildProcessBrokerOptions["killWindowsTree"]>;
   private readonly stopGraceMs: number;
   private readonly exitWaitMs: number;
@@ -288,16 +293,15 @@ export class PluginChildProcessBroker {
   constructor(private readonly options: PluginChildProcessBrokerOptions) {
     this.forkProcess = options.forkProcess ?? forkElectronUtilityProcess;
     this.platform = options.platform ?? process.platform;
-    // Signals the pid directly, not the negated "-pid" process-group form
-    // (CodeRabbit #779 R10): utilityProcess.fork never makes the child its
-    // own group leader (no `detached` option exists on that API), so it
-    // inherits this process's group — `-pid` there is at best an ESRCH
-    // no-op and at worst signals an unrelated group. A caller whose own
-    // spawn setup does create a real process group may still override this
-    // option with its own group-targeting implementation.
-    this.killProcessGroup = options.killProcessGroup ?? ((pid, signal) => {
-      process.kill(pid, signal);
-    });
+    // Signals the child's own pid and every descendant pid read from the
+    // process table, never the negated "-pid" process-group form (CodeRabbit
+    // #779 R10): utilityProcess.fork never makes the child its own group
+    // leader (no `detached` option exists on that API), so it inherits this
+    // process's group — `-pid` there is at best an ESRCH no-op and at worst
+    // signals an unrelated group. Enumerating descendants is what stops a
+    // brokered child's own servers and workers from surviving teardown.
+    this.killProcessTreePosix = options.killProcessTreePosix ??
+      killProcessTreePosix;
     this.killWindowsTree = options.killWindowsTree ?? killWindowsTree;
     this.stopGraceMs = options.stopGraceMs ?? CHILD_PROCESS_STOP_GRACE_MS;
     this.exitWaitMs = options.exitWaitMs ?? CHILD_PROCESS_EXIT_WAIT_MS;
@@ -530,7 +534,25 @@ export class PluginChildProcessBroker {
     childId: string,
   ): SpawnRecord {
     const child = this.children.get(childId);
-    if (!child) throw new Error(`Child process "${childId}" was not found.`);
+    if (!child) {
+      // A handle can go missing because retention evicted it, which is a
+      // configured limit the calling plugin's agent has to be able to read
+      // off the error itself.
+      const evicted = this.evictedExitedChildren.get(
+        this.spawnKey(context.pluginId, context.spawnId),
+      ) ?? 0;
+      if (evicted > 0) {
+        throw new Error(
+          `Child process "${childId}" was not found. This spawn discarded ` +
+            `${evicted} exited ${evicted === 1 ? "child" : "children"}: the ` +
+            "broker retains at most " +
+            `${EXITED_CHILD_RETENTION_LIMIT} exited children per spawn and ` +
+            "discards the oldest first. Read a child's logs and exit result " +
+            "before spawning more.",
+        );
+      }
+      throw new Error(`Child process "${childId}" was not found.`);
+    }
     if (
       child.pluginId !== context.pluginId ||
       child.spawnId !== context.spawnId
@@ -612,6 +634,10 @@ export class PluginChildProcessBroker {
       const child = this.children.get(childId);
       if (child) this.removeChild(child);
     }
+    this.evictedExitedChildren.set(
+      key,
+      (this.evictedExitedChildren.get(key) ?? 0) + excess,
+    );
   }
 
   private async stopChild(record: SpawnRecord): Promise<void> {
@@ -622,12 +648,17 @@ export class PluginChildProcessBroker {
       if (pid !== undefined) await this.killWindowsTree(pid);
       if (!record.exited) record.child.kill();
     } else {
-      this.signalPosix(record, "SIGTERM");
+      await this.signalPosix(record, "SIGTERM");
       let forceTimer: NodeJS.Timeout | undefined;
       const force = new Promise<void>((resolveForce) => {
         forceTimer = setTimeout(() => {
-          if (!record.exited) this.signalPosix(record, "SIGKILL");
-          resolveForce();
+          if (record.exited) {
+            resolveForce();
+            return;
+          }
+          // Enumerates the tree again: a child started after the SIGTERM
+          // round must not survive the SIGKILL round.
+          void this.signalPosix(record, "SIGKILL").finally(resolveForce);
         }, this.stopGraceMs);
         forceTimer.unref?.();
       });
@@ -652,10 +683,13 @@ export class PluginChildProcessBroker {
     }
   }
 
-  private signalPosix(record: SpawnRecord, signal: NodeJS.Signals): void {
+  private async signalPosix(
+    record: SpawnRecord,
+    signal: NodeJS.Signals,
+  ): Promise<void> {
     const pid = record.child.pid;
     try {
-      if (pid !== undefined) this.killProcessGroup(pid, signal);
+      if (pid !== undefined) await this.killProcessTreePosix(pid, signal);
       else record.child.kill();
     } catch {
       if (!record.exited) record.child.kill();
@@ -689,6 +723,7 @@ export class PluginChildProcessBroker {
     if ((this.childrenBySpawn.get(key)?.size ?? 0) === 0) {
       this.childrenBySpawn.delete(key);
       this.spawnSignals.delete(key);
+      this.evictedExitedChildren.delete(key);
     }
     for (const [subscriptionId, subscription] of this.subscriptions) {
       if (

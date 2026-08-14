@@ -5,8 +5,10 @@ import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PLUGIN_CHILD_PROCESS_METHODS } from "@dohc/sdk/node";
 import { createTestScratch } from "../workspaces/testTemp";
+import { processTreePids } from "../process/posixSpawn";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import {
+  EXITED_CHILD_RETENTION_LIMIT,
   PluginChildProcessBroker,
   type PluginChildProcessBrokerContext,
   type PluginChildProcessForkOptions,
@@ -53,7 +55,10 @@ interface BrokerFixture {
 async function createFixture(
   options: {
     platform?: NodeJS.Platform;
-    killProcessGroup?: (pid: number, signal: NodeJS.Signals) => void;
+    killProcessTreePosix?: (
+      pid: number,
+      signal: NodeJS.Signals,
+    ) => Promise<void> | void;
   } = {},
 ): Promise<BrokerFixture> {
   const root = await createTestScratch("dohc-plugin-child-broker-");
@@ -82,7 +87,7 @@ async function createFixture(
       windowsTreeKills.push(pid);
       return true;
     },
-    killProcessGroup: options.killProcessGroup,
+    killProcessTreePosix: options.killProcessTreePosix,
     stopGraceMs: 10,
     exitWaitMs: 50,
   });
@@ -341,12 +346,12 @@ describe("PluginChildProcessBroker", () => {
     expect(fixture.children[1]?.killCalls).toBe(0);
   });
 
-  it("terminates the POSIX process group when a spawn aborts", async () => {
+  it("terminates the POSIX process tree when a spawn aborts", async () => {
     const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
     let child: FakeUtilityProcess | undefined;
     const fixture = await createFixture({
       platform: "linux",
-      killProcessGroup: (pid, signal) => {
+      killProcessTreePosix: (pid, signal) => {
         signals.push({ pid, signal });
         if (signal === "SIGTERM") queueMicrotask(() => child?.emit("exit", 0));
       },
@@ -486,9 +491,93 @@ describe("PluginChildProcessBroker", () => {
       await fixture.broker.invoke(brokerContext, PLUGIN_CHILD_PROCESS_METHODS.terminate, {
         childId,
       });
-      expect(killCalls).toEqual([{ pid: child.pid, signal: "SIGTERM" }]);
+      // The tree sweep may add descendant pids on a host with a readable
+      // process table. None of them may ever be a negated group id.
+      expect(killCalls).toContainEqual({ pid: child.pid, signal: "SIGTERM" });
+      expect(killCalls.every((call) => call.pid > 0)).toBe(true);
     } finally {
       killSpy.mockRestore();
     }
+  });
+
+  it("signals a POSIX child's descendants, re-enumerating before the SIGKILL round", async () => {
+    // The live `ps` path cannot run on this Windows host, so the sweep is
+    // driven through an injected process table.
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let round = 0;
+    const fixture = await createFixture({
+      platform: "linux",
+      killProcessTreePosix: async (pid, signal) => {
+        round += 1;
+        // A worker the child started only after the SIGTERM round.
+        const table = round === 1
+          ? [{ pid: 10_000, ppid: 1 }, { pid: 20_001, ppid: 10_000 }]
+          : [
+            { pid: 10_000, ppid: 1 },
+            { pid: 20_001, ppid: 10_000 },
+            { pid: 20_002, ppid: 20_001 },
+          ];
+        for (const target of processTreePids(table, pid)) {
+          signals.push({ pid: target, signal });
+        }
+      },
+    });
+    const brokerContext = context("plugin-a", "spawn-a");
+    const childId = await spawnChild(fixture, brokerContext);
+    const child = fixture.children[0];
+    if (!child) throw new Error("No child was spawned.");
+
+    const terminate = fixture.broker.invoke(
+      brokerContext,
+      PLUGIN_CHILD_PROCESS_METHODS.terminate,
+      { childId },
+    );
+    // Never exits on SIGTERM, so the SIGKILL escalation has to run.
+    setTimeout(() => child.emit("exit", 0), 30);
+    await terminate;
+
+    expect(signals.filter((entry) => entry.signal === "SIGTERM")).toEqual([
+      { pid: 20_001, signal: "SIGTERM" },
+      { pid: 10_000, signal: "SIGTERM" },
+    ]);
+    // The second round enumerated freshly and caught the new grandchild.
+    expect(signals.filter((entry) => entry.signal === "SIGKILL")).toEqual([
+      { pid: 20_002, signal: "SIGKILL" },
+      { pid: 20_001, signal: "SIGKILL" },
+      { pid: 10_000, signal: "SIGKILL" },
+    ]);
+  });
+
+  it("names the retention limit when an evicted child handle is used", async () => {
+    const fixture = await createFixture();
+    const brokerContext = context("plugin-a", "spawn-a");
+    const childIds: string[] = [];
+    for (let index = 0; index <= EXITED_CHILD_RETENTION_LIMIT; index += 1) {
+      childIds.push(await spawnChild(fixture, brokerContext));
+    }
+    // Exit them all: the oldest passes the retention cap and is discarded.
+    for (const child of fixture.children) child.emit("exit", 0);
+
+    const evictedId = childIds[0];
+    if (!evictedId) throw new Error("No child id was recorded.");
+    await expect(
+      fixture.broker.invoke(brokerContext, PLUGIN_CHILD_PROCESS_METHODS.logs, {
+        childId: evictedId,
+      }),
+    ).rejects.toThrow(
+      /discarded 1 exited child: the broker retains at most 200 exited children per spawn and discards the oldest first/,
+    );
+  });
+
+  it("does not mention retention when an unknown child id was never spawned", async () => {
+    const fixture = await createFixture();
+    const brokerContext = context("plugin-a", "spawn-a");
+    await spawnChild(fixture, brokerContext);
+
+    await expect(
+      fixture.broker.invoke(brokerContext, PLUGIN_CHILD_PROCESS_METHODS.logs, {
+        childId: "00000000-0000-4000-8000-000000000000",
+      }),
+    ).rejects.toThrow(/^Child process "[^"]+" was not found\.$/);
   });
 });

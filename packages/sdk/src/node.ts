@@ -73,6 +73,15 @@ export interface PluginChildProcessHandle {
   terminate(options?: DohcRequestOptions): Promise<PluginChildProcessExit>;
 }
 
+/**
+ * Spawns child processes for one plugin activation.
+ *
+ * Retention: an exited child's handle stays readable so `logs()` and `wait()`
+ * still work after it exits, but the host retains at most 200 exited children
+ * per activation and discards the oldest first. A handle discarded that way
+ * fails with a "was not found" error that names the limit. Read a child's
+ * logs and exit result before spawning more.
+ */
 export interface PluginChildProcessClient {
   spawn(
     input: PluginChildProcessSpawnOptions,
