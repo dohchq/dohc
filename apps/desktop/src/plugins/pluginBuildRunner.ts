@@ -67,16 +67,23 @@ export type PluginBuildResult =
     ok: true;
     liveRoot: string;
     bundlePath: string;
-    /** SHA-256 of bundle.mjs read back from its final, post-atomic-swap
-     * location — the executing artifact's own hash (CERT779: source hash
-     * alone verified a tree that never runs; this is what PluginPipeline
-     * records as approvedBundleHash and re-checks before every start). */
+    /** SHA-256 of the built bundle.mjs — the executing artifact's own hash
+     * (CERT779: source hash alone verified a tree that never runs; this is
+     * what PluginPipeline records as approvedBundleHash and re-checks before
+     * every start). `publish` only renames the staged tree into place, so
+     * this stays the hash of the file that runs. */
     bundleHash: string;
     manifestPath: string;
     metafilePath: string;
     metafile: Metafile;
     diagnostics: PluginBuildDiagnostics;
-    cleanupWarning: string | null;
+    /** Swaps the built tree into the live root. A build is deliberately not
+     * published by building: the caller persists the approval state for
+     * `bundleHash` first, so nothing can serve bytes whose approval was
+     * never durably recorded (#779 round 6 F5). */
+    publish: () => Promise<{ cleanupWarning: string | null }>;
+    /** Drops the built tree and puts the installed snapshot back. */
+    discard: () => Promise<void>;
   }
   | {
     ok: false;
@@ -493,6 +500,20 @@ async function replaceLiveRoot(
   }
 }
 
+/** Puts the installed snapshot back and removes the staged build. */
+async function discardStaging(
+  stagingRoot: string,
+  snapshotRestorePath: string,
+): Promise<void> {
+  await renameWithWindowsRetry(join(stagingRoot, "snapshot"), snapshotRestorePath);
+  await rm(stagingRoot, {
+    recursive: true,
+    force: true,
+    maxRetries: WINDOWS_RENAME_RETRY_DELAYS_MS.length,
+    retryDelay: 200,
+  });
+}
+
 function parseManifest(input: BuildPluginBundleInput): DohcPluginManifest {
   const parsed = DohcPluginManifestSchema.safeParse(input.manifest);
   if (parsed.success) return parsed.data;
@@ -641,19 +662,28 @@ async function runBuildJob(
         `${JSON.stringify({ ...manifest, entry: "bundle.mjs" }, null, 2)}\n`,
       ),
     ]);
-    snapshotRestorePath = null;
-    const cleanupWarning = await replaceLiveRoot(paths.liveRoot, stagingRoot);
-    stagingRoot = null;
-
-    const bundlePath = join(paths.liveRoot, "bundle.mjs");
     const bundleHash = createHash("sha256")
-      .update(await readFile(bundlePath))
+      .update(await readFile(outfile))
       .digest("hex");
+
+    const builtStagingRoot = stagingRoot;
+    stagingRoot = null;
+    snapshotRestorePath = null;
+    let settled = false;
+    const settle = (): void => {
+      if (settled) {
+        throw new Error(
+          `Plugin "${input.pluginId}" build at ${builtStagingRoot} was ` +
+            "already published or discarded.",
+        );
+      }
+      settled = true;
+    };
 
     return {
       ok: true,
       liveRoot: paths.liveRoot,
-      bundlePath,
+      bundlePath: join(paths.liveRoot, "bundle.mjs"),
       bundleHash,
       manifestPath: join(paths.liveRoot, "dohc-plugin.generated.json"),
       metafilePath: join(paths.liveRoot, "meta.json"),
@@ -662,7 +692,16 @@ async function runBuildJob(
         errors: outcome.result.errors,
         warnings: outcome.result.warnings,
       },
-      cleanupWarning,
+      publish: async () => {
+        settle();
+        return {
+          cleanupWarning: await replaceLiveRoot(paths.liveRoot, builtStagingRoot),
+        };
+      },
+      discard: async () => {
+        settle();
+        await discardStaging(builtStagingRoot, paths.snapshotRoot);
+      },
     };
   } catch (error) {
     let result = failureResult(error, timeoutMs);

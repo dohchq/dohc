@@ -28,6 +28,7 @@ import {
   SEARCH_EVENT_MAX_PREVIEW_CHARS,
   PLUGIN_PIPELINE_ERROR_STAGES,
   PLUGIN_PIPELINE_STATUSES,
+  PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT,
   UPDATE_CHANNELS,
   UPDATE_STATUSES,
   WORKBENCH_MENU_COMMANDS,
@@ -2314,28 +2315,17 @@ const PluginUninstallCounts = z.object({
   notRecoverableFromHistory: z.number().int().nonnegative(),
 }).strict();
 
-const PluginUninstallFileInventory = z.object({
-  relPath: PATH_STRING,
-  status: z.enum([
-    "unchanged",
-    "modified",
-    "added-since-baseline",
-    "removed-since-baseline",
-    "unknown-without-baseline",
-  ]),
-  byteLength: z.number().int().nonnegative().nullable(),
-  contentKind: z.enum(["text", "binary"]).nullable(),
-  historyRecovery: z
-    .enum(["captured-recoverable", "not-recoverable-from-history"])
-    .nullable(),
-}).strict();
-
+// Only a bounded sample of unrecoverable paths crosses the bridge; the whole
+// inventory stays in main. counts.notRecoverableFromHistory is the real
+// total, which is what the dialog counts "and N more" from.
 const PluginUninstallWarning = z.object({
   kind: z.enum(["local-modifications", "cannot-verify-baseline"]),
   summary: z.string().min(1).max(10_000),
   details: z.array(PLUGIN_DIAGNOSTIC),
   counts: PluginUninstallCounts,
-  notRecoverablePaths: z.array(PATH_STRING),
+  notRecoverablePathSample: z
+    .array(PATH_STRING)
+    .max(PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT),
 }).strict();
 
 export const PluginUninstallPreflightRecord = z.object({
@@ -2345,8 +2335,6 @@ export const PluginUninstallPreflightRecord = z.object({
   baselineManifestPath: PATH_STRING,
   summary: z.string().min(1).max(10_000),
   counts: PluginUninstallCounts,
-  files: z.array(PluginUninstallFileInventory),
-  notRecoverablePaths: z.array(PATH_STRING),
   warning: PluginUninstallWarning.nullable(),
 }).strict();
 export type PluginUninstallPreflightRecord = z.infer<

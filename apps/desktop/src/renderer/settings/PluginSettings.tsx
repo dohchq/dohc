@@ -624,7 +624,7 @@ export function PluginSettings(props: { workspaceId: string }) {
                       <li key={detail}>{detail}</li>
                     ))}
                   </ul>
-                  {confirmation.preflight.warning.notRecoverablePaths.length > 0 ? (
+                  {confirmation.preflight.warning.notRecoverablePathSample.length > 0 ? (
                     <div className="mt-3">
                       <p className="m-0 text-[11px] font-medium text-danger">
                         History cannot recover these files:
@@ -633,7 +633,7 @@ export function PluginSettings(props: { workspaceId: string }) {
                         data-testid="plugin-uninstall-not-recoverable"
                         className="mb-0 mt-1 list-none space-y-1 p-0"
                       >
-                        {confirmation.preflight.warning.notRecoverablePaths.map(
+                        {confirmation.preflight.warning.notRecoverablePathSample.map(
                           (path) => (
                             <li
                               key={path}
@@ -644,6 +644,22 @@ export function PluginSettings(props: { workspaceId: string }) {
                           ),
                         )}
                       </ul>
+                      {confirmation.preflight.warning.counts.notRecoverableFromHistory >
+                          confirmation.preflight.warning.notRecoverablePathSample.length
+                        ? (
+                          <p
+                            data-testid="plugin-uninstall-not-recoverable-more"
+                            className="m-0 mt-1 text-[11px] text-danger"
+                          >
+                            {`and ${
+                              confirmation.preflight.warning.counts
+                                .notRecoverableFromHistory -
+                              confirmation.preflight.warning.notRecoverablePathSample
+                                .length
+                            } more`}
+                          </p>
+                        )
+                        : null}
                     </div>
                   ) : null}
                 </div>

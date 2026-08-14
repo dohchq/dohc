@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   copyFile,
@@ -207,6 +207,7 @@ describe("buildPluginBundle", () => {
     const fixture = await createBuildFixture();
 
     const success = requireSuccess(await buildPluginBundle(fixture.input));
+    const published = await success.publish();
     const imported: unknown = await import(
       `${pathToFileURL(success.bundlePath).href}?test=${randomUUID()}`
     );
@@ -216,13 +217,51 @@ describe("buildPluginBundle", () => {
       'from "./increment"',
     );
     expect(success.diagnostics).toEqual({ errors: [], warnings: [] });
-    expect(success.cleanupWarning).toBeNull();
+    expect(published.cleanupWarning).toBeNull();
+  });
+
+  it("leaves the live root untouched until publish is called (#779 round 6 F5)", async () => {
+    const fixture = await createBuildFixture();
+    const oldBundlePath = join(fixture.liveRoot, "bundle.mjs");
+    await writeFile(oldBundlePath, "old bundle bytes\n");
+
+    const success = requireSuccess(await buildPluginBundle(fixture.input));
+
+    // The caller records approval for success.bundleHash before anything can
+    // execute those bytes.
+    expect(await readFile(oldBundlePath, "utf8")).toBe("old bundle bytes\n");
+    await success.publish();
+    const liveBundle = await readFile(oldBundlePath);
+    expect(liveBundle.toString("utf8")).not.toContain("old bundle bytes");
+    expect(createHash("sha256").update(liveBundle).digest("hex")).toBe(
+      success.bundleHash,
+    );
+    await expectNoStaging(fixture.liveRoot);
+  });
+
+  it("discard restores the installed snapshot and keeps the old bundle live", async () => {
+    const fixture = await createBuildFixture();
+    const oldBundlePath = join(fixture.liveRoot, "bundle.mjs");
+    await writeFile(oldBundlePath, "old bundle bytes\n");
+
+    const success = requireSuccess(await buildPluginBundle(fixture.input));
+    await success.discard();
+
+    expect(await readFile(oldBundlePath, "utf8")).toBe("old bundle bytes\n");
+    await expect(
+      readFile(join(fixture.snapshotRoot, "src", "index.ts"), "utf8"),
+    ).resolves.toContain("increment(41)");
+    await expectNoStaging(fixture.liveRoot);
+    await expect(success.publish()).rejects.toThrow(
+      /was already published or discarded/,
+    );
   });
 
   it("writes the returned metafile and a generated manifest for bundle.mjs", async () => {
     const fixture = await createBuildFixture({ pluginId: "@scope/build-fixture" });
 
     const success = requireSuccess(await buildPluginBundle(fixture.input));
+    await success.publish();
     const metafileOnDisk: unknown = JSON.parse(
       await readFile(success.metafilePath, "utf8"),
     );
@@ -314,6 +353,7 @@ describe("buildPluginBundle", () => {
     await writeFile(oldOnlyPath, "must disappear\n");
 
     const success = requireSuccess(await buildPluginBundle(fixture.input));
+    await success.publish();
 
     expect(await readFile(success.bundlePath, "utf8")).not.toContain(
       "old bundle bytes",

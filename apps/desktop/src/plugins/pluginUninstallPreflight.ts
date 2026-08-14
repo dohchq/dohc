@@ -12,6 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
 import { isTextMediaType, mediaTypeForPath } from "@dohc/workspace-fs";
 import { z } from "zod";
+import { PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT } from "../ipc/channels";
 import { MAX_HISTORY_TEXT_SNAPSHOT_BYTES } from "../workspaces/workspaceWatcher";
 import {
   canonicalPluginSourceHash,
@@ -102,6 +103,52 @@ export interface PluginUninstallPreflightResult {
   files: PluginUninstallFileInventory[];
   notRecoverablePaths: string[];
   warning: PluginUninstallWarning | null;
+}
+
+/** What the uninstall dialog reads. The per-file inventory and the whole
+ * unrecoverable-path list stay in main: a plugin tree can hold thousands of
+ * files, and the dialog shows counts, the warning text, and a sample. */
+export interface PluginUninstallPreflightSummary {
+  verification: "verified" | "cannot-verify";
+  installedBaselineHash: string | null;
+  liveHash: string | null;
+  baselineManifestPath: string;
+  summary: string;
+  counts: PluginUninstallPreflightCounts;
+  warning:
+    | {
+      kind: PluginUninstallWarning["kind"];
+      summary: string;
+      details: string[];
+      counts: PluginUninstallPreflightCounts;
+      notRecoverablePathSample: string[];
+    }
+    | null;
+}
+
+export function summarizeUninstallPreflight(
+  result: PluginUninstallPreflightResult,
+): PluginUninstallPreflightSummary {
+  return {
+    verification: result.verification,
+    installedBaselineHash: result.installedBaselineHash,
+    liveHash: result.liveHash,
+    baselineManifestPath: result.baselineManifestPath,
+    summary: result.summary,
+    counts: result.counts,
+    warning: result.warning
+      ? {
+        kind: result.warning.kind,
+        summary: result.warning.summary,
+        details: result.warning.details,
+        counts: result.warning.counts,
+        notRecoverablePathSample: result.warning.notRecoverablePaths.slice(
+          0,
+          PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT,
+        ),
+      }
+      : null,
+  };
 }
 
 export interface WritePluginBaselineManifestInput {

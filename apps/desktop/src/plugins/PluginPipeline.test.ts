@@ -25,7 +25,7 @@ import {
   type PluginInstallProcessHandle,
 } from "./pluginInstallRunner";
 import { resolvePluginEsbuildBinary } from "./pluginBuildRunner";
-import { workspaceStateKey } from "./pluginLocalState";
+import { mutatePluginRecord, workspaceStateKey } from "./pluginLocalState";
 import { pluginUninstallPreflight } from "./pluginUninstallPreflight";
 
 interface Deferred {
@@ -496,6 +496,66 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(liveBundleAfter).not.toContain("TAMPERED-PAYLOAD");
       expect(liveBundleAfter).toContain("one");
       expect(pipeline.list()[0]?.approvedHash).toBe(approvedHashBeforeTamper);
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("keeps the approved bundle live when the new build's approval cannot be persisted (#779 round 6 F5)", async () => {
+    const fixture = await createPluginWorkspace();
+    let failRecordWrite = false;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        mutateRecord: async (stateDir, workspaceRoot, pluginId, mutate) => {
+          if (failRecordWrite) throw new Error("approval record write failed");
+          return mutatePluginRecord(stateDir, workspaceRoot, pluginId, mutate);
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      expect(installed.ok).toBe(true);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      const bundlePath = liveBundlePath(fixture, "example-plugin");
+      expect(await readFile(bundlePath, "utf8")).toContain("one");
+      const approvedHashBefore = pipeline.list()[0]?.approvedHash;
+
+      await writeFile(fixture.entryPath, [
+        'export const marker = "two";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      failRecordWrite = true;
+      const rebuilt = await pipeline.install("example-plugin");
+
+      expect(rebuilt.ok).toBe(false);
+      // The new bundle was built but never published, so the bytes on disk
+      // are still the ones whose approval is durably recorded.
+      const liveBundle = await readFile(bundlePath, "utf8");
+      expect(liveBundle).toContain("one");
+      expect(liveBundle).not.toContain("two");
+      expect(pipeline.list()[0]?.approvedHash).toBe(approvedHashBefore);
     } finally {
       await pipeline.dispose();
     }

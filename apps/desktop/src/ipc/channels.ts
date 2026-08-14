@@ -131,6 +131,11 @@ export const PLUGIN_PIPELINE_ERROR_STAGES = [
   "uninstall",
 ] as const;
 
+// How many unrecoverable paths the uninstall preflight sends to the renderer.
+// The dialog lists this sample and says how many more there are; a plugin
+// tree can hold thousands, and the whole inventory stays in main.
+export const PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT = 20;
+
 // Closed main→renderer update-state event shape (Phase E2 status bar). Like
 // MENU_COMMANDS this lives here, not bridgeContract, because the SANDBOXED
 // preload validates against it as a plain value and must stay dependency-free.

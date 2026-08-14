@@ -73,8 +73,6 @@ const cleanPreflight: PluginUninstallPreflightRecord = {
     capturedRecoverable: 0,
     notRecoverableFromHistory: 0,
   },
-  files: [],
-  notRecoverablePaths: [],
   warning: null,
 };
 
@@ -309,7 +307,6 @@ describe("PluginSettings", () => {
           capturedRecoverable: 1,
           notRecoverableFromHistory: 1,
         },
-        notRecoverablePaths: ["large.txt"],
         warning: {
           kind: "local-modifications",
           summary: "Uninstall will delete 2 modified or added plugin source files.",
@@ -324,7 +321,7 @@ describe("PluginSettings", () => {
             capturedRecoverable: 1,
             notRecoverableFromHistory: 1,
           },
-          notRecoverablePaths: ["large.txt"],
+          notRecoverablePathSample: ["large.txt"],
         },
       },
     });
@@ -343,6 +340,45 @@ describe("PluginSettings", () => {
     expect(screen.getByTestId("plugin-uninstall-not-recoverable").textContent).toContain(
       "large.txt",
     );
+  });
+
+  it("counts the unrecoverable files the bounded sample leaves out", async () => {
+    const installed = plugin("edited-plugin");
+    const sample = Array.from({ length: 20 }, (_, index) => `asset-${index}.bin`);
+    const counts = {
+      ...cleanPreflight.counts,
+      modified: 25,
+      capturedRecoverable: 0,
+      notRecoverableFromHistory: 25,
+    };
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [installed] });
+    bridgeMock.pluginUninstallPreflight.mockResolvedValue({
+      ok: true,
+      confirmationToken: "00000000-0000-4000-8000-000000000003",
+      preflight: {
+        ...cleanPreflight,
+        summary: "Uninstall will delete 25 modified or added plugin source files.",
+        counts,
+        warning: {
+          kind: "local-modifications",
+          summary: "Uninstall will delete 25 modified or added plugin source files.",
+          details: ["25 changed files cannot be recovered from history."],
+          counts,
+          notRecoverablePathSample: sample,
+        },
+      },
+    });
+
+    render(<PluginSettings workspaceId="ws-1" />);
+    await userEvent.click(await screen.findByTestId("plugin-uninstall"));
+
+    expect(await screen.findByTestId("plugin-uninstall-dialog")).toBeTruthy();
+    expect(
+      screen.getByTestId("plugin-uninstall-not-recoverable").textContent,
+    ).toContain("asset-19.bin");
+    expect(
+      screen.getByTestId("plugin-uninstall-not-recoverable-more").textContent,
+    ).toBe("and 5 more");
   });
 
   it("shows a busy action and an actionable error when the action fails", async () => {

@@ -31,8 +31,9 @@ import {
 } from "./pluginSourceSnapshot";
 import {
   pluginUninstallPreflight,
+  summarizeUninstallPreflight,
   writePluginBaselineManifest,
-  type PluginUninstallPreflightResult,
+  type PluginUninstallPreflightSummary,
 } from "./pluginUninstallPreflight";
 
 export { PLUGIN_PIPELINE_ERROR_STAGES, PLUGIN_PIPELINE_STATUSES };
@@ -80,7 +81,7 @@ export type PluginPipelineUninstallPreflightResult =
   | {
     ok: true;
     confirmationToken: string;
-    preflight: PluginUninstallPreflightResult;
+    preflight: PluginUninstallPreflightSummary;
   }
   | { ok: false; error: PluginPipelineError };
 
@@ -576,7 +577,11 @@ export class PluginPipeline {
           pluginRoot: resolve(candidate.rootPath),
           liveHash: preflight.liveHash,
         });
-        return { ok: true, confirmationToken, preflight };
+        return {
+          ok: true,
+          confirmationToken,
+          preflight: summarizeUninstallPreflight(preflight),
+        };
       } catch (error) {
         return {
           ok: false,
@@ -1066,18 +1071,11 @@ export class PluginPipeline {
         resourcesBasePath: this.options.resourcesBasePath,
         signal: this.abortController.signal,
       }));
-      const warnings = [
-        ...scan.warningLines,
-        ...(built.cleanupWarning ? [built.cleanupWarning] : []),
-      ];
-
+      // The build stages its output; it does not replace the live root. The
+      // record that approves these exact bytes is written first, so a failed
+      // write leaves the old, already-approved bundle serving instead of
+      // publishing bytes whose approval was never recorded (#779 round 6 F5).
       try {
-        await this.operations.writeBaseline({
-          dohcDir: this.dohcDir,
-          pluginId: candidate.id,
-          baselineDigest,
-          installedBaselineHash: snapshot.sourceHash,
-        });
         await this.operations.mutateRecord(
           this.options.stateDir,
           this.workspaceRoot,
@@ -1090,8 +1088,37 @@ export class PluginPipeline {
           }),
         );
       } catch (error) {
+        // The next install re-stages the snapshot, so a discard that also
+        // fails cannot make the recorded state wrong — only the staged tree
+        // is lost.
+        await built.discard().catch(() => undefined);
         throw failureFromUnknown("state", "state-write-failed", error);
       }
+
+      let published: { cleanupWarning: string | null };
+      try {
+        published = await built.publish();
+      } catch (error) {
+        throw failureFromUnknown("build", "publish-failed", error);
+      }
+      // The baseline manifest lives inside the live root that publish just
+      // replaced, so it can only be written now. It is uninstall's evidence
+      // of the installed source, not an approval gate: a failure here cannot
+      // let unapproved bytes run.
+      try {
+        await this.operations.writeBaseline({
+          dohcDir: this.dohcDir,
+          pluginId: candidate.id,
+          baselineDigest,
+          installedBaselineHash: snapshot.sourceHash,
+        });
+      } catch (error) {
+        throw failureFromUnknown("state", "state-write-failed", error);
+      }
+      const warnings = [
+        ...scan.warningLines,
+        ...(published.cleanupWarning ? [published.cleanupWarning] : []),
+      ];
 
       if (input.startRuntime) {
         this.setStatus(candidate, { status: "starting", warnings });

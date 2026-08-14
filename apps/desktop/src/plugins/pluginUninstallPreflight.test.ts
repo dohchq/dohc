@@ -9,6 +9,8 @@ import {
 import { dirname, join } from "node:path";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { PluginUninstallPreflightRecord } from "../ipc/bridgeContract";
+import { PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT } from "../ipc/channels";
 import { createTestScratch } from "../workspaces/testTemp";
 import { MAX_HISTORY_TEXT_SNAPSHOT_BYTES } from "../workspaces/workspaceWatcher";
 import { hashPluginSourceFiles } from "./pluginSourceSnapshot";
@@ -36,6 +38,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 const {
   pluginBaselineManifestPath,
   pluginUninstallPreflight,
+  summarizeUninstallPreflight,
   writePluginBaselineManifest,
 } = await import("./pluginUninstallPreflight");
 
@@ -372,5 +375,30 @@ describe("plugin uninstall preflight", () => {
       }),
     ]);
     expect(result.notRecoverablePaths).toEqual(["index.txt"]);
+  });
+
+  it("sends the renderer a bounded summary, not the whole file inventory", async () => {
+    const fixture = await createFixture();
+    for (let index = 0; index < 25; index += 1) {
+      await writeSourceFile(fixture, `asset-${index}.bin`, `bytes ${index}\n`);
+    }
+    const installedBaselineHash = await saveBaseline(fixture);
+    for (let index = 0; index < 25; index += 1) {
+      await writeSourceFile(fixture, `asset-${index}.bin`, `changed ${index}\n`);
+    }
+
+    // Capture is not running, so no changed file can be promised back.
+    const result = await runPreflight(fixture, installedBaselineHash, false);
+    const summary = summarizeUninstallPreflight(result);
+
+    expect(result.warning?.notRecoverablePaths).toHaveLength(25);
+    expect(summary.warning?.notRecoverablePathSample).toHaveLength(
+      PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT,
+    );
+    expect(summary.counts.notRecoverableFromHistory).toBe(25);
+    // The bridge contract is the enforcing edge: an uncapped producer fails
+    // here instead of shipping an unbounded array to the renderer.
+    expect(() => PluginUninstallPreflightRecord.parse(summary)).not.toThrow();
+    expect(Object.keys(summary)).not.toContain("files");
   });
 });
