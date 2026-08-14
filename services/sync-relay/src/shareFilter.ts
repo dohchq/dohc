@@ -1,5 +1,7 @@
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
+  MAX_SHARE_PATHS,
+  MAX_SHARE_PATH_CHARS,
   MAX_SHARE_VERSION_ID_CHARS,
   type ShareAccess,
   isShareAccessValue,
@@ -26,8 +28,8 @@ import { RELAY_ERRORS } from "./errorCodes";
 // forkSnapshots). It still never interprets content, and any op kind or
 // payload shape it does not positively recognize is EXCLUDED.
 
-export const MAX_SHARE_PATHS = 100;
-export const MAX_SHARE_PATH_CHARS = 1024;
+export { MAX_SHARE_PATHS, MAX_SHARE_PATH_CHARS };
+
 export const MAX_CHANNEL_WIRE_ID_CHARS = 256;
 
 export const MAIN_VERSION_ID = "main";

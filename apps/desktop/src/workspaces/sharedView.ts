@@ -5,7 +5,7 @@ import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   isShareAccessValue,
-  isShareablePath,
+  isShareablePathList,
   isValidShareVersionId,
 } from "@dohc/security-contract/share-selector";
 import type { ShareViewSelector } from "./shareViewInfo";
@@ -80,7 +80,7 @@ export function recordedShareSelector(
   if (!Array.isArray(candidate.paths)) return null;
   // One rule, one place: a path the relay could not have issued (empty,
   // unnormalized, untracked, secret) must not read back as a granted one.
-  if (!candidate.paths.every((path) => isShareablePath(path))) return null;
+  if (!isShareablePathList(candidate.paths)) return null;
   // The version dimension decides whether a no-paths selector grants the whole
   // tracked workspace, so a version id the relay could not have issued ("",
   // " v1", or an unbounded one) must never read as one. Same rule, same place,

@@ -182,7 +182,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
       `/sync/${workspaceId}/shares`,
       {
         method: "POST",
-        body: JSON.stringify({ recipientEmail: RECIPIENT_EMAIL, paths: ["docs"] }),
+        body: JSON.stringify({ recipientEmail: RECIPIENT_EMAIL, paths: ["docs"], access: "view" }),
       },
     );
     expect(create.status).toBe(200);
@@ -393,7 +393,7 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
       `/sync/${granterWorkspaceId}/shares`,
       {
         method: "POST",
-        body: JSON.stringify({ recipientEmail: RECIPIENT_EMAIL, paths: ["docs"] }),
+        body: JSON.stringify({ recipientEmail: RECIPIENT_EMAIL, paths: ["docs"], access: "view" }),
       },
     );
     expect(create.status).toBe(200);

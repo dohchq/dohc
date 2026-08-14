@@ -45,6 +45,16 @@ describe("share-view marker presence", () => {
 });
 
 describe("share-view pinned level", () => {
+  it("accepts a grant right at the count cap", () => {
+    expect(
+      readableShareLevel({
+        paths: Array.from({ length: 100 }, (_, i) => `docs/f${i}.md`),
+        versionId: null,
+        access: "view",
+      }),
+    ).toBe("view");
+  });
+
   it("reads the level from a complete grant", () => {
     expect(
       readableShareLevel({ paths: ["docs"], versionId: null, access: "comment" }),
@@ -71,6 +81,16 @@ describe("share-view pinned level", () => {
       { paths: [".env"], versionId: null, access: "view" },
       { paths: ["docs/"], versionId: null, access: "view" },
       { paths: ["docs//notes.md"], versionId: null, access: "view" },
+      // The cap is one number in one place, so the minting side and every
+      // reading side agree instead of drifting apart.
+      { paths: ["d".repeat(1025)], versionId: null, access: "view" },
+      // The COUNT cap is the same class of gap as the length cap: a 101-path
+      // grant is one the relay would never have issued.
+      {
+        paths: Array.from({ length: 101 }, (_, i) => `docs/f${i}.md`),
+        versionId: null,
+        access: "view",
+      },
     ]) {
       expect(readableShareLevel(selector), JSON.stringify(selector)).toBeNull();
     }

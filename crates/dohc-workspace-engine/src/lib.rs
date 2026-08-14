@@ -2328,7 +2328,15 @@ impl EngineService {
         // process cannot read must never pin (#646) — refusing early is the
         // same posture as every other unreadable-field refusal here.
         let access = dohc_engine_sync::ShareAccess::parse(&params.granted_selector.access)
-            .ok_or_else(|| wire(ErrorCode::InvalidParams, "unknown share access"))?;
+            .ok_or_else(|| {
+                // Names the constraint and the accepted set, like the relay's
+                // own refusal: the caller is an agent reading this error, and
+                // "unknown share access" told it nothing it could act on.
+                wire(
+                    ErrorCode::InvalidParams,
+                    r#"access must be "view", "comment", or "edit""#,
+                )
+            })?;
         let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let outcome = self

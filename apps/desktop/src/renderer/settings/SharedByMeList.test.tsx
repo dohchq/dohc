@@ -85,6 +85,24 @@ describe("SharedByMeList", () => {
     ]);
   });
 
+  // A row the relay cannot read has no code worth handing out: the
+  // recipient's own open would refuse it. Ending the share must survive,
+  // because a share you cannot end is worse than one you cannot copy.
+  it("hides Copy code for an unreadable row but keeps End share", async () => {
+    bridgeMock.listRelayShares.mockResolvedValue({
+      granted: [{ ...ACTIVE_SHARE, selector: null, damaged: true }],
+    });
+    render(<SharedByMeList />);
+
+    await screen.findByTestId("shared-by-me-row");
+    expect(
+      screen.queryByTestId("shared-by-me-copy"),
+      "MUTATION: handing out a code for a share the relay cannot read",
+    ).toBeNull();
+    expect(screen.queryByTestId("shared-by-me-revoke")).not.toBeNull();
+    expect(screen.queryByTestId("share-access-badge")).toBeNull();
+  });
+
   it("copies the share code for re-sending", async () => {
     const user = userEvent.setup();
     render(<SharedByMeList />);

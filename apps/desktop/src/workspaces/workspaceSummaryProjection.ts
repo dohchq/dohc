@@ -1,5 +1,6 @@
-import { WorkspaceSummary } from "../ipc/bridgeContract";
+import { ShareSkippedOpsSummary, WorkspaceSummary } from "../ipc/bridgeContract";
 import type { RegistryEntry } from "./registryStore";
+import { validMountLabel } from "./shareMounts";
 import {
   readableShareLevel,
   shareViewGranterEmail,
@@ -60,7 +61,6 @@ function boundedString(value: unknown, min: number, max: number): string | null 
  * unreadable after that is the workspace itself, and throws.
  */
 export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
-  const shareViewShape = WorkspaceSummary.shape.shareView;
   const shareMountsShape = WorkspaceSummary.shape.shareMounts;
 
   const rawShareView: unknown = entry.shareView;
@@ -68,39 +68,27 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
   if (shareViewIsPresent(rawShareView)) {
     // PRESENT, so restricted — readable or not. A non-object value here is
     // still a share view that lost its marker, never an ordinary workspace.
-    const level = isRecord(rawShareView)
-      ? readableShareLevel(rawShareView.grantedSelector)
-      : null;
-    const withLevel = isRecord(rawShareView)
-      ? { ...rawShareView, access: level ?? undefined }
-      : {};
-    // A healthy marker needs an IDENTITY as well as a grant. `shareId` is
-    // optional on the schema only so the damaged shape can omit it, so a
-    // marker with a perfect grant and no id would classify healthy and then
-    // fail every refresh it advertises — a live-looking share that can never
-    // load. Bounded to the schema's own limits for the same reason the
-    // granter email is: an out-of-range value carried into the damaged shape
-    // would fail the summary parse and throw out of the whole projection.
-    const shareId = boundedString(
-      isRecord(rawShareView) ? rawShareView.shareId : undefined,
-      1,
-      200,
-    );
-    const readable =
-      shareId !== null && level !== null && shareViewShape.safeParse(withLevel).success;
-    // The degraded marker keeps the stance and drops only the level. It is
-    // never a guess about WHY: `damaged` says the grant could not be read,
-    // and nothing here invents a level, an end, or a reason.
-    shareView = readable
-      ? withLevel
-      : {
-          // Only what could actually be read. A share id is never invented:
-          // an unreadable marker has no identity to state, and a placeholder
-          // would be a lie the rest of the app could act on.
-          ...(shareId !== null ? { shareId } : {}),
-          granterEmail: shareViewGranterEmail(rawShareView),
-          damaged: true as const,
-        };
+    const raw = isRecord(rawShareView) ? rawShareView : {};
+    // AUTHORITATIVE fields only. `damaged` means "this grant cannot be read",
+    // and only two things can make that true: the share has no identity to
+    // act on, or its pinned grant is unreadable. Display metadata gets no
+    // vote — a malformed `ended` flag saying the GRANT is unreadable would be
+    // a false statement, and it would suppress the refresh as well.
+    const shareId = boundedString(raw.shareId, 1, 200);
+    const level = readableShareLevel(raw.grantedSelector);
+    const damaged = shareId === null || level === null;
+    // Ancillary metadata normalizes FAIL-SOFT and independently: each field
+    // is kept when the wire schema will carry it and dropped when it will
+    // not. Dropping one costs a line of display; rejecting the record costs
+    // the whole workspace list.
+    const skipped = ShareSkippedOpsSummary.safeParse(raw.skippedOps);
+    shareView = {
+      ...(shareId !== null ? { shareId } : {}),
+      granterEmail: boundedString(raw.granterEmail, 3, 320),
+      ...(damaged ? { damaged: true as const } : { access: level }),
+      ...(raw.ended === true ? { ended: true } : {}),
+      ...(skipped.success ? { skippedOps: skipped.data } : {}),
+    };
   }
 
   const rawMounts: unknown = entry.shareMounts;
@@ -108,20 +96,23 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
     ? rawMounts
         .map((row: unknown) => {
           if (!isRecord(row)) return row;
+          // Same split as the share view. A mount's authoritative fields are
+          // its identity and its grant — and its LABEL is part of that
+          // identity: it names the folder on disk, and a label this app would
+          // never materialize through cannot be trusted to address one.
+          const shareId = boundedString(row.shareId, 1, 200);
+          const label = boundedString(row.label, 1, 64);
+          const usableLabel = label !== null && validMountLabel(label);
           const level = readableShareLevel(row.grantedSelector);
-          const healthy = { ...row, access: level ?? undefined };
-          if (level !== null && shareMountsShape.safeParse([healthy]).success) {
-            return healthy;
-          }
-          // Damaged, but KEPT: the mount's folder is on disk, and the Remove
-          // action is the only way back. Every field is bounded to the wire
-          // schema here, because a value it refuses would drop the row and
-          // strand the folder — the failure this branch exists to prevent.
+          const damaged = shareId === null || !usableLabel || level === null;
+          const skipped = ShareSkippedOpsSummary.safeParse(row.skippedOps);
           return {
-            shareId: boundedString(row.shareId, 1, 200),
-            label: boundedString(row.label, 1, 64),
+            ...(shareId !== null ? { shareId } : {}),
+            ...(label !== null ? { label } : {}),
             granterEmail: boundedString(row.granterEmail, 3, 320),
-            damaged: true as const,
+            ...(damaged ? { damaged: true as const } : { access: level }),
+            ...(row.ended === true ? { ended: true } : {}),
+            ...(skipped.success ? { skippedOps: skipped.data } : {}),
           };
         })
         .filter((row) => shareMountsShape.safeParse([row]).success)

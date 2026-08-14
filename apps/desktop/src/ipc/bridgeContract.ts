@@ -2909,6 +2909,12 @@ export type UnmountSharePayload = z.infer<typeof UnmountSharePayload>;
 
 export const UnmountShareResult = z.object({
   workspace: WorkspaceSummary,
+  // The registry record was removed but its folder was LEFT on disk, because
+  // the record's label is not one this app would ever materialize through.
+  // Removing a folder named by an unusable label is exactly what the label
+  // validator exists to prevent, so the record is cleaned up and the folder
+  // is reported instead of touched (#646).
+  folderLeft: z.literal(true).optional(),
 });
 export type UnmountShareResult = z.infer<typeof UnmountShareResult>;
 

@@ -120,6 +120,10 @@ export function SharedByMeList() {
           </div>
           {share.revokedAtMs === null ? (
             <>
+              {/* No code to hand out for a row the relay cannot read: the
+                  recipient's own open would refuse it. Ending the share
+                  stays available — the reverse path must not disappear. */}
+              {share.selector ? (
               <button
                 type="button"
                 data-testid="shared-by-me-copy"
@@ -133,6 +137,7 @@ export function SharedByMeList() {
                 )}
                 {copiedShareId === share.shareId ? "Copied" : "Copy code"}
               </button>
+              ) : null}
               <button
                 type="button"
                 data-testid="shared-by-me-revoke"

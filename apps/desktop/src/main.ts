@@ -441,6 +441,7 @@ import {
   relayTargetForShareMount,
   refreshShareMountOnce,
   removeMountFolder,
+  validMountLabel,
 } from "./workspaces/shareMounts";
 import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
 import {
@@ -5902,7 +5903,15 @@ function registerIpcHandlers(
     await closeRelayTransportWorkspace(
       mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId),
     );
-    await removeMountFolder(workspace.rootPath, mount.label);
+    // A record whose label this app would never materialize through gets
+    // RECORD cleanup only. Deleting a folder named by an unusable label is
+    // the exact move the validator exists to refuse, so the record goes and
+    // the folder is reported, never touched. Without this the record could
+    // not be removed at all: the folder path would throw and strand it.
+    const folderRemovable = validMountLabel(mount.label);
+    if (folderRemovable) {
+      await removeMountFolder(workspace.rootPath, mount.label);
+    }
     const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
     setWorkspaceShareMounts(
       workspace.workspaceId,
@@ -5911,7 +5920,8 @@ function registerIpcHandlers(
     refreshNativeWorkspaceSurfaces();
     notifyRenderer();
     return UnmountShareResult.parse({
-      workspace: WorkspaceSummary.parse(findWorkspace(workspace.workspaceId)),
+      workspace: workspaceSummaryFor(requireWorkspace(workspace.workspaceId)),
+      ...(folderRemovable ? {} : { folderLeft: true as const }),
     });
     });
   });

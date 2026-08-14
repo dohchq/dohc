@@ -211,6 +211,75 @@ describe("workspace summary projection", () => {
     expect(summary.shareView?.access).toBe("comment");
   });
 
+  // Damage means "this grant cannot be read". Only identity and the pinned
+  // grant can make that true. Display metadata gets no vote: a malformed
+  // `ended` flag claiming the GRANT is unreadable would be false, and it
+  // would suppress the refresh too.
+  it("never lets display metadata claim the grant is unreadable", () => {
+    for (const junk of [
+      { ended: "yes" },
+      { ended: 1 },
+      { skippedOps: "nonsense" },
+      { skippedOps: { ops: "no" } },
+      { granterEmail: 7 },
+      { granterEmail: "x" },
+      { extra: { deeply: { nested: [1, 2, 3] } } },
+    ]) {
+      const summary = workspaceSummaryFor(
+        entry({
+          shareView: { ...shareView(goodSelector), ...junk },
+        }),
+      );
+      expect(
+        summary.shareView?.damaged,
+        `MUTATION: ${JSON.stringify(junk)} must not read as an unreadable grant`,
+      ).toBeUndefined();
+      expect(summary.shareView?.access).toBe("view");
+    }
+  });
+
+  it("normalizes display metadata fail-soft instead of rejecting the record", () => {
+    const summary = workspaceSummaryFor(
+      entry({
+        shareView: {
+          ...shareView(goodSelector),
+          granterEmail: "x",
+          ended: "yes",
+          skippedOps: "nonsense",
+        },
+      }),
+    );
+    expect(summary.shareView?.granterEmail).toBeNull();
+    expect(summary.shareView?.ended).toBeUndefined();
+    expect(summary.shareView?.skippedOps).toBeUndefined();
+  });
+
+  // The label names a folder on disk. A label this app would never
+  // materialize through cannot be trusted to address one, so the row is
+  // damaged — and stays listed, because removing it is the whole point.
+  it("marks a mount whose label could never have been materialized", () => {
+    const summary = workspaceSummaryFor(
+      entry({
+        shareMounts: [
+          mount("m-good", "alex", goodSelector),
+          mount("m-traversal", "../escape", goodSelector),
+          mount("m-secret", ".env", goodSelector),
+          mount("m-slash", "a/b", goodSelector),
+        ],
+      }),
+    );
+    expect(summary.shareMounts?.map((m) => m.shareId)).toEqual([
+      "m-good",
+      "m-traversal",
+      "m-secret",
+      "m-slash",
+    ]);
+    expect(
+      summary.shareMounts?.filter((m) => m.damaged).map((m) => m.shareId),
+      "MUTATION: an unusable label must not read as a healthy mount",
+    ).toEqual(["m-traversal", "m-secret", "m-slash"]);
+  });
+
   it("treats an ABSENT share view as an ordinary workspace", () => {
     expect(workspaceSummaryFor(entry()).shareView).toBeUndefined();
     expect(workspaceSummaryFor(entry({ shareView: undefined })).shareView).toBeUndefined();

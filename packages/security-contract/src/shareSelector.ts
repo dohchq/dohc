@@ -50,13 +50,43 @@ export function isValidShareVersionId(value: unknown): value is string {
  * `services/sync-relay/src/shareFilter.ts`, which expands the same rule into
  * separate branches because it owes distinct error codes at create time).
  *
+ * The length cap lives here too, so the minting side and every reading side
+ * agree on one number instead of two that can drift.
+ *
  * Every surface that reads a selector BACK applies this, for the same reason
  * the version rule lives here: a reader that accepts more than the writer
  * issues will accept damage, and `""` is the path-shaped version of the empty
  * version id that got through once already.
  */
+/**
+ * How many paths one selector may carry, and how long each may be.
+ *
+ * Both live here so the minting side and every reading side agree on one
+ * number. A reader that ignores a cap the writer enforces will accept a
+ * selector the relay would never have issued — the count is the same class of
+ * gap as the length, and a 101-path grant read back as healthy is a grant
+ * nobody could have made.
+ */
+export const MAX_SHARE_PATHS = 100;
+
+export const MAX_SHARE_PATH_CHARS = 1024;
+
+/**
+ * Whether `paths` is a path LIST the relay could have issued: within the
+ * count cap, and every entry a path it could have issued.
+ */
+export function isShareablePathList(paths: readonly unknown[]): boolean {
+  return paths.length <= MAX_SHARE_PATHS && paths.every(isShareablePath);
+}
+
 export function isShareablePath(value: unknown): value is string {
-  if (typeof value !== "string" || value.length === 0) return false;
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_SHARE_PATH_CHARS
+  ) {
+    return false;
+  }
   const validated = validateUserWritePath(value);
   if (!validated.ok || validated.normalized !== value) return false;
   return classifyEngineFilePath(validated.normalized).kind === "tracked";
