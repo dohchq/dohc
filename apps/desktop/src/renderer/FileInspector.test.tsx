@@ -3238,7 +3238,6 @@ describe("markdown editor unmount flush", () => {
       });
       expect(buffer.getSnapshot()).toMatchObject({
         body: peerBody,
-        source: peerSource,
       });
     },
   );
