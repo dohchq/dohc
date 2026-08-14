@@ -1,9 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { spawn } from "node:child_process";
+import { describe, expect, it, vi } from "vitest";
 import {
   killProcessTreePosix,
   parseProcessTable,
   processTreePids,
 } from "./posixSpawn";
+
+// The live test spawns a real tree and polls for its death.
+vi.setConfig({ testTimeout: 20_000 });
 
 // The real `ps` path cannot run on a Windows host, so the parser and the sweep
 // are proven here against captured output and injected fakes.
@@ -132,6 +136,53 @@ describe("killProcessTreePosix", () => {
     ).rejects.toThrow("operation not permitted");
   });
 
+  it("still signals captured descendants when the root already exited", async () => {
+    // The force round runs after the root has gone. ESRCH on the root pid is
+    // the expected outcome there, not a failure — deleting that tolerance
+    // makes this round reject and abandons the descendants it exists for.
+    const signalled: number[] = [];
+
+    await expect(
+      killProcessTreePosix(100, "SIGKILL", {
+        readProcessTable: async () => "  200     1\n",
+        alsoSignal: [200],
+        sendSignal: (pid) => {
+          if (pid === 100) {
+            throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+          }
+          signalled.push(pid);
+        },
+      }),
+    ).resolves.toEqual([100, 200]);
+
+    expect(signalled).toEqual([200]);
+  });
+
+  it("expands a captured pid whose parent chain already exited", async () => {
+    // 200 was captured under root 100 at the SIGTERM round. 100 has since
+    // exited and 200 was reparented to init, so no walk from 100 reaches it
+    // or the worker 300 it forked afterwards.
+    const signalled: number[] = [];
+
+    const pids = await killProcessTreePosix(100, "SIGKILL", {
+      readProcessTable: async () => "  200     1\n  300   200\n",
+      alsoSignal: [200],
+      sendSignal: (pid) => signalled.push(pid),
+    });
+
+    expect(signalled).toEqual([100, 300, 200]);
+    expect(pids).toEqual([100, 300, 200]);
+  });
+
+  it("returns the pids a round signalled so the next round can reuse them", async () => {
+    const pids = await killProcessTreePosix(100, "SIGTERM", {
+      readProcessTable: async () => "  100     1\n  200   100\n",
+      sendSignal: () => undefined,
+    });
+
+    expect(pids).toEqual([200, 100]);
+  });
+
   it("stays silent when only a descendant signal fails", async () => {
     await expect(
       killProcessTreePosix(100, "SIGTERM", {
@@ -144,6 +195,73 @@ describe("killProcessTreePosix", () => {
           }
         },
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual([200, 100]);
+  });
+});
+
+// The fakes above prove the sweep's arithmetic. Only a real tree proves the
+// `ps` reader, the parser, and process.kill agree about it — the same reason
+// windowsSpawn.test.ts keeps a win32-gated spawn-and-verify test.
+const describePosix = process.platform === "win32" ? describe.skip : describe;
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+async function waitForDeath(pid: number): Promise<boolean> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (!isAlive(pid)) return true;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+  }
+  return !isAlive(pid);
+}
+
+describePosix("real process tree teardown (posix)", () => {
+  it("kills a grandchild that the root's own signal never reaches", async () => {
+    // The root becomes `sleep` through exec, so it forwards nothing. Its
+    // child does the same, leaving the grandchild reachable only by walking
+    // the process table.
+    const child = spawn(
+      "sh",
+      ["-c", 'sh -c "sleep 30 & echo \\$! ; exec sleep 30" & exec sleep 30'],
+      { stdio: ["ignore", "pipe", "ignore"] },
+    );
+    const rootPid = child.pid;
+    expect(rootPid).toBeGreaterThan(0);
+
+    const grandchildPid = await new Promise<number>((resolvePid, reject) => {
+      let out = "";
+      child.stdout?.on("data", (chunk: Buffer) => {
+        out += String(chunk);
+        const line = out.split("\n")[0];
+        if (out.includes("\n") && line) resolvePid(Number(line.trim()));
+      });
+      child.once("error", reject);
+      setTimeout(() => reject(new Error("The tree never reported its grandchild pid.")), 10_000);
+    });
+
+    try {
+      expect(grandchildPid).toBeGreaterThan(0);
+      expect(isAlive(grandchildPid)).toBe(true);
+
+      await killProcessTreePosix(rootPid as number, "SIGKILL");
+
+      expect(await waitForDeath(grandchildPid)).toBe(true);
+      expect(await waitForDeath(rootPid as number)).toBe(true);
+    } finally {
+      for (const pid of [grandchildPid, rootPid as number]) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Already dead, which is the point of the test.
+        }
+      }
+    }
   });
 });

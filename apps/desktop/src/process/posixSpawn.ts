@@ -62,6 +62,13 @@ export interface KillProcessTreePosixOptions {
   /** Injectable for tests: the real `ps` cannot run on Windows hosts. */
   readProcessTable?: () => Promise<string>;
   sendSignal?: (pid: number, signal: NodeJS.Signals) => void;
+  /**
+   * Pids an earlier round already enumerated. Each one is signalled and its
+   * own subtree is enumerated again, so a descendant whose parent has since
+   * exited — leaving it linked to init rather than to `rootPid` — is still
+   * reachable in this round.
+   */
+  alsoSignal?: readonly number[];
 }
 
 function readProcessTableWithPs(): Promise<string> {
@@ -74,25 +81,30 @@ function readProcessTableWithPs(): Promise<string> {
 }
 
 /**
- * Signals `rootPid` and every descendant. Enumerates the process table on
- * every call, so a child started after an earlier round still gets signalled.
- * An unreadable process table degrades to signalling the root alone.
- * Rejects only when the root pid itself could not be signalled.
+ * Signals `rootPid`, every pid in `options.alsoSignal`, and every descendant
+ * of them. Enumerates the process table on every call, so a child started
+ * after an earlier round still gets signalled. An unreadable process table
+ * degrades to signalling those pids alone. Rejects only when the root pid
+ * itself could not be signalled. Returns every pid it signalled, which the
+ * next round takes as its `alsoSignal` set.
  */
 export async function killProcessTreePosix(
   rootPid: number,
   signal: NodeJS.Signals,
   options: KillProcessTreePosixOptions = {},
-): Promise<void> {
+): Promise<number[]> {
   const readProcessTable = options.readProcessTable ?? readProcessTableWithPs;
   const sendSignal = options.sendSignal ??
     ((pid, pidSignal) => process.kill(pid, pidSignal));
+  const roots = [rootPid, ...(options.alsoSignal ?? [])];
 
-  let pids = [rootPid];
+  let pids = [...new Set(roots)];
   try {
-    pids = processTreePids(parseProcessTable(await readProcessTable()), rootPid);
+    const table = parseProcessTable(await readProcessTable());
+    pids = [...new Set(roots.flatMap((pid) => processTreePids(table, pid)))];
   } catch {
-    // The process table is unavailable. The root pid is still worth signalling.
+    // The process table is unavailable. The known pids are still worth
+    // signalling.
   }
 
   let rootFailure: unknown;
@@ -101,9 +113,12 @@ export async function killProcessTreePosix(
       sendSignal(pid, signal);
     } catch (error) {
       // ESRCH means the process already exited, which is the outcome we want.
+      // It covers the root too: a root that exits between rounds must not
+      // fail the round that still has to reach its descendants.
       if ((error as NodeJS.ErrnoException).code === "ESRCH") continue;
       if (pid === rootPid) rootFailure = error;
     }
   }
   if (rootFailure !== undefined) throw rootFailure;
+  return pids;
 }

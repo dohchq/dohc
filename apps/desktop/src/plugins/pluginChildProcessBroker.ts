@@ -29,11 +29,16 @@ const MAX_CHILD_ARG_LENGTH = 16_384;
 const MAX_CHILD_ENV_ENTRIES = 512;
 const MAX_CHILD_ENV_KEY_LENGTH = 256;
 const MAX_CHILD_ENV_VALUE_LENGTH = 32_768;
-const MAX_CHILD_ENV_BYTES = 65_536;
-// This worktree's healthy desktop environment measured 86 entries and 5,559
-// UTF-16 code units on 2026-08-14. The configured limit leaves more than 11x
-// headroom while preventing an unbounded caller-controlled environment block.
-const MAX_MERGED_CHILD_ENV_CODE_UNITS = 65_536;
+export const MAX_CHILD_ENV_BYTES = 65_536;
+// Measured healthy environments, and the platform ceilings they sit under,
+// are recorded in
+// docs/superpowers/plans/2026-08-13-plugin-timeout-measurements.md. The
+// largest healthy inherited environment measured 5,052 UTF-16 code units,
+// and Windows caps a process environment block at 32,767 characters. This
+// limit clears that ceiling plus a plugin's whole MAX_CHILD_ENV_BYTES budget
+// with room to spare, so it only rejects an environment no healthy caller
+// builds.
+export const MAX_MERGED_CHILD_ENV_CODE_UNITS = 262_144;
 
 export type {
   PluginChildProcessExit,
@@ -73,10 +78,13 @@ export interface PluginChildProcessBrokerOptions {
     options: PluginChildProcessForkOptions,
   ) => Promise<PluginChildProcessHandle> | PluginChildProcessHandle;
   platform?: NodeJS.Platform;
+  /** Signals the pid, `alsoSignal`, and every descendant of them; returns the
+   * pids it signalled. See posixSpawn.ts's killProcessTreePosix. */
   killProcessTreePosix?: (
     pid: number,
     signal: NodeJS.Signals,
-  ) => Promise<void> | void;
+    alsoSignal: readonly number[],
+  ) => Promise<readonly number[]> | readonly number[];
   killWindowsTree?: (pid: number) => Promise<boolean>;
   stopGraceMs?: number;
   exitWaitMs?: number;
@@ -301,7 +309,8 @@ export class PluginChildProcessBroker {
     // signals an unrelated group. Enumerating descendants is what stops a
     // brokered child's own servers and workers from surviving teardown.
     this.killProcessTreePosix = options.killProcessTreePosix ??
-      killProcessTreePosix;
+      ((pid, signal, alsoSignal) =>
+        killProcessTreePosix(pid, signal, { alsoSignal }));
     this.killWindowsTree = options.killWindowsTree ?? killWindowsTree;
     this.stopGraceMs = options.stopGraceMs ?? CHILD_PROCESS_STOP_GRACE_MS;
     this.exitWaitMs = options.exitWaitMs ?? CHILD_PROCESS_EXIT_WAIT_MS;
@@ -648,22 +657,29 @@ export class PluginChildProcessBroker {
       if (pid !== undefined) await this.killWindowsTree(pid);
       if (!record.exited) record.child.kill();
     } else {
-      await this.signalPosix(record, "SIGTERM");
-      let forceTimer: NodeJS.Timeout | undefined;
-      const force = new Promise<void>((resolveForce) => {
-        forceTimer = setTimeout(() => {
-          if (record.exited) {
-            resolveForce();
-            return;
-          }
-          // Enumerates the tree again: a child started after the SIGTERM
-          // round must not survive the SIGKILL round.
-          void this.signalPosix(record, "SIGKILL").finally(resolveForce);
-        }, this.stopGraceMs);
-        forceTimer.unref?.();
+      const captured = await this.signalPosix(record, "SIGTERM", []);
+      let graceTimer: NodeJS.Timeout | undefined;
+      const grace = new Promise<void>((resolveGrace) => {
+        graceTimer = setTimeout(resolveGrace, this.stopGraceMs);
+        graceTimer.unref?.();
       });
-      await Promise.race([record.exit.then(() => undefined), force]);
-      if (forceTimer) clearTimeout(forceTimer);
+      // The root exiting ends the grace period early, but never cancels the
+      // force round: a descendant that ignored SIGTERM outlives its parent,
+      // and a root whose SIGTERM handler forks before exiting would otherwise
+      // leave that fork running. The round re-enumerates from the captured
+      // pids as well as the root, so a descendant already reparented to init
+      // is still reached.
+      //
+      // Residual: a process forked after this capture, whose whole ancestor
+      // chain exits before the force round, is reparented to init and no ppid
+      // walk can find it. Closing that needs a process group this app owns,
+      // and these children cannot have one — utilityProcess.fork has no
+      // `detached` option (#779 R10), and packaged builds fuse `runAsNode`
+      // off and ship no system node, so no detached group-leader node process
+      // can exist to wrap them.
+      await Promise.race([record.exit.then(() => undefined), grace]);
+      if (graceTimer) clearTimeout(graceTimer);
+      await this.signalPosix(record, "SIGKILL", captured);
     }
 
     let waitTimer: NodeJS.Timeout | undefined;
@@ -683,16 +699,22 @@ export class PluginChildProcessBroker {
     }
   }
 
+  /** Returns the pids this round signalled, for the next round to reuse. */
   private async signalPosix(
     record: SpawnRecord,
     signal: NodeJS.Signals,
-  ): Promise<void> {
+    alsoSignal: readonly number[],
+  ): Promise<readonly number[]> {
     const pid = record.child.pid;
+    if (pid === undefined) {
+      record.child.kill();
+      return alsoSignal;
+    }
     try {
-      if (pid !== undefined) await this.killProcessTreePosix(pid, signal);
-      else record.child.kill();
+      return await this.killProcessTreePosix(pid, signal, alsoSignal);
     } catch {
       if (!record.exited) record.child.kill();
+      return alsoSignal;
     }
   }
 

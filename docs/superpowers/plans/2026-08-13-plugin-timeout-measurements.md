@@ -1,7 +1,9 @@
-# Plugin install/bundle timeout measurements
+# Plugin limit measurements
 
 The evidence record for `PLUGIN_INSTALL_TIMEOUT_MS` and
-`PLUGIN_BUNDLE_TIMEOUT_MS` in `apps/desktop/src/plugins/pluginSourceSnapshot.ts`
+`PLUGIN_BUNDLE_TIMEOUT_MS` in `apps/desktop/src/plugins/pluginSourceSnapshot.ts`,
+and for `MAX_MERGED_CHILD_ENV_CODE_UNITS` in
+`apps/desktop/src/plugins/pluginChildProcessBroker.ts`
 (AGENTS.md's "measure limits that reject work" rule). Moved here from a
 gitignored `.agent-artifacts/references/` note (CodeRabbit #779 fixround
 Section B item 9) so the record a shipped limit depends on is actually
@@ -135,3 +137,54 @@ Largest healthy bundle: 550.465 ms. Four times this value is 2,201.860 ms.
 `PLUGIN_BUNDLE_TIMEOUT_MS` is corrected from 1,000 ms to **3,000 ms**, still
 rounding upward to a clean value beyond four times the measured healthy
 maximum. Re-measure against a real T3-scale plugin once one exists (PR3).
+
+## Merged child environment measurements (2026-08-14)
+
+The evidence for `MAX_MERGED_CHILD_ENV_CODE_UNITS`, which rejects a brokered
+child spawn when the merged environment (this process's inherited environment
+plus the plugin-supplied entries) is too large. The inherited part is not the
+plugin's to control, so a limit near its size rejects valid work.
+
+Each environment was measured in a Node process started from that shell, with
+the same arithmetic the broker uses: one code unit for the block terminator,
+then `key.length + value.length + 2` UTF-16 code units per entry.
+
+```js
+Object.entries(process.env).reduce(
+  (total, [key, value]) =>
+    value === undefined ? total : total + key.length + value.length + 2,
+  1,
+);
+```
+
+| Environment | Entries | UTF-16 code units |
+| --- | ---: | ---: |
+| Windows 11 PowerShell 7 desktop session | 76 | 4,532 |
+| Git Bash dev shell (this repo's agent session) | 82 | 5,052 |
+| WSL Ubuntu login shell | 29 | 3,205 |
+
+A hosted CI runner was not measured: this repo's workflows are dispatch-only
+(AGENTS.md), so no runner environment was available to measure honestly.
+
+Platform ceilings bound how large a healthy inherited environment can get:
+
+- Windows refuses to start a process whose environment block is over 32,767
+  characters (`CreateProcessW`, `lpEnvironment`). No healthy Windows
+  environment can exceed that.
+- Linux bounds argv plus the environment by `ARG_MAX`; WSL Ubuntu reports
+  2,097,152 bytes, with a single string capped at 131,072 bytes.
+
+### Derived limit
+
+- Largest measured healthy inherited environment: 5,052 code units.
+- Plugin-supplied budget: `MAX_CHILD_ENV_BYTES` is 65,536 bytes.
+- Windows environment-block ceiling: 32,767 characters.
+
+`MAX_MERGED_CHILD_ENV_CODE_UNITS` is 262,144 code units. That is 3.7 times
+the measured healthy environment plus the whole plugin budget (70,588), and
+2.7 times the Windows ceiling plus the whole plugin budget (98,303). The
+previous value, 65,536, rejected a plugin that used its own documented
+environment budget at all, because the inherited environment alone consumed
+part of it. `pluginChildProcessBroker.test.ts` holds both checks, including
+one that fails on any host whose environment leaves less than the full plugin
+budget — the signal to re-measure.

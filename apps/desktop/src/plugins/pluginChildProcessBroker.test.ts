@@ -9,6 +9,8 @@ import { processTreePids } from "../process/posixSpawn";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import {
   EXITED_CHILD_RETENTION_LIMIT,
+  MAX_CHILD_ENV_BYTES,
+  MAX_MERGED_CHILD_ENV_CODE_UNITS,
   PluginChildProcessBroker,
   type PluginChildProcessBrokerContext,
   type PluginChildProcessForkOptions,
@@ -58,7 +60,8 @@ async function createFixture(
     killProcessTreePosix?: (
       pid: number,
       signal: NodeJS.Signals,
-    ) => Promise<void> | void;
+      alsoSignal: readonly number[],
+    ) => Promise<readonly number[]> | readonly number[];
   } = {},
 ): Promise<BrokerFixture> {
   const root = await createTestScratch("dohc-plugin-child-broker-");
@@ -234,6 +237,21 @@ describe("PluginChildProcessBroker", () => {
     expect(fixture.forks).toEqual([]);
   });
 
+  it("spawns a child whose plugin-supplied env uses the whole configured budget", async () => {
+    const fixture = await createFixture();
+    // Just under MAX_CHILD_ENV_BYTES: 2 * (5 + 32,000 + 2) = 64,014 bytes.
+    const value = "v".repeat(32_000);
+    const env = { KEY_A: value, KEY_B: value };
+
+    await spawnChild(fixture, context("plugin-a", "spawn-a"), {
+      modulePath: "server.mjs",
+      env,
+    });
+
+    expect(fixture.forks).toHaveLength(1);
+    expect(fixture.forks[0]?.options.env).toMatchObject(env);
+  });
+
   it("captures and streams bounded stdout and stderr", async () => {
     const fixture = await createFixture();
     const events: Array<{
@@ -354,6 +372,7 @@ describe("PluginChildProcessBroker", () => {
       killProcessTreePosix: (pid, signal) => {
         signals.push({ pid, signal });
         if (signal === "SIGTERM") queueMicrotask(() => child?.emit("exit", 0));
+        return [pid];
       },
     });
     const controller = new AbortController();
@@ -364,9 +383,49 @@ describe("PluginChildProcessBroker", () => {
     controller.abort();
     await fixture.broker.disposeSpawn("plugin-a", "spawn-a");
 
-    expect(signals).toEqual([{ pid: 10_000, signal: "SIGTERM" }]);
+    expect(signals).toEqual([
+      { pid: 10_000, signal: "SIGTERM" },
+      { pid: 10_000, signal: "SIGKILL" },
+    ]);
     expect(child?.killCalls).toBe(0);
     expect(fixture.windowsTreeKills).toEqual([]);
+  });
+
+  it("runs the SIGKILL round over the captured pids even when the root exits first", async () => {
+    // The root's SIGTERM handler exits immediately and its worker ignores
+    // SIGTERM. Skipping the force round because the root is gone would leave
+    // that worker running with the plugin's ports and files.
+    const rounds: Array<{
+      pid: number;
+      signal: NodeJS.Signals;
+      alsoSignal: readonly number[];
+    }> = [];
+    let child: FakeUtilityProcess | undefined;
+    const fixture = await createFixture({
+      platform: "linux",
+      killProcessTreePosix: (pid, signal, alsoSignal) => {
+        rounds.push({ pid, signal, alsoSignal });
+        if (signal === "SIGTERM") {
+          queueMicrotask(() => child?.emit("exit", 0));
+          return [20_001, pid];
+        }
+        return [...alsoSignal];
+      },
+    });
+    const brokerContext = context("plugin-a", "spawn-a");
+    const childId = await spawnChild(fixture, brokerContext);
+    child = fixture.children[0];
+
+    await fixture.broker.invoke(
+      brokerContext,
+      PLUGIN_CHILD_PROCESS_METHODS.terminate,
+      { childId },
+    );
+
+    expect(rounds).toEqual([
+      { pid: 10_000, signal: "SIGTERM", alsoSignal: [] },
+      { pid: 10_000, signal: "SIGKILL", alsoSignal: [20_001, 10_000] },
+    ]);
   });
 
   it("tears down every remaining plugin child on broker disposal", async () => {
@@ -517,9 +576,9 @@ describe("PluginChildProcessBroker", () => {
             { pid: 20_001, ppid: 10_000 },
             { pid: 20_002, ppid: 20_001 },
           ];
-        for (const target of processTreePids(table, pid)) {
-          signals.push({ pid: target, signal });
-        }
+        const targets = processTreePids(table, pid);
+        for (const target of targets) signals.push({ pid: target, signal });
+        return targets;
       },
     });
     const brokerContext = context("plugin-a", "spawn-a");
@@ -566,6 +625,39 @@ describe("PluginChildProcessBroker", () => {
       }),
     ).rejects.toThrow(
       /discarded 1 exited child: the broker retains at most 200 exited children per spawn and discards the oldest first/,
+    );
+  });
+
+  // The merged-env limit rejects otherwise valid work, so AGENTS.md requires
+  // recorded evidence for it. These numbers are the environment measurements
+  // in docs/superpowers/plans/2026-08-13-plugin-timeout-measurements.md.
+  it("keeps the merged env limit clear of a healthy env plus the plugin budget", () => {
+    // Largest healthy inherited environment measured on 2026-08-14 (Git Bash
+    // dev shell: 82 entries, 5,052 UTF-16 code units).
+    const MEASURED_HEALTHY_ENV_CODE_UNITS = 5_052;
+    // Windows refuses to start a process with an environment block over
+    // 32,767 characters, so no healthy Windows environment can pass it.
+    const WINDOWS_ENV_BLOCK_CEILING = 32_767;
+
+    expect(MAX_MERGED_CHILD_ENV_CODE_UNITS).toBeGreaterThan(
+      MEASURED_HEALTHY_ENV_CODE_UNITS + MAX_CHILD_ENV_BYTES,
+    );
+    expect(MAX_MERGED_CHILD_ENV_CODE_UNITS).toBeGreaterThan(
+      WINDOWS_ENV_BLOCK_CEILING + MAX_CHILD_ENV_BYTES,
+    );
+  });
+
+  it("leaves this host's own environment the whole plugin env budget", () => {
+    // Fails on any host whose environment is far outside the measured range,
+    // which is the signal to re-measure rather than to widen the limit.
+    const inherited = Object.entries(process.env).reduce(
+      (total, [key, value]) =>
+        value === undefined ? total : total + key.length + value.length + 2,
+      1,
+    );
+
+    expect(MAX_MERGED_CHILD_ENV_CODE_UNITS - inherited).toBeGreaterThanOrEqual(
+      MAX_CHILD_ENV_BYTES,
     );
   });
 
