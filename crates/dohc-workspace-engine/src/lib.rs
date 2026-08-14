@@ -2387,7 +2387,8 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: ShareViewParams = parse(params)?;
-        let access = parse_share_access(&params.granted_selector.access)?;
+        let access = dohc_engine_sync::ShareAccess::parse(&params.granted_selector.access)
+            .ok_or_else(|| wire(ErrorCode::InvalidParams, "unknown share access"))?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let outcome = self
             .relay_execute(
