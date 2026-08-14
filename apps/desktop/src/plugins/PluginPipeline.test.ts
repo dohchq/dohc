@@ -639,4 +639,78 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.dispose();
     }
   }, 60_000);
+
+  it("never runs a plugin-authored .pnpmfile.cjs hook during install (#779 round 3 finding 6)", async () => {
+    const fixture = await createPluginWorkspace();
+    const canaryPath = join(
+      fixture.stateDir,
+      "plugin-data",
+      workspaceStateKey(fixture.workspaceRoot),
+      "plugins",
+      "example-plugin",
+      "snapshot",
+      "PNPMFILE_CANARY.txt",
+    );
+    // --ignore-scripts alone does not stop this: .pnpmfile.cjs hooks
+    // (readPackage/afterAllResolved) are a separate pnpm mechanism that runs
+    // arbitrary Node code during dependency resolution.
+    await writeFile(
+      join(fixture.pluginRoot, ".pnpmfile.cjs"),
+      [
+        'const fs = require("fs");',
+        'const path = require("path");',
+        "module.exports = {",
+        "  hooks: {",
+        "    readPackage(pkg) {",
+        '      fs.writeFileSync(path.join(__dirname, "PNPMFILE_CANARY.txt"), "ran\\n");',
+        "      return pkg;",
+        "    },",
+        "  },",
+        "};",
+        "",
+      ].join("\n"),
+    );
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+
+      // Whichever way the install resolves — a plugin-authored .pnpmfile.cjs
+      // becoming active is itself a red flag, whether pnpm ran the hook and
+      // succeeded or the now-active pnpmfile disrupted --frozen-lockfile —
+      // the canary must never exist either way.
+      await expect(lstat(canaryPath)).rejects.toMatchObject({ code: "ENOENT" });
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
 });

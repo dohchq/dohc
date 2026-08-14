@@ -64,6 +64,12 @@ function buildPluginInstallEnv(pnpmPaths: PluginPnpmPaths): NodeJS.ProcessEnv {
 export const PLUGIN_INSTALL_ARGS = [
   "install",
   "--ignore-scripts",
+  // --ignore-scripts only blocks package.json lifecycle scripts
+  // (postinstall, etc.) — a .pnpmfile.cjs hook (readPackage/afterAllResolved)
+  // is a completely separate pnpm mechanism that runs arbitrary Node code
+  // during resolution regardless of --ignore-scripts (#779 round 3
+  // finding 6, security-grade).
+  "--ignore-pnpmfile",
   "--ignore-workspace",
   "--frozen-lockfile",
   "--node-linker=isolated",
