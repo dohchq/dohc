@@ -96,7 +96,11 @@ unnoticed.
 
 ### Decided in this document
 
-**1. File-linked chat already replicates. PR2 adds no push plumbing.**
+**1. File-linked chat already replicates. The granter needs no new push.**
+
+> **Corrected by PR2.** The heading said "PR2 adds no push plumbing", which was
+> true of the granter and false of the recipient. There was no share-view push
+> lane at all. See "Recipient writes back".
 
 `create_thread` journals a replication op unconditionally
 (`crates/dohc-engine-domain/src/chats.rs:2572-2591`), payload
@@ -127,6 +131,13 @@ path selector admits only `workspace.init`, `moment.append` and
 refuses a `chat.thread.create` that carries `linkedObjectId` outright
 (`shareFilter.ts:487`). A file-linked thread is therefore unservable through
 any share today — which is the gap, not a guard to work around.
+
+The recipient side is not done, and this document originally missed that. Only
+MU-C4's `push_shared_channel` existed: no share-view push, no actor operation,
+no RPC, no desktop client method. PR2 built the mirror rather than copying it —
+one push body parameterized by a `SharePushScope` (`Channel` | `View`), so
+both surfaces run the same scan, the same dense per-share origin sequence, and
+the same batched POST.
 
 **2. The relay resolves the current path from its own log.**
 
@@ -282,22 +293,34 @@ plumbing testable before its rights exist.
 
 ### The relay's two new resolvers
 
+> **Corrected by PR2.** The first resolver's shape was wrong. It could not
+> describe a thread the RECIPIENT created, and that thread then died after its
+> first batch — see the note under the signature.
+
 Both mirror `findThreadCreateChannelWireId` (`storage.ts:1437-1477`): the same
 tri-state, the same earliest-wins rule, the same per-request memoization in
 `chatResolverFor` (`server.ts:199-216`).
 
 ```
-threadLinkedObjectId(workspaceId, threadId): string | null | undefined
+threadFileBinding(workspaceId, threadId): ThreadFileBinding | null | undefined
   // From the EARLIEST chat.thread.create for threadId:
-  //   string    -> its linkedObjectId (a file-linked thread)
-  //   null      -> an authoritative create exists with no file link
-  //   undefined -> no create in the log
+  //   {kind:"object", objectId}  -> the granter's own op
+  //   {kind:"path", path}        -> a recipient's op, pushed back
+  //   null       -> an authoritative create exists with no file link
+  //   undefined  -> no create in the log
 
 objectCurrentPath(workspaceId, objectId): string | null | undefined
   //   string    -> path of the LATEST moment.append for objectId
   //   null      -> the latest moment's operation is "delete"
   //   undefined -> the relay has never seen this object
 ```
+
+A thread create carries its file one of two ways, and one resolver has to
+answer for both. A recipient's create names the granted PATH, because its own
+object ids mean nothing to the relay, and that is the payload the relay stores.
+A resolver that returned only an object id would answer `null` for such a
+thread, and every later message on it would be denied — so a recipient could
+open a thread, post one message in the same batch, and be refused from then on.
 
 The `delete` case denies. Hiding the discussion about a deleted file is the
 fail-closed answer and the simple one to state.
@@ -446,7 +469,22 @@ function assertChatWritable(scope: ChatScope): void  // share: access must be co
 `requireChatScope` returns today's capture scope for a local workspace by
 calling `requireEngineCapture` unchanged, and the share scope for a share view.
 `assertChatWritable` throws the file-share sibling of the existing read-only
-error (see "Refusals" below) when a share scope is View.
+error (see "Refusals" below) unless the scope names `comment` or `edit`.
+
+> **Corrected by PR2.** This said "when a share scope is View", and a share
+> scope can name no level at all: a damaged share record keeps its restrictive
+> marker and loses its level. Refusing only `view` would then read an
+> unreadable grant as one that allows writes. Every level test in PR2 asks
+> instead whether the level IS `comment` or `edit`, and main validates the
+> stored value with `isShareAccessValue` rather than trusting the record's
+> type. The renderer's per-file panel takes the decision as a boolean, not the
+> level, because the level is the part that can go missing.
+
+A share scope also carries the account the recipient writes chat under. A share
+view is not an enrolled workspace: it has no `remote`, so the workspace rule
+resolves no author id, and a chat op replicates only when its author carries
+one. Without this the write would look sent and never leave the machine, so
+`assertChatWritable` refuses when no identity resolves.
 
 Handlers reachable from a share view in PR2, and no others:
 
@@ -500,6 +538,20 @@ not `linkedObjectId` — the recipient's object id is local and meaningless to
 the granter. The relay validates that path against the selector directly, with
 no resolver hop. On the granter's side, applying that op means binding the
 thread to the granter's own object for that path.
+
+> **Corrected by PR2.** Two things this section assumed did not exist.
+>
+> There was no lane to push through. PR2 adds `push_share_view`, a
+> `PushShareView` actor operation, a `share.view.push` RPC, and a
+> `pushShareView` client method, all sharing MU-C4's body through
+> `SharePushScope`.
+>
+> And the granter could not apply the op. MU-C4 needed no granter-side branch
+> because `apply_thread` already resolves a channel thread's wire shape
+> through `resolve_or_create_placeholder`. `linkedPath` had no such rule, so
+> PR2 adds its file sibling, `linked_object_for_apply`, in the same function.
+> One rule serves both directions: the recipient replaying the granter's thread
+> and the granter applying the recipient's.
 
 ## Enforcement table
 
@@ -660,9 +712,19 @@ claim from the mode descriptions and let the banner state the right after open.
 `DesktopWorkspaceShell.tsx:4457-4469` renders a terminal placeholder for Chats
 in a share view: `A shared view has no chats. Close this tab to go back to the
 shared files.` PR2 does not turn the Chats tab on — decision 5 gives a share
-view no workspace-wide chat listing. Chat appears on the open file, through
-the existing per-file chat surface. The placeholder stays, and its words stay
-true: the Chats *tab* still has nothing to show.
+view no workspace-wide chat listing. Chat appears on the open file.
+
+> **Corrected by PR2.** There was no per-file chat surface to appear on. One
+> flag, `engineSurfacesExist = engineEnabled && !isShareView`, gated the Chats
+> sidebar, the titlebar button, `Ctrl+Alt+B`, and the palette command, and
+> `#615` pinned all four as absent. PR2 derives `chatsSurfaceExists` and opens
+> them for a share view, restricted to the file tab, and evolves those pins
+> rather than deleting them: the property they protected — a share view never
+> reaches the workspace-wide listing — is asserted directly now.
+>
+> The placeholder's words also stopped being true, so PR2 rewrites them. A
+> shared view has chat; what it has no listing of is every conversation in the
+> workspace.
 
 At View level, the composer on a shared file is disabled with the refusal
 words: `This shared file is read-only for you.`
