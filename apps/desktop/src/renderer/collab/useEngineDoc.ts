@@ -591,6 +591,19 @@ export function useEngineDoc(input: {
       setSaveError(error);
     };
 
+    const sceneAssetCacheKey = (
+      descriptor: EngineYDocBinding["artifactAssets"][number],
+    ): string =>
+      JSON.stringify([
+        descriptor.id,
+        descriptor.mimeType,
+        descriptor.created,
+        descriptor.ref,
+        descriptor.sha256,
+        descriptor.lastRetrieved ?? null,
+        descriptor.version ?? null,
+      ]);
+
     const prepareSceneRecovery = (
       bytes: Uint8Array,
       bound: EngineYDocBinding | null,
@@ -603,9 +616,12 @@ export function useEngineDoc(input: {
         ]),
       );
       const reads = initial.requiredAssetIds.map((assetId) => {
-        let read = recoveryAssetReads.get(assetId);
+        const descriptor = descriptors.get(assetId);
+        const cacheKey = descriptor
+          ? sceneAssetCacheKey(descriptor)
+          : JSON.stringify([assetId, null]);
+        let read = recoveryAssetReads.get(cacheKey);
         if (!read) {
-          const descriptor = descriptors.get(assetId);
           read = descriptor && bound
             ? bound
                 .readArtifactAsset(assetId)
@@ -614,7 +630,7 @@ export function useEngineDoc(input: {
                 )
                 .catch(() => null)
             : Promise.resolve(null);
-          recoveryAssetReads.set(assetId, read);
+          recoveryAssetReads.set(cacheKey, read);
         }
         return read.then((file) => [assetId, file] as const);
       });
@@ -634,6 +650,21 @@ export function useEngineDoc(input: {
           };
         }),
       };
+    };
+
+    const cacheSceneAssetRead = (
+      descriptor: EngineYDocBinding["artifactAssets"][number],
+      bound: EngineYDocBinding,
+    ): void => {
+      const cacheKey = sceneAssetCacheKey(descriptor);
+      if (recoveryAssetReads.has(cacheKey)) return;
+      recoveryAssetReads.set(
+        cacheKey,
+        bound
+          .readArtifactAsset(descriptor.id)
+          .then((loaded) => binaryFileDataFromArtifact(descriptor, loaded))
+          .catch(() => null),
+      );
     };
 
     // `forceCreate` false means: nothing was unsettled at the moment this
@@ -896,12 +927,24 @@ export function useEngineDoc(input: {
     const preserveRetiredDocument = (retired: Y.Doc): void => {
       writesRefused.current = true;
       let draftId: number | null = null;
+      let retiredRecoveryRevision = 0;
       let projectionQueue: Promise<void> = Promise.resolve();
+      const retiredBinding = binding
+        ? {
+            ...binding,
+            artifactAssets: [...binding.artifactAssets],
+          }
+        : null;
+      if (binding && retiredBinding) {
+        for (const descriptor of retiredBinding.artifactAssets) {
+          cacheSceneAssetRead(descriptor, binding);
+        }
+      }
       const persist = (): void => {
         const bytes = Y.encodeStateAsUpdate(retired);
         if (documentKind === "scene") {
-          const revision = ++recoveryRevision;
-          const sceneRecovery = prepareSceneRecovery(bytes, binding);
+          const revision = ++retiredRecoveryRevision;
+          const sceneRecovery = prepareSceneRecovery(bytes, retiredBinding);
           if (draftId === null) {
             draftId = captureOrphanedDraft(
               workspaceId,
@@ -928,7 +971,7 @@ export function useEngineDoc(input: {
           const capturedDraftId = draftId;
           void sceneRecovery.completed
             .then((recovered) => {
-              if (revision !== recoveryRevision) return;
+              if (revision !== retiredRecoveryRevision) return;
               replaceOrphanedDraft(
                 workspaceId,
                 path,

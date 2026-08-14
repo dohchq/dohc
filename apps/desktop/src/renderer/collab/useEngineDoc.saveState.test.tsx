@@ -611,7 +611,95 @@ it("hydrates winner-only scene assets after lineage replacement without reopenin
   await waitFor(() =>
     expect(screen.getByTestId("hydrated-assets").textContent).toBe(winner.id),
   );
-  expect(readAsset).toHaveBeenCalledExactlyOnceWith(winner.id);
+  expect(readAsset).toHaveBeenNthCalledWith(1, loser.id);
+  expect(readAsset).toHaveBeenNthCalledWith(2, winner.id);
+  expect(readAsset).toHaveBeenCalledTimes(2);
+});
+
+it("does not reuse a losing lineage asset when the winner reuses its file ID", async () => {
+  harness = harnessBridge("scene");
+  const loser = {
+    ...IMAGE_DESCRIPTOR,
+    ref: "assets/loser.png",
+    sha256: "a".repeat(64),
+  };
+  const winner = {
+    ...IMAGE_DESCRIPTOR,
+    ref: "assets/winner.png",
+    sha256: "b".repeat(64),
+  };
+  let activeDescriptor = loser;
+  const readAsset = vi.fn(async () => ({
+    descriptor: activeDescriptor,
+    bytes: new Uint8Array(activeDescriptor === loser ? [9] : [1, 2, 3]),
+  }));
+  harness.setArtifactReader([loser], readAsset);
+  putSceneAsset(harness.sourceDoc, loser);
+  insertElementRevision(harness.sourceDoc, {
+    id: "lineage-image",
+    type: "image",
+    fileId: loser.id,
+    version: 1,
+    versionNonce: 1,
+    isDeleted: false,
+    index: "a1",
+  });
+  vi.stubGlobal("dohcDesktop", harness.api);
+  render(
+    <Harness workspaceId="ws-1" path="drawing.excalidraw" kind="scene" />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+
+  const retired = lastBoundDoc!;
+  act(() => screen.getByTestId("type").click());
+  harness.emitLineageReplacement("unused", [winner]);
+  await waitFor(() => expect(readAsset).toHaveBeenCalledTimes(1));
+  await waitFor(() =>
+    expect(screen.getByTestId("asset-recovery").textContent).toBe("none"),
+  );
+
+  activeDescriptor = winner;
+  act(() =>
+    insertElementRevision(retired, {
+      id: "lineage-image",
+      type: "image",
+      fileId: loser.id,
+      version: 2,
+      versionNonce: 2,
+      isDeleted: false,
+      index: "a1",
+      x: 77,
+    }),
+  );
+  await waitFor(() => {
+    const recovered = parseExcalidrawDocument(
+      screen.getByTestId("draft").textContent!,
+    );
+    expect(recovered.elements).toContainEqual(
+      expect.objectContaining({ id: "lineage-image", x: 77 }),
+    );
+    expect(recovered.files[loser.id]).toMatchObject({
+      dataURL: "data:image/png;base64,CQ==",
+    });
+  });
+  expect(readAsset).toHaveBeenCalledTimes(1);
+
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+
+  await waitFor(() => expect(readAsset).toHaveBeenCalledTimes(2));
+  await waitFor(() => {
+    const recovered = parseExcalidrawDocument(
+      screen.getByTestId("draft").textContent!,
+    );
+    expect(recovered.files[winner.id]).toMatchObject({
+      dataURL: "data:image/png;base64,AQID",
+    });
+  });
+  expect(screen.getByTestId("draft").textContent).not.toContain("CQ==");
 });
 
 it("shows the failure when a settle fails, instead of reading Saved", async () => {

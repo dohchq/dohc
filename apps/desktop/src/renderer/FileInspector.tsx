@@ -4254,19 +4254,16 @@ export function FileInspector(props: {
       workspaceId={props.workspaceId}
       path={props.path}
       message={
-        kind === "drawing" &&
-        (engine.deletedWhileEditing ||
-          engine.readOnlyWhileEditing ||
-          engine.permanentFailureWhileEditing)
-          ? engine.recoveryAssets?.state === "loading"
-            ? `dohc is adding ${engine.recoveryAssets.count} ${engine.recoveryAssets.count === 1 ? "image" : "images"} to your set-aside drawing. Wait before you copy it.`
-            : engine.recoveryAssets?.state === "missing"
-              ? `dohc could not recover ${engine.recoveryAssets.count} ${engine.recoveryAssets.count === 1 ? "image" : "images"}. Copy your set-aside drawing to keep the rest.`
-              : engine.deletedWhileEditing
-                ? "This drawing was deleted. Copy your set-aside drawing to keep it."
-                : engine.permanentFailureWhileEditing
-                  ? "dohc could not save this drawing. Copy your set-aside drawing to keep it."
-                : "This drawing became read-only before your edit saved. Copy your set-aside drawing to keep it."
+        kind === "drawing" && engine.recoveryAssets?.state === "loading"
+          ? `dohc is adding ${engine.recoveryAssets.count} ${engine.recoveryAssets.count === 1 ? "image" : "images"} to your set-aside drawing. Wait before you copy it.`
+          : kind === "drawing" && engine.recoveryAssets?.state === "missing"
+            ? `dohc could not recover ${engine.recoveryAssets.count} ${engine.recoveryAssets.count === 1 ? "image" : "images"}. Copy your set-aside drawing to keep the rest.`
+            : kind === "drawing" && engine.deletedWhileEditing
+              ? "This drawing was deleted. Copy your set-aside drawing to keep it."
+              : kind === "drawing" && engine.permanentFailureWhileEditing
+                ? "dohc could not save this drawing. Copy your set-aside drawing to keep it."
+                : kind === "drawing" && engine.readOnlyWhileEditing
+                  ? "This drawing became read-only before your edit saved. Copy your set-aside drawing to keep it."
           : engine.readOnlyWhileEditing
             ? "This document became read-only before your edit saved. Copy your text to keep it."
             : undefined

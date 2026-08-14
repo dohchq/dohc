@@ -11,7 +11,10 @@ import {
 import * as Y from "yjs";
 import type { ExcalidrawCanvasProps } from "./ExcalidrawCanvas";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
-import type { EngineYDocSaveStateEvent } from "../ipc/channels";
+import type {
+  EngineYDocLineageReplacementEvent,
+  EngineYDocSaveStateEvent,
+} from "../ipc/channels";
 import { resetOrphanedDrafts } from "./orphanedDrafts";
 
 const canvas = vi.hoisted(() => ({
@@ -160,6 +163,9 @@ function bridgeFor(
   const saveStateListeners = new Set<
     (event: EngineYDocSaveStateEvent) => void
   >();
+  const lineageReplacementListeners = new Set<
+    (event: EngineYDocLineageReplacementEvent) => void
+  >();
   let sessionId: string | null = null;
   return {
     readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({
@@ -189,7 +195,12 @@ function bridgeFor(
       throw new Error("The scene has no artifact assets.");
     }),
     onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
-    onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+    onEngineYDocLineageReplacement: vi.fn(
+      (listener: (event: EngineYDocLineageReplacementEvent) => void) => {
+        lineageReplacementListeners.add(listener);
+        return () => lineageReplacementListeners.delete(listener);
+      },
+    ),
     acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
       updates: [],
     })),
@@ -203,6 +214,21 @@ function bridgeFor(
       if (!sessionId) throw new Error("The scene session is not open.");
       for (const listener of saveStateListeners) {
         listener({ sessionId, state, seq });
+      }
+    },
+    emitLineageReplacement(
+      update: Uint8Array,
+      replacementAssets: readonly (typeof ARTIFACT_DESCRIPTOR)[] = [],
+    ) {
+      if (!sessionId) throw new Error("The scene session is not open.");
+      for (const listener of lineageReplacementListeners) {
+        listener({
+          sessionId,
+          update,
+          recoveredPaths: [],
+          artifactAssets: [...replacementAssets],
+          lineageGeneration: 2,
+        });
       }
     },
     openFileExternally: vi.fn(async () => undefined),
@@ -919,6 +945,67 @@ describe("FileInspector Excalidraw view", () => {
       expect.objectContaining({ id: "image-1", fileId: null, x: 40 }),
     );
     expect(recovered.files).toEqual({});
+  });
+
+  it("reports drawing image recovery after lineage replacement", async () => {
+    const scene = new Y.Doc();
+    declareSceneRoots(scene);
+    insertElementRevision(scene, {
+      id: "image-1",
+      type: "image",
+      fileId: ARTIFACT_DESCRIPTOR.id,
+      version: 1,
+      versionNonce: 1,
+      isDeleted: false,
+      index: "a0",
+    });
+    putSceneAsset(scene, ARTIFACT_DESCRIPTOR);
+    let rejectAsset!: (cause: Error) => void;
+    const pendingAsset = new Promise<{
+      descriptor: typeof ARTIFACT_DESCRIPTOR;
+      bytes: Uint8Array;
+    }>((_resolve, reject) => {
+      rejectAsset = reject;
+    });
+    const bridge = bridgeFor(drawing("engine"), scene, [ARTIFACT_DESCRIPTOR]);
+    bridge.readEngineYDocArtifactAsset = vi.fn(() => pendingAsset);
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
+
+    await screen.findByTestId("mock-excalidraw-canvas");
+    const retired = (canvas.props as unknown as ExcalidrawCanvasProps).sceneDoc!;
+    act(() =>
+      insertElementRevision(retired, {
+        id: "image-1",
+        type: "image",
+        fileId: ARTIFACT_DESCRIPTOR.id,
+        version: 2,
+        versionNonce: 2,
+        isDeleted: false,
+        index: "a0",
+        x: 40,
+      }),
+    );
+    await waitFor(() => expect(bridge.applyEngineYDocUpdate).toHaveBeenCalledOnce());
+
+    const winner = new Y.Doc();
+    declareSceneRoots(winner);
+    act(() => bridge.emitLineageReplacement(Y.encodeStateAsUpdate(winner)));
+
+    const notice = await screen.findByTestId("orphaned-draft-notice");
+    expect(notice.textContent).toContain(
+      "dohc is adding 1 image to your set-aside drawing. Wait before you copy it.",
+    );
+
+    await act(async () => {
+      rejectAsset(new Error("asset unavailable"));
+      await pendingAsset.catch(() => undefined);
+    });
+    await waitFor(() =>
+      expect(notice.textContent).toContain(
+        "dohc could not recover 1 image. Copy your set-aside drawing to keep the rest.",
+      ),
+    );
   });
 
   it("keeps a truncated drawing non-writable while its scene opens", async () => {
