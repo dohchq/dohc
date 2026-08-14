@@ -314,9 +314,10 @@ type DiffBudget = {
 // This bounds the quadratic part of Myers's algorithm by diagonal visits, not
 // by document size. The focused measurement keeps all precise ranges for 32
 // independent substitutions within this budget. A rewrite that needs more
-// work switches to unique fixed-width anchors and coarse ranges between them.
-// That fallback is O(n log n), never rejects the update, and keeps positions
-// outside each changed range exact.
+// work switches to unique anchors and coarse ranges between them. Text anchors
+// use fixed-width windows; child anchors use serialized node values. The
+// fallback is O(n log n), never rejects the update, and keeps positions outside
+// each changed range exact.
 const SEQUENCE_DIFF_WORK_BUDGET = 4_096;
 const FALLBACK_TEXT_ANCHOR_LENGTH = 8;
 
@@ -462,40 +463,36 @@ function appendRange(
   ranges.push(start, oldSize, newSize);
 }
 
-type TextAnchor = {
+type DiffAnchor = {
   oldStart: number;
   newStart: number;
   length: number;
 };
 
-function uniqueTextWindows(text: string): Map<string, number> {
-  const windows = new Map<string, number>();
-  for (
-    let index = 0;
-    index + FALLBACK_TEXT_ANCHOR_LENGTH <= text.length;
-    index += 1
-  ) {
-    const window = text.slice(index, index + FALLBACK_TEXT_ANCHOR_LENGTH);
-    windows.set(window, windows.has(window) ? -1 : index);
+function uniqueItemIndices<T, Key>(
+  items: readonly T[],
+  keyOf: (item: T) => Key,
+): Map<Key, number> {
+  const indices = new Map<Key, number>();
+  for (let index = 0; index < items.length; index += 1) {
+    const key = keyOf(items[index]!);
+    indices.set(key, indices.has(key) ? -1 : index);
   }
-  return windows;
+  return indices;
 }
 
-function increasingTextAnchors(
-  before: string,
-  after: string,
-): TextAnchor[] {
-  const oldWindows = uniqueTextWindows(before);
-  const newWindows = uniqueTextWindows(after);
-  const candidates: TextAnchor[] = [];
-  for (const [window, oldStart] of oldWindows) {
-    const newStart = newWindows.get(window);
+function increasingAnchors<T, Key>(
+  before: readonly T[],
+  after: readonly T[],
+  keyOf: (item: T) => Key,
+): DiffAnchor[] {
+  const oldIndices = uniqueItemIndices(before, keyOf);
+  const newIndices = uniqueItemIndices(after, keyOf);
+  const candidates: DiffAnchor[] = [];
+  for (const [key, oldStart] of oldIndices) {
+    const newStart = newIndices.get(key);
     if (oldStart >= 0 && newStart !== undefined && newStart >= 0) {
-      candidates.push({
-        oldStart,
-        newStart,
-        length: FALLBACK_TEXT_ANCHOR_LENGTH,
-      });
+      candidates.push({ oldStart, newStart, length: 1 });
     }
   }
 
@@ -516,7 +513,7 @@ function increasingTextAnchors(
     tails[low] = index;
   }
 
-  const anchors: TextAnchor[] = [];
+  const anchors: DiffAnchor[] = [];
   for (
     let index = tails.length === 0 ? -1 : tails[tails.length - 1]!;
     index >= 0;
@@ -525,8 +522,35 @@ function increasingTextAnchors(
     anchors.push(candidates[index]!);
   }
   anchors.reverse();
+  return anchors;
+}
 
-  const normalized: TextAnchor[] = [];
+function textWindows(text: string): string[] {
+  const windows: string[] = [];
+  for (
+    let index = 0;
+    index + FALLBACK_TEXT_ANCHOR_LENGTH <= text.length;
+    index += 1
+  ) {
+    windows.push(text.slice(index, index + FALLBACK_TEXT_ANCHOR_LENGTH));
+  }
+  return windows;
+}
+
+function increasingTextAnchors(
+  before: string,
+  after: string,
+): DiffAnchor[] {
+  const anchors = increasingAnchors(
+    textWindows(before),
+    textWindows(after),
+    (window) => window,
+  ).map((anchor) => ({
+    ...anchor,
+    length: FALLBACK_TEXT_ANCHOR_LENGTH,
+  }));
+
+  const normalized: DiffAnchor[] = [];
   for (const anchor of anchors) {
     const last = normalized[normalized.length - 1];
     if (!last) {
@@ -553,30 +577,57 @@ function increasingTextAnchors(
   return normalized;
 }
 
+function diffWithAnchors<T>(
+  before: readonly T[],
+  after: readonly T[],
+  anchors: readonly DiffAnchor[],
+  start: number,
+  ranges: number[],
+  sizeOf: (item: T) => number,
+): void {
+  let oldCursor = 0;
+  let newCursor = 0;
+  let pos = start;
+  for (const anchor of anchors) {
+    let oldSize = 0;
+    let newSize = 0;
+    while (oldCursor < anchor.oldStart) {
+      oldSize += sizeOf(before[oldCursor++]!);
+    }
+    while (newCursor < anchor.newStart) {
+      newSize += sizeOf(after[newCursor++]!);
+    }
+    appendRange(ranges, pos, oldSize, newSize);
+    pos += oldSize;
+    for (let count = 0; count < anchor.length; count += 1) {
+      pos += sizeOf(before[oldCursor++]!);
+      newCursor += 1;
+    }
+  }
+  let oldSize = 0;
+  let newSize = 0;
+  while (oldCursor < before.length) {
+    oldSize += sizeOf(before[oldCursor++]!);
+  }
+  while (newCursor < after.length) {
+    newSize += sizeOf(after[newCursor++]!);
+  }
+  appendRange(ranges, pos, oldSize, newSize);
+}
+
 function diffTextWithAnchors(
   before: string,
   after: string,
   start: number,
   ranges: number[],
 ): void {
-  const anchors = increasingTextAnchors(before, after);
-  let oldCursor = 0;
-  let newCursor = 0;
-  for (const anchor of anchors) {
-    appendRange(
-      ranges,
-      start + oldCursor,
-      anchor.oldStart - oldCursor,
-      anchor.newStart - newCursor,
-    );
-    oldCursor = anchor.oldStart + anchor.length;
-    newCursor = anchor.newStart + anchor.length;
-  }
-  appendRange(
+  diffWithAnchors(
+    before.split(""),
+    after.split(""),
+    increasingTextAnchors(before, after),
+    start,
     ranges,
-    start + oldCursor,
-    before.length - oldCursor,
-    after.length - newCursor,
+    () => 1,
   );
 }
 
@@ -692,7 +743,16 @@ function diffContent(
     budget,
   );
   if (components === null) {
-    appendRange(ranges, start, before.content.size, after.content.size);
+    diffWithAnchors(
+      oldChildren,
+      newChildren,
+      increasingAnchors(oldChildren, newChildren, (node) =>
+        JSON.stringify(node.toJSON()),
+      ),
+      start,
+      ranges,
+      (node) => node.nodeSize,
+    );
     return;
   }
   for (const component of components) {

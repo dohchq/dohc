@@ -409,6 +409,7 @@ describe("documentReplacementMap", () => {
     nodes: {
       doc: { content: "block+" },
       paragraph: { content: "inline*", group: "block" },
+      blockquote: { content: "block+", group: "block" },
       text: { group: "inline" },
     },
     marks: {
@@ -418,6 +419,16 @@ describe("documentReplacementMap", () => {
   });
   const paragraph = (text: string) =>
     schema.node("paragraph", null, schema.text(text));
+  const fiftySubstitutedParagraphs = () => {
+    const beforeParagraphs = Array.from({ length: 100 }, (_, index) =>
+      paragraph(`before-${index.toString().padStart(3, "0")}`),
+    );
+    const afterParagraphs = beforeParagraphs.map((_, index) => {
+      const prefix = index < 50 ? "after" : "before";
+      return paragraph(`${prefix}-${index.toString().padStart(3, "0")}`);
+    });
+    return { beforeParagraphs, afterParagraphs };
+  };
   const changedRanges = (mapping: ReturnType<typeof documentReplacementMap>) => {
     const ranges: number[] = [];
     mapping.forEach((oldStart, oldEnd, newStart, newEnd) => {
@@ -489,6 +500,54 @@ describe("documentReplacementMap", () => {
     expect(mapping.map(2, 1)).toBe(2);
     expect(mapping.map(107, 1)).toBe(111);
     expect(mapping.map(210, 1)).toBe(218);
+  });
+
+  it("preserves unchanged blocks after the child diff budget expires", () => {
+    const { beforeParagraphs, afterParagraphs } =
+      fiftySubstitutedParagraphs();
+    const before = schema.node("doc", null, beforeParagraphs);
+    const after = schema.node("doc", null, afterParagraphs);
+    const mapping = documentReplacementMap(before, after);
+    const positionInParagraph80 =
+      beforeParagraphs
+        .slice(0, 80)
+        .reduce((position, node) => position + node.nodeSize, 1) + 3;
+    const expectedPosition =
+      afterParagraphs
+        .slice(0, 80)
+        .reduce((position, node) => position + node.nodeSize, 1) + 3;
+
+    expect(changedRanges(mapping)).not.toEqual([
+      0,
+      before.content.size,
+      after.content.size,
+    ]);
+    expect(mapping.map(positionInParagraph80, 1)).toBe(expectedPosition);
+  });
+
+  it("preserves unchanged nested blocks after the shared budget expires", () => {
+    const { beforeParagraphs, afterParagraphs } =
+      fiftySubstitutedParagraphs();
+    const beforeQuote = schema.node("blockquote", null, beforeParagraphs);
+    const afterQuote = schema.node("blockquote", null, afterParagraphs);
+    const before = schema.node("doc", null, [beforeQuote]);
+    const after = schema.node("doc", null, [afterQuote]);
+    const mapping = documentReplacementMap(before, after);
+    const positionInParagraph80 =
+      beforeParagraphs
+        .slice(0, 80)
+        .reduce((position, node) => position + node.nodeSize, 2) + 3;
+    const expectedPosition =
+      afterParagraphs
+        .slice(0, 80)
+        .reduce((position, node) => position + node.nodeSize, 2) + 3;
+
+    expect(changedRanges(mapping)).not.toEqual([
+      1,
+      beforeQuote.content.size,
+      afterQuote.content.size,
+    ]);
+    expect(mapping.map(positionInParagraph80, 1)).toBe(expectedPosition);
   });
 
   it("uses one bounded range when a large rewrite has no usable anchor", () => {
