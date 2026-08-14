@@ -17,5 +17,7 @@ export function liveDocumentKindForPath(path: string): LiveDocumentKind | null {
   const dot = path.lastIndexOf(".");
   if (dot === -1) return null;
   const extension = path.slice(dot + 1).toLowerCase();
-  return LIVE_DOCUMENT_KIND_BY_EXTENSION[extension] ?? null;
+  return Object.hasOwn(LIVE_DOCUMENT_KIND_BY_EXTENSION, extension)
+    ? LIVE_DOCUMENT_KIND_BY_EXTENSION[extension]
+    : null;
 }

@@ -24,7 +24,22 @@ describe("liveDocumentKindForPath", () => {
     "notes/today.md.bak",
     "notes/markdown",
     "drawings/plan.excalidraw.json",
+    "notes/a.constructor",
+    "notes/a.__proto__",
   ])("leaves %s outside live document sessions", (path) => {
     expect(liveDocumentKindForPath(path)).toBeNull();
+  });
+
+  it("ignores extension names inherited from a poisoned object prototype", () => {
+    Object.defineProperty(Object.prototype, "poisonedextension", {
+      configurable: true,
+      value: "scene",
+    });
+
+    try {
+      expect(liveDocumentKindForPath("notes/a.poisonedextension")).toBeNull();
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).poisonedextension;
+    }
   });
 });

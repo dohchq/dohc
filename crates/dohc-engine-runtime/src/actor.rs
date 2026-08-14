@@ -9292,6 +9292,8 @@ fn map_scene_asset_validation_error(error: dohc_engine_sync::SyncError) -> Runti
             RuntimeError::YdocArtifactAssetsPending
         }
         error @ dohc_engine_sync::SyncError::ProjectionTooLarge { .. } => RuntimeError::Sync(error),
+        dohc_engine_sync::SyncError::Storage(storage) => RuntimeError::Storage(storage),
+        dohc_engine_sync::SyncError::FaultCrash => RuntimeError::OperationCrashed,
         _ => RuntimeError::YdocArtifactAssetsInvalid,
     }
 }
@@ -12861,6 +12863,38 @@ mod scene_seed_transaction_tests {
                 actual_bytes,
                 limit_bytes,
             }) if actual_bytes == limit_bytes + 1
+        ));
+    }
+
+    #[test]
+    fn scene_asset_validation_preserves_storage_and_crash_failures() {
+        let storage = map_scene_asset_validation_error(dohc_engine_sync::SyncError::Storage(
+            StorageError::StateCorrupt { source: None },
+        ));
+        assert_eq!(storage.code(), "state-corrupt");
+        assert!(matches!(
+            storage,
+            RuntimeError::Storage(StorageError::StateCorrupt { .. })
+        ));
+
+        let crash = map_scene_asset_validation_error(dohc_engine_sync::SyncError::FaultCrash);
+        assert_eq!(crash.code(), "operation-crashed");
+        assert!(matches!(crash, RuntimeError::OperationCrashed));
+    }
+
+    #[test]
+    fn scene_asset_validation_keeps_asset_state_taxonomy() {
+        assert!(matches!(
+            map_scene_asset_validation_error(dohc_engine_sync::SyncError::RetryableState {
+                reason: "asset pending",
+            }),
+            RuntimeError::YdocArtifactAssetsPending
+        ));
+        assert!(matches!(
+            map_scene_asset_validation_error(dohc_engine_sync::SyncError::InvalidInput {
+                reason: "asset invalid",
+            }),
+            RuntimeError::YdocArtifactAssetsInvalid
         ));
     }
 
