@@ -2,7 +2,11 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
-import { loadPluginPanelRegistration } from "./pluginPanelRegistration";
+import {
+  loadPluginPanelRegistration,
+  rememberPluginRegistration,
+  type RegisteredPlugin,
+} from "./pluginPanelRegistration";
 
 const roots: string[] = [];
 
@@ -137,5 +141,70 @@ describe("plugin panel registration", () => {
         panelId: "missing",
       }),
     ).rejects.toThrow(/does not declare panel/);
+  });
+
+  it("serves the panels of the manifest as it is now, not as first registered (#779 round 10 B7)", async () => {
+    const workspace = await scratch("dohc-plugin-panel-workspace-");
+    const pluginRoot = join(workspace, "plugins", "hello-plugin");
+    await writePlugin(pluginRoot);
+    const registrations = new Map<string, Map<string, RegisteredPlugin>>();
+    const load = (panelId: string) =>
+      loadPluginPanelRegistration({
+        workspaceRoot: workspace,
+        pluginRoot,
+        pluginId: "hello-plugin",
+        panelId,
+      });
+
+    rememberPluginRegistration(registrations, "workspace-1", await load("main"));
+
+    // The plugin author adds a panel and the user approves it. Serving the
+    // first registration's manifest forever left the new panel unstartable.
+    await writeFile(
+      join(pluginRoot, "dohc-plugin.json"),
+      JSON.stringify({
+        version: 1,
+        name: "hello-plugin",
+        entry: "plugin.mjs",
+        panels: [
+          { id: "main", title: "Hello again", entry: "panel/index.html" },
+          { id: "second", title: "Second", entry: "panel/second.html" },
+        ],
+      }),
+    );
+    await writeFile(join(pluginRoot, "panel", "second.html"), "<h1>Two</h1>\n");
+
+    const remembered = rememberPluginRegistration(
+      registrations,
+      "workspace-1",
+      await load("second"),
+    );
+
+    expect(remembered.manifest.panels?.map((panel) => panel.id))
+      .toEqual(["main", "second"]);
+    expect(registrations.get("workspace-1")?.get("hello-plugin")?.manifest)
+      .toBe(remembered.manifest);
+    expect(remembered.manifest.panels?.[0]?.title).toBe("Hello again");
+  });
+
+  it("refuses a second registration from another root", async () => {
+    const workspace = await scratch("dohc-plugin-panel-workspace-");
+    const pluginRoot = join(workspace, "plugins", "hello-plugin");
+    await writePlugin(pluginRoot);
+    const registration = await loadPluginPanelRegistration({
+      workspaceRoot: workspace,
+      pluginRoot,
+      pluginId: "hello-plugin",
+      panelId: "main",
+    });
+    const registrations = new Map<string, Map<string, RegisteredPlugin>>();
+    rememberPluginRegistration(registrations, "workspace-1", registration);
+
+    expect(() =>
+      rememberPluginRegistration(registrations, "workspace-1", {
+        ...registration,
+        pluginRoot: join(workspace, "plugins", "elsewhere"),
+      })
+    ).toThrow(/already running from another root/);
   });
 });

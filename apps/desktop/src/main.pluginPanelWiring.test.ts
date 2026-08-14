@@ -177,13 +177,17 @@ describe("plugin panel main-process wiring", () => {
     expect(ensureStart).toContain("panelStartedHosts.add(");
     // Ownership is only claimed on the cold-start branch, after the
     // already-running early return — a panel riding along on a host
-    // something else started must never claim it.
+    // something else started must never claim it. The pipeline reports
+    // whether THIS call performed the transition, because a queued
+    // reconciliation can start the host between the early return and the
+    // panel's own ensureStarted (#779 round 10 B3).
     const alreadyRunningAt = ensureStart.indexOf(
       "if (pipeline.host.getSpawnId(plugin.manifest.name)) return pipeline.host;",
     );
     const claimAt = ensureStart.indexOf("panelStartedHosts.add(");
     expect(alreadyRunningAt).toBeGreaterThan(-1);
     expect(claimAt).toBeGreaterThan(alreadyRunningAt);
+    expect(ensureStart).toContain("if (result.startedHost) {");
 
     const stopPanel = mainSource.slice(
       mainSource.indexOf("async function stopPluginPanel("),
@@ -212,5 +216,19 @@ describe("plugin panel main-process wiring", () => {
     expect(pluginAction).toContain(
       "panelStartedHosts.delete(pluginLifecycleKey(input.workspaceId, input.pluginId));",
     );
+  });
+
+  it("drops a plugin's panel registration when it is uninstalled or its workspace closes (#779 round 10 B7)", () => {
+    const uninstall = handler("uninstallPlugin");
+    expect(uninstall).toContain("if (result.ok) {");
+    expect(uninstall).toContain(
+      "pluginRegistrations.get(input.workspaceId)?.delete(input.pluginId);",
+    );
+
+    const stopWorkspace = mainSource.slice(
+      mainSource.indexOf("async function stopPluginWorkspace("),
+      mainSource.indexOf("\n}\n\nasync function stopAllPluginWorkspaces"),
+    );
+    expect(stopWorkspace).toContain("pluginRegistrations.delete(workspaceId);");
   });
 });

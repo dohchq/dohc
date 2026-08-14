@@ -23,6 +23,8 @@ import {
   type DohcPluginManifest,
 } from "./pluginManifestSchema";
 import {
+  BUILD_PREVIOUS_SUFFIX,
+  BUILD_STAGING_SUFFIX,
   isPluginSourceRoot,
   PLUGIN_BUNDLE_TIMEOUT_MS,
   PLUGIN_SNAPSHOT_DIR_NAME,
@@ -471,7 +473,7 @@ async function publishStaging(
   liveRoot: string,
   stagingRoot: string,
 ): Promise<string | null> {
-  const previousRoot = `${liveRoot}.previous-${randomUUID()}`;
+  const previousRoot = `${liveRoot}${BUILD_PREVIOUS_SUFFIX}${randomUUID()}`;
   const previousSnapshot = join(previousRoot, "snapshot");
   const stagedSnapshot = join(stagingRoot, "snapshot");
   try {
@@ -600,7 +602,7 @@ async function runBuildJob(
     // broker, whose containment is rooted at the live root, and made the live
     // root incomplete for the whole build — a panel start during a build then
     // failed outright (#779 round 7 A1).
-    stagingRoot = `${paths.liveRoot}.staging-${randomUUID()}`;
+    stagingRoot = `${paths.liveRoot}${BUILD_STAGING_SUFFIX}${randomUUID()}`;
     await mkdir(stagingRoot);
     const outfile = join(stagingRoot, "bundle.mjs");
     const options = {

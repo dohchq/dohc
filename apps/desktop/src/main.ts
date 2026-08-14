@@ -570,7 +570,8 @@ import {
 import { createPluginPanelSdkAuthorityRegistry } from "./plugins/pluginPanelSdkAuthority";
 import {
   loadPluginPanelRegistration,
-  type PluginPanelRegistration,
+  rememberPluginRegistration,
+  type RegisteredPlugin,
 } from "./plugins/pluginPanelRegistration";
 import type { DohcPluginManifest } from "./plugins/pluginManifestSchema";
 import {
@@ -2704,11 +2705,6 @@ async function openWorkspaceActivity(
   return result;
 }
 
-interface RegisteredPlugin {
-  pluginRoot: string;
-  manifest: DohcPluginManifest;
-}
-
 interface RunningPluginPanel {
   handle: StaticSitePreview;
   releaseOrigin: () => void;
@@ -2853,29 +2849,6 @@ function pluginSnapshotRoot(workspace: CreatedWorkspace, pluginId: string): stri
   );
 }
 
-function rememberPluginRegistration(
-  workspaceId: string,
-  registration: PluginPanelRegistration,
-): RegisteredPlugin {
-  const registrations = pluginRegistrations.get(workspaceId) ?? new Map();
-  const existing = registrations.get(registration.manifest.name);
-  if (
-    existing &&
-    resolve(existing.pluginRoot) !== resolve(registration.pluginRoot)
-  ) {
-    throw new Error(
-      `Plugin "${registration.manifest.name}" is already running from another root.`,
-    );
-  }
-  const remembered = existing ?? {
-    pluginRoot: registration.pluginRoot,
-    manifest: registration.manifest,
-  };
-  registrations.set(registration.manifest.name, remembered);
-  pluginRegistrations.set(workspaceId, registrations);
-  return remembered;
-}
-
 // Opening a panel must never execute code the install/build pipeline hasn't
 // verified and built. `PluginPipeline.ensureStarted()` checks the plugin is
 // enabled, its live source hash still matches its approved hash, and starts
@@ -2894,9 +2867,15 @@ async function ensurePluginStarted(
   if (!result.ok) {
     throw new Error(result.error.message);
   }
-  // The host was not running a moment ago and is now — this call is why,
-  // so it (and only it, via its panel) owns stopping it later.
-  panelStartedHosts.add(pluginLifecycleKey(workspace.workspaceId, plugin.manifest.name));
+  // Only when THIS call performed the zero-to-running transition does the
+  // panel own stopping the host later. The pipeline reports that from inside
+  // its own per-plugin queue, where a workspace reconciliation that started
+  // the host first is already visible (#779 round 10 B3).
+  if (result.startedHost) {
+    panelStartedHosts.add(
+      pluginLifecycleKey(workspace.workspaceId, plugin.manifest.name),
+    );
+  }
   return pipeline.host;
 }
 
@@ -2985,6 +2964,9 @@ async function stopPluginPanelsForWorkspace(workspaceId: string): Promise<void> 
 async function stopPluginWorkspace(workspaceId: string): Promise<void> {
   await stopPluginPanelsForWorkspace(workspaceId);
   await stopPluginPipelineForWorkspace(workspaceId);
+  // The registrations describe manifests read from a workspace that is no
+  // longer open. Reopening a panel re-reads them (#779 round 10 B7).
+  pluginRegistrations.delete(workspaceId);
 }
 
 async function stopAllPluginWorkspaces(): Promise<void> {
@@ -6208,6 +6190,7 @@ function registerIpcHandlers(
     );
     assertWritableWorkspace(workspace);
     const plugin = rememberPluginRegistration(
+      pluginRegistrations,
       workspace.workspaceId,
       registration,
     );
@@ -6485,9 +6468,16 @@ function registerIpcHandlers(
     const input = UninstallPluginPayload.parse(payload);
     try {
       const pipeline = await activePluginPipelineFor(event, input.workspaceId);
-      return PluginActionResult.parse(
+      const result = PluginActionResult.parse(
         await pipeline.uninstall(input.pluginId, input.confirmationToken),
       );
+      if (result.ok) {
+        pluginRegistrations.get(input.workspaceId)?.delete(input.pluginId);
+        panelStartedHosts.delete(
+          pluginLifecycleKey(input.workspaceId, input.pluginId),
+        );
+      }
+      return result;
     } catch (error) {
       return PluginActionResult.parse({
         ok: false,

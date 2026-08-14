@@ -40,7 +40,20 @@ export const PLUGIN_SNAPSHOT_DIR_NAME = "snapshot";
  * root, so unpublished bytes parked inside it are reachable (#779 round 7 A1,
  * round 9 B1).
  */
-const SNAPSHOT_STAGING_SUFFIX = ".snap-staging-";
+export const SNAPSHOT_STAGING_SUFFIX = ".snap-staging-";
+/** Where a build writes its output before it replaces the live root. */
+export const BUILD_STAGING_SUFFIX = ".staging-";
+/** Where the build parks the old live root while it swaps the new one in. */
+export const BUILD_PREVIOUS_SUFFIX = ".previous-";
+/** Every family of sibling directory this pipeline creates beside a live
+ * plugin root. Each one is `<liveRoot><suffix><randomUUID()>`. */
+export const PLUGIN_ROOT_ARTIFACT_SUFFIXES = [
+  SNAPSHOT_STAGING_SUFFIX,
+  BUILD_STAGING_SUFFIX,
+  BUILD_PREVIOUS_SUFFIX,
+] as const;
+const ARTIFACT_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const PINNED_PLUGIN_PNPM_VERSION = "11.20.0";
 export const PINNED_PLUGIN_PACKAGE_MANAGER =
@@ -493,20 +506,21 @@ async function readAndValidatePackageJson(stagingRoot: string): Promise<void> {
   const packagePath = join(stagingRoot, "package.json");
   let body: string;
   try {
+    const packageJsonBytes = (await lstat(packagePath)).size;
+    if (packageJsonBytes > MAX_PLUGIN_PACKAGE_JSON_BYTES) {
+      throw new SnapshotError(
+        "invalid-package-json",
+        `package.json at ${packagePath} is ${packageJsonBytes} bytes; the ` +
+          `configured limit is ${MAX_PLUGIN_PACKAGE_JSON_BYTES} bytes.`,
+        packagePath,
+      );
+    }
     body = await readFile(packagePath, "utf8");
   } catch (error) {
+    if (error instanceof SnapshotError) throw error;
     throw new SnapshotError(
       "invalid-package-json",
       `package.json at ${packagePath} could not be read: ${errorMessage(error)}`,
-      packagePath,
-    );
-  }
-  const packageJsonBytes = Buffer.byteLength(body, "utf8");
-  if (packageJsonBytes > MAX_PLUGIN_PACKAGE_JSON_BYTES) {
-    throw new SnapshotError(
-      "invalid-package-json",
-      `package.json at ${packagePath} is ${packageJsonBytes} bytes; the ` +
-        `configured limit is ${MAX_PLUGIN_PACKAGE_JSON_BYTES} bytes.`,
       packagePath,
     );
   }
@@ -527,20 +541,21 @@ async function readAndValidatePnpmLockfile(stagingRoot: string): Promise<void> {
   const lockfilePath = join(stagingRoot, "pnpm-lock.yaml");
   let body: string;
   try {
+    const lockfileBytes = (await lstat(lockfilePath)).size;
+    if (lockfileBytes > MAX_PLUGIN_LOCKFILE_BYTES) {
+      throw new SnapshotError(
+        "invalid-lockfile",
+        `pnpm-lock.yaml at ${lockfilePath} is ${lockfileBytes} bytes; the ` +
+          `configured limit is ${MAX_PLUGIN_LOCKFILE_BYTES} bytes.`,
+        lockfilePath,
+      );
+    }
     body = await readFile(lockfilePath, "utf8");
   } catch (error) {
+    if (error instanceof SnapshotError) throw error;
     throw new SnapshotError(
       "invalid-lockfile",
       `pnpm-lock.yaml at ${lockfilePath} could not be read: ${errorMessage(error)}`,
-      lockfilePath,
-    );
-  }
-  const lockfileBytes = Buffer.byteLength(body, "utf8");
-  if (lockfileBytes > MAX_PLUGIN_LOCKFILE_BYTES) {
-    throw new SnapshotError(
-      "invalid-lockfile",
-      `pnpm-lock.yaml at ${lockfilePath} is ${lockfileBytes} bytes; the ` +
-        `configured limit is ${MAX_PLUGIN_LOCKFILE_BYTES} bytes.`,
       lockfilePath,
     );
   }
@@ -973,15 +988,21 @@ function removeStaging(stagingRoot: string): Promise<void> {
  * this snapshot's, so it fails loudly instead — the same guard the build
  * runner puts on its own staged tree.
  */
-function settleOnce(stagingRoot: string): () => void {
+function settleOnce(stagingRoot: string): { assertOpen: () => void; claim: () => void } {
   let settled = false;
-  return () => {
+  const assertOpen = (): void => {
     if (settled) {
       throw new Error(
         `Plugin source snapshot at ${stagingRoot} was already published or discarded.`,
       );
     }
-    settled = true;
+  };
+  return {
+    assertOpen,
+    claim: () => {
+      assertOpen();
+      settled = true;
+    },
   };
 }
 
@@ -1073,10 +1094,30 @@ export function isPluginSourceRoot(liveRoot: string, sourceRoot: string): boolea
   }
   return (
     dirname(resolvedSourceRoot) === dirname(resolvedLiveRoot) &&
-    basename(resolvedSourceRoot).startsWith(
-      `${basename(resolvedLiveRoot)}${SNAPSHOT_STAGING_SUFFIX}`,
+    isPluginRootArtifact(
+      basename(resolvedLiveRoot),
+      basename(resolvedSourceRoot),
+      [SNAPSHOT_STAGING_SUFFIX],
     )
   );
+}
+
+/**
+ * Whether `name` is one of this pipeline's own staging or swap artifacts for
+ * the live root named `liveRootName`. The uuid is part of the match: plugin
+ * ids may contain "." and "-", so a bare prefix test also accepts another
+ * plugin's live root — `example.snap-staging-1` for `example`, or `foo.bar`
+ * for `foo` (#779 round 10 A1/B1).
+ */
+export function isPluginRootArtifact(
+  liveRootName: string,
+  name: string,
+  suffixes: readonly string[] = PLUGIN_ROOT_ARTIFACT_SUFFIXES,
+): boolean {
+  return suffixes.some((suffix) => {
+    const prefix = `${liveRootName}${suffix}`;
+    return name.startsWith(prefix) && ARTIFACT_UUID.test(name.slice(prefix.length));
+  });
 }
 
 export function pluginIdToSafePath(pluginId: string): string {
@@ -1186,12 +1227,16 @@ export async function snapshotPluginSource(
       digest,
       pnpmPaths,
       publish: async () => {
-        settle();
+        settle.claim();
         await replaceSnapshot(stagedRoot, liveSnapshotRoot);
       },
+      // Claimed only once the tree is actually gone. A removal that failed
+      // left it exactly where it was, so it is still this snapshot's and the
+      // caller's retry has to reach it (#779 round 10 A5).
       discard: async () => {
-        settle();
+        settle.assertOpen();
         await removeStaging(stagedRoot);
+        settle.claim();
       },
     };
   } catch (error) {

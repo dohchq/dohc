@@ -174,9 +174,9 @@ async function writePluginLocalState(
   if (bytes > MAX_PLUGIN_LOCAL_STATE_FILE_BYTES) {
     throw new Error(
       `Plugin local state for ${path} is ${bytes} bytes with ` +
-        `${Object.keys(state.plugins).length} plugin records; the configured ` +
-        `limit is ${MAX_PLUGIN_LOCAL_STATE_FILE_BYTES} bytes. Uninstall ` +
-        "plugins in this workspace to get back under it.",
+        `${Object.keys(state.plugins).length} plugin records; the plugin ` +
+        `local-state size limit is ${MAX_PLUGIN_LOCAL_STATE_FILE_BYTES} ` +
+        "bytes. Uninstall plugins in this workspace to get back under it.",
     );
   }
   const temporaryPath = `${path}.tmp-${process.pid}-${randomUUID()}`;

@@ -19,6 +19,10 @@ export const TERMINATE_FAILURE_GRACE_MS = 5_000;
 // How long a signalled install tree has to exit before the force round, the
 // same grace the plugin child-process broker gives its own children.
 export const INSTALL_TREE_STOP_GRACE_MS = 2_000;
+// A job reports teardown complete only after the force round ran, so a
+// caller-supplied kill that never returns must not hold the job open
+// forever: the grace, plus the same budget again for the kill itself.
+export const INSTALL_TREE_TEARDOWN_CAP_MS = INSTALL_TREE_STOP_GRACE_MS + 2_000;
 
 // CodeRabbit #779 R18 (Critical): this install's cwd is a copy of
 // plugin-authored source, whose pnpm-lock.yaml/.npmrc the plugin author
@@ -302,22 +306,31 @@ function delay(milliseconds: number): Promise<void> {
  * utility process itself is terminated. The POSIX force round reuses the pids
  * round one captured, the same captured-set semantics the plugin
  * child-process broker uses.
+ *
+ * `forceRound` is that second round. The caller must await it before it
+ * reports teardown complete: a SIGTERM-ignoring descendant is still alive and
+ * still writing until the SIGKILL lands, and the pipeline discards the
+ * staging tree the moment this install returns (#779 round 10 B2).
  */
 async function signalInstallTree(
   pid: number | undefined,
   platform: NodeJS.Platform,
   killPosix: NonNullable<InstallPluginDependenciesInput["killProcessTreePosix"]>,
   killWindows: NonNullable<InstallPluginDependenciesInput["killWindowsTree"]>,
-): Promise<void> {
-  if (pid === undefined) return;
+): Promise<{ forceRound: Promise<void> }> {
+  const noForceRound = { forceRound: Promise.resolve() };
+  if (pid === undefined) return noForceRound;
   if (platform === "win32") {
     await killWindows(pid);
-    return;
+    return noForceRound;
   }
   const captured = await killPosix(pid, "SIGTERM", []);
-  void delay(INSTALL_TREE_STOP_GRACE_MS)
-    .then(() => killPosix(pid, "SIGKILL", captured))
-    .catch(() => undefined);
+  return {
+    forceRound: delay(INSTALL_TREE_STOP_GRACE_MS)
+      .then(async () => {
+        await killPosix(pid, "SIGKILL", captured);
+      }),
+  };
 }
 
 async function forkElectronUtilityProcess(
@@ -494,13 +507,15 @@ async function runInstallJob(
     let termination: "timeout" | "aborted" | null = null;
     let processError: string | null = null;
     let settled = false;
+    // Resolves when the whole stop sequence has run, force round included.
+    let teardown: Promise<void> = Promise.resolve();
 
     const cleanup = () => {
       if (timer) clearTimeout(timer);
       input.signal?.removeEventListener("abort", abortInstall);
     };
 
-    const terminate = async (reason: "timeout" | "aborted"): Promise<void> => {
+    const terminate = (reason: "timeout" | "aborted"): void => {
       if (settled || termination !== null) return;
       termination = reason;
       if (reason === "timeout") {
@@ -508,38 +523,46 @@ async function runInstallJob(
       } else {
         pushLog(logs, "system", "Install cancelled by the caller.");
       }
-      await signalInstallTree(child.pid, platform, killPosix, killWindows)
-        .catch(() => undefined);
-      const sent = child.terminate();
-      if (sent) return;
-      // terminate() reports it never sent the request (e.g. the child has
-      // no PID yet) — no exit event may ever follow, so this cannot wait
-      // for one unbounded (CodeRabbit #779 R20).
-      pushLog(
-        logs,
-        "system",
-        `Termination request was not sent. Forcing a result after ` +
-          `${TERMINATE_FAILURE_GRACE_MS} ms if the process never exits.`,
-      );
-      setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        stdoutBuffer.flush();
-        stderrBuffer.flush();
-        resolveResult(failure(
-          "spawn-failed",
-          `Plugin "${input.pluginId}" dependency install could not be ` +
-            `terminated (${reason}) and did not exit within ` +
-            `${TERMINATE_FAILURE_GRACE_MS} ms afterward.`,
-          timeoutMs,
-          logs,
-        ));
-      }, TERMINATE_FAILURE_GRACE_MS);
+      teardown = (async () => {
+        const stop = await signalInstallTree(
+          child.pid,
+          platform,
+          killPosix,
+          killWindows,
+        ).catch(() => ({ forceRound: Promise.resolve() }));
+        const sent = child.terminate();
+        if (!sent) {
+          // terminate() reports it never sent the request (e.g. the child
+          // has no PID yet) — no exit event may ever follow, so this cannot
+          // wait for one unbounded (CodeRabbit #779 R20).
+          pushLog(
+            logs,
+            "system",
+            `Termination request was not sent. Forcing a result after ` +
+              `${TERMINATE_FAILURE_GRACE_MS} ms if the process never exits.`,
+          );
+          setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            stdoutBuffer.flush();
+            stderrBuffer.flush();
+            resolveResult(failure(
+              "spawn-failed",
+              `Plugin "${input.pluginId}" dependency install could not be ` +
+                `terminated (${reason}) and did not exit within ` +
+                `${TERMINATE_FAILURE_GRACE_MS} ms afterward.`,
+              timeoutMs,
+              logs,
+            ));
+          }, TERMINATE_FAILURE_GRACE_MS);
+        }
+        await stop.forceRound.catch(() => undefined);
+      })();
     };
 
     function abortInstall(): void {
-      void terminate("aborted");
+      terminate("aborted");
     }
 
     child.onError((message) => {
@@ -551,6 +574,16 @@ async function runInstallJob(
     child.onExit((exitCode) => {
       if (settled) return;
       settled = true;
+      void finishExit(exitCode);
+    });
+
+    async function finishExit(exitCode: number): Promise<void> {
+      // The root process exited, but a SIGTERM-ignoring descendant it left
+      // behind is alive until the force round kills it, and the pipeline
+      // discards the staging tree as soon as this job returns (#779 round 10
+      // B2). The cap keeps a kill seam that never returns from holding the
+      // job open forever.
+      await Promise.race([teardown, delay(INSTALL_TREE_TEARDOWN_CAP_MS)]);
       cleanup();
       stdoutBuffer.flush();
       stderrBuffer.flush();
@@ -624,9 +657,9 @@ async function runInstallJob(
         logs,
         exitCode,
       ));
-    });
+    }
 
-    timer = setTimeout(() => void terminate("timeout"), timeoutMs);
+    timer = setTimeout(() => terminate("timeout"), timeoutMs);
     if (input.signal?.aborted) abortInstall();
     else input.signal?.addEventListener("abort", abortInstall, { once: true });
   });

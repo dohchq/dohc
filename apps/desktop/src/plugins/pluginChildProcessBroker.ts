@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
   PLUGIN_CHILD_PROCESS_METHODS,
   type PluginChildProcessExit,
@@ -59,11 +59,18 @@ export interface PluginChildProcessHandle {
   readonly stderr: NodeJS.ReadableStream | null;
   postMessage(message: unknown): void;
   kill(): boolean;
-  once(event: "exit", listener: (code: number) => void): this;
-  once(
-    event: "error",
-    listener: (type: string, location: string, report: string) => void,
-  ): this;
+}
+
+/**
+ * The exit and error listeners a fork implementation must attach in the same
+ * turn it starts the child. The broker receives its handle one await later,
+ * so a listener it attached itself would miss a child that exited first —
+ * the record would then never finish, `wait()` would time out, and the
+ * retained handle would never be cleaned up (#779 round 10 B4).
+ */
+export interface PluginChildProcessLifecycle {
+  onExit(code: number): void;
+  onError(type: string, location: string, report: string): void;
 }
 
 export interface PluginChildProcessBrokerOptions {
@@ -76,6 +83,7 @@ export interface PluginChildProcessBrokerOptions {
     modulePath: string,
     args: string[],
     options: PluginChildProcessForkOptions,
+    lifecycle: PluginChildProcessLifecycle,
   ) => Promise<PluginChildProcessHandle> | PluginChildProcessHandle;
   platform?: NodeJS.Platform;
   /** Signals the pid, `alsoSignal`, and every descendant of them; returns the
@@ -134,10 +142,16 @@ function errorMessage(error: unknown): string {
 }
 
 function isInside(parent: string, child: string): boolean {
+  if (child === parent) return true;
   const pathFromParent = relative(parent, child);
+  // The ".." has to be a whole segment. Testing the prefix alone rejected
+  // real contained names — a child under "..cache/" is inside the root
+  // (#779 round 10 B5).
   return (
-    pathFromParent === "" ||
-    (!pathFromParent.startsWith("..") && !isAbsolute(pathFromParent))
+    pathFromParent.length > 0 &&
+    !isAbsolute(pathFromParent) &&
+    pathFromParent !== ".." &&
+    !pathFromParent.startsWith(`..${sep}`)
   );
 }
 
@@ -237,9 +251,14 @@ async function forkElectronUtilityProcess(
   modulePath: string,
   args: string[],
   options: PluginChildProcessForkOptions,
+  lifecycle: PluginChildProcessLifecycle,
 ): Promise<PluginChildProcessHandle> {
   const { utilityProcess } = await import("electron");
-  return utilityProcess.fork(modulePath, args, options);
+  const child = utilityProcess.fork(modulePath, args, options);
+  child.once("exit", (code) => lifecycle.onExit(code));
+  child.once("error", (type, location, report) =>
+    lifecycle.onError(type, location, report));
+  return child;
 }
 
 function killWindowsTree(pid: number): Promise<boolean> {
@@ -439,17 +458,40 @@ export class PluginChildProcessBroker {
         `childProcesses.spawn merged env uses ${envCodeUnits} UTF-16 code units; the configured limit is ${MAX_MERGED_CHILD_ENV_CODE_UNITS} UTF-16 code units.`,
       );
     }
-    const child = await this.forkProcess(modulePath, request.args, {
-      cwd,
-      env,
-      serviceName: `dohc.plugin.${context.pluginId}.child`,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    // The fork attaches these in the same turn it starts the child, so an
+    // exit or error that lands before the record exists is buffered here
+    // rather than lost (#779 round 10 B4).
+    let record: SpawnRecord | null = null;
+    let exitedWith: number | null = null;
+    const pendingErrors: string[] = [];
+    const errorText = (type: string, location: string, report: string): string =>
+      `Utility process error ${type} at ${location}: ${report}`;
+    const child = await this.forkProcess(
+      modulePath,
+      request.args,
+      {
+        cwd,
+        env,
+        serviceName: `dohc.plugin.${context.pluginId}.child`,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+      {
+        onExit: (code) => {
+          if (record) this.finishExit(record, code);
+          else exitedWith = code;
+        },
+        onError: (type, location, report) => {
+          const text = errorText(type, location, report);
+          if (record) this.appendOutput(record, "stderr", text);
+          else pendingErrors.push(text);
+        },
+      },
+    );
     let resolveExit: (result: PluginChildProcessExit) => void = () => undefined;
     const exit = new Promise<PluginChildProcessExit>((resolveResult) => {
       resolveExit = resolveResult;
     });
-    const record: SpawnRecord = {
+    record = {
       pluginId: context.pluginId,
       spawnId: context.spawnId,
       childId,
@@ -469,14 +511,8 @@ export class PluginChildProcessBroker {
 
     this.captureStream(record, "stdout", child.stdout);
     this.captureStream(record, "stderr", child.stderr);
-    child.once("error", (type, location, report) => {
-      this.appendOutput(
-        record,
-        "stderr",
-        `Utility process error ${type} at ${location}: ${report}`,
-      );
-    });
-    child.once("exit", (code) => this.finishExit(record, code));
+    for (const text of pendingErrors) this.appendOutput(record, "stderr", text);
+    if (exitedWith !== null) this.finishExit(record, exitedWith);
 
     if (context.signal.aborted) {
       try {

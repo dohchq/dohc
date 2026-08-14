@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   copyFile,
@@ -1385,9 +1385,18 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // built plugin bytes, and it is outside the live root, so uninstall's
       // recursive delete of the live root alone would walk straight past it.
       const dataRoot = pluginsDataRoot(fixture);
-      const orphanedStaging = join(dataRoot, "example-plugin.staging-orphan");
+      const orphanedStaging = join(
+        dataRoot,
+        `example-plugin.staging-${randomUUID()}`,
+      );
       await mkdir(orphanedStaging, { recursive: true });
       await writeFile(join(orphanedStaging, "bundle.mjs"), "orphaned bytes\n");
+      // npm names allow dots, so this is another installed plugin's own live
+      // root — not an artifact of this one, and never uninstall's to delete
+      // (#779 round 10 B1).
+      const neighbourRoot = join(dataRoot, "example-plugin.bar");
+      await mkdir(join(neighbourRoot, "snapshot"), { recursive: true });
+      await writeFile(join(neighbourRoot, "bundle.mjs"), "neighbour bytes\n");
 
       const preflight = await pipeline.uninstallPreflight("example-plugin");
       if (!preflight.ok) throw new Error(preflight.error.message);
@@ -1397,7 +1406,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       );
 
       expect(uninstalled.ok).toBe(true);
-      expect(await readdir(dataRoot)).toEqual([]);
+      expect(await readdir(dataRoot)).toEqual(["example-plugin.bar"]);
+      expect(await readFile(join(neighbourRoot, "bundle.mjs"), "utf8"))
+        .toBe("neighbour bytes\n");
     } finally {
       await pipeline.dispose();
     }
@@ -1957,6 +1968,206 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       );
       if (!state.ok) throw new Error(state.warning);
       expect(state.state.plugins["@scope/bar"]).toBeUndefined();
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("leaves a dotted neighbour's data alone when an identity is renamed (#779 round 10 B1)", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      // The same sweep uninstall uses also runs on any identity change, so a
+      // plugin named "example-plugin.bar" loses its live root there too.
+      const dataRoot = pluginsDataRoot(fixture);
+      const neighbourRoot = join(dataRoot, "example-plugin.bar");
+      await mkdir(join(neighbourRoot, "snapshot"), { recursive: true });
+      await writeFile(join(neighbourRoot, "bundle.mjs"), "neighbour bytes\n");
+
+      await writeFile(join(fixture.pluginRoot, "dohc-plugin.json"), `${JSON.stringify({
+        version: 1,
+        name: "renamed-plugin",
+        displayName: "Renamed plugin",
+        entry: "src/index.ts",
+      }, null, 2)}\n`);
+      pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin/dohc-plugin.json",
+        operation: "update",
+      }]);
+      await waitFor(
+        () => pipeline.list().some((plugin) => plugin.id === "renamed-plugin"),
+        "Manifest identity change did not land as a new discovery.",
+      );
+
+      expect(await readdir(dataRoot)).toEqual(["example-plugin.bar"]);
+      expect(await readFile(join(neighbourRoot, "bundle.mjs"), "utf8"))
+        .toBe("neighbour bytes\n");
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("retries a staged tree's cleanup when the first discard rejects (#779 round 10 A5)", async () => {
+    const fixture = await createPluginWorkspace();
+    let failNextDiscard = false;
+    const discards: string[] = [];
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        snapshot: async (input) => {
+          const result = await snapshotPluginSource(input);
+          if (!result.ok) return result;
+          return {
+            ...result,
+            discard: async () => {
+              discards.push(result.snapshotRoot);
+              // The first removal rejects and leaves the tree where it was —
+              // a locked file, a scanner, a permission error.
+              if (failNextDiscard) {
+                failNextDiscard = false;
+                throw new Error("simulated: staged tree is busy");
+              }
+              await result.discard();
+            },
+          };
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      // Source no longer matches the approved hash, so ensureStarted stages a
+      // tree and then has to drop it again.
+      await writeFile(fixture.entryPath, [
+        'export const marker = "unapproved";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      failNextDiscard = true;
+      const started = await pipeline.ensureStarted("example-plugin");
+
+      // Fail-closed, and no staged bytes left beside the live root: the
+      // rejected discard is retried by the same job's cleanup (#779 round
+      // 10 A5).
+      expect(started.ok).toBe(false);
+      expect(discards).toHaveLength(2);
+      expect(await stagingLeftovers(fixture, "example-plugin")).toEqual([]);
+      expect(await readFile(
+        join(liveSnapshotRoot(fixture, "example-plugin"), "src", "index.ts"),
+        "utf8",
+      )).toContain('marker = "one"');
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("hands panel ownership only to the call that started the host (#779 round 10 B3)", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      // The install is the workspace starting the host, exactly as a queued
+      // reconciliation would during workspace startup.
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      // A panel's own ensureStarted now succeeds on an already-running host.
+      // It did not perform the zero-to-running transition, so closing that
+      // panel must not stop an enabled plugin's background work.
+      const followed = await pipeline.ensureStarted("example-plugin");
+      expect(followed.ok).toBe(true);
+      expect(followed.ok && followed.startedHost).toBe(false);
+
+      await host.stop("example-plugin");
+      const cold = await pipeline.ensureStarted("example-plugin");
+      expect(cold.ok).toBe(true);
+      expect(cold.ok && cold.startedHost).toBe(true);
     } finally {
       await pipeline.dispose();
     }

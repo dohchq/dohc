@@ -401,6 +401,7 @@ describe("installPluginDependencies", () => {
     const orphanedTable = [" 4243     1", " 4244     1", " 5000     1", ""].join("\n");
     let tableReads = 0;
 
+    let settled = false;
     const install = installPluginDependencies({
       ...fixture.input,
       forkProcess: () => {
@@ -419,6 +420,9 @@ describe("installPluginDependencies", () => {
             signalled.push({ pid: targetPid, signal: targetSignal });
           },
         }),
+    }).then((result) => {
+      settled = true;
+      return result;
     });
     await started.promise;
     controller.abort();
@@ -433,6 +437,13 @@ describe("installPluginDependencies", () => {
     ]);
     expect(child.terminate).toHaveBeenCalledTimes(1);
 
+    // pnpm itself is gone, but the git and tar processes it left are not, so
+    // this job must not report teardown complete yet — the pipeline discards
+    // the staging tree the moment it does (#779 round 10 B2).
+    child.exit(143);
+    await flushMicrotasks();
+    expect(settled).toBe(false);
+
     // The force round reuses the pids the first round captured, so the now
     // orphaned git and tar processes are still reached.
     await vi.advanceTimersByTimeAsync(INSTALL_TREE_STOP_GRACE_MS);
@@ -440,7 +451,6 @@ describe("installPluginDependencies", () => {
       entry.pid
     ).sort()).toEqual([4_242, 4_243, 4_244]);
 
-    child.exit(143);
     expect(requireFailure(await install).error.code).toBe("aborted");
   });
 
@@ -503,6 +513,9 @@ describe("installPluginDependencies", () => {
     expect(child.terminate).toHaveBeenCalledTimes(1);
     expect(settled).toBe(false);
     child.exit(143);
+    await flushMicrotasks();
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(INSTALL_TREE_STOP_GRACE_MS);
 
     const failure = requireFailure(await install);
     expect(failure.error).toMatchObject({

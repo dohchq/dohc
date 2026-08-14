@@ -80,8 +80,15 @@ async function createFixture(
   const broker = new PluginChildProcessBroker({
     dohcDir: root,
     platform: options.platform ?? "win32",
-    forkProcess: (modulePath, args, forkOptions) => {
+    forkProcess: (modulePath, args, forkOptions, lifecycle) => {
       const child = new FakeUtilityProcess(10_000 + children.length);
+      // The real fork wires these in the same turn it starts the child.
+      child.once("exit", (code: number) => lifecycle.onExit(code));
+      child.once(
+        "error",
+        (type: string, location: string, report: string) =>
+          lifecycle.onError(type, location, report),
+      );
       children.push(child);
       forks.push({ modulePath, args, options: forkOptions });
       return child;
@@ -229,6 +236,60 @@ describe("PluginChildProcessBroker", () => {
       modulePath: ".staging-run6/bundle.mjs",
     });
     expect(fixture.forks).toHaveLength(1);
+  });
+
+  it("accepts a dot-prefixed directory whose name starts with two dots (#779 round 10 B5)", async () => {
+    const fixture = await createFixture();
+    const brokerContext = context("plugin-a", "spawn-a");
+    const cacheDirectory = join(fixture.root, "plugins", "plugin-a", "..cache");
+    await mkdir(cacheDirectory);
+    await writeFile(join(cacheDirectory, "server.mjs"), "export {};\n");
+
+    // "..cache/server.mjs" is contained; only a whole ".." segment escapes.
+    await spawnChild(fixture, brokerContext, {
+      modulePath: "..cache/server.mjs",
+      cwd: "..cache",
+    });
+
+    expect(fixture.forks).toHaveLength(1);
+    expect(fixture.forks[0]?.modulePath).toBe(join(cacheDirectory, "server.mjs"));
+    await expect(
+      spawnChild(fixture, brokerContext, { modulePath: "../plugin-b/server.mjs" }),
+    ).rejects.toThrow("escapes plugin directory");
+    expect(fixture.forks).toHaveLength(1);
+  });
+
+  it("finishes a child that exited before the broker held its handle (#779 round 10 B4)", async () => {
+    const root = await createTestScratch("dohc-plugin-child-broker-");
+    roots.push(root);
+    const pluginRoot = join(root, "plugins", "plugin-a");
+    await mkdir(pluginRoot, { recursive: true });
+    await writeFile(join(pluginRoot, "server.mjs"), "export {};\n");
+    const child = new FakeUtilityProcess(12_345);
+    const broker = new PluginChildProcessBroker({
+      dohcDir: root,
+      platform: "win32",
+      // A fork that resolves only after the child has already exited. The
+      // default Electron path leaves a one-microtask window; the seam makes
+      // that window arbitrarily wide.
+      forkProcess: async (_modulePath, _args, _options, lifecycle) => {
+        child.once("exit", (code: number) => lifecycle.onExit(code));
+        child.emit("exit", 3);
+        await Promise.resolve();
+        return child;
+      },
+      killWindowsTree: async () => true,
+    });
+    const brokerContext = context("plugin-a", "spawn-a");
+
+    const childId = await spawnChild(
+      { root, broker, children: [child], forks: [], windowsTreeKills: [] },
+      brokerContext,
+    );
+
+    await expect(
+      broker.invoke(brokerContext, PLUGIN_CHILD_PROCESS_METHODS.wait, { childId }),
+    ).resolves.toMatchObject({ code: 3, reason: "exited" });
   });
 
   it("refuses a cwd link that resolves outside the plugin built directory", async () => {

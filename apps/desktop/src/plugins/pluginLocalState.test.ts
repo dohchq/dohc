@@ -415,7 +415,11 @@ describe("plugin local state", () => {
     expect(thrown).toBeInstanceOf(Error);
     if (!(thrown instanceof Error)) throw new Error("expected an Error");
     expect(thrown.message).toContain("plugin records");
-    expect(thrown.message).toContain(`${MAX_PLUGIN_LOCAL_STATE_FILE_BYTES} bytes`);
+    // The constraint is named, not just "the configured limit": the agent
+    // reading this error has to know which limit it hit (#779 round 10 A2).
+    expect(thrown.message).toContain(
+      `the plugin local-state size limit is ${MAX_PLUGIN_LOCAL_STATE_FILE_BYTES} bytes`,
+    );
     expect(await readFile(path)).toEqual(before);
   });
 

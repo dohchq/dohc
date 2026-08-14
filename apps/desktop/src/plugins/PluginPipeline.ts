@@ -26,6 +26,7 @@ import type { DohcPluginManifest } from "./pluginManifestSchema";
 import type { PluginRuntimeStatus } from "./pluginHostProtocol";
 import {
   hashPluginSourceFiles,
+  isPluginRootArtifact,
   pluginIdToSafePath,
   snapshotPluginSource,
   type PluginSourceSnapshotResult,
@@ -72,6 +73,22 @@ export type PluginPipelineStatusEvent =
 
 export type PluginPipelineActionResult =
   | { ok: true; plugin: PluginPipelinePluginStatus }
+  | {
+    ok: false;
+    error: PluginPipelineError;
+    plugin: PluginPipelinePluginStatus | null;
+  };
+
+/**
+ * `startedHost` is true only when this very call took the plugin's host from
+ * not-running to running. A panel owns stopping a host only when its own
+ * ensureStarted caused that transition, and jobs are serialized per plugin,
+ * so a queued workspace reconciliation can win the race and start the host
+ * first — the panel's call then succeeds on an already-running host and must
+ * not claim it (#779 round 10 B3).
+ */
+export type PluginPipelineEnsureStartedResult =
+  | { ok: true; plugin: PluginPipelinePluginStatus; startedHost: boolean }
   | {
     ok: false;
     error: PluginPipelineError;
@@ -431,42 +448,56 @@ export class PluginPipeline {
    * an agent or the user placed under plugins/ is trusted the same way any
    * local process is, the first time its panel opens as much as any other.
    */
-  ensureStarted(pluginId: string): Promise<PluginPipelineActionResult> {
+  ensureStarted(pluginId: string): Promise<PluginPipelineEnsureStartedResult> {
+    let startedHost = false;
     return this.enqueueAction(pluginId, async () => {
-      const candidate = this.requireValidCandidate(pluginId);
-      const state = await this.localRecord(pluginId);
-      if (state?.disabled === true) {
-        return this.failure(
-          pluginId,
-          pipelineError(
-            "state",
-            "plugin-disabled",
-            `Plugin "${pluginId}" is disabled. Enable it before opening it.`,
-          ),
-        );
-      }
-      if (!state?.approvedHash) {
-        return this.runFullBuild({
-          candidate,
-          startRuntime: true,
-          disabledReasonAfterBuild: null,
-          resetCrashAccounting: true,
-          freshInstall: true,
-        });
-      }
+      // Sampled inside the job, not before it was queued: whatever ran ahead
+      // of this call in the queue has already finished starting the host.
+      const runningBefore = Boolean(this.options.pluginHost.getStatus(pluginId));
+      const result = await this.runEnsureStarted(pluginId);
+      startedHost = result.ok &&
+        !runningBefore &&
+        Boolean(this.options.pluginHost.getStatus(pluginId));
+      return result;
+    }).then((result) => (result.ok ? { ...result, startedHost } : result));
+  }
 
-      const verified = await this.verifyApprovedSource(candidate, state.approvedHash);
-      if (verified.kind === "failed") return verified.result;
-      if (verified.kind === "changed") {
-        return this.holdForApproval(candidate, verified.sourceHash);
-      }
-
-      return this.startVerified(candidate, state, {
-        clearDisabled: false,
-        resetCrashAccounting: false,
-        freshInstall: false,
-        runtimeErrorCode: "start-failed",
+  private async runEnsureStarted(
+    pluginId: string,
+  ): Promise<PluginPipelineActionResult> {
+    const candidate = this.requireValidCandidate(pluginId);
+    const state = await this.localRecord(pluginId);
+    if (state?.disabled === true) {
+      return this.failure(
+        pluginId,
+        pipelineError(
+          "state",
+          "plugin-disabled",
+          `Plugin "${pluginId}" is disabled. Enable it before opening it.`,
+        ),
+      );
+    }
+    if (!state?.approvedHash) {
+      return this.runFullBuild({
+        candidate,
+        startRuntime: true,
+        disabledReasonAfterBuild: null,
+        resetCrashAccounting: true,
+        freshInstall: true,
       });
+    }
+
+    const verified = await this.verifyApprovedSource(candidate, state.approvedHash);
+    if (verified.kind === "failed") return verified.result;
+    if (verified.kind === "changed") {
+      return this.holdForApproval(candidate, verified.sourceHash);
+    }
+
+    return this.startVerified(candidate, state, {
+      clearDisabled: false,
+      resetCrashAccounting: false,
+      freshInstall: false,
+      runtimeErrorCode: "start-failed",
     });
   }
 
@@ -1107,8 +1138,12 @@ export class PluginPipeline {
         input.expectedHash !== undefined &&
         snapshot.sourceHash !== input.expectedHash
       ) {
-        unpublishedSource = null;
+        // Ownership passes back only once the tree is actually gone: a
+        // discard that rejects here has to reach the catch's own cleanup
+        // instead of leaving staged bytes beside the live root (#779 round
+        // 10 A5).
         await snapshot.discard();
+        unpublishedSource = null;
         const priorDisabledReason = input.disabledReasonAfterBuild === "user"
           ? this.statuses.get(candidate.id)?.disabledReason ?? "user"
           : undefined;
@@ -1346,15 +1381,24 @@ export class PluginPipeline {
     | { kind: "changed"; sourceHash: string }
     | { kind: "failed"; result: PluginPipelineActionResult }
   > {
+    // The staged tree, until it is published or discarded. A cleanup that
+    // rejects must reach the catch below and be retried there, or its bytes
+    // stay beside the live root with nothing left to remove them (#779 round
+    // 10 A5).
+    let unpublishedSource: { discard: () => Promise<void> } | null = null;
     try {
       const snapshot = await this.snapshotOrThrow(candidate, approvedHash);
+      unpublishedSource = snapshot;
       if (snapshot.sourceHash !== approvedHash) {
         await snapshot.discard();
+        unpublishedSource = null;
         return { kind: "changed", sourceHash: snapshot.sourceHash };
       }
       await snapshot.publish();
+      unpublishedSource = null;
       return { kind: "verified", snapshot };
     } catch (error) {
+      await unpublishedSource?.discard().catch(() => undefined);
       const detail = error instanceof PipelineFailure
         ? error.detail
         : pipelineError("snapshot", "snapshot-failed", errorMessage(error));
@@ -1495,16 +1539,19 @@ export class PluginPipeline {
   }
 
   /**
-   * The live root and anything the build left beside it. A build stages at
+   * The live root and anything the pipeline left beside it. A build stages at
    * `<liveRoot>.staging-<uuid>` and swaps through `<liveRoot>.previous-<uuid>`
-   * (#779 round 7 A1), so a build that died between renames leaves plugin
-   * bytes outside the live root that a recursive delete of the live root
-   * alone would not reach.
+   * (#779 round 7 A1), and a source snapshot stages at
+   * `<liveRoot>.snap-staging-<uuid>`, so a job that died mid-rename leaves
+   * plugin bytes outside the live root that a recursive delete of the live
+   * root alone would not reach. Only those exact families match: plugin ids
+   * may contain dots, so any looser test deletes plugin `foo.bar`'s live root
+   * while uninstalling `foo` (#779 round 10 B1).
    */
   private async pluginDataPaths(pluginId: string): Promise<string[]> {
     const liveRoot = this.liveRoot(pluginId);
     const parent = dirname(liveRoot);
-    const prefix = `${basename(liveRoot)}.`;
+    const liveRootName = basename(liveRoot);
     const siblings = await readdir(parent).catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
@@ -1512,7 +1559,7 @@ export class PluginPipeline {
     return [
       liveRoot,
       ...siblings
-        .filter((name) => name.startsWith(prefix))
+        .filter((name) => isPluginRootArtifact(liveRootName, name))
         .map((name) => join(parent, name)),
     ];
   }

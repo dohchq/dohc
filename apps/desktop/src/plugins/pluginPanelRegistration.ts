@@ -1,5 +1,5 @@
 import { realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { resolveWorkspaceFile } from "../workspaces/workspaceAssets";
 import { readPluginManifestFile } from "./pluginManifest";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
@@ -8,6 +8,45 @@ export interface PluginPanelRegistration {
   pluginRoot: string;
   manifest: DohcPluginManifest;
   panel: NonNullable<DohcPluginManifest["panels"]>[number];
+}
+
+/** What the main process serves a plugin's panels from, per workspace. */
+export interface RegisteredPlugin {
+  pluginRoot: string;
+  manifest: DohcPluginManifest;
+}
+
+/**
+ * Records the newest registration for a plugin in a workspace, replacing the
+ * one before it. Keeping the first registration forever froze the manifest
+ * panels are served from, so an approved manifest edit that added a panel or
+ * changed an entry never became servable — not even after reopening the
+ * workspace (#779 round 10 B7). The plugin root is the one thing that cannot
+ * change under an id while it is registered.
+ */
+export function rememberPluginRegistration(
+  registrations: Map<string, Map<string, RegisteredPlugin>>,
+  workspaceId: string,
+  registration: PluginPanelRegistration,
+): RegisteredPlugin {
+  const forWorkspace = registrations.get(workspaceId) ??
+    new Map<string, RegisteredPlugin>();
+  const existing = forWorkspace.get(registration.manifest.name);
+  if (
+    existing &&
+    resolve(existing.pluginRoot) !== resolve(registration.pluginRoot)
+  ) {
+    throw new Error(
+      `Plugin "${registration.manifest.name}" is already running from another root.`,
+    );
+  }
+  const remembered: RegisteredPlugin = {
+    pluginRoot: registration.pluginRoot,
+    manifest: registration.manifest,
+  };
+  forWorkspace.set(registration.manifest.name, remembered);
+  registrations.set(workspaceId, forWorkspace);
+  return remembered;
 }
 
 function workspaceRelativePluginRoot(

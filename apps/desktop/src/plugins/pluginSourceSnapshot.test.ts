@@ -10,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   DohcPluginManifest,
@@ -19,9 +19,11 @@ import {
 } from "./pluginManifestSchema";
 import {
   MAX_PLUGIN_LOCKFILE_BYTES,
+  MAX_PLUGIN_PACKAGE_JSON_BYTES,
   PINNED_PLUGIN_PACKAGE_MANAGER,
   assertSafeSnapshotEntryName,
   hashPluginSourceFiles,
+  isPluginSourceRoot,
   pluginIdToSafePath,
   snapshotPluginSource,
   type PluginSourceSnapshotResult,
@@ -159,6 +161,10 @@ async function stagingLeftovers(fixture: PluginFixture): Promise<string[]> {
   const parent = join(fixture.dohcDir, "plugins");
   const prefix = `${pluginIdToSafePath(fixture.manifest.name)}.snap-staging-`;
   return (await readdir(parent)).filter((name) => name.startsWith(prefix));
+}
+
+function escapeForRegExp(value: string): string {
+  return value.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
 }
 
 function requireSuccess(
@@ -366,6 +372,25 @@ describe("snapshotPluginSource package-manager configuration", () => {
     await expectMissing(liveSnapshotRoot(fixture));
   });
 
+  it("rejects package-manager configuration nested anywhere in the source (#779 round 10 A4)", async () => {
+    const fixture = await createPluginFixture();
+    const nested = join(fixture.pluginRoot, "test", "fixtures");
+    await mkdir(nested, { recursive: true });
+    await writeFile(join(nested, ".npmrc"), "@evil:registry=http://127.0.0.1:9/\n");
+
+    const failure = requireFailure(await stageSnapshot(fixture));
+
+    // The rule is tree-wide on purpose: rejecting at every depth needs no
+    // depth bookkeeping and leaves no dead config for a later pnpm to start
+    // reading. The copy walk never descends into node_modules, so this is
+    // every depth a plugin's own source actually reaches.
+    expect(failure.error.code).toBe("unsupported-package-manager-config");
+    expect(failure.error.path).toBe(join(nested, ".npmrc"));
+    expect(failure.error.message).toContain("dohc's own pnpm configuration");
+    await expectMissing(liveSnapshotRoot(fixture));
+    expect(await stagingLeftovers(fixture)).toEqual([]);
+  });
+
   it("still snapshots a plugin that ships no package-manager configuration", async () => {
     const fixture = await createPluginFixture();
     await writeFile(join(fixture.pluginRoot, "npmrc.md"), "docs about npmrc\n");
@@ -509,6 +534,24 @@ describe("snapshotPluginSource dependency validation", () => {
     expect(failure.error.message).toContain(`"${PINNED_PLUGIN_PACKAGE_MANAGER}"`);
   });
 
+  it("rejects a package.json over its configured byte limit before reading it (CodeRabbit #779 R25)", async () => {
+    const fixture = await createPluginFixture();
+    await writeFile(
+      join(fixture.pluginRoot, "package.json"),
+      `${JSON.stringify({
+        name: fixture.manifest.name,
+        description: "x".repeat(MAX_PLUGIN_PACKAGE_JSON_BYTES),
+      }, null, 2)}\n`,
+    );
+
+    const failure = requireFailure(await runSnapshot(fixture));
+
+    expect(failure.error.code).toBe("invalid-package-json");
+    expect(failure.error.message).toContain(
+      `the configured limit is ${MAX_PLUGIN_PACKAGE_JSON_BYTES} bytes`,
+    );
+  });
+
   it("rejects a pnpm-lock.yaml over its configured byte limit before parsing it (CodeRabbit #779 R25)", async () => {
     const fixture = await createPluginFixture();
     const oversizedLockfile =
@@ -648,10 +691,36 @@ describe("snapshotPluginSource canonical hash and replacement", () => {
     // The child-process broker's containment is rooted at the live root, so
     // unpublished bytes parked inside it would be reachable (#779 round 7
     // A1, round 9 B1).
-    expect(staged.snapshotRoot.startsWith(pluginDataRootFor(fixture) + sep))
-      .toBe(false);
+    const liveRoot = pluginDataRootFor(fixture);
+    expect(staged.snapshotRoot.startsWith(liveRoot + sep)).toBe(false);
+    expect(dirname(staged.snapshotRoot)).toBe(dirname(liveRoot));
+    expect(basename(staged.snapshotRoot)).toMatch(
+      new RegExp(
+        `^${escapeForRegExp(basename(liveRoot))}\\.snap-staging-` +
+          "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      ),
+    );
+    expect(isPluginSourceRoot(liveRoot, staged.snapshotRoot)).toBe(true);
     expect(await stagingLeftovers(fixture)).toHaveLength(1);
     await staged.discard();
+  });
+
+  it("refuses another plugin's live root that only looks like a staged tree (#779 round 10 A1)", () => {
+    const plugins = join(sep, "data", "plugins");
+    const liveRoot = join(plugins, "example");
+    const uuid = "3f2a1c0d-4b5e-4a6f-8c7d-9e0f1a2b3c4d";
+
+    // "example.snap-staging-1" is a legal npm name, so it is some other
+    // plugin's own live root — never this build's source.
+    expect(isPluginSourceRoot(liveRoot, join(plugins, "example.snap-staging-1")))
+      .toBe(false);
+    expect(
+      isPluginSourceRoot(liveRoot, join(plugins, `example.snap-staging-${uuid}`)),
+    ).toBe(true);
+    expect(isPluginSourceRoot(liveRoot, join(liveRoot, "snapshot"))).toBe(true);
+    expect(
+      isPluginSourceRoot(liveRoot, join(plugins, `example.staging-${uuid}`)),
+    ).toBe(false);
   });
 
   it("preserves an installed node_modules across a hash-check reconcile that finds no change (fixround Section B item 11)", async () => {
