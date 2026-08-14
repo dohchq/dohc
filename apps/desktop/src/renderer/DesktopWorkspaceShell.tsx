@@ -4630,7 +4630,7 @@ export function DesktopWorkspaceShell(props: {
           visible: wb.sidebarVisible,
           onToggle: () => mutateWb(toggleSidebar),
         }}
-        {...(engineSurfacesExist
+        {...(chatsSurfaceExists
           ? {
               chatsSidebar: {
                 visible: wb.chatsVisible,
@@ -5277,7 +5277,7 @@ export function DesktopWorkspaceShell(props: {
             width={wb.chatsWidth}
             onWidthChange={(width) => mutateWb((state) => setChatsWidth(state, width))}
             onCollapse={() => mutateWb(toggleChats)}
-            tabs={isShareView ? SHARE_VIEW_CHATS_PANEL_TABS : ALL_CHATS_PANEL_TABS}
+            tabs={ALL_CHATS_PANEL_TABS}
             tab={chatsPanelActiveTab}
             onTabChange={setChatsPanelTab}
             actions={
