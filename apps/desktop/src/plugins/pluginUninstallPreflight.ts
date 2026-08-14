@@ -17,6 +17,7 @@ import {
   type PluginSourceDigest,
   type PluginSourceFileDigest,
 } from "./pluginSourceSnapshot";
+import { errorMessage, lexicalCompare } from "./pluginShared";
 
 const BASELINE_MANIFEST_FILE_NAME = "baseline-manifest.json";
 const Sha256Digest = z.string().regex(/^[0-9a-f]{64}$/);
@@ -182,14 +183,6 @@ type BaselineManifestRead =
   | { kind: "ok"; manifest: PluginBaselineManifest }
   | { kind: "missing" }
   | { kind: "invalid"; problem: string };
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function lexicalCompare(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
 
 function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
   return count === 1 ? singular : pluralForm;

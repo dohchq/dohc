@@ -12,13 +12,16 @@ import {
   type PluginActivateParams,
   type PluginInvokeCommandParams,
 } from "./pluginHostProtocol.ts";
-
 const transport = createProcessTransport();
 const client = createDohcClient({ transport });
 const childProcesses = createPluginChildProcessClient(transport);
 const commandRuns = new Map<string, (...args: unknown[]) => unknown>();
 let activeHandler: PluginHandler | null = null;
 
+// Local on purpose, not pluginShared's: this file is a standalone child
+// entry that plain Node also executes directly from source (PluginHost's
+// tests fork it as-is), where an extension-less relative import does not
+// resolve under type stripping.
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

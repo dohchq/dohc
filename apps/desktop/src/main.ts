@@ -553,6 +553,7 @@ import {
   PluginPipeline,
   type PluginPipelineStatusEvent,
 } from "./plugins/PluginPipeline";
+import { createPluginAuthoredTextWriter } from "./plugins/pluginAuthoredWrite";
 import { invokePluginSdkHost } from "./plugins/pluginSdkHost";
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
@@ -791,10 +792,20 @@ function notifyPluginStatusChanged(
   workspaceId: string,
   event: PluginPipelineStatusEvent,
 ): void {
-  const payload = PluginStatusChangedEvent.parse({ workspaceId, ...event });
+  // Emitted from a queueMicrotask with no catch above it, so a payload that
+  // fails the IPC schema is dropped and logged — it must never become an
+  // uncaught main-process exception (#779 round 13 A2).
+  const payload = PluginStatusChangedEvent.safeParse({ workspaceId, ...event });
+  if (!payload.success) {
+    console.error(
+      `[desktop] dropped a plugin status event for ${workspaceId} that ` +
+        `failed the IPC schema: ${payload.error.message}`,
+    );
+    return;
+  }
   for (const win of BrowserWindow.getAllWindows()) {
     if (activeWorkspaceIdBySender.get(win.webContents.id) !== workspaceId) continue;
-    win.webContents.send(CHANNELS.pluginStatusChanged, payload);
+    win.webContents.send(CHANNELS.pluginStatusChanged, payload.data);
   }
 }
 
@@ -2785,35 +2796,16 @@ function invokeWorkspacePluginSdk(input: {
       },
       signal: input.signal,
       invokeChildProcess: input.invokeChildProcess,
-      writeAuthoredText: async (
-        path,
-        text,
-        { overwrite, author },
-      ) => {
-        const { workspace: workspaceForWrite, capture } =
-          await requirePluginEngineCapture(input.workspaceId);
-        assertWritableWorkspace(workspaceForWrite);
-        if (input.signal?.aborted) {
-          throw new Error("Plugin panel is no longer active.");
-        }
-        const absolutePath = join(workspaceForWrite.rootPath, path);
-        await capture.writeAuthoredTextFile(absolutePath, text, author, {
-          createOnly: !overwrite,
-          signal: input.signal,
-        });
-        // This write is door-written (per-operation authored, stamped with
-        // MomentAuthor above) — the plan doc's auto-approve predicate is
-        // attribution through the door, not topology. Tell the owning
-        // plugin's pipeline directly rather than waiting for the watcher to
-        // observe the same write as an unattributed disk change.
-        const ownerId = pluginPipelines.get(input.workspaceId)
-          ?.pluginIdForPath(absolutePath);
-        if (ownerId) {
-          pluginPipelines.get(input.workspaceId)
-            ?.handleDoorWrittenSourceChange(ownerId);
-        }
-        return { path };
-      },
+      writeAuthoredText: createPluginAuthoredTextWriter({
+        signal: input.signal,
+        requireWritableCapture: async () => {
+          const { workspace: workspaceForWrite, capture } =
+            await requirePluginEngineCapture(input.workspaceId);
+          assertWritableWorkspace(workspaceForWrite);
+          return { workspaceRoot: workspaceForWrite.rootPath, capture };
+        },
+        pipeline: () => pluginPipelines.get(input.workspaceId),
+      }),
     },
     input.method,
     input.params,

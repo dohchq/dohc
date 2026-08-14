@@ -9,15 +9,14 @@ import {
 import {
   isAbsolute,
   join,
-  relative,
   resolve,
-  sep,
 } from "node:path";
 import { load } from "js-yaml";
 import {
   NPM_PACKAGE_NAME,
   type DohcPluginManifest,
 } from "./pluginManifestSchema";
+import { errorMessage, isInside, lexicalCompare } from "./pluginShared";
 
 // `prepublish` is deliberately absent. Measured against the pinned
 // pnpm@11.20.0 on 2026-08-14, with `postinstall` as the control in every
@@ -118,27 +117,8 @@ interface PackageManifestRecord {
   scripts: Record<string, unknown> | null;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isInside(parent: string, child: string): boolean {
-  if (child === parent) return true;
-  const pathFromParent = relative(parent, child);
-  return (
-    pathFromParent.length > 0 &&
-    !isAbsolute(pathFromParent) &&
-    pathFromParent !== ".." &&
-    !pathFromParent.startsWith(`..${sep}`)
-  );
-}
-
-function lexicalCompare(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function compareDiagnostics(

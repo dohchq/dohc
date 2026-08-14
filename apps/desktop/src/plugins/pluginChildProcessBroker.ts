@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import {
   PLUGIN_CHILD_PROCESS_METHODS,
   type PluginChildProcessExit,
@@ -9,6 +9,7 @@ import {
   type PluginChildProcessStream,
 } from "@dohc/sdk/node";
 import { killProcessTreePosix } from "../process/posixSpawn";
+import { errorMessage, isInside } from "./pluginShared";
 import { pluginIdToSafePath } from "./pluginSourceSnapshot";
 import { PLUGIN_PROCESS_LOG_LIMIT } from "./pluginHostProtocol";
 
@@ -135,24 +136,6 @@ interface SubscriptionRecord {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function isInside(parent: string, child: string): boolean {
-  if (child === parent) return true;
-  const pathFromParent = relative(parent, child);
-  // The ".." has to be a whole segment. Testing the prefix alone rejected
-  // real contained names — a child under "..cache/" is inside the root
-  // (#779 round 10 B5).
-  return (
-    pathFromParent.length > 0 &&
-    !isAbsolute(pathFromParent) &&
-    pathFromParent !== ".." &&
-    !pathFromParent.startsWith(`..${sep}`)
-  );
 }
 
 function assertRelativePluginPath(value: unknown, label: string): string {
@@ -384,6 +367,20 @@ export class PluginChildProcessBroker {
     if (existing) return existing;
     const teardown = this.disposeSpawnInternal(pluginId, spawnId, key);
     this.spawnTeardowns.set(key, teardown);
+    // The entry exists to join concurrent teardowns of one spawn, not to be
+    // a permanent record: spawn keys are unique per spawn, so keeping every
+    // fulfilled teardown grew the map without bound across plugin restarts
+    // (#779 round 13 A4). The failure paths delete their own entries; only
+    // the entry that IS this settled promise may be removed here, so a
+    // replacement teardown registered after a failure is left alone.
+    teardown.then(
+      () => {
+        if (this.spawnTeardowns.get(key) === teardown) {
+          this.spawnTeardowns.delete(key);
+        }
+      },
+      () => undefined,
+    );
     return teardown;
   }
 

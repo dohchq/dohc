@@ -532,6 +532,36 @@ describe("PluginChildProcessBroker", () => {
     expect(fixture.children.map((child) => child.killCalls)).toEqual([1, 1]);
   });
 
+  it("forgets a fulfilled spawn teardown instead of retaining it across restarts (#779 round 13 A4)", async () => {
+    const fixture = await createFixture();
+    const teardowns = () => (fixture.broker as unknown as {
+      spawnTeardowns: Map<string, Promise<void>>;
+    }).spawnTeardowns;
+
+    // Ten restarts of one plugin: every spawn id is new, so a map that only
+    // ever adds entries grows by one per restart.
+    for (let restart = 0; restart < 10; restart += 1) {
+      const spawnId = `spawn-${restart}`;
+      await spawnChild(fixture, context("plugin-a", spawnId));
+      await fixture.broker.disposeSpawn("plugin-a", spawnId);
+    }
+    expect(teardowns().size).toBe(0);
+  });
+
+  it("still joins a second teardown started while the first drains (#779 round 13 A4)", async () => {
+    const fixture = await createFixture();
+    await spawnChild(fixture, context("plugin-a", "spawn-a"));
+
+    const first = fixture.broker.disposeSpawn("plugin-a", "spawn-a");
+    const second = fixture.broker.disposeSpawn("plugin-a", "spawn-a");
+    await Promise.all([first, second]);
+
+    // One stop for one child: the second call joined the in-flight teardown
+    // rather than tearing the same spawn down twice.
+    expect(fixture.windowsTreeKills).toEqual([10_000]);
+    expect(fixture.children[0]?.killCalls).toBe(1);
+  });
+
   it("tears down every brokered child during PluginHost disposal", async () => {
     const fixture = await createFixture();
     let callbacks:

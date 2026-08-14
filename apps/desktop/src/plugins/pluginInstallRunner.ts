@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { access, realpath } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import { killProcessTreePosix } from "../process/posixSpawn";
 import { killProcessTreeWin32 } from "../process/windowsSpawn";
 import {
@@ -8,6 +8,7 @@ import {
   PLUGIN_INSTALL_TIMEOUT_MS,
   type PluginPnpmPaths,
 } from "./pluginSourceSnapshot";
+import { delay, errorMessage, isInside } from "./pluginShared";
 
 const MAX_LOG_ENTRIES = 500;
 const PLUGIN_INSTALL_SERVICE_NAME = "dohc.plugin.install";
@@ -217,10 +218,6 @@ export interface InstallPluginDependenciesInput {
 
 const installQueues = new Map<string, Promise<void>>();
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function pushLog(
   logs: PluginInstallLogEntry[],
   stream: PluginInstallLogStream,
@@ -290,13 +287,6 @@ function lockfileMismatch(logs: PluginInstallLogEntry[]): boolean {
     /frozen-lockfile[^\n]*(?:out[- ]of[- ]date|not up to date|mismatch)/i.test(output) ||
     /lockfile[^\n]*(?:out[- ]of[- ]date|not up to date|doesn't match)/i.test(output)
   );
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolveDelay) => {
-    const timer = setTimeout(resolveDelay, milliseconds);
-    timer.unref?.();
-  });
 }
 
 /**
@@ -385,17 +375,6 @@ async function inspectLockfile(
       [],
     );
   }
-}
-
-function isInside(parent: string, child: string): boolean {
-  if (child === parent) return true;
-  const pathFromParent = relative(parent, child);
-  return (
-    pathFromParent.length > 0 &&
-    !isAbsolute(pathFromParent) &&
-    pathFromParent !== ".." &&
-    !pathFromParent.startsWith(`..${sep}`)
-  );
 }
 
 /**

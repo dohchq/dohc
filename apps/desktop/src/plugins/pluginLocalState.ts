@@ -11,6 +11,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { formatZodIssues } from "./zodDiagnostics";
+import { errorMessage } from "./pluginShared";
 
 /**
  * The one bound on this file, enforced on both sides: a read refuses a file
@@ -70,10 +71,6 @@ export const DEFAULT_PLUGIN_LOCAL_STATE: PluginLocalState = {
 export type PluginLocalStateResult =
   | { ok: true; state: PluginLocalState }
   | { ok: false; warning: string };
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function unreadableState(path: string, problem: string): PluginLocalStateResult {
   return {

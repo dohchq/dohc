@@ -4,12 +4,10 @@ import {
   mkdir,
   readFile,
   realpath,
-  rename,
-  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import type {
   build as esbuildBuild,
   stop as esbuildStop,
@@ -23,6 +21,14 @@ import {
   type DohcPluginManifest,
 } from "./pluginManifestSchema";
 import {
+  delay,
+  errorMessage,
+  isInside,
+  removeStaging,
+  renameWithWindowsRetry,
+  WINDOWS_RENAME_RETRY_DELAYS_MS,
+} from "./pluginShared";
+import {
   BUILD_PREVIOUS_SUFFIX,
   BUILD_STAGING_SUFFIX,
   isPluginSourceRoot,
@@ -31,7 +37,6 @@ import {
   pluginIdToSafePath,
 } from "./pluginSourceSnapshot";
 
-const WINDOWS_RENAME_RETRY_DELAYS_MS = [100, 150, 200, 250, 300] as const;
 const BUILD_STOP_SETTLE_MS = 250;
 
 export type PluginBuildFailureCode =
@@ -170,21 +175,6 @@ function loadEsbuild(esbuildBinary: string): Promise<{
   return esbuildModule;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function isInside(parent: string, child: string): boolean {
-  if (child === parent) return true;
-  const pathFromParent = relative(parent, child);
-  return (
-    pathFromParent.length > 0 &&
-    !isAbsolute(pathFromParent) &&
-    pathFromParent !== ".." &&
-    !pathFromParent.startsWith(`..${sep}`)
-  );
-}
-
 function isEsbuildFailure(
   error: unknown,
 ): error is Error & { errors: Message[]; warnings: Message[] } {
@@ -197,46 +187,22 @@ function isEsbuildFailure(
   );
 }
 
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
-}
-
-function isWindowsRenameLock(error: unknown): boolean {
-  if (process.platform !== "win32") return false;
-  const code = (error as NodeJS.ErrnoException).code;
-  return code === "EPERM" || code === "EBUSY";
-}
-
-async function renameWithWindowsRetry(
-  source: string,
-  destination: string,
-): Promise<void> {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await rename(source, destination);
-      return;
-    } catch (error) {
-      const retryDelay = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
-      if (!isWindowsRenameLock(error) || retryDelay === undefined) {
-        if (isWindowsRenameLock(error)) {
-          throw new PluginBuildRunnerError(
-            "output-locked",
-            `Plugin build target at ${destination} stayed locked after ` +
-              `${WINDOWS_RENAME_RETRY_DELAYS_MS.length} retries over 1,000 ms. ` +
-              "Stop processes that use this plugin and retry.",
-            destination,
-          );
-        }
-        throw new PluginBuildRunnerError(
-          "output-io",
-          `Plugin build path could not be renamed from ${source} to ` +
-            `${destination}: ${errorMessage(error)}`,
-          destination,
-        );
-      }
-      await delay(retryDelay);
-    }
-  }
+function renameBuildPath(source: string, destination: string): Promise<void> {
+  return renameWithWindowsRetry(source, destination, (error, lockedAfterRetries) =>
+    lockedAfterRetries
+      ? new PluginBuildRunnerError(
+        "output-locked",
+        `Plugin build target at ${destination} stayed locked after ` +
+          `${WINDOWS_RENAME_RETRY_DELAYS_MS.length} retries over 1,000 ms. ` +
+          "Stop processes that use this plugin and retry.",
+        destination,
+      )
+      : new PluginBuildRunnerError(
+        "output-io",
+        `Plugin build path could not be renamed from ${source} to ` +
+          `${destination}: ${errorMessage(error)}`,
+        destination,
+      ));
 }
 
 async function inspectBuildPaths(
@@ -451,15 +417,6 @@ async function buildWithDeadline(
   return outcome;
 }
 
-function removeStaging(stagingRoot: string): Promise<void> {
-  return rm(stagingRoot, {
-    recursive: true,
-    force: true,
-    maxRetries: WINDOWS_RENAME_RETRY_DELAYS_MS.length,
-    retryDelay: 200,
-  });
-}
-
 /**
  * Swaps the staged tree in, the same way pluginSourceSnapshot's
  * replaceSnapshot swaps a snapshot in: move the old directory aside, move the
@@ -477,7 +434,7 @@ async function publishStaging(
   const previousSnapshot = join(previousRoot, "snapshot");
   const stagedSnapshot = join(stagingRoot, "snapshot");
   try {
-    await renameWithWindowsRetry(liveRoot, previousRoot);
+    await renameBuildPath(liveRoot, previousRoot);
   } catch (error) {
     // Nothing moved, so the live root is still whole and the dead staged tree
     // is safe to drop.
@@ -486,15 +443,15 @@ async function publishStaging(
   }
   let snapshotMoved = false;
   try {
-    await renameWithWindowsRetry(previousSnapshot, stagedSnapshot);
+    await renameBuildPath(previousSnapshot, stagedSnapshot);
     snapshotMoved = true;
-    await renameWithWindowsRetry(stagingRoot, liveRoot);
+    await renameBuildPath(stagingRoot, liveRoot);
   } catch (error) {
     try {
       if (snapshotMoved) {
-        await renameWithWindowsRetry(stagedSnapshot, previousSnapshot);
+        await renameBuildPath(stagedSnapshot, previousSnapshot);
       }
-      await renameWithWindowsRetry(previousRoot, liveRoot);
+      await renameBuildPath(previousRoot, liveRoot);
     } catch (rollbackError) {
       // The live root is not whole. Everything stays on disk for recovery.
       throw new PluginBuildRunnerError(

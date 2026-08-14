@@ -24,6 +24,9 @@
 // pnpm had been launched directly.
 import { pathToFileURL } from "node:url";
 
+// Local on purpose, not pluginShared's: this file is a standalone child
+// entry that plain Node can execute directly from source, where an
+// extension-less relative import does not resolve under type stripping.
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

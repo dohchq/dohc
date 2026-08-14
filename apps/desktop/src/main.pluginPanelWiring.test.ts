@@ -80,12 +80,9 @@ describe("plugin panel main-process wiring", () => {
     expect(invoke).toContain("const liveSpawnId = host?.getSpawnId(input.pluginId);");
     expect(invoke).toContain("liveSpawnId,");
     expect(router).toContain("return invokePluginSdkHost(");
-    expect(router).toContain(
-      "await capture.writeAuthoredTextFile(absolutePath, text, author, {",
-    );
   });
 
-  it("routes a plugin's own door-written source write into its pipeline (A5)", () => {
+  it("wires the production authored-text writer with this invocation's own signal and pipeline (CERT779L D1)", () => {
     const routerStart = mainSource.indexOf("function invokeWorkspacePluginSdk");
     const routerEnd = mainSource.indexOf(
       "\n}\n\nfunction registeredPlugin",
@@ -93,26 +90,33 @@ describe("plugin panel main-process wiring", () => {
     );
     expect(routerEnd).toBeGreaterThan(-1);
     const router = mainSource.slice(routerStart, routerEnd);
-    const writeAt = router.indexOf(
-      "await capture.writeAuthoredTextFile(absolutePath, text, author, {",
+    const writerAt = router.indexOf(
+      "writeAuthoredText: createPluginAuthoredTextWriter({",
     );
-    const ownerAt = router.indexOf(
-      "?.pluginIdForPath(absolutePath);",
-      writeAt,
+    const signalAt = router.indexOf("signal: input.signal,", writerAt);
+    const captureAt = router.indexOf(
+      "await requirePluginEngineCapture(input.workspaceId);",
+      writerAt,
     );
-    const notifyAt = router.indexOf(
-      "?.handleDoorWrittenSourceChange(ownerId);",
-      ownerAt,
+    const writableAt = router.indexOf(
+      "assertWritableWorkspace(workspaceForWrite);",
+      writerAt,
+    );
+    const pipelineAt = router.indexOf(
+      "pipeline: () => pluginPipelines.get(input.workspaceId),",
+      writerAt,
     );
 
-    // A door-attributed write (files.write, stamped with MomentAuthor above)
-    // must tell the owning plugin's pipeline directly — the plan doc's
-    // auto-approve predicate is attribution through the door, not topology —
-    // rather than only reaching the pipeline as an unattributed watcher
-    // event, which never auto-approves.
-    expect(writeAt).toBeGreaterThan(-1);
-    expect(ownerAt).toBeGreaterThan(writeAt);
-    expect(notifyAt).toBeGreaterThan(ownerAt);
+    // What the writer does with these — the aborted precheck, the signal
+    // handed to the capture's write, and the door-write notification into the
+    // owning plugin's pipeline — is pinned by behavior in
+    // pluginAuthoredWrite.test.ts. This asserts only that main.ts hands the
+    // factory this invocation's real signal, capture, and pipeline.
+    expect(writerAt).toBeGreaterThan(-1);
+    expect(signalAt).toBeGreaterThan(writerAt);
+    expect(captureAt).toBeGreaterThan(writerAt);
+    expect(writableAt).toBeGreaterThan(captureAt);
+    expect(pipelineAt).toBeGreaterThan(writerAt);
   });
 
   it("uses utilityProcess and tears plugin hosts down with their owners", () => {

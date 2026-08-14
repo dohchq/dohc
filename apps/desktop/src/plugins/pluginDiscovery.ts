@@ -8,6 +8,7 @@ import {
 } from "./pluginManifest";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
 import { EXCLUDED_SOURCE_NAMES } from "./pluginSourceSnapshot";
+import { errorMessage, lexicalCompare } from "./pluginShared";
 
 type PluginRootKind = "directory" | "symlink" | "invalid";
 
@@ -34,10 +35,6 @@ export interface InstalledPluginRecord {
 // carry an id that ListPluginsResult.parse rejects — taking the whole list
 // down with it, including the diagnostics needed to find the directory.
 const PLUGIN_ID_MAX_LENGTH = 214;
-
-function lexicalCompare(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
 
 function recordFromCandidate(candidate: PluginDiscoveryCandidate): InstalledPluginRecord {
   const manifest = candidate.manifestResult?.ok
@@ -136,10 +133,6 @@ async function findNestedManifestPaths(
     }
   }
   return nested;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 async function inspectCandidate(

@@ -8,10 +8,9 @@ import {
   readFile,
   readdir,
   realpath,
-  rename,
   rm,
 } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { load } from "js-yaml";
 import {
@@ -19,6 +18,14 @@ import {
   type DohcPluginManifest,
 } from "./pluginManifestSchema";
 import { workspaceStateKey } from "./pluginLocalState";
+import {
+  errorMessage,
+  isInside,
+  lexicalCompare,
+  removeStaging,
+  renameWithWindowsRetry,
+  WINDOWS_RENAME_RETRY_DELAYS_MS,
+} from "./pluginShared";
 
 // CodeRabbit #779 R25: a byte bound before JSON.parse/js-yaml load, so an
 // oversized plugin-authored package.json/pnpm-lock.yaml fails with a named
@@ -121,7 +128,6 @@ export const REJECTED_PACKAGE_MANAGER_CONFIG_NAMES = new Set([
   ".pnpmfile.mjs",
   "pnpm-workspace.yaml",
 ]);
-const WINDOWS_RENAME_RETRY_DELAYS_MS = [100, 150, 200, 250, 300] as const;
 const READ_NO_FOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 
 type LocalDependencyProtocol = "file:" | "link:" | "workspace:";
@@ -250,27 +256,8 @@ class SnapshotError extends Error {
   }
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isInside(parent: string, child: string): boolean {
-  if (child === parent) return true;
-  const pathFromParent = relative(parent, child);
-  return (
-    pathFromParent.length > 0 &&
-    !isAbsolute(pathFromParent) &&
-    pathFromParent !== ".." &&
-    !pathFromParent.startsWith(`..${sep}`)
-  );
-}
-
-function lexicalCompare(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function localDependencyProtocol(spec: string): LocalDependencyProtocol | null {
@@ -938,50 +925,17 @@ export async function hashPluginSourceFiles(
   };
 }
 
-function isWindowsRenameLock(error: unknown): boolean {
-  if (process.platform !== "win32") return false;
-  const code = (error as NodeJS.ErrnoException).code;
-  return code === "EPERM" || code === "EBUSY";
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
-}
-
-async function renameWithWindowsRetry(
-  source: string,
-  destination: string,
-): Promise<void> {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await rename(source, destination);
-      return;
-    } catch (error) {
-      const retryDelay = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
-      if (!isWindowsRenameLock(error) || retryDelay === undefined) {
-        if (isWindowsRenameLock(error)) {
-          throw new SnapshotError(
-            "snapshot-locked",
-            `Plugin snapshot target at ${destination} stayed locked after ` +
-              `${WINDOWS_RENAME_RETRY_DELAYS_MS.length} retries over 1,000 ms. ` +
-              "Close processes that use this plugin and retry.",
-            destination,
-          );
-        }
-        throw error;
-      }
-      await delay(retryDelay);
-    }
-  }
-}
-
-function removeStaging(stagingRoot: string): Promise<void> {
-  return rm(stagingRoot, {
-    recursive: true,
-    force: true,
-    maxRetries: WINDOWS_RENAME_RETRY_DELAYS_MS.length,
-    retryDelay: 200,
-  });
+function renameSnapshotPath(source: string, destination: string): Promise<void> {
+  return renameWithWindowsRetry(source, destination, (error, lockedAfterRetries) =>
+    lockedAfterRetries
+      ? new SnapshotError(
+        "snapshot-locked",
+        `Plugin snapshot target at ${destination} stayed locked after ` +
+          `${WINDOWS_RENAME_RETRY_DELAYS_MS.length} retries over 1,000 ms. ` +
+          "Close processes that use this plugin and retry.",
+        destination,
+      )
+      : error);
 }
 
 /**
@@ -1042,14 +996,14 @@ async function replaceSnapshot(
   const previousRoot = `${snapshotRoot}.previous-${randomUUID()}`;
   let movedPrevious = false;
   if (snapshotStats) {
-    await renameWithWindowsRetry(snapshotRoot, previousRoot);
+    await renameSnapshotPath(snapshotRoot, previousRoot);
     movedPrevious = true;
   }
   try {
-    await renameWithWindowsRetry(stagingRoot, snapshotRoot);
+    await renameSnapshotPath(stagingRoot, snapshotRoot);
   } catch (error) {
     if (movedPrevious) {
-      await renameWithWindowsRetry(previousRoot, snapshotRoot).catch((restoreError) => {
+      await renameSnapshotPath(previousRoot, snapshotRoot).catch((restoreError) => {
         throw new SnapshotError(
           "snapshot-io",
           `Plugin snapshot replacement failed and the previous snapshot at ` +

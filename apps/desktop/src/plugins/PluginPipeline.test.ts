@@ -15,13 +15,20 @@ import {
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stop } from "esbuild";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  PluginStatusChangedEvent,
+  PluginStatusRecord,
+} from "../ipc/bridgeContract";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
-import { discoverInstalledPlugins } from "./pluginDiscovery";
-import { PluginPipeline } from "./PluginPipeline";
+import {
+  discoverInstalledPlugins,
+  type InstalledPluginRecord,
+} from "./pluginDiscovery";
+import { PluginPipeline, type PluginPipelineStatusEvent } from "./PluginPipeline";
 import {
   installPluginDependencies,
   type PluginInstallForkOptions,
@@ -2709,6 +2716,573 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
+  it("holds a change that lands between reconcile's verify pass and the build's own snapshot (#779 round 13 A1)", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const newHost = () =>
+      new PluginHost({
+        stateDir: fixture.stateDir,
+        workspaceRoot: fixture.workspaceRoot,
+        spawnTransport: fakeSpawnTransport(),
+        routeSdkRequest: async () => ({}),
+        onStatusChange: (pluginId, status) => {
+          pipeline.noteRuntimeStatus(pluginId, status);
+        },
+      });
+
+    // Session 1: a normal install records the approval.
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: newHost(),
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+    } finally {
+      await pipeline.dispose();
+    }
+    const approvedState = await readPluginLocalState(
+      fixture.stateDir,
+      fixture.workspaceRoot,
+    );
+    if (!approvedState.ok) throw new Error(approvedState.warning);
+    const approvedHash = approvedState.state.plugins["example-plugin"]?.approvedHash;
+    expect(approvedHash).toEqual(expect.any(String));
+
+    // Session 2: the startup reconcile verifies the approved source
+    // (snapshot 1) and then rebuilds it (snapshot 2). The interloper lands
+    // exactly between the two.
+    let snapshotCalls = 0;
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: newHost(),
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        snapshot: async (input) => {
+          snapshotCalls += 1;
+          if (snapshotCalls === 2) {
+            await writeFile(fixture.entryPath, [
+              'export const marker = "window-interloper";',
+              "export default { activate() {} };",
+              "",
+            ].join("\n"));
+          }
+          return snapshotPluginSource(input);
+        },
+      },
+    });
+    try {
+      await pipeline.start();
+      await waitFor(
+        () => pipeline.list()[0]?.status === "disabled-pending-approval",
+        "The change inside reconcile's build window was not held for approval.",
+      );
+      // The interloper was neither recorded as approved nor executed.
+      const state = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      if (!state.ok) throw new Error(state.warning);
+      expect(state.state.plugins["example-plugin"]?.approvedHash).toBe(approvedHash);
+      expect(await readFile(liveBundlePath(fixture, "example-plugin"), "utf8"))
+        .not.toContain("window-interloper");
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 120_000);
+
+  it("holds a change that lands between enable's verify pass and the rebuild's own snapshot (#779 round 13 A1)", async () => {
+    const fixture = await createPluginWorkspace();
+    let armed = false;
+    let armedSnapshots = 0;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        snapshot: async (input) => {
+          if (armed) {
+            armedSnapshots += 1;
+            // Call 1 is enable's verify pass; call 2 is the rebuild's own
+            // snapshot. The interloper lands exactly between.
+            if (armedSnapshots === 2) {
+              await writeFile(fixture.entryPath, [
+                'export const marker = "window-interloper";',
+                "export default { activate() {} };",
+                "",
+              ].join("\n"));
+            }
+          }
+          return snapshotPluginSource(input);
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      const approvedState = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      if (!approvedState.ok) throw new Error(approvedState.warning);
+      const approvedHash =
+        approvedState.state.plugins["example-plugin"]?.approvedHash;
+
+      const disabledResult = await pipeline.disable("example-plugin");
+      expect(disabledResult.ok).toBe(true);
+      // The built bundle is tampered while the plugin is off, so enable's
+      // bundle check fails and it has to rebuild from the verified source.
+      await writeFile(
+        liveBundlePath(fixture, "example-plugin"),
+        "globalThis.tampered = true;\n",
+      );
+
+      armed = true;
+      const enabled = await pipeline.enable("example-plugin");
+      expect(enabled.ok).toBe(true);
+      expect(pipeline.list()[0]).toMatchObject({
+        status: "disabled-pending-approval",
+        disabledReason: "approval",
+      });
+      // The interloper was neither recorded as approved nor built.
+      const state = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      if (!state.ok) throw new Error(state.warning);
+      expect(state.state.plugins["example-plugin"]?.approvedHash).toBe(approvedHash);
+      expect(await readFile(liveBundlePath(fixture, "example-plugin"), "utf8"))
+        .toBe("globalThis.tampered = true;\n");
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 120_000);
+
+  it("bounds a noisy candidate's diagnostics so the plugin list and its status events stay inside the IPC schema (#779 round 13 A2)", async () => {
+    const fixture = await createPluginWorkspace();
+    const noisy: InstalledPluginRecord = {
+      id: "noisy-plugin",
+      directoryName: "noisy-plugin",
+      rootPath: join(fixture.workspaceRoot, "plugins", "noisy-plugin"),
+      manifest: null,
+      valid: false,
+      diagnostics: Array.from(
+        { length: 400 },
+        (_, index) => `manifest problem ${index}: ${"x".repeat(40)}`,
+      ),
+    };
+    // An installed record for the noisy candidate, so its seeded status —
+    // the payload the status emit crosses IPC with — carries the error too.
+    await mutatePluginRecord(
+      fixture.stateDir,
+      fixture.workspaceRoot,
+      "noisy-plugin",
+      () => ({
+        disabled: false,
+        approvedHash: "ab".repeat(32),
+        installedBaselineHash: "ab".repeat(32),
+        directoryName: "noisy-plugin",
+      }),
+    );
+    const events: PluginPipelineStatusEvent[] = [];
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      onStatusChange: (event) => events.push(event),
+      operations: {
+        discover: async () => [noisy],
+      },
+    });
+
+    try {
+      await pipeline.start();
+      // Status events emit through queueMicrotask; let them drain.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      const row = pipeline.list().find((entry) => entry.id === "noisy-plugin");
+      expect(row?.error?.message).toContain("diagnostics elided");
+      // The production oracle: the bridge schema every listed record and
+      // every status event must pass to cross IPC at all.
+      const parsedRow = PluginStatusRecord.safeParse(row);
+      expect(parsedRow.success, parsedRow.error?.message).toBe(true);
+      expect(events.length).toBeGreaterThan(0);
+      for (const event of events) {
+        const parsed = PluginStatusChangedEvent.safeParse({
+          workspaceId: "workspace-a",
+          ...event,
+        });
+        expect(parsed.success, parsed.error?.message).toBe(true);
+      }
+    } finally {
+      await pipeline.dispose();
+    }
+  });
+
+  it("compares the newest door write's hash when a second write lands while the refresh is queued (#779 round 13 A3)", async () => {
+    const fixture = await createPluginWorkspace();
+    const installGate = deferred();
+    let installCalls = 0;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: async (input) => {
+          installCalls += 1;
+          // approve()'s install call blocks, occupying this plugin's job
+          // queue so both door writes land while the refresh is queued.
+          if (installCalls === 2) await installGate.promise;
+          return installPluginDependencies({ ...input, forkProcess: nodeForkProcess });
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      const originalHash = pipeline.list()[0]?.approvedHash;
+
+      const approvePromise = pipeline.approve("example-plugin");
+      await waitFor(() => installCalls === 2, "approve() never reached the gated install.");
+
+      // A routine multi-file agent edit: two door writes in quick
+      // succession. The dedup drops the second notification's queue entry,
+      // and the surviving refresh must still compare the hash of the tree
+      // that contains BOTH writes.
+      await writeFile(fixture.entryPath, [
+        'export const marker = "door-one";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      pipeline.handleDoorWrittenSourceChange("example-plugin");
+      // Let the first door-write hash capture finish reading the file
+      // before the second write replaces it (same reasoning as the round-3
+      // finding-1 test above).
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      await writeFile(fixture.entryPath, [
+        'export const marker = "door-two";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      pipeline.handleDoorWrittenSourceChange("example-plugin");
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+      installGate.resolve();
+      const approved = await approvePromise;
+      expect(approved.ok).toBe(true);
+
+      // Every byte arrived through the door, so the single surviving
+      // refresh auto-approves the combined tree and the plugin runs.
+      await waitFor(
+        () => {
+          const row = pipeline.list()[0];
+          return row?.status === "ready" && row.approvedHash !== originalHash;
+        },
+        "The combined door-written tree was not auto-approved.",
+        60_000,
+      );
+      expect(pipeline.list()[0]?.disabledReason).toBeNull();
+      expect(await readFile(liveBundlePath(fixture, "example-plugin"), "utf8"))
+        .toContain("door-two");
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 180_000);
+
+  it("brings a plugin back from an approval hold without a user-disable label once its door writes settle (#779 round 13 A3)", async () => {
+    const fixture = await createPluginWorkspace();
+    const installGate = deferred();
+    let installCalls = 0;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: async (input) => {
+          installCalls += 1;
+          if (installCalls === 2) await installGate.promise;
+          return installPluginDependencies({ ...input, forkProcess: nodeForkProcess });
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      // First: a door write raced by a disk-only interloper, so the refresh
+      // holds for approval (the round-3 finding-1 behavior).
+      const approvePromise = pipeline.approve("example-plugin");
+      await waitFor(() => installCalls === 2, "approve() never reached the gated install.");
+      await writeFile(fixture.entryPath, [
+        'export const marker = "door-held";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      pipeline.handleDoorWrittenSourceChange("example-plugin");
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      await writeFile(fixture.entryPath, [
+        'export const marker = "disk-only-interloper";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      installGate.resolve();
+      const approved = await approvePromise;
+      expect(approved.ok).toBe(true);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "disabled-pending-approval",
+        "The interloper was not held for approval.",
+        60_000,
+      );
+      expect(pipeline.list()[0]?.disabledReason).toBe("approval");
+
+      // Then: the agent's next door write matches the live tree exactly.
+      // The hold's disabled bit came from the approval path, not the user,
+      // so the plugin must come back running — not stay stopped under a
+      // "user" label the user never chose.
+      await writeFile(fixture.entryPath, [
+        'export const marker = "door-fixed";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      pipeline.handleDoorWrittenSourceChange("example-plugin");
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        `The settled door write did not bring the plugin back; status is ` +
+          `"${pipeline.list()[0]?.status}" ` +
+          `(disabledReason "${pipeline.list()[0]?.disabledReason}").`,
+        60_000,
+      );
+      expect(pipeline.list()[0]?.disabledReason).toBeNull();
+      const state = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      if (!state.ok) throw new Error(state.warning);
+      expect(state.state.plugins["example-plugin"]?.disabled).toBe(false);
+      expect(await readFile(liveBundlePath(fixture, "example-plugin"), "utf8"))
+        .toContain("door-fixed");
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 180_000);
+
+  it("reconciles a scoped plugin in a differently named directory when its manifest returns (#779 round 13 D2)", async () => {
+    const fixture = await createNamedPluginWorkspace("foo", "@scope/bar");
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("@scope/bar");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      const manifestPath = join(fixture.pluginRoot, "dohc-plugin.json");
+      const manifestText = await readFile(manifestPath, "utf8");
+
+      await writeFile(manifestPath, "{ half written\n");
+      pipeline.handleWatcherEvents([{
+        path: "plugins/foo/dohc-plugin.json",
+        operation: "update",
+      }]);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "invalid",
+        "The broken manifest never landed as an invalid row.",
+      );
+
+      // While the manifest was broken, discovery knew this root only by its
+      // fallback id "foo" — not "@scope/bar". Restoring the manifest has to
+      // reconcile through the root the two identities share, or the plugin
+      // never returns to running.
+      await writeFile(manifestPath, manifestText);
+      pipeline.handleWatcherEvents([{
+        path: "plugins/foo/dohc-plugin.json",
+        operation: "update",
+      }]);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "The restored manifest did not return the scoped plugin to ready.",
+        60_000,
+      );
+      expect(pipeline.list()[0]).toMatchObject({
+        id: "@scope/bar",
+        directoryName: "foo",
+        valid: true,
+      });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 120_000);
+
+  it("refuses uninstall preflight when the source root cannot be inspected (#779 round 13 D3)", async () => {
+    const fixture = await createPluginWorkspace();
+    let epermArmed = false;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        inspectPath: (async (path: string | Buffer | URL) => {
+          // A locked plugin root on Windows: lstat fails with EPERM, which
+          // is not "the tree is gone".
+          if (epermArmed && resolve(String(path)) === resolve(fixture.pluginRoot)) {
+            const error = new Error(
+              "EPERM: operation not permitted, lstat",
+            ) as NodeJS.ErrnoException;
+            error.code = "EPERM";
+            throw error;
+          }
+          return lstat(path);
+        }) as typeof lstat,
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      epermArmed = true;
+      const preflight = await pipeline.uninstallPreflight("example-plugin");
+      expect(preflight.ok).toBe(false);
+      if (preflight.ok) throw new Error("unreachable");
+      expect(preflight.error.message).toContain("could not be inspected");
+      // Nothing was decided, so nothing was dropped: the record, the source
+      // tree, and the plugin data are all still there.
+      const state = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      if (!state.ok) throw new Error(state.warning);
+      expect(state.state.plugins["example-plugin"]?.approvedHash).toEqual(
+        expect.any(String),
+      );
+      await expect(lstat(fixture.pluginRoot)).resolves.toBeDefined();
+
+      // Once the root is inspectable again, the same uninstall proceeds.
+      epermArmed = false;
+      const retry = await pipeline.uninstallPreflight("example-plugin");
+      expect(retry.ok).toBe(true);
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 120_000);
+
   it("stops the old runtime before it publishes, and refuses a bundle swapped after publication (#779 round 12 A3)", async () => {
     const fixture = await createPluginWorkspace();
     let tamperOnPublish = false;
@@ -2737,6 +3311,20 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        snapshot: async (input) => {
+          const snapshot = await snapshotPluginSource(input);
+          if (!snapshot.ok) return snapshot;
+          return {
+            ...snapshot,
+            publish: async () => {
+              // The live source tree is as reachable by a running plugin as
+              // the bundle is, so the stop has to precede THIS publish too,
+              // not just the bundle's (#779 round 13 D4).
+              order.push("snapshot-publish");
+              return snapshot.publish();
+            },
+          };
+        },
         build: async (input) => {
           const built = await buildPluginBundle(input);
           if (!built.ok) return built;
@@ -2778,8 +3366,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       tamperOnPublish = true;
       const rebuilt = await pipeline.install("example-plugin");
 
-      // Nothing may run out of the live root while it is being replaced.
-      expect(order).toEqual(["stop", "publish"]);
+      // Nothing may run out of the live root while it is being replaced:
+      // the stop precedes BOTH publishes (#779 round 13 D4 — recording only
+      // the bundle publish let the stop slide between the two).
+      expect(order).toEqual(["stop", "snapshot-publish", "publish"]);
       // The published bytes are not the bytes the record just approved, so
       // the start is refused and they never execute.
       expect(rebuilt.ok).toBe(false);

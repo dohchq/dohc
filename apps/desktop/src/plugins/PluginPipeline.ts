@@ -37,6 +37,7 @@ import {
   writePluginBaselineManifest,
   type PluginUninstallPreflightSummary,
 } from "./pluginUninstallPreflight";
+import { errorMessage } from "./pluginShared";
 
 export { PLUGIN_PIPELINE_ERROR_STAGES, PLUGIN_PIPELINE_STATUSES };
 
@@ -163,12 +164,14 @@ interface FullBuildOptions {
   /**
    * The source hash this build is allowed to approve. A caller that already
    * decided this content is approvable — the door write, which compared the
-   * tree it wrote against the tree on disk — passes what it compared. The
+   * tree it wrote against the tree on disk, or a verify pass that confirmed
+   * the tree still matches its approved hash — passes what it verified. The
    * build takes its own fresh snapshot, so without this an out-of-band change
-   * landing between that comparison and the snapshot rode the door write
-   * straight to auto-approval (#779 round 9 B2, the second window of the same
-   * shape as round 3 finding 1). Callers with no such expectation (install,
-   * approve, reconcile) leave it unset and approve whatever they snapshot.
+   * landing between that verification and the snapshot rode the caller's
+   * decision straight to auto-approval (#779 round 9 B2 on the door path,
+   * round 13 A1 on the reconcile/start paths). Only install and approve —
+   * whose entire point is a user gesture approving whatever is on disk right
+   * now — leave it unset and approve what they snapshot.
    */
   expectedHash?: string;
 }
@@ -194,10 +197,6 @@ const DEFAULT_OPERATIONS: PluginPipelineOperations = {
   inspectPath: lstat,
   readFile,
 };
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function pipelineError(
   stage: PluginPipelineErrorStage,
@@ -253,12 +252,35 @@ function notDiscoveredError(pluginId: string): PluginPipelineError {
   );
 }
 
+/**
+ * The bridge contract caps PluginPipelineError.message at 10,000 characters
+ * (min 1), and a noisy plugin directory can produce arbitrarily many
+ * discovery diagnostics. An unbounded join here made the whole plugin list —
+ * and every status event for the candidate — fail schema parsing over one
+ * bad directory (#779 round 13 A2), so the join stops under this budget and
+ * names what it elided.
+ */
+const INVALID_PLUGIN_MESSAGE_MAX_CHARS = 8_000;
+
 function invalidPluginError(
   candidate: InstalledPluginRecord,
 ): PluginPipelineError | null {
-  return candidate.diagnostics.length > 0
-    ? pipelineError("discovery", "invalid-plugin", candidate.diagnostics.join(" "))
-    : null;
+  if (candidate.diagnostics.length === 0) return null;
+  const included: string[] = [];
+  let length = 0;
+  for (const diagnostic of candidate.diagnostics) {
+    if (length + diagnostic.length > INVALID_PLUGIN_MESSAGE_MAX_CHARS) break;
+    included.push(diagnostic);
+    length += diagnostic.length + 1;
+  }
+  const elided = candidate.diagnostics.length - included.length;
+  if (elided > 0) {
+    included.push(
+      `[${elided} of ${candidate.diagnostics.length} diagnostics elided; ` +
+        `this message is capped at ${INVALID_PLUGIN_MESSAGE_MAX_CHARS} characters.]`,
+    );
+  }
+  return pipelineError("discovery", "invalid-plugin", included.join(" "));
 }
 
 function generatedManifest(manifest: DohcPluginManifest): DohcPluginManifest {
@@ -290,6 +312,8 @@ export class PluginPipeline {
   private readonly statuses = new Map<string, PluginPipelinePluginStatus>();
   private readonly queues = new Map<string, PluginJobQueue>();
   private readonly uninstallConfirmations = new Map<string, UninstallConfirmation>();
+  /** The newest door write's tree hash per plugin — see handleDoorWrittenSourceChange. */
+  private readonly doorWrittenHashes = new Map<string, Promise<string | null>>();
   private discovery: InstalledPluginRecord[] = [];
   private discoveryTail: Promise<void> = Promise.resolve();
   private startPromise: Promise<void> | null = null;
@@ -439,18 +463,10 @@ export class PluginPipeline {
           ),
         );
       }
-
-      const verified = await this.verifyApprovedSource(candidate, state.approvedHash);
-      if (verified.kind === "failed") return verified.result;
-      if (verified.kind === "changed") {
-        return this.holdForApproval(candidate, verified.sourceHash);
-      }
-
-      const current = this.statuses.get(pluginId);
-      return this.startVerified(candidate, state, {
+      return this.startFromApprovedSource(candidate, state, state.approvedHash, {
         clearDisabled: true,
-        resetCrashAccounting: current?.disabledReason === "crash-loop",
-        freshInstall: false,
+        resetCrashAccounting:
+          this.statuses.get(pluginId)?.disabledReason === "crash-loop",
         runtimeErrorCode: "enable-failed",
       });
     });
@@ -512,17 +528,9 @@ export class PluginPipeline {
         freshInstall: true,
       });
     }
-
-    const verified = await this.verifyApprovedSource(candidate, state.approvedHash);
-    if (verified.kind === "failed") return verified.result;
-    if (verified.kind === "changed") {
-      return this.holdForApproval(candidate, verified.sourceHash);
-    }
-
-    return this.startVerified(candidate, state, {
+    return this.startFromApprovedSource(candidate, state, state.approvedHash, {
       clearDisabled: false,
       resetCrashAccounting: false,
-      freshInstall: false,
       runtimeErrorCode: "start-failed",
     });
   }
@@ -556,10 +564,17 @@ export class PluginPipeline {
     // the live tree once it actually runs and holds for approval instead
     // of building if the two disagree, so that interloping change can
     // never ride the door write's auto-approval (#779 round 3 finding 1,
-    // security-grade).
-    const doorWrittenHash = hashPluginSourceFiles(candidate.rootPath)
-      .then((digest) => digest.sourceHash)
-      .catch(() => null);
+    // security-grade). Keyed per plugin, not captured in the job's closure:
+    // enqueueSourceRefresh drops this notification when a refresh is
+    // already queued, and the surviving job must compare the NEWEST door
+    // write's hash — a stale first-write hash read a combined multi-write
+    // tree as an interloper (#779 round 13 A3).
+    this.doorWrittenHashes.set(
+      pluginId,
+      hashPluginSourceFiles(candidate.rootPath)
+        .then((digest) => digest.sourceHash)
+        .catch(() => null),
+    );
 
     this.enqueueSourceRefresh(pluginId, async () => {
       const freshCandidate = this.validCandidate(pluginId);
@@ -569,9 +584,17 @@ export class PluginPipeline {
         this.setStatus(freshCandidate, { status: "discovered" });
         return;
       }
-      const disabled = state.disabled === true;
+      // A disabled record only stays stopped when the user chose that. A
+      // hold created by the approval path also writes disabled: true, and a
+      // door write whose bytes all arrived through the door satisfies that
+      // hold — reading it as the user's own disable kept the plugin stopped
+      // under a "user" label the user never chose (#779 round 13 A3).
+      const priorDisabledReason = state.disabled === true
+        ? this.statuses.get(pluginId)?.disabledReason ?? "user"
+        : undefined;
+      const disabled = priorDisabledReason === "user";
       const [expectedHash, liveDigest] = await Promise.all([
-        doorWrittenHash,
+        this.doorWrittenHashes.get(pluginId) ?? null,
         hashPluginSourceFiles(freshCandidate.rootPath).catch(() => null),
       ]);
       if (
@@ -579,9 +602,6 @@ export class PluginPipeline {
         liveDigest === null ||
         liveDigest.sourceHash !== expectedHash
       ) {
-        const priorDisabledReason = disabled
-          ? this.statuses.get(pluginId)?.disabledReason ?? "user"
-          : undefined;
         await this.holdForApproval(
           freshCandidate,
           liveDigest?.sourceHash ?? state.approvedHash,
@@ -813,6 +833,7 @@ export class PluginPipeline {
           () => undefined,
         );
         this.statuses.delete(pluginId);
+        this.doorWrittenHashes.delete(pluginId);
         // One directory is one discovery entry, so the deleted root — not the
         // id, which an invalid candidate does not share with its record — is
         // what identifies the entry that just went away.
@@ -1156,6 +1177,11 @@ export class PluginPipeline {
       disabledReasonAfterBuild: null,
       resetCrashAccounting: true,
       freshInstall: false,
+      // Bound to the hash verifyApprovedSource just confirmed: the build's
+      // own snapshot is two full tree copies later, and an out-of-band write
+      // landing in between must hold for approval, not ride this reconcile
+      // to auto-approval (#779 round 13 A1).
+      expectedHash: record.approvedHash,
     });
   }
 
@@ -1170,6 +1196,7 @@ export class PluginPipeline {
       );
       await this.removePluginData(candidate.id);
       this.statuses.delete(candidate.id);
+      this.doorWrittenHashes.delete(candidate.id);
       this.uninstallConfirmations.delete(candidate.id);
       this.emit({ kind: "removed", pluginId: candidate.id });
     } catch (error) {
@@ -1657,12 +1684,26 @@ export class PluginPipeline {
     throw new PipelineFailure(notDiscoveredError(pluginId));
   }
 
+  /**
+   * Only ENOENT means the source tree is gone. Any other inspection error —
+   * a Windows EPERM or EBUSY on a locked root — used to read as "nothing
+   * left to delete", and the confirmed uninstall then dropped the record and
+   * plugin data while the source tree survived: a half-uninstall that
+   * re-discovered as a fresh install (#779 round 13 D3). The preflight
+   * refuses instead.
+   */
   private async sourceRootPresent(pluginRoot: string): Promise<boolean> {
     try {
       await this.operations.inspectPath(pluginRoot);
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw new PipelineFailure(pipelineError(
+        "uninstall",
+        "preflight-failed",
+        `Plugin source at ${pluginRoot} could not be inspected, so uninstall ` +
+          `cannot know what it would delete: ${errorMessage(error)}`,
+      ));
     }
   }
 
@@ -1704,6 +1745,7 @@ export class PluginPipeline {
         () => undefined,
       );
       this.statuses.delete(pluginId);
+      this.doorWrittenHashes.delete(pluginId);
       this.emit({ kind: "removed", pluginId });
       return {
         ok: true,
@@ -1801,33 +1843,45 @@ export class PluginPipeline {
   }
 
   /**
-   * The shared tail of enable() and ensureStarted(): the candidate's source
-   * hash already matches its approvedHash, so the only remaining question is
-   * whether the already-built bundle.mjs on disk can still be trusted to run
-   * as-is. When it can, this starts the host directly; when it can't (never
-   * built, or tampered since — CERT779), this rebuilds from the still-
-   * approved source rather than starting whatever bytes are on disk.
+   * The one verified-source ladder behind enable() and ensureStarted():
+   * verify the live tree still hashes to the approved value, hold for
+   * approval when it doesn't, then ask whether the already-built bundle.mjs
+   * on disk can still be trusted to run as-is. When it can, this starts the
+   * host directly; when it can't (never built, or tampered since — CERT779),
+   * this rebuilds from the just-verified source rather than starting
+   * whatever bytes are on disk.
    */
-  private async startVerified(
+  private async startFromApprovedSource(
     candidate: InstalledPluginRecord & { manifest: DohcPluginManifest },
     state: PluginRecordShape,
+    approvedHash: string,
     options: {
       clearDisabled: boolean;
       resetCrashAccounting: boolean;
-      freshInstall: boolean;
       runtimeErrorCode: string;
     },
   ): Promise<PluginPipelineActionResult> {
+    const verified = await this.verifyApprovedSource(candidate, approvedHash);
+    if (verified.kind === "failed") return verified.result;
+    if (verified.kind === "changed") {
+      return this.holdForApproval(candidate, verified.sourceHash);
+    }
+
     const pluginId = candidate.id;
     const liveRoot = this.liveRoot(pluginId);
-    const verified = await this.verifiedLiveBundle(liveRoot, state.approvedBundleHash);
-    if (!verified) {
+    if (!await this.verifiedLiveBundle(liveRoot, state.approvedBundleHash)) {
       return this.runFullBuild({
         candidate,
         startRuntime: true,
         disabledReasonAfterBuild: null,
         resetCrashAccounting: options.resetCrashAccounting,
-        freshInstall: options.freshInstall,
+        freshInstall: false,
+        // The build snapshots the tree again, two full tree copies after the
+        // verify pass above. Binding it to the hash that pass verified is
+        // what keeps an out-of-band write landing in that window from being
+        // auto-approved (#779 round 13 A1 — the same window round 9 B2
+        // closed on the door-write path).
+        expectedHash: approvedHash,
       });
     }
 
