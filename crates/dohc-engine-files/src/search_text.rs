@@ -39,10 +39,14 @@ pub fn extract_search_text<'a>(path: &str, body: &'a str) -> Cow<'a, str> {
 }
 
 fn is_excalidraw_path(path: &str) -> bool {
-    Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("excalidraw"))
+    let path = Path::new(path);
+    path.file_name()
+        .and_then(|file_name| file_name.to_str())
+        .is_some_and(|file_name| file_name.eq_ignore_ascii_case(".excalidraw"))
+        || path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("excalidraw"))
 }
 
 fn extract_excalidraw_text(body: &str) -> Option<String> {

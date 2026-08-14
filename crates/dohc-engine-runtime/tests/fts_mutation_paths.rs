@@ -138,7 +138,7 @@ async fn capture_text_ingest_and_retire_update_certified_search_index() {
 #[tokio::test]
 async fn excalidraw_capture_indexes_only_live_text_and_invalid_update_clears_it() {
     const WS: &str = "ws-excalidraw-fts";
-    const PATH: &str = "boards/plan.excalidraw";
+    const PATH: &str = ".excalidraw";
     const LIVE: &str = "drawinglivetextneedle";
     const DELETED: &str = "drawingdeletedtextneedle";
     const EMBEDDED: &str = "DRAWINGBASE64SEARCHSECRET";

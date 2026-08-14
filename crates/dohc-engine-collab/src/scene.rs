@@ -851,54 +851,58 @@ fn generate_key_between(lower: Option<&str>, upper: Option<&str>) -> Result<Stri
     }
 }
 
-fn fractional_midpoint(lower: &str, upper: Option<&str>) -> Result<String, ()> {
-    if upper.is_some_and(|upper| lower >= upper)
-        || lower.ends_with('0')
-        || upper.is_some_and(|upper| upper.ends_with('0'))
-    {
-        return Err(());
-    }
-    if let Some(upper) = upper {
-        let lower_bytes = lower.as_bytes();
-        let upper_bytes = upper.as_bytes();
-        let mut prefix = 0;
-        while prefix < upper_bytes.len()
-            && lower_bytes.get(prefix).copied().unwrap_or(b'0') == upper_bytes[prefix]
-        {
-            prefix += 1;
-        }
-        if prefix > 0 {
-            return Ok(format!(
-                "{}{}",
-                &upper[..prefix],
-                fractional_midpoint(&lower[prefix.min(lower.len())..], Some(&upper[prefix..]))?
-            ));
-        }
-    }
+fn fractional_midpoint(mut lower: &str, mut upper: Option<&str>) -> Result<String, ()> {
+    let capacity = lower.len().max(upper.map_or(0, str::len)).saturating_add(1);
+    let mut midpoint = String::with_capacity(capacity);
 
-    let lower_digit = lower
-        .as_bytes()
-        .first()
-        .map_or(Some(0), |byte| fractional_digit(*byte))
-        .ok_or(())?;
-    let upper_digit = match upper.and_then(|upper| upper.as_bytes().first().copied()) {
-        Some(byte) => fractional_digit(byte).ok_or(())?,
-        None => FRACTIONAL_INDEX_DIGITS.len(),
-    };
-    if upper_digit > lower_digit + 1 {
-        let middle = (lower_digit + upper_digit).div_ceil(2);
-        return Ok(char::from(FRACTIONAL_INDEX_DIGITS[middle]).to_string());
-    }
-    if let Some(upper) = upper {
-        if upper.len() > 1 {
-            return Ok(upper[..1].to_owned());
+    loop {
+        if upper.is_some_and(|upper| lower >= upper)
+            || lower.ends_with('0')
+            || upper.is_some_and(|upper| upper.ends_with('0'))
+        {
+            return Err(());
         }
+        if let Some(upper_bound) = upper {
+            let lower_bytes = lower.as_bytes();
+            let upper_bytes = upper_bound.as_bytes();
+            let mut prefix = 0;
+            while prefix < upper_bytes.len()
+                && lower_bytes.get(prefix).copied().unwrap_or(b'0') == upper_bytes[prefix]
+            {
+                prefix += 1;
+            }
+            if prefix > 0 {
+                midpoint.push_str(&upper_bound[..prefix]);
+                lower = &lower[prefix.min(lower.len())..];
+                upper = Some(&upper_bound[prefix..]);
+                continue;
+            }
+        }
+
+        let lower_digit = lower
+            .as_bytes()
+            .first()
+            .map_or(Some(0), |byte| fractional_digit(*byte))
+            .ok_or(())?;
+        let upper_digit = match upper.and_then(|upper| upper.as_bytes().first().copied()) {
+            Some(byte) => fractional_digit(byte).ok_or(())?,
+            None => FRACTIONAL_INDEX_DIGITS.len(),
+        };
+        if upper_digit > lower_digit + 1 {
+            let middle = (lower_digit + upper_digit).div_ceil(2);
+            midpoint.push(char::from(FRACTIONAL_INDEX_DIGITS[middle]));
+            return Ok(midpoint);
+        }
+        if let Some(upper_bound) = upper {
+            if upper_bound.len() > 1 {
+                midpoint.push_str(&upper_bound[..1]);
+                return Ok(midpoint);
+            }
+        }
+        midpoint.push(char::from(FRACTIONAL_INDEX_DIGITS[lower_digit]));
+        lower = lower.get(1..).unwrap_or("");
+        upper = None;
     }
-    let head = char::from(FRACTIONAL_INDEX_DIGITS[lower_digit]);
-    Ok(format!(
-        "{head}{}",
-        fractional_midpoint(lower.get(1..).unwrap_or(""), None)?
-    ))
 }
 
 fn fractional_digit(byte: u8) -> Option<usize> {
@@ -2042,6 +2046,21 @@ mod tests {
                 .expect("keys across integer boundary"),
             ["ZzG", "ZzV", "a0", "a00V"]
         );
+    }
+
+    #[test]
+    fn fractional_midpoint_handles_a_maximum_text_sized_order_key() {
+        let lower = format!(
+            "z{}{}",
+            "z".repeat(26),
+            "z".repeat(dohc_engine_domain::MAX_TEXT_BYTES - 27)
+        );
+        assert_eq!(lower.len(), dohc_engine_domain::MAX_TEXT_BYTES);
+
+        let midpoint = generate_key_between(Some(&lower), None)
+            .expect("a valid imported order key has a successor");
+
+        assert_eq!(midpoint.strip_prefix(&lower), Some("V"));
     }
 
     #[test]
