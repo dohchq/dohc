@@ -10,6 +10,7 @@ import {
 import * as Y from "yjs";
 import {
   applyCanvasSceneChange,
+  createSceneRemoteEchoes,
   rememberRemoteScene,
   sceneForCanvas,
 } from "./excalidrawSceneAdapter";
@@ -48,7 +49,7 @@ function apply(doc: Y.Doc, elements: readonly unknown[]) {
       scrollX: 400,
     },
     files: {},
-    remoteEchoes: new Set(),
+    remoteEchoes: createSceneRemoteEchoes(),
   });
 }
 
@@ -81,8 +82,8 @@ describe("Excalidraw scene adapter", () => {
     const doc = new Y.Doc();
     const remote = rectangle(2, 7, 30);
     insertElementRevision(doc, remote);
-    const echoes = new Set<string>();
-    rememberRemoteScene(sceneForCanvas(doc).elements, echoes);
+    const echoes = createSceneRemoteEchoes();
+    rememberRemoteScene(sceneForCanvas(doc), echoes);
     const before = Y.encodeStateVector(doc);
 
     const result = applyCanvasSceneChange({
@@ -101,12 +102,12 @@ describe("Excalidraw scene adapter", () => {
     const doc = new Y.Doc();
     const first = rectangle(1, 9, 10);
     insertElementRevision(doc, first);
-    const echoes = new Set<string>();
-    rememberRemoteScene(sceneForCanvas(doc).elements, echoes);
+    const echoes = createSceneRemoteEchoes();
+    rememberRemoteScene(sceneForCanvas(doc), echoes);
     // A second remote render replaces the echo identities before Excalidraw
     // delivers the first render's callback.
     insertElementRevision(doc, rectangle(2, 7, 20));
-    rememberRemoteScene(sceneForCanvas(doc).elements, echoes);
+    rememberRemoteScene(sceneForCanvas(doc), echoes);
 
     const result = applyCanvasSceneChange({
       doc,
@@ -134,9 +135,53 @@ describe("Excalidraw scene adapter", () => {
     expect(foldScene(doc).elements[0]?.x).toBe(40);
   });
 
+  it("discards a delayed callback's superseded app state", () => {
+    const doc = new Y.Doc();
+    const echoes = createSceneRemoteEchoes();
+    // First remote render carries gridSize 10; a second render moves it to 20
+    // before Excalidraw delivers the first render's callback.
+    applyCanvasSceneChange({
+      doc,
+      elements: [],
+      appState: { gridSize: 10 },
+      files: {},
+      remoteEchoes: createSceneRemoteEchoes(),
+    });
+    rememberRemoteScene(sceneForCanvas(doc), echoes);
+    applyCanvasSceneChange({
+      doc,
+      elements: [],
+      appState: { gridSize: 20 },
+      files: {},
+      remoteEchoes: createSceneRemoteEchoes(),
+    });
+    rememberRemoteScene(sceneForCanvas(doc), echoes);
+
+    const stale = applyCanvasSceneChange({
+      doc,
+      elements: [],
+      appState: { gridSize: 10 },
+      files: {},
+      remoteEchoes: echoes,
+    });
+    expect(stale.changed).toBe(false);
+    expect(foldScene(doc).appState.gridSize).toBe(20);
+
+    // A real local change to a NEW value still lands.
+    const edited = applyCanvasSceneChange({
+      doc,
+      elements: [],
+      appState: { gridSize: 30 },
+      files: {},
+      remoteEchoes: echoes,
+    });
+    expect(edited.changed).toBe(true);
+    expect(foldScene(doc).appState.gridSize).toBe(30);
+  });
+
   it("keeps a typed-out text element away from the document until it has text", () => {
     const doc = new Y.Doc();
-    const echoes = new Set<string>();
+    const echoes = createSceneRemoteEchoes();
     const emptyText = {
       id: "note",
       type: "text",
@@ -175,8 +220,8 @@ describe("Excalidraw scene adapter", () => {
       isDeleted: false,
     };
     insertElementRevision(doc, sparseRemote);
-    const echoes = new Set<string>();
-    rememberRemoteScene(sceneForCanvas(doc).elements, echoes);
+    const echoes = createSceneRemoteEchoes();
+    rememberRemoteScene(sceneForCanvas(doc), echoes);
     const before = Y.encodeStateVector(doc);
 
     // Excalidraw v0.18's restoreElementWithProperties supplies these defaults
@@ -294,7 +339,7 @@ describe("Excalidraw scene adapter", () => {
       files: {
         image: { dataURL: `data:image/png;base64,${secret}` },
       },
-      remoteEchoes: new Set(),
+      remoteEchoes: createSceneRemoteEchoes(),
     });
 
     expect(result).toEqual({ changed: true, assetsRefused: true });
@@ -326,7 +371,7 @@ describe("Excalidraw scene adapter", () => {
       files: {
         image: { dataURL: `data:image/png;base64,${secret}` },
       },
-      remoteEchoes: new Set(),
+      remoteEchoes: createSceneRemoteEchoes(),
       hydratedFileIds: new Set(["image"]),
     });
 

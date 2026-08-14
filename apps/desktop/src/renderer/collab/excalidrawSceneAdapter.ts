@@ -21,7 +21,21 @@ export const LOCAL_EXCALIDRAW_ORIGIN: unique symbol = Symbol(
 // JSON even though it still carries the same immutable revision identity.
 // Consume that identity once; a real local edit always bumps the version and
 // nonce, so it cannot be mistaken for the remote callback.
-export type SceneRemoteEchoes = Set<string>;
+export type SceneRemoteEchoes = {
+  // Revision tuples of the elements the LAST remote render handed the canvas.
+  elements: Set<string>;
+  // Durable app-state values recent remote renders handed the canvas, per
+  // key. Unlike elements these carry no revision identity, so a delayed
+  // callback's stale value can only be recognized by remembering the values
+  // themselves. Bounded per key; consumed on echo.
+  appState: Map<string, Set<string>>;
+};
+
+export function createSceneRemoteEchoes(): SceneRemoteEchoes {
+  return { elements: new Set(), appState: new Map() };
+}
+
+const MAX_REMEMBERED_APP_STATE_VALUES = 8;
 
 export function sceneForCanvas(doc: Y.Doc): {
   elements: ElementSnapshot[];
@@ -32,12 +46,33 @@ export function sceneForCanvas(doc: Y.Doc): {
 }
 
 export function rememberRemoteScene(
-  elements: readonly ElementSnapshot[],
+  scene: {
+    elements: readonly ElementSnapshot[];
+    appState: Readonly<Record<string, unknown>>;
+  },
   echoes: SceneRemoteEchoes,
 ): void {
-  echoes.clear();
-  for (const element of elements) {
-    echoes.add(revisionKey(element.id, element.version, element.versionNonce));
+  echoes.elements.clear();
+  for (const element of scene.elements) {
+    echoes.elements.add(
+      revisionKey(element.id, element.version, element.versionNonce),
+    );
+  }
+  for (const key of EXCALIDRAW_EXPORTABLE_APP_STATE) {
+    const value = scene.appState[key];
+    if (value === undefined) continue;
+    let values = echoes.appState.get(key);
+    if (!values) {
+      values = new Set();
+      echoes.appState.set(key, values);
+    }
+    const encoded = stableJson(jsonValueOf(value));
+    values.delete(encoded);
+    values.add(encoded);
+    while (values.size > MAX_REMEMBERED_APP_STATE_VALUES) {
+      const oldest = values.values().next().value!;
+      values.delete(oldest);
+    }
   }
 }
 
@@ -74,8 +109,8 @@ export function applyCanvasSceneChange(input: {
         element.version,
         element.versionNonce,
       );
-      if (input.remoteEchoes.has(key)) {
-        input.remoteEchoes.delete(key);
+      if (input.remoteEchoes.elements.has(key)) {
+        input.remoteEchoes.elements.delete(key);
         continue;
       }
       const winner = currentElements.get(element.id);
@@ -112,11 +147,19 @@ export function applyCanvasSceneChange(input: {
       const value = input.appState[key];
       if (value === undefined) continue;
       const jsonValue = jsonValueOf(value);
+      const encoded = stableJson(jsonValue);
       const currentValue = current.appState[key];
-      if (
-        currentValue !== undefined &&
-        stableJson(currentValue) === stableJson(jsonValue)
-      ) {
+      if (currentValue !== undefined && stableJson(currentValue) === encoded) {
+        continue;
+      }
+      // A delayed callback can replay a superseded remote render's app state
+      // (elements are guarded by revision dominance; app state has no
+      // revision identity). A remembered remote value that no longer matches
+      // the fold is such a replay — consume it instead of writing an old
+      // gridSize or background over the newer value.
+      const rememberedRemote = input.remoteEchoes.appState.get(key);
+      if (rememberedRemote?.has(encoded)) {
+        rememberedRemote.delete(encoded);
         continue;
       }
       setAppStateProperty(input.doc, key, jsonValue);

@@ -23,6 +23,7 @@ import type { ExcalidrawDocument } from "./excalidrawDocument";
 import { bridge } from "./bridge";
 import {
   applyCanvasSceneChange,
+  createSceneRemoteEchoes,
   LOCAL_EXCALIDRAW_ORIGIN,
   rememberRemoteScene,
   sceneForCanvas,
@@ -88,7 +89,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
   const mountedRef = useRef(false);
   const [readyApi, setReadyApi] = useState<ExcalidrawImperativeAPI | null>(null);
   const [presenceBound, setPresenceBound] = useState(false);
-  const remoteEchoes = useRef<SceneRemoteEchoes>(new Set());
+  const remoteEchoes = useRef<SceneRemoteEchoes>(createSceneRemoteEchoes());
   const hydratedFileIds = useRef<Set<string>>(new Set());
   const presenceBinding = useRef<ExcalidrawPresenceBinding | null>(null);
   const presenceHandoff = useRef<Promise<void>>(Promise.resolve());
@@ -96,7 +97,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
   const sceneDocGeneration = useRef(0);
   if (boundSceneDoc.current !== props.sceneDoc) {
     boundSceneDoc.current = props.sceneDoc;
-    remoteEchoes.current.clear();
+    remoteEchoes.current = createSceneRemoteEchoes();
     hydratedFileIds.current.clear();
     // Remount the canvas below. Excalidraw's imperative API can add files but
     // never remove them, so a replacement document that reuses a fileId would
@@ -116,7 +117,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
   const renderSceneDoc = useCallback(() => {
     if (!props.sceneDoc || !readyApi) return;
     const scene = sceneForCanvas(props.sceneDoc);
-    rememberRemoteScene(scene.elements, remoteEchoes.current);
+    rememberRemoteScene(scene, remoteEchoes.current);
     readyApi.updateScene({
       elements: scene.elements as unknown as Parameters<
         ExcalidrawImperativeAPI["updateScene"]
