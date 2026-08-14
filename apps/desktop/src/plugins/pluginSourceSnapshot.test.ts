@@ -158,7 +158,7 @@ describe("pluginIdToSafePath", () => {
     const pluginId = "@scope/name";
 
     expect(NPM_PACKAGE_NAME.test(pluginId)).toBe(true);
-    expect(pluginIdToSafePath(pluginId)).toBe("@scope__name");
+    expect(pluginIdToSafePath(pluginId)).toBe("@scope%2Fname");
     expect(pluginIdToSafePath(pluginId)).not.toMatch(/[\\/\0]/);
     expect(isAbsolute(pluginIdToSafePath(pluginId))).toBe(false);
   });
@@ -172,6 +172,15 @@ describe("pluginIdToSafePath", () => {
       );
     },
   );
+
+  it("maps two distinct ids that only differ in where the scope separator falls to distinct paths (#779 round 3 finding 4)", () => {
+    const first = "@a/b__c";
+    const second = "@a__b/c";
+
+    expect(NPM_PACKAGE_NAME.test(first)).toBe(true);
+    expect(NPM_PACKAGE_NAME.test(second)).toBe(true);
+    expect(pluginIdToSafePath(first)).not.toBe(pluginIdToSafePath(second));
+  });
 });
 
 describe("snapshotPluginSource containment", () => {
@@ -261,7 +270,7 @@ describe("snapshotPluginSource containment", () => {
     const result = requireSuccess(await runSnapshot(fixture));
 
     expect(result.snapshotRoot).toBe(
-      join(fixture.dohcDir, "plugins", "@scope__example-plugin", "snapshot"),
+      join(fixture.dohcDir, "plugins", "@scope%2Fexample-plugin", "snapshot"),
     );
     await expectMissing(join(result.snapshotRoot, "node_modules"));
     await expectMissing(join(result.snapshotRoot, ".dohc"));

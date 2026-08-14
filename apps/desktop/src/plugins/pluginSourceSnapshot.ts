@@ -871,7 +871,12 @@ export function pluginIdToSafePath(pluginId: string): string {
       `Plugin id "${pluginId}" does not match the manifest name pattern.`,
     );
   }
-  return pluginId.replace("/", "__");
+  // "/" percent-encodes to "%2F", never "__": a plain "__" substitution was
+  // not injective — "@a/b__c" and "@a__b/c" are both valid ids (NPM_PACKAGE_NAME
+  // allows "_" in every segment) that collided on the same directory (#779
+  // round 3 finding 4). "%" is outside NPM_PACKAGE_NAME's character class, so
+  // "%2F" can never occur any other way and this is a true one-to-one map.
+  return pluginId.replaceAll("/", "%2F");
 }
 
 export async function snapshotPluginSource(
