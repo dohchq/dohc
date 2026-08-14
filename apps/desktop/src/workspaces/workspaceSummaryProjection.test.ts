@@ -156,6 +156,28 @@ describe("workspace summary projection", () => {
     }
   });
 
+  // A perfect grant is not enough. Every live-share action is addressed by
+  // share id, so a marker that cannot name itself would present as a normal
+  // live share and then fail every refresh it offers.
+  it("marks a share view with a healthy grant but no id as damaged", () => {
+    for (const shareId of [undefined, null, "", 7, "x".repeat(201)]) {
+      const summary = workspaceSummaryFor(
+        entry({
+          shareView: {
+            ...(shareId === undefined ? {} : { shareId }),
+            granterEmail: "sam@dohc.test",
+            grantedSelector: goodSelector,
+          },
+        }),
+      );
+      expect(
+        summary.shareView?.damaged,
+        `MUTATION: shareId ${String(shareId)} presents a live share that can never refresh`,
+      ).toBe(true);
+      expect(summary.shareView?.access).toBeUndefined();
+    }
+  });
+
   it("treats an ABSENT share view as an ordinary workspace", () => {
     expect(workspaceSummaryFor(entry()).shareView).toBeUndefined();
     expect(workspaceSummaryFor(entry({ shareView: undefined })).shareView).toBeUndefined();

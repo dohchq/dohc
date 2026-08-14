@@ -37,11 +37,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** The level a stored grant names, or undefined when it names none we can read. */
-function levelOf(grantedSelector: unknown): unknown {
-  return isRecord(grantedSelector) ? grantedSelector.access : undefined;
-}
-
 /**
  * Project one registry entry for the renderer.
  *
@@ -64,8 +59,20 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
     const withLevel = isRecord(rawShareView)
       ? { ...rawShareView, access: level ?? undefined }
       : {};
+    // A healthy marker needs an IDENTITY as well as a grant. `shareId` is
+    // optional on the schema only so the damaged shape can omit it, so a
+    // marker with a perfect grant and no id would classify healthy and then
+    // fail every refresh it advertises — a live-looking share that can never
+    // load. Bounded to the schema's own limits for the same reason the
+    // granter email is: an out-of-range value carried into the damaged shape
+    // would fail the summary parse and throw out of the whole projection.
+    const rawId = isRecord(rawShareView) ? rawShareView.shareId : undefined;
+    const shareId =
+      typeof rawId === "string" && rawId.length >= 1 && rawId.length <= 200
+        ? rawId
+        : null;
     const readable =
-      level !== null && shareViewShape.safeParse(withLevel).success;
+      shareId !== null && level !== null && shareViewShape.safeParse(withLevel).success;
     // The degraded marker keeps the stance and drops only the level. It is
     // never a guess about WHY: `damaged` says the grant could not be read,
     // and nothing here invents a level, an end, or a reason.
@@ -75,9 +82,7 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
           // Only what could actually be read. A share id is never invented:
           // an unreadable marker has no identity to state, and a placeholder
           // would be a lie the rest of the app could act on.
-          ...(isRecord(rawShareView) && typeof rawShareView.shareId === "string"
-            ? { shareId: rawShareView.shareId }
-            : {}),
+          ...(shareId !== null ? { shareId } : {}),
           granterEmail: shareViewGranterEmail(rawShareView),
           damaged: true as const,
         };

@@ -181,7 +181,9 @@ export const WorkspaceSummary = z.object({
     .object({
       // Absent ONLY on a `damaged` marker whose stored record had no readable
       // id. Never invented: a placeholder id is a lie the rest of the app
-      // could act on.
+      // could act on. A marker WITHOUT one is damaged by definition — every
+      // live-share action (refresh, dismiss) is addressed by share id, so a
+      // marker that cannot name itself cannot be presented as a live share.
       shareId: z.string().min(1).max(200).optional(),
       granterEmail: z.string().min(3).max(320).nullable(),
       // The pinned level (#646). Absent ONLY when `damaged` says the stored
