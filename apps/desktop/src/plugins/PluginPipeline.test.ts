@@ -146,6 +146,55 @@ async function createPluginWorkspace(): Promise<{
   return { root, workspaceRoot, pluginRoot, entryPath, stateDir };
 }
 
+async function createNamedPluginWorkspace(directoryName: string, pluginId: string): Promise<{
+  root: string;
+  workspaceRoot: string;
+  pluginRoot: string;
+  entryPath: string;
+  stateDir: string;
+}> {
+  const root = await mkdtemp(join(tmpdir(), "dohc-plugin-pipeline-"));
+  roots.push(root);
+  const workspaceRoot = join(root, "workspace");
+  const pluginRoot = join(workspaceRoot, "plugins", directoryName);
+  const entryPath = join(pluginRoot, "src", "index.ts");
+  const stateDir = join(root, "state");
+  await Promise.all([
+    mkdir(dirname(entryPath), { recursive: true }),
+    mkdir(stateDir, { recursive: true }),
+  ]);
+  await Promise.all([
+    writeFile(join(pluginRoot, "dohc-plugin.json"), `${JSON.stringify({
+      version: 1,
+      name: pluginId,
+      displayName: pluginId,
+      entry: "src/index.ts",
+    }, null, 2)}\n`),
+    writeFile(join(pluginRoot, "package.json"), `${JSON.stringify({
+      name: pluginId,
+      version: "1.0.0",
+      private: true,
+      type: "module",
+      packageManager: "pnpm@11.20.0",
+    }, null, 2)}\n`),
+    writeFile(join(pluginRoot, "pnpm-lock.yaml"), [
+      "lockfileVersion: '9.0'",
+      "settings:",
+      "  autoInstallPeers: true",
+      "  excludeLinksFromLockfile: false",
+      "importers:",
+      "  .: {}",
+      "",
+    ].join("\n")),
+    writeFile(entryPath, [
+      'export const marker = "one";',
+      "export default { activate() {} };",
+      "",
+    ].join("\n")),
+  ]);
+  return { root, workspaceRoot, pluginRoot, entryPath, stateDir };
+}
+
 // Matches PluginPipeline's own dohcDir computation exactly: derived plugin
 // artifacts live under <stateDir>/plugin-data/<workspaceStateKey>, never
 // inside the workspace folder (CERT779).
@@ -780,6 +829,117 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // Refused, not deleted.
       await expect(lstat(fixture.pluginRoot)).resolves.toBeDefined();
       expect(preflightCalls).toBe(3);
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("never lets a same-batch identity vacate and get reclaimed carry its approval across (#779 round 3 finding 2)", async () => {
+    // Two identities change in the SAME watcher batch: "temp"@aaa-renamed
+    // (sorts first, lexically, so it's processed first) renames to "bar",
+    // landing on the exact id "bar"@zzz-original is simultaneously
+    // vacating. Processing "temp"'s replacement (the new "bar") before
+    // "bar"@zzz-original's own departure is fully applied would let the
+    // replacement read the departing identity's still-present, about-to-
+    // be-deleted approvedHash under the very id it's claiming.
+    const fixture = await createNamedPluginWorkspace("zzz-original", "bar");
+    const renamedRoot = join(fixture.workspaceRoot, "plugins", "aaa-renamed");
+    await mkdir(join(renamedRoot, "src"), { recursive: true });
+    await writeFile(join(renamedRoot, "dohc-plugin.json"), `${JSON.stringify({
+      version: 1, name: "temp", displayName: "temp", entry: "src/index.ts",
+    }, null, 2)}\n`);
+    await writeFile(join(renamedRoot, "package.json"), `${JSON.stringify({
+      name: "temp", version: "1.0.0", private: true, type: "module",
+      packageManager: "pnpm@11.20.0",
+    }, null, 2)}\n`);
+    await writeFile(join(renamedRoot, "pnpm-lock.yaml"), [
+      "lockfileVersion: '9.0'",
+      "settings:",
+      "  autoInstallPeers: true",
+      "  excludeLinksFromLockfile: false",
+      "importers:",
+      "  .: {}",
+      "",
+    ].join("\n"));
+    await writeFile(join(renamedRoot, "src", "index.ts"), [
+      'export const marker = "one";',
+      "export default { activate() {} };",
+      "",
+    ].join("\n"));
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      // Approve "bar" for real, at its original root.
+      const installed = await pipeline.install("bar");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list().find((p) => p.id === "bar")?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      // Stop the live host directly (not disable(), which would also flip
+      // the persisted approval's disabled bit) — approved but not currently
+      // running, so a hash-match at reconcile time falls through to
+      // runFullBuild's real "start it" branch instead of the unrelated
+      // already-running no-op shortcut.
+      await pipeline.host.stop("bar");
+      // Discover "temp" too, so it's a tracked candidate before the batch.
+      pipeline.handleWatcherEvents([{ path: "plugins/aaa-renamed", operation: "create" }]);
+      await waitFor(
+        () => pipeline.list().some((p) => p.id === "temp"),
+        "temp was never discovered.",
+      );
+
+      // Now, in one batch: "aaa-renamed" renames from "temp" to "bar" with
+      // content byte-identical to what "bar" already had approved, while
+      // the ORIGINAL "bar"@zzz-original is deleted outright.
+      await writeFile(join(renamedRoot, "dohc-plugin.json"), `${JSON.stringify({
+        version: 1, name: "bar", displayName: "bar", entry: "src/index.ts",
+      }, null, 2)}\n`);
+      await writeFile(join(renamedRoot, "package.json"), `${JSON.stringify({
+        name: "bar", version: "1.0.0", private: true, type: "module",
+        packageManager: "pnpm@11.20.0",
+      }, null, 2)}\n`);
+      await rm(fixture.pluginRoot, { recursive: true, force: true });
+      pipeline.handleWatcherEvents([
+        { path: "plugins/aaa-renamed", operation: "update" },
+        { path: "plugins/zzz-original", operation: "delete" },
+      ]);
+
+      await waitFor(
+        () => pipeline.list().some((p) => p.id === "bar" && p.rootPath === renamedRoot),
+        "The renamed identity was never rediscovered at its new root.",
+      );
+      // Give any (buggy) auto-approval a real chance to happen before
+      // asserting it didn't.
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      const moved = pipeline.list().find((p) => p.id === "bar" && p.rootPath === renamedRoot);
+      expect(moved).toMatchObject({ status: "discovered", approvedHash: null });
+      expect(host.getStatus("bar")).toBeUndefined();
     } finally {
       await pipeline.dispose();
     }

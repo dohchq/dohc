@@ -758,6 +758,8 @@ export class PluginPipeline {
       nextValid.map((candidate) => [resolve(candidate.rootPath), candidate]),
     );
     const replaced = new Set<string>();
+    const departing: InstalledPluginRecord[] = [];
+    const replacements: InstalledPluginRecord[] = [];
 
     for (const oldCandidate of previousValid) {
       const sameId = nextById.get(oldCandidate.id);
@@ -769,16 +771,7 @@ export class PluginPipeline {
         sameRoot.id !== oldCandidate.id;
       if (!identityChanged) continue;
 
-      await this.enqueueActionValue(oldCandidate.id, () =>
-        this.removeOldIdentity(oldCandidate));
-
-      // The old identity's approval never carries to the replacement
-      // (CERT779 A4): a manifest-name change or root swap is a new identity,
-      // and reconcileApprovedCandidate keys approval strictly by this
-      // identity's own (id, content hash) record — matching a mismatch or
-      // a never-approved id the same way any other unapproved discovery
-      // does, and continuing seamlessly only when this identity's own
-      // approval already matches its current content.
+      departing.push(oldCandidate);
       const replacement = sameRoot ?? sameId;
       if (
         replacement?.valid &&
@@ -786,9 +779,36 @@ export class PluginPipeline {
         !replaced.has(candidateKey(replacement))
       ) {
         replaced.add(candidateKey(replacement));
-        this.enqueueSourceRefresh(replacement.id, () =>
-          this.reconcileApprovedCandidate(replacement.id, true));
+        replacements.push(replacement);
       }
+    }
+
+    // Every departing identity is fully removed — including its local
+    // state record — before any replacement is reconciled. A replacement
+    // can land on the exact id a departing identity is vacating (a rename
+    // colliding with an already-installed id, or a literal two-way swap);
+    // reconciling it first can still observe that departing identity's
+    // still-live host status and its about-to-be-deleted approvedHash —
+    // both let byte-identical relocated content carry the old identity's
+    // approval and running state across without ever holding for approval
+    // (#779 round 3 finding 2 — CERT779 A4 keyed reconcileApprovedCandidate
+    // strictly by (id, hash), but a same-batch ordering race let a
+    // replacement read the departing identity's own not-yet-cleaned-up
+    // record and host status under that same id).
+    for (const oldCandidate of departing) {
+      await this.enqueueActionValue(oldCandidate.id, () =>
+        this.removeOldIdentity(oldCandidate));
+    }
+    // The old identity's approval never carries to the replacement
+    // (CERT779 A4): a manifest-name change or root swap is a new identity,
+    // and reconcileApprovedCandidate keys approval strictly by this
+    // identity's own (id, content hash) record — matching a mismatch or
+    // a never-approved id the same way any other unapproved discovery
+    // does, and continuing seamlessly only when this identity's own
+    // approval already matches its current content.
+    for (const replacement of replacements) {
+      this.enqueueSourceRefresh(replacement.id, () =>
+        this.reconcileApprovedCandidate(replacement.id, true));
     }
 
     for (const candidate of nextValid) {
