@@ -4299,7 +4299,11 @@ function DrawingView({
           const loaded = await hydrationSession.read(descriptor);
           if (activeHydrationSession.current !== hydrationSession) continue;
           const file = binaryFileDataFromArtifact(descriptor, loaded);
+          // A read that succeeds but cannot convert (a changed descriptor, a
+          // MIME type outside the allowlist) is still a missing image — it
+          // must surface the hydration warning, not vanish silently.
           if (file) files.push(file);
+          else failures += 1;
         } catch {
           // One missing asset cannot stop the drawing or its other assets.
           failures += 1;

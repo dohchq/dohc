@@ -47,7 +47,9 @@ export type ExcalidrawPresenceFactory = {
 export type ExcalidrawPresenceBinding = {
   updatePointer(update: ExcalidrawPointerUpdate): void;
   updateSelection(selectedElementIds: Record<string, boolean>): void;
-  destroy(): void;
+  // Resolves once the presence leave reached the transport — see
+  // DocPresenceBinding.destroy.
+  destroy(): Promise<void>;
 };
 
 type PresenceScheduler = {
@@ -275,7 +277,7 @@ export function bindExcalidrawPresence(options: {
       }
     },
     destroy() {
-      if (destroyed) return;
+      if (destroyed) return Promise.resolve();
       destroyed = true;
       if (pointerTimer !== null) scheduler.cancel(pointerTimer);
       pointerTimer = null;
@@ -286,7 +288,7 @@ export function bindExcalidrawPresence(options: {
       } catch {
         // The canvas may already be gone.
       }
-      binding.destroy();
+      return binding.destroy();
     },
   };
 }

@@ -91,6 +91,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
   const remoteEchoes = useRef<SceneRemoteEchoes>(new Set());
   const hydratedFileIds = useRef<Set<string>>(new Set());
   const presenceBinding = useRef<ExcalidrawPresenceBinding | null>(null);
+  const presenceHandoff = useRef<Promise<void>>(Promise.resolve());
   const boundSceneDoc = useRef(props.sceneDoc);
   const sceneDocGeneration = useRef(0);
   if (boundSceneDoc.current !== props.sceneDoc) {
@@ -160,25 +161,39 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
   useEffect(() => {
     setPresenceBound(false);
     if (props.readOnly || !props.sceneDoc || !props.presence || !readyApi) return;
-    let binding: ExcalidrawPresenceBinding;
-    try {
-      binding = bindExcalidrawPresence({
-        doc: props.sceneDoc,
-        transport: props.presence.transport,
-        topic: props.presence.topic,
-        clientId: props.presence.clientId,
-        displayName: props.presence.displayName,
-        getApi: () => (apiRef.current === readyApi ? readyApi : null),
-      });
-    } catch {
-      // Presence is optional. A binding failure cannot affect the scene.
-      return;
-    }
-    presenceBinding.current = binding;
-    setPresenceBound(true);
+    const { sceneDoc, presence } = props;
+    let binding: ExcalidrawPresenceBinding | null = null;
+    let cancelled = false;
+    // Rebinding reuses the same topic and client id, so the new binding must
+    // wait out the old one's leave: publishing first would let that leave
+    // delete the fresh relay entry and peers would lose this editor until the
+    // next pointer update or heartbeat.
+    presenceHandoff.current = presenceHandoff.current.then(() => {
+      if (cancelled) return;
+      try {
+        binding = bindExcalidrawPresence({
+          doc: sceneDoc,
+          transport: presence.transport,
+          topic: presence.topic,
+          clientId: presence.clientId,
+          displayName: presence.displayName,
+          getApi: () => (apiRef.current === readyApi ? readyApi : null),
+        });
+      } catch {
+        // Presence is optional. A binding failure cannot affect the scene.
+        return;
+      }
+      presenceBinding.current = binding;
+      setPresenceBound(true);
+    });
     return () => {
-      if (presenceBinding.current === binding) presenceBinding.current = null;
-      binding.destroy();
+      cancelled = true;
+      const current = binding;
+      if (!current) return;
+      if (presenceBinding.current === current) presenceBinding.current = null;
+      // Detach synchronously; only the channel's leave is the rebind barrier.
+      const stopped = current.destroy();
+      presenceHandoff.current = presenceHandoff.current.then(() => stopped);
     };
   }, [props.presence, props.readOnly, props.sceneDoc, readyApi]);
 
