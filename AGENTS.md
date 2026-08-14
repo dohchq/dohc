@@ -420,7 +420,11 @@ These are meant to steer us in the right direction. They are not hard-set, but w
 
 - After a PR is merged, delete its remote branch from GitHub unless the user
   explicitly asks to keep it or another open PR still depends on it. Verify the
-  remote ref is gone. Do not delete the local branch or worktree unless asked.
+  remote ref is gone. Do not delete the local branch unless asked.
+- After a PR is merged or its task is abandoned, delete the worktree you or
+  your campaign created for it, then run `git worktree prune`. Stale worktrees
+  keep multi-gigabyte build artifacts. Never delete the main tree, a worktree
+  you did not create, or a worktree another session still uses.
 - Never stop a process by name, command-line pattern, or worktree path. Stop
   only a PID this task started. Verify a port owner's working directory before
   stopping it.
