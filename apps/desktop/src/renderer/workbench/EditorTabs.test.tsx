@@ -2,13 +2,22 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorTabs } from "./EditorTabs";
-import { pluginPanelTabPath } from "./workbenchState";
+import {
+  CHATS_TAB_PATH,
+  pluginPanelTabPath,
+  siteTabPath,
+} from "./workbenchState";
 
 beforeEach(() => {
   // jsdom doesn't implement scrollIntoView; the strip reveals the active
   // tab with it. Nor pointer capture, which the scrollbar thumb drag uses.
   Element.prototype.scrollIntoView = vi.fn();
   Element.prototype.setPointerCapture = vi.fn();
+  Element.prototype.hasPointerCapture = vi.fn(() => false);
+  Object.defineProperty(document, "elementFromPoint", {
+    configurable: true,
+    value: vi.fn(),
+  });
 });
 afterEach(cleanup);
 
@@ -18,6 +27,7 @@ const tabs = [{ path: "a.md" }, { path: "b.md" }, { path: "c.md" }];
 function renderTabs(activeTab: string) {
   return render(
     <EditorTabs
+      groupId="left"
       groupNumber={1}
       tabs={tabs}
       activeTab={activeTab}
@@ -27,6 +37,7 @@ function renderTabs(activeTab: string) {
       onClose={noop}
       onContextMenu={noop}
       onMove={noop}
+      onMoveToGroup={noop}
       onCreateGroupRight={noop}
     />,
   );
@@ -37,6 +48,7 @@ describe("EditorTabs strip scrolling", () => {
     const path = pluginPanelTabPath("hello/plugin", "main panel");
     render(
       <EditorTabs
+        groupId="left"
         groupNumber={1}
         tabs={[{ path }]}
         activeTab={path}
@@ -46,6 +58,7 @@ describe("EditorTabs strip scrolling", () => {
         onClose={noop}
         onContextMenu={noop}
         onMove={noop}
+        onMoveToGroup={noop}
         onCreateGroupRight={noop}
       />,
     );
@@ -71,6 +84,7 @@ describe("EditorTabs strip scrolling", () => {
 
     rerender(
       <EditorTabs
+        groupId="left"
         groupNumber={1}
         tabs={tabs}
         activeTab="c.md"
@@ -80,6 +94,7 @@ describe("EditorTabs strip scrolling", () => {
         onClose={noop}
         onContextMenu={noop}
         onMove={noop}
+        onMoveToGroup={noop}
         onCreateGroupRight={noop}
       />,
     );
@@ -124,6 +139,7 @@ describe("EditorTabs strip scrolling", () => {
 
     rerender(
       <EditorTabs
+        groupId="left"
         groupNumber={1}
         tabs={[]}
         activeTab={null}
@@ -133,11 +149,158 @@ describe("EditorTabs strip scrolling", () => {
         onClose={noop}
         onContextMenu={noop}
         onMove={noop}
+        onMoveToGroup={noop}
         onCreateGroupRight={noop}
       />,
     );
 
     expect(screen.queryByTestId("tabs-overflow-menu")).toBeNull();
+  });
+});
+
+describe("EditorTabs pointer drag", () => {
+  it("keeps live reorder inside the source group", () => {
+    const onMove = vi.fn();
+    const onMoveToGroup = vi.fn();
+    render(
+      <div data-editor-group-id="left">
+        <EditorTabs
+          groupId="left"
+          groupNumber={1}
+          tabs={tabs}
+          activeTab="a.md"
+          activeTabDirty={false}
+          recoveryPaths={new Set<string>()}
+          onActivate={noop}
+          onClose={noop}
+          onContextMenu={noop}
+          onMove={onMove}
+          onMoveToGroup={onMoveToGroup}
+          onCreateGroupRight={noop}
+        />
+      </div>,
+    );
+    const first = screen.getByTestId("tab-a.md");
+    const second = screen.getByTestId("tab-b.md");
+    const third = screen.getByTestId("tab-c.md");
+    Object.defineProperty(second, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 100, width: 100 }),
+    });
+    Object.defineProperty(third, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 200, width: 100 }),
+    });
+    vi.mocked(document.elementFromPoint).mockReturnValue(first);
+
+    fireEvent.pointerDown(first, { button: 0, pointerId: 4, clientX: 10 });
+    fireEvent.pointerMove(first, {
+      pointerId: 4,
+      buttons: 1,
+      clientX: 260,
+      clientY: 10,
+    });
+    fireEvent.pointerUp(first, { pointerId: 4, clientX: 260, clientY: 10 });
+
+    expect(onMove).toHaveBeenCalledWith("a.md", 2);
+    expect(onMoveToGroup).not.toHaveBeenCalled();
+  });
+
+  it("moves a tab to an empty group when released over its editor body", () => {
+    const onMove = vi.fn();
+    const onMoveToGroup = vi.fn();
+    render(
+      <>
+        <div data-editor-group-id="left">
+          <EditorTabs
+            groupId="left"
+            groupNumber={1}
+            tabs={tabs}
+            activeTab="a.md"
+            activeTabDirty={false}
+            recoveryPaths={new Set<string>()}
+            onActivate={noop}
+            onClose={noop}
+            onContextMenu={noop}
+            onMove={onMove}
+            onMoveToGroup={onMoveToGroup}
+            onCreateGroupRight={noop}
+          />
+        </div>
+        <div data-editor-group-id="right">
+          <div data-testid="empty-right-editor" />
+        </div>
+      </>,
+    );
+    const source = screen.getByTestId("tab-a.md");
+    const target = screen.getByTestId("empty-right-editor");
+    vi.mocked(document.elementFromPoint).mockReturnValue(target);
+
+    fireEvent.pointerDown(source, { button: 0, pointerId: 7, clientX: 10 });
+    fireEvent.pointerMove(source, {
+      pointerId: 7,
+      buttons: 1,
+      clientX: 500,
+      clientY: 200,
+    });
+    fireEvent.pointerUp(source, {
+      pointerId: 7,
+      clientX: 500,
+      clientY: 200,
+    });
+
+    expect(onMove).not.toHaveBeenCalled();
+    expect(onMoveToGroup).toHaveBeenCalledOnce();
+    expect(onMoveToGroup).toHaveBeenCalledWith("a.md", "right", 0);
+  });
+
+  it("starts a new drag after cancelling an unfinished pointer", () => {
+    const onMove = vi.fn();
+    render(
+      <div data-editor-group-id="left">
+        <EditorTabs
+          groupId="left"
+          groupNumber={1}
+          tabs={tabs}
+          activeTab="a.md"
+          activeTabDirty={false}
+          recoveryPaths={new Set<string>()}
+          onActivate={noop}
+          onClose={noop}
+          onContextMenu={noop}
+          onMove={onMove}
+          onMoveToGroup={noop}
+          onCreateGroupRight={noop}
+        />
+      </div>,
+    );
+    const first = screen.getByTestId("tab-a.md");
+    const second = screen.getByTestId("tab-b.md");
+    Object.defineProperty(second, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 100, width: 100 }),
+    });
+    vi.mocked(document.elementFromPoint).mockReturnValue(first);
+
+    fireEvent.pointerDown(first, { button: 0, pointerId: 4, clientX: 10 });
+    fireEvent.pointerMove(first, {
+      pointerId: 4,
+      buttons: 1,
+      clientX: 160,
+      clientY: 10,
+    });
+    onMove.mockClear();
+
+    fireEvent.pointerDown(first, { button: 0, pointerId: 5, clientX: 10 });
+    fireEvent.pointerMove(first, {
+      pointerId: 5,
+      buttons: 1,
+      clientX: 160,
+      clientY: 10,
+    });
+    fireEvent.pointerUp(first, { pointerId: 5, clientX: 160, clientY: 10 });
+
+    expect(onMove).toHaveBeenCalledWith("a.md", 2);
   });
 });
 
@@ -205,6 +368,7 @@ describe("EditorTabs overlay scrollbar", () => {
 
     rerender(
       <EditorTabs
+        groupId="left"
         groupNumber={1}
         tabs={tabs}
         activeTab="a.md"
@@ -214,6 +378,7 @@ describe("EditorTabs overlay scrollbar", () => {
         onClose={noop}
         onContextMenu={noop}
         onMove={noop}
+        onMoveToGroup={noop}
         onCreateGroupRight={noop}
       />,
     );
@@ -240,6 +405,7 @@ describe("EditorTabs overlay scrollbar", () => {
     const onCloseGroup = vi.fn();
     render(
       <EditorTabs
+        groupId="left"
         groupNumber={2}
         tabs={tabs}
         activeTab="a.md"
@@ -249,6 +415,7 @@ describe("EditorTabs overlay scrollbar", () => {
         onClose={noop}
         onContextMenu={noop}
         onMove={noop}
+        onMoveToGroup={noop}
         onCreateGroupRight={onCreateGroupRight}
         onCloseGroup={onCloseGroup}
       />,
@@ -264,5 +431,36 @@ describe("EditorTabs overlay scrollbar", () => {
     expect(onCreateGroupRight).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "Close editor group" }));
     expect(onCloseGroup).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["Chats", CHATS_TAB_PATH],
+    ["a site preview", siteTabPath("client-portal")],
+    ["a plugin panel", pluginPanelTabPath("hello-plugin", "main")],
+  ])("disables Split Right when %s is the active tab", (_label, path) => {
+    const onCreateGroupRight = vi.fn();
+    render(
+      <EditorTabs
+        groupId="left"
+        groupNumber={1}
+        tabs={[{ path }, { path: "a.md" }]}
+        activeTab={path}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={onCreateGroupRight}
+      />,
+    );
+
+    const split = screen.getByRole("button", {
+      name: "New editor group right",
+    });
+    expect((split as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(split);
+    expect(onCreateGroupRight).not.toHaveBeenCalled();
   });
 });

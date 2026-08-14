@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
+import { Schema } from "@tiptap/pm/model";
+import { EditorState } from "@tiptap/pm/state";
 import {
   computeAttachmentPaths,
   dragCarriesFiles,
@@ -11,6 +13,8 @@ import {
   handlePaneImageDrop,
   imageExtension,
   insertImageAtPosition,
+  documentReplacementMap,
+  placeImageFiles,
   pickAndInsertImages,
   sanitizeAttachmentFolderName,
   shortContentHash,
@@ -249,7 +253,12 @@ function makeMockView(docSize = 8, coordsPos: number | null = 5) {
       doc: { content: { size: docSize } },
       tr: {
         insert(pos: number, node: MockNode) {
-          return { pos, node };
+          return {
+            pos,
+            node,
+            docChanged: true,
+            mapping: { map: (mappedPos: number) => mappedPos + node.nodeSize },
+          };
         },
       },
     },
@@ -277,10 +286,707 @@ describe("insertImageAtPosition", () => {
     expect(next).toBe(4);
   });
 
+  it("keeps a two-image batch ordered when insertion creates a paragraph wrapper", () => {
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: { content: "inline*", group: "block" },
+        code_block: { content: "text*", group: "block", code: true },
+        text: { group: "inline" },
+        image: {
+          inline: true,
+          group: "inline",
+          atom: true,
+          attrs: { src: {}, alt: { default: "" } },
+        },
+      },
+    });
+    let state = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [
+        schema.node("code_block", null, schema.text("x")),
+        schema.node("paragraph", null, schema.text("After")),
+      ]),
+    });
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch(transaction: Parameters<typeof state.apply>[0]) {
+        state = state.apply(transaction);
+      },
+    };
+
+    let pos = insertImageAtPosition(
+      view as never,
+      { src: "one.png", alt: "" },
+      2,
+    );
+    pos = insertImageAtPosition(
+      view as never,
+      { src: "two.png", alt: "" },
+      pos,
+    );
+
+    expect(state.doc.child(1).toJSON()).toMatchObject({
+      type: "paragraph",
+      content: [
+        { type: "image", attrs: { src: "one.png" } },
+        { type: "image", attrs: { src: "two.png" } },
+      ],
+    });
+  });
+
   it("clamps an out-of-range position to the document size", () => {
     const { view, dispatched } = makeMockView(8);
     insertImageAtPosition(view as never, { src: "x", alt: "" }, 999);
     expect(dispatched[0]!.pos).toBe(8);
+  });
+
+  it("does not advance when the schema rejects the image", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: {
+          content: "inline*",
+          group: "block",
+          attrs: { kind: {} },
+        },
+        plain: { content: "text*", group: "block" },
+        code_block: { content: "text*", group: "block", code: true },
+        text: { group: "inline" },
+        image: {
+          inline: true,
+          group: "inline",
+          atom: true,
+          attrs: { src: {}, alt: { default: "" } },
+        },
+      },
+    });
+    let state = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [
+        schema.node("code_block", null, schema.text("x")),
+        schema.node("plain", null, schema.text("After")),
+      ]),
+    });
+    const dispatch = vi.fn(
+      (transaction: Parameters<typeof state.apply>[0]) => {
+        state = state.apply(transaction);
+      },
+    );
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch,
+    };
+
+    const next = insertImageAtPosition(
+      view as never,
+      { src: "assets/pic.png", alt: "" },
+      2,
+    );
+
+    expect(next).toBe(2);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      '[dohc] skipped image asset "assets/pic.png" at document position 2; the editor rejected the insertion.',
+    );
+    let imageCount = 0;
+    state.doc.descendants((node) => {
+      if (node.type.name === "image") imageCount += 1;
+    });
+    expect(imageCount).toBe(0);
+    expect(state.doc.child(1).textContent).toBe("After");
+    warn.mockRestore();
+  });
+});
+
+describe("documentReplacementMap", () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: "block+" },
+      paragraph: { content: "inline*", group: "block" },
+      blockquote: { content: "block+", group: "block" },
+      text: { group: "inline" },
+    },
+    marks: {
+      strong: {},
+      emphasis: {},
+    },
+  });
+  const paragraph = (text: string) =>
+    schema.node("paragraph", null, schema.text(text));
+  const fiftySubstitutedParagraphs = () => {
+    const beforeParagraphs = Array.from({ length: 100 }, (_, index) =>
+      paragraph(`before-${index.toString().padStart(3, "0")}`),
+    );
+    const afterParagraphs = beforeParagraphs.map((_, index) => {
+      const prefix = index < 50 ? "after" : "before";
+      return paragraph(`${prefix}-${index.toString().padStart(3, "0")}`);
+    });
+    return { beforeParagraphs, afterParagraphs };
+  };
+  const changedRanges = (mapping: ReturnType<typeof documentReplacementMap>) => {
+    const ranges: number[] = [];
+    mapping.forEach((oldStart, oldEnd, newStart, newEnd) => {
+      ranges.push(oldStart, oldEnd - oldStart, newEnd - newStart);
+    });
+    return ranges;
+  };
+
+  it("maps through disjoint edits within one text node", () => {
+    const before = schema.node("doc", null, [paragraph("before Target after")]);
+    const after = schema.node("doc", null, [paragraph("peer before Target after tail")]);
+
+    expect(documentReplacementMap(before, after).map(11, 1)).toBe(16);
+  });
+
+  it("maps through disjoint block and inline edits", () => {
+    const before = schema.node("doc", null, [
+      paragraph("Before"),
+      paragraph("Target"),
+      paragraph("After"),
+    ]);
+    const after = schema.node("doc", null, [
+      paragraph("Peer"),
+      paragraph("Before"),
+      paragraph("Tar!get"),
+      paragraph("After"),
+      paragraph("Tail"),
+    ]);
+
+    expect(documentReplacementMap(before, after).map(12, 1)).toBe(19);
+  });
+
+  it("preserves positions across mark-only child segmentation", () => {
+    const strong = schema.mark("strong");
+    const before = schema.node("doc", null, [paragraph("Before target after")]);
+    const after = schema.node("doc", null, [
+      schema.node("paragraph", null, [
+        schema.text("Before "),
+        schema.text("target", [strong]),
+        schema.text(" after"),
+      ]),
+    ]);
+    const mapping = documentReplacementMap(before, after);
+
+    expect(changedRanges(mapping)).toEqual([]);
+    expect(mapping.map(17, 1)).toBe(17);
+  });
+
+  it("merges touching marked-child changes at their selection junction", () => {
+    const strong = schema.mark("strong");
+    const emphasis = schema.mark("emphasis");
+    const before = schema.node("doc", null, [
+      schema.node("paragraph", null, [
+        schema.text("AA", [strong]),
+        schema.text("BB", [emphasis]),
+      ]),
+    ]);
+    const after = schema.node("doc", null, [
+      schema.node("paragraph", null, [
+        schema.text("AAAA", [strong]),
+        schema.text("CCBB", [emphasis]),
+      ]),
+    ]);
+    const mapping = documentReplacementMap(before, after);
+
+    expect(changedRanges(mapping)).toEqual([3, 0, 4]);
+    expect(mapping.map(3, 1)).toBe(7);
+  });
+
+  it("preserves an obvious middle anchor after the exact-diff budget expires", () => {
+    const stable = " stable ";
+    const before = schema.node("doc", null, [
+      paragraph("Lead"),
+      paragraph(`${"a".repeat(96)}${stable}${"b".repeat(96)}`),
+      paragraph("Tail"),
+    ]);
+    const after = schema.node("doc", null, [
+      paragraph("Lead"),
+      paragraph(`${"x".repeat(100)}${stable}${"y".repeat(100)}`),
+      paragraph("Tail"),
+    ]);
+    const mapping = documentReplacementMap(before, after);
+
+    expect(changedRanges(mapping)).toEqual([7, 96, 100, 111, 96, 100]);
+    expect(mapping.map(2, 1)).toBe(2);
+    expect(mapping.map(107, 1)).toBe(111);
+    expect(mapping.map(210, 1)).toBe(218);
+  });
+
+  it("preserves unchanged blocks after the child diff budget expires", () => {
+    const { beforeParagraphs, afterParagraphs } =
+      fiftySubstitutedParagraphs();
+    const before = schema.node("doc", null, beforeParagraphs);
+    const after = schema.node("doc", null, afterParagraphs);
+    const mapping = documentReplacementMap(before, after);
+    const positionInParagraph80 =
+      beforeParagraphs
+        .slice(0, 80)
+        .reduce((position, node) => position + node.nodeSize, 1) + 3;
+    const expectedPosition =
+      afterParagraphs
+        .slice(0, 80)
+        .reduce((position, node) => position + node.nodeSize, 1) + 3;
+
+    expect(changedRanges(mapping)).not.toEqual([
+      0,
+      before.content.size,
+      after.content.size,
+    ]);
+    expect(mapping.map(positionInParagraph80, 1)).toBe(expectedPosition);
+  });
+
+  it("preserves unchanged nested blocks after the shared budget expires", () => {
+    const { beforeParagraphs, afterParagraphs } =
+      fiftySubstitutedParagraphs();
+    const beforeQuote = schema.node("blockquote", null, beforeParagraphs);
+    const afterQuote = schema.node("blockquote", null, afterParagraphs);
+    const before = schema.node("doc", null, [beforeQuote]);
+    const after = schema.node("doc", null, [afterQuote]);
+    const mapping = documentReplacementMap(before, after);
+    const positionInParagraph80 =
+      beforeParagraphs
+        .slice(0, 80)
+        .reduce((position, node) => position + node.nodeSize, 2) + 3;
+    const expectedPosition =
+      afterParagraphs
+        .slice(0, 80)
+        .reduce((position, node) => position + node.nodeSize, 2) + 3;
+
+    expect(changedRanges(mapping)).not.toEqual([
+      1,
+      beforeQuote.content.size,
+      afterQuote.content.size,
+    ]);
+    expect(mapping.map(positionInParagraph80, 1)).toBe(expectedPosition);
+  });
+
+  it("uses one bounded range when a large rewrite has no usable anchor", () => {
+    const before = schema.node("doc", null, [
+      paragraph("Lead"),
+      paragraph(`${"a".repeat(96)}cat${"b".repeat(96)}`),
+      paragraph("Tail"),
+    ]);
+    const after = schema.node("doc", null, [
+      paragraph("Lead"),
+      paragraph(`${"x".repeat(100)}cat${"y".repeat(100)}`),
+      paragraph("Tail"),
+    ]);
+    const mapping = documentReplacementMap(before, after);
+
+    expect(changedRanges(mapping)).toEqual([7, 195, 203]);
+    expect(mapping.map(205, 1)).toBe(213);
+  });
+
+  it("keeps precise ranges for 32 independent ordinary edits", () => {
+    const beforeText = Array.from({ length: 32 }, (_, index) =>
+      `a${index.toString().padStart(2, "0")}-`,
+    ).join("");
+    const afterText = beforeText.replaceAll("a", "b");
+    const before = schema.node("doc", null, [paragraph(beforeText)]);
+    const after = schema.node("doc", null, [paragraph(afterText)]);
+    const mapping = documentReplacementMap(before, after);
+
+    expect(changedRanges(mapping)).toHaveLength(32 * 3);
+  });
+});
+
+describe("placeImageFiles", () => {
+  it("rebases the insertion position when peer content lands during the asset write", async () => {
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: { content: "inline*", group: "block" },
+        text: { group: "inline" },
+        image: {
+          inline: true,
+          group: "inline",
+          atom: true,
+          attrs: { src: {}, alt: { default: "" } },
+        },
+      },
+    });
+    const paragraph = (text: string) =>
+      schema.node("paragraph", null, text ? schema.text(text) : undefined);
+    let state = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [paragraph("Target")]),
+    });
+    const startPos = state.doc.content.size - 1;
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch(transaction: Parameters<typeof state.apply>[0]) {
+        state = state.apply(transaction);
+      },
+    };
+
+    await placeImageFiles(
+      view as never,
+      [
+        {
+          name: "photo.png",
+          mimeType: "image/png",
+          size: 1,
+          read: async () => new Uint8Array([1]),
+        },
+      ],
+      {
+        workspaceId: "ws1",
+        docPath: "notes/plan.md",
+        writeAsset: async () => {
+          state = EditorState.create({
+            schema,
+            doc: schema.node("doc", null, [
+              paragraph("Peer"),
+              paragraph("Target"),
+            ]),
+          });
+        },
+      },
+      startPos,
+    );
+
+    expect(state.doc.child(0).textContent).toBe("Peer");
+    const target = state.doc.child(1);
+    expect(target.textContent).toBe("Target");
+    expect(target.lastChild?.type.name).toBe("image");
+  });
+
+  it("keeps a rejected two-image batch anchored after a peer replaces its paragraph", async () => {
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: {
+          content: "inline*",
+          group: "block",
+          attrs: { kind: {} },
+        },
+        plain: { content: "text*", group: "block" },
+        code_block: { content: "text*", group: "block", code: true },
+        text: { group: "inline" },
+        image: {
+          inline: true,
+          group: "inline",
+          atom: true,
+          attrs: { src: {}, alt: { default: "" } },
+        },
+      },
+    });
+    const paragraph = (text: string) =>
+      schema.node("paragraph", { kind: "anchor" }, schema.text(text));
+    let state = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [
+        paragraph("Target"),
+        schema.node("plain", null, schema.text("After")),
+      ]),
+    });
+    const startPos = 2;
+    const dispatch = vi.fn(
+      (transaction: Parameters<typeof state.apply>[0]) => {
+        state = state.apply(transaction);
+      },
+    );
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch,
+    };
+    let writes = 0;
+
+    await placeImageFiles(
+      view as never,
+      ["one.png", "two.png"].map((name) => ({
+        name,
+        mimeType: "image/png",
+        size: 1,
+        read: async () => new Uint8Array([1]),
+      })),
+      {
+        workspaceId: "ws1",
+        docPath: "notes/plan.md",
+        writeAsset: async () => {
+          writes += 1;
+          if (writes === 1) {
+            state = EditorState.create({
+              schema,
+              doc: schema.node("doc", null, [
+                schema.node("code_block", null, schema.text("x")),
+                schema.node("plain", null, schema.text("After")),
+              ]),
+            });
+          }
+        },
+      },
+      startPos,
+    );
+
+    expect(state.doc.child(0).type.name).toBe("code_block");
+    expect(state.doc.child(1).textContent).toBe("After");
+    let images = 0;
+    state.doc.descendants((node) => {
+      if (node.type.name === "image") images += 1;
+    });
+    expect(images).toBe(0);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("does not map a repeated-sibling deletion before its replacement boundary", async () => {
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: { content: "inline*", group: "block" },
+        text: { group: "inline" },
+        image: {
+          inline: true,
+          group: "inline",
+          atom: true,
+          attrs: { src: {}, alt: { default: "" } },
+        },
+      },
+    });
+    const paragraph = () =>
+      schema.node("paragraph", null, schema.text("same"));
+    let state = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [paragraph(), paragraph(), paragraph()]),
+    });
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch(transaction: Parameters<typeof state.apply>[0]) {
+        state = state.apply(transaction);
+      },
+    };
+
+    await placeImageFiles(
+      view as never,
+      [
+        {
+          name: "photo.png",
+          mimeType: "image/png",
+          size: 1,
+          read: async () => new Uint8Array([1]),
+        },
+      ],
+      {
+        workspaceId: "ws1",
+        docPath: "notes/plan.md",
+        writeAsset: async () => {
+          state = EditorState.create({
+            schema,
+            doc: schema.node("doc", null, [paragraph()]),
+          });
+        },
+      },
+      7,
+    );
+
+    expect(state.doc.child(0).textContent).toBe("same");
+    expect(state.doc.child(1).firstChild?.type.name).toBe("image");
+  });
+
+  it("keeps an async image anchor between disjoint peer edits", async () => {
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: { content: "inline*", group: "block" },
+        text: { group: "inline" },
+        image: {
+          inline: true,
+          group: "inline",
+          atom: true,
+          attrs: { src: {}, alt: { default: "" } },
+        },
+      },
+    });
+    const paragraph = (text: string) =>
+      schema.node("paragraph", null, schema.text(text));
+    let state = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [
+        paragraph("Before"),
+        paragraph("Target"),
+        paragraph("After"),
+      ]),
+    });
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch(transaction: Parameters<typeof state.apply>[0]) {
+        state = state.apply(transaction);
+      },
+    };
+
+    await placeImageFiles(
+      view as never,
+      [
+        {
+          name: "photo.png",
+          mimeType: "image/png",
+          size: 1,
+          read: async () => new Uint8Array([1]),
+        },
+      ],
+      {
+        workspaceId: "ws1",
+        docPath: "notes/plan.md",
+        writeAsset: async () => {
+          state = EditorState.create({
+            schema,
+            doc: schema.node("doc", null, [
+              paragraph("Peer"),
+              paragraph("Before"),
+              paragraph("Target"),
+              paragraph("After"),
+              paragraph("Tail"),
+            ]),
+          });
+        },
+      },
+      12,
+    );
+
+    const target = state.doc.child(2);
+    expect(target.childCount).toBe(3);
+    expect(target.child(0).textContent).toBe("Tar");
+    expect(target.child(1).type.name).toBe("image");
+    expect(target.child(2).textContent).toBe("get");
+  });
+
+  it("keeps an async image inside an unchanged island after a large rewrite", async () => {
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: { content: "inline*", group: "block" },
+        text: { group: "inline" },
+        image: {
+          inline: true,
+          group: "inline",
+          atom: true,
+          attrs: { src: {}, alt: { default: "" } },
+        },
+      },
+    });
+    const paragraph = (text: string) =>
+      schema.node("paragraph", null, schema.text(text));
+    const stable = " stable ";
+    let state = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [
+        paragraph(`${"a".repeat(96)}${stable}${"b".repeat(96)}`),
+      ]),
+    });
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch(transaction: Parameters<typeof state.apply>[0]) {
+        state = state.apply(transaction);
+      },
+    };
+
+    await placeImageFiles(
+      view as never,
+      [
+        {
+          name: "photo.png",
+          mimeType: "image/png",
+          size: 1,
+          read: async () => new Uint8Array([1]),
+        },
+      ],
+      {
+        workspaceId: "ws1",
+        docPath: "notes/plan.md",
+        writeAsset: async () => {
+          state = EditorState.create({
+            schema,
+            doc: schema.node("doc", null, [
+              paragraph(`${"x".repeat(100)}${stable}${"y".repeat(100)}`),
+            ]),
+          });
+        },
+      },
+      100,
+    );
+
+    let imagePosition: number | null = null;
+    state.doc.descendants((node, pos) => {
+      if (node.type.name === "image") imagePosition = pos;
+    });
+    expect(imagePosition).toBe(104);
+  });
+
+  it("anchors before the asynchronous attachment-settings read", async () => {
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: { content: "inline*", group: "block" },
+        text: { group: "inline" },
+        image: {
+          inline: true,
+          group: "inline",
+          atom: true,
+          attrs: { src: {}, alt: { default: "" } },
+        },
+      },
+    });
+    const paragraph = (text: string) =>
+      schema.node("paragraph", null, schema.text(text));
+    let state = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [paragraph("Target")]),
+    });
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch(transaction: Parameters<typeof state.apply>[0]) {
+        state = state.apply(transaction);
+      },
+    };
+
+    await placeImageFiles(
+      view as never,
+      [
+        {
+          name: "photo.png",
+          mimeType: "image/png",
+          size: 1,
+          read: async () => new Uint8Array([1]),
+        },
+      ],
+      {
+        workspaceId: "ws1",
+        docPath: "notes/plan.md",
+        readAttachments: async () => {
+          state = EditorState.create({
+            schema,
+            doc: schema.node("doc", null, [
+              paragraph("Peer"),
+              paragraph("Target"),
+            ]),
+          });
+          return { location: "per-document", folderName: "assets" };
+        },
+        writeAsset: async () => undefined,
+      },
+      state.doc.content.size - 1,
+    );
+
+    expect(state.doc.child(0).textContent).toBe("Peer");
+    expect(state.doc.child(1).lastChild?.type.name).toBe("image");
   });
 });
 
@@ -656,6 +1362,56 @@ describe("pickAndInsertImages", () => {
 
     expect(writeAsset).toHaveBeenCalledTimes(2);
     expect(dispatched.map((d) => d.pos)).toEqual([3, 4]);
+  });
+
+  it("anchors before the asynchronous native picker", async () => {
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: { content: "inline*", group: "block" },
+        text: { group: "inline" },
+        image: {
+          inline: true,
+          group: "inline",
+          atom: true,
+          attrs: { src: {}, alt: { default: "" } },
+        },
+      },
+    });
+    const paragraph = (text: string) =>
+      schema.node("paragraph", null, schema.text(text));
+    let state = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [paragraph("Target")]),
+    });
+    const pos = state.doc.content.size - 1;
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch(transaction: Parameters<typeof state.apply>[0]) {
+        state = state.apply(transaction);
+      },
+    };
+
+    await pickAndInsertImages(view as never, pos, {
+      workspaceId: "ws1",
+      docPath: "notes/plan.md",
+      writeAsset: async () => undefined,
+      pickImages: async () => {
+        state = EditorState.create({
+          schema,
+          doc: schema.node("doc", null, [
+            paragraph("Peer"),
+            paragraph("Target"),
+          ]),
+        });
+        return [picked("photo.png", [1])];
+      },
+    });
+
+    expect(state.doc.child(0).textContent).toBe("Peer");
+    expect(state.doc.child(1).lastChild?.type.name).toBe("image");
   });
 
   it("writes nothing when the picker is cancelled", async () => {

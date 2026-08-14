@@ -13,7 +13,7 @@
 // mirror doc under ENGINE_SOURCED_ORIGIN; the update observer that ships local
 // edits to main SKIPS that origin, so an engine-applied update is never bounced
 // back to main (which would double-journal / echo-storm). A real editor edit
-// carries Tiptap's own (non-ENGINE) origin and IS shipped.
+// carries the editor's own (non-ENGINE) origin and IS shipped.
 
 import * as Y from "yjs";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
@@ -70,6 +70,10 @@ export interface EngineYDocTransport {
   stageLocalUpdate(): number | null;
   // Ship a local editor batch to main, where it is journaled via recordUpdate.
   // sequence is the newest staged edit covered by the merged update.
+  // Resolution acknowledges that main accepted the batch. A refusal main
+  // returns as data must surface as EngineYDocDeliveryRefusedError — the one
+  // permanent delivery failure — while a transport fault rejects with its own
+  // error and is retried at the head of the queue.
   applyLocalUpdate(
     update: Uint8Array,
     sequence: number,
@@ -118,17 +122,34 @@ export class EngineYDocUpdateTooLargeError extends Error {
   }
 }
 
-function isEngineYDocUpdateTooLargeError(
-  error: unknown,
-): error is EngineYDocUpdateTooLargeError {
-  return error instanceof EngineYDocUpdateTooLargeError;
+export class EngineYDocDeliveryRefusedError extends Error {
+  constructor(readonly reason: string) {
+    super(`The engine refused the Y.Doc update: ${reason}.`);
+    this.name = "EngineYDocDeliveryRefusedError";
+  }
+}
+
+function isPermanentDeliveryError(error: unknown): boolean {
+  return (
+    error instanceof EngineYDocUpdateTooLargeError ||
+    error instanceof EngineYDocDeliveryRefusedError
+  );
 }
 
 export interface EngineYDocBindOptions {
-  onPermanentLocalUpdateFailure?: (
-    error: EngineYDocUpdateTooLargeError,
-    doc: Y.Doc,
-  ) => void;
+  // A permanent delivery failure (an oversized update, or a refusal main
+  // returned as data). The mirror's edits can no longer reach the engine, so
+  // the full canonical state is handed over before anything destroys it. The
+  // queue halts until a lineage replacement installs a writable winner.
+  onDeliveryFailure?: (
+    snapshot: Uint8Array,
+    error: unknown,
+    source: Y.Doc,
+  ) => void | Promise<void>;
+  // Main can report a later update as saved while earlier edits still sit in
+  // the batch queue or an unacknowledged delivery. Keep the owner informed
+  // until every accepted local update has been acknowledged.
+  onDeliveryPendingChange?: (pending: boolean) => void;
   // Runs after the losing mirror stops shipping updates and before main
   // accepts the winner generation. The desktop uses this boundary to persist
   // state that existed only in the losing renderer mirror.
@@ -188,8 +209,9 @@ export function mergeYDocUpdatesForTransport(
 }
 
 export interface EngineYDocBinding {
-  // The mirror Y.Doc Tiptap binds to, or null when the doc is not engine-backed
-  // (available:false) — the caller stays on the local autosave editor.
+  // The mirror Y.Doc the editor binds to, or null when the doc is not
+  // engine-backed (available:false) — the caller stays on the local autosave
+  // editor.
   readonly doc: Y.Doc | null;
   readonly available: boolean;
   readonly objectId: string | null;
@@ -306,21 +328,65 @@ export async function bindEngineYDoc(
     sequence: number;
   }> = [];
   let sendChain = Promise.resolve();
+  let unacknowledgedBatches = 0;
+  let deliveryPending = false;
   let localUpdatesRefused = false;
   let replacementInProgress = false;
+  let destroyRequested = false;
+  let recoveryError: unknown = null;
 
-  const refuseLocalUpdates = (error: EngineYDocUpdateTooLargeError): void => {
+  const setDeliveryPending = (pending: boolean): void => {
+    if (deliveryPending === pending) return;
+    deliveryPending = pending;
+    options.onDeliveryPendingChange?.(pending);
+  };
+
+  const finishDeliveryIfSafe = (): void => {
+    if (pendingLocalUpdates.length === 0 && unacknowledgedBatches === 0) {
+      setDeliveryPending(false);
+    }
+  };
+
+  const refuseLocalUpdates = (error: unknown): void => {
     if (localUpdatesRefused) return;
     localUpdatesRefused = true;
     pendingLocalUpdates = [];
+    const refusedDoc = doc;
     try {
-      options.onPermanentLocalUpdateFailure?.(error, doc);
-    } catch {
-      // Observer boundary: recovery reporting must not wedge teardown.
+      // The full state, not the failed delta: it also covers every edit made
+      // while the failed delivery was in flight, and it survives the mirror's
+      // destruction.
+      const handed = options.onDeliveryFailure?.(
+        Y.encodeStateAsUpdate(refusedDoc),
+        error,
+        refusedDoc,
+      );
+      void Promise.resolve(handed)
+        .catch((captureError: unknown) => {
+          recoveryError = captureError;
+        })
+        .finally(() => finishDeliveryIfSafe());
+    } catch (captureError) {
+      // Observer boundary: recovery reporting must not wedge teardown — but a
+      // failed recovery is the loss of the last copy, so destroy rethrows it.
+      recoveryError = captureError;
+      finishDeliveryIfSafe();
     }
   };
 
   const applyLocalUpdateUntilAcknowledged = async (batch: {
+    update: Uint8Array;
+    sequence: number;
+  }, batchGeneration: number): Promise<void> => {
+    try {
+      await deliverBatchUntilAcknowledged(batch, batchGeneration);
+    } finally {
+      unacknowledgedBatches -= 1;
+      finishDeliveryIfSafe();
+    }
+  };
+
+  const deliverBatchUntilAcknowledged = async (batch: {
     update: Uint8Array;
     sequence: number;
   }, batchGeneration: number): Promise<void> => {
@@ -341,8 +407,19 @@ export async function bindEngineYDoc(
         );
         return;
       } catch (error) {
-        if (isEngineYDocUpdateTooLargeError(error)) {
+        if (isPermanentDeliveryError(error)) {
           refuseLocalUpdates(error);
+          return;
+        }
+        if (destroyRequested) {
+          // Teardown must not spin on an unavailable transport. The canonical
+          // mirror is preserved instead, and close may then proceed.
+          refuseLocalUpdates(error);
+          return;
+        }
+        // An abandoned batch must not sleep first: a replacement is waiting
+        // for this chain to drain before it preserves and acknowledges.
+        if (replacementInProgress || batchGeneration !== lineageGeneration) {
           return;
         }
         // Yjs increments a client's clock across updates. A later delta can
@@ -372,6 +449,7 @@ export async function bindEngineYDoc(
     // chain remains pending during retries, so teardown cannot settle and
     // close a session that still has renderer-only edits.
     for (const batch of mergeYDocUpdatesForTransport(updates)) {
+      unacknowledgedBatches += 1;
       sendChain = sendChain.then(() =>
         applyLocalUpdateUntilAcknowledged(batch, batchGeneration),
       );
@@ -387,8 +465,8 @@ export async function bindEngineYDoc(
     }, LOCAL_UPDATE_BATCH_MS);
   };
 
-  // Coalesce consecutive LOCAL editor edits before shipping them to main. A
-  // Tiptap edit carries a non-ENGINE origin; an engine-sourced apply carries
+  // Coalesce consecutive LOCAL editor edits before shipping them to main. An
+  // editor edit carries a non-ENGINE origin; an engine-sourced apply carries
   // ENGINE_SOURCED_ORIGIN and is skipped (no echo back to main).
   const onUpdate = (update: Uint8Array, origin: unknown): void => {
     if (destroyed) return;
@@ -396,6 +474,7 @@ export async function bindEngineYDoc(
     if (localUpdatesRefused) return;
     const sequence = transport.stageLocalUpdate();
     if (sequence === null) return;
+    setDeliveryPending(true);
     pendingLocalUpdates.push({ update, sequence });
     scheduleLocalUpdateFlush();
   };
@@ -431,6 +510,13 @@ export async function bindEngineYDoc(
         scheduledFlush = null;
       }
       pendingLocalUpdates = [];
+      // Wait out any delivery already in flight before preserving and
+      // acknowledging: the winner must not install while the loser's last
+      // batch is still being answered. In-queue batches abandon themselves
+      // the moment their retry loop observes the replacement.
+      if (unacknowledgedBatches > 0) {
+        await sendChain.catch(() => undefined);
+      }
       let bufferedUpdates: Uint8Array[];
       try {
         if (options.onDocumentReplacing) {
@@ -457,6 +543,7 @@ export async function bindEngineYDoc(
       artifactAssets = input.artifactAssets;
       localUpdatesRefused = false;
       replacementInProgress = false;
+      finishDeliveryIfSafe();
       for (const listener of replacementListeners) {
         listener(replacement, input.recoveredPaths);
       }
@@ -516,14 +603,23 @@ export async function bindEngineYDoc(
       // A close settles the engine state. Flush and await every accepted local
       // edit before close so teardown cannot settle behind the mirror. If the
       // transport stays unavailable, this promise stays pending by design.
-      // Main's sender-destroyed cleanup owns a renderer-process exit.
+      // Main's sender-destroyed cleanup owns a renderer-process exit. A
+      // PERMANENT refusal resolves the chain instead: the canonical state was
+      // already handed to onDeliveryFailure, so close may proceed.
+      destroyRequested = true;
       destroyPromise = (async () => {
+        if (replacementHandoff) {
+          await Promise.allSettled([replacementHandoff]);
+        }
         await flushPendingLocalUpdates();
         await transport.close().catch(() => undefined);
         unsubscribeReplacement();
         doc.destroy();
         for (const retired of retiredDocs) retired.destroy();
         retiredDocs.clear();
+        // A failed recovery is the loss of the mirror's last copy — it must
+        // not vanish into a resolved teardown.
+        if (recoveryError !== null) throw recoveryError;
       })();
       return destroyPromise;
     },

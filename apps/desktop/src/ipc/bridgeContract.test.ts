@@ -20,6 +20,7 @@ import {
   CreateWorkspaceVersionPayload,
   EngineMomentDetailRecord,
   ApplyEngineYDocUpdatePayload,
+  ApplyEngineYDocUpdateResult,
   OpenEngineYDocSessionResult,
   ReadEngineYDocArtifactAssetResult,
   ExportDocumentFilePayload,
@@ -86,8 +87,11 @@ import {
 } from "./bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import {
+  CHATS_TAB_PATH,
   MAX_EDITOR_GROUPS,
   MAX_EDITOR_GROUP_ID_CHARS,
+  pluginPanelTabPath,
+  siteTabPath,
 } from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
@@ -695,8 +699,9 @@ describe("workspace UI state IPC contract", () => {
     ).toBe(false);
   });
 
-  it("requires globally unique tabs, valid focus, and normalized sizes", () => {
-    const duplicate = WorkspaceUiState.safeParse({
+  it("allows a path in several groups while requiring group-local uniqueness", () => {
+    expect(
+      WorkspaceUiState.safeParse({
         ...validState,
         editorGroups: [
           { ...validState.editorGroups[0], size: 0.5 },
@@ -707,13 +712,94 @@ describe("workspace UI state IPC contract", () => {
             size: 0.5,
           },
         ],
-      });
-    expect(duplicate.success).toBe(false);
-    if (!duplicate.success) {
-      expect(duplicate.error.issues.map((issue) => issue.message)).toEqual([
-        "Open tab paths must be unique across editor groups.",
+      }).success,
+    ).toBe(true);
+    const duplicateInGroup = WorkspaceUiState.safeParse({
+      ...validState,
+      editorGroups: [
+        {
+          ...validState.editorGroups[0],
+          tabs: ["notes/a.md", "notes/a.md"],
+        },
+      ],
+    });
+    expect(duplicateInGroup.success).toBe(false);
+    if (!duplicateInGroup.success) {
+      expect(duplicateInGroup.error.issues.map((issue) => issue.message)).toEqual([
+        "Editor group tabs must be unique.",
       ]);
     }
+  });
+
+  it("rejects Chats in several editor groups with an exact issue", () => {
+    const result = WorkspaceUiState.safeParse({
+      ...validState,
+      editorGroups: [
+        {
+          id: "left",
+          tabs: [CHATS_TAB_PATH, "notes/a.md"],
+          activeTab: CHATS_TAB_PATH,
+          size: 0.5,
+        },
+        {
+          id: "right",
+          tabs: ["notes/a.md", CHATS_TAB_PATH],
+          activeTab: CHATS_TAB_PATH,
+          size: 0.5,
+        },
+      ],
+      activeEditorGroup: "left",
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toEqual([
+        expect.objectContaining({
+          path: ["editorGroups", 1, "tabs", 1],
+          message: "Chats can be open in only one editor group.",
+        }),
+      ]);
+    }
+  });
+
+  it.each([
+    ["site preview", siteTabPath("client-portal"), "dohc://site/%63lient-portal"],
+    [
+      "plugin panel",
+      pluginPanelTabPath("hello-plugin", "main"),
+      "dohc://plugin-panel/%68ello-plugin/main",
+    ],
+  ])("rejects one %s path in several editor groups", (_label, path, alias) => {
+    const result = WorkspaceUiState.safeParse({
+      ...validState,
+      editorGroups: [
+        {
+          id: "left",
+          tabs: [path, "notes/a.md"],
+          activeTab: path,
+          size: 0.5,
+        },
+        {
+          id: "right",
+          tabs: ["notes/a.md", alias],
+          activeTab: alias,
+          size: 0.5,
+        },
+      ],
+      activeEditorGroup: "left",
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toContainEqual(
+        expect.objectContaining({
+          path: ["editorGroups", 1, "tabs", 1],
+        }),
+      );
+    }
+  });
+
+  it("requires valid focus and normalized sizes", () => {
     expect(
       WorkspaceUiState.safeParse({
         ...validState,
@@ -1928,6 +2014,24 @@ describe("engine Y.Doc update IPC contract", () => {
       `ENGINE_YDOC_UPDATE_MAX_BYTES is ${ENGINE_YDOC_UPDATE_MAX_BYTES} bytes; ` +
         `the update is ${observedBytes} bytes.`,
     );
+  });
+
+  it("distinguishes accepted updates from explicit main-process refusals", () => {
+    expect(ApplyEngineYDocUpdateResult.parse({ accepted: true })).toEqual({
+      accepted: true,
+    });
+    expect(
+      ApplyEngineYDocUpdateResult.parse({
+        accepted: false,
+        reason: "lineage-transition",
+      }),
+    ).toEqual({ accepted: false, reason: "lineage-transition" });
+    expect(
+      ApplyEngineYDocUpdateResult.safeParse({
+        accepted: false,
+        reason: "silently-dropped",
+      }).success,
+    ).toBe(false);
   });
 });
 

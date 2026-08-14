@@ -4,6 +4,7 @@ import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 import {
   bindEngineYDoc,
+  EngineYDocDeliveryRefusedError,
   EngineYDocUpdateTooLargeError,
   mergeYDocUpdatesForTransport,
   type EngineYDocBatchScheduler,
@@ -651,8 +652,12 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       | undefined;
     let recoveredText = "";
     const binding = await bindEngineYDoc(transport, batches.scheduler, {
-      onPermanentLocalUpdateFailure(error, doc) {
-        refusal = error;
+      onDeliveryFailure(_snapshot, error, doc) {
+        refusal = error as {
+          constraint: string;
+          limitBytes: number;
+          observedBytes: number;
+        };
         recoveredText = doc.getText("plainText").toString();
       },
     });
@@ -717,69 +722,6 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     expect(mock.shippedGenerations).toEqual([2]);
     expect(bodyText(binding.doc!)).toContain("fresh");
     await binding.destroy();
-  });
-
-  it("keeps teardown pending and the session open while the head cannot be acknowledged", async () => {
-    const seed = new Y.Doc();
-    seed.getText("plainText").insert(0, "seed");
-    const mainDoc = new Y.Doc();
-    Y.applyUpdate(mainDoc, Y.encodeStateAsUpdate(seed));
-    let refuse = true;
-    let attempts = 0;
-    let closed = false;
-    const transport: EngineYDocTransport = {
-      async open() {
-        return {
-          available: true,
-          initialUpdate: Y.encodeStateAsUpdate(seed),
-          lineageGeneration: 1,
-        };
-      },
-      stageLocalUpdate: () => 1,
-      async applyLocalUpdate(update) {
-        attempts += 1;
-        if (refuse) throw new Error("IPC unavailable");
-        Y.applyUpdate(mainDoc, update);
-      },
-      onRemoteUpdate() {
-        return () => undefined;
-      },
-      onLineageReplacement() {
-        return () => undefined;
-      },
-      async acknowledgeLineageReplacement() {
-        return [];
-      },
-      async close() {
-        closed = true;
-      },
-    };
-    const batches = manualBatchScheduler();
-    const binding = await bindEngineYDoc(transport, batches.scheduler);
-    binding.doc!.getText("plainText").insert(4, "-local");
-    await batches.runNext();
-
-    let destroyed = false;
-    const destroying = binding.destroy().then(() => {
-      destroyed = true;
-    });
-    await batches.runNext();
-    await Promise.resolve();
-    expect(attempts).toBe(2);
-    expect(closed).toBe(false);
-    expect(destroyed).toBe(false);
-    expect(batches.delays).toEqual([32, 250, 250]);
-
-    // Recovery acknowledges the retained head. Only then may close settle the
-    // session and destroy the mirror.
-    refuse = false;
-    await batches.runNext();
-    await destroying;
-    expect(attempts).toBe(3);
-    expect(closed).toBe(true);
-    expect(mainDoc.getText("plainText").toString()).toBe("seed-local");
-    mainDoc.destroy();
-    seed.destroy();
   });
 
   it("falls back (doc:null) when the transport reports the doc is not engine-backed", async () => {
@@ -874,6 +816,194 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     // Idempotent.
     await binding.destroy();
     expect(mock.events).toEqual(["apply:1", "close"]);
+  });
+
+  it("waits for an in-flight local update before closing", async () => {
+    const mock = mockTransport();
+    let releaseUpdate!: () => void;
+    const pendingUpdate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+    mock.transport.applyLocalUpdate = async (update) => {
+      await pendingUpdate;
+      Y.applyUpdate(mock.mainDoc, update);
+    };
+    const binding = await bindEngineYDoc(mock.transport);
+    typeIntoBody(binding.doc!, "Final edit.");
+
+    const destroying = binding.destroy();
+    await Promise.resolve();
+    expect(mock.closed()).toBe(false);
+
+    releaseUpdate();
+    await destroying;
+    expect(mock.closed()).toBe(true);
+    expect(bodyText(mock.mainDoc)).toContain("Final edit.");
+  });
+
+  it("captures the final mirror before close when delivery stays unavailable", async () => {
+    const mock = mockTransport();
+    const order: string[] = [];
+    mock.transport.applyLocalUpdate = async () => {
+      throw new Error("delivery stayed unavailable");
+    };
+    mock.transport.close = async () => {
+      order.push("close");
+    };
+    const binding = await bindEngineYDoc(mock.transport, undefined, {
+      onDeliveryFailure(snapshot) {
+        const recovered = new Y.Doc();
+        Y.applyUpdate(recovered, snapshot);
+        expect(bodyText(recovered)).toContain("Set aside edit.");
+        recovered.destroy();
+        order.push("recovery");
+      },
+    });
+    typeIntoBody(binding.doc!, "Set aside edit.");
+
+    await binding.destroy();
+
+    expect(order).toEqual(["recovery", "close"]);
+  });
+
+  it("captures a terminal refusal once without retrying the retired lineage", async () => {
+    vi.useFakeTimers();
+    try {
+      const mock = mockTransport();
+      let attempts = 0;
+      const recovered: string[] = [];
+      mock.transport.applyLocalUpdate = async () => {
+        attempts += 1;
+        throw new EngineYDocDeliveryRefusedError("lineage-transition");
+      };
+      const binding = await bindEngineYDoc(mock.transport, undefined, {
+        onDeliveryFailure(snapshot) {
+          const restored = new Y.Doc();
+          Y.applyUpdate(restored, snapshot);
+          recovered.push(bodyText(restored));
+          restored.destroy();
+        },
+      });
+
+      typeIntoBody(binding.doc!, "Retired edit.");
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(attempts).toBe(1);
+      expect(recovered.at(-1)).toContain("Retired edit.");
+      await binding.destroy();
+      expect(attempts).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a synchronous terminal-recovery failure before destroying the mirror", async () => {
+    const mock = mockTransport();
+    const recoveryError = new Error("recovery storage unavailable");
+    let closed = false;
+    mock.transport.applyLocalUpdate = async () => {
+      throw new EngineYDocDeliveryRefusedError("session-unavailable");
+    };
+    mock.transport.close = async () => {
+      closed = true;
+    };
+    const binding = await bindEngineYDoc(mock.transport, undefined, {
+      onDeliveryFailure() {
+        throw recoveryError;
+      },
+    });
+
+    typeIntoBody(binding.doc!, "Keep this edit.");
+
+    await expect(binding.destroy()).rejects.toBe(recoveryError);
+    expect(closed).toBe(true);
+  });
+
+  it("stops retrying when a full-state repair receives a terminal refusal", async () => {
+    vi.useFakeTimers();
+    try {
+      const mock = mockTransport();
+      let attempts = 0;
+      const recovered: string[] = [];
+      mock.transport.applyLocalUpdate = async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("transient delivery failure");
+        throw new EngineYDocDeliveryRefusedError("session-unavailable");
+      };
+      const binding = await bindEngineYDoc(mock.transport, undefined, {
+        onDeliveryFailure(snapshot) {
+          const restored = new Y.Doc();
+          Y.applyUpdate(restored, snapshot);
+          recovered.push(bodyText(restored));
+          restored.destroy();
+        },
+      });
+
+      typeIntoBody(binding.doc!, "Repair was refused.");
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(attempts).toBe(2);
+      expect(recovered.at(-1)).toContain("Repair was refused.");
+      await binding.destroy();
+      expect(attempts).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drains an old delivery and preserves its mirror before acknowledging a replacement", async () => {
+    const mock = mockTransport(["Losing root."]);
+    let rejectDelivery!: (error: Error) => void;
+    const heldDelivery = new Promise<void>((_resolve, reject) => {
+      rejectDelivery = reject;
+    });
+    mock.transport.applyLocalUpdate = async (update, _sequence, generation) => {
+      mock.shipped.push(update);
+      mock.shippedGenerations.push(generation);
+      await heldDelivery;
+    };
+    const preserved: string[] = [];
+    const batches = manualBatchScheduler();
+    const binding = await bindEngineYDoc(mock.transport, batches.scheduler, {
+      onDocumentReplacing(retired) {
+        preserved.push(bodyText(retired));
+      },
+    });
+    typeIntoBody(binding.doc!, "Unacknowledged edit.");
+    // Flush the batch so its delivery is genuinely in flight — and held.
+    await batches.runNext();
+    expect(mock.shipped).toHaveLength(1);
+
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+    const replacing = mock.replaceLineage({
+      update: Y.encodeStateAsUpdate(winner),
+      recoveredPaths: [],
+      artifactAssets: [],
+      lineageGeneration: 2,
+    });
+    await Promise.resolve();
+    expect(mock.acknowledgedGenerations).toEqual([]);
+
+    rejectDelivery(new Error("old delivery failed"));
+    for (let turn = 0; turn < 10 && preserved.length === 0; turn += 1) {
+      await Promise.resolve();
+    }
+    expect(preserved).toHaveLength(1);
+    expect(preserved[0]).toContain("Unacknowledged edit.");
+    for (
+      let turn = 0;
+      turn < 10 && mock.acknowledgedGenerations.length === 0;
+      turn += 1
+    ) {
+      await Promise.resolve();
+    }
+    expect(mock.acknowledgedGenerations).toEqual([2]);
+
+    mock.releaseReplacement();
+    await replacing;
+    expect(bodyText(binding.doc!)).toContain("Winning root.");
+    await binding.destroy();
   });
 
   it("replaces an independent lineage instead of merging it and rejects stale updates", async () => {

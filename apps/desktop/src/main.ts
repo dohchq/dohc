@@ -251,6 +251,7 @@ import {
   ReadEngineYDocArtifactAssetPayload,
   ReadEngineYDocArtifactAssetResult,
   ApplyEngineYDocUpdatePayload,
+  ApplyEngineYDocUpdateResult,
   AcknowledgeEngineYDocLineageReplacementPayload,
   AcknowledgeEngineYDocLineageReplacementResult,
   CloseEngineYDocSessionPayload,
@@ -3100,6 +3101,9 @@ interface EngineYDocSessionEntry {
   // Set by releaseEngineYDocSession when a close failed. The next open of this
   // document retries the release before it binds anything.
   closeFailed?: boolean;
+  // The session is closing and no longer accepts renderer updates. The entry
+  // stays registered until close settles so a failed release remains owned.
+  releasing?: boolean;
   // A successful delete removed this path after capture closed the engine
   // session. Main keeps the renderer entry until its normal close, but every
   // later update is an inert no-op and repeats the deleted state.
@@ -3128,6 +3132,7 @@ function releaseEngineYDocSessionEntry(
   entry: EngineYDocSessionEntry,
   reason: string,
 ): Promise<boolean> {
+  entry.releasing = true;
   pendingEngineYDocLineageHandoffs.delete(sessionKey);
   return releaseEngineYDocSession({
     sessions: engineYDocSessions,
@@ -9059,9 +9064,25 @@ function registerIpcHandlers(
               lineageGeneration: nextLineageGeneration,
             }),
           );
-        } catch {
-          // The provider already installed the winner. A malformed event must
-          // not re-enter its observer or restore the retired lineage.
+        } catch (error) {
+          // The provider already installed the winner, so the retired lineage
+          // cannot safely resume. Release this session instead of leaving an
+          // unacknowledgeable handoff armed forever.
+          if (pendingEngineYDocLineageHandoffs.get(sessionKey) === handoff) {
+            pendingEngineYDocLineageHandoffs.delete(sessionKey);
+          }
+          refused = true;
+          console.error(
+            `[desktop] could not announce the engine Y.Doc lineage replacement for ${input.path}:`,
+            error,
+          );
+          if (registeredEntry !== null) {
+            void releaseEngineYDocSessionEntry(
+              sessionKey,
+              registeredEntry,
+              "lineage replacement announcement failed",
+            );
+          }
         }
       };
       let session: WorkspaceEngineYDocProviderSession;
@@ -9210,6 +9231,13 @@ function registerIpcHandlers(
         refused = true;
         return releaseEngineYDocSessionEntry(sessionKey, entry, reason);
       };
+      if (refused) {
+        const released = await release("lineage replacement announcement failed");
+        return OpenEngineYDocSessionResult.parse({
+          available: false,
+          ...(released ? {} : { engineMayHoldDocument: true }),
+        });
+      }
       // The renderer can die or reload DURING the await above. Close the stale
       // session before crash cleanup completes so its reservation cannot block
       // the replacement renderer's open.
@@ -9323,17 +9351,35 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = ApplyEngineYDocUpdatePayload.parse(payload);
     // Owner-scoped BY THE KEY: the sender comes from the event, so a renderer
-    // can only ever reach a session it opened. A no-op for an unknown, closed,
-    // or foreign session (this boundary never throws to the caller).
+    // can only ever reach a session it opened. Refusals are returned as data so
+    // the renderer can preserve its canonical mirror.
     const sessionKey = engineYDocSessionKey(event.sender.id, input.sessionId);
     const entry = engineYDocSessions.get(sessionKey);
-    if (!entry) return;
+    if (!entry) {
+      return ApplyEngineYDocUpdateResult.parse({
+        accepted: false,
+        reason: "session-unavailable",
+      });
+    }
+    if (entry.releasing) {
+      return ApplyEngineYDocUpdateResult.parse({
+        accepted: false,
+        reason: "session-unavailable",
+      });
+    }
     // Main has installed an independent winner, but the renderer may still be
     // inside a transaction on the losing mirror. Never merge that update into
     // the winner and never accept winner edits before the renderer has exposed
     // it. The renderer persists the losing mirror before acknowledging.
-    if (pendingEngineYDocLineageHandoffs.has(sessionKey)) return;
-    if (input.lineageGeneration !== entry.lineageGeneration) return;
+    if (
+      pendingEngineYDocLineageHandoffs.has(sessionKey) ||
+      input.lineageGeneration !== entry.lineageGeneration
+    ) {
+      return ApplyEngineYDocUpdateResult.parse({
+        accepted: false,
+        reason: "lineage-transition",
+      });
+    }
     if (entry.deleted) {
       sendEngineYDocSaveState(
         entry.sender,
@@ -9342,7 +9388,10 @@ function registerIpcHandlers(
         "deleted",
         input.seq,
       );
-      return;
+      return ApplyEngineYDocUpdateResult.parse({
+        accepted: false,
+        reason: "deleted",
+      });
     }
     // WS-G2-C-2 (gate fix 4): RE-CHECK the shared-view guard before applying — a
     // workspace can become a read-only shared view after a session opened, and
@@ -9357,7 +9406,10 @@ function registerIpcHandlers(
         "read-only",
         input.seq,
       );
-      return;
+      return ApplyEngineYDocUpdateResult.parse({
+        accepted: false,
+        reason: "read-only",
+      });
     }
     // Count the edit when it REACHES the settle, not when it arrives here.
     // The session queues updates, so hand-over runs ahead of journaling: a
@@ -9367,6 +9419,7 @@ function registerIpcHandlers(
     entry.session.applyLocalUpdate(input.update, () =>
       noteLocalEdit(entry.saveSeq, input.seq),
     );
+    return ApplyEngineYDocUpdateResult.parse({ accepted: true });
   });
 
   ipcMain.handle(

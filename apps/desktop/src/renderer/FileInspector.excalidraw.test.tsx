@@ -188,7 +188,7 @@ function bridgeFor(
         : { available: false };
     }),
     closeEngineYDocSession: vi.fn(async () => undefined),
-    applyEngineYDocUpdate: vi.fn(async () => undefined),
+    applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
     readEngineYDocArtifactAsset: vi.fn<
       DohcDesktopBridge["readEngineYDocArtifactAsset"]
     >(async () => {
@@ -527,6 +527,12 @@ describe("FileInspector Excalidraw view", () => {
       ),
     );
     fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
+    // The copy resolves the lossless draft text asynchronously at the click.
+    await waitFor(() =>
+      expect(
+        (navigator.clipboard as Clipboard & { lastText?: string }).lastText,
+      ).toBeTruthy(),
+    );
     const text = (navigator.clipboard as Clipboard & { lastText: string })
       .lastText;
     const recovered = parseExcalidrawDocument(text);
@@ -938,6 +944,12 @@ describe("FileInspector Excalidraw view", () => {
       ),
     );
     fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
+    // The copy resolves the lossless draft text asynchronously at the click.
+    await waitFor(() =>
+      expect(
+        (navigator.clipboard as Clipboard & { lastText?: string }).lastText,
+      ).toBeTruthy(),
+    );
     const recovered = parseExcalidrawDocument(
       (navigator.clipboard as Clipboard & { lastText: string }).lastText,
     );

@@ -25,15 +25,17 @@ test("editor groups keep mixed surfaces visible, resize, and collapse", async ()
     await explorerRow(page, "brief.md").click();
     await expect(page.getByTestId("view-markdown")).toBeVisible();
     await page.getByTestId("create-editor-group-right").click();
-    await expect(page.getByRole("region", { name: "Editor group 2" })).toBeVisible();
+    const leftGroup = page.getByRole("region", { name: "Editor group 1" });
+    const rightGroup = page.getByRole("region", { name: "Editor group 2" });
+    await expect(rightGroup).toBeVisible();
+    await expect(leftGroup.getByTestId("tab-brief.md")).toBeVisible();
+    await expect(rightGroup.getByTestId("tab-brief.md")).toBeVisible();
+    await expect(leftGroup.getByTestId("view-markdown")).toBeVisible();
+    await expect(rightGroup.getByTestId("view-markdown")).toBeVisible();
 
     await explorerRow(page, "data.csv").click();
-    const markdown = page
-      .getByRole("region", { name: "Editor group 1" })
-      .getByTestId("view-markdown");
-    const csv = page
-      .getByRole("region", { name: "Editor group 2" })
-      .getByTestId("view-csv");
+    const markdown = leftGroup.getByTestId("view-markdown");
+    const csv = rightGroup.getByTestId("view-csv");
     await expect(markdown).toBeVisible();
     await expect(csv).toBeVisible();
 
@@ -51,8 +53,25 @@ test("editor groups keep mixed surfaces visible, resize, and collapse", async ()
       .poll(async () => Number(await separator.getAttribute("aria-valuenow")))
       .toBeGreaterThan(before);
 
+    const csvTabBox = await rightGroup.getByTestId("tab-data.csv").boundingBox();
+    const leftBox = await leftGroup.boundingBox();
+    expect(csvTabBox).not.toBeNull();
+    expect(leftBox).not.toBeNull();
+    await page.mouse.move(
+      csvTabBox!.x + csvTabBox!.width / 2,
+      csvTabBox!.y + csvTabBox!.height / 2,
+    );
+    await page.mouse.down();
+    await page.mouse.move(leftBox!.x + leftBox!.width / 2, leftBox!.y + 60, {
+      steps: 8,
+    });
+    await page.mouse.up();
+    await expect(leftGroup.getByTestId("tab-data.csv")).toBeVisible();
+    await expect(rightGroup.getByTestId("tab-data.csv")).toHaveCount(0);
+
+    await rightGroup.click({ position: { x: 20, y: 60 } });
     await page.keyboard.press(process.platform === "darwin" ? "Meta+w" : "Control+w");
-    await expect(page.getByRole("region", { name: "Editor group 2" })).toHaveCount(0);
+    await expect(rightGroup).toHaveCount(0);
     await expect(page.getByTestId("tab-brief.md")).toBeVisible();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

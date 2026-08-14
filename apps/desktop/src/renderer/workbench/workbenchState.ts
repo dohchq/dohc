@@ -82,6 +82,20 @@ export function isPluginPanelTabPath(path: string | null): boolean {
   return typeof path === "string" && path.startsWith(PLUGIN_PANEL_TAB_PREFIX);
 }
 
+export function isSingletonEditorTabPath(path: string | null): boolean {
+  return (
+    isChatsTabPath(path) || isSiteTabPath(path) || isPluginPanelTabPath(path)
+  );
+}
+
+export function canonicalSingletonEditorTabPath(path: string | null): string | null {
+  if (isChatsTabPath(path)) return CHATS_TAB_PATH;
+  const siteRoot = parseSiteTabPath(path);
+  if (siteRoot !== null) return siteTabPath(siteRoot);
+  const panel = parsePluginPanelTabPath(path);
+  return panel === null ? null : pluginPanelTabPath(panel.pluginId, panel.panelId);
+}
+
 export function parseSiteTabPath(path: string | null): string | null {
   if (typeof path !== "string" || !isSiteTabPath(path)) return null;
   try {
@@ -178,8 +192,8 @@ export interface WorkbenchState {
   activeView: ViewId;
   sidebarVisible: boolean;
   sidebarWidth: number;
-  // Editor groups appear in horizontal visual order. A path belongs to at
-  // most one group, while each group owns its own active tab.
+  // Editor groups appear in horizontal visual order. A path can be open once
+  // in each group, while each group owns its own active tab.
   editorGroups: EditorGroup[];
   activeEditorGroup: string;
   // The right-hand Chats panel (VS Code's secondary sidebar: toggleable,
@@ -199,6 +213,8 @@ export interface WorkbenchState {
   // quick-open ranking. Persisted with the rest of the ui-state.
   recentFiles: string[];
 }
+
+type EditorTransitionActivation = "target" | "preserve";
 
 export const SIDEBAR_MIN_WIDTH = 160;
 export const SIDEBAR_MAX_WIDTH = 2400;
@@ -276,15 +292,16 @@ export function allTabs(state: WorkbenchState): WorkbenchTab[] {
   return state.editorGroups.flatMap((group) => group.tabs);
 }
 
-export function findTab(
+function findTabInGroup(
   state: WorkbenchState,
+  groupId: string,
   path: string,
-): { group: EditorGroup; tab: WorkbenchTab; index: number } | null {
-  for (const group of state.editorGroups) {
-    const index = group.tabs.findIndex((tab) => tab.path === path);
-    if (index !== -1) return { group, tab: group.tabs[index], index };
-  }
-  return null;
+): WorkbenchTab | null {
+  return (
+    state.editorGroups
+      .find((group) => group.id === groupId)
+      ?.tabs.find((tab) => tab.path === path) ?? null
+  );
 }
 
 function replaceGroup(
@@ -302,6 +319,21 @@ function replaceGroup(
   return { ...state, editorGroups };
 }
 
+function detachTabFromGroup(
+  group: EditorGroup,
+  path: string,
+): { group: EditorGroup; tab: WorkbenchTab } | null {
+  const index = group.tabs.findIndex((tab) => tab.path === path);
+  if (index === -1) return null;
+  const tab = group.tabs[index];
+  const tabs = group.tabs.filter((candidate) => candidate !== tab);
+  const activeTab =
+    group.activeTab === path
+      ? ((tabs[index] ?? tabs[index - 1])?.path ?? null)
+      : group.activeTab;
+  return { group: { ...group, tabs, activeTab }, tab };
+}
+
 function normalizeEditorGroupSizes(groups: EditorGroup[]): EditorGroup[] {
   const weights = groups.map((group) =>
     Number.isFinite(group.size) && group.size > 0 ? group.size : 1,
@@ -311,6 +343,20 @@ function normalizeEditorGroupSizes(groups: EditorGroup[]): EditorGroup[] {
     const size = weights[index] / total;
     return group.size === size ? group : { ...group, size };
   });
+}
+
+// Make room for one tab instance without unmounting any active editor. Tab
+// identity matters here: the same path can be active in several groups.
+function evictFirstInactiveTab(state: WorkbenchState): WorkbenchState | null {
+  for (const group of state.editorGroups) {
+    const evicted = group.tabs.find((tab) => tab.path !== group.activeTab);
+    if (!evicted) continue;
+    return replaceGroup(state, group.id, (current) => ({
+      ...current,
+      tabs: current.tabs.filter((tab) => tab !== evicted),
+    }));
+  }
+  return null;
 }
 
 export function focusEditorGroup(
@@ -327,40 +373,47 @@ export function focusEditorGroup(
 }
 
 // Open or reactivate a tab in the requested group, or in the focused group.
-// Paths are globally unique: reopening a path focuses its existing owner.
+// A path is unique within a group and can be open in several groups.
 export function openTab(
   state: WorkbenchState,
   path: string,
   targetGroupId: string = state.activeEditorGroup,
 ): WorkbenchState {
-  const existing = findTab(state, path);
-  if (existing) return activateTab(state, existing.group.id, path);
-
+  const singletonPath = canonicalSingletonEditorTabPath(path);
+  if (isSingletonEditorTabPath(path) && singletonPath === null) return state;
+  const openedPath = singletonPath ?? path;
+  if (singletonPath !== null) {
+    const existingGroup = state.editorGroups.find((group) =>
+      group.tabs.some(
+        (tab) => canonicalSingletonEditorTabPath(tab.path) === singletonPath,
+      ),
+    );
+    const existingTab = existingGroup?.tabs.find(
+      (tab) => canonicalSingletonEditorTabPath(tab.path) === singletonPath,
+    );
+    if (existingGroup && existingTab) {
+      return activateTab(state, existingGroup.id, existingTab.path);
+    }
+  }
   const target = state.editorGroups.find((group) => group.id === targetGroupId)
     ? targetGroupId
     : state.activeEditorGroup;
+  if (findTabInGroup(state, target, openedPath)) {
+    return activateTab(state, target, openedPath);
+  }
+
   let next = state;
   if (allTabs(state).length >= MAX_OPEN_TABS) {
-    const activePaths = new Set(
-      state.editorGroups.flatMap((group) =>
-        group.activeTab === null ? [] : [group.activeTab],
-      ),
-    );
-    const evicted = allTabs(state).find((tab) => !activePaths.has(tab.path));
     // Every tab can be active only when every group owns one. The cap still
     // wins, but no mounted editor is evicted.
+    const evicted = evictFirstInactiveTab(state);
     if (!evicted) return state;
-    const owner = findTab(state, evicted.path);
-    if (!owner) return state;
-    next = replaceGroup(state, owner.group.id, (group) => ({
-      ...group,
-      tabs: group.tabs.filter((tab) => tab !== evicted),
-    }));
+    next = evicted;
   }
   next = replaceGroup(next, target, (group) => ({
     ...group,
-    tabs: [...group.tabs, { path }],
-    activeTab: path,
+    tabs: [...group.tabs, { path: openedPath }],
+    activeTab: openedPath,
   }));
   return next.activeEditorGroup === target
     ? next
@@ -391,16 +444,11 @@ export function closeTab(
   groupId: string,
   path: string,
 ): WorkbenchState {
-  return replaceGroup(state, groupId, (group) => {
-    const index = group.tabs.findIndex((tab) => tab.path === path);
-    if (index === -1) return group;
-    const tabs = group.tabs.filter((tab) => tab.path !== path);
-    const activeTab =
-      group.activeTab === path
-        ? ((tabs[index] ?? tabs[index - 1])?.path ?? null)
-        : group.activeTab;
-    return { ...group, tabs, activeTab };
-  });
+  return replaceGroup(
+    state,
+    groupId,
+    (group) => detachTabFromGroup(group, path)?.group ?? group,
+  );
 }
 
 // Reorder one group's tabs. The target index clamps into that group.
@@ -422,11 +470,62 @@ export function moveTab(
   });
 }
 
+// Move one tab instance between existing groups. A destination that already
+// has the same path keeps its own instance and the source copy closes.
+export function moveTabToGroup(
+  state: WorkbenchState,
+  sourceGroupId: string,
+  targetGroupId: string,
+  path: string,
+  toIndex: number,
+  activation: EditorTransitionActivation = "target",
+): WorkbenchState {
+  if (!Number.isInteger(toIndex)) return state;
+  const source = state.editorGroups.find((group) => group.id === sourceGroupId);
+  const target = state.editorGroups.find((group) => group.id === targetGroupId);
+  if (!source || !target || source === target) return state;
+
+  const detached = detachTabFromGroup(source, path);
+  if (!detached) return state;
+  const existingTarget = target.tabs.find((candidate) => candidate.path === path);
+  const targetTabs = [...target.tabs];
+  if (!existingTarget) {
+    const bounded = Math.min(
+      Math.max(toIndex, 0),
+      targetTabs.length,
+    );
+    targetTabs.splice(bounded, 0, detached.tab);
+  }
+  const editorGroups = state.editorGroups.map((group) => {
+    if (group.id === sourceGroupId) {
+      return detached.group;
+    }
+    if (group.id === targetGroupId) {
+      return {
+        ...group,
+        tabs: targetTabs,
+        activeTab:
+          activation === "target" || group.activeTab === null
+            ? path
+            : group.activeTab,
+      };
+    }
+    return group;
+  });
+  return {
+    ...state,
+    editorGroups,
+    activeEditorGroup:
+      activation === "target" ? targetGroupId : state.activeEditorGroup,
+  };
+}
+
 export function moveTabToNewGroup(
   state: WorkbenchState,
   sourceGroupId: string,
   path: string,
   newGroupId: string,
+  activation: EditorTransitionActivation = "target",
 ): WorkbenchState {
   if (
     newGroupId.length === 0 ||
@@ -441,7 +540,10 @@ export function moveTabToNewGroup(
   // the actual persisted-payload limit.
   const baseGroups = normalizeEditorGroupSizes(
     state.editorGroups.filter(
-      (group) => group.id === sourceGroupId || group.tabs.length > 0,
+      (group) =>
+        group.id === sourceGroupId ||
+        group.tabs.length > 0 ||
+        (activation === "preserve" && group.id === state.activeEditorGroup),
     ),
   );
   const sourceIndex = baseGroups.findIndex(
@@ -449,29 +551,54 @@ export function moveTabToNewGroup(
   );
   if (sourceIndex === -1) return state;
   const source = baseGroups[sourceIndex];
-  const tabIndex = source.tabs.findIndex((tab) => tab.path === path);
-  if (tabIndex === -1) return state;
-  const tab = source.tabs[tabIndex];
-  const tabs = source.tabs.filter((candidate) => candidate !== tab);
-  const activeTab =
-    source.activeTab === path
-      ? ((tabs[tabIndex] ?? tabs[tabIndex - 1])?.path ?? null)
-      : source.activeTab;
+  const detached = detachTabFromGroup(source, path);
+  if (!detached) return state;
+  if (baseGroups.length >= MAX_EDITOR_GROUPS) {
+    // At the cap, the only valid extra group is the focused empty placeholder
+    // retained above. Moving the sole tab out of its source can replace that
+    // source in place, so the requested group is created without discarding
+    // the user's newer empty-group focus or exceeding the persisted contract.
+    if (
+      baseGroups.length !== MAX_EDITOR_GROUPS ||
+      detached.group.tabs.length > 0
+    ) {
+      return state;
+    }
+    const editorGroups = [...baseGroups];
+    editorGroups[sourceIndex] = {
+      id: newGroupId,
+      tabs: [detached.tab],
+      activeTab: path,
+      size: source.size,
+    };
+    return {
+      ...state,
+      editorGroups,
+      activeEditorGroup:
+        activation === "target" ? newGroupId : state.activeEditorGroup,
+    };
+  }
   const splitSize = source.size / 2;
   const editorGroups = [...baseGroups];
   editorGroups.splice(
     sourceIndex,
     1,
-    { ...source, tabs, activeTab, size: splitSize },
-    { id: newGroupId, tabs: [tab], activeTab: path, size: splitSize },
+    { ...detached.group, size: splitSize },
+    { id: newGroupId, tabs: [detached.tab], activeTab: path, size: splitSize },
   );
-  return { ...state, editorGroups, activeEditorGroup: newGroupId };
+  return {
+    ...state,
+    editorGroups,
+    activeEditorGroup:
+      activation === "target" ? newGroupId : state.activeEditorGroup,
+  };
 }
 
 export function createEditorGroupRight(
   state: WorkbenchState,
   sourceGroupId: string,
   newGroupId: string,
+  activation: EditorTransitionActivation = "target",
 ): WorkbenchState {
   if (
     newGroupId.length === 0 ||
@@ -480,24 +607,52 @@ export function createEditorGroupRight(
   ) {
     return state;
   }
-  const baseGroups = normalizeEditorGroupSizes(
-    state.editorGroups.filter(
-      (group) => group.id === sourceGroupId || group.tabs.length > 0,
-    ),
+  const requestedSource = state.editorGroups.find(
+    (group) => group.id === sourceGroupId,
   );
-  const sourceIndex = baseGroups.findIndex((group) => group.id === sourceGroupId);
-  const source = baseGroups[sourceIndex];
+  if (isSingletonEditorTabPath(requestedSource?.activeTab ?? null)) return state;
+  let base: WorkbenchState = {
+    ...state,
+    editorGroups: normalizeEditorGroupSizes(
+      state.editorGroups.filter(
+        (group) =>
+          group.id === sourceGroupId ||
+          group.tabs.length > 0 ||
+          (activation === "preserve" && group.id === state.activeEditorGroup),
+      ),
+    ),
+  };
+  if (allTabs(base).length >= MAX_OPEN_TABS) {
+    const evicted = evictFirstInactiveTab(base);
+    if (!evicted) return state;
+    base = evicted;
+  }
+  const sourceIndex = base.editorGroups.findIndex(
+    (group) => group.id === sourceGroupId,
+  );
+  const source = base.editorGroups[sourceIndex];
+  const activeTab = source?.tabs.find((tab) => tab.path === source.activeTab);
   // An empty focused group is already the destination for the next open.
-  if (!source || source.tabs.length === 0) return state;
+  if (!source || !activeTab) return state;
   const splitSize = source.size / 2;
-  const editorGroups = [...baseGroups];
+  const editorGroups = [...base.editorGroups];
   editorGroups.splice(
     sourceIndex,
     1,
     { ...source, size: splitSize },
-    { id: newGroupId, tabs: [], activeTab: null, size: splitSize },
+    {
+      id: newGroupId,
+      tabs: [{ path: activeTab.path }],
+      activeTab: activeTab.path,
+      size: splitSize,
+    },
   );
-  return { ...state, editorGroups, activeEditorGroup: newGroupId };
+  return {
+    ...state,
+    editorGroups,
+    activeEditorGroup:
+      activation === "target" ? newGroupId : state.activeEditorGroup,
+  };
 }
 
 // Resize an adjacent pair. `leftSize` is the left group's normalized size;
@@ -633,14 +788,14 @@ export function togglePinned(state: WorkbenchState, path: string): WorkbenchStat
 }
 
 // Rename/move/delete remap: every path-keyed slice re-projects through one
-// projection. Group order wins when two tabs collide onto the same path.
+// projection. Tab collisions are removed within each group.
 export function remapWorkbenchPaths(
   state: WorkbenchState,
   project: (path: string) => string | null,
 ): WorkbenchState {
-  const seen = new Set<string>();
   const projected = new Map<string, string | null>();
   const editorGroups = state.editorGroups.map((group) => {
+    const seen = new Set<string>();
     const tabs: WorkbenchTab[] = [];
     for (const tab of group.tabs) {
       const next = project(tab.path);
@@ -775,7 +930,9 @@ export function parseUiState(raw: unknown): WorkbenchState {
   };
   const editorGroups: EditorGroup[] = [];
   const groupIds = new Set<string>();
-  const tabPaths = new Set<string>();
+  const singletonOwnerGroups = new Map<string, string>();
+  const discardedActiveSingletons = new Map<string, string>();
+  let tabCount = 0;
   const rawGroups = own("editorGroups");
   if (Array.isArray(rawGroups)) {
     for (
@@ -799,27 +956,49 @@ export function parseUiState(raw: unknown): WorkbenchState {
       }
       groupIds.add(id);
       const tabs: WorkbenchTab[] = [];
+      const tabPaths = new Set<string>();
       const rawTabs = groupOwn("tabs");
+      const rawActiveTab = groupOwn("activeTab");
+      const normalizedActiveTab =
+        typeof rawActiveTab === "string"
+          ? (canonicalSingletonEditorTabPath(rawActiveTab) ??
+            (isSingletonEditorTabPath(rawActiveTab) ? null : rawActiveTab))
+          : null;
       if (Array.isArray(rawTabs)) {
         for (const tab of rawTabs) {
-          if (tabPaths.size >= MAX_OPEN_TABS) break;
+          if (tabCount >= MAX_OPEN_TABS) break;
           if (
             typeof tab !== "string" ||
             tab.length === 0 ||
-            tab.length > 4096 ||
-            tabPaths.has(tab)
+            tab.length > 4096
           ) {
             continue;
           }
-          tabPaths.add(tab);
-          tabs.push({ path: tab });
+          const canonicalSingleton = canonicalSingletonEditorTabPath(tab);
+          if (isSingletonEditorTabPath(tab) && canonicalSingleton === null) {
+            continue;
+          }
+          const tabPath = canonicalSingleton ?? tab;
+          if (tabPaths.has(tabPath)) continue;
+          const singletonOwner = canonicalSingleton !== null
+            ? singletonOwnerGroups.get(tabPath)
+            : undefined;
+          if (singletonOwner !== undefined) {
+            if (normalizedActiveTab === tabPath) {
+              discardedActiveSingletons.set(id, tabPath);
+            }
+            continue;
+          }
+          tabPaths.add(tabPath);
+          if (canonicalSingleton !== null) singletonOwnerGroups.set(tabPath, id);
+          tabCount += 1;
+          tabs.push({ path: tabPath });
         }
       }
-      const rawActiveTab = groupOwn("activeTab");
       const activeTab =
-        typeof rawActiveTab === "string" &&
-        tabs.some((tab) => tab.path === rawActiveTab)
-          ? rawActiveTab
+        normalizedActiveTab !== null &&
+        tabs.some((tab) => tab.path === normalizedActiveTab)
+          ? normalizedActiveTab
           : (tabs[0]?.path ?? null);
       const rawSize = groupOwn("size");
       const size =
@@ -833,12 +1012,25 @@ export function parseUiState(raw: unknown): WorkbenchState {
     editorGroups.push(defaults.editorGroups[0]);
     groupIds.add(defaults.editorGroups[0].id);
   }
-  const normalizedGroups = normalizeEditorGroupSizes(editorGroups);
+  let normalizedGroups = normalizeEditorGroupSizes(editorGroups);
   const rawActiveEditorGroup = own("activeEditorGroup");
-  const activeEditorGroup =
+  let activeEditorGroup =
     typeof rawActiveEditorGroup === "string" && groupIds.has(rawActiveEditorGroup)
       ? rawActiveEditorGroup
       : normalizedGroups[0].id;
+  const discardedActiveSingleton = discardedActiveSingletons.get(activeEditorGroup);
+  const singletonOwnerGroup = discardedActiveSingleton
+    ? singletonOwnerGroups.get(discardedActiveSingleton)
+    : undefined;
+  if (discardedActiveSingleton && singletonOwnerGroup) {
+    activeEditorGroup = singletonOwnerGroup;
+    normalizedGroups = normalizedGroups.map((group) =>
+      group.id === singletonOwnerGroup &&
+      group.activeTab !== discardedActiveSingleton
+        ? { ...group, activeTab: discardedActiveSingleton }
+        : group,
+    );
+  }
   const rawView = own("activeView");
   const rawSidebarVisible = own("sidebarVisible");
   const rawSidebarWidth = own("sidebarWidth");
