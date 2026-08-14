@@ -232,13 +232,12 @@ describe("engine Y.Doc artifact assets stay bound to one authorized session", ()
     expect(handler).toContain("entry.sender !== event.sender");
     expect(handler).toContain("entry.generation !== rendererGeneration(event.sender.id)");
     expect(handler).toContain("entry.artifactAssetsById.get(requested.id)");
-    expect(handler).toContain(
-      "entry.retiredArtifactAssetsById.get(requested.id)",
-    );
+    expect(handler).toContain("...entry.retiredArtifactAssets,");
     // The renderer's descriptor is a SELECTOR among main's pinned
     // descriptors: the hydration call receives the pinned match, and every
-    // field must agree so one id cannot cross lineages.
-    expect(handler).toContain("candidate.sha256 === requested.sha256");
+    // field must agree so one id cannot cross lineages — including two
+    // retired lineages that reused the same file id.
+    expect(handler).toContain("sameEngineYDocArtifactAsset(candidate, requested)");
     expect(handler).toContain("entry.session.readArtifactAsset(descriptor)");
     expect(handler).not.toContain("workspaceId");
     expect(handler).not.toContain("versionId");

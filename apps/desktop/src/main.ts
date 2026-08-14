@@ -3042,6 +3042,25 @@ const searchRegistry = createSearchRegistry({ rgPath });
 // Senders whose 'destroyed' cleanup hook is already attached.
 const searchCleanupHooked = new WeakSet<Electron.WebContents>();
 
+type EngineYDocArtifactAsset = NonNullable<
+  WorkspaceEngineYDocProviderSession["artifactAssets"]
+>[number];
+
+function sameEngineYDocArtifactAsset(
+  left: EngineYDocArtifactAsset,
+  right: EngineYDocArtifactAsset,
+): boolean {
+  return (
+    left.id === right.id &&
+    left.mimeType === right.mimeType &&
+    left.created === right.created &&
+    left.ref === right.ref &&
+    left.sha256 === right.sha256 &&
+    left.lastRetrieved === right.lastRetrieved &&
+    left.version === right.version
+  );
+}
+
 // WS-G2-C-2 engine Y.Doc editor binding: the live node-only sessions main owns
 // on the renderer's behalf, keyed by engineYDocSessionKey — the renderer-minted
 // sessionId under the sender main owns. Each holds the single-canonical
@@ -3069,19 +3088,15 @@ interface EngineYDocSessionEntry {
   // are routinely in flight at once, so this is a FIFO, not a scalar — see
   // engineYDocSaveSeq.ts.
   saveSeq: EngineYDocSaveSeqState;
-  artifactAssetsById: ReadonlyMap<
-    string,
-    NonNullable<WorkspaceEngineYDocProviderSession["artifactAssets"]>[number]
-  >;
-  // Descriptors from lineages this session already replaced. A retired
+  artifactAssetsById: ReadonlyMap<string, EngineYDocArtifactAsset>;
+  // Descriptors from every lineage this session already replaced. A retired
   // document's recovery can retry a failed asset read after the
   // acknowledgement swapped `artifactAssetsById` to the winner, so losing
-  // descriptors stay readable until the normal session close. The current
-  // lineage wins an id collision.
-  retiredArtifactAssetsById: Map<
-    string,
-    NonNullable<WorkspaceEngineYDocProviderSession["artifactAssets"]>[number]
-  >;
+  // descriptors stay readable until the normal session close. Kept per
+  // descriptor identity, not per id: successive replacements can reuse one
+  // file id for different content, and each retired lineage's recovery needs
+  // its own descriptor. The current lineage wins an id collision.
+  retiredArtifactAssets: EngineYDocArtifactAsset[];
   // Set by releaseEngineYDocSession when a close failed. The next open of this
   // document retries the release before it binds anything.
   closeFailed?: boolean;
@@ -8988,8 +9003,14 @@ function registerIpcHandlers(
             lineageGeneration = nextLineageGeneration;
             if (registeredEntry !== null) {
               registeredEntry.lineageGeneration = nextLineageGeneration;
-              for (const [id, asset] of registeredEntry.artifactAssetsById) {
-                registeredEntry.retiredArtifactAssetsById.set(id, asset);
+              for (const asset of registeredEntry.artifactAssetsById.values()) {
+                if (
+                  !registeredEntry.retiredArtifactAssets.some((retired) =>
+                    sameEngineYDocArtifactAsset(retired, asset),
+                  )
+                ) {
+                  registeredEntry.retiredArtifactAssets.push(asset);
+                }
               }
               registeredEntry.artifactAssetsById = new Map(
                 handoff.artifactAssets.map((asset) => [asset.id, asset]),
@@ -9166,7 +9187,7 @@ function registerIpcHandlers(
         artifactAssetsById: new Map(
           (session.artifactAssets ?? []).map((asset) => [asset.id, asset]),
         ),
-        retiredArtifactAssetsById: new Map(),
+        retiredArtifactAssets: [],
       };
       registeredEntry = entry;
       // Every path below that refuses this session releases it through the
@@ -9268,16 +9289,11 @@ function registerIpcHandlers(
       const requested = input.descriptor;
       const descriptor = [
         entry.artifactAssetsById.get(requested.id),
-        entry.retiredArtifactAssetsById.get(requested.id),
+        ...entry.retiredArtifactAssets,
       ].find(
         (candidate) =>
           candidate !== undefined &&
-          candidate.mimeType === requested.mimeType &&
-          candidate.created === requested.created &&
-          candidate.ref === requested.ref &&
-          candidate.sha256 === requested.sha256 &&
-          candidate.lastRetrieved === requested.lastRetrieved &&
-          candidate.version === requested.version,
+          sameEngineYDocArtifactAsset(candidate, requested),
       );
       if (!descriptor) {
         throw new Error(
