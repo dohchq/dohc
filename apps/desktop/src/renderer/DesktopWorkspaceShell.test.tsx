@@ -1150,6 +1150,154 @@ describe("editor groups", () => {
     expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
   });
 
+  it("keeps a newer duplicate-file open when a delayed cross-group move completes", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          {
+            id: "left",
+            tabs: ["race-a.md"],
+            activeTab: "race-a.md",
+            size: 1 / 3,
+          },
+          { id: "middle", tabs: ["b.md"], activeTab: "b.md", size: 1 / 3 },
+          { id: "right", tabs: ["c.md"], activeTab: "c.md", size: 1 / 3 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["race-a.md", "b.md", "c.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    Object.defineProperty(Element.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    Object.defineProperty(Element.prototype, "hasPointerCapture", {
+      configurable: true,
+      value: vi.fn(() => false),
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(3),
+    );
+    const left = screen.getByTestId("editor-group-left");
+    const middle = screen.getByTestId("editor-group-middle");
+    const right = screen.getByTestId("editor-group-right");
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), " dirty");
+    await waitFor(() => expect(within(left).getByTestId("tab-dirty")).toBeTruthy());
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: vi.fn(() => middle),
+    });
+
+    const source = within(left).getByTestId("tab-race-a.md");
+    fireEvent.pointerDown(source, {
+      button: 0,
+      pointerId: 7,
+      clientX: 10,
+      clientY: 10,
+    });
+    fireEvent.pointerMove(source, {
+      buttons: 1,
+      pointerId: 7,
+      clientX: 30,
+      clientY: 40,
+    });
+    fireEvent.pointerUp(source, {
+      pointerId: 7,
+      clientX: 30,
+      clientY: 40,
+    });
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+
+    fireEvent.pointerDown(right);
+    await waitFor(() => expect(right.dataset.active).toBe("true"));
+    await user.click(fileTreeRow("race-a.md"));
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    await waitFor(() => {
+      expect(within(right).getByTestId("tab-race-a.md").dataset.active).toBe(
+        "true",
+      );
+      expect(within(middle).getByTestId("tab-b.md").dataset.active).toBe("true");
+      expect(within(middle).getByTestId("tab-race-a.md").dataset.active).not.toBe(
+        "true",
+      );
+    });
+  });
+
+  it("keeps a newer duplicate-file open when a delayed split completes", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          {
+            id: "left",
+            tabs: ["race-a.md"],
+            activeTab: "race-a.md",
+            size: 1 / 3,
+          },
+          { id: "middle", tabs: ["b.md"], activeTab: "b.md", size: 1 / 3 },
+          { id: "right", tabs: ["c.md"], activeTab: "c.md", size: 1 / 3 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["race-a.md", "b.md", "c.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(3),
+    );
+    const left = screen.getByTestId("editor-group-left");
+    const right = screen.getByTestId("editor-group-right");
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), " dirty");
+    await waitFor(() => expect(within(left).getByTestId("tab-dirty")).toBeTruthy());
+
+    await user.click(within(left).getByTestId("create-editor-group-right"));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+    fireEvent.pointerDown(right);
+    await waitFor(() => expect(right.dataset.active).toBe("true"));
+    await user.click(fileTreeRow("race-a.md"));
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    await waitFor(() => {
+      expect(within(right).getByTestId("tab-race-a.md").dataset.active).toBe(
+        "true",
+      );
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(4);
+    });
+  });
+
   it("does not offer Split Right for the singleton Chats tab", async () => {
     renderShell(
       makeBridge(
@@ -1162,6 +1310,34 @@ describe("editor groups", () => {
       (screen.getByTestId("create-editor-group-right") as HTMLButtonElement)
         .disabled,
     ).toBe(true);
+  });
+
+  it("explains why a lifecycle-owned tab cannot create an editor group", async () => {
+    const user = userEvent.setup();
+    renderShell(
+      makeBridge(
+        Promise.resolve(storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH)),
+      ),
+    );
+
+    await screen.findByTestId(`tab-${CHATS_TAB_PATH}`);
+    expect(
+      (screen.getByTestId("create-editor-group-right") as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "New editor group right",
+      ),
+    );
+
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain(
+      "This tab owns its process and cannot be split. Open another tab before you create an editor group.",
+    );
+    expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1);
   });
 
   it("explains the 100 open-tab limit when Split Right cannot create a group", async () => {
@@ -1219,7 +1395,49 @@ describe("editor groups", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  it("does not report the open-tab limit when Chats refuses Split Right", async () => {
+  it("explains the 100 open-tab limit when a file cannot open", async () => {
+    const editorGroups = Array.from({ length: 100 }, (_, index) => ({
+      id: `group-${index}`,
+      tabs: [`file-${index}.md`],
+      activeTab: `file-${index}.md`,
+      size: 0.01,
+    }));
+    const unopenedPath = "file-100.md";
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups,
+        activeEditorGroup: "group-0",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: [
+        ...editorGroups.map((group) => ({
+          path: group.activeTab,
+          kind: "file" as const,
+        })),
+        { path: unopenedPath, kind: "file" as const },
+      ],
+      folders: [],
+    }));
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-file-0.md");
+    await userEvent.click(fileTreeRow(unopenedPath));
+
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain(
+      "This workspace has 100 open tabs; the limit is 100. Close a tab to open this file.",
+    );
+    expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(100);
+    expect(screen.queryByTestId(`tab-${unopenedPath}`)).toBeNull();
+    fireEvent(window, new Event("beforeunload"));
+    const [persisted] = bridge.setWorkspaceUiState.mock.calls.at(-1)!;
+    expect(persisted.state.recentFiles ?? []).not.toContain(unopenedPath);
+  });
+
+  it("reports lifecycle ownership before the open-tab limit for Chats", async () => {
     const fileGroups = Array.from({ length: 99 }, (_, index) => ({
       id: `group-${index}`,
       tabs: [`file-${index}.md`],
@@ -1252,9 +1470,12 @@ describe("editor groups", () => {
 
     await screen.findByTestId(`tab-${CHATS_TAB_PATH}`);
     fireEvent.keyDown(window, { key: "\\", ctrlKey: true });
-    await act(async () => Promise.resolve());
 
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain(
+      "This tab owns its process and cannot be split. Open another tab before you create an editor group.",
+    );
     expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(100);
   });
 

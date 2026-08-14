@@ -419,6 +419,22 @@ describe("tabs", () => {
     expect(next.editorGroups[1].activeTab).toBe("file-1.md");
   });
 
+  it("returns the same state when every group has one active tab at the cap", () => {
+    const editorGroups = Array.from({ length: MAX_OPEN_TABS }, (_, index) => ({
+      id: `group-${index}`,
+      tabs: [{ path: `file-${index}.md` }],
+      activeTab: `file-${index}.md`,
+      size: 1 / MAX_OPEN_TABS,
+    }));
+    const state: WorkbenchState = {
+      ...defaultWorkbenchState(),
+      editorGroups,
+      activeEditorGroup: "group-0",
+    };
+
+    expect(openTab(state, "new.md", "group-0")).toBe(state);
+  });
+
   it("splits at the tab cap by evicting the oldest inactive tab instance", () => {
     let state = defaultWorkbenchState();
     for (let index = 0; index < MAX_OPEN_TABS; index++) {

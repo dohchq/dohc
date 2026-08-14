@@ -153,6 +153,7 @@ import {
   isHistoryDiffTabPath,
   isHistoryTabPath,
   isPluginPanelTabPath,
+  isSingletonEditorTabPath,
   isSiteTabPath,
   isVirtualTabPath,
   MAX_OPEN_TABS,
@@ -1322,8 +1323,42 @@ export function DesktopWorkspaceShell(props: {
   const [shellError, setShellError] = useState<{
     message: string;
     retry: (() => void) | null;
-    kind?: "split-tab-limit";
+    kind?: "singleton-tab-split" | "tab-limit";
   } | null>(null);
+  const showTabLimitError = useCallback(
+    (
+      openTabCount: number,
+      nextAction: "open this file" | "open another tab" | "create an editor group",
+    ) => {
+      setShellError({
+        message: `This workspace has ${openTabCount} open tabs; the limit is ${MAX_OPEN_TABS}. Close a tab to ${nextAction}.`,
+        retry: null,
+        kind: "tab-limit",
+      });
+    },
+    [],
+  );
+  const clearTabLimitError = useCallback(() => {
+    setShellError((currentError) =>
+      currentError?.kind === "tab-limit" ? null : currentError,
+    );
+  }, []);
+  const showSingletonTabSplitError = useCallback(() => {
+    setShellError({
+      message:
+        "This tab owns its process and cannot be split. Open another tab before you create an editor group.",
+      retry: null,
+      kind: "singleton-tab-split",
+    });
+  }, []);
+  const clearEditorGroupRefusalError = useCallback(() => {
+    setShellError((currentError) =>
+      currentError?.kind === "singleton-tab-split" ||
+      currentError?.kind === "tab-limit"
+        ? null
+        : currentError,
+    );
+  }, []);
   // Inline-create requests routed INTO the explorer (palette/menu/header).
   const [createRequest, setCreateRequest] = useState<{
     kind: "file" | "folder";
@@ -1738,6 +1773,40 @@ export function DesktopWorkspaceShell(props: {
       invalidateDeferredFileOpen(previousGroupId);
       if (nextGroupId !== previousGroupId) {
         invalidateDeferredFileOpen(nextGroupId);
+      }
+    },
+    [invalidateDeferredFileOpen],
+  );
+  const invalidateDeferredFileOpensForTabTransition = useCallback(
+    (
+      previous: WorkbenchState,
+      next: WorkbenchState,
+      requestSequencesAtIssue: ReadonlyMap<string, number>,
+    ) => {
+      const previousGroups = new Map(
+        previous.editorGroups.map((group) => [group.id, group] as const),
+      );
+      const nextGroups = new Map(
+        next.editorGroups.map((group) => [group.id, group] as const),
+      );
+      const invalidatedGroups = new Set<string>();
+      for (const groupId of new Set([...previousGroups.keys(), ...nextGroups.keys()])) {
+        if (
+          (previousGroups.get(groupId)?.activeTab ?? null) !==
+          (nextGroups.get(groupId)?.activeTab ?? null)
+        ) {
+          invalidatedGroups.add(groupId);
+        }
+      }
+      const activeGroupId = previous.activeEditorGroup;
+      if (
+        fileOpenRequests.current.sequenceByGroup.get(activeGroupId) ===
+        requestSequencesAtIssue.get(activeGroupId)
+      ) {
+        invalidatedGroups.add(activeGroupId);
+      }
+      for (const groupId of invalidatedGroups) {
+        invalidateDeferredFileOpen(groupId);
       }
     },
     [invalidateDeferredFileOpen],
@@ -2734,13 +2803,37 @@ export function DesktopWorkspaceShell(props: {
         if (!isCurrentRequest()) return;
         const current = wbRef.current;
         if (!current.editorGroups.some((group) => group.id === targetGroupId)) return;
-        if (openTab(current, path, targetGroupId) !== current) {
+        const next = openTab(current, path, targetGroupId);
+        const targetAlreadyOwnsPath = current.editorGroups
+          .find((group) => group.id === targetGroupId)
+          ?.tabs.some((tab) => tab.path === path);
+        if (
+          next === current &&
+          !targetAlreadyOwnsPath &&
+          allTabs(current).length >= MAX_OPEN_TABS
+        ) {
+          showTabLimitError(allTabs(current).length, "open this file");
+          return;
+        }
+        if (next !== current) {
           rendererMarks.mark(fileOpenStartMark(targetGroupId));
         }
+        clearTabLimitError();
         // Every open also records recency (quick-open ranking, Phase E5.0).
-        mutateWb((state) =>
-          recordRecentFile(openTab(state, path, targetGroupId), path),
-        );
+        mutateWb((state) => {
+          const opened = state === current ? next : openTab(state, path, targetGroupId);
+          const rebasedTargetAlreadyOwnsPath = state.editorGroups
+            .find((group) => group.id === targetGroupId)
+            ?.tabs.some((tab) => tab.path === path);
+          if (
+            opened === state &&
+            !rebasedTargetAlreadyOwnsPath &&
+            allTabs(state).length >= MAX_OPEN_TABS
+          ) {
+            return state;
+          }
+          return recordRecentFile(opened, path);
+        });
       };
 
       const targetGroup = wbRef.current.editorGroups.find(
@@ -2775,9 +2868,11 @@ export function DesktopWorkspaceShell(props: {
     },
     [
       flushStableDrafts,
+      clearTabLimitError,
       invalidateDeferredFileOpen,
       mutateWb,
       reportShellError,
+      showTabLimitError,
       workspaceId,
     ],
   );
@@ -2796,9 +2891,30 @@ export function DesktopWorkspaceShell(props: {
     (path: string) => {
       const targetGroupId = wbRef.current.activeEditorGroup;
       invalidateDeferredFileOpen(targetGroupId);
-      mutateWb((state) => openTab(state, path, targetGroupId));
+      const current = wbRef.current;
+      const next = openTab(current, path, targetGroupId);
+      const targetAlreadyOwnsPath = current.editorGroups
+        .find((group) => group.id === targetGroupId)
+        ?.tabs.some((tab) => tab.path === path);
+      if (
+        next === current &&
+        !targetAlreadyOwnsPath &&
+        allTabs(current).length >= MAX_OPEN_TABS
+      ) {
+        showTabLimitError(allTabs(current).length, "open another tab");
+        return;
+      }
+      clearTabLimitError();
+      mutateWb((state) =>
+        state === current ? next : openTab(state, path, targetGroupId),
+      );
     },
-    [invalidateDeferredFileOpen, mutateWb],
+    [
+      clearTabLimitError,
+      invalidateDeferredFileOpen,
+      mutateWb,
+      showTabLimitError,
+    ],
   );
   const openVersionCompareTab = useCallback(
     (versionId: string) => {
@@ -3280,6 +3396,9 @@ export function DesktopWorkspaceShell(props: {
       const tab = sourceGroup?.tabs.find((candidate) => candidate.path === path);
       if (!tab) return;
       const focus = editorFocus(wbRef.current);
+      const requestSequencesAtIssue = new Map(
+        fileOpenRequests.current.sequenceByGroup,
+      );
 
       const commitMove = () => {
         const current = wbRef.current;
@@ -3303,9 +3422,10 @@ export function DesktopWorkspaceShell(props: {
           );
         const next = moveState(current);
         if (next === current) return;
-        invalidateDeferredFileOpenForGroupChange(
-          current.activeEditorGroup,
-          targetGroupId,
+        invalidateDeferredFileOpensForTabTransition(
+          current,
+          next,
+          requestSequencesAtIssue,
         );
         for (const groupId of groupsMountingNewDocument(current, next)) {
           const nextActiveTab = next.editorGroups.find(
@@ -3329,7 +3449,7 @@ export function DesktopWorkspaceShell(props: {
     },
     [
       commitAfterTabFlush,
-      invalidateDeferredFileOpenForGroupChange,
+      invalidateDeferredFileOpensForTabTransition,
       mutateWb,
     ],
   );
@@ -3602,6 +3722,9 @@ export function DesktopWorkspaceShell(props: {
       const tab = group.tabs.find((candidate) => candidate.path === tabPath);
       if (!tab) return;
       const focus = editorFocus(current);
+      const requestSequencesAtIssue = new Map(
+        fileOpenRequests.current.sequenceByGroup,
+      );
       // Mint outside mutateWb: that seam probes the updater before React calls
       // it, so generating inside would produce two IDs for one command.
       const newGroupId = crypto.randomUUID();
@@ -3621,9 +3744,10 @@ export function DesktopWorkspaceShell(props: {
           );
         const next = moveState(current);
         if (next === current) return;
-        invalidateDeferredFileOpenForGroupChange(
-          current.activeEditorGroup,
-          newGroupId,
+        invalidateDeferredFileOpensForTabTransition(
+          current,
+          next,
+          requestSequencesAtIssue,
         );
         for (const mountingGroupId of groupsMountingNewDocument(current, next)) {
           const nextActiveTab = next.editorGroups.find(
@@ -3646,7 +3770,7 @@ export function DesktopWorkspaceShell(props: {
     },
     [
       commitAfterTabFlush,
-      invalidateDeferredFileOpenForGroupChange,
+      invalidateDeferredFileOpensForTabTransition,
       mutateWb,
     ],
   );
@@ -3660,8 +3784,15 @@ export function DesktopWorkspaceShell(props: {
         (candidate) => candidate.path === group.activeTab,
       );
       if (!group || !tab) return;
+      if (isSingletonEditorTabPath(tab.path)) {
+        showSingletonTabSplitError();
+        return;
+      }
       const focus = editorFocus(wbRef.current);
       const newGroupId = crypto.randomUUID();
+      const requestSequencesAtIssue = new Map(
+        fileOpenRequests.current.sequenceByGroup,
+      );
       const commitSplit = () => {
         const current = wbRef.current;
         const liveGroup = current.editorGroups.find(
@@ -3681,29 +3812,21 @@ export function DesktopWorkspaceShell(props: {
         const next = splitState(current);
         if (next === current) {
           const openTabCount = allTabs(current).length;
-          if (
-            !isChatsTabPath(tab.path) &&
-            openTabCount >= MAX_OPEN_TABS
-          ) {
-            setShellError({
-              message: `This workspace has ${openTabCount} open tabs; the limit is ${MAX_OPEN_TABS}. Close a tab to create an editor group.`,
-              retry: null,
-              kind: "split-tab-limit",
-            });
+          if (openTabCount >= MAX_OPEN_TABS) {
+            showTabLimitError(openTabCount, "create an editor group");
           }
           return;
         }
-        invalidateDeferredFileOpenForGroupChange(
-          current.activeEditorGroup,
-          newGroupId,
+        invalidateDeferredFileOpensForTabTransition(
+          current,
+          next,
+          requestSequencesAtIssue,
         );
         const viewKind = classifyForView(tab.path);
         if (viewKind === "markdown" || viewKind === "database") {
           rendererMarks.mark(fileOpenStartMark(newGroupId));
         }
-        setShellError((currentError) =>
-          currentError?.kind === "split-tab-limit" ? null : currentError,
-        );
+        clearEditorGroupRefusalError();
         mutateWb(splitState);
       };
       commitAfterTabFlush(
@@ -3714,9 +3837,12 @@ export function DesktopWorkspaceShell(props: {
       );
     },
     [
+      clearEditorGroupRefusalError,
       commitAfterTabFlush,
-      invalidateDeferredFileOpenForGroupChange,
+      invalidateDeferredFileOpensForTabTransition,
       mutateWb,
+      showSingletonTabSplitError,
+      showTabLimitError,
     ],
   );
 
