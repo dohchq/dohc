@@ -268,6 +268,20 @@ and disabled. A relay client may still create a comment or edit share; the
 route accepts it and the gates key on it. That is what makes PR1's level
 plumbing testable before its rights exist.
 
+## Chat follows paths, and only paths
+
+> **Corrected by PR2**, after review. This document assumed every file share
+> names paths. A VERSION share does not, and the containment rule reads an
+> empty path list as "every tracked path" — bounded for files by the version
+> check, unbounded for chat, which has no version to check. A version share
+> would have carried the live discussion about every file on main, including
+> files created long after the version and never in it.
+>
+> So: a selector with no paths carries NO chat, in either direction, at any
+> level. The relay refuses it, the recipient's boundary refuses it, and the
+> append lane refuses it. A version share is a snapshot of files; the
+> conversation is not in the snapshot.
+
 ## The chat-over-share mechanism (PR2)
 
 ### Pipeline, end to end
@@ -404,6 +418,30 @@ the opaque chip the channel branch already serves
 (`shareFilter.ts:545-557`) — its `objectId`/`pathHint` could name a file
 outside the share, so they stay dropped and the recipient renders a chip it
 cannot follow.
+
+**Decided: recipients of overlapping shares see each other's comments.**
+Two people independently granted overlapping paths read the same discussion
+about the same file, including each other's display names and user ids. This
+matches what a commenter on a shared document already expects — the people
+commenting on a document see who else commented — and it is what makes the
+discussion a discussion rather than a set of private notes. It is recorded
+here because it is a disclosure between recipients who were never told about
+each other, and a reader deserves to find it stated rather than infer it.
+
+**Two residuals the rename rule leaves, both accepted.**
+
+A thread the RECIPIENT created is bound by path, and the relay re-proves that
+path against its log on every serve. That closes the rename, but leaves this:
+a NEW file later created at the same path re-attaches the old discussion to
+it. The path is inside the selector either way, so this is mis-association,
+not disclosure — the recipient sees a conversation about a file that is no
+longer the file it was about.
+
+And the recipient's own copy goes stale. A rename that crosses the share
+boundary is not served at all (the moment rule refuses it in both directions),
+so the recipient's store keeps the old path and its local boundary keeps
+admitting ops for it. The relay's denial is the authority: nothing further is
+served or accepted, and the stale local copy simply stops receiving.
 
 **Known limitation, stated on purpose.** A file renamed out of the selector
 stops serving its threads at the moment of the rename, and the recipient keeps

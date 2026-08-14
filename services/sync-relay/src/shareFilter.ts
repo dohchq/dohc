@@ -71,7 +71,10 @@ export type AnyShareSelector = ShareSelector | ChatChannelShareSelector;
 
 export type ChatShareChannelKind = "channel" | "dm" | "agent";
 
-export type { ThreadFileBinding } from "./storage";
+// Declared where it is read out of the log, and re-exported here for the
+// filter that consumes it.
+import type { ThreadFileBinding } from "./storage";
+export type { ThreadFileBinding };
 
 // #646 PR2: how the file-chat branch answers "which file is this thread
 // about, and where is that file now?" from the workspace OWNER's log. Both
