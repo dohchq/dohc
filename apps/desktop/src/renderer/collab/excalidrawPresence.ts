@@ -10,7 +10,6 @@ import type { PresenceScope, PresenceTransport } from "./presenceChannel";
 
 const CURSOR_PUBLISH_MS = 33;
 const MAX_POINTER_COORDINATE = 10_000_000;
-const MAX_SELECTED_ELEMENT_IDS = 16;
 // Budgeted against the transport's REAL envelope: the relay refuses a
 // presence state above PRESENCE_STATE_MAX_BYTES of UTF-8 JSON, and the
 // awareness update rides base64-wrapped inside that state. The selection may
@@ -18,7 +17,11 @@ const MAX_SELECTED_ELEMENT_IDS = 16;
 // user/pointer fields, shrunk by the base64 expansion. A TOTAL budget, not a
 // per-id cap: the scene codec accepts any nonempty well-formed id, so even a
 // single long imported id is valid work while it fits the envelope.
-const SELECTION_HEADROOM_BYTES = 2048;
+// Half the envelope, measured: the "keeps a maximum sanitized selection
+// inside the 8 KiB presence envelope" test drives a full-budget selection
+// through the real awareness encoding, and the base64 framing plus the
+// user/pointer wrapper consume close to this much around it.
+const SELECTION_HEADROOM_BYTES = 4096;
 const MAX_SELECTION_ID_BYTES_TOTAL = Math.floor(
   ((PRESENCE_STATE_MAX_BYTES - SELECTION_HEADROOM_BYTES) * 3) / 4,
 );
@@ -155,13 +158,10 @@ function cleanSelection(value: unknown): CleanSelection | undefined {
     )
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
   let usedBytes = 0;
-  let kept = 0;
   for (const [id] of entries) {
-    if (kept >= MAX_SELECTED_ELEMENT_IDS) break;
     const cost = utf8ByteLength(id) + SELECTION_ENTRY_OVERHEAD_BYTES;
     if (usedBytes + cost > MAX_SELECTION_ID_BYTES_TOTAL) continue;
     usedBytes += cost;
-    kept += 1;
     selected[id] = true;
   }
   return selected;

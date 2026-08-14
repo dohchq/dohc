@@ -1647,6 +1647,9 @@ const PRESENCE_STATE_MAX_DEPTH = 32;
 // moment it exceeds the cap — so an oversized payload is rejected WITHOUT a full
 // JSON.stringify. Returns false for cycles, over-depth nesting, and non-JSON
 // values (bigint), which the relay would reject or main would throw on anyway.
+// Printable ASCII minus `"` and `\` — characters JSON serializes verbatim.
+const SAFE_JSON_STRING_CHARS = /^[ !#-\[\]-~]*$/;
+
 export function presenceStateWithinCap(
   value: unknown,
   maxBytes: number = PRESENCE_STATE_MAX_BYTES,
@@ -1665,10 +1668,16 @@ export function presenceStateWithinCap(
         return spend(5); // up to "false"
       case "number":
         return spend(v && Number.isFinite(v) ? 24 : 4); // non-finite → "null"
-      case "string":
-        // Upper bound: a JSON string is the UTF-8 bytes plus quotes/escapes; 6
-        // bytes per char covers the worst-case "\uXXXX" escape.
-        return spend(2 + v.length * 6);
+      case "string": {
+        // Upper bound: printable ASCII without quotes or backslashes
+        // serializes one byte per character; anything else may need a
+        // "\uXXXX" escape or multi-byte UTF-8, and 6 bytes covers the
+        // worst case. Without the split, a base64 payload (the presence
+        // awareness update) was charged six times its real size and
+        // healthy states hit the cap far below the relay's actual limit.
+        const perChar = SAFE_JSON_STRING_CHARS.test(v) ? 1 : 6;
+        return spend(2 + v.length * perChar);
+      }
       case "object": {
         const obj = v as object;
         if (seen.has(obj)) return false; // cycle → reject as over-cap
