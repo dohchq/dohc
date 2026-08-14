@@ -94,11 +94,23 @@ describe("SharedWithMeList", () => {
     });
     bridgeMock.unmountShare.mockResolvedValue({ folderLeft: true });
 
-    render(<SharedWithMeList workspaceId={WORKSPACE_ID} />);
+    const onFilesChanged = vi.fn();
+    render(
+      <SharedWithMeList
+        workspaceId={WORKSPACE_ID}
+        onWorkspaceFilesChanged={onFilesChanged}
+      />,
+    );
     await screen.findByTestId("shared-with-me-row");
     await user.click(screen.getByTestId("shared-with-me-unmount"));
 
     const notice = await screen.findByTestId("shared-with-me-folder-left");
+    // Reported upward too: the shell reloads after this and would otherwise
+    // project a folder delete over files that are still on disk.
+    expect(
+      onFilesChanged,
+      "MUTATION: the shell never learns the folder stayed",
+    ).toHaveBeenCalledWith({ folderLeftShareId: "share-1" });
     expect(
       notice.textContent,
       "MUTATION: dropping folderLeft leaves the files on disk with nothing said",
@@ -127,12 +139,22 @@ describe("SharedWithMeList", () => {
     });
     bridgeMock.unmountShare.mockResolvedValue({});
 
-    render(<SharedWithMeList workspaceId={WORKSPACE_ID} />);
+    const onFilesChangedHealthy = vi.fn();
+    render(
+      <SharedWithMeList
+        workspaceId={WORKSPACE_ID}
+        onWorkspaceFilesChanged={onFilesChangedHealthy}
+      />,
+    );
     await screen.findByTestId("shared-with-me-row");
     await user.click(screen.getByTestId("shared-with-me-unmount"));
 
     await waitFor(() => expect(bridgeMock.unmountShare).toHaveBeenCalled());
     expect(screen.queryByTestId("shared-with-me-folder-left")).toBeNull();
+    // No exemption reported, so the shell projects the delete as usual.
+    await waitFor(() =>
+      expect(onFilesChangedHealthy).toHaveBeenCalledWith(undefined),
+    );
   });
 
   it("shows the pinned level, not a wider one the relay restates", async () => {

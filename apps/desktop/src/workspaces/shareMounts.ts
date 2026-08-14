@@ -10,7 +10,9 @@ import type { SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import type { ShareMountRecord } from "./registryStore";
 import type { ShareViewSelector } from "./shareViewInfo";
+import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
 import {
+  SharePinInvalidError,
   refreshSharedViewOnce,
   repairSharedViewProjection,
   type RefreshSharedViewOutcome,
@@ -188,6 +190,31 @@ export function relayTargetForShareMount(
 // the cursor. Same crash-safe ordering as the standalone shared view
 // (materialize before commit; re-replay is idempotent). Revocation comes
 // back as status "ended" with the files left exactly as they were.
+/**
+ * What one mount's refresh failure does to the REST of the refresh.
+ *
+ * Only a failure that makes every remaining pull pointless may abandon them.
+ * An expired session is that: nothing else can succeed until the user signs
+ * in. A damaged pin is not — it is permanent for ONE mount, and throwing it
+ * stopped healthy shares from refreshing at all.
+ *
+ * It gets a status of its own rather than "unchanged", because "unchanged"
+ * would hide a mount that can never refresh again behind a word that means
+ * everything is fine.
+ */
+export function classifyShareMountRefreshError(
+  error: unknown,
+): { kind: "abort"; message: string } | { kind: "row"; status: "damaged" | "unchanged" } {
+  if (error instanceof RelayUnauthorizedError) {
+    return {
+      kind: "abort",
+      message: "Your dohc Cloud session expired. Sign in again, then refresh shares.",
+    };
+  }
+  if (error instanceof SharePinInvalidError) return { kind: "row", status: "damaged" };
+  return { kind: "row", status: "unchanged" };
+}
+
 export async function refreshShareMountOnce(input: {
   hostWorkspaceId: string;
   hostRoot: string;

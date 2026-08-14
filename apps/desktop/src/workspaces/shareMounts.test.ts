@@ -1,3 +1,5 @@
+import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
+import { SharePinInvalidError } from "./sharedView";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises";
@@ -9,6 +11,7 @@ import {
 } from "../testing/shareViewLoopbackTransport";
 import {
   assertMountableSelector,
+  classifyShareMountRefreshError,
   createMountDirectory,
   mountLabelFor,
   mountRootFor,
@@ -651,5 +654,39 @@ describe("removeMountFolder", () => {
     await expect(removeMountFolder(host, "..")).rejects.toThrow(
       /Invalid share mount label/,
     );
+  });
+});
+
+// One mount's permanent failure must stay ONE mount's failure. A damaged pin
+// used to throw out of the refresh loop, so a single damaged record stopped
+// every healthy share after it from refreshing at all.
+describe("share mount refresh failures", () => {
+  it("contains a damaged pin to its own row and keeps the loop going", () => {
+    expect(
+      classifyShareMountRefreshError(new SharePinInvalidError("share-1")),
+      "MUTATION: a damaged pin abandons every mount after it",
+    ).toEqual({ kind: "row", status: "damaged" });
+  });
+
+  it("does not hide a damaged mount behind unchanged", () => {
+    const verdict = classifyShareMountRefreshError(new SharePinInvalidError("s"));
+    expect(verdict.kind === "row" && verdict.status).not.toBe("unchanged");
+  });
+
+  // The one failure that DOES make every remaining pull pointless.
+  it("abandons the refresh only when the session expired", () => {
+    expect(classifyShareMountRefreshError(new RelayUnauthorizedError())).toEqual({
+      kind: "abort",
+      message: "Your dohc Cloud session expired. Sign in again, then refresh shares.",
+    });
+  });
+
+  it("reports an ordinary failure as unchanged and moves on", () => {
+    for (const error of [new Error("offline"), "nonsense", null]) {
+      expect(classifyShareMountRefreshError(error)).toEqual({
+        kind: "row",
+        status: "unchanged",
+      });
+    }
   });
 });

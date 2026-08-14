@@ -29,7 +29,11 @@ export function DesktopSettings(props: {
   onOpenCloud?: () => void;
   // Share mounts added/removed from Settings change the workspace tree and
   // the shell's live mount set.
-  onWorkspaceFilesChanged?: () => void;
+  onWorkspaceFilesChanged?: (outcome?: {
+    // The removal cleaned up the record but left its folder on disk. The
+    // shell needs the id before its reload sees the record vanish.
+    folderLeftShareId?: string;
+  }) => void;
 }) {
   return <SettingsDialog {...props} />;
 }

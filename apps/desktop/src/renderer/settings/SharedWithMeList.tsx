@@ -105,7 +105,11 @@ function SkippedLine(props: {
 export function SharedWithMeList(props: {
   workspaceId: string;
   // Mount/unmount change the explorer tree; the settings host refreshes it.
-  onWorkspaceFilesChanged?: () => void;
+  onWorkspaceFilesChanged?: (outcome?: {
+    // The removal cleaned up the record but left its folder on disk. The
+    // shell needs the id before its reload sees the record vanish.
+    folderLeftShareId?: string;
+  }) => void;
 }) {
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [busyShareId, setBusyShareId] = useState<string | null>(null);
@@ -281,9 +285,16 @@ export function SharedWithMeList(props: {
       // The record went but its folder stayed, because its label is not one
       // this app would ever address a folder through. Saying so is the whole
       // point: the files are still on disk, and only the user can decide.
-      setNotice(result?.folderLeft ? FOLDER_LEFT_NOTICE : null);
+      const folderLeft = result?.folderLeft === true;
+      setNotice(folderLeft ? FOLDER_LEFT_NOTICE : null);
       await refresh();
-      if (live()) props.onWorkspaceFilesChanged?.();
+      // Reported so the shell does not project a folder delete over files
+      // that are still on disk when its own reload sees the record vanish.
+      if (live()) {
+        props.onWorkspaceFilesChanged?.(
+          folderLeft ? { folderLeftShareId: shareId } : undefined,
+        );
+      }
     } catch (cause) {
       if (live()) setLoad({ status: "error", message: errorMessage(cause) });
     } finally {

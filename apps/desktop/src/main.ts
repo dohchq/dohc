@@ -440,6 +440,7 @@ import {
   mountStoreWorkspaceIdFor,
   relayTargetForShareMount,
   refreshShareMountOnce,
+  classifyShareMountRefreshError,
   removeMountFolder,
   validMountLabel,
 } from "./workspaces/shareMounts";
@@ -5773,7 +5774,7 @@ function registerIpcHandlers(
     const results: Array<{
       shareId: string;
       label: string;
-      status: "updated" | "unchanged" | "ended";
+      status: "updated" | "unchanged" | "ended" | "damaged";
       changedPaths: number;
     }> = [];
     if (mounts.length === 0) {
@@ -5859,24 +5860,16 @@ function registerIpcHandlers(
         // An expired session must SURFACE, not read as "refreshed, nothing
         // new" — a manual Refresh Share would otherwise report success
         // forever while every pull 401s (codex P2).
-        if (error instanceof RelayUnauthorizedError) {
-          throw new Error(
-            "Your dohc Cloud session expired. Sign in again, then refresh shares.",
-          );
-        }
-        // A damaged pin is permanent, like the expired session above: no
-        // later refresh repairs it, and the relay must not be asked for a
-        // replacement scope. Reporting "unchanged" would hide it forever.
-        if (error instanceof SharePinInvalidError) {
-          throw new Error(
-            `The record for the share in "${mount.label}" is damaged, so it can't ` +
-              "refresh safely. Remove that share, then add it again.",
-          );
-        }
-        // One mount's network failure must not stop the others; report it
-        // as unchanged and move on.
+        const verdict = classifyShareMountRefreshError(error);
+        if (verdict.kind === "abort") throw new Error(verdict.message);
+        // One mount's failure must not stop the others.
         console.error(`[desktop] share-mount refresh failed for ${mount.label}:`, error);
-        results.push({ shareId: mount.shareId, label: mount.label, status: "unchanged", changedPaths: 0 });
+        results.push({
+          shareId: mount.shareId,
+          label: mount.label,
+          status: verdict.status,
+          changedPaths: 0,
+        });
       }
     }
     return RefreshShareMountsResult.parse({ results });
