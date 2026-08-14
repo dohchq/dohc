@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import * as Y from "yjs";
 
 // Both halves of the recovery snapshot contract (#769): the encoder the
@@ -117,16 +116,14 @@ export function durableMarkdownFromSnapshot(
   )} -->`;
 }
 
-// The readable half of an encoded draft, with the comment removed. What the
-// user gets when the snapshot cannot be projected — never the encoding.
-function crudeRecoveryText(text: string): string {
-  const match = RECOVERY_COMMENT.exec(text);
-  return match ? text.slice(0, match.index) : text;
-}
-
 // The recovery text as the user must receive it. A draft the projection never
 // refined carries the full document in the encoded comment, so the snapshot —
 // not the crude fallback beside it — is what Copy has to hand back.
+//
+// Resolved per copy, at the click. The lazy import can still be in flight when
+// the row renders, and a failed one clears its own cache — so a copy waits for
+// the lossless answer, and the copy after a transient failure retries instead
+// of serving that failure's fallback for as long as the row stays mounted.
 export async function restoreRecoveryDraftText(text: string): Promise<string> {
   const match = RECOVERY_COMMENT.exec(text);
   if (!match) return text;
@@ -141,22 +138,4 @@ export async function restoreRecoveryDraftText(text: string): Promise<string> {
     // half still is. Degrading is the whole point of keeping both.
     return text.slice(0, match.index);
   }
-}
-
-// Recovery surfaces render before the projection module can answer, so the
-// crude text stands in — the encoded comment never reaches the screen or the
-// clipboard, in either direction.
-export function useRecoveredDraftText(text: string): string {
-  const [restored, setRestored] = useState(() => crudeRecoveryText(text));
-  useEffect(() => {
-    let live = true;
-    setRestored(crudeRecoveryText(text));
-    void restoreRecoveryDraftText(text).then((markdown) => {
-      if (live) setRestored(markdown);
-    });
-    return () => {
-      live = false;
-    };
-  }, [text]);
-  return restored;
 }

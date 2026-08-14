@@ -32,7 +32,7 @@ import {
   type EngineRemovalInProgress,
   type UseEngineDoc,
 } from "./collab/useEngineDoc";
-import { useRecoveredDraftText } from "./collab/recoverySnapshot";
+import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import {
   applyFrontmatter,
   orderFrontmatter,
@@ -675,7 +675,9 @@ function ViewHeader(props: {
 // text"): quiet inline "Copied" confirmation, same swap-and-restore rhythm as
 // DocumentMenu / the code-block copy button (FEEDBACK_MS there is 1200 too).
 function CopySourceButton(props: {
-  getSource: () => string | null;
+  // A promise for callers whose text has to be resolved at the click — the
+  // recovery notice decodes its snapshot there (#769).
+  getSource: () => string | Promise<string> | null;
   // The default is pinned by e2e; the orphaned-draft notice (#567) renders its
   // own copy control beside a possible source view, so it needs its own name.
   testId?: string;
@@ -694,9 +696,10 @@ function CopySourceButton(props: {
       data-testid={props.testId ?? "markdown-source-copy"}
       onClick={() => {
         const source = props.getSource();
-        const write = source === null ? undefined : navigator.clipboard?.writeText(source);
-        if (!write) return;
-        void write
+        const clipboard = navigator.clipboard;
+        if (source === null || !clipboard) return;
+        void Promise.resolve(source)
+          .then((text) => clipboard.writeText(text))
           .then(() => setLabel("Copied"))
           .catch(() => setLabel("Couldn't copy"))
           .then(() => {
@@ -721,16 +724,6 @@ const DELETED_WITH_SET_ASIDE_EDIT_NOTICE =
 const DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
   "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.";
 
-// Same rule as the recovery list's Copy: a draft the projection never refined
-// carries the document inside an encoded comment, and the user gets the
-// document. A component, because the hook cannot run inside the map below.
-function OrphanedDraftCopyButton(props: { text: string }) {
-  const text = useRecoveredDraftText(props.text);
-  return (
-    <CopySourceButton testId="orphaned-draft-copy" getSource={() => text} />
-  );
-}
-
 function OrphanedDraftNotices(props: { workspaceId: string; path: string }) {
   const drafts = useOrphanedDrafts(props.workspaceId, props.path);
   if (drafts.length === 0) return null;
@@ -747,7 +740,13 @@ function OrphanedDraftNotices(props: { workspaceId: string; path: string }) {
             to keep it.
           </span>
           <div className="flex items-center gap-2">
-            <OrphanedDraftCopyButton text={draft.text} />
+            {/* Same rule as the recovery list's Copy: a draft the projection
+                never refined carries the document inside an encoded comment,
+                and the decode runs at the click (#769). */}
+            <CopySourceButton
+              testId="orphaned-draft-copy"
+              getSource={() => restoreRecoveryDraftText(draft.text)}
+            />
             {/* Deleting the only copy needs the explicit confirm step (#579
                 review, r6) — the same control the recovery list uses. */}
             <DismissDraftControls
