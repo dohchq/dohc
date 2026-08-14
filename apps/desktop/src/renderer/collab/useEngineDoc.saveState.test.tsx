@@ -8,7 +8,10 @@ import {
   resetOrphanedDrafts,
   useOrphanedDrafts,
 } from "../orphanedDrafts";
-import { useEngineDoc } from "./useEngineDoc";
+import {
+  disposeEngineDocLeasesForTests,
+  useEngineDoc,
+} from "./useEngineDoc";
 
 // AUDIT-SILENTSAVE. The engine editor's save indicator used to be a 1s timer
 // that flipped to "saved" no matter what the engine did — three dogfood
@@ -16,8 +19,6 @@ import { useEngineDoc } from "./useEngineDoc";
 // only by main's real settle outcomes. These tests own that contract: no
 // timer may resurrect "saved", a failure must show, and a settle that predates
 // the newest keystroke must not claim to cover it.
-
-afterEach(cleanup);
 
 type SaveStateListener = (event: EngineYDocSaveStateEvent) => void;
 type LineageReplacementListener = (event: {
@@ -34,6 +35,10 @@ function harnessBridge() {
   >();
   const lineageReplacementListeners = new Set<LineageReplacementListener>();
   const applied: Array<{ sessionId: string; seq: number }> = [];
+  let applyAttempts = 0;
+  let applyFailuresRemaining = 0;
+  let deferredApplyFailure: Promise<never> | null = null;
+  let closeCount = 0;
   const acknowledgedGenerations: number[] = [];
   let openedSessionId: string | null = null;
   const doc = new Y.Doc();
@@ -62,8 +67,25 @@ function harnessBridge() {
         lineageGeneration: 1,
       };
     },
-    async applyEngineYDocUpdate(payload: { sessionId: string; seq: number }) {
+    async applyEngineYDocUpdate(payload: {
+      sessionId: string;
+      update: Uint8Array;
+      seq: number;
+    }) {
+      applyAttempts += 1;
+      if (deferredApplyFailure) {
+        const failure = deferredApplyFailure;
+        deferredApplyFailure = null;
+        await failure;
+        return { accepted: true as const };
+      }
+      if (applyFailuresRemaining > 0) {
+        applyFailuresRemaining -= 1;
+        throw new Error("renderer update delivery failed");
+      }
+      Y.applyUpdate(doc, payload.update);
       applied.push({ sessionId: payload.sessionId, seq: payload.seq });
+      return { accepted: true as const };
     },
     onEngineYDocRemoteUpdate: (
       listener: (event: { sessionId: string; update: Uint8Array }) => void,
@@ -86,6 +108,7 @@ function harnessBridge() {
       return () => saveStateListeners.delete(listener);
     },
     async closeEngineYDocSession() {
+      closeCount += 1;
       return undefined;
     },
   };
@@ -107,7 +130,7 @@ function harnessBridge() {
     });
   }
 
-  function emitLineageReplacement(text: string): void {
+  function emitLineageReplacement(text: string, lineageGeneration = 2): void {
     if (openedSessionId === null) throw new Error("session not open yet");
     const replacement = new Y.Doc();
     replacement.getMap("meta").set("contentKind", "plain-text");
@@ -116,7 +139,7 @@ function harnessBridge() {
       sessionId: openedSessionId,
       update: Y.encodeStateAsUpdate(replacement),
       recoveredPaths: [],
-      lineageGeneration: 2,
+      lineageGeneration,
     };
     act(() => {
       for (const listener of [...lineageReplacementListeners]) listener(event);
@@ -153,6 +176,9 @@ function harnessBridge() {
     emitRemoteEdit,
     emitLineageReplacement,
     applied,
+    applyAttempts: () => applyAttempts,
+    closeCount: () => closeCount,
+    mainText: () => doc.getText("plainText").toString(),
     acknowledgedGenerations,
     sessionId: () => openedSessionId,
     setRemovalInProgress(value: typeof removalInProgress) {
@@ -160,6 +186,16 @@ function harnessBridge() {
     },
     setEmitDeletedDuringOpen(value: boolean) {
       emitDeletedDuringOpen = value;
+    },
+    failNextApply(count = 1) {
+      applyFailuresRemaining = count;
+    },
+    deferNextApplyFailure() {
+      let rejectFailure!: (error: Error) => void;
+      deferredApplyFailure = new Promise<never>((_resolve, reject) => {
+        rejectFailure = reject;
+      });
+      return () => rejectFailure(new Error("renderer update delivery failed"));
     },
   };
 }
@@ -180,8 +216,11 @@ function Harness(props: { workspaceId: string; path: string; enabled?: boolean }
     <div>
       <span data-testid="state">{engine.saveState}</span>
       <span data-testid="available">{String(engine.available)}</span>
+      <span data-testid="text">{engine.doc?.getText("plainText").toString() ?? "none"}</span>
       <span data-testid="deleted">{String(engine.deletedWhileEditing)}</span>
       <span data-testid="draft">{drafts.at(-1)?.text ?? "none"}</span>
+      <span data-testid="draft-count">{drafts.length}</span>
+      <span data-testid="drafts">{drafts.map((draft) => draft.text).join("|")}</span>
       <span data-testid="removal-operation">
         {engine.removalInProgress?.operation ?? "none"}
       </span>
@@ -215,7 +254,9 @@ beforeEach(() => {
   lastBoundDoc = null;
 });
 
-afterEach(() => {
+afterEach(async () => {
+  cleanup();
+  await disposeEngineDocLeasesForTests();
   vi.useRealTimers();
   vi.unstubAllGlobals();
   resetOrphanedDrafts();
@@ -277,6 +318,62 @@ it("persists a late edit on the losing mirror during replacement", async () => {
   expect(screen.getByTestId("available").textContent).toBe("true");
 });
 
+it("keeps deletion recovery separate from refused winner edits", async () => {
+  await mountBound();
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  const appliedAtDelete = harness.applied.length;
+  harness.emit("deleted", harness.applied.at(-1)!.seq);
+  await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("seed!"));
+
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  expect(screen.getByTestId("state").textContent).toBe("deleted");
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("winner!"));
+  expect(harness.applied).toHaveLength(appliedAtDelete);
+  expect(screen.getByTestId("draft-count").textContent).toBe("2");
+  expect(screen.getByTestId("drafts").textContent).toContain("seed!");
+  expect(screen.getByTestId("drafts").textContent).toContain("winner!");
+  expect(screen.getByTestId("state").textContent).toBe("deleted");
+
+  cleanup();
+  await disposeEngineDocLeasesForTests();
+  render(
+    <Harness
+      workspaceId="ws-1"
+      path="notes/big.md"
+      enabled={false}
+    />,
+  );
+  expect(screen.getByTestId("draft-count").textContent).toBe("2");
+  expect(screen.getByTestId("drafts").textContent).toContain("seed!");
+  expect(screen.getByTestId("drafts").textContent).toContain("winner!");
+});
+
+it("keeps recovery from consecutive independent lineage replacements", async () => {
+  await mountBound();
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  harness.emitLineageReplacement("final", 3);
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2, 3]));
+
+  expect(screen.getByTestId("draft-count").textContent).toBe("2");
+  expect(screen.getByTestId("drafts").textContent).toContain("seed!");
+  expect(screen.getByTestId("drafts").textContent).toContain("winner!");
+});
+
 it("shows the failure when a settle fails, instead of reading Saved", async () => {
   await mountBound();
 
@@ -291,6 +388,134 @@ it("shows the failure when a settle fails, instead of reading Saved", async () =
     await vi.advanceTimersByTimeAsync(10_000);
   });
   expect(screen.getByTestId("state").textContent).toBe("error");
+});
+
+it("does not report Saved until a rejected earlier update is repaired", async () => {
+  await mountBound();
+  const rejectFirst = harness.deferNextApplyFailure();
+
+  act(() => {
+    screen.getByTestId("type").click();
+    screen.getByTestId("type").click();
+  });
+  expect(harness.applyAttempts()).toBe(2);
+  expect(harness.applied.at(-1)?.seq).toBe(2);
+
+  // Main accepted the later delta, but the first delivery has not answered.
+  // Its settle cannot make the renderer claim the whole mirror is durable.
+  harness.emit("saved", 2);
+  expect(screen.getByTestId("state").textContent).toBe("saving");
+
+  rejectFirst();
+  await waitFor(() => expect(harness.applyAttempts()).toBe(3));
+  expect(harness.mainText()).toBe("seed!!");
+  expect(harness.applied.at(-1)?.seq).toBe(3);
+  expect(screen.getByTestId("state").textContent).toBe("saving");
+
+  harness.emit("saved", 3);
+  expect(screen.getByTestId("state").textContent).toBe("saved");
+});
+
+it("stays Saving until a delayed full-state repair converges", async () => {
+  await mountBound();
+  harness.failNextApply(2);
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(harness.applyAttempts()).toBe(2);
+  expect(screen.getByTestId("state").textContent).toBe("saving");
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(250);
+  });
+  await waitFor(() => expect(harness.applyAttempts()).toBe(3));
+  expect(harness.mainText()).toBe("seed!");
+  expect(screen.getByTestId("state").textContent).toBe("saving");
+
+  harness.emit("saved", harness.applied.at(-1)!.seq);
+  expect(screen.getByTestId("state").textContent).toBe("saved");
+});
+
+it("delivers the final mirror state before the final consumer closes and reopens", async () => {
+  const view = render(
+    <Harness workspaceId="ws-1" path="notes/big.md" enabled />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  harness.failNextApply();
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  await waitFor(() => expect(harness.applyAttempts()).toBe(2));
+  expect(harness.applied).toHaveLength(1);
+
+  view.unmount();
+  await waitFor(() => expect(harness.closeCount()).toBe(1));
+
+  render(<Harness workspaceId="ws-1" path="notes/big.md" enabled />);
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  expect(screen.getByTestId("text").textContent).toBe("seed!");
+  expect(harness.applyAttempts()).toBe(2);
+  expect(harness.applied).toHaveLength(1);
+});
+
+it("delivers a rejected edit before retry replaces the live session", async () => {
+  render(<Harness workspaceId="ws-1" path="notes/big.md" enabled />);
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  harness.failNextApply();
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  await waitFor(() => expect(harness.applyAttempts()).toBe(1));
+  act(() => {
+    screen.getByTestId("retry").click();
+  });
+
+  await waitFor(() => expect(harness.closeCount()).toBe(1));
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  expect(screen.getByTestId("text").textContent).toBe("seed!");
+  expect(harness.applyAttempts()).toBe(2);
+  expect(harness.applied).toHaveLength(1);
+});
+
+it("sets aside the final mirror when live repair and final delivery fail", async () => {
+  const view = render(
+    <Harness workspaceId="ws-1" path="notes/big.md" enabled />,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  harness.failNextApply(3);
+
+  act(() => {
+    screen.getByTestId("type").click();
+  });
+  await waitFor(() => expect(harness.applyAttempts()).toBe(1));
+  view.unmount();
+  await waitFor(() => expect(harness.closeCount()).toBe(1));
+
+  render(<Harness workspaceId="ws-1" path="notes/big.md" enabled />);
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  expect(screen.getByTestId("text").textContent).toBe("seed");
+  expect(screen.getByTestId("draft").textContent).toBe("seed!");
+  expect(harness.applyAttempts()).toBe(3);
+  expect(harness.applied).toHaveLength(0);
 });
 
 it("refuses transport writes synchronously after main reports deletion", async () => {
@@ -526,7 +751,9 @@ it("does not claim Saved for a settle that predates the newest keystroke", async
 
   // The follow-up settle covers it.
   harness.emit("saved", secondSeq);
-  expect(screen.getByTestId("state").textContent).toBe("saved");
+  await waitFor(() =>
+    expect(screen.getByTestId("state").textContent).toBe("saved"),
+  );
 });
 
 it("degrades to not-engine-backed on a bridge without the save-state channel, instead of blanking the editor", async () => {
@@ -561,5 +788,7 @@ it("ignores a save-state report addressed to a different session", async () => {
   expect(screen.getByTestId("state").textContent).toBe("saving");
 
   harness.emit("saved", seq);
-  expect(screen.getByTestId("state").textContent).toBe("saved");
+  await waitFor(() =>
+    expect(screen.getByTestId("state").textContent).toBe("saved"),
+  );
 });

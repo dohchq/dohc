@@ -4,6 +4,11 @@ import {
 } from "@dohc/workspace-core";
 import { z } from "zod";
 import {
+  CHATS_TAB_PATH,
+  canonicalSingletonEditorTabPath,
+  isPluginPanelTabPath,
+  isSingletonEditorTabPath,
+  isSiteTabPath,
   MAX_EXPANDED_FOLDERS,
   MAX_EDITOR_GROUPS,
   MAX_EDITOR_GROUP_ID_CHARS,
@@ -3207,7 +3212,7 @@ export const WorkspaceUiState = z.object({
   recentFiles: z.array(PATH_STRING).max(MAX_RECENT_FILES).optional(),
 }).superRefine((state, context) => {
   const groupIds = new Set<string>();
-  const tabPaths = new Set<string>();
+  const singletonOwners = new Set<string>();
   let tabCount = 0;
   let totalSize = 0;
   for (let groupIndex = 0; groupIndex < state.editorGroups.length; groupIndex++) {
@@ -3220,19 +3225,39 @@ export const WorkspaceUiState = z.object({
       });
     }
     groupIds.add(group.id);
-    totalSize += group.size;
+    const groupSingletons = new Set<string>();
     for (let tabIndex = 0; tabIndex < group.tabs.length; tabIndex++) {
-      const path = group.tabs[tabIndex];
-      tabCount += 1;
-      if (tabPaths.has(path)) {
+      const tab = group.tabs[tabIndex];
+      if (!isSingletonEditorTabPath(tab)) continue;
+      const identity = canonicalSingletonEditorTabPath(tab);
+      if (identity === null || identity !== tab) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["editorGroups", groupIndex, "tabs", tabIndex],
-          message: "Open tab paths must be unique across editor groups.",
+          message: "Process-owning preview tab paths must use canonical encoding.",
         });
       }
-      tabPaths.add(path);
+      if (identity === null || groupSingletons.has(identity)) continue;
+      groupSingletons.add(identity);
+      if (singletonOwners.has(identity)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["editorGroups", groupIndex, "tabs", tabIndex],
+          message:
+            tab === CHATS_TAB_PATH
+              ? "Chats can be open in only one editor group."
+              : isSiteTabPath(tab)
+                ? "A site preview can be open in only one editor group."
+                : isPluginPanelTabPath(tab)
+                  ? "A plugin panel can be open in only one editor group."
+                  : "This tab can be open in only one editor group.",
+        });
+      } else {
+        singletonOwners.add(identity);
+      }
     }
+    totalSize += group.size;
+    tabCount += group.tabs.length;
   }
   if (tabCount > MAX_OPEN_TABS) {
     context.addIssue({
@@ -3396,6 +3421,22 @@ export const ApplyEngineYDocUpdatePayload = z.object({
   seq: z.number().int().nonnegative().default(0),
 });
 export type ApplyEngineYDocUpdatePayload = z.infer<typeof ApplyEngineYDocUpdatePayload>;
+
+export const ApplyEngineYDocUpdateResult = z.discriminatedUnion("accepted", [
+  z.object({ accepted: z.literal(true) }),
+  z.object({
+    accepted: z.literal(false),
+    reason: z.enum([
+      "session-unavailable",
+      "lineage-transition",
+      "deleted",
+      "read-only",
+    ]),
+  }),
+]);
+export type ApplyEngineYDocUpdateResult = z.infer<
+  typeof ApplyEngineYDocUpdateResult
+>;
 
 export const AcknowledgeEngineYDocLineageReplacementPayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
@@ -3802,8 +3843,11 @@ export interface DohcDesktopBridge {
     payload: OpenEngineYDocSessionPayload,
   ): Promise<OpenEngineYDocSessionResult>;
   // Ship a local editor CRDT update to main (journaled via recordUpdate +
-  // debounced settle). A no-op if the session is unknown/closed.
-  applyEngineYDocUpdate(payload: ApplyEngineYDocUpdatePayload): Promise<void>;
+  // debounced settle). A refusal is explicit so the renderer can preserve the
+  // mirror instead of treating a dropped update as durable.
+  applyEngineYDocUpdate(
+    payload: ApplyEngineYDocUpdatePayload,
+  ): Promise<ApplyEngineYDocUpdateResult>;
   // Completes the replacement handoff only after the renderer detached the
   // losing mirror and durably preserved any edit that did not reach main.
   acknowledgeEngineYDocLineageReplacement(

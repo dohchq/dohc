@@ -2,7 +2,10 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { useEngineDoc } from "./useEngineDoc";
+import {
+  disposeEngineDocLeasesForTests,
+  useEngineDoc,
+} from "./useEngineDoc";
 
 // #533. `available: false` used to mean two different things — "this document
 // is not engine-backed" and "dohc has not found out yet" — and the editor
@@ -25,8 +28,9 @@ beforeEach(() => {
   rendered = [];
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await disposeEngineDocLeasesForTests();
   vi.unstubAllGlobals();
 });
 
@@ -83,7 +87,7 @@ function deferredBridge() {
           },
         ),
     ),
-    applyEngineYDocUpdate: vi.fn(async () => undefined),
+    applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
     onEngineYDocRemoteUpdate: () => () => undefined,
     onEngineYDocLineageReplacement: () => () => undefined,
     onEngineYDocSaveState: () => () => undefined,
@@ -197,6 +201,9 @@ it("re-enters opening on the FIRST render of a version switch, not one frame lat
 
   // And it stays that way until the NEW open answers.
   expect(screen.getByTestId("opening").textContent).toBe("true");
+  await waitFor(() =>
+    expect(bridge.api.openEngineYDocSession).toHaveBeenCalledTimes(2),
+  );
   bridge.bind();
   await waitFor(() =>
     expect(screen.getByTestId("available").textContent).toBe("true"),

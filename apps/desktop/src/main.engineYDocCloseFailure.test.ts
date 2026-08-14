@@ -37,19 +37,20 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
     expect(handler).not.toContain("catch(() => undefined)");
   });
 
-  it("routes all three discard paths through the release", () => {
+  it("routes every discard path through the release", () => {
     const handler = handlerSource("engineYDocOpen");
     for (const reason of [
       "stale session replaced",
       "renderer gone before hand-over",
       "kind-mismatched lineage",
+      "lineage replacement announcement failed",
     ]) {
       expect(handler).toContain(reason);
     }
-    // The stale close, the path-keyed retry, and the shared `release` helper
-    // the two post-open refusals call.
-    expect(handler.split("releaseEngineYDocSessionEntry(").length - 1).toBe(3);
-    expect(handler.split("await release(").length - 1).toBe(2);
+    // The stale close, the path-keyed retry, the replacement-announcement
+    // failure, and the shared `release` helper the post-open refusals call.
+    expect(handler.split("releaseEngineYDocSessionEntry(").length - 1).toBe(4);
+    expect(handler.split("await release(").length - 1).toBe(3);
   });
 
   it("answers engineMayHoldDocument — not a plain fallback — when a close fails", () => {
@@ -63,12 +64,12 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
       handler.indexOf("THIS OPEN IS THE RETRY"),
     );
     expect(staleAnswer).toContain("engineMayHoldDocument: true");
-    // The two post-open refusals answer it conditionally, on the release's
+    // The post-open refusals answer it conditionally, on the release's
     // own verdict — a released session really is on disk and keeps the plain
     // editor.
     expect(
       handler.split("...(released ? {} : { engineMayHoldDocument: true }),").length - 1,
-    ).toBe(2);
+    ).toBe(3);
   });
 
   it("retries a failed close BY PATH before it binds anything", () => {

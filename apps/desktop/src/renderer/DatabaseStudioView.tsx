@@ -78,6 +78,7 @@ function compareCells(a: unknown, b: unknown, numeric: boolean): number {
 export function DatabaseStudioView(props: {
   workspaceId: string;
   path: string;
+  fileOpenStartMark?: string;
   refreshKey?: number;
   onSharePath?: (path: string) => void;
   // Mounted shares (and other read-only surfaces): cells never enter edit
@@ -150,11 +151,14 @@ export function DatabaseStudioView(props: {
   // snapshot read → first page of rows on screen.
   useEffect(() => {
     if (snapshot) {
-      rendererMarks.measureSince("sqlite-first-page", "file-open-start");
+      rendererMarks.measureSince(
+        "sqlite-first-page",
+        props.fileOpenStartMark ?? "file-open-start",
+      );
       // Last-wins: readers poll this epoch for freshness (see FileInspector).
       rendererMarks.mark("sqlite-first-page-rendered");
     }
-  }, [snapshot]);
+  }, [props.fileOpenStartMark, snapshot]);
 
   const active =
     snapshot?.tables.find((t) => t.name === activeName) ??

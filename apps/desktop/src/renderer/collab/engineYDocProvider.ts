@@ -21,6 +21,9 @@ import * as Y from "yjs";
 // (initial state, forwarded remote deltas). The local-edit observer ignores it.
 const ENGINE_SOURCED_ORIGIN: unique symbol = Symbol("dohc.engineSourcedUpdate");
 
+const REPAIR_RETRY_INITIAL_MS = 250;
+const REPAIR_RETRY_MAX_MS = 5_000;
+
 // One name for one concept, shared by the transport's open answer and the
 // binding it produces (and re-exported from useEngineDoc.ts) — three inline
 // copies of the same shape could drift silently if a third operation joins
@@ -50,7 +53,9 @@ export interface EngineYDocTransport {
     removalInProgress?: EngineRemovalInProgress;
   }>;
   // Ship a local editor update to main, where it is journaled via recordUpdate.
-  applyLocalUpdate(update: Uint8Array, lineageGeneration: number): void;
+  // Resolution acknowledges that main accepted the update. The binding joins
+  // every acknowledgement before close, so teardown cannot outrun an edit.
+  applyLocalUpdate(update: Uint8Array, lineageGeneration: number): Promise<void>;
   // Subscribe to remote CRDT deltas main forwards (a co-editor's edit routed
   // through the engine). Returns an unsubscribe function.
   onRemoteUpdate(
@@ -69,6 +74,13 @@ export interface EngineYDocTransport {
   acknowledgeLineageReplacement(lineageGeneration: number): Promise<Uint8Array[]>;
   // Settle + close the engine session in main (releases the reservation).
   close(): Promise<void>;
+}
+
+export class EngineYDocDeliveryRefusedError extends Error {
+  constructor(readonly reason: string) {
+    super(`The engine refused the Y.Doc update: ${reason}.`);
+    this.name = "EngineYDocDeliveryRefusedError";
+  }
 }
 
 export interface EngineYDocBinding {
@@ -95,6 +107,17 @@ export interface EngineYDocBinding {
 }
 
 export interface EngineYDocBindingOptions {
+  // If both ordinary delivery and the final full-state retry fail, preserve
+  // the canonical mirror before close destroys it.
+  onDeliveryFailure?: (
+    snapshot: Uint8Array,
+    error: unknown,
+    source: Y.Doc,
+  ) => void | Promise<void>;
+  // Main can report a later update as saved before an earlier rejected IPC
+  // delivery is repaired. Keep the owner informed until every accepted local
+  // update, including a full-state repair, has finished.
+  onDeliveryPendingChange?: (pending: boolean) => void;
   // Runs after the losing mirror stops shipping updates and before main
   // accepts the winner generation. The desktop uses this boundary to persist
   // text that existed only in the losing renderer mirror.
@@ -170,6 +193,132 @@ export async function bindEngineYDoc(
   Y.applyUpdate(doc, opened.initialUpdate, ENGINE_SOURCED_ORIGIN);
 
   let destroyed = false;
+  let destroyPromise: Promise<void> | null = null;
+  const activeDeliveries = new Set<Promise<void>>();
+  let deliveryPending = false;
+  let repairNeeded = false;
+  let repairRunning = false;
+  let repairRequested = false;
+  let repairRetryDelayMs = REPAIR_RETRY_INITIAL_MS;
+  let repairRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let lineageReplacing = false;
+  let terminalDeliveryError: unknown = null;
+  let terminalRecoveryError: unknown = null;
+
+  const setDeliveryPending = (pending: boolean): void => {
+    if (deliveryPending === pending) return;
+    deliveryPending = pending;
+    options.onDeliveryPendingChange?.(pending);
+  };
+
+  const finishDeliveryIfSafe = (): void => {
+    if (
+      activeDeliveries.size === 0 &&
+      !repairNeeded &&
+      !repairRunning
+    ) {
+      setDeliveryPending(false);
+    }
+  };
+
+  const trackDelivery = (delivery: Promise<void>): void => {
+    let tracked!: Promise<void>;
+    tracked = delivery.finally(() => {
+      activeDeliveries.delete(tracked);
+      finishDeliveryIfSafe();
+    });
+    activeDeliveries.add(tracked);
+    void tracked.catch(() => undefined);
+  };
+
+  const drainDeliveries = async (): Promise<void> => {
+    while (activeDeliveries.size > 0) {
+      await Promise.allSettled([...activeDeliveries]);
+    }
+  };
+
+  const clearRepairRetry = (): void => {
+    if (repairRetryTimer === null) return;
+    clearTimeout(repairRetryTimer);
+    repairRetryTimer = null;
+  };
+
+  const scheduleRepairRetry = (): void => {
+    if (
+      destroyed ||
+      lineageReplacing ||
+      terminalDeliveryError !== null ||
+      repairRetryTimer !== null ||
+      !repairNeeded
+    ) {
+      return;
+    }
+    const delay = repairRetryDelayMs;
+    repairRetryDelayMs = Math.min(delay * 2, REPAIR_RETRY_MAX_MS);
+    repairRetryTimer = setTimeout(() => {
+      repairRetryTimer = null;
+      startRepair();
+    }, delay);
+  };
+
+  function startRepair(): void {
+    if (
+      destroyed ||
+      lineageReplacing ||
+      terminalDeliveryError !== null ||
+      repairRunning ||
+      !repairNeeded
+    ) {
+      return;
+    }
+    clearRepairRetry();
+    repairNeeded = false;
+    repairRunning = true;
+    repairRequested = false;
+    const repairDoc = doc;
+    const snapshot = Y.encodeStateAsUpdate(repairDoc);
+    const repair = (async () => {
+      let repaired = false;
+      try {
+        await transport.applyLocalUpdate(snapshot, lineageGeneration);
+        repaired = true;
+      } catch (error: unknown) {
+        if (error instanceof EngineYDocDeliveryRefusedError) {
+          await preserveTerminalFailure(snapshot, error, repairDoc);
+          return;
+        }
+        repairNeeded = true;
+      } finally {
+        repairRunning = false;
+        if (repaired) repairRetryDelayMs = REPAIR_RETRY_INITIAL_MS;
+        if (repairNeeded) {
+          if (repaired || repairRequested) startRepair();
+          else scheduleRepairRetry();
+        }
+      }
+    })();
+    trackDelivery(repair);
+  }
+
+  const preserveTerminalFailure = (
+    snapshot: Uint8Array,
+    error: unknown,
+    source: Y.Doc,
+  ): Promise<void> => {
+    terminalDeliveryError = error;
+    repairNeeded = false;
+    repairRequested = false;
+    clearRepairRetry();
+    const recovery = Promise.resolve()
+      .then(() => options.onDeliveryFailure?.(snapshot, error, source))
+      .catch((captureError: unknown) => {
+        terminalRecoveryError = captureError;
+      })
+      .finally(() => {
+        finishDeliveryIfSafe();
+      });
+    return recovery;
+  };
 
   // Ship every LOCAL editor edit to main. A Tiptap edit carries a non-ENGINE
   // origin; an engine-sourced apply carries ENGINE_SOURCED_ORIGIN and is
@@ -177,7 +326,38 @@ export async function bindEngineYDoc(
   const onUpdate = (update: Uint8Array, origin: unknown): void => {
     if (destroyed) return;
     if (origin === ENGINE_SOURCED_ORIGIN) return;
-    transport.applyLocalUpdate(update, lineageGeneration);
+    setDeliveryPending(true);
+    if (terminalDeliveryError !== null) {
+      trackDelivery(
+        preserveTerminalFailure(
+          Y.encodeStateAsUpdate(doc),
+          terminalDeliveryError,
+          doc,
+        ),
+      );
+      return;
+    }
+    if (repairRunning) repairRequested = true;
+    let delivery: Promise<void>;
+    try {
+      // Start synchronously, as before. Main owns update ordering; the
+      // acknowledgement tracking below is not a second delivery queue.
+      delivery = transport.applyLocalUpdate(update, lineageGeneration);
+    } catch (error: unknown) {
+      delivery = Promise.reject(error);
+    }
+    const observed = delivery.catch((error: unknown) => {
+      if (error instanceof EngineYDocDeliveryRefusedError) {
+        return preserveTerminalFailure(Y.encodeStateAsUpdate(doc), error, doc);
+      }
+      repairNeeded = true;
+      startRepair();
+      throw error;
+    });
+    trackDelivery(observed);
+    // A new edit is a delivery opportunity, so it need not wait for a
+    // scheduled repair retry.
+    startRepair();
   };
   doc.on("update", onUpdate);
 
@@ -202,10 +382,17 @@ export async function bindEngineYDoc(
       const retired = doc;
       // First close the only path that can ship a losing transaction to main.
       // It stays closed for the whole acknowledgement handoff.
+      lineageReplacing = true;
       retired.off("update", onUpdate);
+      clearRepairRetry();
+      if (activeDeliveries.size > 0) await drainDeliveries();
       if (options.onDocumentReplacing) {
         await options.onDocumentReplacing(retired, input.recoveredPaths);
       }
+      repairNeeded = false;
+      repairRequested = false;
+      terminalDeliveryError = null;
+      terminalRecoveryError = null;
       const bufferedUpdates = await transport.acknowledgeLineageReplacement(
         input.lineageGeneration,
       );
@@ -220,6 +407,8 @@ export async function bindEngineYDoc(
       retiredDocs.add(retired);
       doc = replacement;
       lineageGeneration = input.lineageGeneration;
+      lineageReplacing = false;
+      setDeliveryPending(false);
       for (const listener of replacementListeners) {
         listener(replacement, input.recoveredPaths);
       }
@@ -257,18 +446,53 @@ export async function bindEngineYDoc(
       replacementListeners.add(listener);
       return () => replacementListeners.delete(listener);
     },
-    async destroy() {
-      if (destroyed) return;
+    destroy() {
+      if (destroyPromise) return destroyPromise;
       destroyed = true;
+      clearRepairRetry();
       doc.off("update", onUpdate);
       unsubscribe();
       unsubscribeReplacement();
-      // Close the engine session first (it settles the converged state), then
-      // drop the mirror doc.
-      await transport.close().catch(() => undefined);
-      doc.destroy();
-      for (const retired of retiredDocs) retired.destroy();
-      retiredDocs.clear();
+      destroyPromise = (async () => {
+        let deliveryError: unknown = null;
+        let recoveryError: unknown = terminalRecoveryError;
+        if (replacementHandoff) {
+          await Promise.allSettled([replacementHandoff]);
+        }
+        await drainDeliveries();
+        recoveryError ??= terminalRecoveryError;
+        if (terminalDeliveryError !== null) {
+          deliveryError = terminalDeliveryError;
+        } else if (repairNeeded) {
+          const finalSnapshot = Y.encodeStateAsUpdate(doc);
+          try {
+            // Full state, not the failed delta: this also covers every edit
+            // made while the failed delivery was in flight.
+            await transport.applyLocalUpdate(finalSnapshot, lineageGeneration);
+          } catch (error: unknown) {
+            deliveryError = error;
+            try {
+            await options.onDeliveryFailure?.(finalSnapshot, error, doc);
+            } catch (captureError: unknown) {
+              recoveryError = captureError;
+            }
+          }
+        }
+
+        // Main settles the converged state on close. A close failure is still
+        // retained and retried by main, so it stays best-effort here.
+        await transport.close().catch(() => undefined);
+        doc.destroy();
+        for (const retired of retiredDocs) retired.destroy();
+        retiredDocs.clear();
+
+        if (recoveryError !== null) throw recoveryError;
+        // Generic bindings without a recovery owner must not hide loss.
+        if (deliveryError !== null && !options.onDeliveryFailure) {
+          throw deliveryError;
+        }
+      })();
+      return destroyPromise;
     },
   };
 }

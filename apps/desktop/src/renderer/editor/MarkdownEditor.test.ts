@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { createElement, createRef, type SetStateAction } from "react";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -46,6 +47,30 @@ import {
   type SlashCommandState,
 } from "./slashCommands";
 
+const scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(
+  Element.prototype,
+  "scrollIntoView",
+);
+
+async function flushAnimationFrames(count = 2): Promise<void> {
+  await act(async () => {
+    for (let frame = 0; frame < count; frame += 1) {
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => resolve());
+      });
+    }
+  });
+}
+
+function selectionTextOffset(element: HTMLElement): number | null {
+  const selection = document.getSelection();
+  if (!selection?.anchorNode) return null;
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.setEnd(selection.anchorNode, selection.anchorOffset);
+  return range.toString().length;
+}
+
 beforeEach(() => {
   vi.stubGlobal(
     "ResizeObserver",
@@ -81,6 +106,15 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  if (scrollIntoViewDescriptor) {
+    Object.defineProperty(
+      Element.prototype,
+      "scrollIntoView",
+      scrollIntoViewDescriptor,
+    );
+  } else {
+    Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+  }
   vi.unstubAllGlobals();
 });
 
@@ -884,6 +918,134 @@ describe("MarkdownEditor history", () => {
     }
   });
 
+  it("shares one ordered undo history across duplicate collaboration views", async () => {
+    const ydoc = markdownToYDoc("seed");
+    const user = userEvent.setup();
+    const collab = {
+      ydoc,
+      status: "connected" as const,
+      peerCount: 0,
+      synced: true,
+    };
+    const editorProps = {
+      value: "seed",
+      onDirty: vi.fn(),
+      workspaceId: "workspace-1",
+      path: "notes/duplicate.md",
+      knownFiles: [],
+      collab,
+    };
+    const paneARef = createRef<MarkdownEditorHandle>();
+    const paneBRef = createRef<MarkdownEditorHandle>();
+    const paneAElement = () =>
+      createElement(MarkdownEditor, {
+        ...editorProps,
+        key: "pane-a",
+        ref: paneARef,
+      });
+    const paneBElement = () =>
+      createElement(MarkdownEditor, {
+        ...editorProps,
+        key: "pane-b",
+        ref: paneBRef,
+      });
+    const view = render(createElement("div", null, paneAElement()));
+
+    try {
+      const paneA = await screen.findByTestId("markdown-editor");
+      expect(paneA).toBeTruthy();
+      await waitFor(() => {
+        expect(paneA!.textContent).toBe("seed");
+      });
+
+      await waitFor(() => {
+        paneARef.current?.focus("end");
+        expect(document.activeElement).toBe(paneA);
+      });
+      await user.keyboard("A");
+      await waitFor(() => {
+        expect(paneA!.textContent).toBe("seedA");
+      });
+
+      view.rerender(
+        createElement("div", null, paneAElement(), paneBElement()),
+      );
+      await waitFor(() => {
+        expect(screen.getAllByTestId("markdown-editor")).toHaveLength(2);
+      });
+      const [, paneB] = screen.getAllByTestId("markdown-editor");
+      expect(paneB).toBeTruthy();
+      await waitFor(() => {
+        expect(paneB!.textContent).toBe("seedA");
+      });
+
+      await waitFor(() => {
+        paneBRef.current?.focus("end");
+        expect(document.activeElement).toBe(paneB);
+      });
+      await user.keyboard("B");
+      await waitFor(() => {
+        expect(paneA!.textContent).toBe("seedAB");
+        expect(paneB!.textContent).toBe("seedAB");
+      });
+
+      fireEvent.keyDown(paneA!, {
+        key: "z",
+        code: "KeyZ",
+        ctrlKey: true,
+      });
+      await waitFor(() => {
+        expect(paneA!.textContent).toBe("seedA");
+        expect(paneB!.textContent).toBe("seedA");
+      });
+
+      fireEvent.keyDown(paneB!, {
+        key: "z",
+        code: "KeyZ",
+        ctrlKey: true,
+      });
+      await waitFor(() => {
+        expect(paneA!.textContent).toBe("seed");
+        expect(paneB!.textContent).toBe("seed");
+      });
+
+      fireEvent.keyDown(paneA!, {
+        key: "z",
+        code: "KeyZ",
+        ctrlKey: true,
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(paneA!.textContent).toBe("seed");
+      expect(paneB!.textContent).toBe("seed");
+
+      view.rerender(createElement("div", null, paneBElement()));
+      await waitFor(() => {
+        expect(screen.getAllByTestId("markdown-editor")).toHaveLength(1);
+      });
+      await waitFor(() => {
+        paneBRef.current?.focus("end");
+        expect(document.activeElement).toBe(paneB);
+      });
+      await user.keyboard("C");
+      await waitFor(() => {
+        expect(paneB!.textContent).toBe("seedC");
+      });
+      fireEvent.keyDown(paneB!, {
+        key: "z",
+        code: "KeyZ",
+        ctrlKey: true,
+      });
+      await waitFor(() => {
+        expect(paneB!.textContent).toBe("seed");
+      });
+    } finally {
+      view.unmount();
+      ydoc.destroy();
+    }
+  });
+
   it("keeps local StarterKit undo working outside collaboration mode", async () => {
     const user = userEvent.setup();
     render(
@@ -1041,6 +1203,281 @@ describe("MarkdownEditor remote carets", () => {
 // content held a ``` line closed its fence early and truncated on
 // re-import (#704).
 describe("MarkdownEditor markdown export: code fence widening (#704)", () => {
+  it("reports Replace all while the find input owns focus", async () => {
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const user = userEvent.setup();
+    const onDirty = vi.fn();
+    render(
+      createElement(MarkdownEditor, {
+        value: "alpha alpha",
+        onDirty,
+        workspaceId: "workspace-1",
+        path: "notes/shared.md",
+        knownFiles: [],
+      }),
+    );
+    const editor = await screen.findByTestId("markdown-editor");
+    await flushAnimationFrames();
+    editor.focus();
+    await user.keyboard("{Control>}h{/Control}");
+    const find = await screen.findByPlaceholderText("Find");
+    const replacement = screen.getByPlaceholderText("Replace");
+    await user.type(find, "alpha");
+    await user.type(replacement, "beta");
+    onDirty.mockClear();
+
+    await user.click(screen.getByRole("button", { name: "Replace all" }));
+
+    expect(editor.textContent).toContain("beta beta");
+    expect(document.activeElement).not.toBe(editor);
+    expect(
+      onDirty.mock.calls.some(([materialize]) =>
+        (materialize as () => string)().includes("beta beta"),
+      ),
+    ).toBe(true);
+  });
+
+  it("reports an asynchronous image insert after the editor loses focus", async () => {
+    let resolveSettings!: (value: unknown) => void;
+    const settings = new Promise((resolve) => {
+      resolveSettings = resolve;
+    });
+    const writeWorkspaceAsset = vi.fn().mockResolvedValue(undefined);
+    window.dohcDesktop = {
+      getWorkspaceSettings: vi.fn(() => settings),
+      writeWorkspaceAsset,
+    } as never;
+    const onDirty = vi.fn();
+    const file = new File([new Uint8Array([1, 2, 3])], "photo.png", {
+      type: "image/png",
+    });
+    Object.defineProperty(file, "arrayBuffer", {
+      configurable: true,
+      value: async () => new Uint8Array([1, 2, 3]).buffer,
+    });
+
+    try {
+      render(
+        createElement(
+          "div",
+          null,
+          createElement("button", { type: "button" }, "Other pane"),
+          createElement(MarkdownEditor, {
+            value: "# Before\n",
+            onDirty,
+            workspaceId: "workspace-1",
+            path: "notes/shared.md",
+            knownFiles: [],
+          }),
+        ),
+      );
+      const editor = await screen.findByTestId("markdown-editor");
+      await flushAnimationFrames();
+      editor.focus();
+      onDirty.mockClear();
+      fireEvent.paste(editor, {
+        clipboardData: {
+          files: [file],
+          getData: () => "",
+          types: ["Files"],
+        },
+      });
+      screen.getByRole("button", { name: "Other pane" }).focus();
+
+      resolveSettings({
+        settings: {
+          files: {
+            attachmentLocation: "per-document",
+            attachmentFolderName: "assets",
+          },
+        },
+      });
+
+      await waitFor(() => expect(writeWorkspaceAsset).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(
+          onDirty.mock.calls.some(([materialize]) =>
+            (materialize as () => string)().includes("assets/photo-"),
+          ),
+        ).toBe(true),
+      );
+      expect(document.activeElement).not.toBe(editor);
+    } finally {
+      delete window.dohcDesktop;
+    }
+  });
+
+  it("replaces local Markdown without remounting or reporting a user edit", async () => {
+    const ref = createRef<MarkdownEditorHandle>();
+    const onDirty = vi.fn();
+    render(
+      createElement(MarkdownEditor, {
+        ref,
+        value: "# Before\n",
+        onDirty,
+        workspaceId: "workspace-1",
+        path: "notes/shared.md",
+        knownFiles: [],
+      }),
+    );
+    const editor = await screen.findByTestId("markdown-editor");
+    act(() => ref.current?.focus("start"));
+    await waitFor(() => expect(document.activeElement).toBe(editor));
+    const offsetBefore = selectionTextOffset(editor);
+    expect(offsetBefore).not.toBeNull();
+
+    act(() => ref.current?.replaceMarkdown("# After\n\nPeer edit"));
+
+    expect(screen.getByTestId("markdown-editor")).toBe(editor);
+    expect(document.activeElement).toBe(editor);
+    expect(selectionTextOffset(editor)).toBe(offsetBefore);
+    expect(editor.textContent).toContain("After");
+    expect(editor.textContent).toContain("Peer edit");
+    expect(onDirty).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(editor, { key: "z", ctrlKey: true });
+    await act(async () => Promise.resolve());
+    expect(editor.textContent).toContain("After");
+    expect(editor.textContent).not.toContain("Before");
+    expect(onDirty).not.toHaveBeenCalled();
+  });
+
+  it("maps an end cursor across peer content prepended by replacement", async () => {
+    const ref = createRef<MarkdownEditorHandle>();
+    const onDirty = vi.fn();
+    const user = userEvent.setup();
+    render(
+      createElement(MarkdownEditor, {
+        ref,
+        value: "# Target\n\nTail",
+        onDirty,
+        workspaceId: "workspace-1",
+        path: "notes/shared.md",
+        knownFiles: [],
+      }),
+    );
+    const editor = await screen.findByTestId("markdown-editor");
+    act(() => ref.current?.focus("end"));
+    await waitFor(() => expect(document.activeElement).toBe(editor));
+    expect(selectionTextOffset(editor)).toBe(editor.textContent?.length);
+
+    act(() =>
+      ref.current?.replaceMarkdown("# Peer\n\n# Target\n\nTail"),
+    );
+
+    expect(document.activeElement).toBe(editor);
+    expect(selectionTextOffset(editor)).toBe(editor.textContent?.length);
+    expect(onDirty).not.toHaveBeenCalled();
+    await user.keyboard("!");
+    expect(editor.textContent).toMatch(/Tail!$/);
+  });
+
+  it("keeps an end cursor before peer content appended by replacement", async () => {
+    const ref = createRef<MarkdownEditorHandle>();
+    const onDirty = vi.fn();
+    const user = userEvent.setup();
+    render(
+      createElement(MarkdownEditor, {
+        ref,
+        value: "# Target\n\nTail",
+        onDirty,
+        workspaceId: "workspace-1",
+        path: "notes/shared.md",
+        knownFiles: [],
+      }),
+    );
+    const editor = await screen.findByTestId("markdown-editor");
+    act(() => ref.current?.focus("end"));
+    await waitFor(() => expect(document.activeElement).toBe(editor));
+
+    act(() =>
+      ref.current?.replaceMarkdown("# Target\n\nTail\n\nPeer"),
+    );
+    expect(onDirty).not.toHaveBeenCalled();
+    await user.keyboard("!");
+
+    expect(editor.textContent).toContain("Tail!");
+    expect(editor.textContent).not.toContain("Peer!");
+    expect(onDirty).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a cursor in unchanged content between disjoint peer edits", async () => {
+    const ref = createRef<MarkdownEditorHandle>();
+    const onDirty = vi.fn();
+    render(
+      createElement(MarkdownEditor, {
+        ref,
+        value: "Before\n\nTarget\n\nAfter",
+        onDirty,
+        workspaceId: "workspace-1",
+        path: "notes/shared.md",
+        knownFiles: [],
+      }),
+    );
+    const editor = await screen.findByTestId("markdown-editor");
+    const target = Array.from(editor.querySelectorAll("p")).find(
+      (paragraph) => paragraph.textContent === "Target",
+    );
+    const text = target?.firstChild;
+    if (!(text instanceof Text)) throw new Error("expected target paragraph text");
+    editor.focus();
+    const range = document.createRange();
+    range.setStart(text, 3);
+    range.collapse(true);
+    const selection = document.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    fireEvent(document, new Event("selectionchange"));
+    await waitFor(() => expect(selectionTextOffset(editor)).toBe(9));
+
+    act(() =>
+      ref.current?.replaceMarkdown("Peer\n\nBefore\n\nTarget\n\nAfter\n\nTail"),
+    );
+
+    expect(selectionTextOffset(editor)).toBe(13);
+    expect(onDirty).not.toHaveBeenCalled();
+  });
+
+  it("keeps a cursor in an unchanged island after a large peer rewrite", async () => {
+    const ref = createRef<MarkdownEditorHandle>();
+    const onDirty = vi.fn();
+    const stable = " stable ";
+    render(
+      createElement(MarkdownEditor, {
+        ref,
+        value: `${"a".repeat(96)}${stable}${"b".repeat(96)}`,
+        onDirty,
+        workspaceId: "workspace-1",
+        path: "notes/shared.md",
+        knownFiles: [],
+      }),
+    );
+    const editor = await screen.findByTestId("markdown-editor");
+    const text = editor.querySelector("p")?.firstChild;
+    if (!(text instanceof Text)) throw new Error("expected paragraph text");
+    editor.focus();
+    const range = document.createRange();
+    range.setStart(text, 99);
+    range.collapse(true);
+    const selection = document.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    fireEvent(document, new Event("selectionchange"));
+    await waitFor(() => expect(selectionTextOffset(editor)).toBe(99));
+
+    act(() =>
+      ref.current?.replaceMarkdown(
+        `${"x".repeat(100)}${stable}${"y".repeat(100)}`,
+      ),
+    );
+
+    expect(selectionTextOffset(editor)).toBe(103);
+    expect(onDirty).not.toHaveBeenCalled();
+  });
+
   it("widens a code fence in the live editor's getMarkdown when the block content contains a fence", async () => {
     const content = "before\n```\nafter";
     const value = ["````js", "before", "```", "after", "````"].join("\n");

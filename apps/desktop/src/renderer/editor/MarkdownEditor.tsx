@@ -19,6 +19,7 @@ import { Markdown } from "@tiptap/markdown";
 import { TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import {
@@ -41,6 +42,7 @@ import {
 import { FenceWideningCodeBlock, getDohcYDocSelectionSeed } from "./import-export";
 import type { ImageSrcContext } from "./imageSrc";
 import {
+  documentReplacementMap,
   handleImageDrop,
   handleImagePaste,
   handlePaneImageDragOver,
@@ -117,10 +119,12 @@ import {
 } from "./OutlinePanel";
 import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { SafeTrailingNode } from "./safeTrailingNode";
+import { createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
 
 export type MarkdownEditorHandle = {
   focus: (position?: "start" | "end") => void;
   getMarkdown: () => string;
+  replaceMarkdown: (markdown: string) => void;
 };
 
 export type MarkdownEditorCollab = {
@@ -160,7 +164,8 @@ export type BlockNavigationTarget = {
 
 export type MarkdownEditorProps = {
   value: string;
-  onDirty: () => void;
+  onDirty: (materialize?: () => string) => void;
+  onFocus?: () => void;
   workspaceId: string;
   path: string;
   knownFiles: ReadonlyArray<WikilinkFile>;
@@ -180,6 +185,7 @@ export type MarkdownEditorProps = {
 type CollaborationExtension = typeof import("@tiptap/extension-collaboration").Collaboration;
 type CollaborationCaretExtension =
   typeof import("@tiptap/extension-collaboration-caret").CollaborationCaret;
+type YTiptap = typeof import("@tiptap/y-tiptap");
 
 // Both extensions bind to the same ydoc/awareness pair and are only ever
 // used together, so they load as one lazy bundle — a caller with an
@@ -189,6 +195,7 @@ type CollaborationCaretExtension =
 type CollaborationExtensions = {
   Collaboration: CollaborationExtension;
   CollaborationCaret: CollaborationCaretExtension;
+  yTiptap: YTiptap;
 };
 
 let collaborationExtensionsPromise: Promise<CollaborationExtensions> | null = null;
@@ -198,9 +205,11 @@ async function loadCollaborationExtensions(): Promise<CollaborationExtensions> {
     collaborationExtensionsPromise = Promise.all([
       import("@tiptap/extension-collaboration"),
       import("@tiptap/extension-collaboration-caret"),
-    ]).then(([collaboration, collaborationCaret]) => ({
+      import("@tiptap/y-tiptap"),
+    ]).then(([collaboration, collaborationCaret, yTiptap]) => ({
       Collaboration: collaboration.Collaboration,
       CollaborationCaret: collaborationCaret.CollaborationCaret,
+      yTiptap,
     }));
   }
   return collaborationExtensionsPromise;
@@ -360,6 +369,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     {
       value,
       onDirty,
+      onFocus,
       knownFiles,
       onOpenWikilink,
       onOpenWorkspaceLink,
@@ -415,6 +425,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const onOpenWorkspaceLinkRef = useRef<
       ((target: WorkspaceLinkTarget) => void) | null
     >(onOpenWorkspaceLink ?? null);
+    const onFocusRef = useRef(onFocus);
+    onFocusRef.current = onFocus;
 
     // ProseMirror invokes menu handlers outside React's render cycle. Keep the
     // imperative ref current in the same tick as the visual state so rapid
@@ -473,6 +485,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           folderName: result.settings.files.attachmentFolderName,
         };
       },
+      onBeforeInsert: () => onFocusRef.current?.(),
     });
 
     useEffect(() => {
@@ -590,6 +603,19 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       [],
     );
 
+    const collaborationHistory = useMemo(() => {
+      if (!collab?.ydoc || !collaborationExtensions) return null;
+      const protectedNodes = new Set(["paragraph"]);
+      return createCollaborationHistoryHandle(collab.ydoc, {
+        trackedOrigin: collaborationExtensions.yTiptap.ySyncPluginKey,
+        deleteFilter: (item) =>
+          collaborationExtensions.yTiptap.defaultDeleteFilter(
+            item,
+            protectedNodes,
+          ),
+      });
+    }, [collab?.ydoc, collaborationExtensions]);
+
     const extensions = useMemo(
       () => {
         const collabYDoc = collab?.ydoc ?? null;
@@ -604,6 +630,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                 collaborationExtensions!.Collaboration.configure({
                   document: collabYDoc,
                   field: "body",
+                  yUndoOptions: { undoManager: collaborationHistory! },
                 }),
                 // Additive: only wired when the caller hands us an Awareness
                 // bound to this same ydoc (docPresence.ts's bindDocPresence).
@@ -626,7 +653,14 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           linkMenuExtension,
         ];
       },
-      [collab?.ydoc, collab?.awareness, collaborationExtensions, dohcPlugins, linkMenuExtension],
+      [
+        collab?.ydoc,
+        collab?.awareness,
+        collaborationExtensions,
+        collaborationHistory,
+        dohcPlugins,
+        linkMenuExtension,
+      ],
     );
 
     const collabActive = Boolean(collab?.ydoc && collaborationExtensions);
@@ -677,13 +711,24 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             handleImagePaste(view, event, pasteContextRef.current),
           handleDrop: (view, event) =>
             handleImageDrop(view, event as DragEvent, pasteContextRef.current),
+          handleDOMEvents: {
+            focus: () => {
+              collaborationHistory?.stopCapturing();
+              onFocusRef.current?.();
+              return false;
+            },
+          },
         },
         immediatelyRender: true,
-        onUpdate() {
+        onUpdate({ editor, transaction }) {
           if (collabActive) return;
           if (applyingPendingUndoRef.current) return;
           if (!dirtyTrackingReadyRef.current) return;
-          onDirty();
+          if (!transaction.docChanged) return;
+          const document = editor.state.doc;
+          onDirty(() =>
+            serializeRichdocBody(escapeHighlightMarkdown(document.toJSON())),
+          );
         },
       },
       [extensions, collabActive],
@@ -930,8 +975,29 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           // losslessly reversible `==a\=\=b==` (matches import-export.ts).
           return serializeRichdocBody(escapeHighlightMarkdown(editor.getJSON()));
         },
+        replaceMarkdown(markdown) {
+          if (!editor || collabActive) return;
+          const documentBefore = editor.state.doc;
+          const selection = editor.state.selection.getBookmark();
+          editor
+            .chain()
+            .setContent(markdown, {
+              contentType: "markdown",
+              emitUpdate: false,
+            })
+            .command(({ tr }) => {
+              tr.setMeta("addToHistory", false);
+              return true;
+            })
+            .run();
+          const documentAfter = editor.state.doc;
+          const mappedSelection = selection
+            .map(documentReplacementMap(documentBefore, documentAfter))
+            .resolve(documentAfter);
+          editor.view.dispatch(editor.state.tr.setSelection(mappedSelection));
+        },
       }),
-      [editor, value],
+      [collabActive, editor, value],
     );
 
     const pickerView = editor
