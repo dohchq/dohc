@@ -2724,6 +2724,14 @@ const pluginPanelSdkAuthorities = createPluginPanelSdkAuthorityRegistry();
 const runningPluginPanels = new Map<string, RunningPluginPanel>();
 const pluginPanelStartLocks = new Map<string, Promise<void>>();
 const pluginHostLifecycleLocks = new Map<string, Promise<void>>();
+// A plugin's host can be running because the workspace enabled it (install,
+// enable, approve — it should keep running with no panel open at all) or
+// because a panel's own cold start is the only reason it's alive. Only the
+// latter is this key's to stop when its last panel closes (#779 round 4
+// finding 3). ensurePluginStarted adds a key only when IT causes the
+// zero-to-running transition; any workspace-level plugin action clears it,
+// handing ownership back to the workspace.
+const panelStartedHosts = new Set<string>();
 
 function pluginPanelKey(
   workspaceId: string,
@@ -2886,6 +2894,9 @@ async function ensurePluginStarted(
   if (!result.ok) {
     throw new Error(result.error.message);
   }
+  // The host was not running a moment ago and is now — this call is why,
+  // so it (and only it, via its panel) owns stopping it later.
+  panelStartedHosts.add(pluginLifecycleKey(workspace.workspaceId, plugin.manifest.name));
   return pipeline.host;
 }
 
@@ -2930,7 +2941,13 @@ async function stopPluginPanel(
           candidate.workspaceId === workspaceId &&
           candidate.pluginId === pluginId,
       );
-      if (!hasAnotherPanel) {
+      if (
+        !hasAnotherPanel &&
+        // Only stop the host if a panel is the reason it's running at all
+        // — an enabled, workspace-started plugin has no panel to answer to
+        // (#779 round 4 finding 3).
+        panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))
+      ) {
         // Stops the shared host directly rather than through the pipeline's
         // disable()/enable() actions — this is "no panel needs the process
         // right now," not a user disable, so local state (disabled,
@@ -6419,7 +6436,15 @@ function registerIpcHandlers(
       const input = PluginActionPayload.parse(payload);
       try {
         const pipeline = await activePluginPipelineFor(event, input.workspaceId);
-        return PluginActionResult.parse(await run(pipeline, input.pluginId));
+        const result = PluginActionResult.parse(await run(pipeline, input.pluginId));
+        if (result.ok) {
+          // install/enable/approve/disable/uninstall each decide this
+          // plugin's running state on the workspace's own authority — an
+          // earlier panel's cold start no longer owns whether closing it
+          // stops the host (#779 round 4 finding 3).
+          panelStartedHosts.delete(pluginLifecycleKey(input.workspaceId, input.pluginId));
+        }
+        return result;
       } catch (error) {
         return PluginActionResult.parse({
           ok: false,
@@ -6502,7 +6527,14 @@ function registerIpcHandlers(
     }
     refreshNativeWorkspaceSurfaces();
     const status = SyncStatusResult.parse(await openWorkspaceActivity(workspace));
-    if (!sharedViewOf(workspace.workspaceId)) {
+    // A later openWorkspace call from this same sender can have switched to
+    // a different workspace while the await above was pending — its own
+    // handler already started stopping this workspace's plugins (the
+    // previousWorkspaceId branch above). Warming this workspace's pipeline
+    // anyway would start it right back up for a workspace this sender no
+    // longer has open (#779 round 4 finding 1).
+    const stillActive = activeWorkspaceIdBySender.get(senderId) === workspace.workspaceId;
+    if (stillActive && !sharedViewOf(workspace.workspaceId)) {
       // A plugin-pipeline start failure must not fail the whole handler —
       // the workspace itself already opened. listPlugins and friends
       // separately convert a failed ensurePluginPipeline into a structured

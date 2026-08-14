@@ -147,4 +147,70 @@ describe("plugin panel main-process wiring", () => {
     expect(invoke).not.toContain("writable: authority.writable");
     expect(invoke).toContain("isWritable: () => !sharedViewOf(authority.workspaceId)");
   });
+
+  it("skips plugin-pipeline warmup when a later openWorkspace switched away first (#779 round 4 finding 1)", () => {
+    const open = handler("openWorkspace");
+    const awaitAt = open.indexOf(
+      "const status = SyncStatusResult.parse(await openWorkspaceActivity(workspace));",
+    );
+    const recheckAt = open.indexOf(
+      "const stillActive = activeWorkspaceIdBySender.get(senderId) === workspace.workspaceId;",
+      awaitAt,
+    );
+    const warmupAt = open.indexOf("await ensurePluginPipeline(workspace)", recheckAt);
+
+    // MUTATION (open race): without a recheck after the await, a sender that
+    // switched workspaces while this call's openWorkspaceActivity was still
+    // pending would warm the plugin pipeline for the workspace it just left
+    // instead of the one it is actually on now.
+    expect(awaitAt).toBeGreaterThan(-1);
+    expect(recheckAt).toBeGreaterThan(awaitAt);
+    expect(warmupAt).toBeGreaterThan(recheckAt);
+    expect(open).toContain("stillActive && !sharedViewOf(workspace.workspaceId)");
+  });
+
+  it("stops a host on last-panel-close only when a panel is the reason it's running (#779 round 4 finding 3)", () => {
+    const ensureStart = mainSource.slice(
+      mainSource.indexOf("async function ensurePluginStarted("),
+      mainSource.indexOf("\n}\n\nasync function stopRunningPluginPanelPreview"),
+    );
+    expect(ensureStart).toContain("panelStartedHosts.add(");
+    // Ownership is only claimed on the cold-start branch, after the
+    // already-running early return — a panel riding along on a host
+    // something else started must never claim it.
+    const alreadyRunningAt = ensureStart.indexOf(
+      "if (pipeline.host.getSpawnId(plugin.manifest.name)) return pipeline.host;",
+    );
+    const claimAt = ensureStart.indexOf("panelStartedHosts.add(");
+    expect(alreadyRunningAt).toBeGreaterThan(-1);
+    expect(claimAt).toBeGreaterThan(alreadyRunningAt);
+
+    const stopPanel = mainSource.slice(
+      mainSource.indexOf("async function stopPluginPanel("),
+      mainSource.indexOf("\n}\n\nasync function stopPluginPanelsForWorkspace"),
+    );
+    const hasAnotherAt = stopPanel.indexOf("hasAnotherPanel");
+    const deleteAt = stopPanel.indexOf(
+      "panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))",
+    );
+    const stopHostAt = stopPanel.indexOf(
+      "await pluginPipelines.get(workspaceId)?.host.stop(pluginId);",
+    );
+    // MUTATION (ownership): dropping the panelStartedHosts.delete() guard
+    // (leaving only !hasAnotherPanel) stops every plugin's host on its last
+    // panel close, including one the workspace itself enabled and expects
+    // to keep running with no panel open at all.
+    expect(hasAnotherAt).toBeGreaterThan(-1);
+    expect(deleteAt).toBeGreaterThan(hasAnotherAt);
+    expect(stopHostAt).toBeGreaterThan(deleteAt);
+
+    const pluginActionStart = mainSource.indexOf("const pluginAction = (");
+    const pluginActionEnd = mainSource.indexOf("\n  };\n\n  pluginAction(", pluginActionStart);
+    expect(pluginActionEnd).toBeGreaterThan(-1);
+    const pluginAction = mainSource.slice(pluginActionStart, pluginActionEnd);
+    expect(pluginAction).toContain("if (result.ok) {");
+    expect(pluginAction).toContain(
+      "panelStartedHosts.delete(pluginLifecycleKey(input.workspaceId, input.pluginId));",
+    );
+  });
 });
