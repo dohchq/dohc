@@ -208,6 +208,47 @@ describe("share selector validation", () => {
   // two ends disagreeing about what a share grants. A row can only carry
   // paths this relay could have issued, because it is the relay that wrote
   // them: normalized, tracked, non-secret, within both caps.
+  // A stored version id the relay could not have issued is not cosmetic. A
+  // no-paths selector treats ANY non-null version as "the whole tracked
+  // workspace", so `""` in a stored row authorizes every tracked path — and
+  // presence on every topic with it.
+  it("fails a stored row closed to null when the version id is not one the relay could have issued", () => {
+    for (const versionId of ["", "   ", " v1", "v1 ", "v".repeat(MAX_SHARE_VERSION_ID_CHARS + 1)]) {
+      const row = JSON.stringify({ paths: [], versionId, access: "view" });
+      expect(
+        parseShareSelectorJson(row),
+        `MUTATION: ${JSON.stringify(versionId)} grants the whole tracked workspace`,
+      ).toBeNull();
+    }
+    // The version share the relay really does issue still loads.
+    expect(
+      parseShareSelectorJson(JSON.stringify({ paths: [], versionId: "v1", access: "view" })),
+    ).toEqual({ paths: [], versionId: "v1", access: "view" });
+  });
+
+  // The concrete authorization failure the rule above prevents: a no-paths
+  // selector admits presence on every tracked path as soon as its version is
+  // non-null, and `""` is non-null.
+  it("does not let a damaged stored version authorize presence on every path", () => {
+    const resolver: ChatShareThreadResolver = {
+      channelKind: () => undefined,
+      threadChannelWireId: () => undefined,
+    };
+    const asItWouldHaveBeen = {
+      paths: [],
+      versionId: "",
+      access: "view",
+    } as unknown as ShareSelector;
+    expect(
+      presenceTopicAllowedForShare(asItWouldHaveBeen, "docs/unrelated.md", resolver),
+      "the damaged selector really does authorize an unrelated path — which is why it must never parse",
+    ).toBe(true);
+    // So it never parses.
+    expect(
+      parseShareSelectorJson(JSON.stringify({ paths: [], versionId: "", access: "view" })),
+    ).toBeNull();
+  });
+
   it("fails a stored row closed to null when a path is not one the relay could have issued", () => {
     const row = (paths: unknown) =>
       JSON.stringify({ paths, versionId: null, access: "view" });

@@ -13,6 +13,7 @@ import {
 import {
   assertMountableSelector,
   classifyShareMountRefreshError,
+  shareMountResultRow,
   createMountDirectory,
   mountLabelFor,
   mountRootFor,
@@ -734,6 +735,66 @@ describe("refresh result wire shape", () => {
         RefreshShareMountsResult.safeParse({ results: [row(verdict.status)] }).success,
         `MUTATION: the classifier returns ${verdict.status}, which the wire cannot carry`,
       ).toBe(true);
+    }
+  });
+});
+
+// Identity damage is contained per ROW, like grant damage. The loop used to
+// push raw registry values and parse the whole array at the end, so one
+// record with a 65-character label threw AFTER every pull had run: no row
+// survived, and the user was told the refresh failed while the healthy
+// mounts had in fact refreshed.
+describe("share mount result rows", () => {
+  it("carries a row the schema can hold", () => {
+    expect(
+      shareMountResultRow({
+        shareId: "s-1",
+        label: "alex",
+        status: "updated",
+        changedPaths: 3,
+      }),
+    ).toEqual({ shareId: "s-1", label: "alex", status: "updated", changedPaths: 3 });
+  });
+
+  it("drops a row whose identity the schema cannot carry, and nothing else", () => {
+    for (const bad of [
+      { shareId: "s-1", label: "x".repeat(65) },
+      { shareId: "s-1", label: "" },
+      { shareId: "s-1", label: 7 },
+      { shareId: "", label: "alex" },
+      { shareId: null, label: "alex" },
+      { shareId: "s".repeat(201), label: "alex" },
+    ]) {
+      expect(
+        shareMountResultRow({ ...bad, status: "unchanged", changedPaths: 0 }),
+        `MUTATION: ${JSON.stringify(bad).slice(0, 40)} fails the whole refresh report`,
+      ).toBeNull();
+    }
+  });
+
+  it("keeps changedPaths within what the schema accepts", () => {
+    expect(
+      shareMountResultRow({
+        shareId: "s-1",
+        label: "alex",
+        status: "updated",
+        changedPaths: -4,
+      })?.changedPaths,
+    ).toBe(0);
+  });
+
+  // The seam rule: whatever this builder produces, the wire must carry.
+  it("produces rows the refresh result always parses", () => {
+    for (const status of ["updated", "unchanged", "ended", "damaged"] as const) {
+      const row = shareMountResultRow({
+        shareId: "s-1",
+        label: "alex",
+        status,
+        changedPaths: 1,
+      });
+      expect(RefreshShareMountsResult.safeParse({ results: [row] }).success, status).toBe(
+        true,
+      );
     }
   });
 });

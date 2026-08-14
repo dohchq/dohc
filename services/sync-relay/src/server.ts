@@ -105,6 +105,27 @@ const MAX_EMAIL_CHARS = 320;
 const MAX_SHARE_ID_CHARS = 128;
 const MAX_IDENTITY_BYTES = 512;
 
+// The selector KIND from a stored row, without trusting the rest of it. A
+// row can be damaged in every other dimension and still say honestly which
+// manager owns it; `undefined` means even that could not be read.
+function storedSelectorKind(
+  selectorJson: string,
+): { selectorKind: "chat-channel" } | Record<string, never> {
+  try {
+    const parsed: unknown = JSON.parse(selectorJson);
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      (parsed as { kind?: unknown }).kind === "chat-channel"
+    ) {
+      return { selectorKind: "chat-channel" };
+    }
+  } catch {
+    // Unreadable JSON names no kind.
+  }
+  return {};
+}
+
 export function createSyncRelayHandler({
   storage,
   resolveActor,
@@ -255,7 +276,13 @@ export function createSyncRelayHandler({
       // path is the invariant here, and listing it reveals nothing the
       // caller did not already have.
       selector,
-      ...(selector ? {} : { damaged: true as const }),
+      // The KIND survives the damage when it can be read at all. It is what
+      // routes a row to the right manager, and losing it made a damaged
+      // chat-channel grant surface in the path/version lists as an unreadable
+      // path share. A kind that cannot be read is not invented.
+      ...(selector
+        ? {}
+        : { damaged: true as const, ...storedSelectorKind(share.selectorJson) }),
       createdAtMs: share.createdAtMs,
     };
     if (side === "granted") {

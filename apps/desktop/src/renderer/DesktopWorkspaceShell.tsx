@@ -257,9 +257,9 @@ export function shareRefreshSummary(
   if (damaged.length === 0) return refreshed;
   return `${refreshed} dohc can't read what ${damaged
     .map((row) => row.label)
-    .join(", ")} grants. Remove ${
+    .join(", ")} ${damaged.length === 1 ? "grants" : "grant"}. Remove ${
     damaged.length === 1 ? "it" : "them"
-  } and add the share again.`;
+  } and add ${damaged.length === 1 ? "the share" : "those shares"} again.`;
 }
 
 function isMountedSharePath(path: string | null): boolean {

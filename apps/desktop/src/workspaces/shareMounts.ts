@@ -202,6 +202,49 @@ export function relayTargetForShareMount(
  * would hide a mount that can never refresh again behind a word that means
  * everything is fine.
  */
+/**
+ * One refresh result row, built so the wire schema can always carry it.
+ *
+ * The loop used to push the registry's raw `shareId` and `label` and parse
+ * the whole array at the end, so ONE record with a 65-character label threw
+ * after every pull had already run — no row survived, and the user was told
+ * "Couldn't refresh shares." while the healthy mounts had in fact refreshed.
+ *
+ * Identity damage is contained exactly like grant damage: a row that cannot
+ * state its own identity within the schema's bounds is dropped from the
+ * report rather than allowed to take the whole report with it. Nothing is
+ * invented — a fabricated id or label would be a lie the UI could act on.
+ */
+export function shareMountResultRow(input: {
+  shareId: unknown;
+  label: unknown;
+  status: "updated" | "unchanged" | "ended" | "damaged";
+  changedPaths: number;
+}): {
+  shareId: string;
+  label: string;
+  status: "updated" | "unchanged" | "ended" | "damaged";
+  changedPaths: number;
+} | null {
+  const shareId =
+    typeof input.shareId === "string" &&
+    input.shareId.length >= 1 &&
+    input.shareId.length <= 200
+      ? input.shareId
+      : null;
+  const label =
+    typeof input.label === "string" && input.label.length >= 1 && input.label.length <= 64
+      ? input.label
+      : null;
+  if (shareId === null || label === null) return null;
+  return {
+    shareId,
+    label,
+    status: input.status,
+    changedPaths: Math.max(0, Math.trunc(input.changedPaths)),
+  };
+}
+
 export function classifyShareMountRefreshError(
   error: unknown,
 ): { kind: "abort"; message: string } | { kind: "row"; status: "damaged" | "unchanged" } {

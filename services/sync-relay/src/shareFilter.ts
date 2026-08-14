@@ -294,7 +294,14 @@ export function parseShareSelectorJson(selectorJson: string): ShareSelector | nu
     // refuses must not load here either, or the two ends disagree about what
     // a share grants.
     if (!isShareablePathList(candidate.paths)) return null;
-    if (candidate.versionId !== null && typeof candidate.versionId !== "string") return null;
+    // The SAME version rule as create and as every recipient reader. A
+    // stored `""` is not a version this relay could have issued, and it is
+    // not harmless: `pathVisibleThroughShare` reads any non-null version on a
+    // no-paths selector as "the whole tracked workspace", so a row carrying
+    // one grants everything — including presence topics.
+    if (candidate.versionId !== null && !isValidShareVersionId(candidate.versionId)) {
+      return null;
+    }
     if (!isShareAccessValue(candidate.access)) return null;
     return {
       paths: candidate.paths as string[],

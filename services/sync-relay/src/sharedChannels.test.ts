@@ -203,6 +203,41 @@ async function fetchSharePage(
 }
 
 describe("shared channels (MU-C4)", () => {
+  // A damaged row loses its selector, and with it the KIND that routes it to
+  // the right manager. Without the kind surviving, a damaged chat-channel
+  // grant surfaced in the path/version share lists as an unreadable path
+  // share — the wrong manager, offering the wrong actions.
+  it("still says a damaged row is a chat-channel grant", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await seedOwnerWorkspace(h);
+    // A stored row damaged in every dimension EXCEPT its kind, written
+    // through the same API the create route uses.
+    storage.createShare({
+      shareId: "share-damaged-channel",
+      workspaceId: WORKSPACE,
+      granterUserId: OWNER,
+      recipientUserId: MEMBER_A,
+      recipientEmail: null,
+      selectorJson: JSON.stringify({
+        kind: "chat-channel",
+        channelWireId: "",
+        access: "nonsense",
+      }),
+      createdAtMs: 1000,
+    });
+
+    const listing = await json(await h(request(OWNER, "/sync/shares")));
+    const row = (listing.granted as Array<Record<string, unknown>>).find(
+      (candidate) => candidate.shareId === "share-damaged-channel",
+    );
+    expect(row?.selector, "a damaged row carries no selector").toBeNull();
+    expect(
+      row?.selectorKind,
+      "MUTATION: a damaged chat-channel grant surfaces in the path/version share lists",
+    ).toBe("chat-channel");
+  });
+
   it("creates a chat-channel grant (read-write default) and echoes the selector on both sides", async () => {
     const storage = await testStorage();
     const h = handler(storage);

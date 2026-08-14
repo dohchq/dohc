@@ -442,6 +442,7 @@ import {
   refreshShareMountOnce,
   classifyShareMountRefreshError,
   removeMountFolder,
+  shareMountResultRow,
   validMountLabel,
 } from "./workspaces/shareMounts";
 import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
@@ -4987,8 +4988,12 @@ function registerIpcHandlers(
     const relayUrl = cachedCredentials?.relayUrl;
     // Chat-channel grants (MU-C4) are listed through listChatChannelShares;
     // this surface stays the path/version share manager (grant AND receive).
+    // A damaged row loses its selector, so the kind is read from the row
+    // itself when the relay could still state it. Without that, a damaged
+    // chat-channel grant surfaced here as an unreadable PATH share.
     const notChatChannel = (row: Record<string, unknown>) =>
-      (row.selector as { kind?: unknown } | undefined)?.kind !== "chat-channel";
+      (row.selector as { kind?: unknown } | undefined)?.kind !== "chat-channel" &&
+      row.selectorKind !== "chat-channel";
     const withCode = (row: Record<string, unknown>) => ({
       ...row,
       shareCode: buildShareCode({ shareId: String(row.shareId), relayUrl: relayUrl! }),
@@ -5777,6 +5782,22 @@ function registerIpcHandlers(
       status: "updated" | "unchanged" | "ended" | "damaged";
       changedPaths: number;
     }> = [];
+    // Every row goes through the bounded builder. A record whose identity the
+    // wire schema cannot carry is dropped from the REPORT rather than allowed
+    // to fail the parse at the end and discard every other mount's status.
+    const pushMountResult = (
+      mount: { shareId: unknown; label: unknown },
+      status: "updated" | "unchanged" | "ended" | "damaged",
+      changedPaths: number,
+    ): void => {
+      const row = shareMountResultRow({
+        shareId: mount.shareId,
+        label: mount.label,
+        status,
+        changedPaths,
+      });
+      if (row) results.push(row);
+    };
     if (mounts.length === 0) {
       return RefreshShareMountsResult.parse({ results });
     }
@@ -5791,7 +5812,7 @@ function registerIpcHandlers(
     try {
     for (const mount of mounts) {
       if (mount.ended) {
-        results.push({ shareId: mount.shareId, label: mount.label, status: "ended", changedPaths: 0 });
+        pushMountResult(mount, "ended", 0);
         continue;
       }
       // Offline, signed out, signed into a DIFFERENT relay, or signed into a
@@ -5805,7 +5826,7 @@ function registerIpcHandlers(
           credentials.email != null &&
           credentials.email !== mount.recipientEmail)
       ) {
-        results.push({ shareId: mount.shareId, label: mount.label, status: "unchanged", changedPaths: 0 });
+        pushMountResult(mount, "unchanged", 0);
         continue;
       }
       try {
@@ -5850,12 +5871,7 @@ function registerIpcHandlers(
             current.map((m) => (m.shareId === mount.shareId ? { ...m, ended: true } : m)),
           );
         }
-        results.push({
-          shareId: mount.shareId,
-          label: mount.label,
-          status: outcome.status,
-          changedPaths: outcome.changedPaths,
-        });
+        pushMountResult(mount, outcome.status, outcome.changedPaths);
       } catch (error) {
         // An expired session must SURFACE, not read as "refreshed, nothing
         // new" — a manual Refresh Share would otherwise report success
@@ -5864,12 +5880,7 @@ function registerIpcHandlers(
         if (verdict.kind === "abort") throw new Error(verdict.message);
         // One mount's failure must not stop the others.
         console.error(`[desktop] share-mount refresh failed for ${mount.label}:`, error);
-        results.push({
-          shareId: mount.shareId,
-          label: mount.label,
-          status: verdict.status,
-          changedPaths: 0,
-        });
+        pushMountResult(mount, verdict.status, 0);
       }
     }
     return RefreshShareMountsResult.parse({ results });

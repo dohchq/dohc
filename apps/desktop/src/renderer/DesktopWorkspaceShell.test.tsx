@@ -3806,6 +3806,7 @@ describe("share refresh summary", () => {
       summary,
       "MUTATION: the summary replaces the damage notice and the fix is lost",
     ).toContain("dohc can't read what alex grants. Remove it and add the share again.");
+    expect(summary).not.toContain("grant.");
   });
 
   it("says nothing about damage when every mount is healthy", () => {
@@ -3821,7 +3822,11 @@ describe("share refresh summary", () => {
       row({ label: "sam", status: "damaged" }),
     ]);
     expect(summary).toContain("kim ended");
-    expect(summary).toContain("what alex, sam grants. Remove them");
+    // Plural subjects take the plural verb; the singular case keeps "grants".
+    expect(
+      summary,
+      "MUTATION: two shares reading as one — \"what alex, sam grants\"",
+    ).toContain("what alex, sam grant. Remove them and add those shares again.");
   });
 
   it("says so when there is nothing to refresh", () => {

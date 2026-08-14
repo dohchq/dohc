@@ -84,7 +84,7 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
     const skipped = ShareSkippedOpsSummary.safeParse(raw.skippedOps);
     shareView = {
       ...(shareId !== null ? { shareId } : {}),
-      granterEmail: boundedString(raw.granterEmail, 3, 320),
+      granterEmail: shareViewGranterEmail(raw),
       ...(damaged ? { damaged: true as const } : { access: level }),
       ...(raw.ended === true ? { ended: true } : {}),
       ...(skipped.success ? { skippedOps: skipped.data } : {}),
