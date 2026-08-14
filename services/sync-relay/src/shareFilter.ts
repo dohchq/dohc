@@ -2,6 +2,7 @@ import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floo
 import {
   MAX_SHARE_PATHS,
   MAX_SHARE_PATH_CHARS,
+  isShareablePathList,
   MAX_SHARE_VERSION_ID_CHARS,
   type ShareAccess,
   isShareAccessValue,
@@ -287,7 +288,12 @@ export function parseShareSelectorJson(selectorJson: string): ShareSelector | nu
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
     const candidate = parsed as { paths?: unknown; versionId?: unknown; access?: unknown };
     if (!Array.isArray(candidate.paths)) return null;
-    if (!candidate.paths.every((path) => typeof path === "string" && path.length > 0)) return null;
+    // The SAME rule every other selector reader applies. This was the last
+    // reader on its own check, and a laxer reader than the writer accepts
+    // damage the writer would never have issued: a stored row the desktop
+    // refuses must not load here either, or the two ends disagree about what
+    // a share grants.
+    if (!isShareablePathList(candidate.paths)) return null;
     if (candidate.versionId !== null && typeof candidate.versionId !== "string") return null;
     if (!isShareAccessValue(candidate.access)) return null;
     return {

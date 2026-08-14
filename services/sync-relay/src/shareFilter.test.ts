@@ -6,6 +6,7 @@ import {
 import {
   MAX_CHANNEL_WIRE_ID_CHARS,
   MAX_SHARE_PATHS,
+  MAX_SHARE_PATH_CHARS,
   filterOpForShare,
   parseAnyShareSelectorJson,
   parseChatThreadTopic,
@@ -202,6 +203,44 @@ describe("share selector validation", () => {
   // create-time default in validateShareSelector is a create-time-only
   // convenience (decision G), and this is the row-reload rule mirroring the
   // chat-channel selector's identical posture at line 277-287.
+  // Every selector reader applies ONE path rule. This one was the last on its
+  // own check, so a stored row the desktop refuses used to load here — the
+  // two ends disagreeing about what a share grants. A row can only carry
+  // paths this relay could have issued, because it is the relay that wrote
+  // them: normalized, tracked, non-secret, within both caps.
+  it("fails a stored row closed to null when a path is not one the relay could have issued", () => {
+    const row = (paths: unknown) =>
+      JSON.stringify({ paths, versionId: null, access: "view" });
+    for (const paths of [
+      [""],
+      ["../escape.md"],
+      ["/absolute.md"],
+      [".env"],
+      ["config/.env"],
+      ["docs/"],
+      ["docs//notes.md"],
+      ["d".repeat(MAX_SHARE_PATH_CHARS + 1)],
+      Array.from({ length: MAX_SHARE_PATHS + 1 }, (_, i) => `docs/f${i}.md`),
+      ["docs", 7],
+    ]) {
+      expect(
+        parseShareSelectorJson(row(paths)),
+        `MUTATION: ${JSON.stringify(paths).slice(0, 40)} loads here but the desktop refuses it`,
+      ).toBeNull();
+    }
+    // A row the relay really did mint still loads, at both caps.
+    expect(parseShareSelectorJson(row(["docs/notes.md"]))).toEqual({
+      paths: ["docs/notes.md"],
+      versionId: null,
+      access: "view",
+    });
+    expect(
+      parseShareSelectorJson(
+        row(Array.from({ length: MAX_SHARE_PATHS }, (_, i) => `docs/f${i}.md`)),
+      ),
+    ).not.toBeNull();
+  });
+
   it("fails a stored row closed to null when access is missing or unrecognized, even though create-time defaults it", () => {
     expect(
       parseShareSelectorJson('{"paths":["docs"],"versionId":null}'),
