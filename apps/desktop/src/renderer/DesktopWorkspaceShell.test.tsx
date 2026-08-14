@@ -10556,12 +10556,32 @@ describe("open editors", () => {
     expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
       workspaceId: "ws-shell-test",
       relativePath: "Untitled.txt",
+      initialText: "",
     });
     expect(await screen.findByTestId("tab-Untitled.txt")).toBeTruthy();
 
     await user.click(screen.getByLabelText("Close all editors"));
     await waitFor(() => expect(screen.queryByTestId("tab-Untitled.txt")).toBeNull());
     expect(screen.queryAllByTestId("open-editor-row")).toHaveLength(0);
+  });
+
+  it("numbers untitled text files after case-insensitive file and folder matches", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      files: [{ path: "untitled.txt", kind: "file" as const }],
+      folders: ["UNTITLED 2.TXT"],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New untitled text file"));
+
+    expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
+      workspaceId: "ws-shell-test",
+      relativePath: "Untitled 3.txt",
+      initialText: "",
+    });
   });
 
   it("surfaces file title actions for create, refresh, and collapse folders", async () => {
@@ -10602,6 +10622,7 @@ describe("open editors", () => {
       expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
         workspaceId: "ws-shell-test",
         relativePath: "docs/notes.md",
+        initialText: "",
       }),
     );
 
@@ -11142,6 +11163,88 @@ describe("settings entry points", () => {
 
     await user.keyboard("{Control>},{/Control}");
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+  });
+});
+
+describe("drawing entry point", () => {
+  it("creates and opens an empty engine-claimable drawing from the command palette", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "New drawing",
+      ),
+    );
+
+    await waitFor(() =>
+      expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        relativePath: "Untitled.excalidraw",
+        initialText: "",
+      }),
+    );
+    expect(
+      (await screen.findAllByText("Untitled.excalidraw")).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("numbers drawings after case-insensitive file and folder matches", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      files: [{ path: "UNTITLED 2.EXCALIDRAW", kind: "file" as const }],
+      folders: ["untitled.excalidraw"],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "New drawing",
+      ),
+    );
+
+    await waitFor(() =>
+      expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        relativePath: "Untitled 3.excalidraw",
+        initialText: "",
+      }),
+    );
+  });
+
+  it("opens a new drawing only in the focused editor group", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-a.md");
+    await screen.findByTestId("tab-b.md");
+    const left = await screen.findByRole("region", { name: "Editor group 1" });
+    const right = await screen.findByRole("region", { name: "Editor group 2" });
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "New drawing",
+      ),
+    );
+
+    expect(await within(right).findByTestId("tab-Untitled.excalidraw")).toBeTruthy();
+    expect(within(left).queryByTestId("tab-Untitled.excalidraw")).toBeNull();
+    expect(within(left).getByTestId("tab-a.md")).toBeTruthy();
   });
 });
 

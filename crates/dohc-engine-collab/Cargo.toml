@@ -15,7 +15,7 @@ version.workspace = true
 edition = "2021"
 rust-version = "1.82"
 publish.workspace = true
-description = "R11a durable Y.Doc layer: the content-addressed durable update log, folded snapshots, convergence-neutral compaction, per-doc leases, base-once replicated lineage, idempotent/echo-suppressed ydoc.update replication apply, and the settle→markdown projection materialized through R04's job pipeline. Two regimes (local-only prunable cache vs replicated never-prune durable lineage). Dormant; not wired into the product."
+description = "R11a durable Y.Doc layer: the content-addressed durable update log, folded snapshots, convergence-neutral compaction, per-doc leases, base-once replicated lineage, idempotent/echo-suppressed ydoc.update replication apply, and the settle projection materialized through R04's job pipeline. Two regimes (local-only prunable cache vs replicated never-prune durable lineage). Dormant; not wired into the product."
 
 [features]
 # Passthrough of the storage crate's crash-injection seam so the durable
@@ -47,19 +47,21 @@ rusqlite = "0.40"
 # The CRDT. Pinned to the exact spike version; every wire-facing Doc is built
 # with OffsetKind::Utf16 (binding constraint 1).
 yrs = "=0.27.3"
-# Content-addressing of markdown projections and provenance state vectors, and
+# Content-addressing of artifact projections and provenance state vectors, and
 # the canonical-content fingerprint used by the convergence checks.
 sha2 = "0.11"
 thiserror = "2"
 # Canonical content JSON (the semantic convergence surface shared with yjs, and
 # the frontmatter projection).
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
+# ECMAScript number spelling for canonical JSON shared with TypeScript.
+ryu-js = "1.0.3"
+# Native Excalidraw imports carry embedded binary files as base64 data URLs.
+base64 = "0.23"
 
 [dev-dependencies]
 dohc-test-scratch = { path = "../dohc-test-scratch" }
-# Decoding the base64 real-yjs fixture blobs in the cross-engine tests.
-base64 = "0.23"
 
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
 [lints]

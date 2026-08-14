@@ -5,6 +5,7 @@ import {
   VersionedLoopbackEngine,
   type Request,
 } from "@dohc/workspace-engine-client";
+import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -436,6 +437,26 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
       }),
     ).rejects.toThrow(/destination already exists/u);
     expect(await capture.fileObjectIdForPath(existing.path)).toBe(existing.objectId);
+    await capture.stop();
+  });
+
+  it("refuses generated text past the daemon write limit before mutation", async () => {
+    const rootPath = await root();
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "generated-write-limit-test",
+      rootPath,
+      rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
+    });
+
+    await expect(
+      capture.writeGeneratedTextFile({
+        path: "Bookmarks/Chats/oversized.md",
+        text: "x".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES + 1),
+      }),
+    ).rejects.toThrow(
+      `Generated Markdown exceeds the in-band write limit: limit ${MAX_DESKTOP_CAPTURE_TEXT_BYTES} bytes, observed ${MAX_DESKTOP_CAPTURE_TEXT_BYTES + 1} bytes: Bookmarks/Chats/oversized.md.`,
+    );
+    await expect(capture.fileObjectIdForPath("Bookmarks/Chats/oversized.md")).resolves.toBeNull();
     await capture.stop();
   });
 

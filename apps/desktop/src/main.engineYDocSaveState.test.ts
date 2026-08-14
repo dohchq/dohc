@@ -65,6 +65,23 @@ describe("engine Y.Doc save-state reporting in main", () => {
     }
   });
 
+  it("refuses a rename that would change a live document's kind", () => {
+    const handler = handlerSource("moveWorkspacePath");
+    // An engine rename preserves the stable object's Y.Doc kind while the
+    // editor for the new path is chosen by suffix — a cross-kind rename
+    // would strand the document between them. The guard must run before the
+    // engine records the rename moment.
+    expect(handler).toContain("liveDocumentKindForPath(input.fromPath)");
+    expect(handler).toContain("liveDocumentKindForPath(input.toPath)");
+    // Including a rename OUT of a live kind: a drawing renamed `.txt` keeps
+    // a scene lineage nothing at the new path can update.
+    const guardAt = handler.indexOf("fromKind !== null && fromKind !== toKind");
+    const renameAt = handler.indexOf("capture.beginFileRename(");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(renameAt);
+    expect(handler).toContain("cannot change a live document's kind");
+  });
+
   it("admits unconditional file and folder creation through stale-sensitive workspace scheduling", () => {
     for (const [channel, mutation] of [
       ["createWorkspaceFile", "await createFile("],
@@ -198,6 +215,24 @@ describe("engine Y.Doc save-state reporting in main", () => {
 
     const acknowledge = handlerSource("engineYDocAcknowledgeLineageReplacement");
     expect(acknowledge).toContain("handoff.acknowledge()");
+  });
+
+  it("atomically replaces artifact asset authority when the handoff is acknowledged", () => {
+    const open = handlerSource("engineYDocOpen");
+    const acknowledgeAt = open.indexOf("acknowledge: ()");
+    const replaceAssetsAt = open.indexOf(
+      "registeredEntry.artifactAssetsById = new Map(",
+      acknowledgeAt,
+    );
+    const deleteHandoffAt = open.indexOf(
+      "pendingEngineYDocLineageHandoffs.delete(sessionKey)",
+      acknowledgeAt,
+    );
+    expect(replaceAssetsAt).toBeGreaterThan(acknowledgeAt);
+    expect(replaceAssetsAt).toBeLessThan(deleteHandoffAt);
+    expect(open.slice(replaceAssetsAt, deleteHandoffAt)).toContain(
+      "handoff.artifactAssets.map",
+    );
   });
 
   it("reports an unknown update session as refused instead of acknowledging a drop", () => {

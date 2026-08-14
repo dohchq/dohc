@@ -118,6 +118,77 @@ function daemonRefusal(
 }
 
 describe("EngineWorkspaceSessions", () => {
+  it("keeps a committed scene read-only while asset materialization is pending", () => {
+    const refusal = daemonRefusal(
+      "OVERLOADED",
+      "ydoc-artifact-assets-pending: invalid_jobs=0, incomplete_jobs=4",
+      "afterBackoff",
+    );
+    expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
+    expect(
+      isEngineWorkspaceOpenRefusedError(
+        daemonRefusal(
+          "OVERLOADED",
+          "ydoc-artifact-assets-pending",
+          "afterBackoff",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isEngineWorkspaceOpenRefusedError(new Error("ydoc-artifact-assets-pending")),
+    ).toBe(false);
+  });
+
+  it("keeps a canonical scene read-only when linked asset authority is corrupt", () => {
+    const refusal = new DaemonRefusalError(
+      {
+        code: "INTERNAL",
+        message: "ydoc-artifact-assets-invalid: invalid_jobs=2, incomplete_jobs=3",
+        retry: "no",
+      },
+      undefined,
+    );
+    expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
+  });
+
+  it.each([
+    "ydoc-open-storage-failed",
+    "ydoc-open-operation-crashed",
+  ])("keeps a canonical document read-only after %s", (message) => {
+    const refusal = new DaemonRefusalError(
+      { code: "INTERNAL", message, retry: "no" },
+      undefined,
+    );
+    expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
+  });
+
+  it("requires the exact scene asset refusal detail delimiter", () => {
+    for (const message of [
+      "ydoc-artifact-assets-pending-extra",
+      "ydoc-artifact-assets-pending:invalid_jobs=0",
+      "ydoc-artifact-assets-pending: ",
+    ]) {
+      expect(
+        isEngineWorkspaceOpenRefusedError(
+          daemonRefusal("OVERLOADED", message, "afterBackoff"),
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it("finds a detailed scene asset refusal through a wrapped cause", () => {
+    const refusal = daemonRefusal(
+      "OVERLOADED",
+      "ydoc-artifact-assets-pending: invalid_jobs=0, incomplete_jobs=1",
+      "afterBackoff",
+    );
+    expect(
+      isEngineWorkspaceOpenRefusedError(
+        new Error("The engine refused the document open.", { cause: refusal }),
+      ),
+    ).toBe(true);
+  });
+
   it("prepares an ordinary workspace before opening it in the daemon", async () => {
     const rootPath = await tempRoot();
     let opened = false;

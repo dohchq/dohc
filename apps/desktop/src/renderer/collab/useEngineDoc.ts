@@ -1,8 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
+import type { LiveDocumentKind } from "@dohc/workspace-contracts/live-documents";
+import {
+  declareSceneRoots,
+  exportPortableScene,
+  stableJson,
+} from "@dohc/excalidraw-scene";
+import type { BinaryFileData } from "@excalidraw/excalidraw/types";
+import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
 import type { EngineYDocSaveStateEvent } from "../../ipc/channels";
 import { bridge } from "../bridge";
 import { documentKey, documentVersionKey } from "../documentVersionKey";
+import {
+  binaryFileDataFromArtifact,
+  sameArtifactAssetDescriptor,
+} from "../excalidrawAssets";
 import {
   captureOrphanedDraft,
   replaceOrphanedDraft,
@@ -22,6 +34,75 @@ import {
 
 export type { EngineRemovalInProgress };
 
+function sceneFromSnapshot(snapshot: Uint8Array): string {
+  const rebuilt = new Y.Doc();
+  declareSceneRoots(rebuilt);
+  Y.applyUpdate(rebuilt, snapshot);
+  return exportPortableScene(rebuilt);
+}
+
+type SceneRecoveryWork = {
+  immediateText: string;
+  requiredAssetCount: number;
+  completed: Promise<{ text: string; missingAssetCount: number }>;
+};
+
+type ArtifactAssetRead = Awaited<
+  ReturnType<EngineYDocBinding["readArtifactAsset"]>
+>;
+
+function portableSceneRecovery(
+  snapshot: Uint8Array,
+  files: Readonly<Record<string, BinaryFileData>>,
+): { text: string; requiredAssetIds: readonly string[] } {
+  const scene = JSON.parse(sceneFromSnapshot(snapshot)) as {
+    elements: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  const requiredAssetIds = new Set<string>();
+  for (const element of scene.elements) {
+    if (element.type === "image" && typeof element.fileId === "string") {
+      requiredAssetIds.add(element.fileId);
+    }
+  }
+  const available = new Set(Object.keys(files));
+  const elements = scene.elements.map((element) =>
+    element.type === "image" &&
+    typeof element.fileId === "string" &&
+    !available.has(element.fileId)
+      ? { ...element, fileId: null }
+      : element,
+  );
+  return {
+    text: stableJson({ ...scene, elements, files }),
+    requiredAssetIds: [...requiredAssetIds],
+  };
+}
+
+function recoveryTextFromSnapshot(
+  kind: LiveDocumentKind,
+  snapshot: Uint8Array,
+): Promise<string> {
+  return kind === "scene"
+    ? Promise.resolve(sceneFromSnapshot(snapshot))
+    : markdownFromSnapshot(snapshot);
+}
+
+// The immediate fallback the recovery boundary persists BEFORE the
+// projection module is even guaranteed to load. A scene exports losslessly
+// without the module; a rich document embeds its canonical snapshot in an
+// inert comment (durableMarkdownFromSnapshot) so a crash before the faithful
+// projection cannot lose structure.
+function crudeRecoveryText(
+  kind: LiveDocumentKind,
+  doc: Y.Doc,
+  snapshot: Uint8Array,
+): string {
+  return kind === "scene"
+    ? exportPortableScene(doc)
+    : durableMarkdownFromSnapshot(doc, snapshot);
+}
+
 function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i += 1) {
@@ -30,26 +111,28 @@ function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
-// The engine Y.Doc editor hook for rich-text files. Given a workspace + rich
-// file, it opens a
-// live engine Y.Doc session in MAIN over IPC and binds a mirror Y.Doc the Tiptap
-// Collaboration extension drives via its "body" XmlFragment — no websocket, no
-// token, no cloud. Solo editing runs entirely on the engine; a co-editor's edit
-// arrives as a forwarded remote delta on the same channel.
+// The engine Y.Doc editor hook for live files. Given a workspace, path, and
+// format kind, it opens a live engine Y.Doc session in main over IPC and binds
+// a mirror Y.Doc to the format editor. Solo editing runs through the engine; a
+// co-editor's edit arrives as a forwarded remote delta on the same channel.
 //
 // available:false AND opening:false => the doc is NOT engine-backed (unflagged
 // workspace, secret path, or already live) — the caller stays on the plain
 // local autosave editor showing the real on-disk content. While opening:true
 // the answer is not known yet and the caller must stay read-only. The other
 // exception is `notInVersion`, where the answer IS known and the caller must
-// stop editing rather than fall back (#534). Undo/redo is intact: the
-// Collaboration extension bundles the Yjs UndoManager binding (COLLAB_STARTER_KIT
-// disables the plain history), so Mod-z/Mod-y drive the CRDT undo stack.
+// stop editing rather than fall back (#534). Each editor owns undo: rich
+// documents use their collaboration history, while drawings use Excalidraw's
+// native history and publish the resulting higher element revision.
+//
+// Duplicate views of one document share ONE session: leases are keyed by the
+// workspace, path, and active-version token, so two panes showing the same
+// file bind the same mirror Y.Doc, share its save state, and recover together.
 //
 // Renderer async-state invariant (product invariant): every open response is
-// guarded by the per-open request token (a monotonic id + the effect's cancelled
-// flag). A slow open for workspace/path A can never bind or repaint after the
-// user has switched to B — the stale response is dropped and its session closed.
+// guarded by its request key and the session's disposed flag. A slow open for
+// workspace/path A can never bind or repaint after the user has switched to B
+// — the stale response is dropped and its session closed.
 
 // "error" = a settle FAILED, so the file on disk is behind what the editor
 // shows. "file-locked" = the same stale disk, but transient by contract:
@@ -84,14 +167,21 @@ export type UseEngineDoc = {
   // version switch), because both are the same unanswered question.
   // The caller must offer no writable surface while this is true.
   opening: boolean;
-  // The mirror Y.Doc Tiptap binds to; null until bound / when unavailable.
+  // The mirror Y.Doc the editor binds to; null until bound / when unavailable.
   doc: Y.Doc | null;
+  // Exact engine identity for this bound document. Presence must not use the
+  // path because a rename does not create a new document.
+  objectId: string | null;
+  versionId: string | null;
   // The document's REAL save state. "saving" the moment an edit is made,
   // "saved" ONLY when main reports a settle that covered that edit actually
   // committed and wrote the .md, "error" when a settle failed. This used to be
   // a 1s timer that flipped to "saved" regardless of what the engine did —
   // three dogfood journeys watched a doc read "Saved" over a zero-byte file.
   saveState: EngineDocSaveState;
+  // A known terminal save failure. The save-state chip uses this instead of
+  // its generic error text so it can name the constraint and measured bytes.
+  saveError: string | null;
   // The path is not in the version this workspace is on: a version switch
   // removed it while this open was queued behind that switch (#534). Unlike
   // every other available:false the caller must NOT fall back to the writable
@@ -103,14 +193,35 @@ export type UseEngineDoc = {
   // stays read-only, states the reason, and offers a retry (bump retryKey),
   // which is also what discharges what the failure left behind.
   engineMayHoldDocument: boolean;
+  // The canonical drawing's image records conflict with authoritative
+  // storage. Retrying cannot repair this state.
+  artifactAssetsInvalid: boolean;
   // Main confirmed that it removed this file while the live session was
   // bound. The current document is retained for recovery only.
   deletedWhileEditing: boolean;
   // The recovery row created for this deletion, if it still exists.
   deletedDraftId: number | null;
+  // Image recovery for a drawing retained after deletion or a read-only
+  // transition, or after a permanent local-update refusal. While loading, the
+  // immediate draft has null file references.
+  recoveryAssets:
+    | { state: "loading"; count: number }
+    | { state: "missing"; count: number }
+    | null;
+  // A local update exceeded the permanent transport limit, or main refused a
+  // delivery outright. The rejected document is retained for recovery only.
+  permanentFailureWhileEditing: boolean;
+  // Main refused a live edit because this workspace became read-only after
+  // the session opened. The rejected document is retained for recovery only.
+  readOnlyWhileEditing: boolean;
   // An open lost to a delete or move interval. This is not a terminal outcome:
   // the operation can still fail, so the caller stays read-only and retries.
   removalInProgress: EngineRemovalInProgress | null;
+  artifactAssets: readonly ArtifactAssetDescriptor[];
+  readArtifactAsset(descriptor: ArtifactAssetDescriptor): Promise<{
+    descriptor: ArtifactAssetDescriptor;
+    bytes: Uint8Array;
+  }>;
 };
 
 // What ONE open answers: a workspace, a path, the gate, and the active-version
@@ -120,11 +231,13 @@ function engineDocRequestKey(input: {
   workspaceId: string;
   path: string;
   enabled: boolean;
+  kind?: LiveDocumentKind;
   reopenKey?: number;
   retryKey?: number;
 }): string {
   return JSON.stringify([
     input.enabled,
+    input.kind ?? "richdoc",
     input.workspaceId,
     input.path,
     input.reopenKey ?? null,
@@ -134,7 +247,15 @@ function engineDocRequestKey(input: {
 
 // The settled result of one open.
 type EngineDocOpenOutcome =
-  | { token: number; kind: "bound"; doc: Y.Doc }
+  | {
+      token: number;
+      kind: "bound";
+      doc: Y.Doc;
+      objectId: string | null;
+      versionId: string | null;
+      artifactAssets: readonly ArtifactAssetDescriptor[];
+      readArtifactAsset: EngineYDocBinding["readArtifactAsset"];
+    }
   | { kind: "unavailable" }
   // Their OWN kinds, not flags on "unavailable": every other unavailable
   // answer means "fall back to the plain editor", and these two mean the
@@ -142,6 +263,7 @@ type EngineDocOpenOutcome =
   // behind one flag.
   | { kind: "not-in-version" }
   | { kind: "engine-may-hold-document" }
+  | { kind: "artifact-assets-invalid" }
   | { kind: "removal-in-progress"; removal: EngineRemovalInProgress };
 
 let engineDocSessionCounter = 0;
@@ -160,9 +282,11 @@ function makeTransport(
   // the newest edit may be reported as "Saved".
   localSeq: { current: number },
   writesRefused: { current: boolean },
+  kind: LiveDocumentKind,
 ): EngineYDocTransport {
   let lineageGeneration = 1;
   return {
+    ...(kind === "scene" ? { initializeDoc: declareSceneRoots } : {}),
     async open() {
       const result = await bridge().openEngineYDocSession({
         workspaceId,
@@ -175,26 +299,38 @@ function makeTransport(
       return {
         available: result.available,
         ...(result.initialUpdate ? { initialUpdate: result.initialUpdate } : {}),
+        ...(result.objectId ? { objectId: result.objectId } : {}),
+        ...(result.versionId ? { versionId: result.versionId } : {}),
+        ...(result.artifactAssets
+          ? { artifactAssets: result.artifactAssets }
+          : {}),
         ...(result.available && result.lineageGeneration !== undefined
           ? { lineageGeneration: result.lineageGeneration }
           : {}),
         ...(result.notInVersion ? { notInVersion: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
+        ...(result.artifactAssetsInvalid ? { artifactAssetsInvalid: true } : {}),
         ...(result.removalInProgress
           ? { removalInProgress: result.removalInProgress }
           : {}),
       };
     },
-    async applyLocalUpdate(update, updateGeneration) {
-      if (writesRefused.current) {
-        throw new EngineYDocDeliveryRefusedError("document-writes-refused");
-      }
-      // Main journals + settles. The provider owns the asynchronous delivery
-      // tail and repairs a rejected delta with the full mirror state before
-      // close. The seq is NOT rolled back on failure — the edit is genuinely
-      // unsaved until that repair or a later settle covers it.
+    readArtifactAsset(descriptor) {
+      return bridge().readEngineYDocArtifactAsset({ sessionId, descriptor });
+    },
+    stageLocalUpdate() {
+      if (writesRefused.current) return null;
       localSeq.current += 1;
-      const seq = localSeq.current;
+      return localSeq.current;
+    },
+    async applyLocalUpdate(update, seq, updateGeneration) {
+      if (writesRefused.current) return;
+      // The provider owns ordered retry. Rejecting here keeps this batch at
+      // the head of that queue; resolving is the acknowledgement that main
+      // accepted it. The staged seq is reused on retry, never rolled back.
+      // Main returns refusals as data; they surface as the one permanent
+      // delivery error so the provider preserves the mirror instead of
+      // retrying forever.
       const result = await bridge().applyEngineYDocUpdate({
         sessionId,
         update,
@@ -218,6 +354,7 @@ function makeTransport(
         void listener({
           update: event.update,
           recoveredPaths: event.recoveredPaths,
+          artifactAssets: event.artifactAssets,
           lineageGeneration: event.lineageGeneration,
         });
       });
@@ -239,12 +376,16 @@ function makeTransport(
 type EngineDocInput = {
   workspaceId: string;
   path: string;
-  // The caller gates: only a rich (markdown) file that is not truncated / read-
-  // only opens an engine session. Everything else keeps the local editor.
+  // The caller gates which supported live files open an engine session.
+  // Read-only shared views stay local. A scene can open even when the bounded
+  // renderer text read is truncated because the engine owns the full scene.
   enabled: boolean;
-  // Bump to retry after engineMayHoldDocument (#564): part of the request
-  // key, so a retry is a fresh open with the same stale-response guard as any
-  // other.
+  // Defaults to richdoc for existing direct hook callers. Product callers pass
+  // the classifier result explicitly.
+  kind?: LiveDocumentKind;
+  // Bump to retry after engineMayHoldDocument (#564): a retry replaces the
+  // lease's session behind every subscriber, with the same stale-response
+  // guard as any other open.
   retryKey?: number;
   // G2-C-3 version-switch re-bind: a monotonic token that changes whenever the
   // active version of this workspace changes while the same file stays open.
@@ -255,7 +396,15 @@ type EngineDocLeaseSnapshot = {
   key: string;
   outcome: EngineDocOpenOutcome | null;
   saveState: EngineDocSaveState;
+  saveError: string | null;
   deletion: { token: number; draftId: number | null } | null;
+  readOnlyTransition: { token: number } | null;
+  permanentFailure: { token: number } | null;
+  sceneRecoveryAssets: {
+    token: number;
+    state: "loading" | "missing";
+    count: number;
+  } | null;
 };
 
 type EngineDocSession = {
@@ -278,6 +427,19 @@ type EngineDocLease = Omit<EngineDocSession, "start"> & {
 const engineDocLeases = new Map<string, EngineDocLease>();
 const engineDocDisposalBarriers = new Map<string, Promise<void>>();
 let engineDocLeaseCounter = 0;
+
+function emptyLeaseSnapshot(requestKey: string): EngineDocLeaseSnapshot {
+  return {
+    key: requestKey,
+    outcome: null,
+    saveState: "saved",
+    saveError: null,
+    deletion: null,
+    readOnlyTransition: null,
+    permanentFailure: null,
+    sceneRecoveryAssets: null,
+  };
+}
 
 async function settleEngineDocCleanup(
   cleanup: Promise<void> | undefined,
@@ -314,6 +476,7 @@ function createEngineDocSession(
   requestKey: string,
 ): EngineDocSession {
   const { workspaceId, path } = input;
+  const documentKind = input.kind ?? "richdoc";
   const token = ++engineDocLeaseCounter;
   const sessionId = nextSessionId();
   const listeners = new Set<() => void>();
@@ -326,25 +489,17 @@ function createEngineDocSession(
     sessionId,
     localSeq,
     writesRefused,
+    documentKind,
   );
 
-  let snapshot: EngineDocLeaseSnapshot = {
-    key: requestKey,
-    outcome: null,
-    saveState: "saved",
-    deletion: null,
-  };
+  let snapshot = emptyLeaseSnapshot(requestKey);
   let started = false;
   let disposed = false;
   let binding: EngineYDocBinding | null = null;
+  let retiredBinding: EngineYDocBinding | null = null;
   let bindingDestroyed = false;
   let detachSaveObserver: (() => void) | null = null;
   let unsubscribeSaveState: (() => void) | null = null;
-  let deletionSnapshotBytes: Uint8Array | null = null;
-  let deletionDraftId: number | null = null;
-  let deletionDocument: Y.Doc | null = null;
-  const recoveryDraftIds = new WeakMap<Y.Doc, number>();
-  let deletionQueue: Promise<void> = Promise.resolve();
   let deletionPending = false;
   let deliveryPending = false;
   let pendingSavedSeq: number | null = null;
@@ -352,6 +507,34 @@ function createEngineDocSession(
   let lifecycle: Promise<void> = Promise.resolve();
   let disposePromise: Promise<void> | null = null;
   let closeBarrierPromise: Promise<void> | null = null;
+
+  // The last recovery snapshot (for change dedup) and the draft it produced.
+  // Terminal deletion, read-only transitions, and permanently refused local
+  // updates share this path because the mirror holds the user's latest work.
+  type RecoverySlot = {
+    snapshotBytes: Uint8Array | null;
+    draftId: number | null;
+    transition: "deletion" | "read-only" | "permanent-failure" | null;
+    revision: number;
+  };
+  const newRecoverySlot = (): RecoverySlot => ({
+    snapshotBytes: null,
+    draftId: null,
+    transition: null,
+    revision: 0,
+  });
+  let recovery = newRecoverySlot();
+  // Serializes recovery snapshots in the order they were taken: a later
+  // snapshot's capture must never be overwritten by an earlier one that
+  // resolves late (the projection import, and each markdown conversion,
+  // are async now).
+  let recoveryQueue: Promise<void> = Promise.resolve();
+  let recoveryStatusRevision = 0;
+  let releaseStarted = false;
+  const recoveryAssetReads = new Map<
+    string,
+    Promise<ArtifactAssetRead | null>
+  >();
 
   const publish = (
     update: (current: EngineDocLeaseSnapshot) => EngineDocLeaseSnapshot,
@@ -361,24 +544,16 @@ function createEngineDocSession(
     for (const listener of listeners) listener();
   };
 
-  const setOutcome = (outcome: EngineDocOpenOutcome): void => {
+  const setOutcome = (outcome: EngineDocOpenOutcome | null): void => {
     publish((current) => ({ ...current, outcome }));
   };
 
-  const clearOutcome = (): void => {
-    publish((current) => ({ ...current, outcome: null }));
-  };
-
-  const setDeletion = (draftId: number | null): void => {
-    publish((current) => ({
-      ...current,
-      deletion: { token, draftId },
-    }));
-  };
-
-  const reportSaveState = (state: EngineDocSaveState): void => {
+  const reportSaveState = (
+    state: EngineDocSaveState,
+    error: string | null = null,
+  ): void => {
     saveStateRef.current = state;
-    publish((current) => ({ ...current, saveState: state }));
+    publish((current) => ({ ...current, saveState: state, saveError: error }));
   };
 
   const onDeliveryPendingChange = (pending: boolean): void => {
@@ -398,171 +573,397 @@ function createEngineDocSession(
     pendingSavedSeq = null;
   };
 
-  // Refinement runs off a serial queue, so the user can capture a newer
-  // snapshot while an earlier projection is still pending. Every refinement
-  // therefore projects the NEWEST snapshot for its document, and drops a
-  // result another one has overtaken. Projecting the bytes it was queued with
-  // would roll the durable row back to text the user has already moved past —
-  // and that row is the only copy of the newer edit.
-  const newestSnapshots = new WeakMap<Y.Doc, Uint8Array>();
-  const enqueueRefinement = (
-    source: Y.Doc,
-    bytes: Uint8Array,
-    apply: (text: string) => void,
-    failure: string,
+  const sceneAssetCacheKey = (
+    descriptor: EngineYDocBinding["artifactAssets"][number],
+  ): string =>
+    JSON.stringify([
+      descriptor.id,
+      descriptor.mimeType,
+      descriptor.created,
+      descriptor.ref,
+      descriptor.sha256,
+      descriptor.lastRetrieved ?? null,
+      descriptor.version ?? null,
+    ]);
+
+  const readSceneAsset = (
+    cacheKey: string,
+    descriptor: EngineYDocBinding["artifactAssets"][number],
+    bound: EngineYDocBinding,
+  ): Promise<ArtifactAssetRead | null> => {
+    const cached = recoveryAssetReads.get(cacheKey);
+    if (cached) return cached;
+    const read: Promise<ArtifactAssetRead | null> = bound
+      .readArtifactAsset(descriptor)
+      .then((loaded) =>
+        binaryFileDataFromArtifact(descriptor, loaded) ? loaded : null,
+      );
+    void read.catch(() => {
+      // A transient read failure must not poison later recovery. Keep
+      // successful bytes cached, but let deletion/replacement retry a
+      // descriptor whose eager prewarm failed.
+      if (recoveryAssetReads.get(cacheKey) === read) {
+        recoveryAssetReads.delete(cacheKey);
+      }
+    });
+    recoveryAssetReads.set(cacheKey, read);
+    return read;
+  };
+
+  const cacheSceneAssetRead = (
+    descriptor: EngineYDocBinding["artifactAssets"][number],
+    bound: EngineYDocBinding,
   ): void => {
-    newestSnapshots.set(source, bytes);
-    deletionQueue = deletionQueue
+    void readSceneAsset(
+      sceneAssetCacheKey(descriptor),
+      descriptor,
+      bound,
+    ).catch(() => undefined);
+  };
+
+  const prepareSceneRecovery = (
+    bytes: Uint8Array,
+    bound: EngineYDocBinding | null,
+  ): SceneRecoveryWork => {
+    const initial = portableSceneRecovery(bytes, {});
+    const descriptors = new Map(
+      (bound?.artifactAssets ?? []).map((descriptor) => [
+        descriptor.id,
+        descriptor,
+      ]),
+    );
+    const reads = initial.requiredAssetIds.map((assetId) => {
+      const descriptor = descriptors.get(assetId);
+      const cacheKey = descriptor
+        ? sceneAssetCacheKey(descriptor)
+        : JSON.stringify([assetId, null]);
+      const read = descriptor && bound
+        ? readSceneAsset(cacheKey, descriptor, bound)
+            .catch(() => readSceneAsset(cacheKey, descriptor, bound))
+            .then((loaded) =>
+              loaded
+                ? binaryFileDataFromArtifact(descriptor, loaded)
+                : null,
+            )
+            .catch(() => null)
+        : Promise.resolve(null);
+      return read.then((file) => [assetId, file] as const);
+    });
+    return {
+      immediateText: initial.text,
+      requiredAssetCount: initial.requiredAssetIds.length,
+      completed: Promise.all(reads).then((results) => {
+        const files: Record<string, BinaryFileData> = {};
+        let missingAssetCount = 0;
+        for (const [assetId, file] of results) {
+          if (file) files[assetId] = file;
+          else missingAssetCount += 1;
+        }
+        return {
+          text: portableSceneRecovery(bytes, files).text,
+          missingAssetCount,
+        };
+      }),
+    };
+  };
+
+  const setSceneRecoveryAssets = (
+    value: EngineDocLeaseSnapshot["sceneRecoveryAssets"],
+  ): void => {
+    publish((current) => ({ ...current, sceneRecoveryAssets: value }));
+  };
+
+  // `forceCreate` false means: nothing was unsettled at the moment this
+  // snapshot was taken (the dominant delete path, settled before removal)
+  // — no draft is worth creating for it. A later snapshot always forces
+  // creation: it only runs because the doc changed since the last one.
+  const enqueueRecoverySnapshot = (
+    bytes: Uint8Array,
+    forceCreate: boolean,
+    transition: "deletion" | "read-only" | "permanent-failure" | null,
+    sceneRecovery: SceneRecoveryWork | null = null,
+  ): void => {
+    const slot = recovery;
+    const revision = ++slot.revision;
+    const statusRevision = transition && sceneRecovery
+      ? ++recoveryStatusRevision
+      : null;
+    if (transition && sceneRecovery) {
+      setSceneRecoveryAssets(
+        sceneRecovery.requiredAssetCount === 0
+          ? null
+          : {
+              token,
+              state: "loading",
+              count: sceneRecovery.requiredAssetCount,
+            },
+      );
+    }
+    recoveryQueue = recoveryQueue
       .then(async () => {
-        const newest = newestSnapshots.get(source) ?? bytes;
-        const text = await markdownFromSnapshot(newest);
-        if (newestSnapshots.get(source) !== newest) return;
-        apply(text);
+        // Every refinement projects the NEWEST snapshot its slot holds, so an
+        // older capture that resolves late can never roll the durable row
+        // back to text the user has already moved past — that row is the
+        // only copy of the newer edit.
+        const newest = slot.snapshotBytes ?? bytes;
+        const text =
+          sceneRecovery?.immediateText ??
+          (await recoveryTextFromSnapshot(documentKind, newest));
+        if (slot.snapshotBytes !== null && slot.snapshotBytes !== newest) {
+          // A newer snapshot was captured while this one projected. Its own
+          // refinement owns the row; applying this result would roll the
+          // durable text back past an edit that exists nowhere else.
+          return;
+        }
+        if (slot.draftId === null) {
+          if (!forceCreate) return;
+          slot.draftId = captureOrphanedDraft(workspaceId, path, text);
+        } else {
+          replaceOrphanedDraft(workspaceId, path, slot.draftId, text);
+        }
+        // Only the published render state dies with the session — the draft
+        // itself is already durable in the module-level store, unmount or not.
+        if (transition === "deletion" && slot === recovery) {
+          publish((current) => ({
+            ...current,
+            deletion: { token, draftId: slot.draftId },
+          }));
+        }
+        if (!sceneRecovery) return;
+        // Asset I/O must not hold the recovery queue. A later scene update
+        // must replace the immediate draft now, even if this older image
+        // read is slow. Only the newest snapshot may apply its async result.
+        void sceneRecovery.completed.then((recovered) => {
+          if (revision !== slot.revision || slot.draftId === null) {
+            return;
+          }
+          replaceOrphanedDraft(
+            workspaceId,
+            path,
+            slot.draftId,
+            recovered.text,
+          );
+          if (transition && statusRevision === recoveryStatusRevision) {
+            setSceneRecoveryAssets(
+              recovered.missingAssetCount === 0
+                ? null
+                : {
+                    token,
+                    state: "missing",
+                    count: recovered.missingAssetCount,
+                  },
+            );
+          }
+        });
       })
       .catch((error: unknown) => {
+        // This draft is the last copy of the user's text — a load failure
+        // here must not disappear silently. When a crude draft already made
+        // the text durable, only the faithful refinement was lost.
         console.error(
-          `[desktop] could not ${failure} for ${workspaceId}:${path}:`,
+          transition === "deletion" || slot.draftId === null
+            ? `[desktop] could not write a recovery draft for ${workspaceId}:${path}:`
+            : `[desktop] could not refine the recovery draft for ${workspaceId}:${path}:`,
           error,
         );
       });
   };
 
-  // forceCreate false means the file was settled when main removed it. A later
-  // snapshot always creates a draft because the retained document changed.
-  const enqueueDeletionSnapshot = (
-    source: Y.Doc,
-    bytes: Uint8Array,
-    forceCreate: boolean,
-  ): void => {
-    enqueueRefinement(
-      source,
-      bytes,
-      (text) => {
-        if (deletionDraftId === null) {
-          if (!forceCreate) return;
-          deletionDraftId = captureOrphanedDraft(workspaceId, path, text);
-        } else {
-          replaceOrphanedDraft(workspaceId, path, deletionDraftId, text);
-        }
-        setDeletion(deletionDraftId);
-      },
-      "write a recovery draft after deletion",
-    );
-  };
-
   const captureDeletion = (doc: Y.Doc): void => {
     writesRefused.current = true;
-    deletionDocument = doc;
+    // The PATH is gone whichever lineage wins: deletion outlives any later
+    // replacement, and a fresh recovery slot re-captures on its first edit.
+    deletionPending = true;
+    recovery.transition = "deletion";
+    // Snapshot NOW, synchronously: the doc can be destroyed (unmount) or
+    // the caller's reference can go stale before a lazily-loaded
+    // serializer would otherwise get to read it.
     const bytes = Y.encodeStateAsUpdate(doc);
-    deletionSnapshotBytes = bytes;
+    recovery.snapshotBytes = bytes;
     const forceCreate = saveStateRef.current !== "saved";
+    const sceneRecovery =
+      forceCreate && documentKind === "scene" && binding
+        ? prepareSceneRecovery(bytes, binding)
+        : null;
     if (forceCreate) {
-      deletionDraftId = captureOrphanedDraft(
+      // Persisted NOW, before the projection module is even guaranteed to
+      // load: a renderer close/reload/crash while that import is still in
+      // flight must not lose text that exists only in this queue's promise
+      // closure, with the file already gone and no draft for the recovery
+      // close guard to find. The queue below upgrades this row to the
+      // faithful markdown a microtask later; it never creates a second one.
+      recovery.draftId = captureOrphanedDraft(
         workspaceId,
         path,
-        durableMarkdownFromSnapshot(doc, bytes),
+        sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
       );
     }
-    setDeletion(deletionDraftId);
+    publish((current) => ({
+      ...current,
+      deletion: { token, draftId: recovery.draftId },
+    }));
     reportSaveState("deleted");
-    enqueueDeletionSnapshot(doc, bytes, forceCreate);
-  };
-
-  const recoveryDraftId = (source: Y.Doc): number | null => {
-    if (source === deletionDocument) return deletionDraftId;
-    return recoveryDraftIds.get(source) ?? null;
-  };
-
-  const setRecoveryDraftId = (source: Y.Doc, draftId: number): void => {
-    if (source === deletionDocument) {
-      deletionDraftId = draftId;
-    } else {
-      recoveryDraftIds.set(source, draftId);
-    }
-  };
-
-  const captureUndeliveredSnapshot = (
-    bytes: Uint8Array,
-    _error: unknown,
-    source: Y.Doc,
-  ): void => {
-    const rebuilt = new Y.Doc();
-    Y.applyUpdate(rebuilt, bytes);
-    const fallback = durableMarkdownFromSnapshot(rebuilt, bytes);
-    rebuilt.destroy();
-    let draftId = recoveryDraftId(source);
-    if (draftId === null) {
-      draftId = captureOrphanedDraft(workspaceId, path, fallback);
-      setRecoveryDraftId(source, draftId);
-    } else {
-      replaceOrphanedDraft(workspaceId, path, draftId, fallback);
-    }
-    if (
-      deletionSnapshotBytes === null &&
-      saveStateRef.current !== "read-only"
-    ) {
-      reportSaveState("error");
-    }
-    const capturedDraftId = draftId;
-    enqueueRefinement(
-      source,
+    enqueueRecoverySnapshot(
       bytes,
-      (text) => replaceOrphanedDraft(workspaceId, path, capturedDraftId, text),
-      "refine the recovery draft after update delivery failed",
+      forceCreate,
+      recovery.transition,
+      sceneRecovery,
     );
   };
 
-  const refreshDeletionDraft = (doc: Y.Doc): void => {
-    if (doc !== deletionDocument) return;
-    if (deletionSnapshotBytes === null) return;
-    const bytes = Y.encodeStateAsUpdate(doc);
-    if (snapshotsEqual(bytes, deletionSnapshotBytes)) return;
-    deletionSnapshotBytes = bytes;
-    enqueueDeletionSnapshot(doc, bytes, true);
-  };
-
-  const observeSaveState = (doc: Y.Doc): void => {
-    detachSaveObserver?.();
-    const onUpdate = () => {
-      if (disposed) return;
-      if (writesRefused.current) {
-        refreshDeletionDraft(doc);
-        return;
-      }
-      reportSaveState("saving");
-    };
-    doc.on("update", onUpdate);
-    detachSaveObserver = () => doc.off("update", onUpdate);
-  };
-
-  const preserveRetiredDocument = (retired: Y.Doc): void => {
+  const captureReadOnlyTransition = (doc: Y.Doc): void => {
     writesRefused.current = true;
-    detachSaveObserver?.();
-    detachSaveObserver = null;
-    const persist = (): void => {
-      const bytes = Y.encodeStateAsUpdate(retired);
-      const fallback = durableMarkdownFromSnapshot(retired, bytes);
-      let draftId = recoveryDraftId(retired);
-      if (draftId === null) {
-        draftId = captureOrphanedDraft(workspaceId, path, fallback);
-        setRecoveryDraftId(retired, draftId);
-      } else {
-        replaceOrphanedDraft(workspaceId, path, draftId, fallback);
-      }
-      const capturedDraftId = draftId;
-      enqueueRefinement(
-        retired,
-        bytes,
-        (markdown) =>
-          replaceOrphanedDraft(workspaceId, path, capturedDraftId, markdown),
-        "refine the recovery draft after lineage replacement",
+    recovery.transition = "read-only";
+    const bytes = Y.encodeStateAsUpdate(doc);
+    recovery.snapshotBytes = bytes;
+    const sceneRecovery =
+      documentKind === "scene" && binding
+        ? prepareSceneRecovery(bytes, binding)
+        : null;
+    // Main sends this state only after it has discarded a local update.
+    // Persist the rejected document synchronously before the session closes.
+    recovery.draftId = captureOrphanedDraft(
+      workspaceId,
+      path,
+      sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
+    );
+    publish((current) => ({
+      ...current,
+      readOnlyTransition: { token },
+    }));
+    reportSaveState("read-only");
+    enqueueRecoverySnapshot(bytes, true, recovery.transition, sceneRecovery);
+  };
+
+  const refreshRecoveryDraft = (doc: Y.Doc): void => {
+    if (recovery.snapshotBytes === null) return;
+    const bytes = Y.encodeStateAsUpdate(doc);
+    if (snapshotsEqual(bytes, recovery.snapshotBytes)) return;
+    recovery.snapshotBytes = bytes;
+    const sceneRecovery =
+      documentKind === "scene" && binding
+        ? prepareSceneRecovery(bytes, binding)
+        : null;
+    if (recovery.draftId !== null) {
+      // The newest text is durable IMMEDIATELY — the faithful projection
+      // refines this row later, and a crash before it cannot lose the edit.
+      replaceOrphanedDraft(
+        workspaceId,
+        path,
+        recovery.draftId,
+        sceneRecovery?.immediateText ??
+          crudeRecoveryText(documentKind, doc, bytes),
       );
-    };
-    if (saveStateRef.current !== "saved" || deliveryPending) persist();
-    const onRetiredUpdate = () => persist();
-    retired.on("update", onRetiredUpdate);
-    retiredDraftObservers.set(retired, () => retired.off("update", onRetiredUpdate));
-    clearOutcome();
+    }
+    enqueueRecoverySnapshot(
+      bytes,
+      true,
+      recovery.transition,
+      sceneRecovery,
+    );
+  };
+
+  const capturePermanentFailure = (error: Error, doc: Y.Doc): void => {
+    writesRefused.current = true;
+    recovery.transition = "permanent-failure";
+    const bytes = Y.encodeStateAsUpdate(doc);
+    recovery.snapshotBytes = bytes;
+    const sceneRecovery =
+      documentKind === "scene" && binding
+        ? prepareSceneRecovery(bytes, binding)
+        : null;
+    recovery.draftId = captureOrphanedDraft(
+      workspaceId,
+      path,
+      sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
+    );
+    if (!disposed) {
+      publish((current) => ({
+        ...current,
+        permanentFailure: { token },
+      }));
+      reportSaveState("error", error.message);
+    }
+    enqueueRecoverySnapshot(bytes, true, recovery.transition, sceneRecovery);
+  };
+
+  const releaseBinding = (): void => {
+    if (!binding || releaseStarted) return;
+    releaseStarted = true;
+    // The rejected apply is an acknowledged no-op. destroy() drains that
+    // acknowledgement, refuses queued follow-ups through writesRefused, and
+    // then closes the main session instead of leaving it alive to retry.
+    void destroyBinding();
+  };
+
+  // The provider's one failure hook: an oversized update, or a refusal main
+  // returned as data. Routed to the capture that owns the user-facing state.
+  const captureDeliveryFailure = (
+    _snapshot: Uint8Array,
+    error: unknown,
+    source: Y.Doc,
+  ): void => {
+    if (
+      error instanceof EngineYDocDeliveryRefusedError &&
+      error.reason === "lineage-transition"
+    ) {
+      // The replacement protocol preserves the retired mirror itself
+      // (onDocumentReplacing persists it before main installs the winner).
+      return;
+    }
+    if (recovery.snapshotBytes !== null) {
+      refreshRecoveryDraft(source);
+      return;
+    }
+    if (
+      error instanceof EngineYDocDeliveryRefusedError &&
+      error.reason === "read-only"
+    ) {
+      captureReadOnlyTransition(source);
+      releaseBinding();
+      return;
+    }
+    if (
+      error instanceof EngineYDocDeliveryRefusedError &&
+      error.reason === "deleted"
+    ) {
+      captureDeletion(source);
+      return;
+    }
+    capturePermanentFailure(
+      error instanceof Error ? error : new Error(String(error)),
+      source,
+    );
+  };
+
+  const captureLineageReplacementFailure = (
+    error: unknown,
+    retired: Y.Doc,
+  ): void => {
+    writesRefused.current = true;
+    if (disposed) return;
+    publish((current) => ({
+      ...current,
+      readOnlyTransition: { token },
+    }));
+    const bound = retiredBinding ?? binding;
+    if (bound) {
+      setOutcome({
+        token,
+        kind: "bound",
+        doc: retired,
+        objectId: bound.objectId,
+        versionId: bound.versionId,
+        artifactAssets: [...bound.artifactAssets],
+        readArtifactAsset: (descriptor) => bound.readArtifactAsset(descriptor),
+      });
+    }
+    reportSaveState(
+      "error",
+      error instanceof Error
+        ? `dohc could not finish replacing this document: ${error.message}`
+        : "dohc could not finish replacing this document.",
+    );
   };
 
   const onSaveState = (event: EngineYDocSaveStateEvent): void => {
@@ -575,16 +976,38 @@ function createEngineDocSession(
         writesRefused.current = true;
         return;
       }
-      if (deletionSnapshotBytes !== null) {
-        refreshDeletionDraft(doc);
+      if (recovery.snapshotBytes !== null) {
+        deletionPending = true;
+        recovery.transition = "deletion";
+        publish((current) => ({
+          ...current,
+          deletion: { token, draftId: recovery.draftId },
+        }));
+        reportSaveState("deleted");
+        refreshRecoveryDraft(doc);
         return;
       }
       captureDeletion(doc);
       return;
     }
+    // Deletion is terminal for this session. A settle/update already in
+    // flight can report after main's deletion notice, but it no longer
+    // describes a path that exists and must not repaint this state.
     if (writesRefused.current) return;
+    if (event.state === "read-only") {
+      pendingSavedSeq = null;
+      const doc = binding?.doc;
+      // Unlike deletion, this report answers a local update, so it cannot
+      // precede the binding that allowed that update.
+      if (!doc) return;
+      captureReadOnlyTransition(doc);
+      releaseBinding();
+      return;
+    }
     if (event.state === "saved") {
       if (deliveryPending) {
+        // Batches or unacknowledged deliveries are still outstanding — a
+        // settle that raced ahead of them must not vouch for the mirror.
         pendingSavedSeq = Math.max(pendingSavedSeq ?? 0, event.seq);
         return;
       }
@@ -596,11 +1019,7 @@ function createEngineDocSession(
       if (event.seq >= localSeq.current) reportSaveState(event.state);
       return;
     }
-    if (
-      event.state === "error" ||
-      event.state === "read-only" ||
-      event.state === "changed-on-disk"
-    ) {
+    if (event.state === "error" || event.state === "changed-on-disk") {
       reportSaveState(event.state);
       return;
     }
@@ -608,6 +1027,186 @@ function createEngineDocSession(
       reportSaveState("saving");
       return;
     }
+  };
+
+  const observeSaveState = (doc: Y.Doc): void => {
+    detachSaveObserver?.();
+    const onUpdate = () => {
+      if (disposed) return;
+      if (writesRefused.current) {
+        if (recovery.snapshotBytes === null && deletionPending) {
+          // A replacement installed a fresh recovery slot while the path
+          // stayed deleted. The first edit on the winner starts its own
+          // draft instead of vanishing.
+          captureDeletion(doc);
+          return;
+        }
+        refreshRecoveryDraft(doc);
+        return;
+      }
+      reportSaveState("saving");
+    };
+    doc.on("update", onUpdate);
+    detachSaveObserver = () => doc.off("update", onUpdate);
+  };
+
+  const preserveRetiredDocument = (retired: Y.Doc): void => {
+    writesRefused.current = true;
+    const retiredRecoverySlot = recovery;
+    // A deletion (or other capture) already owns a draft for this mirror —
+    // the retired preserve refines that row instead of adding a sibling.
+    let draftId: number | null = retiredRecoverySlot.draftId;
+    let retiredRecoveryRevision = 0;
+    let projectionQueue: Promise<void> = Promise.resolve();
+    const activeBinding = binding;
+    const retiredAssets = activeBinding
+      ? [...activeBinding.artifactAssets]
+      : [];
+    const retiredAuthority: EngineYDocBinding | null = activeBinding
+      ? {
+          ...activeBinding,
+          artifactAssets: retiredAssets,
+          readArtifactAsset: async (descriptor) => {
+            const retained = retiredAssets.find((candidate) =>
+              sameArtifactAssetDescriptor(candidate, descriptor),
+            );
+            if (!retained) {
+              throw new Error(
+                `Artifact asset ${descriptor.id} does not belong to the retired document.`,
+              );
+            }
+            const loaded = await readSceneAsset(
+              sceneAssetCacheKey(retained),
+              retained,
+              activeBinding,
+            );
+            if (!loaded) {
+              throw new Error(
+                `Artifact asset ${descriptor.id} is invalid for the retired document.`,
+              );
+            }
+            return loaded;
+          },
+        }
+      : null;
+    retiredBinding = retiredAuthority;
+    if (documentKind === "scene" && activeBinding) {
+      for (const descriptor of retiredAssets) {
+        cacheSceneAssetRead(descriptor, activeBinding);
+      }
+    }
+    const persist = (): void => {
+      const bytes = Y.encodeStateAsUpdate(retired);
+      if (documentKind === "scene") {
+        const publishesRecoveryStatus = retiredRecoverySlot === recovery;
+        const revision = ++retiredRecoveryRevision;
+        const statusRevision = ++recoveryStatusRevision;
+        const sceneRecovery = prepareSceneRecovery(bytes, retiredAuthority);
+        if (draftId === null) {
+          draftId = captureOrphanedDraft(
+            workspaceId,
+            path,
+            sceneRecovery.immediateText,
+          );
+        } else {
+          replaceOrphanedDraft(
+            workspaceId,
+            path,
+            draftId,
+            sceneRecovery.immediateText,
+          );
+        }
+        if (publishesRecoveryStatus) {
+          setSceneRecoveryAssets(
+            sceneRecovery.requiredAssetCount === 0
+              ? null
+              : {
+                  token,
+                  state: "loading",
+                  count: sceneRecovery.requiredAssetCount,
+                },
+          );
+        }
+        if (publishesRecoveryStatus) {
+          // The slot must know about this draft and snapshot: a deletion or
+          // read-only push arriving after the preserve refines this row
+          // instead of capturing a sibling from the same mirror.
+          retiredRecoverySlot.snapshotBytes = bytes;
+          retiredRecoverySlot.draftId = draftId;
+        }
+        const capturedDraftId = draftId;
+        void sceneRecovery.completed
+          .then((recovered) => {
+            if (revision !== retiredRecoveryRevision) return;
+            replaceOrphanedDraft(
+              workspaceId,
+              path,
+              capturedDraftId,
+              recovered.text,
+            );
+            if (
+              publishesRecoveryStatus &&
+              statusRevision === recoveryStatusRevision
+            ) {
+              setSceneRecoveryAssets(
+                recovered.missingAssetCount === 0
+                  ? null
+                  : {
+                      token,
+                      state: "missing",
+                      count: recovered.missingAssetCount,
+                    },
+              );
+            }
+          })
+          .catch((error: unknown) => {
+            console.error(
+              `[desktop] could not recover drawing assets for ${workspaceId}:${path} after lineage replacement:`,
+              error,
+            );
+          });
+        return;
+      }
+      const crude = durableMarkdownFromSnapshot(retired, bytes);
+      if (draftId === null) {
+        draftId = captureOrphanedDraft(workspaceId, path, crude);
+      } else {
+        replaceOrphanedDraft(workspaceId, path, draftId, crude);
+      }
+      if (retiredRecoverySlot === recovery) {
+        // The slot must know about this draft and snapshot: a deletion or
+        // read-only push arriving after the preserve refines this row
+        // instead of capturing a sibling from the same mirror.
+        retiredRecoverySlot.snapshotBytes = bytes;
+        retiredRecoverySlot.draftId = draftId;
+      }
+      const capturedDraftId = draftId;
+      projectionQueue = projectionQueue
+        .then(async () => {
+          const markdown = await markdownFromSnapshot(bytes);
+          replaceOrphanedDraft(
+            workspaceId,
+            path,
+            capturedDraftId,
+            markdown,
+          );
+        })
+        .catch((error: unknown) => {
+          console.error(
+            `[desktop] could not refine the recovery draft for ${workspaceId}:${path} after lineage replacement:`,
+            error,
+          );
+        });
+    };
+    // A dirty mirror may contain the update main refused when replacement
+    // began. Persist it synchronously before acknowledging. If a transaction
+    // already in the editor lands before React unmounts the retired doc, the
+    // observer refreshes that same durable draft.
+    if (saveStateRef.current !== "saved" || deliveryPending) persist();
+    const onRetiredUpdate = () => persist();
+    retired.on("update", onRetiredUpdate);
+    retiredDraftObservers.set(retired, () => retired.off("update", onRetiredUpdate));
+    setOutcome(null);
   };
 
   const destroyBinding = async (): Promise<void> => {
@@ -634,10 +1233,11 @@ function createEngineDocSession(
           // Main can publish deletion after registering the live session but
           // before open returns, so subscribe before opening the transport.
           unsubscribeSaveState = bridge().onEngineYDocSaveState(onSaveState);
-          const bound = await bindEngineYDoc(transport, {
-            onDeliveryFailure: captureUndeliveredSnapshot,
+          const bound = await bindEngineYDoc(transport, undefined, {
+            onDeliveryFailure: captureDeliveryFailure,
             onDeliveryPendingChange,
             onDocumentReplacing: preserveRetiredDocument,
+            onLineageReplacementFailure: captureLineageReplacementFailure,
           });
           binding = bound;
           if (disposed) {
@@ -645,14 +1245,27 @@ function createEngineDocSession(
             return;
           }
 
-          // Warm the deletion projection without delaying the open result.
-          void loadProjectionModule();
+          // Preload, don't block: by the time any real deletion can arrive,
+          // the module is very likely already resolved, so a draft's markdown
+          // lands within the same microtask as its snapshot. The snapshot in
+          // captureDeletion/refreshRecoveryDraft keeps a genuinely cold start
+          // (import still in flight) correct regardless.
+          if (documentKind === "richdoc") void loadProjectionModule();
           if (!bound.available || !bound.doc) {
+            // Resolved: NOT engine-backed. The caller may offer the plain
+            // local editor again — that is what `opening` was holding back.
+            // EXCEPT when the path is not in this version, where offering it
+            // would write the phantom the engine just refused (#534), and
+            // when the engine may still hold the document, where a plain
+            // autosave would race the session it still binds (#564, #657).
             if (bound.notInVersion) {
               setOutcome({ kind: "not-in-version" });
+            } else if (bound.artifactAssetsInvalid) {
+              setOutcome({ kind: "artifact-assets-invalid" });
             } else if (bound.engineMayHoldDocument) {
               setOutcome({ kind: "engine-may-hold-document" });
             } else if (bound.removalInProgress) {
+              writesRefused.current = true;
               setOutcome({
                 kind: "removal-in-progress",
                 removal: bound.removalInProgress,
@@ -665,19 +1278,54 @@ function createEngineDocSession(
 
           bound.onDocumentReplaced((replacement) => {
             if (disposed) return;
-            if (!deletionPending && deletionSnapshotBytes === null) {
+            // The losing slot owns its recovery draft and any pending image
+            // reads. The winner starts a fresh slot so later delete/unmount
+            // work cannot rewrite that draft with an independent lineage.
+            recovery = newRecoverySlot();
+            retiredBinding = null;
+            // Deletion of the PATH outlives any lineage: the file is gone
+            // whichever lineage wins, so only non-deletion refusals reset.
+            if (!deletionPending) {
               writesRefused.current = false;
             }
+            publish((current) => ({
+              ...current,
+              readOnlyTransition: null,
+              permanentFailure: null,
+              ...(deletionPending ? {} : { deletion: null }),
+            }));
             if (!writesRefused.current && !deliveryPending) {
               reportSaveState("saved");
             }
             observeSaveState(replacement);
-            setOutcome({ token, kind: "bound", doc: replacement });
+            setOutcome({
+              token,
+              kind: "bound",
+              doc: replacement,
+              objectId: bound.objectId,
+              versionId: bound.versionId,
+              artifactAssets: bound.artifactAssets,
+              readArtifactAsset: (descriptor) =>
+                bound.readArtifactAsset(descriptor),
+            });
           });
+          // An edit is unsaved the instant it happens. Only main's settle
+          // report may clear it — nothing here guesses "saved". The seed apply
+          // happened before this observer attached, so it never shows a
+          // spurious "saving".
           const doc = bound.doc;
           observeSaveState(doc);
           if (deletionPending) captureDeletion(doc);
-          setOutcome({ token, kind: "bound", doc });
+          setOutcome({
+            token,
+            kind: "bound",
+            doc,
+            objectId: bound.objectId,
+            versionId: bound.versionId,
+            artifactAssets: bound.artifactAssets,
+            readArtifactAsset: (descriptor) =>
+              bound.readArtifactAsset(descriptor),
+          });
         } catch {
           if (!disposed) {
             setOutcome({ kind: "unavailable" });
@@ -688,7 +1336,10 @@ function createEngineDocSession(
     dispose() {
       if (disposePromise) return disposePromise;
 
-      if (binding?.doc) refreshDeletionDraft(binding.doc);
+      // Belt-and-suspenders, not the sole catcher: the save observer already
+      // snapshots synchronously for any doc mutation once writesRefused is
+      // true. This guards a mutation landing between disposal and detach.
+      if (binding?.doc) refreshRecoveryDraft(binding.doc);
       disposed = true;
       unsubscribeSaveState?.();
       unsubscribeSaveState = null;
@@ -712,10 +1363,10 @@ function createEngineDocSession(
           // must not wait forever for that external answer.
           void lifecycle.catch(() => undefined);
         }
-        // A deletion projection can outlive React cleanup. Production must
+        // A recovery projection can outlive React cleanup. Production must
         // retain that recovery write; tests also need a join point before they
         // reset the process-wide recovery store.
-        await deletionQueue;
+        await recoveryQueue;
         listeners.clear();
       })();
       return disposePromise;
@@ -737,12 +1388,7 @@ function createEngineDocLease(
 ): EngineDocLease {
   const stableDocumentKey = documentKey(input.workspaceId, input.path);
   const listeners = new Set<() => void>();
-  let snapshot: EngineDocLeaseSnapshot = {
-    key: requestKey,
-    outcome: null,
-    saveState: "saved",
-    deletion: null,
-  };
+  let snapshot = emptyLeaseSnapshot(requestKey);
   let refCount = 0;
   let releaseToken = 0;
   let started = false;
@@ -797,6 +1443,7 @@ function createEngineDocLease(
       });
     },
     disposeIfReleased() {
+      if (refCount !== 0) return;
       releaseToken += 1;
       disposeReleasedLease();
     },
@@ -810,12 +1457,7 @@ function createEngineDocLease(
       activeSession = null;
       unsubscribeSession?.();
       unsubscribeSession = null;
-      publish({
-        key: nextRequestKey,
-        outcome: null,
-        saveState: "saved",
-        deletion: null,
-      });
+      publish(emptyLeaseSnapshot(nextRequestKey));
 
       transition = settleEngineDocCleanup(
         transition.then(async () => {
@@ -969,10 +1611,17 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
       unsubscribe();
       lease.release();
     };
-    // Re-open only when the workspace, path, gate, retry, or active version
-    // changes. Other renders keep the same shared lease.
+    // Re-open only when the workspace, path, gate, kind, retry, or active
+    // version changes. Other renders keep the same shared lease.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input.workspaceId, input.path, input.enabled, input.reopenKey, input.retryKey]);
+  }, [
+    input.workspaceId,
+    input.path,
+    input.enabled,
+    input.kind,
+    input.reopenKey,
+    input.retryKey,
+  ]);
 
   // Derive this during render. A result for an earlier request never grants
   // one editable frame while a version, path, gate, or retry request changes.
@@ -981,28 +1630,64 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const outcome = settled?.outcome ?? null;
   const available = outcome?.kind === "bound";
   const doc = outcome?.kind === "bound" ? outcome.doc : null;
+  const objectId = outcome?.kind === "bound" ? outcome.objectId : null;
+  const versionId = outcome?.kind === "bound" ? outcome.versionId : null;
   const opening = input.enabled && outcome === null;
   const notInVersion = outcome?.kind === "not-in-version";
-  const engineMayHoldDocument =
-    outcome?.kind === "engine-may-hold-document";
+  const engineMayHoldDocument = outcome?.kind === "engine-may-hold-document";
+  const artifactAssetsInvalid = outcome?.kind === "artifact-assets-invalid";
+  const artifactAssets =
+    outcome?.kind === "bound" ? outcome.artifactAssets : [];
+  const readArtifactAsset =
+    outcome?.kind === "bound"
+      ? outcome.readArtifactAsset
+      : (descriptor: ArtifactAssetDescriptor) =>
+          Promise.reject(
+            new Error(
+              `Artifact asset ${descriptor.id} cannot load without a live document session.`,
+            ),
+          );
   const removalInProgress =
     outcome?.kind === "removal-in-progress" ? outcome.removal : null;
   const deletedWhileEditing =
-    outcome?.kind === "bound" &&
-    settled?.deletion?.token === outcome.token;
+    outcome?.kind === "bound" && settled?.deletion?.token === outcome.token;
   const deletedDraftId = deletedWhileEditing
     ? (settled?.deletion?.draftId ?? null)
     : null;
+  const readOnlyWhileEditing =
+    outcome?.kind === "bound" &&
+    settled?.readOnlyTransition?.token === outcome.token;
+  const permanentFailureWhileEditing =
+    outcome?.kind === "bound" &&
+    settled?.permanentFailure?.token === outcome.token;
+  const recoveryAssets =
+    settled?.sceneRecoveryAssets != null &&
+    outcome?.kind === "bound" &&
+    settled.sceneRecoveryAssets.token === outcome.token
+      ? {
+          state: settled.sceneRecoveryAssets.state,
+          count: settled.sceneRecoveryAssets.count,
+        }
+      : null;
 
   return {
     available,
     opening,
     doc,
+    objectId,
+    versionId,
     saveState: settled?.saveState ?? "saved",
+    saveError: settled?.saveError ?? null,
     notInVersion,
     engineMayHoldDocument,
+    artifactAssetsInvalid,
     deletedWhileEditing,
     deletedDraftId,
+    recoveryAssets,
+    permanentFailureWhileEditing,
+    readOnlyWhileEditing,
     removalInProgress,
+    artifactAssets,
+    readArtifactAsset,
   };
 }

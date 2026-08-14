@@ -513,6 +513,11 @@ impl EngineStore {
         materialize::mark_conflict(&self.conn, job_id, now_ms)
     }
 
+    /// Requeue one conflict whose external disk preimage was removed.
+    pub fn requeue_materialization_conflict(&self, job_id: &str) -> Result<bool, StorageError> {
+        materialize::requeue_conflict(&self.conn, job_id)
+    }
+
     /// The number of pending materialization jobs.
     pub fn pending_materialization_count(&self) -> Result<i64, StorageError> {
         materialize::pending_job_count(&self.conn)

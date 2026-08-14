@@ -646,7 +646,7 @@ export class YDocEngineDriverError extends Error {
 // The driver dimension for a replicated rich doc: does its projection read the
 // XmlFragment body (richdoc) or the plain Y.Text (plaintext). Mirrors the
 // engine's ydoc_docs.content_kind column.
-export type YDocReplicationContentKind = "richdoc" | "plaintext";
+export type YDocReplicationContentKind = "richdoc" | "plaintext" | "scene";
 
 /**
  * WS-G2-C1 — one Yjs CRDT update for a rich-doc object, riding the multi-origin

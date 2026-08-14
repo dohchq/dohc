@@ -48,6 +48,7 @@ describe("NewFileDialog", () => {
     expect(bridgeMock.createWorkspaceFile).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       relativePath: "notes/new.md",
+      initialText: "",
     });
   });
 
@@ -71,6 +72,7 @@ describe("NewFileDialog", () => {
     expect(bridgeMock.createWorkspaceFile).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       relativePath: "plans/roadmap.md",
+      initialText: "",
     });
     expect(onCreated).toHaveBeenCalledWith("plans/roadmap.md");
   });
@@ -92,6 +94,7 @@ describe("NewFileDialog", () => {
     expect(bridgeMock.createWorkspaceFile).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       relativePath: "data.csv",
+      initialText: "",
     });
   });
 });

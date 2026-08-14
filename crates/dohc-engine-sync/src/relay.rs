@@ -2629,49 +2629,9 @@ fn preflight_collisions(
 pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, SyncError> {
     #[cfg(test)]
     CANONICAL_JSON_CALLS.with(|calls| calls.set(calls.get() + 1));
-    fn write_canonical(value: &serde_json::Value, output: &mut String) -> Result<(), SyncError> {
-        match value {
-            serde_json::Value::Array(values) => {
-                output.push('[');
-                for (index, value) in values.iter().enumerate() {
-                    if index > 0 {
-                        output.push(',');
-                    }
-                    write_canonical(value, output)?;
-                }
-                output.push(']');
-            }
-            serde_json::Value::Object(object) => {
-                let mut entries = object.iter().collect::<Vec<_>>();
-                entries.sort_by_key(|(key, _)| *key);
-                output.push('{');
-                for (index, (key, value)) in entries.into_iter().enumerate() {
-                    if index > 0 {
-                        output.push(',');
-                    }
-                    output.push_str(
-                        &serde_json::to_string(key).map_err(|_| SyncError::CoordinateDiverged)?,
-                    );
-                    output.push(':');
-                    write_canonical(value, output)?;
-                }
-                output.push('}');
-            }
-            serde_json::Value::Number(number) => {
-                output.push_str(&javascript_number(number)?);
-            }
-            scalar => {
-                output.push_str(
-                    &serde_json::to_string(scalar).map_err(|_| SyncError::CoordinateDiverged)?,
-                );
-            }
-        }
-        Ok(())
-    }
-
-    let mut output = String::new();
-    write_canonical(value, &mut output)?;
-    Ok(output.into_bytes())
+    dohc_engine_collab::canonical_json::canonical_json_string(value)
+        .map(String::into_bytes)
+        .ok_or(SyncError::CoordinateDiverged)
 }
 
 #[cfg(test)]
@@ -2686,73 +2646,6 @@ pub(crate) fn take_canonical_json_call_count() -> usize {
         calls.set(0);
         count
     })
-}
-
-fn javascript_number(number: &serde_json::Number) -> Result<String, SyncError> {
-    let value = number.as_f64().ok_or(SyncError::CoordinateDiverged)?;
-    if !value.is_finite() {
-        return Err(SyncError::CoordinateDiverged);
-    }
-    if value == 0.0 {
-        return Ok("0".to_owned());
-    }
-
-    let negative = value.is_sign_negative();
-    let fixed = value.abs().to_string();
-    let (integer, fractional) = fixed.split_once('.').unwrap_or((&fixed, ""));
-    let mut raw = String::with_capacity(integer.len() + fractional.len());
-    raw.push_str(integer);
-    raw.push_str(fractional);
-    let leading = raw.bytes().take_while(|byte| *byte == b'0').count();
-    let decimal_position =
-        i32::try_from(integer.len()).map_err(|_| SyncError::CoordinateDiverged)?;
-    let leading = i32::try_from(leading).map_err(|_| SyncError::CoordinateDiverged)?;
-    let exponent_position = decimal_position
-        .checked_sub(leading)
-        .ok_or(SyncError::CoordinateDiverged)?;
-    let digits = raw[usize::try_from(leading).map_err(|_| SyncError::CoordinateDiverged)?..]
-        .trim_end_matches('0');
-    if digits.is_empty() {
-        return Ok("0".to_owned());
-    }
-
-    let mut output = String::new();
-    if negative {
-        output.push('-');
-    }
-    if exponent_position > 0 && exponent_position <= 21 {
-        let split =
-            usize::try_from(exponent_position).map_err(|_| SyncError::CoordinateDiverged)?;
-        if split >= digits.len() {
-            output.push_str(digits);
-            output.extend(std::iter::repeat_n('0', split - digits.len()));
-        } else {
-            output.push_str(&digits[..split]);
-            output.push('.');
-            output.push_str(&digits[split..]);
-        }
-    } else if exponent_position <= 0 && exponent_position > -6 {
-        output.push_str("0.");
-        let zeros =
-            usize::try_from(-exponent_position).map_err(|_| SyncError::CoordinateDiverged)?;
-        output.extend(std::iter::repeat_n('0', zeros));
-        output.push_str(digits);
-    } else {
-        output.push(char::from(digits.as_bytes()[0]));
-        if digits.len() > 1 {
-            output.push('.');
-            output.push_str(&digits[1..]);
-        }
-        let exponent = exponent_position
-            .checked_sub(1)
-            .ok_or(SyncError::CoordinateDiverged)?;
-        output.push('e');
-        if exponent >= 0 {
-            output.push('+');
-        }
-        output.push_str(&exponent.to_string());
-    }
-    Ok(output)
 }
 
 fn merge_by_origin(ops: Vec<ReplicationEnvelope>) -> Vec<ReplicationEnvelope> {

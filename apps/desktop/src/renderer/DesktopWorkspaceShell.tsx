@@ -598,17 +598,23 @@ function ancestorDirs(path: string): string[] {
   return segments.slice(0, -1).map((_, i) => segments.slice(0, i + 1).join("/"));
 }
 
-function uniqueUntitledTextPath(
+function uniqueUntitledPath(
   files: WorkspaceFileEntry[],
   folders: string[],
+  extension: string,
 ): string {
-  const occupied = new Set([...files.map((file) => file.path), ...folders]);
-  if (!occupied.has("Untitled.txt")) return "Untitled.txt";
+  const occupied = new Set(
+    [...files.map((file) => file.path), ...folders].map((path) =>
+      path.toLowerCase(),
+    ),
+  );
+  const base = `Untitled.${extension}`;
+  if (!occupied.has(base.toLowerCase())) return base;
   for (let index = 2; index < 10_000; index += 1) {
-    const candidate = `Untitled ${index}.txt`;
-    if (!occupied.has(candidate)) return candidate;
+    const candidate = `Untitled ${index}.${extension}`;
+    if (!occupied.has(candidate.toLowerCase())) return candidate;
   }
-  return `Untitled ${Date.now()}.txt`;
+  return `Untitled ${Date.now()}.${extension}`;
 }
 
 function isEditableShortcutTarget(target: EventTarget | null) {
@@ -3663,12 +3669,29 @@ export function DesktopWorkspaceShell(props: {
     try {
       const result = await bridge().createWorkspaceFile({
         workspaceId,
-        relativePath: uniqueUntitledTextPath(files, folders),
+        relativePath: uniqueUntitledPath(files, folders, "txt"),
+        initialText: "",
       });
       await refreshFiles();
       openFile(result.path);
     } catch (error) {
       reportShellError("Could not create an untitled text file.", error);
+    }
+  }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
+  const createUntitledDrawing = useCallback(async () => {
+    try {
+      const result = await bridge().createWorkspaceFile({
+        workspaceId,
+        relativePath: uniqueUntitledPath(files, folders, "excalidraw"),
+        // The engine's absent-head contract admits a new path only while its
+        // artifact is empty. The scene session initializes its own Y.Doc;
+        // DrawingView supplies portable JSON when the engine is unavailable.
+        initialText: "",
+      });
+      await refreshFiles();
+      openFile(result.path);
+    } catch (error) {
+      reportShellError("Could not create a drawing.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
   const openHistoryView = useCallback(() => {
@@ -4089,6 +4112,11 @@ export function DesktopWorkspaceShell(props: {
         run: () => setNewFileOpen(true),
       },
       {
+        id: "new-drawing",
+        label: "New drawing",
+        run: () => void createUntitledDrawing(),
+      },
+      {
         id: "new-folder",
         label: "New folder",
         run: () => requestExplorerCreate("folder"),
@@ -4200,6 +4228,7 @@ export function DesktopWorkspaceShell(props: {
     ],
     [
       activeDocumentPath,
+      createUntitledDrawing,
       openWorkspaceFolder,
       closeActiveTab,
       importFiles,
@@ -5054,6 +5083,7 @@ export function DesktopWorkspaceShell(props: {
                 // is a Chats call like any other (#615) — same gate as the
                 // panel, the tab and the graph's toggle.
                 chatMentionsAvailable={captureAvailable}
+                drawingCollaboration={chatCollaboration}
                 scrollTarget={groupScrollTarget}
                 headingTarget={
                   headingTarget?.groupId === editorGroup.id &&

@@ -1,14 +1,16 @@
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
 use dohc_engine_collab::{
-    CollabError, DocKey, RemoteUpdate, ReplicationApplyOutcome, apply_remote_update,
+    CollabError, ContentKind, DocKey, RemoteUpdate, ReplicationApplyOutcome, apply_remote_update,
     apply_remote_update_in_transaction, maybe_compact,
 };
 use dohc_engine_domain::{
     ConflictFileState, DomainError, WriteText, enqueue_write, select_snapshot_by_path_in_tx,
     write_projected_text_in_tx,
 };
-use dohc_engine_storage::{EngineStore, FaultInjector, Preimage, StorageError, TxnOutcome};
-use rusqlite::{OptionalExtension, params};
+use dohc_engine_storage::{
+    EngineStore, FaultInjector, Preimage, StorageError, TxnOutcome, get_binary_blob, hex_sha256,
+};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 
 use dohc_engine_files::{
@@ -18,6 +20,18 @@ use dohc_engine_files::{
 use crate::error::local_corruption;
 use crate::file_search::{search_policy_for_store, upsert_file_search_index};
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
+
+fn projection_too_large_reason(
+    content_kind: dohc_engine_collab::ContentKind,
+    constraint: &'static str,
+    actual_bytes: usize,
+    limit_bytes: usize,
+) -> String {
+    let format = content_kind.as_str();
+    format!(
+        "{format} projection exceeds {constraint}: limit {limit_bytes} bytes, observed at least {actual_bytes} bytes"
+    )
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,7 +69,7 @@ pub(crate) fn is_exact_repairable_ydoc_base_claim(
         && payload.update_blob_sha256 == lineage_claim_id
         && payload.lineage_claim_id == lineage_claim_id
         && valid_lineage_claim_id(lineage_claim_id)
-        && matches!(payload.content_kind.as_str(), "plaintext" | "richdoc")
+        && ContentKind::parse(&payload.content_kind).is_ok()
         && classification == PathClassification::Tracked
         && normalized.as_deref() == Some(payload.path.as_str())
 }
@@ -285,13 +299,9 @@ fn apply_deferred_base(
             None
         };
         let losing_projection = match (losing_doc.as_ref(), marker_before.as_ref()) {
-            (Some(doc), Some(marker)) => Some(
-                doc.project(marker.content_kind)
-                    .map_err(|_| SyncError::InvalidInput {
-                        reason: "ydoc projection exceeds materialization cap",
-                    })?
-                    .markdown,
-            ),
+            (Some(doc), Some(marker)) => {
+                Some(project_ydoc_with_store(tx, &key, doc, marker.content_kind)?.content)
+            }
             (None, _) => None,
             (Some(_), None) => {
                 return Err(local_corruption(
@@ -336,7 +346,8 @@ fn apply_deferred_base(
         let claim = dohc_engine_collab::claim_base_at_relay_in_tx(
             tx,
             &key,
-            dohc_engine_collab::ContentKind::parse(&payload.content_kind),
+            dohc_engine_collab::ContentKind::parse(&payload.content_kind)
+                .map_err(map_collab_hard_error)?,
             &bytes,
             &state_vector,
             &dohc_engine_collab::BaseRelayCoordinate::new(origin_id.clone(), origin_seq, relay_seq)
@@ -567,6 +578,7 @@ fn drain_deferred_ydoc(
     let mut drained_coordinates: Vec<(String, i64)> = Vec::new();
     let mut last_coordinate: Option<(String, i64)> = None;
     let mut lineage_replacements = Vec::new();
+    let mut projection_refusal = None;
     for (origin_id, origin_seq, relay_seq, recorded_at_ms, lineage_claim_id, payload) in pending {
         if let DeferredDrainMode::Live(expected_claim_id) = mode
             && Some(lineage_claim_id.as_str()) != expected_claim_id
@@ -618,11 +630,16 @@ fn drain_deferred_ydoc(
         let established_kind = dohc_engine_collab::read_marker(store, key)
             .map_err(map_collab_hard_error)?
             .map(|marker| marker.content_kind);
-        let content_kind_refusal = established_kind
-            .is_some_and(|kind| {
-                kind != dohc_engine_collab::ContentKind::parse(&payload.content_kind)
-            })
-            .then_some("ydoc.update content kind does not match the established lineage");
+        let content_kind_refusal =
+            match dohc_engine_collab::ContentKind::parse(&payload.content_kind) {
+                Ok(payload_kind) if established_kind.is_some_and(|kind| kind != payload_kind) => {
+                    Some("ydoc.update content kind does not match the established lineage")
+                }
+                Ok(_) => None,
+                Err(_) => {
+                    Some("ydoc.update content kind must be `plaintext`, `richdoc`, or `scene`")
+                }
+            };
         // Once the base arrives it establishes the authoritative path. A
         // queued payload naming another path is still refused, but its valid
         // CRDT bytes must enter the lineage first so descendants do not retain
@@ -728,16 +745,41 @@ fn drain_deferred_ydoc(
             // content is durable above; the visible path legitimately remains
             // governed by its current owner, so consume the marker.
             Err(SyncError::InvalidInput { .. }) => {}
+            // A measured size rejection is also terminal, but unlike an
+            // identity pin it must stay visible to the peer. Persist it against
+            // the last coordinate whose accepted bytes made this projection
+            // too large before the queue cleanup below consumes the marker.
+            Err(SyncError::ProjectionTooLarge {
+                constraint,
+                actual_bytes,
+                limit_bytes,
+            }) => {
+                projection_refusal = Some(deferred_ydoc_refusal(
+                    key,
+                    drain_origin,
+                    drain_seq,
+                    projection_too_large_reason(
+                        persisted.marker.content_kind,
+                        constraint,
+                        actual_bytes,
+                        limit_bytes,
+                    ),
+                ));
+            }
             // Anything else (storage) is retryable: keep the markers so the
             // next drain retries the projection.
             Err(other) => return Err(other),
         }
     }
-    // The durable markers clear LAST — after the projection committed. A
-    // crash anywhere above leaves the rows in place, and the retry re-runs
-    // apply (content-deduped) AND the projection; deleting first opened a
-    // window where the CRDT held the edit but nothing would ever project it.
+    // The durable markers clear LAST — after the projection committed or a
+    // terminal disposition was persisted. A crash anywhere above leaves the
+    // rows in place, and the retry re-runs apply (content-deduped) AND the
+    // projection; deleting first opened a window where the CRDT held the edit
+    // but nothing would ever project it.
     let cleared = store.write_with(faults, |tx| {
+        if let Some(refusal) = projection_refusal.as_ref() {
+            crate::apply::persist_refusal(tx, refusal)?;
+        }
         for (origin_id, origin_seq) in &drained_coordinates {
             tx.execute(
                 "DELETE FROM ydoc_deferred_updates \
@@ -750,6 +792,9 @@ fn drain_deferred_ydoc(
     })?;
     if matches!(cleared, TxnOutcome::Crashed { .. }) {
         return Err(SyncError::FaultCrash);
+    }
+    if let Some(refusal) = projection_refusal {
+        refusals.push(refusal);
     }
     // The count is DRAINED COORDINATES, not newly-applied rows: a marker
     // surviving an earlier failed drain redelivers its row as a dedupe, and
@@ -773,18 +818,10 @@ fn refuse_deferred_ydoc(
     key: &DocKey,
     origin_id: &str,
     origin_seq: i64,
-    reason: &'static str,
+    reason: impl Into<String>,
     faults: &dyn FaultInjector,
 ) -> Result<crate::ReplicationRefusal, SyncError> {
-    let refusal = crate::ReplicationRefusal {
-        workspace_id: key.workspace_id.clone(),
-        origin_id: origin_id.to_owned(),
-        origin_seq,
-        op_kind: "ydoc.update".to_owned(),
-        reason: crate::RefusalReason::InvalidInput {
-            reason: reason.to_owned(),
-        },
-    };
+    let refusal = deferred_ydoc_refusal(key, origin_id, origin_seq, reason);
     match store.write_with(faults, |tx| {
         crate::apply::persist_refusal(tx, &refusal)?;
         tx.execute(
@@ -797,6 +834,23 @@ fn refuse_deferred_ydoc(
     })? {
         TxnOutcome::Committed(()) => Ok(refusal),
         TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
+    }
+}
+
+fn deferred_ydoc_refusal(
+    key: &DocKey,
+    origin_id: &str,
+    origin_seq: i64,
+    reason: impl Into<String>,
+) -> crate::ReplicationRefusal {
+    crate::ReplicationRefusal {
+        workspace_id: key.workspace_id.clone(),
+        origin_id: origin_id.to_owned(),
+        origin_seq,
+        op_kind: "ydoc.update".to_owned(),
+        reason: crate::RefusalReason::InvalidInput {
+            reason: reason.into(),
+        },
     }
 }
 
@@ -846,6 +900,8 @@ fn open_sync_conflict_id(
 ///
 /// Removing the CRDT rows and marker prevents a later delta from projecting
 /// deleted content back into a snapshot. A later base starts a fresh lineage.
+/// Scene lineages stay durable because their delete-time asset authority and
+/// rollback both depend on the canonical scene records.
 pub fn retire_ydoc_lineage_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -857,6 +913,13 @@ pub fn retire_ydoc_lineage_in_tx(
             reason: "Y.Doc lineage coordinates are invalid",
         })?;
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, &key)?;
+    if complete
+        .state
+        .as_ref()
+        .is_some_and(|(marker, _)| marker.content_kind == dohc_engine_collab::ContentKind::Scene)
+    {
+        return Ok(());
+    }
     retire_complete_ydoc_lineage_in_tx(tx, &complete)
 }
 
@@ -893,12 +956,13 @@ pub(crate) fn retire_complete_ydoc_lineage_in_tx(
     Ok(())
 }
 
-pub(crate) fn ydoc_lineage_has_durable_state_in_tx(
+pub(crate) fn ydoc_lineage_blocks_absent_delete_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
 ) -> Result<bool, SyncError> {
-    tx.query_row(
-        "SELECT EXISTS(
+    let has_durable_state: bool = tx
+        .query_row(
+            "SELECT EXISTS(
              SELECT 1 FROM ydoc_updates
               WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
              UNION ALL
@@ -913,10 +977,48 @@ pub(crate) fn ydoc_lineage_has_durable_state_in_tx(
                 AND (head_update_seq > 0 OR head_snapshot_seq > 0
                      OR lineage_claim_status <> 'unclaimed')
          )",
-        params![key.workspace_id, key.version_id, key.object_id],
-        |row| row.get(0),
-    )
-    .map_err(SyncError::corrupt)
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if !has_durable_state {
+        return Ok(false);
+    }
+
+    // A deleted scene keeps its complete lineage for rollback and asset
+    // authority. An authority tied to a non-record-only delete is durable
+    // proof of retained deleted state, not an unmaterialized local draft.
+    let retained_scene: bool = tx
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM ydoc_docs d
+                 JOIN scene_asset_delete_authorities a
+                   ON a.workspace_id=d.workspace_id
+                  AND a.version_id=d.version_id
+                  AND a.drawing_object_id=d.object_id
+                 JOIN moments m
+                   ON m.workspace_id=a.workspace_id
+                  AND m.version_id=a.version_id
+                  AND m.object_id=a.drawing_object_id
+                  AND m.moment_id=a.drawing_delete_moment_id
+                WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3
+                  AND d.content_kind='scene'
+                  AND m.operation='delete'
+                  AND COALESCE(m.sync_record_only,0)=0
+                  AND NOT EXISTS(
+                      SELECT 1 FROM moments later
+                       WHERE later.workspace_id=m.workspace_id
+                         AND later.version_id=m.version_id
+                         AND later.object_id=m.object_id
+                         AND later.moment_order > m.moment_order
+                         AND COALESCE(later.sync_record_only,0)=0
+                  )
+             )",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    Ok(!retained_scene)
 }
 
 enum YdocLineageCompleteness {
@@ -971,7 +1073,7 @@ pub(crate) fn ensure_ydoc_lineage_complete_in_tx(
 }
 
 pub(crate) struct CompleteYdocProjection {
-    pub markdown: Option<String>,
+    pub content: Option<String>,
     pub claim_status: dohc_engine_collab::LineageClaimStatus,
 }
 
@@ -988,19 +1090,13 @@ pub(crate) fn complete_ydoc_projection_in_tx(
     let has_content = marker.lineage_claim_status.has_claimed_base()
         || marker.head_update_seq > 0
         || marker.head_snapshot_seq > 0;
-    let markdown = if has_content {
-        Some(
-            doc.project(marker.content_kind)
-                .map_err(|_| SyncError::InvalidInput {
-                    reason: "ydoc projection exceeds materialization cap",
-                })?
-                .markdown,
-        )
+    let content = if has_content {
+        Some(project_ydoc_with_store(tx, key, doc, marker.content_kind)?.content)
     } else {
         None
     };
     Ok(Some(CompleteYdocProjection {
-        markdown,
+        content,
         claim_status: marker.lineage_claim_status,
     }))
 }
@@ -1083,11 +1179,18 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
                 || marker.head_snapshot_seq > 0;
             if has_content {
                 let projection =
-                    doc.project(marker.content_kind)
-                        .map_err(|_| SyncError::InvalidInput {
-                            reason: "ydoc projection exceeds materialization cap",
-                        })?;
-                if projection.markdown != text {
+                    project_ydoc_with_store(tx, &complete.key, doc, marker.content_kind)?;
+                if projection.content != text {
+                    if marker.content_kind == ContentKind::Scene {
+                        // The origin of an external scene edit RETIRES its
+                        // lineage instead of emitting a Markdown rewrite (a
+                        // scene has no fold), so the rewrite this pending
+                        // state would wait for is never coming. Converge the
+                        // same way the origin did: the replicated file moment
+                        // is canonical, the lineage retires, and the next
+                        // open seeds a fresh scene from the artifact.
+                        return retire_complete_ydoc_lineage_in_tx(tx, complete);
+                    }
                     return Err(SyncError::RetryableState {
                         reason: "ydoc-resulting-head-pending",
                     });
@@ -1183,13 +1286,23 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
         .map_err(SyncError::persist)?;
         return Ok(());
     }
-    let projection = doc
-        .project(marker.content_kind)
-        .map_err(|_| SyncError::InvalidInput {
-            reason: "ydoc projection exceeds materialization cap",
-        })?;
-    if projection.markdown != chosen_text {
-        let update = doc.rewrite_content_to_markdown(marker.content_kind, chosen_text);
+    let projection = project_ydoc_with_store(tx, key, doc, marker.content_kind)?;
+    if projection.content != chosen_text {
+        if marker.content_kind == ContentKind::Scene {
+            // A scene has no Markdown fold, and refusing here would roll
+            // back the text write that carries an external edit to a closed
+            // drawing — the edit would vanish from history and a later
+            // materialization could overwrite the file with the older
+            // scene. The durable file head is canonical: retire the lineage
+            // and let the next open seed a fresh scene from the artifact,
+            // exactly like a first open.
+            return retire_complete_ydoc_lineage_in_tx(tx, complete);
+        }
+        let update = doc
+            .rewrite_content_to_markdown(marker.content_kind, chosen_text)
+            .map_err(|_| SyncError::InvalidInput {
+                reason: "the content kind does not support Markdown conflict resolution",
+            })?;
         // VERIFY THE FOLD'S OWN OUTPUT. The markdown parser behind the
         // rewrite is asserted to be the projector's inverse, and nothing
         // makes that true: a construct it does not model round-trips through
@@ -1212,12 +1325,8 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
                 observed_bytes: update.len(),
             });
         }
-        let refolded = doc
-            .project(marker.content_kind)
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "ydoc projection exceeds materialization cap",
-            })?;
-        if refolded.markdown != chosen_text {
+        let refolded = project_ydoc_with_store(tx, key, doc, marker.content_kind)?;
+        if refolded.content != chosen_text {
             return Err(SyncError::InvalidInput {
                 reason: "ydoc-resolution-not-representable",
             });
@@ -1284,19 +1393,227 @@ fn settle_ydoc_marker_to_text(
     Ok(())
 }
 
-/// Store the projected markdown as a text blob so a conflict side can
+/// Store the projected content as a text blob so a conflict side can
 /// reference it (the conflict UI hydrates sides from `blobs`).
 fn put_projection_text_blob(
     tx: &rusqlite::Transaction<'_>,
-    markdown: &str,
+    content: &str,
     sha256: &str,
 ) -> Result<(), SyncError> {
     tx.execute(
         "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-        params![sha256, markdown.len() as i64, markdown],
+        params![sha256, content.len() as i64, content],
     )
     .map_err(SyncError::persist)?;
     Ok(())
+}
+
+struct AuthorizedSceneAsset {
+    bytes: Vec<u8>,
+    byte_length: usize,
+}
+
+fn authorize_scene_asset_with_store(
+    conn: &Connection,
+    key: &DocKey,
+    asset: &dohc_engine_collab::SceneAsset,
+) -> Result<AuthorizedSceneAsset, SyncError> {
+    let expected = dohc_engine_collab::scene_asset_ref(
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+        &asset.sha256,
+        &asset.mime_type,
+    )
+    .map_err(|_| SyncError::InvalidInput {
+        reason: "scene asset authority is invalid",
+    })?;
+    let (classification, normalized) = classify_engine_file_path_normalized(&asset.path);
+    if asset.path != expected
+        || classification != PathClassification::Tracked
+        || normalized.as_deref() != Some(asset.path.as_str())
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "scene asset authority is invalid",
+        });
+    }
+    let head: Option<(String, Option<String>, Option<i64>)> = conn
+        .query_row(
+            "SELECT COALESCE(s.content_kind, 'text'), s.binary_sha256, b.byte_length \
+                 FROM path_aliases a JOIN snapshots s \
+                    ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id \
+                   AND s.object_id=a.object_id \
+                 LEFT JOIN binary_blobs b ON b.sha256=s.binary_sha256 \
+                  WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
+            params![key.workspace_id, key.version_id, asset.path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let byte_length = match head {
+        Some((kind, sha256, byte_length)) => {
+            if kind != "binary" || sha256.as_deref() != Some(asset.sha256.as_str()) {
+                return Err(SyncError::InvalidInput {
+                    reason: "scene asset authority is invalid",
+                });
+            }
+            byte_length.ok_or(SyncError::RetryableState {
+                reason: "scene asset blob is pending",
+            })?
+        }
+        None => retired_scene_asset_byte_length(conn, key, &asset.path, &asset.sha256)?.ok_or(
+            SyncError::RetryableState {
+                reason: "scene asset head is pending",
+            },
+        )?,
+    }
+    .try_into()
+    .map_err(|_| SyncError::InvalidInput {
+        reason: "scene asset authority is invalid",
+    })?;
+    let bytes = get_binary_blob(conn, &asset.sha256)?.ok_or(SyncError::RetryableState {
+        reason: "scene asset blob is pending",
+    })?;
+    if hex_sha256(&bytes) != asset.sha256 {
+        return Err(SyncError::InvalidInput {
+            reason: "scene asset authority is invalid",
+        });
+    }
+    Ok(AuthorizedSceneAsset { bytes, byte_length })
+}
+
+/// Verify that a scene asset belongs to this lineage and has its exact blob.
+pub fn validate_scene_asset_with_store(
+    conn: &Connection,
+    key: &DocKey,
+    asset: &dohc_engine_collab::SceneAsset,
+) -> Result<(), SyncError> {
+    authorize_scene_asset_with_store(conn, key, asset).map(|_| ())
+}
+
+/// Project one canonical live document through authoritative versioned state.
+/// Scene bytes never enter the Y.Doc; they resolve from the same workspace and
+/// version as its lineage and are injected only into the portable artifact.
+pub fn project_ydoc_with_store(
+    conn: &Connection,
+    key: &DocKey,
+    doc: &dohc_engine_collab::Ydoc,
+    content_kind: dohc_engine_collab::ContentKind,
+) -> Result<dohc_engine_collab::Projection, SyncError> {
+    if content_kind != dohc_engine_collab::ContentKind::Scene {
+        return doc
+            .project(content_kind)
+            .map_err(|error| map_projection_error(error, "ydoc projection is invalid"));
+    }
+    let folded = doc.fold_scene();
+    // The unhydrated portable form bounds the scene-owned JSON before any
+    // binary reads. Track a lower bound for the final data URLs as each asset
+    // is resolved so repeated files cannot accumulate unbounded raw blobs only
+    // to be refused by the serializer afterward.
+    let mut projected_bytes = folded
+        .portable_json()
+        .map_err(|error| map_projection_error(error, "scene projection is invalid"))?
+        .len();
+    let referenced: std::collections::BTreeSet<&str> = folded
+        .elements
+        .iter()
+        .filter(|element| element.get("type").and_then(serde_json::Value::as_str) == Some("image"))
+        .filter_map(|element| element.get("fileId").and_then(serde_json::Value::as_str))
+        .collect();
+    let mut bytes_by_id = std::collections::BTreeMap::new();
+    for id in referenced {
+        let asset = folded.assets.get(id).ok_or(SyncError::InvalidInput {
+            reason: "scene asset record is invalid",
+        })?;
+        let authorized = authorize_scene_asset_with_store(conn, key, asset)?;
+        let data_url_len =
+            dohc_engine_collab::scene_data_url_len(&asset.mime_type, authorized.byte_length)
+                .map_err(|error| map_projection_error(error, "scene projection is invalid"))?;
+        projected_bytes =
+            projected_bytes
+                .checked_add(data_url_len)
+                .ok_or(SyncError::ProjectionTooLarge {
+                    constraint: "MAX_PROJECTION_BYTES",
+                    actual_bytes: usize::MAX,
+                    limit_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES,
+                })?;
+        if projected_bytes > dohc_engine_collab::limits::MAX_PROJECTION_BYTES {
+            return Err(SyncError::ProjectionTooLarge {
+                constraint: "MAX_PROJECTION_BYTES",
+                actual_bytes: projected_bytes,
+                limit_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES,
+            });
+        }
+        bytes_by_id.insert(id.to_owned(), authorized.bytes);
+    }
+    let content = folded
+        .portable_json_with_asset_bytes(&bytes_by_id)
+        .map_err(|error| map_projection_error(error, "scene projection is invalid"))?;
+    Ok(dohc_engine_collab::Projection {
+        content,
+        content_kind,
+        source_state_vector_sha256: hex_sha256(&doc.encode_state_vector()),
+        destructive: false,
+    })
+}
+
+/// Resolve a scene asset whose generated sidecar head was retired after the
+/// file disappeared from disk. The current delete and its exact producer are
+/// the authority; a blob referenced elsewhere in the workspace is not.
+fn retired_scene_asset_byte_length(
+    conn: &Connection,
+    key: &DocKey,
+    path: &str,
+    sha256: &str,
+) -> Result<Option<i64>, SyncError> {
+    conn.query_row(
+        "SELECT b.byte_length FROM moments deleted \
+         JOIN moments producer ON producer.workspace_id=deleted.workspace_id \
+           AND producer.moment_id=deleted.before_latest_moment_id \
+         JOIN binary_blobs b ON b.sha256=deleted.before_binary_sha256 \
+         WHERE deleted.workspace_id=?1 AND deleted.version_id=?2 AND deleted.path=?3 \
+           AND deleted.operation='delete' AND COALESCE(deleted.sync_record_only,0)=0 \
+           AND deleted.before_present=2 AND deleted.before_content_kind='binary' \
+           AND deleted.before_binary_sha256=?4 AND deleted.payload_before_path=?3 \
+           AND deleted.payload_before_content_kind='binary' \
+           AND deleted.payload_before_blob_sha256=?4 \
+           AND producer.version_id=deleted.version_id \
+           AND producer.object_id=deleted.object_id \
+           AND producer.operation='write' AND COALESCE(producer.sync_record_only,0)=0 \
+           AND producer.after_content_kind='binary' \
+           AND producer.after_binary_sha256=?4 AND producer.path=?3 \
+           AND producer.payload_after_path=?3 \
+           AND producer.payload_after_content_kind='binary' \
+           AND producer.payload_after_blob_sha256=?4 \
+           AND NOT EXISTS (SELECT 1 FROM moments newer \
+             WHERE newer.workspace_id=deleted.workspace_id \
+               AND newer.version_id=deleted.version_id AND newer.path=deleted.path \
+               AND COALESCE(newer.sync_record_only,0)=0 \
+               AND newer.moment_order>deleted.moment_order) \
+         ORDER BY deleted.moment_order DESC LIMIT 1",
+        params![key.workspace_id, key.version_id, path, sha256],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(SyncError::corrupt)
+}
+
+fn map_projection_error(
+    error: dohc_engine_collab::CollabError,
+    invalid_reason: &'static str,
+) -> SyncError {
+    match error {
+        dohc_engine_collab::CollabError::ProjectionTooLarge { actual, max } => {
+            SyncError::ProjectionTooLarge {
+                constraint: "MAX_PROJECTION_BYTES",
+                actual_bytes: actual,
+                limit_bytes: max,
+            }
+        }
+        _ => SyncError::InvalidInput {
+            reason: invalid_reason,
+        },
+    }
 }
 
 /// Oracle parity for applied `ydoc.update` ops (`projectYDocUpdate` →
@@ -1318,19 +1635,15 @@ pub fn project_and_write_in_tx(
     search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<(), SyncError> {
     let current = validate_ydoc_identity(tx, key, path)?;
-    let projection = doc
-        .project(content_kind)
-        .map_err(|_| SyncError::InvalidInput {
-            reason: "ydoc projection exceeds materialization cap",
-        })?;
+    let projection = project_ydoc_with_store(tx, key, doc, content_kind)?;
     // While a sync conflict is open on this object, the visible head belongs
     // to the user's review: writing through it would clobber the exact state
     // the conflict preserves. Coalesce the incoming side to the freshest
     // remote projection instead (moment-lane parity) and leave the head and
     // the settle marker alone until a resolution closes the conflict.
     if let Some(conflict_id) = open_sync_conflict_id(tx, key)? {
-        let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
-        put_projection_text_blob(tx, &projection.markdown, &projected_sha)?;
+        let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
+        put_projection_text_blob(tx, &projection.content, &projected_sha)?;
         let matches_reviewed_side: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM conflicts \
@@ -1375,7 +1688,7 @@ pub fn project_and_write_in_tx(
     // capture/local write while last_settled_sha points at an older settle,
     // and leaving it stale would wedge the next settle in
     // ConflictStaleTarget over a converged doc.
-    let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
+    let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
     if let Some(snapshot) = current
         .snapshot
         .as_ref()
@@ -1411,7 +1724,7 @@ pub fn project_and_write_in_tx(
             version_id: key.version_id.clone(),
             object_id: key.object_id.clone(),
             path: path.to_owned(),
-            text: projection.markdown.clone(),
+            text: projection.content.clone(),
             moment_id,
             metadata_origin: "ydoc".to_owned(),
             metadata_summary: None,
@@ -1487,7 +1800,7 @@ pub fn apply_ydoc_envelope(
     let (classification, normalized) = classify_engine_file_path_normalized(&payload.path);
     if classification != PathClassification::Tracked
         || normalized.as_deref() != Some(payload.path.as_str())
-        || !matches!(payload.content_kind.as_str(), "plaintext" | "richdoc")
+        || ContentKind::parse(&payload.content_kind).is_err()
     {
         return refuse_ydoc(
             store,
@@ -1681,7 +1994,8 @@ pub fn apply_ydoc_envelope(
         // before apply_envelope_with would persist the marker/base for an
         // envelope the sequence/divergence checks then reject (out-of-order
         // or divergent redelivery), leaving state for an unacked coordinate.
-        let kind = dohc_engine_collab::ContentKind::parse(&payload.content_kind);
+        let kind = dohc_engine_collab::ContentKind::parse(&payload.content_kind)
+            .map_err(map_collab_hard_error)?;
         let sv_bytes = {
             let doc = dohc_engine_collab::Ydoc::wire();
             if doc.apply(&bytes).is_err() {
@@ -1780,13 +2094,7 @@ pub fn apply_ydoc_envelope(
                 let marker = marker_before
                     .as_ref()
                     .ok_or_else(|| local_corruption("Y.Doc losing lineage has no marker"))?;
-                Some(
-                    doc.project(marker.content_kind)
-                        .map_err(|_| SyncError::InvalidInput {
-                            reason: "ydoc projection exceeds materialization cap",
-                        })?
-                        .markdown,
-                )
+                Some(project_ydoc_with_store(tx, &claim_key, &doc, marker.content_kind)?.content)
             } else {
                 None
             };
@@ -1985,15 +2293,10 @@ pub fn apply_ydoc_envelope(
                 && !head_is_in_the_union
                 && let Some(snapshot) = current.snapshot.as_ref()
             {
-                let projection =
-                    incoming_doc
-                        .project(kind)
-                        .map_err(|_| SyncError::InvalidInput {
-                            reason: "ydoc projection exceeds materialization cap",
-                        })?;
-                let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
+                let projection = project_ydoc_with_store(tx, &claim_key, &incoming_doc, kind)?;
+                let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
                 if snapshot.blob_sha256 != projected_sha {
-                    put_projection_text_blob(tx, &projection.markdown, &projected_sha)?;
+                    put_projection_text_blob(tx, &projection.content, &projected_sha)?;
                     let incoming_moment_id =
                         ydoc_apply_moment_id(&claim_key, &base_path, &op.origin_id, op.origin_seq);
                     let conflict_id = crate::moment_apply::sync_conflict_id(
@@ -2089,7 +2392,26 @@ pub fn apply_ydoc_envelope(
                     recovered_paths,
                 }),
             })
-        })?;
+        });
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(SyncError::InvalidInput { reason }) => {
+                return refuse_ydoc(store, envelope, faults, reason);
+            }
+            Err(SyncError::ProjectionTooLarge {
+                constraint,
+                actual_bytes,
+                limit_bytes,
+            }) => {
+                return refuse_ydoc_with_reason(
+                    store,
+                    envelope,
+                    faults,
+                    projection_too_large_reason(kind, constraint, actual_bytes, limit_bytes),
+                );
+            }
+            Err(hard) => return Err(hard),
+        };
         if matches!(outcome, ApplyOutcome::Applied(_) | ApplyOutcome::Skipped)
             && dohc_engine_collab::read_marker(store, &key)
                 .map_err(map_collab_hard_error)?
@@ -2276,7 +2598,28 @@ pub fn apply_ydoc_envelope(
                      RELEASE dohc_ydoc_projection",
                     )
                     .map_err(SyncError::persist)?;
-                    return Ok(crate::apply::MutationOutcome::RefusedRetainingMutation { reason });
+                    return Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {
+                        reason: reason.to_owned(),
+                    });
+                }
+                Err(SyncError::ProjectionTooLarge {
+                    constraint,
+                    actual_bytes,
+                    limit_bytes,
+                }) => {
+                    tx.execute_batch(
+                        "ROLLBACK TO dohc_ydoc_projection; \
+                     RELEASE dohc_ydoc_projection",
+                    )
+                    .map_err(SyncError::persist)?;
+                    return Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {
+                        reason: projection_too_large_reason(
+                            update_kind,
+                            constraint,
+                            actual_bytes,
+                            limit_bytes,
+                        ),
+                    });
                 }
                 Err(hard) => return Err(hard),
             }
@@ -2396,6 +2739,17 @@ fn refuse_ydoc(
     })
 }
 
+fn refuse_ydoc_with_reason(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+    reason: String,
+) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
+    crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, move |_tx, _op| {
+        Ok(crate::apply::MutationOutcome::RefusedRetainingMutation { reason })
+    })
+}
+
 fn map_collab_payload_error(error: CollabError, reason: &'static str) -> SyncError {
     match error {
         CollabError::MalformedUpdate { .. }
@@ -2403,7 +2757,8 @@ fn map_collab_payload_error(error: CollabError, reason: &'static str) -> SyncErr
         | CollabError::EmptyUpdate
         | CollabError::UpdateTooLarge { .. }
         | CollabError::ProjectionTooLarge { .. }
-        | CollabError::ProjectionTooComplex { .. } => SyncError::InvalidInput { reason },
+        | CollabError::ProjectionTooComplex { .. }
+        | CollabError::MarkdownRewriteUnsupported { .. } => SyncError::InvalidInput { reason },
         CollabError::BaseStateDiverged => SyncError::CoordinateDiverged,
         CollabError::BaseRelaySequencePending => SyncError::RetryableState {
             reason: "Y.Doc base is waiting for its authenticated relay position",
@@ -2478,6 +2833,15 @@ fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncErr
         hard @ DomainError::InvalidInput {
             reason: "object_id is already bound to another object",
         } => map_domain_hard_error(hard),
+        DomainError::PayloadTooLarge {
+            constraint,
+            limit_bytes,
+            observed_bytes,
+        } => SyncError::ProjectionTooLarge {
+            constraint,
+            actual_bytes: observed_bytes,
+            limit_bytes,
+        },
         // The acknowledged caller-mistake union (#656). A size refusal joins
         // it for the same reason `InvalidText`/`InvalidPath` are here: only
         // `InvalidInput` is ACKNOWLEDGED — the apply path answers it with
@@ -2487,7 +2851,6 @@ fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncErr
         // operation stuck behind it.
         DomainError::InvalidText { .. }
         | DomainError::InvalidPath { .. }
-        | DomainError::PayloadTooLarge { .. }
         | DomainError::InvalidInput { .. } => SyncError::InvalidInput { reason },
         // Everything else is a hard failure.
         hard => map_domain_hard_error(hard),
@@ -2498,5 +2861,41 @@ fn map_domain_hard_error(error: DomainError) -> SyncError {
     match error {
         DomainError::Storage(storage) => SyncError::Storage(storage),
         hard => SyncError::Storage(StorageError::corrupt_public(hard)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projection_limit_reason_names_each_content_kind() {
+        assert_eq!(
+            projection_too_large_reason(
+                dohc_engine_collab::ContentKind::Plaintext,
+                "MAX_PROJECTION_BYTES",
+                17_000_001,
+                16_777_216,
+            ),
+            "plaintext projection exceeds MAX_PROJECTION_BYTES: limit 16777216 bytes, observed at least 17000001 bytes"
+        );
+        assert_eq!(
+            projection_too_large_reason(
+                dohc_engine_collab::ContentKind::Richdoc,
+                "MAX_PROJECTION_BYTES",
+                17_000_002,
+                16_777_216,
+            ),
+            "richdoc projection exceeds MAX_PROJECTION_BYTES: limit 16777216 bytes, observed at least 17000002 bytes"
+        );
+        assert_eq!(
+            projection_too_large_reason(
+                dohc_engine_collab::ContentKind::Scene,
+                "MAX_PROJECTION_BYTES",
+                17_000_003,
+                16_777_216,
+            ),
+            "scene projection exceeds MAX_PROJECTION_BYTES: limit 16777216 bytes, observed at least 17000003 bytes"
+        );
     }
 }

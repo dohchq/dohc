@@ -3,6 +3,8 @@ import {
   WORKSPACE_MODES,
 } from "@dohc/workspace-core";
 import { z } from "zod";
+import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
+import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
 import {
   CHATS_TAB_PATH,
   canonicalSingletonEditorTabPath,
@@ -58,6 +60,11 @@ import type {
   WorkspaceSettings as WorkspaceSettingsType,
   WorkspaceSettingsResult as WorkspaceSettingsResultType,
 } from "../workspaces/workspaceSettings";
+import {
+  utf8ByteLength,
+  WORKSPACE_TEXT_EDITOR_MAX_BYTES,
+  workspaceTextLimitReason,
+} from "../workspaces/workspaceTextLimits";
 
 // Typed contract for everything the preload bridge exposes. Main-process
 // handlers validate payloads on arrival and results before returning them.
@@ -76,6 +83,14 @@ const WORKSPACE_ID = z
   .max(200)
   .regex(/^[a-z0-9][a-z0-9-]*$/, "workspace id must be lowercase alphanumeric/hyphens");
 const PATH_STRING = z.string().min(1).max(4096);
+const WORKSPACE_EDITOR_TEXT = z.string().superRefine((text, ctx) => {
+  const observedBytes = utf8ByteLength(text);
+  if (observedBytes <= WORKSPACE_TEXT_EDITOR_MAX_BYTES) return;
+  ctx.addIssue({
+    code: "custom",
+    message: workspaceTextLimitReason(observedBytes),
+  });
+});
 
 // Stored-body fields are the exception to the caps above. Every RESPONSE field
 // on this schema carries text the ENGINE already accepted, not text a renderer
@@ -251,6 +266,7 @@ export type ListWorkspaceFilesResult = z.infer<typeof ListWorkspaceFilesResult>;
 export const CreateWorkspaceFilePayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
+  initialText: WORKSPACE_EDITOR_TEXT,
 });
 export type CreateWorkspaceFilePayload = z.infer<
   typeof CreateWorkspaceFilePayload
@@ -441,8 +457,8 @@ export type OpenFileExternallyPayload = z.infer<
 export const WriteWorkspaceTextPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
-  // Editor saves are bounded like reads (2MB); the handler re-checks bytes.
-  text: z.string().max(2 * 1024 * 1024),
+  // Editor saves are bounded like reads; the handler re-checks UTF-8 bytes.
+  text: WORKSPACE_EDITOR_TEXT,
   // SHA-256 of the exact bytes returned by the last complete read. Main uses
   // it for optimistic conflict detection immediately before replacement.
   expectedContentHash: WORKSPACE_TEXT_CONTENT_HASH,
@@ -1631,6 +1647,9 @@ const PRESENCE_STATE_MAX_DEPTH = 32;
 // moment it exceeds the cap — so an oversized payload is rejected WITHOUT a full
 // JSON.stringify. Returns false for cycles, over-depth nesting, and non-JSON
 // values (bigint), which the relay would reject or main would throw on anyway.
+// Printable ASCII minus `"` and `\` — characters JSON serializes verbatim.
+const SAFE_JSON_STRING_CHARS = /^[ !#-\[\]-~]*$/;
+
 export function presenceStateWithinCap(
   value: unknown,
   maxBytes: number = PRESENCE_STATE_MAX_BYTES,
@@ -1650,9 +1669,14 @@ export function presenceStateWithinCap(
       case "number":
         return spend(v && Number.isFinite(v) ? 24 : 4); // non-finite → "null"
       case "string":
-        // Upper bound: a JSON string is the UTF-8 bytes plus quotes/escapes; 6
-        // bytes per char covers the worst-case "\uXXXX" escape.
-        return spend(2 + v.length * 6);
+        // Every JSON string costs at least its quotes plus one byte per
+        // UTF-16 code unit — charge that floor first so a huge string still
+        // bails without being scanned. Safe printable ASCII (the base64
+        // awareness update) serializes at exactly the floor; anything else
+        // may need a "\uXXXX" escape or multi-byte UTF-8, and 6 bytes per
+        // code unit covers the worst case.
+        if (!spend(2 + v.length)) return false;
+        return SAFE_JSON_STRING_CHARS.test(v) || spend(v.length * 5);
       case "object": {
         const obj = v as object;
         if (seen.has(obj)) return false; // cycle → reject as over-cap
@@ -3357,17 +3381,41 @@ const ENGINE_YDOC_SESSION_ID = z.string().min(1).max(ENGINE_YDOC_SESSION_ID_MAX_
 // z.custom (not z.instanceof) so the inferred type is a plain `Uint8Array`
 // (ArrayBufferLike) — matching yjs's update type and the transport — rather than
 // the ArrayBuffer-narrowed shape z.instanceof yields.
-const ENGINE_YDOC_UPDATE = z.custom<Uint8Array>(
-  (value) =>
-    value instanceof Uint8Array &&
-    value.byteLength > 0 &&
-    value.byteLength <= ENGINE_YDOC_UPDATE_MAX_BYTES,
-  "Y.Doc update is not a Uint8Array within the IPC byte bound.",
-);
+const ENGINE_YDOC_UPDATE = z
+  .custom<Uint8Array>(
+    (value) => value instanceof Uint8Array,
+    "Y.Doc update must be a Uint8Array.",
+  )
+  .superRefine((value, context) => {
+    if (value.byteLength === 0) {
+      context.addIssue({
+        code: "custom",
+        message: "Y.Doc update must not be empty.",
+      });
+    }
+    if (value.byteLength > ENGINE_YDOC_UPDATE_MAX_BYTES) {
+      context.addIssue({
+        code: "custom",
+        message:
+          `ENGINE_YDOC_UPDATE_MAX_BYTES is ${ENGINE_YDOC_UPDATE_MAX_BYTES} bytes; ` +
+          `the update is ${value.byteLength} bytes.`,
+      });
+    }
+  });
 const ENGINE_YDOC_INITIAL_UPDATE = z.custom<Uint8Array>(
   (value) => value instanceof Uint8Array && value.byteLength <= ENGINE_YDOC_UPDATE_MAX_BYTES,
   "Y.Doc initial update is not a Uint8Array within the IPC byte bound.",
 );
+
+const ARTIFACT_ASSET_DESCRIPTOR: z.ZodType<ArtifactAssetDescriptor> = z.object({
+  id: z.string().min(1),
+  mimeType: z.string().min(1),
+  created: z.number().int().nonnegative(),
+  ref: PATH_STRING,
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  lastRetrieved: z.number().int().nonnegative().optional(),
+  version: z.number().int().nonnegative().optional(),
+});
 
 export const OpenEngineYDocSessionPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -3379,6 +3427,9 @@ export type OpenEngineYDocSessionPayload = z.infer<typeof OpenEngineYDocSessionP
 export const OpenEngineYDocSessionResult = z.object({
   available: z.boolean(),
   initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
+  objectId: z.string().min(1).optional(),
+  versionId: z.string().min(1).optional(),
+  artifactAssets: z.array(ARTIFACT_ASSET_DESCRIPTOR).optional(),
   lineageGeneration: z.number().int().positive().optional(),
   // The path is not in the version the workspace is on — a version switch
   // removed it while this open was queued behind that switch (#534). Every
@@ -3395,6 +3446,10 @@ export const OpenEngineYDocSessionResult = z.object({
   // closed. The caller stays read-only, states the reason, and offers a retry —
   // which is also what discharges what the failure left behind.
   engineMayHoldDocument: z.boolean().optional(),
+  // The engine committed the drawing, but its image records conflict with
+  // authoritative storage. The drawing stays read-only. Retrying cannot
+  // repair this terminal state.
+  artifactAssetsInvalid: z.boolean().optional(),
   // A delete or move owns this path for an interval. The renderer must stay
   // read-only and offer a retry, without claiming that the operation finished.
   removalInProgress: z
@@ -3405,6 +3460,31 @@ export const OpenEngineYDocSessionResult = z.object({
     .optional(),
 });
 export type OpenEngineYDocSessionResult = z.infer<typeof OpenEngineYDocSessionResult>;
+
+export const ReadEngineYDocArtifactAssetPayload = z.object({
+  sessionId: ENGINE_YDOC_SESSION_ID,
+  // The full descriptor, not just the id: after a lineage replacement one id
+  // can name both the winner's asset and a retired lineage's. The descriptor
+  // SELECTS among the descriptors main has pinned for this session — main
+  // hydrates from its own pinned copy, never from these fields.
+  descriptor: ARTIFACT_ASSET_DESCRIPTOR,
+});
+export type ReadEngineYDocArtifactAssetPayload = z.infer<
+  typeof ReadEngineYDocArtifactAssetPayload
+>;
+
+export const ReadEngineYDocArtifactAssetResult = z.object({
+  descriptor: ARTIFACT_ASSET_DESCRIPTOR,
+  bytes: z.custom<Uint8Array>(
+    (value) =>
+      value instanceof Uint8Array &&
+      value.byteLength <= MAX_VERSIONED_BINARY_FILE_BYTES,
+    `Artifact asset bytes must fit the engine's MAX_VERSIONED_BINARY_FILE_BYTES limit of ${MAX_VERSIONED_BINARY_FILE_BYTES} bytes.`,
+  ),
+});
+export type ReadEngineYDocArtifactAssetResult = z.infer<
+  typeof ReadEngineYDocArtifactAssetResult
+>;
 
 export const ApplyEngineYDocUpdatePayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
@@ -3467,6 +3547,7 @@ export const EngineYDocLineageReplacementEventSchema = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
   update: ENGINE_YDOC_UPDATE,
   recoveredPaths: z.array(PATH_STRING),
+  artifactAssets: z.array(ARTIFACT_ASSET_DESCRIPTOR),
   lineageGeneration: z.number().int().positive(),
 });
 
@@ -3833,7 +3914,7 @@ export interface DohcDesktopBridge {
   // batches that belong to a superseded search.
   onSearchResults(listener: (batch: SearchResultsEvent) => void): () => void;
   // WS-G2-C-2 engine Y.Doc editor binding. The renderer mints a sessionId and
-  // opens a live engine Y.Doc session for a rich file; main constructs the
+  // opens a live engine Y.Doc session for a supported live file; main constructs the
   // node-only session through the workspace's engine capture (reusing its
   // store). available:false => not engine-backed
   // (unflagged workspace, secret path, missing file, or already live) — the
@@ -3842,6 +3923,9 @@ export interface DohcDesktopBridge {
   openEngineYDocSession(
     payload: OpenEngineYDocSessionPayload,
   ): Promise<OpenEngineYDocSessionResult>;
+  readEngineYDocArtifactAsset(
+    payload: ReadEngineYDocArtifactAssetPayload,
+  ): Promise<ReadEngineYDocArtifactAssetResult>;
   // Ship a local editor CRDT update to main (journaled via recordUpdate +
   // debounced settle). A refusal is explicit so the renderer can preserve the
   // mirror instead of treating a dropped update as durable.

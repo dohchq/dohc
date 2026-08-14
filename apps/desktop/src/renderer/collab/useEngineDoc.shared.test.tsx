@@ -367,7 +367,9 @@ it("shares one document lease until the final consumer unmounts", async () => {
     expect(screen.getByTestId("state-first").textContent).toBe("saving");
     expect(screen.getByTestId("state-second").textContent).toBe("saving");
   });
-  expect(harness.api.applyEngineYDocUpdate).toHaveBeenCalledTimes(1);
+  await waitFor(() =>
+    expect(harness.api.applyEngineYDocUpdate).toHaveBeenCalledTimes(1),
+  );
 
   harness.emit("saved", 1);
   expect(screen.getByTestId("state-first").textContent).toBe("saved");

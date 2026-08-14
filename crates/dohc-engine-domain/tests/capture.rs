@@ -1165,6 +1165,54 @@ fn disk_driven_retire_owns_materialized_ydoc_heads() {
 }
 
 #[test]
+fn capture_manifest_excludes_pending_conflict_installed_ydoc_asset() {
+    use dohc_engine_domain::{WriteBinaryFile, capture_manifest_seed, write_binary_file_in_tx};
+    use dohc_engine_storage::{Preimage, hex_sha256, put_binary_blob};
+
+    let (scratch, mut store) = open_store();
+    let path = "assets/excalidraw/drawing/asset.png";
+    let bytes = [1, 2, 3, 4];
+    let sha256 = hex_sha256(&bytes);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            put_binary_blob(tx, &bytes).map_err(DomainError::from)?;
+            write_binary_file_in_tx(
+                tx,
+                &WriteBinaryFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: VERSION.to_owned(),
+                    object_id: "scene-asset-object-conflict".to_owned(),
+                    path: path.to_owned(),
+                    binary_sha256: sha256.clone(),
+                    moment_id: "moment-scene-conflict-asset-unprefixed".to_owned(),
+                    metadata_origin: "ydoc".to_owned(),
+                    metadata_summary: Some("Imported drawing asset".to_owned()),
+                    metadata_correlation_id: Some("scene-successor-claim".to_owned()),
+                    author_json: None,
+                    materialize: Some(Preimage::Absent),
+                    now_ms: 10,
+                },
+            )
+        })
+        .expect("install conflict scene asset");
+    assert!(!scratch.path().join(path).exists());
+
+    let seed = capture_manifest_seed(&store, WS, VERSION).expect("capture manifest seed");
+    assert!(
+        seed.iter().all(|entry| entry.path != path),
+        "capture must not claim an asset that has not reached disk"
+    );
+    assert_eq!(
+        VersionedTextStore::new(&mut store)
+            .read_binary(WS, VERSION, path)
+            .expect("read canonical asset")
+            .expect("pending asset remains canonical")
+            .bytes,
+        bytes
+    );
+}
+
+#[test]
 fn snapshot_metadata_reports_which_paths_the_ydoc_editor_owns() {
     // AUDIT-SILENTSAVE round 4 (D3). `has_ydoc_marker` is what stops the
     // desktop capture layer from retiring a settled Y.Doc for exceeding a cap

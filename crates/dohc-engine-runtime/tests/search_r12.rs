@@ -195,6 +195,76 @@ fn short_query_falls_back_to_a_bounded_linear_scan() {
 }
 
 #[test]
+fn rebuild_extracts_drawing_text_without_indexing_scene_data() {
+    const LIVE: &str = "rebuilddrawinglivetextneedle";
+    const DELETED: &str = "rebuilddrawingdeletedneedle";
+    const EMBEDDED: &str = "REBUILDDRAWINGBASE64SECRET";
+    const INVALID: &str = "rebuilddrawinginvalidrawneedle";
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let scene = json!({
+        "type": "excalidraw",
+        "elements": [
+            { "type": "text", "text": LIVE, "originalText": LIVE, "isDeleted": false },
+            { "type": "text", "text": DELETED, "originalText": DELETED, "isDeleted": true }
+        ],
+        "files": {
+            "image": { "dataURL": format!("data:image/png;base64,{EMBEDDED}") }
+        }
+    })
+    .to_string();
+    write_file(
+        &mut store,
+        "drawing-object",
+        "boards/plan.excalidraw",
+        &scene,
+        10,
+    );
+    write_file(
+        &mut store,
+        "invalid-drawing-object",
+        "boards/invalid.excalidraw",
+        &format!(r#"{{"type":"excalidraw","elements":["{INVALID}"#),
+        11,
+    );
+
+    store
+        .write_with(&NO_FAULTS, |transaction| {
+            transaction.execute(
+                "INSERT INTO engine_search_files_fts \
+                 (workspace_id,version_id,object_id,path,text) VALUES (?1,?2,?3,?4,?5)",
+                rusqlite::params![WS, V, "drawing-object", "boards/plan.excalidraw", scene],
+            )?;
+            transaction.execute(
+                "INSERT INTO engine_search_index_state \
+                 (workspace_id,version_id,indexed_at_ms,file_policy_degraded) \
+                 VALUES (?1,?2,-1,0)",
+                rusqlite::params![WS, V],
+            )?;
+            Ok::<_, dohc_engine_runtime::SearchError>(())
+        })
+        .expect("seed previous raw index generation");
+
+    ensure_index(&mut store, &root, 20);
+
+    assert_eq!(
+        run_search(&store, &root, LIVE)
+            .iter()
+            .map(|result| result.path.as_str())
+            .collect::<Vec<_>>(),
+        ["boards/plan.excalidraw"]
+    );
+    for private in [DELETED, EMBEDDED, INVALID, "originalText", "dataURL"] {
+        assert!(
+            run_search(&store, &root, private).is_empty(),
+            "drawing rebuild leaked {private:?}"
+        );
+    }
+}
+
+#[test]
 fn short_query_scan_caps_every_row_examined_even_without_matches() {
     // MUTATION: restore the SQL instr(lower(text), ...) filter or remove the raw
     // row cap and this no-match page scans all three rows and reports no

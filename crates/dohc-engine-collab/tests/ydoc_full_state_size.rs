@@ -87,14 +87,14 @@ fn block(rng: &mut Rng, target: usize) -> String {
 
 struct Sample {
     label: String,
-    markdown_bytes: usize,
+    content_bytes: usize,
     full_state_bytes: usize,
     blocks: usize,
 }
 
 impl Sample {
     fn ratio(&self) -> f64 {
-        self.full_state_bytes as f64 / self.markdown_bytes as f64
+        self.full_state_bytes as f64 / self.content_bytes as f64
     }
 }
 
@@ -103,24 +103,24 @@ impl Sample {
 /// fragmentation axis — the same finished document composed in larger or
 /// smaller units. Fragmentation dominates the encoding overhead, because every
 /// block costs an XML element plus its text item.
-fn grow_rich(target_markdown_bytes: usize, block_bytes: usize, seed: u64) -> Sample {
+fn grow_rich(target_content_bytes: usize, block_bytes: usize, seed: u64) -> Sample {
     let doc = Ydoc::wire();
     let mut rng = Rng(seed);
     let mut blocks = 0_usize;
     let mut approx = 0_usize;
-    while approx < target_markdown_bytes {
+    while approx < target_content_bytes {
         let text = block(&mut rng, block_bytes);
         approx += text.len() + 2;
         doc.richdoc_append_paragraph(&text);
         blocks += 1;
     }
-    let markdown = doc.project(ContentKind::Richdoc).expect("project").markdown;
+    let content = doc.project(ContentKind::Richdoc).expect("project").content;
     Sample {
         label: format!(
             "rich {} / {block_bytes} B blocks",
-            human(target_markdown_bytes)
+            human(target_content_bytes)
         ),
-        markdown_bytes: markdown.len(),
+        content_bytes: content.len(),
         full_state_bytes: doc.encode_full_state().len(),
         blocks,
     }
@@ -131,7 +131,7 @@ fn grow_rich(target_markdown_bytes: usize, block_bytes: usize, seed: u64) -> Sam
 /// behind. This is the churn axis — what a long-lived document accumulates
 /// beyond its content.
 fn grow_plaintext(
-    target_markdown_bytes: usize,
+    target_content_bytes: usize,
     block_bytes: usize,
     revisions: usize,
     seed: u64,
@@ -140,7 +140,7 @@ fn grow_plaintext(
     let mut rng = Rng(seed);
     let mut approx = 0_usize;
     let mut blocks = 0_usize;
-    while approx < target_markdown_bytes {
+    while approx < target_content_bytes {
         let text = format!("{}\n\n", block(&mut rng, block_bytes));
         doc.plaintext_insert(u32::try_from(approx).expect("index"), &text);
         approx += text.len();
@@ -157,16 +157,16 @@ fn grow_plaintext(
         doc.plaintext_insert(u32::try_from(at).expect("index"), &replacement);
         approx = approx - span + replacement.len();
     }
-    let markdown = doc
+    let content = doc
         .project(ContentKind::Plaintext)
         .expect("project")
-        .markdown;
+        .content;
     Sample {
         label: format!(
             "plaintext {} / {block_bytes} B blocks / {revisions} revisions",
-            human(target_markdown_bytes)
+            human(target_content_bytes)
         ),
-        markdown_bytes: markdown.len(),
+        content_bytes: content.len(),
         full_state_bytes: doc.encode_full_state().len(),
         blocks,
     }
@@ -183,13 +183,13 @@ fn human(bytes: usize) -> String {
 fn report(samples: &[Sample]) {
     println!(
         "\n{:<48} {:>12} {:>14} {:>8} {:>8}",
-        "document", "markdown B", "full state B", "ratio", "blocks"
+        "document", "content B", "full state B", "ratio", "blocks"
     );
     for sample in samples {
         println!(
             "{:<48} {:>12} {:>14} {:>8.3} {:>8}",
             sample.label,
-            sample.markdown_bytes,
+            sample.content_bytes,
             sample.full_state_bytes,
             sample.ratio(),
             sample.blocks

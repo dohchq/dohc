@@ -5,10 +5,10 @@
 
 use std::num::NonZeroUsize;
 
-/// Maximum UTF-8 text payload owned by workspace capture. This mirrors
-/// `MAX_HISTORY_TEXT_SNAPSHOT_BYTES` in the dormant TypeScript oracle; the
-/// larger [`ScanBounds::max_file_bytes`] remains the generic scan/hash ceiling.
-pub const MAX_CAPTURE_TEXT_BYTES: u64 = 128 * 1024;
+/// Maximum UTF-8 text payload owned by workspace capture. This equals the
+/// engine-domain `MAX_TEXT_BYTES` admission limit: capture must not reject a
+/// healthy text artifact that the authoritative store accepts.
+pub const MAX_CAPTURE_TEXT_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Maximum binary payload owned by workspace capture. This mirrors
 /// `MAX_VERSIONED_BINARY_FILE_BYTES` (`versionedTextStore.ts`): content over

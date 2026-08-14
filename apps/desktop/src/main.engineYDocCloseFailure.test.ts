@@ -72,6 +72,29 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
     ).toBe(3);
   });
 
+  it("keeps a committed scene read-only while its artifact assets are pending", () => {
+    const handler = handlerSource("engineYDocOpen");
+    // The workspace-session predicate owns pending-refusal classification;
+    // this handler owns mapping that retryable class to a read-only result.
+    const predicateAt = handler.indexOf("isEngineWorkspaceOpenRefusedError(error)");
+    expect(predicateAt).toBeGreaterThan(-1);
+    expect(
+      handler.slice(predicateAt, handler.indexOf("const entry:", predicateAt)),
+    ).toContain("engineMayHoldDocument: true");
+  });
+
+  it("reports corrupt scene asset authority as terminal instead of retryable", () => {
+    const handler = handlerSource("engineYDocOpen");
+    const predicateAt = handler.indexOf("isYdocArtifactAssetsInvalidRefusal(error)");
+    expect(predicateAt).toBeGreaterThan(-1);
+    const invalidBranch = handler.slice(
+      predicateAt,
+      handler.indexOf("isEngineWorkspaceOpenRefusedError(error)", predicateAt),
+    );
+    expect(invalidBranch).toContain("artifactAssetsInvalid: true");
+    expect(invalidBranch).not.toContain("engineMayHoldDocument: true");
+  });
+
   it("retries a failed close BY PATH before it binds anything", () => {
     // The renderer retries under a NEW session id (useEngineDoc, nextSessionId),
     // so an id-keyed retry never reaches the session whose close failed. The
@@ -91,7 +114,7 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
     // opened it, and closing it here would tear down another window's editor.
     expect(retry).toContain("entry.closeFailed");
     expect(retry).toContain("entry.workspaceId !== workspace.workspaceId");
-    expect(retry).toContain("entry.path !== input.path");
+    expect(retry).toContain("entry.path !== path");
     expect(retry).toContain("engineMayHoldDocument: true");
   });
 
@@ -126,7 +149,7 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
     // reachable only by the quit sweep.
     const handler = handlerSource("engineYDocOpen");
     const hookAt = handler.indexOf("engineYDocCleanupHooked.add(sender)");
-    const kindCheckAt = handler.indexOf('session.contentKind !== "richdoc"');
+    const kindCheckAt = handler.indexOf("session.contentKind !== requestedKind");
     expect(hookAt).toBeGreaterThan(-1);
     expect(kindCheckAt).toBeGreaterThan(-1);
     expect(hookAt).toBeLessThan(kindCheckAt);
@@ -168,6 +191,67 @@ describe("engine Y.Doc registry: a registration never replaces a live session", 
       expect(handler).toContain("engineYDocSessionKey(");
       expect(handler).not.toContain("engineYDocSessions.get(input.sessionId)");
     }
+  });
+});
+
+describe("workspace text writes: a live Y.Doc stays canonical", () => {
+  it("refuses the direct disk writer while any session owns the path", () => {
+    const handler = handlerSource("writeWorkspaceText");
+    const sessionGuardAt = handler.indexOf(
+      "for (const entry of engineYDocSessions.values())",
+    );
+    const diskWriteAt = handler.indexOf("await writeWorkspaceText(");
+
+    expect(sessionGuardAt).toBeGreaterThan(-1);
+    expect(sessionGuardAt).toBeLessThan(diskWriteAt);
+    expect(handler).toContain("entry.workspaceId === workspace.workspaceId");
+    expect(handler).toContain("const writePath = validateUserWritePath(input.relativePath)");
+    expect(handler).toContain("entry.path === writePath.normalized");
+    expect(handler).toContain("The engine owns this live document.");
+  });
+
+  it("stores the same normalized path that the direct writer compares", () => {
+    const handler = handlerSource("engineYDocOpen");
+    const validationAt = handler.indexOf(
+      "const validatedPath = validateUserWritePath(input.path)",
+    );
+    const registrationAt = handler.indexOf("const entry: EngineYDocSessionEntry");
+
+    expect(validationAt).toBeGreaterThan(-1);
+    expect(validationAt).toBeLessThan(registrationAt);
+    expect(handler).toContain("const path = validatedPath.normalized");
+    expect(handler.slice(registrationAt)).toContain("path,");
+    expect(handler.slice(registrationAt)).not.toContain("path: input.path");
+  });
+});
+
+describe("engine Y.Doc artifact assets stay bound to one authorized session", () => {
+  it("derives authority from the sender session and its pinned descriptor", () => {
+    const handler = handlerSource("engineYDocReadArtifactAsset");
+    expect(handler).toContain("assertTrustedSender(event)");
+    expect(handler).toContain("engineYDocSessionKey(event.sender.id, input.sessionId)");
+    expect(handler).toContain("entry.sender !== event.sender");
+    expect(handler).toContain("entry.generation !== rendererGeneration(event.sender.id)");
+    expect(handler).toContain("entry.artifactAssetsById.get(requested.id)");
+    expect(handler).toContain("...entry.retiredArtifactAssets,");
+    // The renderer's descriptor is a SELECTOR among main's pinned
+    // descriptors: the hydration call receives the pinned match, and every
+    // field must agree so one id cannot cross lineages — including two
+    // retired lineages that reused the same file id.
+    expect(handler).toContain("sameEngineYDocArtifactAsset(candidate, requested)");
+    expect(handler).toContain("entry.session.readArtifactAsset(descriptor)");
+    expect(handler).not.toContain("workspaceId");
+    expect(handler).not.toContain("versionId");
+    expect(handler).not.toContain("input.ref");
+  });
+
+  it("rejects unknown, stale, and foreign descriptors", () => {
+    const handler = handlerSource("engineYDocReadArtifactAsset");
+    expect(handler).toContain("!entry ||");
+    // A deleted entry stays session-bound until normal close so the renderer
+    // can finish the drawing recovery that the deletion notice started.
+    expect(handler).not.toContain("entry.deleted");
+    expect(handler).toContain("!descriptor");
   });
 });
 

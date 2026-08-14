@@ -438,7 +438,7 @@ fn oversized_lineage() -> &'static OversizedLineage {
             projected
                 .project(ContentKind::Plaintext)
                 .expect("the oversized state remains projectable")
-                .markdown
+                .content
                 .len(),
             visible_bytes
         );
@@ -1828,7 +1828,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
     let doc = Ydoc::wire();
     doc.apply(&opened.initial_update)
         .expect("load seeded state");
-    let seed = opened.seed_markdown.as_deref().expect("Markdown seed");
+    let seed = opened.seed_content.as_deref().expect("Markdown seed");
     doc.plaintext_insert(0, seed);
     assert_eq!(doc.plaintext_string(), BEFORE);
     doc.plaintext_insert(BEFORE.len() as u32, "after\n");

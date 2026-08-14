@@ -29,7 +29,7 @@ pub enum CollabError {
     #[error("Y.Doc update is {actual} bytes, over the {max}-byte cap")]
     UpdateTooLarge { actual: usize, max: usize },
 
-    /// Markdown projection exceeded its materialization cap. This is checked
+    /// The artifact projection exceeded its materialization cap. This is checked
     /// while rendering so hostile content cannot amplify a small Y.Doc into a
     /// much larger temporary allocation before the boundary rejects it.
     #[error("Y.Doc projection is at least {actual} bytes, over the {max}-byte cap")]
@@ -49,6 +49,18 @@ pub enum CollabError {
     /// kind that already owns this durable lineage.
     #[error("Y.Doc content kind does not match the existing lineage")]
     ContentKindMismatch,
+
+    /// A durable marker names a content kind this engine cannot interpret.
+    /// The engine must not guess a projection schema for unknown state.
+    #[error(
+        "unsupported durable Y.Doc content kind `{kind}`; supported kinds are `plaintext`, `richdoc`, and `scene`"
+    )]
+    UnsupportedContentKind { kind: String },
+
+    /// The conflict resolver tried to replace a non-Markdown artifact with
+    /// Markdown source. Scene conflict resolution needs its own operation.
+    #[error("Y.Doc content kind `{kind}` does not support Markdown replacement")]
+    MarkdownRewriteUnsupported { kind: &'static str },
 
     /// A replicated lineage already has its single base; a second base is
     /// rejected (base-once). The caller must resume the existing lineage.
@@ -166,9 +178,9 @@ pub enum CollabError {
     SeedOntoExistingLineage,
 
     /// A local-only close would prune CRDT state whose edits no durable settle
-    /// covers (the current head is not reflected in the materialized markdown).
-    /// Settle first — markdown-is-the-artifact requires the artifact to exist
-    /// before the cache is discarded.
+    /// covers (the current head is not reflected in the materialized artifact).
+    /// Settle first. The workspace file must contain the artifact before the
+    /// cache is discarded.
     #[error("local-only close would discard unsettled edits; settle before closing")]
     UnsettledClose,
 
@@ -194,6 +206,8 @@ impl CollabError {
             CollabError::ProjectionTooComplex { .. } => "projection-too-complex",
             CollabError::InvalidIdentifier { .. } => "invalid-identifier",
             CollabError::ContentKindMismatch => "content-kind-mismatch",
+            CollabError::UnsupportedContentKind { .. } => "unsupported-content-kind",
+            CollabError::MarkdownRewriteUnsupported { .. } => "markdown-rewrite-unsupported",
             CollabError::BaseAlreadyClaimed => "base-already-claimed",
             CollabError::BaseStateDiverged => "base-state-diverged",
             CollabError::BaseRelaySequencePending => "base-relay-sequence-pending",

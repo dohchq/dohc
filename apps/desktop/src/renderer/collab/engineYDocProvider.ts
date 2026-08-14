@@ -1,7 +1,7 @@
 // WS-G2-C-2 — the ENGINE Y.Doc provider (renderer half of the bridge).
 //
 // The live engine Y.Doc lives in MAIN (the engine driver is node-only). The
-// renderer's Tiptap editor binds to a MIRROR Y.Doc that this provider keeps
+// renderer's format editor binds to a MIRROR Y.Doc that this provider keeps
 // convergent with the main session over a transport (IPC in production, a mock
 // in tests). It exposes a Y.Doc that the Collaboration extension binds to via
 // its "body" XmlFragment. Solo editing runs purely on the
@@ -13,16 +13,15 @@
 // mirror doc under ENGINE_SOURCED_ORIGIN; the update observer that ships local
 // edits to main SKIPS that origin, so an engine-applied update is never bounced
 // back to main (which would double-journal / echo-storm). A real editor edit
-// carries Tiptap's own (non-ENGINE) origin and IS shipped.
+// carries the editor's own (non-ENGINE) origin and IS shipped.
 
 import * as Y from "yjs";
+import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
+import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 
 // Applied to the mirror doc for every update that ORIGINATED in the engine
 // (initial state, forwarded remote deltas). The local-edit observer ignores it.
 const ENGINE_SOURCED_ORIGIN: unique symbol = Symbol("dohc.engineSourcedUpdate");
-
-const REPAIR_RETRY_INITIAL_MS = 250;
-const REPAIR_RETRY_MAX_MS = 5_000;
 
 // One name for one concept, shared by the transport's open answer and the
 // binding it produces (and re-exported from useEngineDoc.ts) — three inline
@@ -34,6 +33,9 @@ export type EngineRemovalInProgress = {
 };
 
 export interface EngineYDocTransport {
+  // Declare format-owned top-level roots before the initial engine update is
+  // applied. This prevents Yjs from inferring an incompatible shared type.
+  initializeDoc?(doc: Y.Doc): void;
   // Open the engine session in main. available:false => not an engine-backed
   // doc (unflagged workspace, secret path, or already live) — the caller falls
   // back to the plain local editor. notInVersion:true is the ONE available:false
@@ -43,19 +45,40 @@ export interface EngineYDocTransport {
   open(): Promise<{
     available: boolean;
     initialUpdate?: Uint8Array;
+    objectId?: string;
+    versionId?: string;
+    artifactAssets?: readonly ArtifactAssetDescriptor[];
     lineageGeneration?: number;
     notInVersion?: boolean;
     // A session for this document may still be the engine's (#564, #657) —
     // the other available:false that must not fall back to the plain editor.
     engineMayHoldDocument?: boolean;
+    // The canonical drawing has image records that conflict with storage.
+    // This terminal state stays read-only and must not offer a retry.
+    artifactAssetsInvalid?: boolean;
     // A destructive operation owns this path for an interval. Falling back to
     // the plain editor would let its autosave race that operation.
     removalInProgress?: EngineRemovalInProgress;
   }>;
-  // Ship a local editor update to main, where it is journaled via recordUpdate.
-  // Resolution acknowledges that main accepted the update. The binding joins
-  // every acknowledgement before close, so teardown cannot outrun an edit.
-  applyLocalUpdate(update: Uint8Array, lineageGeneration: number): Promise<void>;
+  readArtifactAsset?(descriptor: ArtifactAssetDescriptor): Promise<{
+    descriptor: ArtifactAssetDescriptor;
+    bytes: Uint8Array;
+  }>;
+  // Reserve the save sequence synchronously when a local edit occurs. The
+  // provider can delay transport without letting an older settle report the
+  // pending edit as saved. null refuses the write before it enters a batch.
+  stageLocalUpdate(): number | null;
+  // Ship a local editor batch to main, where it is journaled via recordUpdate.
+  // sequence is the newest staged edit covered by the merged update.
+  // Resolution acknowledges that main accepted the batch. A refusal main
+  // returns as data must surface as EngineYDocDeliveryRefusedError — the one
+  // permanent delivery failure — while a transport fault rejects with its own
+  // error and is retried at the head of the queue.
+  applyLocalUpdate(
+    update: Uint8Array,
+    sequence: number,
+    lineageGeneration: number,
+  ): void | Promise<void>;
   // Subscribe to remote CRDT deltas main forwards (a co-editor's edit routed
   // through the engine). Returns an unsubscribe function.
   onRemoteUpdate(
@@ -68,12 +91,35 @@ export interface EngineYDocTransport {
     listener: (input: {
       update: Uint8Array;
       recoveredPaths: string[];
+      artifactAssets: readonly ArtifactAssetDescriptor[];
       lineageGeneration: number;
     }) => void | Promise<void>,
   ): () => void;
   acknowledgeLineageReplacement(lineageGeneration: number): Promise<Uint8Array[]>;
   // Settle + close the engine session in main (releases the reservation).
   close(): Promise<void>;
+}
+
+export interface EngineYDocBatchScheduler {
+  schedule(callback: () => void, delayMs: number): unknown;
+  cancel(handle: unknown): void;
+}
+
+export class EngineYDocUpdateTooLargeError extends Error {
+  readonly code = "engine-ydoc-update-too-large";
+  readonly constraint = "ENGINE_YDOC_UPDATE_MAX_BYTES";
+
+  constructor(
+    readonly observedBytes: number,
+    readonly limitBytes: number = ENGINE_YDOC_UPDATE_MAX_BYTES,
+  ) {
+    super(
+      "dohc could not save this edit. ENGINE_YDOC_UPDATE_MAX_BYTES is " +
+        `${limitBytes} bytes; the update is ${observedBytes} bytes. ` +
+        "Copy the set-aside edit below.",
+    );
+    this.name = "EngineYDocUpdateTooLargeError";
+  }
 }
 
 export class EngineYDocDeliveryRefusedError extends Error {
@@ -83,11 +129,93 @@ export class EngineYDocDeliveryRefusedError extends Error {
   }
 }
 
+function isPermanentDeliveryError(error: unknown): boolean {
+  return (
+    error instanceof EngineYDocUpdateTooLargeError ||
+    error instanceof EngineYDocDeliveryRefusedError
+  );
+}
+
+export interface EngineYDocBindOptions {
+  // A permanent delivery failure (an oversized update, or a refusal main
+  // returned as data). The mirror's edits can no longer reach the engine, so
+  // the full canonical state is handed over before anything destroys it. The
+  // queue halts until a lineage replacement installs a writable winner.
+  onDeliveryFailure?: (
+    snapshot: Uint8Array,
+    error: unknown,
+    source: Y.Doc,
+  ) => void | Promise<void>;
+  // Main can report a later update as saved while earlier edits still sit in
+  // the batch queue or an unacknowledged delivery. Keep the owner informed
+  // until every accepted local update has been acknowledged.
+  onDeliveryPendingChange?: (pending: boolean) => void;
+  // Runs after the losing mirror stops shipping updates and before main
+  // accepts the winner generation. The desktop uses this boundary to persist
+  // state that existed only in the losing renderer mirror.
+  onDocumentReplacing?: (
+    retired: Y.Doc,
+    recoveredPaths: string[],
+  ) => void | Promise<void>;
+  onLineageReplacementFailure?: (error: unknown, retired: Y.Doc) => void;
+}
+
+const LOCAL_UPDATE_BATCH_MS = 32;
+// Local IPC normally answers in one turn. A quarter-second retry avoids a hot
+// loop during an outage while recovering a brief renderer/main handoff quickly.
+const LOCAL_UPDATE_RETRY_MS = 250;
+const timeoutBatchScheduler: EngineYDocBatchScheduler = {
+  schedule(callback, delayMs) {
+    return globalThis.setTimeout(callback, delayMs);
+  },
+  cancel(handle) {
+    globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>);
+  },
+};
+
+export function mergeYDocUpdatesForTransport(
+  stagedUpdates: ReadonlyArray<{
+    update: Uint8Array;
+    sequence: number;
+  }>,
+  maxBytes: number = ENGINE_YDOC_UPDATE_MAX_BYTES,
+): Array<{ update: Uint8Array; sequence: number }> {
+  if (stagedUpdates.length === 0) return [];
+
+  const mergeRange = (
+    start: number,
+    end: number,
+  ): Array<{ update: Uint8Array; sequence: number }> => {
+    const range = stagedUpdates.slice(start, end);
+    const merged =
+      range.length === 1
+        ? range[0]!.update
+        : Y.mergeUpdates(range.map(({ update }) => update));
+    const sequence = range.at(-1)!.sequence;
+    if (merged.byteLength <= maxBytes || range.length === 1) {
+      // Keep a single oversized update intact. This provider must not invent a
+      // new rejection; the existing transport boundary owns that refusal.
+      return [{ update: merged, sequence }];
+    }
+
+    const middle = start + Math.ceil(range.length / 2);
+    return [...mergeRange(start, middle), ...mergeRange(middle, end)];
+  };
+
+  // The normal path parses any number of pending updates once. If a throttled
+  // background timer accumulated enough work to cross the existing transport
+  // boundary, balanced splitting avoids repeatedly merging a growing prefix.
+  return mergeRange(0, stagedUpdates.length);
+}
+
 export interface EngineYDocBinding {
-  // The mirror Y.Doc Tiptap binds to, or null when the doc is not engine-backed
-  // (available:false) — the caller stays on the local autosave editor.
+  // The mirror Y.Doc the editor binds to, or null when the doc is not
+  // engine-backed (available:false) — the caller stays on the local autosave
+  // editor.
   readonly doc: Y.Doc | null;
   readonly available: boolean;
+  readonly objectId: string | null;
+  readonly versionId: string | null;
   // The path is not in the version this workspace is on. The caller must stop
   // editing the document, not downgrade it to the writable plain editor.
   readonly notInVersion: boolean;
@@ -95,47 +223,35 @@ export interface EngineYDocBinding {
   // caller keeps the document read-only with the reason stated and a retry
   // offered — the same no-downgrade rule as notInVersion.
   readonly engineMayHoldDocument: boolean;
+  readonly artifactAssetsInvalid: boolean;
   // A delete or move owns the path for an interval. The caller keeps the
   // document read-only and offers a fresh open after the interval ends.
   readonly removalInProgress: EngineRemovalInProgress | null;
+  readonly artifactAssets: readonly ArtifactAssetDescriptor[];
+  readArtifactAsset(descriptor: ArtifactAssetDescriptor): Promise<{
+    descriptor: ArtifactAssetDescriptor;
+    bytes: Uint8Array;
+  }>;
   onDocumentReplaced(
     listener: (doc: Y.Doc, recoveredPaths: string[]) => void,
   ): () => void;
   // Tear down: stop shipping edits, unsubscribe, close the engine session, and
-  // destroy the mirror doc. Idempotent.
+  // destroy the mirror doc. Idempotent. If main has not acknowledged an edit,
+  // teardown waits and keeps the session open. It completes after recovery.
   destroy(): Promise<void>;
-}
-
-export interface EngineYDocBindingOptions {
-  // If both ordinary delivery and the final full-state retry fail, preserve
-  // the canonical mirror before close destroys it.
-  onDeliveryFailure?: (
-    snapshot: Uint8Array,
-    error: unknown,
-    source: Y.Doc,
-  ) => void | Promise<void>;
-  // Main can report a later update as saved before an earlier rejected IPC
-  // delivery is repaired. Keep the owner informed until every accepted local
-  // update, including a full-state repair, has finished.
-  onDeliveryPendingChange?: (pending: boolean) => void;
-  // Runs after the losing mirror stops shipping updates and before main
-  // accepts the winner generation. The desktop uses this boundary to persist
-  // text that existed only in the losing renderer mirror.
-  onDocumentReplacing?: (
-    retired: Y.Doc,
-    recoveredPaths: string[],
-  ) => void | Promise<void>;
 }
 
 // Bind a mirror Y.Doc to an engine session over `transport`. On success the
 // returned binding's `doc` is ready for the Collaboration extension.
 export async function bindEngineYDoc(
   transport: EngineYDocTransport,
-  options: EngineYDocBindingOptions = {},
+  batchScheduler: EngineYDocBatchScheduler = timeoutBatchScheduler,
+  options: EngineYDocBindOptions = {},
 ): Promise<EngineYDocBinding> {
   type LineageReplacement = {
     update: Uint8Array;
     recoveredPaths: string[];
+    artifactAssets: readonly ArtifactAssetDescriptor[];
     lineageGeneration: number;
   };
   const replacementsBeforeOpen: LineageReplacement[] = [];
@@ -163,9 +279,20 @@ export async function bindEngineYDoc(
     return {
       doc: null,
       available: false,
+      objectId: null,
+      versionId: null,
       notInVersion: opened.notInVersion === true,
       engineMayHoldDocument: opened.engineMayHoldDocument === true,
+      artifactAssetsInvalid: opened.artifactAssetsInvalid === true,
       removalInProgress: opened.removalInProgress ?? null,
+      artifactAssets: [],
+      readArtifactAsset(descriptor) {
+        return Promise.reject(
+          new Error(
+            `Artifact asset ${descriptor.id} cannot load without a live document session.`,
+          ),
+        );
+      },
       onDocumentReplaced() {
         return () => undefined;
       },
@@ -188,22 +315,25 @@ export async function bindEngineYDoc(
   }
   let lineageGeneration = opened.lineageGeneration;
   let doc = new Y.Doc();
+  transport.initializeDoc?.(doc);
   // Seed the mirror to the engine's current state BEFORE binding, under the
   // engine origin so the observer we attach next does not ship it back.
   Y.applyUpdate(doc, opened.initialUpdate, ENGINE_SOURCED_ORIGIN);
 
   let destroyed = false;
   let destroyPromise: Promise<void> | null = null;
-  const activeDeliveries = new Set<Promise<void>>();
+  let scheduledFlush: unknown | null = null;
+  let pendingLocalUpdates: Array<{
+    update: Uint8Array;
+    sequence: number;
+  }> = [];
+  let sendChain = Promise.resolve();
+  let unacknowledgedBatches = 0;
   let deliveryPending = false;
-  let repairNeeded = false;
-  let repairRunning = false;
-  let repairRequested = false;
-  let repairRetryDelayMs = REPAIR_RETRY_INITIAL_MS;
-  let repairRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  let lineageReplacing = false;
-  let terminalDeliveryError: unknown = null;
-  let terminalRecoveryError: unknown = null;
+  let localUpdatesRefused = false;
+  let replacementInProgress = false;
+  let destroyRequested = false;
+  let recoveryError: unknown = null;
 
   const setDeliveryPending = (pending: boolean): void => {
     if (deliveryPending === pending) return;
@@ -212,152 +342,141 @@ export async function bindEngineYDoc(
   };
 
   const finishDeliveryIfSafe = (): void => {
-    if (
-      activeDeliveries.size === 0 &&
-      !repairNeeded &&
-      !repairRunning
-    ) {
+    if (pendingLocalUpdates.length === 0 && unacknowledgedBatches === 0) {
       setDeliveryPending(false);
     }
   };
 
-  const trackDelivery = (delivery: Promise<void>): void => {
-    let tracked!: Promise<void>;
-    tracked = delivery.finally(() => {
-      activeDeliveries.delete(tracked);
+  const refuseLocalUpdates = (error: unknown): void => {
+    if (localUpdatesRefused) return;
+    localUpdatesRefused = true;
+    pendingLocalUpdates = [];
+    const refusedDoc = doc;
+    try {
+      // The full state, not the failed delta: it also covers every edit made
+      // while the failed delivery was in flight, and it survives the mirror's
+      // destruction.
+      const handed = options.onDeliveryFailure?.(
+        Y.encodeStateAsUpdate(refusedDoc),
+        error,
+        refusedDoc,
+      );
+      void Promise.resolve(handed)
+        .catch((captureError: unknown) => {
+          recoveryError = captureError;
+        })
+        .finally(() => finishDeliveryIfSafe());
+    } catch (captureError) {
+      // Observer boundary: recovery reporting must not wedge teardown — but a
+      // failed recovery is the loss of the last copy, so destroy rethrows it.
+      recoveryError = captureError;
       finishDeliveryIfSafe();
-    });
-    activeDeliveries.add(tracked);
-    void tracked.catch(() => undefined);
-  };
-
-  const drainDeliveries = async (): Promise<void> => {
-    while (activeDeliveries.size > 0) {
-      await Promise.allSettled([...activeDeliveries]);
     }
   };
 
-  const clearRepairRetry = (): void => {
-    if (repairRetryTimer === null) return;
-    clearTimeout(repairRetryTimer);
-    repairRetryTimer = null;
-  };
-
-  const scheduleRepairRetry = (): void => {
-    if (
-      destroyed ||
-      lineageReplacing ||
-      terminalDeliveryError !== null ||
-      repairRetryTimer !== null ||
-      !repairNeeded
-    ) {
-      return;
+  const applyLocalUpdateUntilAcknowledged = async (batch: {
+    update: Uint8Array;
+    sequence: number;
+  }, batchGeneration: number): Promise<void> => {
+    try {
+      await deliverBatchUntilAcknowledged(batch, batchGeneration);
+    } finally {
+      unacknowledgedBatches -= 1;
+      finishDeliveryIfSafe();
     }
-    const delay = repairRetryDelayMs;
-    repairRetryDelayMs = Math.min(delay * 2, REPAIR_RETRY_MAX_MS);
-    repairRetryTimer = setTimeout(() => {
-      repairRetryTimer = null;
-      startRepair();
-    }, delay);
   };
 
-  function startRepair(): void {
-    if (
-      destroyed ||
-      lineageReplacing ||
-      terminalDeliveryError !== null ||
-      repairRunning ||
-      !repairNeeded
-    ) {
-      return;
-    }
-    clearRepairRetry();
-    repairNeeded = false;
-    repairRunning = true;
-    repairRequested = false;
-    const repairDoc = doc;
-    const snapshot = Y.encodeStateAsUpdate(repairDoc);
-    const repair = (async () => {
-      let repaired = false;
-      try {
-        await transport.applyLocalUpdate(snapshot, lineageGeneration);
-        repaired = true;
-      } catch (error: unknown) {
-        if (error instanceof EngineYDocDeliveryRefusedError) {
-          await preserveTerminalFailure(snapshot, error, repairDoc);
-          return;
-        }
-        repairNeeded = true;
-      } finally {
-        repairRunning = false;
-        if (repaired) repairRetryDelayMs = REPAIR_RETRY_INITIAL_MS;
-        if (repairNeeded) {
-          if (repaired || repairRequested) startRepair();
-          else scheduleRepairRetry();
-        }
-      }
-    })();
-    trackDelivery(repair);
-  }
-
-  const preserveTerminalFailure = (
-    snapshot: Uint8Array,
-    error: unknown,
-    source: Y.Doc,
-  ): Promise<void> => {
-    terminalDeliveryError = error;
-    repairNeeded = false;
-    repairRequested = false;
-    clearRepairRetry();
-    const recovery = Promise.resolve()
-      .then(() => options.onDeliveryFailure?.(snapshot, error, source))
-      .catch((captureError: unknown) => {
-        terminalRecoveryError = captureError;
-      })
-      .finally(() => {
-        finishDeliveryIfSafe();
-      });
-    return recovery;
-  };
-
-  // Ship every LOCAL editor edit to main. A Tiptap edit carries a non-ENGINE
-  // origin; an engine-sourced apply carries ENGINE_SOURCED_ORIGIN and is
-  // skipped (no echo back to main).
-  const onUpdate = (update: Uint8Array, origin: unknown): void => {
-    if (destroyed) return;
-    if (origin === ENGINE_SOURCED_ORIGIN) return;
-    setDeliveryPending(true);
-    if (terminalDeliveryError !== null) {
-      trackDelivery(
-        preserveTerminalFailure(
-          Y.encodeStateAsUpdate(doc),
-          terminalDeliveryError,
-          doc,
-        ),
+  const deliverBatchUntilAcknowledged = async (batch: {
+    update: Uint8Array;
+    sequence: number;
+  }, batchGeneration: number): Promise<void> => {
+    if (localUpdatesRefused) return;
+    if (batch.update.byteLength > ENGINE_YDOC_UPDATE_MAX_BYTES) {
+      refuseLocalUpdates(
+        new EngineYDocUpdateTooLargeError(batch.update.byteLength),
       );
       return;
     }
-    if (repairRunning) repairRequested = true;
-    let delivery: Promise<void>;
-    try {
-      // Start synchronously, as before. Main owns update ordering; the
-      // acknowledgement tracking below is not a second delivery queue.
-      delivery = transport.applyLocalUpdate(update, lineageGeneration);
-    } catch (error: unknown) {
-      delivery = Promise.reject(error);
-    }
-    const observed = delivery.catch((error: unknown) => {
-      if (error instanceof EngineYDocDeliveryRefusedError) {
-        return preserveTerminalFailure(Y.encodeStateAsUpdate(doc), error, doc);
+    for (;;) {
+      if (replacementInProgress || batchGeneration !== lineageGeneration) return;
+      try {
+        await transport.applyLocalUpdate(
+          batch.update,
+          batch.sequence,
+          batchGeneration,
+        );
+        return;
+      } catch (error) {
+        if (isPermanentDeliveryError(error)) {
+          refuseLocalUpdates(error);
+          return;
+        }
+        if (destroyRequested) {
+          // Teardown must not spin on an unavailable transport. The canonical
+          // mirror is preserved instead, and close may then proceed.
+          refuseLocalUpdates(error);
+          return;
+        }
+        // An abandoned batch must not sleep first: a replacement is waiting
+        // for this chain to drain before it preserves and acknowledges.
+        if (replacementInProgress || batchGeneration !== lineageGeneration) {
+          return;
+        }
+        // Yjs increments a client's clock across updates. A later delta can
+        // therefore depend on structs in this one, so the head of the queue
+        // must stay put until main acknowledges it. Retrying the same update
+        // is safe because Yjs updates are idempotent.
+        await new Promise<void>((resolve) => {
+          batchScheduler.schedule(resolve, LOCAL_UPDATE_RETRY_MS);
+        });
       }
-      repairNeeded = true;
-      startRepair();
-      throw error;
-    });
-    trackDelivery(observed);
-    // A new edit is a delivery opportunity, so it need not wait for a
-    // scheduled repair retry.
-    startRepair();
+    }
+  };
+
+  const flushPendingLocalUpdates = (): Promise<void> => {
+    if (scheduledFlush !== null) {
+      batchScheduler.cancel(scheduledFlush);
+      scheduledFlush = null;
+    }
+    if (pendingLocalUpdates.length === 0) {
+      return sendChain;
+    }
+    const updates = pendingLocalUpdates;
+    pendingLocalUpdates = [];
+    const batchGeneration = lineageGeneration;
+    // Preserve batch order even when the transport is asynchronous. A failed
+    // head stays ahead of every later batch until main acknowledges it. The
+    // chain remains pending during retries, so teardown cannot settle and
+    // close a session that still has renderer-only edits.
+    for (const batch of mergeYDocUpdatesForTransport(updates)) {
+      unacknowledgedBatches += 1;
+      sendChain = sendChain.then(() =>
+        applyLocalUpdateUntilAcknowledged(batch, batchGeneration),
+      );
+    }
+    return sendChain;
+  };
+
+  const scheduleLocalUpdateFlush = (): void => {
+    if (scheduledFlush !== null) return;
+    scheduledFlush = batchScheduler.schedule(() => {
+      scheduledFlush = null;
+      void flushPendingLocalUpdates();
+    }, LOCAL_UPDATE_BATCH_MS);
+  };
+
+  // Coalesce consecutive LOCAL editor edits before shipping them to main. An
+  // editor edit carries a non-ENGINE origin; an engine-sourced apply carries
+  // ENGINE_SOURCED_ORIGIN and is skipped (no echo back to main).
+  const onUpdate = (update: Uint8Array, origin: unknown): void => {
+    if (destroyed) return;
+    if (origin === ENGINE_SOURCED_ORIGIN) return;
+    if (localUpdatesRefused) return;
+    const sequence = transport.stageLocalUpdate();
+    if (sequence === null) return;
+    setDeliveryPending(true);
+    pendingLocalUpdates.push({ update, sequence });
+    scheduleLocalUpdateFlush();
   };
   doc.on("update", onUpdate);
 
@@ -374,28 +493,42 @@ export async function bindEngineYDoc(
   >();
   const retiredDocs = new Set<Y.Doc>();
   let replacementHandoff: Promise<void> | null = null;
+  let artifactAssets = opened.artifactAssets ?? [];
   const queueReplacement = (input: LineageReplacement): Promise<void> => {
     const replace = async (): Promise<void> => {
       if (destroyed || input.lineageGeneration <= lineageGeneration) return;
       const replacement = new Y.Doc();
+      transport.initializeDoc?.(replacement);
       Y.applyUpdate(replacement, input.update, ENGINE_SOURCED_ORIGIN);
       const retired = doc;
       // First close the only path that can ship a losing transaction to main.
       // It stays closed for the whole acknowledgement handoff.
-      lineageReplacing = true;
       retired.off("update", onUpdate);
-      clearRepairRetry();
-      if (activeDeliveries.size > 0) await drainDeliveries();
-      if (options.onDocumentReplacing) {
-        await options.onDocumentReplacing(retired, input.recoveredPaths);
+      replacementInProgress = true;
+      if (scheduledFlush !== null) {
+        batchScheduler.cancel(scheduledFlush);
+        scheduledFlush = null;
       }
-      repairNeeded = false;
-      repairRequested = false;
-      terminalDeliveryError = null;
-      terminalRecoveryError = null;
-      const bufferedUpdates = await transport.acknowledgeLineageReplacement(
-        input.lineageGeneration,
-      );
+      pendingLocalUpdates = [];
+      // Wait out any delivery already in flight before preserving and
+      // acknowledging: the winner must not install while the loser's last
+      // batch is still being answered. In-queue batches abandon themselves
+      // the moment their retry loop observes the replacement.
+      if (unacknowledgedBatches > 0) {
+        await sendChain.catch(() => undefined);
+      }
+      let bufferedUpdates: Uint8Array[];
+      try {
+        if (options.onDocumentReplacing) {
+          await options.onDocumentReplacing(retired, input.recoveredPaths);
+        }
+        bufferedUpdates = await transport.acknowledgeLineageReplacement(
+          input.lineageGeneration,
+        );
+      } catch (error) {
+        options.onLineageReplacementFailure?.(error, retired);
+        throw error;
+      }
       if (destroyed) {
         replacement.destroy();
         return;
@@ -407,8 +540,10 @@ export async function bindEngineYDoc(
       retiredDocs.add(retired);
       doc = replacement;
       lineageGeneration = input.lineageGeneration;
-      lineageReplacing = false;
-      setDeliveryPending(false);
+      artifactAssets = input.artifactAssets;
+      localUpdatesRefused = false;
+      replacementInProgress = false;
+      finishDeliveryIfSafe();
       for (const listener of replacementListeners) {
         listener(replacement, input.recoveredPaths);
       }
@@ -439,58 +574,52 @@ export async function bindEngineYDoc(
       return doc;
     },
     available: true,
+    objectId: opened.objectId ?? null,
+    versionId: opened.versionId ?? null,
     notInVersion: false,
     engineMayHoldDocument: false,
+    artifactAssetsInvalid: false,
     removalInProgress: null,
+    get artifactAssets() {
+      return artifactAssets;
+    },
+    readArtifactAsset(descriptor) {
+      if (!transport.readArtifactAsset) {
+        return Promise.reject(
+          new Error("This document transport cannot load artifact assets."),
+        );
+      }
+      return transport.readArtifactAsset(descriptor);
+    },
     onDocumentReplaced(listener) {
       replacementListeners.add(listener);
       return () => replacementListeners.delete(listener);
     },
     destroy() {
-      if (destroyPromise) return destroyPromise;
+      if (destroyPromise !== null) return destroyPromise;
       destroyed = true;
-      clearRepairRetry();
       doc.off("update", onUpdate);
       unsubscribe();
-      unsubscribeReplacement();
+      // A close settles the engine state. Flush and await every accepted local
+      // edit before close so teardown cannot settle behind the mirror. If the
+      // transport stays unavailable, this promise stays pending by design.
+      // Main's sender-destroyed cleanup owns a renderer-process exit. A
+      // PERMANENT refusal resolves the chain instead: the canonical state was
+      // already handed to onDeliveryFailure, so close may proceed.
+      destroyRequested = true;
       destroyPromise = (async () => {
-        let deliveryError: unknown = null;
-        let recoveryError: unknown = terminalRecoveryError;
         if (replacementHandoff) {
           await Promise.allSettled([replacementHandoff]);
         }
-        await drainDeliveries();
-        recoveryError ??= terminalRecoveryError;
-        if (terminalDeliveryError !== null) {
-          deliveryError = terminalDeliveryError;
-        } else if (repairNeeded) {
-          const finalSnapshot = Y.encodeStateAsUpdate(doc);
-          try {
-            // Full state, not the failed delta: this also covers every edit
-            // made while the failed delivery was in flight.
-            await transport.applyLocalUpdate(finalSnapshot, lineageGeneration);
-          } catch (error: unknown) {
-            deliveryError = error;
-            try {
-            await options.onDeliveryFailure?.(finalSnapshot, error, doc);
-            } catch (captureError: unknown) {
-              recoveryError = captureError;
-            }
-          }
-        }
-
-        // Main settles the converged state on close. A close failure is still
-        // retained and retried by main, so it stays best-effort here.
+        await flushPendingLocalUpdates();
         await transport.close().catch(() => undefined);
+        unsubscribeReplacement();
         doc.destroy();
         for (const retired of retiredDocs) retired.destroy();
         retiredDocs.clear();
-
+        // A failed recovery is the loss of the mirror's last copy — it must
+        // not vanish into a resolved teardown.
         if (recoveryError !== null) throw recoveryError;
-        // Generic bindings without a recovery owner must not hide loss.
-        if (deliveryError !== null && !options.onDeliveryFailure) {
-          throw deliveryError;
-        }
       })();
       return destroyPromise;
     },

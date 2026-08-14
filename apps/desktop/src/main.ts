@@ -5,6 +5,7 @@ import {
   validateUserWritePath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
   CHATS_METHOD,
   VersionedLiveAdapter,
@@ -12,6 +13,7 @@ import {
   WorkspaceDaemonRequester,
   decodeGranularChatMessageSearchResponse,
   decodeUnreadFileThreads,
+  isYdocArtifactAssetsInvalidRefusal,
 } from "@dohc/workspace-engine-client";
 import {
   app,
@@ -246,6 +248,8 @@ import {
   SearchResultsEventSchema,
   OpenEngineYDocSessionPayload,
   OpenEngineYDocSessionResult,
+  ReadEngineYDocArtifactAssetPayload,
+  ReadEngineYDocArtifactAssetResult,
   ApplyEngineYDocUpdatePayload,
   ApplyEngineYDocUpdateResult,
   AcknowledgeEngineYDocLineageReplacementPayload,
@@ -684,17 +688,6 @@ function requireWorkspace(workspaceId: string) {
   const workspace = findWorkspace(workspaceId);
   if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
   return workspace;
-}
-
-// WS-G2-C-2: only RICH (markdown) files bind to an engine Y.Doc — that is the
-// editor surface the Collaboration extension drives. Plain source/CSV/JSON/text
-// files keep the local autosave editor, and secret paths never open as a Y.Doc
-// (the driver refuses one anyway). The renderer already gates on the same
-// classifier; this is the main-side authority.
-function isRichEnginePath(path: string): boolean {
-  const dot = path.lastIndexOf(".");
-  const ext = dot === -1 ? "" : path.slice(dot + 1).toLowerCase();
-  return ext === "md" || ext === "markdown";
 }
 
 // PR 18 read-only shared views: a shared view is a read-only local workspace.
@@ -3050,6 +3043,25 @@ const searchRegistry = createSearchRegistry({ rgPath });
 // Senders whose 'destroyed' cleanup hook is already attached.
 const searchCleanupHooked = new WeakSet<Electron.WebContents>();
 
+type EngineYDocArtifactAsset = NonNullable<
+  WorkspaceEngineYDocProviderSession["artifactAssets"]
+>[number];
+
+function sameEngineYDocArtifactAsset(
+  left: EngineYDocArtifactAsset,
+  right: EngineYDocArtifactAsset,
+): boolean {
+  return (
+    left.id === right.id &&
+    left.mimeType === right.mimeType &&
+    left.created === right.created &&
+    left.ref === right.ref &&
+    left.sha256 === right.sha256 &&
+    left.lastRetrieved === right.lastRetrieved &&
+    left.version === right.version
+  );
+}
+
 // WS-G2-C-2 engine Y.Doc editor binding: the live node-only sessions main owns
 // on the renderer's behalf, keyed by engineYDocSessionKey — the renderer-minted
 // sessionId under the sender main owns. Each holds the single-canonical
@@ -3077,6 +3089,15 @@ interface EngineYDocSessionEntry {
   // are routinely in flight at once, so this is a FIFO, not a scalar — see
   // engineYDocSaveSeq.ts.
   saveSeq: EngineYDocSaveSeqState;
+  artifactAssetsById: ReadonlyMap<string, EngineYDocArtifactAsset>;
+  // Descriptors from every lineage this session already replaced. A retired
+  // document's recovery can retry a failed asset read after the
+  // acknowledgement swapped `artifactAssetsById` to the winner, so losing
+  // descriptors stay readable until the normal session close. Kept per
+  // descriptor identity, not per id: successive replacements can reuse one
+  // file id for different content, and each retired lineage's recovery needs
+  // its own descriptor. The current lineage wins an id collision.
+  retiredArtifactAssets: EngineYDocArtifactAsset[];
   // Set by releaseEngineYDocSession when a close failed. The next open of this
   // document retries the release before it binds anything.
   closeFailed?: boolean;
@@ -3092,6 +3113,9 @@ const engineYDocSessions = new Map<string, EngineYDocSessionEntry>();
 type EngineYDocLineageHandoff = {
   lineageGeneration: number;
   remoteUpdates: Uint8Array[];
+  artifactAssets: readonly NonNullable<
+    WorkspaceEngineYDocProviderSession["artifactAssets"]
+  >[number][];
   acknowledge: () => AcknowledgeEngineYDocLineageReplacementResult;
 };
 const pendingEngineYDocLineageHandoffs = new Map<
@@ -3880,7 +3904,11 @@ function registerIpcHandlers(
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
     return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async () => {
-      const path = await createFile(workspace.rootPath, input.relativePath);
+      const path = await createFile(
+        workspace.rootPath,
+        input.relativePath,
+        input.initialText,
+      );
       return CreateWorkspaceFileResult.parse({ path });
     });
   });
@@ -3909,6 +3937,20 @@ function registerIpcHandlers(
         // rename). Anything the engine declines — folders, binary, untracked —
         // returns a no-op finisher and is captured as delete+write as before.
         const capture = activity.engineCaptureFor(workspace.workspaceId);
+        // An engine rename preserves the stable object and its Y.Doc kind,
+        // but the editor for the new path is chosen by suffix. A rename out
+        // of a live kind strands the document between them: a drawing
+        // renamed `.md` hands its portable JSON to a raw autosave editor
+        // beside the still-canonical scene, and a drawing renamed `.txt`
+        // keeps a scene lineage no text editor or Markdown fold can update.
+        // Kind changes go through a new file, not a rename.
+        const fromKind = liveDocumentKindForPath(input.fromPath);
+        const toKind = liveDocumentKindForPath(input.toPath);
+        if (capture && fromKind !== null && fromKind !== toKind) {
+          throw new Error(
+            `A rename cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`,
+          );
+        }
         const finishRename = capture
           ? await capture.beginFileRename(input.fromPath, input.toPath)
           : null;
@@ -4333,6 +4375,18 @@ function registerIpcHandlers(
     const input = WriteWorkspaceTextPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
+    const writePath = validateUserWritePath(input.relativePath);
+    for (const entry of engineYDocSessions.values()) {
+      if (
+        writePath.ok &&
+        entry.workspaceId === workspace.workspaceId &&
+        entry.path === writePath.normalized
+      ) {
+        throw new Error(
+          "The engine owns this live document. Close its editor before writing the file directly.",
+        );
+      }
+    }
     return WriteWorkspaceTextResult.parse(
       await writeWorkspaceText(
         workspace.rootPath,
@@ -8839,7 +8893,7 @@ function registerIpcHandlers(
   // (constructed through the workspace's engine capture, which reuses its store)
   // and forwards remote CRDT deltas back to the sender that opened it. No
   // websocket or token is needed. Gated on an engine-flagged workspace + a
-  // rich (markdown) path; a
+  // classified live-document path; a
   // secret/already-live throw surfaces as available:false so the renderer falls
   // back to the plain local autosave editor. The ONE refusal that must not fall
   // back that way is path-not-in-version (#534): the plain editor is writable
@@ -8861,9 +8915,15 @@ function registerIpcHandlers(
     const sender = event.sender;
     const generation = rendererGeneration(sender.id);
     const capture = activity.engineCaptureFor(workspace.workspaceId);
-    // Only engine-flagged workspaces have a capture; only rich (markdown) files
-    // bind to a Y.Doc. Everything else stays on the plain editor.
-    if (!capture || !isRichEnginePath(input.path)) {
+    const validatedPath = validateUserWritePath(input.path);
+    if (!validatedPath.ok) {
+      return OpenEngineYDocSessionResult.parse({ available: false });
+    }
+    const path = validatedPath.normalized;
+    const requestedKind = liveDocumentKindForPath(path);
+    // Only engine-flagged workspaces have a capture. The shared classifier is
+    // the main-side authority for which paths bind to a Y.Doc.
+    if (!capture || requestedKind === null) {
       return OpenEngineYDocSessionResult.parse({ available: false });
     }
     // PENDING FROM THE FIRST AWAIT, not from the open. A renderer reload waits
@@ -8906,7 +8966,7 @@ function registerIpcHandlers(
       for (const [failedKey, entry] of [...engineYDocSessions]) {
         if (!entry.closeFailed) continue;
         if (entry.workspaceId !== workspace.workspaceId) continue;
-        if (entry.path !== input.path) continue;
+        if (entry.path !== path) continue;
         if (
           !(await releaseEngineYDocSessionEntry(
             failedKey,
@@ -8931,11 +8991,17 @@ function registerIpcHandlers(
         update: Uint8Array;
         recoveredPaths: string[];
         remoteUpdates: Uint8Array[];
+        artifactAssets: readonly NonNullable<
+          WorkspaceEngineYDocProviderSession["artifactAssets"]
+        >[number][];
       } | null = null;
       const announceLineageReplacement = (replacement: {
         update: Uint8Array;
         recoveredPaths: string[];
         remoteUpdates: Uint8Array[];
+        artifactAssets: readonly NonNullable<
+          WorkspaceEngineYDocProviderSession["artifactAssets"]
+        >[number][];
       }): void => {
         if (
           refused ||
@@ -8948,6 +9014,7 @@ function registerIpcHandlers(
         const handoff: EngineYDocLineageHandoff = {
           lineageGeneration: nextLineageGeneration,
           remoteUpdates: replacement.remoteUpdates,
+          artifactAssets: replacement.artifactAssets,
           acknowledge: () => {
             if (pendingEngineYDocLineageHandoffs.get(sessionKey) !== handoff) {
               return { updates: [] };
@@ -8955,6 +9022,18 @@ function registerIpcHandlers(
             lineageGeneration = nextLineageGeneration;
             if (registeredEntry !== null) {
               registeredEntry.lineageGeneration = nextLineageGeneration;
+              for (const asset of registeredEntry.artifactAssetsById.values()) {
+                if (
+                  !registeredEntry.retiredArtifactAssets.some((retired) =>
+                    sameEngineYDocArtifactAsset(retired, asset),
+                  )
+                ) {
+                  registeredEntry.retiredArtifactAssets.push(asset);
+                }
+              }
+              registeredEntry.artifactAssetsById = new Map(
+                handoff.artifactAssets.map((asset) => [asset.id, asset]),
+              );
             }
             pendingEngineYDocLineageHandoffs.delete(sessionKey);
             const queued = queuedLineageReplacement;
@@ -8981,6 +9060,7 @@ function registerIpcHandlers(
               sessionId: input.sessionId,
               update: replacement.update,
               recoveredPaths: replacement.recoveredPaths,
+              artifactAssets: replacement.artifactAssets,
               lineageGeneration: nextLineageGeneration,
             }),
           );
@@ -9008,14 +9088,12 @@ function registerIpcHandlers(
       let session: WorkspaceEngineYDocProviderSession;
       try {
         session = await capture.openYDocSession({
-          path: input.path,
+          path,
           // Explicit, because the daemon defaults an unspecified session to
           // PLAINTEXT (actor.rs requested_content_kind.unwrap_or(Plaintext)).
-          // The gate above admits only rich markdown paths, and a plaintext
-          // session seeds/projects the plainText root while the editor binds
-          // the body fragment — the doc opens empty and every typed edit
-          // settles back to the pre-edit file while the UI shows "Saved".
-          contentKind: "richdoc",
+          // The requested kind must match the editor selected for this path.
+          // A mismatched session binds the editor to the wrong Y.Doc root.
+          contentKind: requestedKind,
           // The document's REAL save state. A settle failure used to reach
           // nothing at all while the editor's own timer kept saying "Saved" —
           // three dogfood journeys watched a doc report Saved over a
@@ -9079,7 +9157,12 @@ function registerIpcHandlers(
             ) {
               return;
             }
-            const replacement = { update, recoveredPaths, remoteUpdates: [] };
+            const replacement = {
+              update,
+              recoveredPaths,
+              remoteUpdates: [],
+              artifactAssets: session.artifactAssets ?? [],
+            };
             if (pendingEngineYDocLineageHandoffs.has(sessionKey)) {
               // Keep only the newest full snapshot. It contains every earlier
               // lineage; deltas observed after it are buffered on this object.
@@ -9104,7 +9187,7 @@ function registerIpcHandlers(
         // is really on disk, so it keeps the plain editor: claiming the
         // version does not have it would be false.
         console.error(
-          `[desktop] engine Y.Doc open refused for ${input.path}:`,
+          `[desktop] engine Y.Doc open refused for ${path}:`,
           error,
         );
         return OpenEngineYDocSessionResult.parse({
@@ -9118,10 +9201,12 @@ function registerIpcHandlers(
                 },
               }
             : {}),
-          ...(isEngineWorkspaceOpenRefusedError(error) ||
-          isYDocSessionUnreleasedError(error)
-            ? { engineMayHoldDocument: true }
-            : {}),
+          ...(isYdocArtifactAssetsInvalidRefusal(error)
+            ? { artifactAssetsInvalid: true }
+            : isEngineWorkspaceOpenRefusedError(error) ||
+                isYDocSessionUnreleasedError(error)
+              ? { engineMayHoldDocument: true }
+              : {}),
         });
       }
       const entry: EngineYDocSessionEntry = {
@@ -9129,11 +9214,15 @@ function registerIpcHandlers(
         sessionId: input.sessionId,
         senderId: sender.id,
         workspaceId: workspace.workspaceId,
-        path: input.path,
+        path,
         sender,
         generation,
         lineageGeneration,
         saveSeq,
+        artifactAssetsById: new Map(
+          (session.artifactAssets ?? []).map((asset) => [asset.id, asset]),
+        ),
+        retiredArtifactAssets: [],
       };
       registeredEntry = entry;
       // Every path below that refuses this session releases it through the
@@ -9172,14 +9261,13 @@ function registerIpcHandlers(
         });
       }
       // The daemon honors the requested kind only for state-free markers; a
-      // lineage with durable state keeps its own. Binding the rich editor's
-      // body fragment onto a plaintext session is silent data loss (empty doc
-      // over a non-empty file, typed edits pruned at close) — refuse loudly,
-      // and fall back to the plain editor only once the session is released.
-      if (session.contentKind !== "richdoc") {
+      // lineage with durable state keeps its own. Binding an editor to a
+      // different content kind is silent data loss. Refuse the session and
+      // fall back to the plain editor only once the session is released.
+      if (session.contentKind !== requestedKind) {
         console.error(
-          `[desktop] engine Y.Doc open for ${input.path} came back ${session.contentKind}; ` +
-            "refusing the rich editor (kind-mismatched lineage).",
+          `[desktop] engine Y.Doc open for ${path} came back ${session.contentKind}; ` +
+            `the editor requested ${requestedKind} (kind-mismatched lineage).`,
         );
         const released = await release("kind-mismatched lineage");
         return OpenEngineYDocSessionResult.parse({
@@ -9206,12 +9294,58 @@ function registerIpcHandlers(
       return OpenEngineYDocSessionResult.parse({
         available: true,
         initialUpdate: Y.encodeStateAsUpdate(session.doc),
+        ...(session.objectId ? { objectId: session.objectId } : {}),
+        ...(session.versionId ? { versionId: session.versionId } : {}),
+        artifactAssets: session.artifactAssets ?? [],
         lineageGeneration,
       });
     } finally {
       finishPendingOpen();
     }
   });
+
+  ipcMain.handle(
+    CHANNELS.engineYDocReadArtifactAsset,
+    async (event, payload) => {
+      assertTrustedSender(event);
+      const input = ReadEngineYDocArtifactAssetPayload.parse(payload);
+      const entry = engineYDocSessions.get(
+        engineYDocSessionKey(event.sender.id, input.sessionId),
+      );
+      // Deletion marks this entry before the renderer can capture its recovery
+      // draft. Keep the version-bound asset reader available until the normal
+      // session close so an image-bearing drawing can finish that recovery.
+      if (
+        !entry ||
+        entry.sender !== event.sender ||
+        entry.generation !== rendererGeneration(event.sender.id)
+      ) {
+        throw new Error(
+          "The live document session is no longer available. Open the file again.",
+        );
+      }
+      // The renderer's descriptor only selects among the descriptors this
+      // session has pinned; the read hydrates from the pinned copy. One id
+      // can name the winner's asset and a retired lineage's, so the match is
+      // field-exact and the current lineage is tried first.
+      const requested = input.descriptor;
+      const descriptor = [
+        entry.artifactAssetsById.get(requested.id),
+        ...entry.retiredArtifactAssets,
+      ].find(
+        (candidate) =>
+          candidate !== undefined &&
+          sameEngineYDocArtifactAsset(candidate, requested),
+      );
+      if (!descriptor) {
+        throw new Error(
+          `The live document does not reference artifact asset ${requested.id}.`,
+        );
+      }
+      const hydrated = await entry.session.readArtifactAsset(descriptor);
+      return ReadEngineYDocArtifactAssetResult.parse(hydrated);
+    },
+  );
 
   ipcMain.handle(CHANNELS.engineYDocApplyUpdate, (event, payload) => {
     assertTrustedSender(event);

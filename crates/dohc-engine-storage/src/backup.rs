@@ -61,6 +61,8 @@ const COMPARED_TABLES: &[&str] = &[
     "snapshots",
     "fork_base_snapshots",
     "moments",
+    "scene_asset_delete_authorities",
+    "scene_asset_delete_authority_items",
     "materialization_jobs",
     "ydoc_docs",
     "ydoc_updates",

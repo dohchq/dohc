@@ -7,6 +7,7 @@ use dohc_engine_runtime::{
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
+use serde_json::json;
 
 const VERSION: &str = "main";
 
@@ -129,6 +130,106 @@ async fn capture_text_ingest_and_retire_update_certified_search_index() {
     assert!(
         retired.is_empty(),
         "capture retire must remove the stale search result, got {retired:?}"
+    );
+
+    supervisor.close(&db).expect("close actor");
+}
+
+#[tokio::test]
+async fn excalidraw_capture_indexes_only_live_text_and_invalid_update_clears_it() {
+    const WS: &str = "ws-excalidraw-fts";
+    const PATH: &str = ".excalidraw";
+    const LIVE: &str = "drawinglivetextneedle";
+    const DELETED: &str = "drawingdeletedtextneedle";
+    const EMBEDDED: &str = "DRAWINGBASE64SEARCHSECRET";
+    const INVALID: &str = "drawinginvalidrawneedle";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("open actor").actor;
+
+    actor
+        .capture_ingest(
+            capture_text(WS, "notes/baseline.md", "baseline", 10),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("seed capture");
+    actor
+        .ensure_search_index(
+            scratch.path().to_path_buf(),
+            WS.to_owned(),
+            VERSION.to_owned(),
+            20,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("certify index before drawing write");
+
+    let scene = json!({
+        "type": "excalidraw",
+        "elements": [
+            { "type": "text", "text": LIVE, "originalText": LIVE, "isDeleted": false },
+            { "type": "text", "text": DELETED, "originalText": DELETED, "isDeleted": true }
+        ],
+        "files": {
+            "image": { "dataURL": format!("data:image/png;base64,{EMBEDDED}") }
+        }
+    })
+    .to_string();
+    actor
+        .capture_ingest_indexed(
+            capture_text(WS, PATH, &scene, 30),
+            scratch.path().to_path_buf(),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("index drawing capture");
+
+    assert_eq!(
+        search(&actor, scratch.path(), WS, LIVE, 40)
+            .await
+            .iter()
+            .map(|result| result.path.as_str())
+            .collect::<Vec<_>>(),
+        [PATH]
+    );
+    for private in [DELETED, EMBEDDED, "originalText", "dataURL"] {
+        assert!(
+            search(&actor, scratch.path(), WS, private, 41)
+                .await
+                .is_empty(),
+            "drawing index leaked {private:?}"
+        );
+    }
+
+    let invalid = format!(r#"{{"type":"excalidraw","elements":["{INVALID}"#);
+    actor
+        .capture_ingest_indexed(
+            capture_text(WS, PATH, &invalid, 50),
+            scratch.path().to_path_buf(),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("index invalid drawing capture");
+    assert!(
+        search(&actor, scratch.path(), WS, LIVE, 60)
+            .await
+            .is_empty(),
+        "an invalid update must replace the old drawing text"
+    );
+    assert!(
+        search(&actor, scratch.path(), WS, INVALID, 61)
+            .await
+            .is_empty(),
+        "invalid scene JSON must not become fallback index text"
     );
 
     supervisor.close(&db).expect("close actor");

@@ -58,6 +58,8 @@ const REQUIRED_TABLES: &[&str] = &[
     "snapshots",
     "fork_base_snapshots",
     "moments",
+    "scene_asset_delete_authorities",
+    "scene_asset_delete_authority_items",
     // R06 conflict-object tables (migration ordinal 7).
     "conflicts",
     // R13 shadow fence token (migration ordinal 8).

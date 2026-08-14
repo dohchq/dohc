@@ -552,13 +552,10 @@ impl<'a> VersionedTextStore<'a> {
             }
             Ok(RollbackPrep { moment, before })
         })?;
-        let compensating_moment_id = format!(
-            "rollback-{}",
-            hash_fields(&[
-                input.workspace_id.as_bytes(),
-                input.version_id.as_bytes(),
-                input.mutation_moment_id.as_bytes(),
-            ])
+        let compensating_moment_id = rollback_compensating_moment_id(
+            &input.workspace_id,
+            &input.version_id,
+            &input.mutation_moment_id,
         );
 
         let outcome = self.store.write_with(faults, |tx| {
@@ -2867,10 +2864,22 @@ pub fn capture_manifest_seed(
                         OR (s.metadata_origin = 'ydoc' \
                             AND NOT EXISTS ( \
                                 SELECT 1 FROM materialization_jobs j \
-                                WHERE j.job_id = 'ydoc-mat_' || s.latest_moment_id \
-                                  AND j.status = 'pending' \
+                                JOIN moments producer \
+                                  ON producer.workspace_id = a.workspace_id \
+                                 AND producer.version_id = a.version_id \
+                                 AND producer.object_id = a.object_id \
+                                 AND producer.moment_id = s.latest_moment_id \
+                                 AND producer.moment_order = j.target_generation \
+                                 AND producer.operation = 'write' \
+                                WHERE j.status = 'pending' \
+                                  AND j.operation = 'write' \
                                   AND (j.workspace_id = ?1 \
-                                       OR j.workspace_id = '')))) \
+                                       OR j.workspace_id = '') \
+                                  AND j.target_path = a.path \
+                                  AND j.content_sha256 = \
+                                      CASE COALESCE(s.content_kind, 'text') \
+                                      WHEN 'binary' THEN s.binary_sha256 \
+                                      ELSE s.blob_sha256 END))) \
                    AND NOT EXISTS ( \
                        SELECT 1 FROM materialization_jobs j \
                         WHERE j.status = 'pending' AND j.operation = 'write' \
@@ -4665,6 +4674,24 @@ pub fn binary_rollback_job_identity(
     format!(
         "{}{mutation_moment_id}",
         binary_rollback_job_version_prefix(workspace_id, version_id)
+    )
+}
+
+/// Derive the moment that records a text mutation rollback's compensating
+/// state. Callers use this identity to find only work owned by that rollback.
+#[doc(hidden)]
+pub fn rollback_compensating_moment_id(
+    workspace_id: &str,
+    version_id: &str,
+    mutation_moment_id: &str,
+) -> String {
+    format!(
+        "rollback-{}",
+        hash_fields(&[
+            workspace_id.as_bytes(),
+            version_id.as_bytes(),
+            mutation_moment_id.as_bytes(),
+        ])
     )
 }
 

@@ -21,12 +21,23 @@ const engineDocState: UseEngineDoc = {
   available: false,
   opening: false,
   doc: null,
+  objectId: null,
+  versionId: null,
   saveState: "saved",
+  saveError: null,
   notInVersion: false,
   engineMayHoldDocument: false,
+  artifactAssetsInvalid: false,
   deletedWhileEditing: false,
   deletedDraftId: null,
+  recoveryAssets: null,
+  permanentFailureWhileEditing: false,
+  readOnlyWhileEditing: false,
   removalInProgress: null,
+  artifactAssets: [],
+  readArtifactAsset: async () => {
+    throw new Error("no artifact asset");
+  },
 };
 
 vi.mock("./collab/useEngineDoc", () => ({

@@ -24,8 +24,8 @@ const WORKSPACE_ID = "workspace";
 const WORKSPACE_HANDLE = "workspace-handle";
 const SENTINEL = new Error("sentinel");
 
-// Past `MAX_DESKTOP_CAPTURE_TEXT_BYTES` (128 KiB), so the daemon withholds this
-// body from a moment payload and reports its digest instead. The leading BOM
+// Past the 128 KiB versioned-text in-band response cap, so the daemon withholds
+// this body from a moment payload and reports its digest instead. The leading BOM
 // and the two-byte characters make the readback a real UTF-8 check rather than
 // an ASCII one.
 const OVER_CAP_TEXT = `\uFEFF# héllo\n${"é".repeat(70 * 1024)}\n`;

@@ -493,7 +493,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
         )
         .await
         .expect("post-prune settle must succeed");
-    assert_eq!(settled.markdown.as_deref(), Some("reseeded body"));
+    assert_eq!(settled.content.as_deref(), Some("reseeded body"));
     assert_eq!(
         std::fs::read_to_string(scratch.path().join(PATH)).expect("disk"),
         "reseeded body"
@@ -639,7 +639,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
         )
         .await
         .expect("fresh settle succeeds");
-    assert_eq!(settled.markdown.as_deref(), Some("fresh body"));
+    assert_eq!(settled.content.as_deref(), Some("fresh body"));
     supervisor.close(&db).expect("close actor");
 }
 
@@ -796,7 +796,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
         )
         .await
         .expect("retry settles");
-    assert_eq!(settled.markdown.as_deref(), Some("v2 v1"));
+    assert_eq!(settled.content.as_deref(), Some("v2 v1"));
     assert_eq!(
         std::fs::read_to_string(scratch.path().join(PATH)).expect("disk v2"),
         "v2 v1"
@@ -870,7 +870,7 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
         )
         .await
         .expect("a freshly blocked settle is durably accepted");
-    assert_eq!(blocked.markdown.as_deref(), Some("durable blocked body"));
+    assert_eq!(blocked.content.as_deref(), Some("durable blocked body"));
     assert_eq!(recorder.records.load(Ordering::Relaxed), 1);
     assert_eq!(
         recorder.retracts.load(Ordering::Relaxed),
@@ -943,7 +943,7 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
         .expect("the next settle replays after containment is restored");
     assert_eq!(recovered.moment_id, blocked.moment_id);
     assert_eq!(recovered.sha256, blocked.sha256);
-    assert_eq!(recovered.markdown.as_deref(), Some("durable blocked body"));
+    assert_eq!(recovered.content.as_deref(), Some("durable blocked body"));
     assert_eq!(
         std::fs::read_to_string(scratch.path().join(PATH)).expect("recovered artifact"),
         "durable blocked body"

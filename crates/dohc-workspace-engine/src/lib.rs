@@ -39,6 +39,7 @@ use dohc_engine_protocol::{
     },
     wire::{Request, Response, WorkspaceHandle},
 };
+use dohc_engine_runtime::actor::YdocSeedMaterialization;
 use dohc_engine_runtime::{
     ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, LifecycleState, NoFaults,
     PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
@@ -3623,6 +3624,42 @@ impl EngineService {
         }
     }
 
+    /// Keep scene-open exclusion owned by the detached completion. The
+    /// protocol supervisor can stop waiting on cancellation or deadline, but
+    /// a queued actor command still runs after its reply receiver is dropped.
+    async fn complete_scene_seed_materialization(
+        cancellation: &OperationCancellation,
+        materialization: impl std::future::Future<
+            Output = Result<YdocSeedMaterialization, RuntimeError>,
+        > + Send
+        + 'static,
+        serial: tokio::sync::OwnedMutexGuard<()>,
+        lease: Lease,
+    ) -> Result<
+        (
+            YdocSeedMaterialization,
+            tokio::sync::OwnedMutexGuard<()>,
+            Lease,
+        ),
+        WireError,
+    > {
+        let completion = tokio::spawn(async move {
+            let materialization = materialization.await;
+            (materialization, serial, lease)
+        });
+        tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                Err(cancellation.interruption("ydoc.open (scene asset materialization)"))
+            }
+            completed = completion => {
+                let (materialization, serial, lease) = completed
+                    .map_err(|_| wire(ErrorCode::Internal, "ydoc scene asset materialization task failed"))?;
+                Ok((materialization.map_err(map_runtime)?, serial, lease))
+            }
+        }
+    }
+
     async fn versions_active(
         &self,
         ctx: &RequestContext,
@@ -7093,13 +7130,19 @@ impl EngineService {
             .as_deref()
             .map(parse_ydoc_content_kind)
             .transpose()?;
+        if params.seed_from_artifact && requested_kind != Some(ContentKind::Scene) {
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "seedFromArtifact requires contentKind scene",
+            ));
+        }
         let cancellation = OperationCancellation::new(ctx);
-        let _serial = tokio::select! {
+        let serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.open (queued)"));
             }
-            serial = open.session_ops.lock() => serial,
+            serial = Arc::clone(&open.session_ops).lock_owned() => serial,
         };
         // The first read only DERIVES the key (head resolution can't happen
         // without it). The lease is then taken on that key and the state is
@@ -7118,7 +7161,7 @@ impl EngineService {
                 cancellation.token(),
             )
             .await
-            .map_err(map_runtime)?;
+            .map_err(map_ydoc_open_runtime)?;
         let lease =
             self.leases
                 .scoped(&open.root)
@@ -7129,7 +7172,7 @@ impl EngineService {
                 })?;
         let state = open
             .actor
-            .ydoc_open_state(
+            .ydoc_open_state_with_artifact_seed(
                 open.workspace_id.clone(),
                 now_ms()?,
                 true,
@@ -7137,15 +7180,48 @@ impl EngineService {
                 params.version_id,
                 params.path.clone(),
                 requested_kind,
+                params.seed_from_artifact,
                 cancellation.token(),
             )
             .await
-            .map_err(map_runtime)?;
+            .map_err(map_ydoc_open_runtime)?;
         if state.key != probe.key {
             // The path's owner changed between the probe and the lease: the
             // held lease guards the WRONG key. Refuse; the client retries.
             return Err(wire(ErrorCode::InvalidParams, "ydoc-session-busy"));
         }
+        let (serial, lease) = if state.seed_materialization_jobs.is_empty() {
+            (serial, lease)
+        } else {
+            let actor = open.actor.clone();
+            let root = open.root.clone();
+            let workspace_id = open.workspace_id.clone();
+            let job_ids = state.seed_materialization_jobs.clone();
+            let self_writes = Arc::new(self.self_writes.scoped(&open.root));
+            let materialization_now_ms = now_ms()?;
+            let materialization = async move {
+                actor
+                    .ydoc_materialize_scene_seed_assets(
+                        root,
+                        workspace_id,
+                        job_ids,
+                        self_writes,
+                        materialization_now_ms,
+                    )
+                    .await
+            };
+            let (materialization, serial, lease) = Self::complete_scene_seed_materialization(
+                &cancellation,
+                materialization,
+                serial,
+                lease,
+            )
+            .await?;
+            if !materialization.materialized {
+                return Err(scene_seed_materialization_error(materialization));
+            }
+            (serial, lease)
+        };
         let sequence = self
             .next_session
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -7167,12 +7243,12 @@ impl EngineService {
             } else {
                 "absent"
             },
-            seed_markdown: {
+            seed_content: {
                 // A seed past the in-band cap cannot cross the wire as one
                 // string, and a client that can't seed can't edit: refuse the
                 // open outright (blob streaming for large bodies is RPC-D).
                 if state
-                    .seed_markdown
+                    .seed_content
                     .as_ref()
                     .is_some_and(|seed| seed.len() > MAX_INBAND_CONTENT_BYTES)
                 {
@@ -7181,8 +7257,23 @@ impl EngineService {
                         "ydoc-seed-exceeds-inband-cap",
                     ));
                 }
-                state.seed_markdown
+                state.seed_content
             },
+            artifact_assets: (!state.artifact_assets.is_empty()).then(|| {
+                state
+                    .artifact_assets
+                    .into_iter()
+                    .map(|asset| ArtifactAssetDescriptorResult {
+                        id: asset.id,
+                        mime_type: asset.mime_type,
+                        created: asset.created,
+                        r#ref: asset.path,
+                        sha256: asset.sha256,
+                        last_retrieved: asset.last_retrieved,
+                        version: asset.version,
+                    })
+                    .collect()
+            }),
         };
         lock(&self.sessions).insert(
             session_id,
@@ -7200,6 +7291,7 @@ impl EngineService {
                 _lease: lease,
             },
         );
+        drop(serial);
         serde_json::to_value(result)
             .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
     }
@@ -7376,7 +7468,7 @@ impl EngineService {
         serde_json::to_value(YdocSettleResult {
             moment_id: settled.moment_id,
             path: settled.path,
-            markdown: settled.markdown,
+            content: settled.content,
             sha256: settled.sha256,
             materialized: settled.materialized,
             projection: YdocProjectionProvenance {
@@ -7446,7 +7538,7 @@ impl EngineService {
         // Missing `settle` means SETTLE — the TS driver treats close() as
         // settle-unless-explicitly-false, and defaulting to false here would
         // fail dirty local-only closes (UnsettledClose) and let a replicated
-        // close compact while the markdown projection is stale.
+        // close compact while the artifact projection is stale.
         let default_settle = {
             let (_open, session) = self.ydoc_session(handle, &params.session_id)?;
             // An untouched absent-lineage session (opened, never seeded) has
@@ -7615,6 +7707,19 @@ impl EngineService {
             initial_update_base64: encode_ydoc_state_base64(&state.initial_update)?,
             lineage_claim_id: state.lineage_claim_id,
             recovered_paths: state.recovered_paths,
+            artifact_assets: state
+                .artifact_assets
+                .into_iter()
+                .map(|asset| ArtifactAssetDescriptorResult {
+                    id: asset.id,
+                    mime_type: asset.mime_type,
+                    created: asset.created,
+                    r#ref: asset.path,
+                    sha256: asset.sha256,
+                    last_retrieved: asset.last_retrieved,
+                    version: asset.version,
+                })
+                .collect(),
         })
         .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
     }
@@ -8252,6 +8357,39 @@ impl EngineService {
             .cloned()
             .ok_or_else(workspace_unavailable)
     }
+}
+
+fn map_ydoc_open_runtime(error: RuntimeError) -> WireError {
+    match error {
+        RuntimeError::YdocArtifactAssetsPending => {
+            wire(ErrorCode::Overloaded, "ydoc-artifact-assets-pending")
+        }
+        RuntimeError::YdocArtifactAssetsInvalid => {
+            wire(ErrorCode::Internal, "ydoc-artifact-assets-invalid")
+        }
+        error @ RuntimeError::Storage(dohc_engine_storage::StorageError::FileLocked) => {
+            map_runtime(error)
+        }
+        RuntimeError::Storage(_) => wire(ErrorCode::Internal, "ydoc-open-storage-failed"),
+        RuntimeError::OperationCrashed => wire(ErrorCode::Internal, "ydoc-open-operation-crashed"),
+        other => map_runtime(other),
+    }
+}
+
+fn scene_seed_materialization_error(materialization: YdocSeedMaterialization) -> WireError {
+    const REFUSAL_DETAIL_DELIMITER: &str = ": ";
+    let (code, message) = if materialization.invalid_jobs > 0 {
+        (ErrorCode::Internal, "ydoc-artifact-assets-invalid")
+    } else {
+        (ErrorCode::Overloaded, "ydoc-artifact-assets-pending")
+    };
+    WireError::new(
+        code,
+        format!(
+            "{message}{REFUSAL_DETAIL_DELIMITER}invalid_jobs={}, incomplete_jobs={}",
+            materialization.invalid_jobs, materialization.incomplete_jobs
+        ),
+    )
 }
 
 async fn close_ydoc_session_for_version_fence(
@@ -9104,6 +9242,8 @@ struct YdocOpenParams {
     path: String,
     #[serde(default)]
     content_kind: Option<String>,
+    #[serde(default)]
+    seed_from_artifact: bool,
 }
 
 #[derive(Serialize)]
@@ -9124,7 +9264,23 @@ struct YdocOpenResult {
     /// (apps/desktop/src/workspaces/workspaceEngineCapture.ts).
     head: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    seed_markdown: Option<String>,
+    seed_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_assets: Option<Vec<ArtifactAssetDescriptorResult>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtifactAssetDescriptorResult {
+    id: String,
+    mime_type: String,
+    created: u64,
+    r#ref: String,
+    sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_retrieved: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -9166,10 +9322,10 @@ struct YdocProjectionProvenance {
 struct YdocSettleResult {
     moment_id: String,
     path: String,
-    /// `null` once the settled markdown is past the in-band cap. The settle
+    /// `null` once the settled content is past the in-band cap. The settle
     /// still committed and the daemon wrote the file — the client reads it
     /// from disk rather than echoing it back over the wire.
-    markdown: Option<String>,
+    content: Option<String>,
     sha256: String,
     /// `false` when the settle committed but materialization was blocked by
     /// containment: the file on disk is still the OLD artifact and the write
@@ -9237,6 +9393,7 @@ struct YdocResyncResult {
     initial_update_base64: String,
     lineage_claim_id: Option<String>,
     recovered_paths: Vec<String>,
+    artifact_assets: Vec<ArtifactAssetDescriptorResult>,
 }
 
 #[derive(Deserialize)]
@@ -11234,6 +11391,7 @@ fn parse_ydoc_content_kind(raw: &str) -> Result<ContentKind, WireError> {
     match raw {
         "plaintext" => Ok(ContentKind::Plaintext),
         "richdoc" => Ok(ContentKind::Richdoc),
+        "scene" => Ok(ContentKind::Scene),
         _ => Err(wire(ErrorCode::InvalidParams, "unknown Y.Doc content kind")),
     }
 }
@@ -11242,6 +11400,7 @@ fn ydoc_content_kind_name(kind: ContentKind) -> &'static str {
     match kind {
         ContentKind::Plaintext => "plaintext",
         ContentKind::Richdoc => "richdoc",
+        ContentKind::Scene => "scene",
     }
 }
 
@@ -11365,6 +11524,12 @@ fn map_runtime(error: RuntimeError) -> WireError {
     if matches!(&error, RuntimeError::Relay(RelayError::ShareReadOnly)) {
         return wire(ErrorCode::InvalidParams, "share-read-only");
     }
+    if matches!(&error, RuntimeError::SceneAssetDeletePending) {
+        return wire(
+            ErrorCode::Overloaded,
+            "Sync has not delivered every drawing asset delete. Retry the rollback after sync completes.",
+        );
+    }
     // The rejections whose message carries numbers. `wire` takes a static
     // string, so the generic tail below would replace them with a placeholder —
     // and a size refusal that drops its limit and usage is the one an agent
@@ -11384,6 +11549,9 @@ fn map_runtime(error: RuntimeError) -> WireError {
             | DomainError::IdentifierTooLong { .. }),
         ) => {
             return WireError::new(ErrorCode::PayloadTooLarge, domain.to_string());
+        }
+        RuntimeError::Sync(sync @ SyncError::ProjectionTooLarge { .. }) => {
+            return WireError::new(ErrorCode::PayloadTooLarge, sync.to_string());
         }
         _ => {}
     }
@@ -11570,6 +11738,8 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::ProjectionTooComplex { .. }
         | CollabError::InvalidIdentifier { .. }
         | CollabError::ContentKindMismatch
+        | CollabError::UnsupportedContentKind { .. }
+        | CollabError::MarkdownRewriteUnsupported { .. }
         | CollabError::BaseAlreadyClaimed
         | CollabError::BaseStateDiverged
         | CollabError::BaseRelaySequencePending
@@ -11609,7 +11779,9 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
         | SyncError::BlobInvalid => ErrorCode::InvalidParams,
         // Same condition as its relay twin, so the same code. A blob over a
         // fixed ceiling is a size refusal on either path.
-        SyncError::BlobTooLarge { .. } | SyncError::InputTooLarge { .. } => {
+        SyncError::BlobTooLarge { .. }
+        | SyncError::InputTooLarge { .. }
+        | SyncError::ProjectionTooLarge { .. } => {
             ErrorCode::PayloadTooLarge
         }
     }
@@ -11930,6 +12102,16 @@ mod tests {
                 limit_bytes: 5 * 1024 * 1024,
                 observed: ObservedBytes::Exact(5 * 1024 * 1024 + 1),
             })
+        );
+        let projection = map_runtime(RuntimeError::Sync(SyncError::ProjectionTooLarge {
+            constraint: "MAX_PROJECTION_BYTES",
+            actual_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES + 1,
+            limit_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES,
+        }));
+        assert_eq!(projection.code, ErrorCode::PayloadTooLarge);
+        assert_eq!(
+            projection.message,
+            "Y.Doc projection exceeds MAX_PROJECTION_BYTES: limit 16777216 bytes, observed at least 16777217 bytes"
         );
     }
 
@@ -12342,6 +12524,142 @@ mod tests {
         assert_eq!(budget.permits.available_permits(), 3);
         drop(second);
         assert_eq!(budget.permits.available_permits(), 8);
+    }
+
+    async fn assert_scene_seed_interruption_retains_exclusion(
+        ctx: RequestContext,
+        expected_code: ErrorCode,
+    ) {
+        let signal = ctx.cancel.clone();
+        let cancellation = OperationCancellation::new(&ctx);
+        let session_ops = Arc::new(tokio::sync::Mutex::new(()));
+        let serial = Arc::clone(&session_ops).lock_owned().await;
+        let leases = LeaseRegistry::new();
+        let key =
+            DocKey::new("ws-seed-cancel", "main", "drawing-object").expect("valid document key");
+        let lease = leases.acquire(&key).expect("initial lease");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let waiting = tokio::spawn(async move {
+            EngineService::complete_scene_seed_materialization(
+                &cancellation,
+                async move {
+                    let _ = started_tx.send(());
+                    release_rx.await.expect("release materialization");
+                    Ok(YdocSeedMaterialization {
+                        materialized: true,
+                        incomplete_jobs: 0,
+                        invalid_jobs: 0,
+                    })
+                },
+                serial,
+                lease,
+            )
+            .await
+        });
+        started_rx.await.expect("materialization started");
+        if expected_code == ErrorCode::Cancelled {
+            signal.cancel();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("interrupted wait completed")
+            .expect("completion task");
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("an interrupted wait must not return materialization"),
+        };
+        assert_eq!(error.code, expected_code);
+        assert!(
+            session_ops.try_lock().is_err(),
+            "the session serial must stay held until actor completion"
+        );
+        assert!(
+            leases.is_held(&key),
+            "the document lease must stay held until actor completion"
+        );
+
+        release_tx.send(()).expect("release actor completion");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if session_ops.try_lock().is_ok() && !leases.is_held(&key) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completion released serial and lease");
+    }
+
+    #[tokio::test]
+    async fn scene_seed_cancellation_keeps_exclusion_until_actor_completion() {
+        assert_scene_seed_interruption_retains_exclusion(
+            RequestContext::unbounded(),
+            ErrorCode::Cancelled,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn scene_seed_deadline_keeps_exclusion_until_actor_completion() {
+        let mut ctx = RequestContext::unbounded();
+        ctx.deadline = Some(std::time::Instant::now() + Duration::from_millis(100));
+        assert_scene_seed_interruption_retains_exclusion(ctx, ErrorCode::DeadlineExceeded).await;
+    }
+
+    #[test]
+    fn scene_seed_materialization_errors_report_exact_job_counts() {
+        let invalid = scene_seed_materialization_error(YdocSeedMaterialization {
+            materialized: false,
+            incomplete_jobs: 3,
+            invalid_jobs: 2,
+        });
+        assert_eq!(invalid.code, ErrorCode::Internal);
+        assert_eq!(
+            invalid.message,
+            "ydoc-artifact-assets-invalid: invalid_jobs=2, incomplete_jobs=3"
+        );
+
+        let pending = scene_seed_materialization_error(YdocSeedMaterialization {
+            materialized: false,
+            incomplete_jobs: 4,
+            invalid_jobs: 0,
+        });
+        assert_eq!(pending.code, ErrorCode::Overloaded);
+        assert_eq!(
+            pending.message,
+            "ydoc-artifact-assets-pending: invalid_jobs=0, incomplete_jobs=4"
+        );
+    }
+
+    #[test]
+    fn ydoc_open_preserves_storage_and_crash_refusals() {
+        let storage = map_ydoc_open_runtime(RuntimeError::Storage(
+            dohc_engine_storage::StorageError::StateCorrupt { source: None },
+        ));
+        assert_eq!(storage.code, ErrorCode::Internal);
+        assert_eq!(storage.message, "ydoc-open-storage-failed");
+
+        let crashed = map_ydoc_open_runtime(RuntimeError::OperationCrashed);
+        assert_eq!(crashed.code, ErrorCode::Internal);
+        assert_eq!(crashed.message, "ydoc-open-operation-crashed");
+
+        let busy = map_ydoc_open_runtime(RuntimeError::Storage(
+            dohc_engine_storage::StorageError::FileLocked,
+        ));
+        assert_eq!(busy.code, ErrorCode::Overloaded);
+        assert_eq!(busy.message, "engine-store-busy");
+    }
+
+    #[test]
+    fn pending_scene_asset_delete_makes_rollback_retryable() {
+        let pending = map_runtime(RuntimeError::SceneAssetDeletePending);
+        assert_eq!(pending.code, ErrorCode::Overloaded);
+        assert_eq!(
+            pending.message,
+            "Sync has not delivered every drawing asset delete. Retry the rollback after sync completes."
+        );
     }
 
     #[test]

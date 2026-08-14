@@ -11,7 +11,7 @@ use dohc_engine_domain::{
     FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, MAX_SECRET_FILE_BYTES,
     MAX_TEXT_BYTES, RenameTextFile, ResolveDecision, SECRET_IV_BYTES, SECRET_TAG_BYTES,
     SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread, VersionedTextStore,
-    attachment_id_for, channel_slug_for_name,
+    WriteBinary, attachment_id_for, channel_slug_for_name,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -1222,7 +1222,7 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
     seed_replication_version(&mut engine, "main", "main");
 
     let source = dohc_engine_collab::Ydoc::wire();
-    source.plaintext_insert(0, &"a".repeat(MAX_TEXT_BYTES + 1));
+    source.plaintext_insert(0, "seed");
     let base = source.encode_full_state();
     assert!(
         base.len() < dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES,
@@ -1230,7 +1230,7 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
         base.len()
     );
     let base_sha = engine.put_binary_blob(&base).expect("base blob");
-    let over_cap = envelope(
+    let base_op = envelope(
         "over-cap-projection-peer",
         0,
         "ydoc.update",
@@ -1244,17 +1244,197 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
             "isBaseState": true
         }),
     );
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(_))
+    ));
 
-    assert_invalid_refusal!(apply_ydoc_envelope(
-        &mut engine,
-        &over_cap,
-        &NoFaults,
-        &NoLiveLeases
+    let delta = source.plaintext_insert(4, &"a".repeat(MAX_TEXT_BYTES));
+    assert!(
+        delta.len() < dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES,
+        "the premise is an update UNDER the update cap, at {} bytes",
+        delta.len()
+    );
+    let delta_sha = engine.put_binary_blob(&delta).expect("delta blob");
+    let over_cap = envelope(
+        "over-cap-projection-peer",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-over-cap-projection",
+            "path": "notes/over-cap-projection.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": delta_sha,
+            "lineageClaimId": base_sha,
+            "isBaseState": false
+        }),
+    );
+
+    let refusal = apply_ydoc_envelope(&mut engine, &over_cap, &NoFaults, &NoLiveLeases)
+        .expect("oversized projection is an acknowledged refusal");
+    let expected_reason = format!(
+        "plaintext projection exceeds MAX_TEXT_BYTES: limit {MAX_TEXT_BYTES} bytes, observed at least {} bytes",
+        MAX_TEXT_BYTES + 4
+    );
+    assert!(matches!(
+        refusal,
+        ApplyOutcome::Refused(ReplicationRefusal {
+            reason: RefusalReason::InvalidInput { ref reason },
+            ..
+        }) if reason == &expected_reason
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "over-cap-projection-peer").expect("ack"),
-        0,
+        1,
         "an unACKed coordinate is redelivered forever"
+    );
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-over-cap-projection")
+        .expect("doc key");
+    let projected = dohc_engine_collab::load_persisted(&engine, &key)
+        .expect("load retained Y.Doc")
+        .expect("persisted Y.Doc")
+        .doc
+        .project(dohc_engine_collab::ContentKind::Plaintext)
+        .expect("the Y.Doc stays under the projection cap");
+    assert_eq!(
+        projected.content.len(),
+        MAX_TEXT_BYTES + 4,
+        "the refused incremental mutation remains canonical"
+    );
+    let (head_text, persisted_reason): (String, String) = engine
+        .read_with(|conn| {
+            let head_text = conn
+                .query_row(
+                    "SELECT b.text FROM path_aliases a \
+                 JOIN snapshots s ON s.workspace_id = a.workspace_id AND s.object_id = a.object_id \
+                 JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE a.workspace_id = 'ws' AND a.version_id = 'main' \
+                   AND a.path = 'notes/over-cap-projection.md'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            let persisted_reason = conn
+                .query_row(
+                    "SELECT reason_message FROM replication_pending_refusals \
+                 WHERE workspace_id = 'ws' AND origin_id = 'over-cap-projection-peer' \
+                   AND origin_seq = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            Ok::<_, SyncError>((head_text, persisted_reason))
+        })
+        .expect("head and persisted refusal");
+    assert_eq!(head_text, "seed", "the oversized artifact is not written");
+    assert_eq!(persisted_reason, expected_reason);
+}
+
+/// A pre-base update is already ACKed when its eventual base drains it. If
+/// the combined document exceeds the text sink's measured cap, the drain must
+/// persist and return that terminal refusal before it removes the queue row.
+#[test]
+fn deferred_ydoc_projection_over_the_text_cap_is_persisted_and_returned() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+
+    let source = dohc_engine_collab::Ydoc::wire();
+    source.plaintext_insert(0, "seed");
+    let base = source.encode_full_state();
+    let base_sha = engine.put_binary_blob(&base).expect("base blob");
+    let delta = source.plaintext_insert(4, &"a".repeat(MAX_TEXT_BYTES));
+    assert!(delta.len() < dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES);
+    let delta_sha = engine.put_binary_blob(&delta).expect("delta blob");
+    let delta_op = envelope(
+        "deferred-over-cap-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-deferred-over-cap",
+            "path": "notes/deferred-over-cap.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": delta_sha,
+            "lineageClaimId": base_sha.clone(),
+            "isBaseState": false,
+        }),
+    );
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &delta_op, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(YdocApplyResult {
+            deferred: true,
+            reason: Some("ydoc-lineage-absent"),
+            ..
+        }))
+    ));
+
+    let base_op = envelope(
+        "deferred-over-cap-base-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-deferred-over-cap",
+            "path": "notes/deferred-over-cap.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha,
+            "isBaseState": true,
+        }),
+    );
+    let outcome = apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases)
+        .expect("base applies and drains the oversized update");
+    let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
+    assert!(matches!(primary, ApplyOutcome::Applied(_)));
+    assert!(sharing_declined.is_empty());
+    let expected_reason = format!(
+        "plaintext projection exceeds MAX_TEXT_BYTES: limit {MAX_TEXT_BYTES} bytes, observed at least {} bytes",
+        MAX_TEXT_BYTES + 4
+    );
+    assert_eq!(
+        refusals,
+        vec![ReplicationRefusal {
+            workspace_id: "ws".to_owned(),
+            origin_id: "deferred-over-cap-peer".to_owned(),
+            origin_seq: 0,
+            op_kind: "ydoc.update".to_owned(),
+            reason: RefusalReason::InvalidInput {
+                reason: expected_reason.clone(),
+            },
+        }],
+        "the base caller must receive the owning deferred coordinate's refusal"
+    );
+
+    let (queued, persisted_reason, head): (i64, String, String) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                    row.get(0)
+                })?,
+                conn.query_row(
+                    "SELECT reason_message FROM replication_pending_refusals \
+                     WHERE workspace_id='ws' AND origin_id='deferred-over-cap-peer' \
+                       AND origin_seq=0",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT b.text FROM snapshots AS s \
+                     JOIN blobs AS b ON b.sha256=s.blob_sha256 \
+                     WHERE s.workspace_id='ws' AND s.version_id='main' \
+                       AND s.path='notes/deferred-over-cap.md'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("deferred refusal disposition");
+    assert_eq!(queued, 0, "the terminally refused marker must be consumed");
+    assert_eq!(persisted_reason, expected_reason);
+    assert_eq!(
+        head, "seed",
+        "the oversized projection must not replace the head"
     );
 }
 
@@ -6128,31 +6308,81 @@ fn seed_identity(engine: &mut EngineStore) {
 
 #[test]
 fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
-    for (label, below_floor, mismatch, expected) in [
-        ("below-floor", true, false, (Some(7), 0_i64, 0_i64)),
-        ("below-floor-mismatch", true, true, (None, 0_i64, 1_i64)),
-        ("absent", false, false, (None, 1_i64, 0_i64)),
+    for (label, content_kind, below_floor, mismatch, expected) in [
+        (
+            "below-floor",
+            dohc_engine_collab::ContentKind::Plaintext,
+            true,
+            false,
+            (Some(7), 0_i64, 0_i64),
+        ),
+        (
+            "scene-below-floor",
+            dohc_engine_collab::ContentKind::Scene,
+            true,
+            false,
+            (Some(7), 0_i64, 0_i64),
+        ),
+        (
+            "below-floor-mismatch",
+            dohc_engine_collab::ContentKind::Plaintext,
+            true,
+            true,
+            (None, 0_i64, 1_i64),
+        ),
+        (
+            "absent",
+            dohc_engine_collab::ContentKind::Plaintext,
+            false,
+            false,
+            (None, 1_i64, 0_i64),
+        ),
     ] {
         let (_scratch, _path, mut engine) = store();
         seed_identity(&mut engine);
         VersionedTextStore::new(&mut engine)
             .ensure_main_version("ws", "main", 1_000, &NoFaults)
             .expect("main version");
+        let path = match content_kind {
+            dohc_engine_collab::ContentKind::Scene => {
+                format!("drawings/{label}.excalidraw")
+            }
+            _ => format!("notes/{label}.md"),
+        };
         seed_text_head(
             &mut engine,
             &format!("object-{label}"),
-            &format!("notes/{label}.md"),
+            &path,
             "legacy base",
         );
         let key = dohc_engine_collab::DocKey::new("ws", "main", format!("object-{label}"))
             .expect("doc key");
         let doc = dohc_engine_collab::Ydoc::wire();
-        doc.plaintext_insert(0, "legacy base");
+        match content_kind {
+            dohc_engine_collab::ContentKind::Scene => {
+                let portable = json!({
+                    "type": "excalidraw",
+                    "version": 2,
+                    "source": "https://excalidraw.com",
+                    "elements": [],
+                    "appState": {},
+                    "files": {},
+                })
+                .to_string();
+                let imported = dohc_engine_collab::import_portable_scene(&portable)
+                    .expect("import legacy scene");
+                doc.apply(&imported.initial_update)
+                    .expect("apply legacy scene");
+            }
+            _ => {
+                doc.plaintext_insert(0, "legacy base");
+            }
+        }
         let base = doc.encode_full_state();
         let claim_id = match dohc_engine_collab::claim_base(
             &mut engine,
             &key,
-            dohc_engine_collab::ContentKind::Plaintext,
+            content_kind,
             &base,
             &NoFaults,
             1_100,
@@ -6167,8 +6397,8 @@ fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
         let payload = json!({
             "versionId": "main",
             "objectId": key.object_id,
-            "path": format!("notes/{label}.md"),
-            "contentKind": "plaintext",
+            "path": path,
+            "contentKind": content_kind.as_str(),
             "updateBlobSha256": &claim_id,
             "lineageClaimId": &claim_id,
             "isBaseState": true,
@@ -6880,6 +7110,187 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
 }
 
 #[test]
+fn lower_relay_scene_base_recovers_the_loser_as_one_ordinary_sibling() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    let scene = |element_id: &str| {
+        json!({
+            "type": "excalidraw",
+            "version": 2,
+            "source": "https://excalidraw.com",
+            "elements": [{
+                "id": element_id,
+                "type": "rectangle",
+                "version": 1,
+                "versionNonce": 1,
+                "isDeleted": false,
+                "index": "a0"
+            }],
+            "appState": {},
+            "files": {}
+        })
+        .to_string()
+    };
+    let path = "drawings/arbitrated.excalidraw";
+    let loser_portable = scene("losing-rectangle");
+    seed_text_head(
+        &mut engine,
+        "object-arbitrated-scene",
+        path,
+        &loser_portable,
+    );
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-arbitrated-scene")
+        .expect("scene key");
+    let loser = dohc_engine_collab::Ydoc::wire();
+    loser
+        .apply(
+            &dohc_engine_collab::import_portable_scene(&loser_portable)
+                .expect("losing scene import")
+                .initial_update,
+        )
+        .expect("losing scene applies");
+    let loser_bytes = loser.encode_full_state();
+    let loser_claim = dohc_engine_storage::hex_sha256(&loser_bytes);
+    assert!(matches!(
+        dohc_engine_collab::claim_base_at_relay(
+            &mut engine,
+            &key,
+            dohc_engine_collab::ContentKind::Scene,
+            &loser_bytes,
+            &dohc_engine_collab::BaseRelayCoordinate::new("loser", 0, 20)
+                .expect("loser coordinate"),
+            &NoFaults,
+            1_100,
+        ),
+        Ok(TxnOutcome::Committed(
+            dohc_engine_collab::ClaimOutcome::Claimed { .. }
+        ))
+    ));
+    engine
+        .write_with(&NoFaults, |tx| {
+            crate::ydoc_apply::project_and_write_in_tx(
+                tx,
+                &key,
+                path,
+                &loser,
+                dohc_engine_collab::ContentKind::Scene,
+                "loser",
+                0,
+                1_100,
+                None,
+            )
+        })
+        .expect("settle the losing scene projection");
+
+    let winner = dohc_engine_collab::Ydoc::wire();
+    winner
+        .apply(
+            &dohc_engine_collab::import_portable_scene(&scene("winning-rectangle"))
+                .expect("winning scene import")
+                .initial_update,
+        )
+        .expect("winning scene applies");
+    let winner_bytes = winner.encode_full_state();
+    let winner_claim = engine.put_binary_blob(&winner_bytes).expect("winner blob");
+    let mut incoming = envelope(
+        "winner",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": key.object_id,
+            "path": path,
+            "contentKind": "scene",
+            "updateBlobSha256": winner_claim,
+            "lineageClaimId": winner_claim,
+            "isBaseState": true
+        }),
+    );
+    incoming.relay_seq = Some(10);
+    let applied = apply_ydoc_envelope(&mut engine, &incoming, &NoFaults, &NoLiveLeases)
+        .expect("winning scene base applies");
+    let ApplyOutcome::Applied(result) = applied else {
+        panic!("winning scene base did not apply: {applied:?}");
+    };
+    let replacement = result
+        .lineage_replacement
+        .expect("scene replacement result");
+    assert_eq!(replacement.winner_lineage_claim_id, winner_claim);
+    assert_eq!(replacement.recovered_paths.len(), 1);
+    let recovered_path = &replacement.recovered_paths[0];
+    assert!(recovered_path.contains(&loser_claim[..8]));
+    assert!(recovered_path.ends_with(".excalidraw"));
+
+    let (original, recovered, decision_kind, recovered_content_kind, recovery_ydocs): (
+        String,
+        String,
+        String,
+        String,
+        i64,
+    ) = engine
+        .read_with(|conn| {
+            let original = conn.query_row(
+                "SELECT blob.text FROM snapshots snapshot
+                 JOIN blobs blob ON blob.sha256=snapshot.blob_sha256
+                 WHERE snapshot.workspace_id='ws' AND snapshot.version_id='main'
+                   AND snapshot.path=?1",
+                [path],
+                |row| row.get(0),
+            )?;
+            let recovered = conn.query_row(
+                "SELECT blob.text FROM snapshots snapshot
+                 JOIN blobs blob ON blob.sha256=snapshot.blob_sha256
+                 WHERE snapshot.workspace_id='ws' AND snapshot.version_id='main'
+                   AND snapshot.path=?1",
+                [recovered_path],
+                |row| row.get(0),
+            )?;
+            let (decision_kind, recovery_object_id) = conn.query_row(
+                "SELECT incoming_content_kind,recovery_object_id
+                   FROM ydoc_recovery_decisions
+                  WHERE workspace_id='ws' AND origin_id='winner' AND origin_seq=0",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?;
+            let recovered_content_kind = conn.query_row(
+                "SELECT content_kind FROM snapshots
+                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [&recovery_object_id],
+                |row| row.get(0),
+            )?;
+            let recovery_ydocs = conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_docs
+                  WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [&recovery_object_id],
+                |row| row.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((
+                original,
+                recovered,
+                decision_kind,
+                recovered_content_kind,
+                recovery_ydocs,
+            ))
+        })
+        .expect("scene recovery state");
+    let original: serde_json::Value =
+        serde_json::from_str(&original).expect("winning scene remains portable JSON");
+    let recovered: serde_json::Value =
+        serde_json::from_str(&recovered).expect("recovered scene remains portable JSON");
+    assert_eq!(original["elements"][0]["id"], "winning-rectangle");
+    assert_eq!(recovered["elements"][0]["id"], "losing-rectangle");
+    assert_eq!(decision_kind, "scene");
+    assert_eq!(recovered_content_kind, "text");
+    assert_eq!(
+        recovery_ydocs, 0,
+        "the recovered scene is an ordinary sibling"
+    );
+}
+
+#[test]
 fn lower_relay_base_recovers_the_loser_even_when_the_text_matches() {
     let (_scratch, _path, mut engine) = store();
     VersionedTextStore::new(&mut engine)
@@ -7315,7 +7726,7 @@ fn live_drain_stops_before_a_foreign_lineage_without_replacing_the_session() {
             .doc
             .project(dohc_engine_collab::ContentKind::Plaintext)
             .expect("projection")
-            .markdown,
+            .content,
         "base live"
     );
 }
@@ -7392,7 +7803,7 @@ fn a_losing_lineage_delta_is_acked_without_entering_the_winner() {
             .doc
             .project(dohc_engine_collab::ContentKind::Plaintext)
             .expect("winner projection")
-            .markdown,
+            .content,
         "winner"
     );
     assert_eq!(
@@ -7881,6 +8292,169 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
             .commit_pull_cursor(&mut reopened, "ws", &pending, &NoFaults, 1_000)
             .expect("commit"),
         TxnOutcome::Committed(Vec::new())
+    );
+}
+
+#[test]
+fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let object_id = "retained-scene";
+    let path = "drawings/retained.excalidraw";
+    let imported = dohc_engine_collab::import_portable_scene(
+        &json!({
+            "type": "excalidraw",
+            "version": 2,
+            "source": "https://excalidraw.com",
+            "elements": [],
+            "appState": {},
+            "files": {}
+        })
+        .to_string(),
+    )
+    .expect("import scene");
+    let base_sha = engine
+        .put_binary_blob(&imported.initial_update)
+        .expect("store scene base");
+    let base = envelope(
+        "scene-base-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": path,
+            "contentKind": "scene",
+            "updateBlobSha256": base_sha,
+            "lineageClaimId": base_sha,
+            "isBaseState": true
+        }),
+    );
+    let base_outcome = apply_replication_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases);
+    assert!(
+        matches!(base_outcome, Ok(ApplyOutcome::Applied(_))),
+        "unexpected scene base outcome: {base_outcome:?}"
+    );
+    let (scene_sha, updated_at_ms, latest_moment_id): (String, i64, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT blob_sha256,updated_at_ms,latest_moment_id \
+                 FROM snapshots WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                [object_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("scene head");
+
+    let delete_payload = |moment_id: &str| {
+        json!({
+            "momentId": moment_id,
+            "versionId": "main",
+            "objectId": object_id,
+            "objectCreatedAtMs": 2_000,
+            "path": path,
+            "recordedAtMs": 3_100,
+            "operation": "delete",
+            "payloadBeforeBlobSha256": scene_sha,
+            "payloadBeforePath": path,
+            "payloadBeforeContentKind": "text",
+            "payloadAfterBlobSha256": scene_sha,
+            "payloadAfterPath": path,
+            "payloadAfterContentKind": "text",
+            "metadata": {"origin": "sync"},
+            "beforePresent": "present",
+            "beforeObjectId": object_id,
+            "beforeVersionId": "main",
+            "beforePath": path,
+            "beforeBlobSha256": scene_sha,
+            "beforeContentKind": "text",
+            "beforeUpdatedAtMs": updated_at_ms,
+            "beforeLatestMomentId": latest_moment_id,
+            "beforeMetadata": {"origin": "sync"}
+        })
+    };
+    let first_delete = envelope(
+        "first-scene-delete-peer",
+        0,
+        "moment.append",
+        delete_payload("first-scene-delete"),
+    );
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &first_delete, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    let key = dohc_engine_collab::DocKey::new("ws", "main", object_id).expect("scene key");
+    assert!(
+        dohc_engine_collab::read_marker(&engine, &key)
+            .expect("read retained marker")
+            .is_some(),
+        "scene rollback and asset authority require the deleted lineage"
+    );
+
+    let peer_delete = envelope(
+        "scene-delete-peer",
+        0,
+        "moment.append",
+        delete_payload("peer-scene-delete"),
+    );
+    let later = envelope("scene-delete-peer", 1, "workspace.init", json!({}));
+    let client = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(Vec::new()),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![peer_delete, later],
+            next_cursor: 2,
+            has_more: false,
+        })),
+    });
+
+    let first = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 3_200)
+        .expect("retained scene delete must not wedge the relay");
+    let first_cursor = match first {
+        SyncPassOutcome::Complete {
+            applied: 2,
+            skipped: 0,
+            pending_cursor: Some(cursor),
+            ..
+        } => cursor,
+        other => panic!("unexpected first pull: {other:?}"),
+    };
+    assert_eq!(first_cursor.cursor, 2);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "scene-delete-peer").expect("peer ack"),
+        1,
+        "the operation after the peer delete must apply"
+    );
+
+    let replay = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 3_300)
+        .expect("cursor-crash replay must dedupe");
+    let replay_cursor = match replay {
+        SyncPassOutcome::Complete {
+            applied: 0,
+            skipped: 2,
+            pending_cursor: Some(cursor),
+            ..
+        } => cursor,
+        other => panic!("unexpected replay pull: {other:?}"),
+    };
+    assert_eq!(replay_cursor.cursor, 2);
+    client
+        .commit_pull_cursor(&mut engine, "ws", &replay_cursor, &NoFaults, 3_400)
+        .expect("commit replay cursor");
+    assert_eq!(
+        read_relay_cursor(&engine, "ws")
+            .expect("read relay cursor")
+            .map(|cursor| cursor.cursor),
+        Some(2)
+    );
+    assert!(
+        dohc_engine_collab::read_marker(&engine, &key)
+            .expect("read retained marker after peer delete")
+            .is_some(),
+        "peer-delete progress must not discard scene rollback state"
     );
 }
 
@@ -9394,7 +9968,7 @@ fn a_fold_the_parser_can_reproduce_still_commits() {
             .doc
             .project(dohc_engine_collab::ContentKind::Richdoc)
             .expect("projection")
-            .markdown,
+            .content,
         chosen,
         "the lineage projects exactly the chosen bytes"
     );
@@ -9694,6 +10268,923 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
 }
 
 #[test]
+fn external_text_write_to_a_closed_scene_retires_the_lineage_for_reseed() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let object_id = "closed-scene";
+    let path = "drawings/closed.excalidraw";
+    let imported = dohc_engine_collab::import_portable_scene(
+        &json!({
+            "type": "excalidraw",
+            "version": 2,
+            "source": "https://excalidraw.com",
+            "elements": [],
+            "appState": {},
+            "files": {}
+        })
+        .to_string(),
+    )
+    .expect("import scene");
+    let base_sha = engine
+        .put_binary_blob(&imported.initial_update)
+        .expect("store scene base");
+    let base = envelope(
+        "closed-scene-base-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": path,
+            "contentKind": "scene",
+            "updateBlobSha256": base_sha,
+            "lineageClaimId": base_sha,
+            "isBaseState": true
+        }),
+    );
+    let base_outcome = apply_replication_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases);
+    assert!(
+        matches!(base_outcome, Ok(ApplyOutcome::Applied(_))),
+        "unexpected scene base outcome: {base_outcome:?}"
+    );
+
+    // An external edit lands while the drawing is closed. A scene has no
+    // Markdown fold, so the reconcile must retire the lineage — the file is
+    // canonical and the next open seeds a fresh scene from it — instead of
+    // failing and rolling the external edit's write back.
+    let changed = json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "https://excalidraw.com",
+        "elements": [{
+            "id": "external-shape",
+            "type": "rectangle",
+            "version": 1,
+            "versionNonce": 1,
+            "isDeleted": false,
+            "index": "a0"
+        }],
+        "appState": {},
+        "files": {}
+    })
+    .to_string();
+    engine
+        .write_with(&NoFaults, |tx| {
+            crate::ydoc_apply::reconcile_local_resulting_head_in_tx(
+                tx,
+                "ws",
+                "main",
+                object_id,
+                crate::ydoc_apply::ResultingHead::Text {
+                    path,
+                    text: &changed,
+                },
+                4_000,
+            )
+        })
+        .expect("the external scene edit reconciles instead of failing");
+    let remaining: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM ydoc_docs \
+                   WHERE workspace_id='ws' AND version_id='main' AND object_id=?1) \
+                 + (SELECT COUNT(*) FROM ydoc_updates \
+                   WHERE workspace_id='ws' AND version_id='main' AND object_id=?1) \
+                 + (SELECT COUNT(*) FROM ydoc_snapshots \
+                   WHERE workspace_id='ws' AND version_id='main' AND object_id=?1)",
+                [object_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("count retired lineage rows");
+    assert_eq!(
+        remaining, 0,
+        "the retired scene lineage leaves no CRDT rows"
+    );
+}
+
+#[test]
+fn replicated_text_write_to_a_scene_retires_the_receiver_lineage() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let object_id = "replicated-scene";
+    let path = "drawings/replicated.excalidraw";
+    let imported = dohc_engine_collab::import_portable_scene(
+        &json!({
+            "type": "excalidraw",
+            "version": 2,
+            "source": "https://excalidraw.com",
+            "elements": [],
+            "appState": {},
+            "files": {}
+        })
+        .to_string(),
+    )
+    .expect("import scene");
+    let base_sha = engine
+        .put_binary_blob(&imported.initial_update)
+        .expect("store scene base");
+    let base = envelope(
+        "replicated-scene-base-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": path,
+            "contentKind": "scene",
+            "updateBlobSha256": base_sha,
+            "lineageClaimId": base_sha,
+            "isBaseState": true
+        }),
+    );
+    let base_outcome = apply_replication_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases);
+    assert!(
+        matches!(base_outcome, Ok(ApplyOutcome::Applied(_))),
+        "unexpected scene base outcome: {base_outcome:?}"
+    );
+
+    // The origin of an external scene edit retires its lineage without
+    // emitting a rewrite, so a receiver applying the replicated file moment
+    // must converge the same way instead of waiting forever for a rewrite
+    // that is never coming.
+    let changed = json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "https://excalidraw.com",
+        "elements": [{
+            "id": "replicated-shape",
+            "type": "rectangle",
+            "version": 1,
+            "versionNonce": 1,
+            "isDeleted": false,
+            "index": "a0"
+        }],
+        "appState": {},
+        "files": {}
+    })
+    .to_string();
+    engine
+        .write_with(&NoFaults, |tx| {
+            crate::ydoc_apply::reconcile_imported_resulting_head_in_tx(
+                tx,
+                "ws",
+                "main",
+                object_id,
+                crate::ydoc_apply::ResultingHead::Text {
+                    path,
+                    text: &changed,
+                },
+                4_000,
+            )
+        })
+        .expect("the replicated scene edit converges instead of waiting for a rewrite");
+    let remaining: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM ydoc_docs \
+                   WHERE workspace_id='ws' AND version_id='main' AND object_id=?1) \
+                 + (SELECT COUNT(*) FROM ydoc_updates \
+                   WHERE workspace_id='ws' AND version_id='main' AND object_id=?1) \
+                 + (SELECT COUNT(*) FROM ydoc_snapshots \
+                   WHERE workspace_id='ws' AND version_id='main' AND object_id=?1)",
+                [object_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("count retired lineage rows");
+    assert_eq!(
+        remaining, 0,
+        "the retired scene lineage leaves no CRDT rows"
+    );
+}
+
+#[test]
+fn oversized_hydrated_scene_base_is_refused_without_storing_the_projection() {
+    const ASSET_BYTES: usize = 3 * 1024 * 1024;
+    const ASSET_IDS: [&str; 4] = ["image-a", "image-b", "image-c", "image-d"];
+
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let object_id = "scene-over-projection-cap";
+    let drawing_path = "drawings/over-cap.excalidraw";
+    let asset_bytes = vec![7_u8; ASSET_BYTES];
+    let asset_sha = dohc_engine_storage::hex_sha256(&asset_bytes);
+    let asset_ref =
+        dohc_engine_collab::scene_asset_ref("ws", "main", object_id, &asset_sha, "image/png")
+            .expect("asset ref");
+    VersionedTextStore::new(&mut engine)
+        .write_binary(
+            &WriteBinary {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "oversized-scene-asset".to_owned(),
+                path: asset_ref.clone(),
+                bytes: asset_bytes,
+                moment_id: "oversized-scene-asset-write".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1_500,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("store authoritative asset");
+
+    let elements = ASSET_IDS
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            json!({
+                "id": format!("element-{index}"),
+                "type": "image",
+                "version": 1,
+                "versionNonce": index + 1,
+                "isDeleted": false,
+                "index": format!("a{index}"),
+                "fileId": id,
+            })
+        })
+        .collect::<Vec<_>>();
+    let files = ASSET_IDS
+        .iter()
+        .map(|id| {
+            (
+                (*id).to_owned(),
+                json!({
+                    "id": id,
+                    "mimeType": "image/png",
+                    "created": 1,
+                    "dataURL": "data:image/png;base64,AQ==",
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let portable = json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "https://excalidraw.com",
+        "elements": elements,
+        "appState": {},
+        "files": files,
+    })
+    .to_string();
+    let imported = dohc_engine_collab::import_portable_scene(&portable).expect("scene import");
+    let records = ASSET_IDS
+        .iter()
+        .map(|id| {
+            (
+                (*id).to_owned(),
+                json!({
+                    "created": 1,
+                    "id": id,
+                    "mimeType": "image/png",
+                    "ref": asset_ref,
+                    "sha256": asset_sha,
+                })
+                .to_string(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let asset_update =
+        dohc_engine_collab::encode_scene_asset_records(&records).expect("asset records");
+    let base_update = dohc_engine_collab::merge_updates(&[imported.initial_update, asset_update])
+        .expect("scene base");
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&base_update).expect("scene applies");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", object_id).expect("scene key");
+    let projection_error = engine
+        .read_with(|conn| {
+            project_ydoc_with_store(conn, &key, &doc, dohc_engine_collab::ContentKind::Scene)
+        })
+        .expect_err("the shared runtime/sync projector must enforce the cap");
+    let (actual_bytes, limit_bytes) = match projection_error {
+        SyncError::ProjectionTooLarge {
+            constraint: "MAX_PROJECTION_BYTES",
+            actual_bytes,
+            limit_bytes,
+        } => (actual_bytes, limit_bytes),
+        other => panic!("unexpected projection error: {other}"),
+    };
+    assert_eq!(
+        limit_bytes,
+        dohc_engine_collab::limits::MAX_PROJECTION_BYTES
+    );
+    assert!(actual_bytes > limit_bytes);
+    let update_sha = engine
+        .put_binary_blob(&doc.encode_full_state())
+        .expect("scene update blob");
+    let operation = envelope(
+        "oversized-scene-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": drawing_path,
+            "contentKind": "scene",
+            "updateBlobSha256": update_sha,
+            "lineageClaimId": update_sha,
+            "isBaseState": true,
+        }),
+    );
+
+    let outcome = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases)
+        .expect("oversized projection is a terminal refusal");
+    assert!(
+        matches!(
+            outcome,
+            ApplyOutcome::Refused(ReplicationRefusal {
+                reason: RefusalReason::InvalidInput { ref reason },
+                ..
+            }) if reason == &format!(
+                "scene projection exceeds MAX_PROJECTION_BYTES: limit {limit_bytes} bytes, observed at least {actual_bytes} bytes"
+            )
+        ),
+        "unexpected oversized scene outcome: {outcome:?}"
+    );
+    assert!(
+        dohc_engine_collab::read_marker(&engine, &key)
+            .expect("read marker")
+            .is_none(),
+        "the refused base must not store a canonical lineage"
+    );
+    let (drawing_heads, drawing_jobs, text_blobs): (i64, i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, SyncError>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots WHERE workspace_id='ws' \
+                     AND version_id='main' AND path=?1",
+                    [drawing_path],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM materialization_jobs WHERE workspace_id='ws' \
+                     AND target_path=?1",
+                    [drawing_path],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?,
+                conn.query_row("SELECT COUNT(*) FROM blobs", [], |row| row.get(0))
+                    .map_err(SyncError::corrupt)?,
+            ))
+        })
+        .expect("inspect refused projection");
+    assert_eq!((drawing_heads, drawing_jobs, text_blobs), (0, 0, 0));
+}
+
+#[test]
+fn an_old_scene_asset_tombstone_cannot_authorize_a_reused_path() {
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    let drawing_object_id = "scene-tombstone-owner";
+    let asset_bytes = vec![1_u8, 2, 3, 4, 5];
+    let asset_sha = dohc_engine_storage::hex_sha256(&asset_bytes);
+    let asset_ref = dohc_engine_collab::scene_asset_ref(
+        "ws",
+        "main",
+        drawing_object_id,
+        &asset_sha,
+        "image/png",
+    )
+    .expect("asset ref");
+    let replacement_bytes = vec![9_u8, 8, 7, 6];
+    let replacement_sha = dohc_engine_storage::hex_sha256(&replacement_bytes);
+    let replacement_ref = dohc_engine_collab::scene_asset_ref(
+        "ws",
+        "main",
+        drawing_object_id,
+        &replacement_sha,
+        "image/png",
+    )
+    .expect("replacement asset ref");
+
+    {
+        let mut versioned = VersionedTextStore::new(&mut engine);
+        versioned
+            .write_binary(
+                &WriteBinary {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "asset-a".to_owned(),
+                    path: asset_ref.clone(),
+                    bytes: asset_bytes,
+                    moment_id: "asset-a-write".to_owned(),
+                    metadata_origin: "ydoc".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_400,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("write original asset");
+        versioned
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: asset_ref.clone(),
+                    moment_id: "asset-a-delete".to_owned(),
+                    request_id: None,
+                    metadata_origin: "capture".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_500,
+                },
+                &NoFaults,
+            )
+            .expect("retire original asset");
+        versioned
+            .write_binary(
+                &WriteBinary {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "asset-b".to_owned(),
+                    path: asset_ref.clone(),
+                    bytes: replacement_bytes.clone(),
+                    moment_id: "asset-b-write".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_600,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("reuse path");
+        versioned
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: asset_ref.clone(),
+                    moment_id: "asset-b-delete".to_owned(),
+                    request_id: None,
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_700,
+                },
+                &NoFaults,
+            )
+            .expect("delete replacement");
+        versioned
+            .write_binary(
+                &WriteBinary {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "asset-c".to_owned(),
+                    path: replacement_ref.clone(),
+                    bytes: replacement_bytes,
+                    moment_id: "asset-c-write".to_owned(),
+                    metadata_origin: "ydoc".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_800,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("write current canonical asset");
+        versioned
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: replacement_ref.clone(),
+                    moment_id: "asset-c-delete".to_owned(),
+                    request_id: None,
+                    metadata_origin: "capture".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1_900,
+                },
+                &NoFaults,
+            )
+            .expect("retire current canonical asset");
+    }
+
+    let portable = json!({
+        "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+        "elements": [{ "id": "image", "type": "image", "version": 1,
+            "versionNonce": 1, "isDeleted": false, "index": "a0", "fileId": "file" }],
+        "appState": {},
+        "files": { "file": { "id": "file", "mimeType": "image/png", "created": 1,
+            "dataURL": "data:image/png;base64,AQIDBAU=" } }
+    })
+    .to_string();
+    let imported = dohc_engine_collab::import_portable_scene(&portable).expect("scene import");
+    let records = BTreeMap::from([(
+        "file".to_owned(),
+        json!({ "created": 1, "id": "file", "mimeType": "image/png",
+            "ref": asset_ref, "sha256": asset_sha })
+        .to_string(),
+    )]);
+    let assets = dohc_engine_collab::encode_scene_asset_records(&records).expect("asset record");
+    let update = dohc_engine_collab::merge_updates(&[imported.initial_update, assets])
+        .expect("scene update");
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&update).expect("apply scene");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", drawing_object_id).expect("key");
+
+    assert!(matches!(
+        engine.read_with(|conn| project_ydoc_with_store(
+            conn,
+            &key,
+            &doc,
+            dohc_engine_collab::ContentKind::Scene,
+        )),
+        Err(SyncError::RetryableState {
+            reason: "scene asset head is pending"
+        })
+    ));
+
+    let current_records = BTreeMap::from([(
+        "file".to_owned(),
+        json!({ "created": 1, "id": "file", "mimeType": "image/png",
+            "ref": replacement_ref, "sha256": replacement_sha })
+        .to_string(),
+    )]);
+    let current_assets =
+        dohc_engine_collab::encode_scene_asset_records(&current_records).expect("asset record");
+    let current_update = dohc_engine_collab::merge_updates(&[
+        dohc_engine_collab::import_portable_scene(&portable)
+            .expect("scene import")
+            .initial_update,
+        current_assets,
+    ])
+    .expect("scene update");
+    let current_doc = dohc_engine_collab::Ydoc::wire();
+    current_doc.apply(&current_update).expect("apply scene");
+    let projection = engine
+        .read_with(|conn| {
+            project_ydoc_with_store(
+                conn,
+                &key,
+                &current_doc,
+                dohc_engine_collab::ContentKind::Scene,
+            )
+        })
+        .expect("the current retired asset projects");
+    let projected: serde_json::Value =
+        serde_json::from_str(&projection.content).expect("projected scene");
+    assert_eq!(
+        projected["files"]["file"]["dataURL"],
+        "data:image/png;base64,CQgHBg=="
+    );
+}
+
+#[test]
+fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
+    let make_ops = |engine: &mut EngineStore| {
+        seed_identity(engine);
+        seed_replication_version(engine, "main", "main");
+        let object_id = "scene-object";
+        let asset_id = "image-file";
+        let asset_bytes = vec![1_u8, 2, 3, 4, 5];
+        let asset_sha = dohc_engine_storage::hex_sha256(&asset_bytes);
+        let asset_ref =
+            dohc_engine_collab::scene_asset_ref("ws", "main", object_id, &asset_sha, "image/png")
+                .expect("asset ref");
+        let portable = serde_json::to_string(&json!({
+            "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+            "elements": [{ "id": "image", "type": "image", "version": 1,
+                "versionNonce": 1, "isDeleted": false, "index": "a0", "fileId": asset_id }],
+            "appState": {},
+            "files": { (asset_id): { "id": asset_id, "mimeType": "image/png", "created": 1,
+                "dataURL": "data:image/png;base64,AQIDBAU=" } }
+        }))
+        .expect("portable scene");
+        let imported = dohc_engine_collab::import_portable_scene(&portable).expect("import");
+        let records = BTreeMap::from([(
+            asset_id.to_owned(),
+            serde_json::to_string(&json!({
+                "created": 1, "id": asset_id, "mimeType": "image/png",
+                "ref": asset_ref, "sha256": asset_sha
+            }))
+            .expect("asset record"),
+        )]);
+        let asset_update =
+            dohc_engine_collab::encode_scene_asset_records(&records).expect("asset-root update");
+        let base_update =
+            dohc_engine_collab::merge_updates(&[imported.initial_update, asset_update])
+                .expect("scene base");
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&base_update).expect("base applies");
+        let ydoc_sha = engine
+            .put_binary_blob(&doc.encode_full_state())
+            .expect("ydoc blob");
+        assert_eq!(
+            engine.put_binary_blob(&asset_bytes).expect("asset blob"),
+            asset_sha
+        );
+        let asset = envelope(
+            "asset-peer",
+            0,
+            "moment.append",
+            json!({
+                "momentId": "asset-moment", "versionId": "main",
+                "objectId": "asset-object", "objectCreatedAtMs": 1,
+                "path": asset_ref, "recordedAtMs": 2_000, "operation": "write",
+                "payloadBeforeBlobSha256": null, "payloadBeforePath": null,
+                "payloadAfterBlobSha256": asset_sha, "payloadAfterPath": asset_ref,
+                "payloadAfterContentKind": "binary", "payloadAfterByteLength": asset_bytes.len(),
+                "metadata": {"origin": "sync"}, "beforePresent": "absent"
+            }),
+        );
+        let scene = envelope(
+            "scene-peer",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main", "objectId": object_id,
+                "path": "drawings/board.excalidraw", "contentKind": "scene",
+                "updateBlobSha256": ydoc_sha, "lineageClaimId": ydoc_sha,
+                "isBaseState": true
+            }),
+        );
+        (asset, scene, asset_ref, portable)
+    };
+
+    let (scratch_a, path_a, mut asset_first) = store();
+    let (asset_a, scene_a, asset_ref_a, _) = make_ops(&mut asset_first);
+    let asset_first_pull = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(Vec::new()),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![asset_a, scene_a],
+            next_cursor: 2,
+            has_more: false,
+        })),
+    });
+    let SyncPassOutcome::Complete {
+        changed_paths: asset_first_changes,
+        applied: 2,
+        refused: 0,
+        ..
+    } = asset_first_pull
+        .pull_chat_workspace(&mut asset_first, "ws", &NoFaults, &NoLiveLeases, 2_100)
+        .expect("asset-first relay pull")
+    else {
+        panic!("asset-first relay pull must complete");
+    };
+
+    let (scratch_b, path_b, mut scene_first) = store();
+    let (asset_b, scene_b, asset_ref_b, portable) = make_ops(&mut scene_first);
+    let scene_first_pull = RelaySyncClient::new(FakeRelay {
+        pushes: Mutex::new(Vec::new()),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![scene_b, asset_b],
+            next_cursor: 2,
+            has_more: false,
+        })),
+    });
+    let SyncPassOutcome::Complete {
+        changed_paths: scene_first_changes,
+        applied: 2,
+        refused: 0,
+        ..
+    } = scene_first_pull
+        .pull_chat_workspace(&mut scene_first, "ws", &NoFaults, &NoLiveLeases, 2_100)
+        .expect("scene-first relay pull retries after the asset moment")
+    else {
+        panic!("scene-first relay pull must complete");
+    };
+
+    let read_head = |engine: &EngineStore| {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+                     WHERE s.workspace_id='ws' AND s.version_id='main' \
+                       AND s.path='drawings/board.excalidraw'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(SyncError::corrupt)
+            })
+            .expect("portable head")
+    };
+    let expected: serde_json::Value = serde_json::from_str(&portable).expect("expected JSON");
+    let first: serde_json::Value = serde_json::from_str(&read_head(&asset_first)).expect("first");
+    let second: serde_json::Value = serde_json::from_str(&read_head(&scene_first)).expect("second");
+    assert_eq!(first, expected);
+    assert_eq!(second, expected);
+    assert_eq!(
+        first["files"]["image-file"]["dataURL"],
+        "data:image/png;base64,AQIDBAU="
+    );
+    let conflicts: i64 = scene_first
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM conflicts", [], |row| row.get(0))
+                .map_err(SyncError::corrupt)
+        })
+        .expect("conflict count");
+    assert_eq!(conflicts, 0);
+
+    for (store, scratch, asset_ref, changes) in [
+        (
+            &mut asset_first,
+            &scratch_a,
+            &asset_ref_a,
+            &asset_first_changes,
+        ),
+        (
+            &mut scene_first,
+            &scratch_b,
+            &asset_ref_b,
+            &scene_first_changes,
+        ),
+    ] {
+        assert_eq!(
+            changes
+                .iter()
+                .map(|change| (change.path.as_str(), change.content_kind))
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([
+                ("drawings/board.excalidraw", "text"),
+                (asset_ref.as_str(), "binary"),
+            ]),
+            "the real pull must expose both disk debts before its cursor commits"
+        );
+        let materialized = dohc_engine_files::run_pending_jobs(
+            store,
+            scratch.path(),
+            dohc_engine_files::DurabilityPolicy::per_os(),
+            &dohc_engine_files::StdReplacer,
+            &dohc_engine_files::NoBackoff,
+            2_500,
+            &NoFaults,
+        )
+        .expect("materialize replicated scene and sidecar");
+        assert!(
+            materialized
+                .iter()
+                .all(|result| matches!(result.outcome, dohc_engine_files::JobOutcome::Completed)),
+            "replicated scene projection must not conflict"
+        );
+        for change in changes {
+            if change.operation != "write" || change.content_kind != "binary" {
+                continue;
+            }
+            let head = VersionedTextStore::new(store)
+                .read_binary("ws", "main", &change.path)
+                .expect("read authoritative binary head")
+                .expect("binary head exists");
+            let target = scratch.join(&change.path);
+            std::fs::create_dir_all(target.parent().expect("asset parent"))
+                .expect("create asset directory");
+            std::fs::write(target, head.bytes).expect("materialize relay binary debt");
+        }
+        let disk: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(scratch.join("drawings/board.excalidraw"))
+                .expect("materialized portable scene"),
+        )
+        .expect("portable scene JSON");
+        assert_eq!(disk, expected);
+        assert_eq!(
+            std::fs::read(scratch.join(asset_ref)).expect("materialized sidecar"),
+            [1, 2, 3, 4, 5]
+        );
+    }
+    drop(asset_first);
+    let restarted_asset_first = EngineStore::open(&path_a, 3_000).expect("restart asset-first");
+    assert!(
+        dohc_engine_collab::load_persisted(
+            &restarted_asset_first,
+            &dohc_engine_collab::DocKey::new("ws", "main", "scene-object").expect("key")
+        )
+        .expect("load asset-first after restart")
+        .is_some()
+    );
+    drop(scene_first);
+    let reopened = EngineStore::open(&path_b, 3_000).expect("restart store");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "scene-object").expect("key");
+    let folded = dohc_engine_collab::load_persisted(&reopened, &key)
+        .expect("load after restart")
+        .expect("scene lineage")
+        .doc
+        .fold_scene();
+    assert_eq!(folded.elements[0]["fileId"], "image-file");
+}
+
+#[test]
+fn scene_base_permanently_refuses_forged_asset_authority() {
+    let sha = "11".repeat(32);
+    let other_sha = "22".repeat(32);
+    let png_ref =
+        dohc_engine_collab::scene_asset_ref("ws", "main", "scene-forged", &sha, "image/png")
+            .expect("PNG ref");
+    let mismatched_hash_ref =
+        dohc_engine_collab::scene_asset_ref("ws", "main", "scene-forged", &other_sha, "image/png")
+            .expect("other hash ref");
+    let cross_workspace_ref = dohc_engine_collab::scene_asset_ref(
+        "other-workspace",
+        "main",
+        "scene-forged",
+        &sha,
+        "image/png",
+    )
+    .expect("cross-workspace ref");
+    let cross_version_ref = dohc_engine_collab::scene_asset_ref(
+        "ws",
+        "other-version",
+        "scene-forged",
+        &sha,
+        "image/png",
+    )
+    .expect("cross-version ref");
+    for (case, mime_type, asset_ref) in [
+        ("unrelated", "image/png", "user/image.png".to_owned()),
+        ("hash-filename", "image/png", mismatched_hash_ref),
+        ("mime-extension", "image/jpeg", png_ref.clone()),
+        ("cross-workspace", "image/png", cross_workspace_ref),
+        ("cross-version", "image/png", cross_version_ref),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        seed_replication_version(&mut engine, "main", "main");
+        let portable = json!({
+            "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+            "elements": [{ "id": "image", "type": "image", "version": 1,
+                "versionNonce": 1, "isDeleted": false, "index": "a0", "fileId": "file" }],
+            "appState": {},
+            "files": { "file": { "id": "file", "mimeType": "image/png", "created": 1,
+                "dataURL": "data:image/png;base64,AQIDBA==" } }
+        })
+        .to_string();
+        let imported = dohc_engine_collab::import_portable_scene(&portable).expect("scene import");
+        let records = BTreeMap::from([(
+            "file".to_owned(),
+            json!({
+                "created": 1, "id": "file", "mimeType": mime_type,
+                "ref": asset_ref, "sha256": sha
+            })
+            .to_string(),
+        )]);
+        let asset_update = dohc_engine_collab::encode_scene_asset_records(&records)
+            .expect("structurally valid forged record");
+        let update = dohc_engine_collab::merge_updates(&[imported.initial_update, asset_update])
+            .expect("merge scene");
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&update).expect("scene applies");
+        let update_sha = engine
+            .put_binary_blob(&doc.encode_full_state())
+            .expect("scene blob");
+        let operation = envelope(
+            &format!("forged-{case}"),
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main", "objectId": "scene-forged",
+                "path": "drawings/forged.excalidraw", "contentKind": "scene",
+                "updateBlobSha256": update_sha, "isBaseState": true
+            }),
+        );
+        assert!(
+            matches!(
+                apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+                Ok(ApplyOutcome::Refused(ReplicationRefusal {
+                    reason: RefusalReason::InvalidInput { .. },
+                    ..
+                }))
+            ),
+            "{case}"
+        );
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", &format!("forged-{case}"))
+                .expect("refusal ack"),
+            0,
+            "{case} must be terminal instead of retrying forever"
+        );
+        assert!(
+            dohc_engine_collab::read_marker(
+                &engine,
+                &dohc_engine_collab::DocKey::new("ws", "main", "scene-forged").expect("key")
+            )
+            .expect("marker read")
+            .is_none(),
+            "{case} must not retain a refused lineage"
+        );
+    }
+}
+
+#[test]
 fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant() {
     for (case, base_kind, queued_kind) in [
         ("plaintext-base", "plaintext", "richdoc"),
@@ -9822,11 +11313,14 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
             .expect("persisted lineage");
         let projected = persisted
             .doc
-            .project(dohc_engine_collab::ContentKind::parse(base_kind))
+            .project(
+                dohc_engine_collab::ContentKind::parse(base_kind)
+                    .expect("established content kind"),
+            )
             .expect("project established kind");
-        assert!(projected.markdown.contains("base"));
+        assert!(projected.content.contains("base"));
         assert!(
-            !projected.markdown.contains("queued"),
+            !projected.content.contains("queued"),
             "the refused alternate-root edit must not project through the established kind"
         );
         assert!(
@@ -10216,7 +11710,7 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
             .doc
             .project(dohc_engine_collab::ContentKind::Plaintext)
             .expect("project converged base")
-            .markdown,
+            .content,
         "device Y document"
     );
 }

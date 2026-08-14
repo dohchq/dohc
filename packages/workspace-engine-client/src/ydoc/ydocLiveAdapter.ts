@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import {
   EngineRequestDeadlineError,
@@ -29,6 +30,7 @@ import {
   type YdocApplyExternalMarkdownEditResult,
   type YdocCloseParams,
   type YdocContentKind,
+  type ArtifactAssetDescriptor,
   type YdocEvictParams,
   type YdocOpenParams,
   type YdocRecordUpdateParams,
@@ -245,7 +247,7 @@ export interface OpenYdocAdapterSessionInput {
   path: string;
   contentKind?: YdocContentKind;
   // An object with no durable CRDT lineage is normally seeded from its
-  // markdown. Set false when the caller ALREADY holds the document's canonical
+  // artifact content. Set false when the caller already holds the canonical
   // state and will replay it: a seed carries a fresh client id, so merging it
   // into a populated doc appends a second copy of the file instead of
   // resuming it. Callers that pass false own re-establishing the content.
@@ -288,17 +290,25 @@ function base64ToBytes(value: string): Uint8Array {
   return new Uint8Array(Buffer.from(value, "base64"));
 }
 
-function declareDohcRootSchema(doc: Y.Doc): void {
+function declareDohcRootSchema(
+  doc: Y.Doc,
+  contentKind?: YdocContentKind,
+): void {
   doc.getMap("frontmatter");
   doc.getMap("meta");
   doc.getXmlFragment("body");
   doc.getText("plainText");
+  if (contentKind === "scene") {
+    doc.getMap(EXCALIDRAW_SCENE_ROOTS.revisions);
+    doc.getMap(EXCALIDRAW_SCENE_ROOTS.appState);
+    doc.getMap(EXCALIDRAW_SCENE_ROOTS.assets);
+  }
 }
 
-function createPlaintextSeedDoc(markdown: string): Y.Doc {
+function createPlaintextSeedDoc(content: string): Y.Doc {
   const doc = new Y.Doc();
   declareDohcRootSchema(doc);
-  if (markdown.length > 0) doc.getText("plainText").insert(0, markdown);
+  if (content.length > 0) doc.getText("plainText").insert(0, content);
   return doc;
 }
 
@@ -555,6 +565,10 @@ export class YdocAdapterSession {
   readonly objectId: string;
   readonly path: string;
   readonly contentKind: YdocContentKind;
+  private activeArtifactAssets: readonly ArtifactAssetDescriptor[];
+  get artifactAssets(): readonly ArtifactAssetDescriptor[] {
+    return this.activeArtifactAssets;
+  }
   readonly workspace: WorkspaceHandle;
   readonly sessionId: string;
   // Whether the ENTERED VERSION has a committed snapshot for this path.
@@ -607,6 +621,7 @@ export class YdocAdapterSession {
       path: string;
       contentKind: YdocContentKind;
       initialUpdate: Uint8Array;
+      artifactAssets?: readonly ArtifactAssetDescriptor[];
       lineageClaimId: string | null;
     },
   ) {
@@ -616,10 +631,11 @@ export class YdocAdapterSession {
     this.objectId = input.objectId;
     this.path = input.path;
     this.contentKind = input.contentKind;
+    this.activeArtifactAssets = input.artifactAssets ?? [];
     this.initialUpdate = input.initialUpdate;
     this.lineageClaimId = input.lineageClaimId;
     this.activeDoc = new Y.Doc();
-    declareDohcRootSchema(this.activeDoc);
+    declareDohcRootSchema(this.activeDoc, this.contentKind);
     Y.applyUpdate(this.activeDoc, this.initialUpdate, ENGINE_DELIVERED_ORIGIN);
     this.activeDoc.on("update", this.handleDocUpdate);
   }
@@ -834,7 +850,7 @@ export class YdocAdapterSession {
       }
       const durableUpdate = durableState.update;
       const durableDoc = new Y.Doc();
-      declareDohcRootSchema(durableDoc);
+      declareDohcRootSchema(durableDoc, this.contentKind);
       Y.applyUpdate(durableDoc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
       // Take the durable state first, exactly as recovery does, so the delta
       // below is measured against what the engine actually holds.
@@ -891,10 +907,10 @@ export class YdocAdapterSession {
     }
     const durableUpdate = durableState.update;
     const durableDoc = new Y.Doc();
-    declareDohcRootSchema(durableDoc);
+    declareDohcRootSchema(durableDoc, this.contentKind);
     Y.applyUpdate(durableDoc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
     const recoveryDoc = new Y.Doc();
-    declareDohcRootSchema(recoveryDoc);
+    declareDohcRootSchema(recoveryDoc, this.contentKind);
     Y.applyUpdate(recoveryDoc, durableUpdate, ENGINE_DELIVERED_ORIGIN);
     Y.applyUpdate(recoveryDoc, refusedUpdate, LOCAL_EDITOR_ORIGIN);
 
@@ -1063,6 +1079,7 @@ export class YdocAdapterSession {
       this.activeDoc = replacement;
       this.lineageClaimId = result.lineageClaimId;
       this.initialUpdate = update;
+      this.activeArtifactAssets = result.artifactAssets;
       for (const listener of this.lineageReplacementListeners) {
         listener(replacement, result.recoveredPaths);
       }
@@ -1093,6 +1110,7 @@ export class YdocAdapterSession {
     update: Uint8Array;
     lineageClaimId: string | null;
     recoveredPaths: string[];
+    artifactAssets: readonly ArtifactAssetDescriptor[];
   }> {
     const raw = await this.adapter.request(this.workspace, YDOC_METHOD.resync, {
       sessionId: this.sessionId,
@@ -1102,6 +1120,7 @@ export class YdocAdapterSession {
       update: base64ToBytes(result.initialUpdateBase64),
       lineageClaimId: result.lineageClaimId,
       recoveredPaths: result.recoveredPaths,
+      artifactAssets: result.artifactAssets,
     };
   }
 
@@ -1268,6 +1287,9 @@ export class YdocLiveAdapter {
       versionId: input.versionId,
       path: input.path,
       ...(input.contentKind ? { contentKind: input.contentKind } : {}),
+      ...(input.contentKind === "scene"
+        ? { seedFromArtifact: input.seedAbsentLineage !== false }
+        : {}),
     };
     const startedAtMs = performance.now();
     let rawResult: Response["result"];
@@ -1289,6 +1311,7 @@ export class YdocLiveAdapter {
       path: result.path,
       contentKind: result.contentKind,
       initialUpdate: base64ToBytes(result.initialUpdateBase64),
+      artifactAssets: result.artifactAssets,
       lineageClaimId: result.lineageClaimId,
     });
     this.sessions.set(result.sessionId, session);
@@ -1301,19 +1324,22 @@ export class YdocLiveAdapter {
     if (
       lineageAbsent &&
       input.seedAbsentLineage !== false &&
-      rawResult !== null &&
-      !Array.isArray(rawResult) &&
-      typeof rawResult === "object" &&
-      typeof rawResult.seedMarkdown === "string"
+      typeof result.seedContent === "string"
     ) {
       try {
-        if (!isWellFormedUtf16(rawResult.seedMarkdown)) {
+        if (result.contentKind === "scene") {
+          throw new YdocAdapterError(
+            "response-mismatch",
+            "The engine returned text seed content for a scene. The engine must seed scenes in the initial Y.Doc update.",
+          );
+        }
+        if (!isWellFormedUtf16(result.seedContent)) {
           throw new IllFormedUtf16EditError();
         }
         const seedDoc =
           result.contentKind === "plaintext"
-            ? createPlaintextSeedDoc(rawResult.seedMarkdown)
-            : markdownToYDoc(rawResult.seedMarkdown);
+            ? createPlaintextSeedDoc(result.seedContent)
+            : markdownToYDoc(result.seedContent);
         await session.applySeedUpdate(Y.encodeStateAsUpdate(seedDoc));
         // The exposed initial state must INCLUDE the seed: consumers (the
         // desktop bridge) forward session.initialUpdate to the renderer,

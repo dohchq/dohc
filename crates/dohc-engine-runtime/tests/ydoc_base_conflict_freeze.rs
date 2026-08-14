@@ -254,7 +254,7 @@ async fn positioned_keep_current_rotates_the_lineage_and_journals_one_compound_r
         .doc
         .project(ContentKind::Plaintext)
         .expect("project successor");
-    assert_eq!(projection.markdown, "local truth");
+    assert_eq!(projection.content, "local truth");
 
     let (local_ops, inactive, pending, dead_resolve): (
         Vec<(i64, String, serde_json::Value)>,
@@ -1035,7 +1035,7 @@ async fn a_reviewed_deletion_retires_the_lineage_instead_of_being_reversed() {
         archived
             .project(ContentKind::Plaintext)
             .expect("project archived predecessor")
-            .markdown,
+            .content,
         "remote truth"
     );
 }
@@ -1237,7 +1237,7 @@ async fn moved_text_and_binary_results_archive_the_full_predecessor_without_a_su
             archived
                 .project(ContentKind::Plaintext)
                 .expect("project predecessor")
-                .markdown,
+                .content,
             "remote truth"
         );
     }

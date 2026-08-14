@@ -86,7 +86,7 @@ async function reconnectFailureCapture(prefix: string) {
         return {
           momentId: `moment-${openedGeneration}`,
           path: options.path,
-          markdown,
+          content: markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
           materialized: true,
           projection: {
@@ -275,7 +275,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
         const result = {
           momentId: `moment-${generation}`,
           path: options.path,
-          markdown,
+          content: markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
           materialized: true,
           projection: {
@@ -319,7 +319,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
   session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
 
   const settled = await session.settleNow();
-  expect(settled.markdown).toBe("seed survives remote");
+  expect(settled.content).toBe("seed survives remote");
   expect(openedDocs).toHaveLength(2);
   expect(openedDocs[1].getText("plainText").toString()).toBe(
     "seed survives remote",
@@ -336,7 +336,7 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
   );
 
   const settledAfterSecondRestart = await session.settleNow();
-  expect(settledAfterSecondRestart.markdown).toBe(
+  expect(settledAfterSecondRestart.content).toBe(
     "seed survives twice remote",
   );
   expect(openedDocs).toHaveLength(3);
@@ -405,7 +405,7 @@ it("replaces rather than merges an independently rooted lineage after restart", 
         return {
           momentId: "winner-moment",
           path: options.path,
-          markdown: "winning root",
+          content: "winning root",
           sha256: createHash("sha256").update("winning root").digest("hex"),
           materialized: true,
           projection: {
@@ -445,7 +445,7 @@ it("replaces rather than merges an independently rooted lineage after restart", 
   const losingDoc = session.doc;
 
   await expect(session.settleNow()).resolves.toMatchObject({
-    markdown: "winning root",
+    content: "winning root",
   });
   expect(session.doc).not.toBe(losingDoc);
   expect(session.doc.getText("plainText").toString()).toBe("winning root");
@@ -515,7 +515,7 @@ it("keeps an unclaimed lineage when its full state is the claimed base", async (
         return {
           momentId: "promoted-moment",
           path: options.path,
-          markdown,
+          content: markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
           materialized: true,
           projection: {
@@ -552,7 +552,7 @@ it("keeps an unclaimed lineage when its full state is the claimed base", async (
   const stableDoc = session.doc;
 
   await expect(session.settleNow()).resolves.toMatchObject({
-    markdown: "shared root remote",
+    content: "shared root remote",
   });
   expect(session.doc).toBe(stableDoc);
   expect(session.doc.getText("plainText").toString()).toBe("shared root remote");
@@ -631,7 +631,7 @@ it("keeps a locally promoted lineage after later updates change its full state",
         return {
           momentId: "promoted-moment",
           path: options.path,
-          markdown,
+          content: markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
           materialized: true,
           projection: {
@@ -676,7 +676,7 @@ it("keeps a locally promoted lineage after later updates change its full state",
   session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
 
   await expect(session.settleNow()).resolves.toMatchObject({
-    markdown: "shared root promoted later remote",
+    content: "shared root promoted later remote",
   });
   expect(session.doc).toBe(stableDoc);
   expect(session.doc.getText("plainText").toString()).toBe(
@@ -751,7 +751,7 @@ it("replaces a fork that claims a base descended from the same Y.Doc history", a
         return {
           momentId: "winner-moment",
           path: options.path,
-          markdown: "shared winner",
+          content: "shared winner",
           sha256: createHash("sha256").update("shared winner").digest("hex"),
           materialized: true,
           projection: {
@@ -788,7 +788,7 @@ it("replaces a fork that claims a base descended from the same Y.Doc history", a
   const losingDoc = session.doc;
 
   await expect(session.settleNow()).resolves.toMatchObject({
-    markdown: "shared winner",
+    content: "shared winner",
   });
   expect(session.doc).not.toBe(losingDoc);
   expect(session.doc.getText("plainText").toString()).toBe("shared winner");
@@ -814,7 +814,7 @@ it("opens first when record recovery loses the restarted daemon transport", asyn
       workspace: workspaceHandle,
       versionId: "main",
       path: "note.md",
-      markdown: "",
+      content: "",
       contentKind: "plaintext",
     });
   }
@@ -890,7 +890,7 @@ it("opens first when record recovery loses the restarted daemon transport", asyn
 
   session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
   await expect(session.settleNow()).resolves.toMatchObject({
-    markdown: "survives",
+    content: "survives",
   });
 
   // MUTATION: remove either reconnect-class rethrow in ydocLiveAdapter. The
@@ -961,7 +961,7 @@ it("recovers a non-reconnect local refusal by releasing, rebinding, and replayin
         return {
           momentId: `moment-${openedGeneration}`,
           path: options.path,
-          markdown,
+          content: markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
           materialized: true,
           projection: {
@@ -999,7 +999,7 @@ it("recovers a non-reconnect local refusal by releasing, rebinding, and replayin
   session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
   const settled = await session.settleNow();
 
-  expect(settled.markdown).toBe("seed survives");
+  expect(settled.content).toBe("seed survives");
   expect(lifecycle.slice(0, 3)).toEqual(["open-1", "close-1", "open-2"]);
   expect(onError).not.toHaveBeenCalled();
   await session.close({ settle: false });
@@ -1066,7 +1066,7 @@ it("releases a close-latched failed generation with settle true before the next 
         return {
           momentId: `moment-${openedGeneration}`,
           path: options.path,
-          markdown,
+          content: markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
           materialized: true,
           projection: {
@@ -1113,14 +1113,14 @@ it("releases a close-latched failed generation with settle true before the next 
   rendererDoc.getText("plainText").insert(4, " first");
   session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, beforeFirst));
   await expect(session.settleNow()).resolves.toMatchObject({
-    markdown: "seed first",
+    content: "seed first",
   });
 
   const beforeSecond = Y.encodeStateVector(rendererDoc);
   rendererDoc.getText("plainText").insert(10, " second");
   session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, beforeSecond));
   await expect(session.settleNow()).resolves.toMatchObject({
-    markdown: "seed first second",
+    content: "seed first second",
   });
 
   expect(closeAttempts.slice(0, 2)).toEqual([
@@ -1287,10 +1287,10 @@ it("defers a version switch behind a dead generation until release converges", a
   await capture.stop();
 });
 
-it("an over-cap settle (markdown omitted from the response) leaves the engine's file on disk intact", async () => {
+it("an over-cap settle (content omitted from the response) leaves the engine's file on disk intact", async () => {
   // AUDIT-SILENTSAVE, fix 2. Past the engine's in-band response cap the settle
   // still commits and the DAEMON materializes the .md — the response just
-  // cannot carry the body as one wire string, so it answers markdown: null.
+  // cannot carry the body as one wire string, so it answers content: null.
   // The capture must recognize that and stand down. Mirroring null onto disk
   // would truncate the user's file to zero bytes, which is the very loss this
   // whole change exists to stop.
@@ -1341,7 +1341,7 @@ it("an over-cap settle (markdown omitted from the response) leaves the engine's 
           momentId: "moment-overcap",
           path: options.path,
           // The engine's over-cap answer.
-          markdown: null,
+          content: null,
           sha256: createHash("sha256").update(onDiskBody).digest("hex"),
           materialized: true,
           projection: {
@@ -1394,7 +1394,7 @@ it("a settle whose materialization was BLOCKED reports an error, never Saved", a
   // AUDIT-SILENTSAVE round 2 (codex P2). `JobOutcome::Blocked` (a symlinked
   // target) is deliberately a durably-pending SUCCESS for the settle contract
   // — marker kept, write retried later — so the response is Ok. But the file
-  // on disk is still the OLD artifact. With markdown omitted (over-cap) the
+  // on disk is still the OLD artifact. With content omitted (over-cap) the
   // desktop writes nothing, so nothing else would ever notice. The engine now
   // says `materialized: false` and the editor must not claim Saved.
   const rootPath = await createTestScratch("dohc-ydoc-blocked-");
@@ -1442,7 +1442,7 @@ it("a settle whose materialization was BLOCKED reports an error, never Saved", a
         const result = {
           momentId: "moment-blocked",
           path: options.path,
-          markdown: null,
+          content: null,
           sha256: createHash("sha256").update("never landed").digest("hex"),
           // Committed, but the disk did not move.
           materialized: false,
@@ -1751,7 +1751,7 @@ async function daemonDeathCapture(
         return {
           momentId: `moment-${openedGeneration}`,
           path: options.path,
-          markdown,
+          content: markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
           materialized: true,
           projection: {
@@ -1846,7 +1846,7 @@ it("keeps every keystroke typed while the daemon is dead and replays them into t
   await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
 
   const settled = await session.settleNow();
-  expect(settled.markdown).toBe("alive PRE_KILL DURING_OUTAGE AFTER_RESTART");
+  expect(settled.content).toBe("alive PRE_KILL DURING_OUTAGE AFTER_RESTART");
   expect(generations[1]?.getText("plainText").toString()).toBe(
     "alive PRE_KILL DURING_OUTAGE AFTER_RESTART",
   );
@@ -1903,7 +1903,7 @@ it("a failure sink that throws cannot turn a daemon death into an unhandled reje
     state.daemonAlive = true;
     typeInto(rendererDoc, session, "AFTER_RESTART");
     await expect.poll(() => state.generation, { timeout: 5_000 }).toBe(2);
-    expect((await session.settleNow()).markdown).toBe(
+    expect((await session.settleNow()).content).toBe(
       "PRE_KILL DURING_OUTAGE AFTER_RESTART",
     );
     await session.close({ settle: false });
@@ -2085,7 +2085,7 @@ it("a settle after the daemon returns recovers the session on its own", async ()
   state.daemonAlive = true;
   const settled = await session.settleNow();
 
-  expect(settled.markdown).toBe("alive PRE_KILL");
+  expect(settled.content).toBe("alive PRE_KILL");
   expect(state.generation).toBe(2);
   await session.close({ settle: false });
   await capture.stop();
@@ -2394,7 +2394,7 @@ it("counts a revived edit against the settle its own replay armed", async () => 
             {
               momentId: `moment-revive-${settleToken}`,
               path: options.path,
-              markdown,
+              content: markdown,
               sha256: createHash("sha256").update(markdown).digest("hex"),
               materialized: true,
               projection: {
@@ -2539,7 +2539,7 @@ it("counts an edit recovered from a synchronous provider refusal", async () => {
             {
               momentId: "moment-recovered",
               path: options.path,
-              markdown,
+              content: markdown,
               sha256: createHash("sha256").update(markdown).digest("hex"),
               materialized: true,
               projection: {
@@ -2558,7 +2558,7 @@ it("counts an edit recovered from a synchronous provider refusal", async () => {
         return {
           momentId: `moment-${opened}`,
           path: options.path,
-          markdown,
+          content: markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
           materialized: true,
           projection: {
@@ -2684,7 +2684,7 @@ it("announces a recovered edit exactly once when both arm points run", async () 
         return {
           momentId: `moment-${opened}`,
           path: options.path,
-          markdown,
+          content: markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
           materialized: true,
           projection: {
@@ -2816,7 +2816,7 @@ async function lockedRebindCapture(
     journal: [] as Uint8Array[],
     settleCalls: [] as number[],
     closeCalls: [] as number[],
-    settledMarkdowns: [] as string[],
+    settledContents: [] as string[],
     generation: 0,
     generationOptions: [] as EngineYdocProviderSessionOptions[],
     errors: [] as string[],
@@ -2903,7 +2903,7 @@ async function lockedRebindCapture(
         const result = {
           momentId: `moment-${gen}-${token}`,
           path: options.path,
-          markdown,
+          content: markdown,
           sha256: createHash("sha256").update(markdown).digest("hex"),
           materialized: !state.unmaterialized,
           projection: {
@@ -2915,7 +2915,7 @@ async function lockedRebindCapture(
         await options.onSettled?.(result, token);
         // The array is what LANDED on disk. An unmaterialized settle
         // committed the lineage and wrote nothing.
-        if (!state.unmaterialized) state.settledMarkdowns.push(markdown);
+        if (!state.unmaterialized) state.settledContents.push(markdown);
         if (state.emitUpdateAfterSettle) {
           // A peer's update lands after this settle resolved: the close
           // that follows cannot vouch for it. It must be a REAL update —
@@ -2946,7 +2946,7 @@ async function lockedRebindCapture(
           state.closesWithSettleFalse += 1;
         } else {
           // The pre-close settle, same contract as settleNow: refuses while
-          // locked, records the settled markdown when it lands.
+          // locked, records the settled content when it lands.
           state.settleCalls.push(gen);
           const token = ++tokens;
           if (state.replicated && state.closeSettleFailure) {
@@ -2964,7 +2964,7 @@ async function lockedRebindCapture(
             options.onSettleError?.(refusal, token);
             preCloseError = refusal;
           } else {
-            state.settledMarkdowns.push(doc.getText("plainText").toString());
+            state.settledContents.push(doc.getText("plainText").toString());
           }
         }
         // The RELEASE. Its failure is what reaches the caller, and it buries
@@ -2981,7 +2981,7 @@ async function lockedRebindCapture(
           ) {
             state.settleCalls.push(gen);
             if (!state.locked && !state.unmaterialized) {
-              state.settledMarkdowns.push(doc.getText("plainText").toString());
+              state.settledContents.push(doc.getText("plainText").toString());
             }
           }
           throw state.closeFailure;
@@ -3109,7 +3109,7 @@ it("absorbs a busy journal refusal instead of rebinding the generation", async (
   // text it was holding the whole time.
   state.recordFailure = null;
   await session.settleNow();
-  const settled = state.settledMarkdowns.at(-1) ?? "";
+  const settled = state.settledContents.at(-1) ?? "";
   for (const text of ["first edit", "second", "third", "fourth"]) {
     expect(settled).toContain(text);
   }
@@ -3168,7 +3168,7 @@ it("re-arms a pending locked settle on the generation that replaces a dead one",
   // The replacement generation settles BY ITSELF, and the settle carries the
   // journaled edit the lock blocked.
   await expect.poll(() => state.settleCalls, { timeout: 5_000 }).toEqual([1, 2]);
-  await expect.poll(() => state.settledMarkdowns, { timeout: 5_000 }).toEqual([
+  await expect.poll(() => state.settledContents, { timeout: 5_000 }).toEqual([
     "locked edit",
   ]);
 
@@ -3226,7 +3226,7 @@ it("pays a locked close debt by itself once the lock releases", async () => {
   // restart: the capture layer's own retry pays the debt.
   state.locked = false;
   await expect
-    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["closing edit"]);
   await capture.stop();
 }, 20_000);
@@ -3246,7 +3246,7 @@ it("a close that fails for a non-lock cause is not retried by the capture layer"
   // what failed. This suite used to assert the opposite (nothing settled),
   // which was the fake's ordering, not the provider's: `close()` settles
   // first and only then asks the daemon to release (#595 round 15 fake audit).
-  expect(state.settledMarkdowns).toEqual(["stranded edit"]);
+  expect(state.settledContents).toEqual(["stranded edit"]);
   const settlesAtFailure = state.settleCalls.length;
 
   // THE invariant this test owns: only a LOCK is worth polling. Past the
@@ -3299,7 +3299,7 @@ it("pays a BUSY close debt too, which is what lets the chip say settling", async
   // a detached debt can finish the write.
   //
   // MUTATION: narrow the arming to `isFileLockedCause(error.cause)` -> nothing
-  // is armed, and `settledMarkdowns` stays empty forever.
+  // is armed, and `settledContents` stays empty forever.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-busy-debt-");
   const { session } = await openWithOneEdit(capture, "busy replicated edit");
 
@@ -3312,7 +3312,7 @@ it("pays a BUSY close debt too, which is what lets the chip say settling", async
   // The store frees; the detached debt reopens and settles by itself.
   state.closeSettleFailure = null;
   await expect
-    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["busy replicated edit"]);
   await capture.stop();
 }, 20_000);
@@ -3336,7 +3336,7 @@ it("pays a locked close debt even when a replicated release succeeds", async () 
 
   state.locked = false;
   await expect
-    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["replicated edit"]);
   await capture.stop();
 }, 20_000);
@@ -3360,7 +3360,7 @@ it("a replicated release with a non-lock settle failure arms no detached retry",
   // Past the first retry delay: no reopen, nothing settled.
   await new Promise((resolve) => setTimeout(resolve, 1_600));
   expect(state.generation).toBe(1);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   await capture.stop();
 }, 10_000);
 
@@ -3420,7 +3420,7 @@ it("the version fence drops a detached locked retry after a switch", async () =>
     )
     .toHaveLength(1);
   expect(state.generation).toBe(1);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   await capture.stop();
 }, 20_000);
 
@@ -3492,7 +3492,7 @@ it("a rename after a version-switch stand-down refuses instead of saving stale c
     "dohc could not rename note.md. dohc gave up on writing note.md earlier, so its last edits never reached disk. The edits stay in the document's history. Open note.md to write them again. Then rename note.md again.",
   );
   await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   await capture.stop();
 }, 25_000);
 
@@ -3521,7 +3521,7 @@ it("a reopen before the timer fires receives the locked debt, not silence", asyn
   state.locked = false;
 
   await expect
-    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["transferred edit"]);
   // The debt was paid THROUGH the live session — no detached reopen.
   expect(state.generation).toBe(2);
@@ -3552,7 +3552,7 @@ it("a rename drains the detached locked debt before touching disk", async () => 
   const finish = await capture.beginFileRename("note.md", "renamed.md");
   // The debt was paid BEFORE the rename proceeded: the pending write settled
   // through a detached reopen, not left targeting a dead path.
-  expect(state.settledMarkdowns).toEqual(["renamed edit"]);
+  expect(state.settledContents).toEqual(["renamed edit"]);
   expect(state.generation).toBe(2);
   await finish(true);
   await capture.stop();
@@ -3587,7 +3587,7 @@ it("a destructive delete cancels the detached locked debt instead of recreating 
     .toHaveLength(1);
   await new Promise((resolve) => setTimeout(resolve, 1_600));
   expect(state.generation).toBe(1);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   await capture.stop();
 }, 15_000);
 
@@ -3641,7 +3641,7 @@ it("an external delete observed before a debt registers cancels it at the door i
   // path stays deleted.
   await new Promise((resolve) => setTimeout(resolve, 1_600));
   expect(state.generation).toBe(1);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   await capture.stop();
 }, 15_000);
 
@@ -3690,7 +3690,7 @@ it("a recreated path's own session arms its debt normally instead of being cance
   // The lock releases, and the ladder — armed normally — lands the write.
   state.locked = false;
   await expect
-    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["a real pending edit"]);
   await capture.stop();
 }, 20_000);
@@ -3741,7 +3741,7 @@ it("a stale session's late debt still cancels at the door despite a later recrea
     .not.toHaveLength(0);
   await new Promise((resolve) => setTimeout(resolve, 1_600));
   expect(state.generation).toBe(1);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   await capture.stop();
 }, 20_000);
 
@@ -3812,7 +3812,7 @@ it("a materialized settle retires a session's deletion fence, so post-recovery e
   // The SAME session settles for real — no lock, no failure — and its
   // materialized write proves note.md exists again.
   await expect(session.settleNow()).resolves.toMatchObject({
-    markdown: "first edit",
+    content: "first edit",
   });
 
   // More edits land on this session, made AFTER the recovery above.
@@ -3841,7 +3841,7 @@ it("a materialized settle retires a session's deletion fence, so post-recovery e
   // The lock releases, and the ladder — armed normally — lands the write.
   state.locked = false;
   await expect
-    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["first edit", "first edit second edit"]);
   await capture.stop();
 }, 20_000);
@@ -3878,7 +3878,7 @@ it("a retry whose own opts already carry settle:false still consults the tombsto
   );
   // That escalation landed the pending edit once, before anything was
   // deleted — the write is legitimate.
-  expect(state.settledMarkdowns).toEqual(["would resurrect via escalation"]);
+  expect(state.settledContents).toEqual(["would resurrect via escalation"]);
 
   // The watcher observes the external delete while the ladder sleeps
   // between attempts, exactly as the sibling pin below.
@@ -3889,9 +3889,9 @@ it("a retry whose own opts already carry settle:false still consults the tombsto
   // from the original call, so `opts?.settle !== false` short-circuited
   // the tombstone check and the retry's escalated settle re-wrote the doc
   // onto the path the user just deleted — a SECOND entry lands in
-  // `settledMarkdowns` after the delete.
+  // `settledContents` after the delete.
   await new Promise((resolve) => setTimeout(resolve, 1_600));
-  expect(state.settledMarkdowns).toEqual(["would resurrect via escalation"]);
+  expect(state.settledContents).toEqual(["would resurrect via escalation"]);
   expect(
     state.errorMessages.some((message) =>
       message.includes("an external delete of note.md removed the path"),
@@ -3935,7 +3935,7 @@ it("a suppressed retry's dirty-session refusal discharges through evict instead 
   // terminal refusal just stops the ladder with the lease still held.
   await expect.poll(() => state.evicts, { timeout: 15_000 }).toBe(1);
   // The refusal never escalated into a write: the deleted path stays gone.
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
 
   // No busy-wedge: a fresh open of the same path succeeds outright. Clear
   // the persistent release refusal first — it was this session's own
@@ -4002,7 +4002,7 @@ it("a delete delivered while the capture chain is busy still suppresses a retry 
   // so the retry (which fires here, off-chain) finds nothing and
   // resettles the doc onto the path the user just deleted.
   await new Promise((resolve) => setTimeout(resolve, 1_600));
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   expect(
     state.errorMessages.some((message) =>
       message.includes("an external delete of note.md removed the path"),
@@ -4063,7 +4063,7 @@ it("a delete landing past the tombstone's own TTL still suppresses an active ret
   // already expired by virtual time, so the retry re-settled the doc onto
   // the path the user just deleted.
   await new Promise((resolve) => setTimeout(resolve, 1_600));
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   expect(
     state.errorMessages.some((message) =>
       message.includes("an external delete of note.md removed the path"),
@@ -4103,7 +4103,7 @@ it("a delete landing after a settle's write but before its late onSettled callba
             const result = {
               momentId: `moment-race-${thisToken}`,
               path: openOptions.path,
-              markdown,
+              content: markdown,
               sha256: createHash("sha256").update(markdown).digest("hex"),
               materialized: true,
               projection: {
@@ -4114,7 +4114,7 @@ it("a delete landing after a settle's write but before its late onSettled callba
             };
             // THE WRITE LANDS now — observable immediately, same as a real
             // materialized settle.
-            state.settledMarkdowns.push(markdown);
+            state.settledContents.push(markdown);
             // The callback that reports it is late.
             await settleGate;
             await openOptions.onSettled?.(result, thisToken);
@@ -4130,7 +4130,7 @@ it("a delete landing after a settle's write but before its late onSettled callba
   // callback is held open — modelling a chain occupied by other work.
   const settling = session.settleNow();
   await expect
-    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["first version"]);
 
   // The delete lands INSIDE the gap: after the write, before the stale
@@ -4150,7 +4150,7 @@ it("a delete landing after a settle's write but before its late onSettled callba
   await expect(session.close()).rejects.toThrow("file-locked");
   state.locked = false;
   await new Promise((resolve) => setTimeout(resolve, 1_600));
-  expect(state.settledMarkdowns).toEqual(["first version"]);
+  expect(state.settledContents).toEqual(["first version"]);
   expect(
     state.errorMessages.some((message) =>
       message.includes("an external delete of note.md removed the path"),
@@ -4183,7 +4183,7 @@ it("a recreated path's fresh close-retry ladder still settles normally despite a
 
   state.locked = false;
   await expect
-    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["a real pending edit"]);
   await capture.stop();
 }, 20_000);
@@ -4226,7 +4226,7 @@ it("a suppressed close-retry ladder stands down once, honestly, instead of resur
   await new Promise((resolve) => setTimeout(resolve, 3_500));
 
   // The close result stays truthful: no artifact ever landed...
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   // ...and the stand-down was recorded exactly once, not re-announced on
   // every later retry.
   expect(
@@ -4277,7 +4277,7 @@ it("a suppressed retry's own transient release failure still stands down on the 
       { timeout: 15_000 },
     )
     .toBe(1);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   const closesAtFirstStandDown = state.closeCalls.length;
 
   // The release clears; the next retry (~2s later, the doubled delay)
@@ -4291,7 +4291,7 @@ it("a suppressed retry's own transient release failure still stands down on the 
   await expect
     .poll(() => state.closeCalls.length, { timeout: 15_000 })
     .toBeGreaterThan(closesAtFirstStandDown);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   expect(
     state.errorMessages.filter((message) =>
       message.includes("an external delete of note.md removed the path"),
@@ -4348,7 +4348,7 @@ it("a delete refuses the open that could register a debt while disk work is in f
   // THE FACT: the deleted path is not reopened and nothing is settled onto it.
   await new Promise((resolve) => setTimeout(resolve, 1_600));
   expect(state.generation).toBe(generationAtDelete);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   // The one debt that existed before the window said so out loud.
   expect(
     state.errors.filter((context) => context.includes("close retry")),
@@ -4388,7 +4388,7 @@ it("a moved-away directory cancels detached locked debts under its prefix", asyn
     .toHaveLength(1);
   await new Promise((resolve) => setTimeout(resolve, 1_600));
   expect(state.generation).toBe(1);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   await capture.stop();
 }, 15_000);
 
@@ -4414,7 +4414,7 @@ it("a FAILED delete restores the detached locked debt instead of cancelling it",
 
   // The debt survived the failed attempt and pays itself once the lock goes.
   await expect
-    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["survives a failed delete"]);
   await capture.stop();
 }, 20_000);
@@ -4472,7 +4472,7 @@ it("a delete's watcher event landing during a suspended debt's window still supp
       { timeout: 15_000 },
     )
     .toBe(true);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   await capture.stop();
 }, 20_000);
 
@@ -4500,12 +4500,12 @@ it("a rename REFUSES while its debt payment is still locked", async () => {
   await expect(capture.beginFileRename("note.md", "renamed.md")).rejects.toThrow(
     /Another program still has note\.md open/,
   );
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
 
   // The debt survived the refusal: releasing the lock still lands the write.
   state.locked = false;
   await expect
-    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["must not be lost"]);
   await capture.stop();
 }, 25_000);
@@ -4551,7 +4551,7 @@ it("a failed release keeps the debt instead of dropping it", async () => {
   expect(state.generation).toBe(generationAtFailure);
   state.closeFailure = null;
   await expect
-    .poll(() => state.settledMarkdowns.length, { timeout: 15_000 })
+    .poll(() => state.settledContents.length, { timeout: 15_000 })
     .toBeGreaterThan(0);
   await capture.stop();
 }, 25_000);
@@ -4587,7 +4587,7 @@ it("a directory move drains a detached debt under its prefix", async () => {
   state.locked = false;
   const finish = await capture.beginFileRename("dir", "moved");
   // The descendant's debt was paid BEFORE the move proceeded.
-  expect(state.settledMarkdowns).toEqual(["moved edit"]);
+  expect(state.settledContents).toEqual(["moved edit"]);
   await finish(true);
   await capture.stop();
 }, 20_000);
@@ -4618,7 +4618,7 @@ it("a move refuses the open that could register a debt while disk work is in fli
   // back onto it.
   await new Promise((resolve) => setTimeout(resolve, 1_600));
   expect(state.generation).toBe(generationAtMove);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   await capture.stop();
 }, 20_000);
 
@@ -4631,7 +4631,7 @@ it("a folder move settles and closes a live child session before opening its win
   // reaches the window alive to race it.
   //
   // MUTATION: narrow the vacate's match back to exact fromPath/toPath -> the
-  // child session survives past `beginFileRename`, `settledMarkdowns` stays
+  // child session survives past `beginFileRename`, `settledContents` stays
   // empty here, and the later close/reopen assertions below fail.
   const { capture, state, rootPath } = await lockedRebindCapture(
     "dohc-ydoc-foldermove-child-vacate-",
@@ -4648,7 +4648,7 @@ it("a folder move settles and closes a live child session before opening its win
   // GREEN proof 1: the child's edit landed through the move's OWN vacate
   // settle, before the window ever opened — not through some later,
   // racing settle.
-  expect(state.settledMarkdowns).toEqual([
+  expect(state.settledContents).toEqual([
     "child settles before the window opens",
   ]);
   // GREEN proof 2: the session is already gone, so closing it again is a
@@ -4705,8 +4705,8 @@ it("a failed folder move's vacated child session needs no debt to keep its edit"
   await openWithOneEdit(capture, "survives a failed move too", "dir/note.md");
 
   const finishMove = await capture.beginFileRename("dir", "moved");
-  expect(state.settledMarkdowns).toEqual(["survives a failed move too"]);
-  const settledAtWindow = state.settledMarkdowns.length;
+  expect(state.settledContents).toEqual(["survives a failed move too"]);
+  const settledAtWindow = state.settledContents.length;
 
   // The disk move failed; the finisher rolls the engine rename back. No
   // debt ladder ever had anything to pay, so a full retry interval passes
@@ -4714,7 +4714,7 @@ it("a failed folder move's vacated child session needs no debt to keep its edit"
   await finishMove(false);
   await new Promise((resolve) => setTimeout(resolve, 1_600));
   await capture.flush();
-  expect(state.settledMarkdowns).toHaveLength(settledAtWindow);
+  expect(state.settledContents).toHaveLength(settledAtWindow);
   await capture.stop();
 }, 20_000);
 
@@ -4731,13 +4731,13 @@ it("a delete window refuses a debt's payment while the disk delete is unfinished
 
   const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
   const attemptsAtWindow = state.openAttempts;
-  const settlesAtWindow = state.settledMarkdowns.length;
+  const settlesAtWindow = state.settledContents.length;
   state.locked = false;
   await new Promise((resolve) => setTimeout(resolve, 1_600));
   await capture.flush();
 
   expect(state.openAttempts).toBe(attemptsAtWindow);
-  expect(state.settledMarkdowns).toHaveLength(settlesAtWindow);
+  expect(state.settledContents).toHaveLength(settlesAtWindow);
   finishDelete(true);
   await capture.stop();
 }, 20_000);
@@ -4758,7 +4758,7 @@ it("a delete window that closes hands the debt back instead of stranding it", as
   state.locked = false;
 
   await expect
-    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .poll(() => state.settledContents, { timeout: 15_000 })
     .toContain("survives the window");
   await capture.stop();
 }, 20_000);
@@ -4783,7 +4783,7 @@ it("a debt's ladder settles nothing while its path's delete is in flight", async
   await new Promise((resolve) => setTimeout(resolve, 1_600));
   await capture.flush();
   expect(state.generation).toBe(generationAtDelete);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
 
   finishDelete(true);
   await capture.stop();
@@ -4809,7 +4809,7 @@ it("a move window refuses a live open before it reaches the daemon", async () =>
 
   // THE FACT: no reopen of the moved-from path, and nothing written to it.
   expect(state.openAttempts).toBe(attemptsAtMove);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
 
   await finishMove(true);
   await capture.stop();
@@ -4835,7 +4835,7 @@ it("a delete window refuses a live open while the disk delete is unfinished", as
   );
 
   // THE FACT: the path being deleted was never reopened and never written.
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   expect(state.generation).toBe(generationAtDelete);
 
   finishDelete(true);
@@ -4873,7 +4873,7 @@ it("a failed delete closes its window before a later debt is paid", async () => 
 
   // The very next drain lands it — no timer, no backoff, nothing stranded.
   const finish = await capture.beginFileRename("note.md", "renamed.md");
-  expect(state.settledMarkdowns).toEqual(["survives the window"]);
+  expect(state.settledContents).toEqual(["survives the window"]);
   await finish(true);
   await capture.stop();
 }, 20_000);
@@ -4924,7 +4924,7 @@ it("a failed move holds its window across the rollback, not just up to it", asyn
     workspacePath: "note.md",
   });
   await finishing;
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   const reopened = await capture.openYDocSession({
     path: "note.md",
     onRemoteUpdate: () => undefined,
@@ -4970,7 +4970,7 @@ it("a failed no-op move closes its window before a later debt is paid", async ()
   // The next move drains the descendant's debt by prefix, exactly as the
   // first one would have.
   const finish = await capture.beginFileRename("dir", "moved");
-  expect(state.settledMarkdowns).toEqual(["survives a failed folder move"]);
+  expect(state.settledContents).toEqual(["survives a failed folder move"]);
   await finish(true);
   await capture.stop();
 }, 20_000);
@@ -4989,12 +4989,12 @@ it("a delete-window open creates no session, debt, or settle", async () => {
   await capture.flush();
 
   expect(state.generation).toBe(generationAtDelete);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
 
   // The delete landed. With no late open there is no debt to cancel and no
   // retry trace to wait for.
   finishDelete(true);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   await capture.stop();
 }, 25_000);
 
@@ -5027,7 +5027,7 @@ it("a folder move fences late live opens on the no-op finisher path", async () =
 
   await new Promise((resolve) => setTimeout(resolve, 1_600));
   expect(state.generation).toBe(generationAtMove);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   await capture.stop();
 }, 20_000);
 
@@ -5074,10 +5074,10 @@ it("refused renames never stack more than one retry ladder", async () => {
   // And the single ladder still pays the debt once the lock releases.
   state.locked = false;
   await expect
-    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["one ladder only"]);
   await new Promise((resolve) => setTimeout(resolve, 2_000));
-  expect(state.settledMarkdowns).toEqual(["one ladder only"]);
+  expect(state.settledContents).toEqual(["one ladder only"]);
   await capture.stop();
 }, 30_000);
 
@@ -5118,7 +5118,7 @@ it("a failing active-version read re-arms instead of stranding the debt", async 
     .not.toHaveLength(0);
   failVersionReads = false;
   await expect
-    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["survives a failed read"]);
   await capture.stop();
 }, 30_000);
@@ -5159,7 +5159,7 @@ it("a handoff to a live session keeps the debt when that settle fails", async ()
   // write lands without any new edit.
   state.settleFailure = null;
   await expect
-    .poll(() => state.settledMarkdowns, { timeout: 15_000 })
+    .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["handed off"]);
   await reopened.close({ settle: false });
   await capture.stop();
@@ -5223,7 +5223,7 @@ it("a close that raced a newer update is not proof the write landed", async () =
   state.locked = false;
   state.emitUpdateAfterSettle = true;
   await expect
-    .poll(() => state.settledMarkdowns.length, { timeout: 15_000 })
+    .poll(() => state.settledContents.length, { timeout: 15_000 })
     .toBeGreaterThan(0);
 
   // The debt was NOT released by that close: another attempt follows and
@@ -5252,7 +5252,7 @@ it("a retained session's settle is never proof, because it stopped hearing the d
   //
   // MUTATION: drop `settleCovers = -1` at retention -> the retained release
   // discharges the debt, no further session opens, and the peer edit never
-  // reaches settledMarkdowns.
+  // reaches settledContents.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-deaf-proof-");
   const { session } = await openWithOneEdit(capture, "deaf proof");
 
@@ -5279,7 +5279,7 @@ it("a retained session's settle is never proof, because it stopped hearing the d
   // The assertion is the new GENERATION, not the settled text. While the
   // release was refused, the provider's escalation settled on its way out and
   // that settle already carried the peer edit — so asserting on
-  // `settledMarkdowns` passes whether or not the debt survived. Only opening
+  // `settledContents` passes whether or not the debt survived. Only opening
   // another session distinguishes them.
   const generationAtRelease = state.generation;
   state.closeFailure = null;
@@ -5313,7 +5313,7 @@ it("a settle held through a refused release stops being proof when an update lan
   state.emitUpdateAfterSettle = true;
   state.closeFailure = new Error("ydoc-unsettled-close");
   await expect
-    .poll(() => state.settledMarkdowns.length, { timeout: 15_000 })
+    .poll(() => state.settledContents.length, { timeout: 15_000 })
     .toBeGreaterThan(0);
   const generationAtRetention = state.generation;
 
@@ -5358,7 +5358,7 @@ it("a cancelled debt whose release is refused keeps retrying that release", asyn
     .toBeGreaterThan(0);
   const releasesBeforeCancel = state.closesWithSettleFalse;
   const generationBeforeCancel = state.generation;
-  const settlesBeforeCancel = state.settledMarkdowns.length;
+  const settlesBeforeCancel = state.settledContents.length;
 
   // The user deletes the path WHILE the release is still refused.
   const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
@@ -5392,7 +5392,7 @@ it("a cancelled debt whose release is refused keeps retrying that release", asyn
   // Long enough for two more rungs of the ladder.
   await new Promise((resolve) => setTimeout(resolve, 12_000));
   expect(state.generation).toBe(generationBeforeCancel);
-  expect(state.settledMarkdowns).toHaveLength(settlesBeforeCancel);
+  expect(state.settledContents).toHaveLength(settlesBeforeCancel);
   await capture.stop();
 }, 60_000);
 
@@ -5484,7 +5484,7 @@ it("a rename after a terminal settle refusal refuses instead of saving stale con
     "dohc could not rename note.md. dohc gave up on writing note.md earlier, so its last edits never reached disk. The edits stay in the document's history. Open note.md to write them again. Then rename note.md again.",
   );
   await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   await capture.stop();
 }, 25_000);
 
@@ -5537,7 +5537,7 @@ it("a settle that committed but wrote nothing stops the ladder and names the sym
   expect(stopMessage).toContain("real folder");
 
   // Nothing was ever reported as written. A stand-down must not read as a save.
-  expect(state.settledMarkdowns).toHaveLength(0);
+  expect(state.settledContents).toHaveLength(0);
 
   // THE liveness proof: the ladder is done. Left armed, its next two rungs
   // both wake inside this window and reopen a session for the same
@@ -5586,7 +5586,7 @@ it("a rename after a symlink stand-down refuses instead of saving stale content"
     "dohc could not rename note.md. dohc gave up on writing note.md earlier, so its last edits never reached disk. The edits stay in the document's history. Open note.md to write them again. Then rename note.md again.",
   );
   await expect(readFile(join(rootPath, "renamed.md"), "utf8")).rejects.toThrow();
-  expect(state.settledMarkdowns).toHaveLength(0);
+  expect(state.settledContents).toHaveLength(0);
   await capture.stop();
 }, 25_000);
 
@@ -5795,7 +5795,7 @@ it("a recovered debt with no retained release does not linger for a later delete
   // carries the journaled "never written" text too — the recovery
   // session's seed, per the fake's own replay of durable state.)
   expect(
-    state.settledMarkdowns.some((text) => text.includes("recovered, nothing owed")),
+    state.settledContents.some((text) => text.includes("recovered, nothing owed")),
   ).toBe(true);
   await reopened.close({ settle: false });
   // Drain the chain so recovery's own enqueued pay() retires the entry
@@ -5860,7 +5860,7 @@ it("a materialized settle after reopening a stood-down path clears the marker an
   // (The doc carries the journaled "never written" text too — the recovery
   // session's seed, per the fake's own replay of durable state.)
   expect(
-    state.settledMarkdowns.some((text) => text.includes("recovered edit")),
+    state.settledContents.some((text) => text.includes("recovered edit")),
   ).toBe(true);
 
   // The marker is gone: the rename now proceeds like any ordinary one.
@@ -5917,7 +5917,7 @@ it("a rename's own vacate settle clears a stood-down marker for a session still 
   await finish(true);
   // Anti-vacuity: the vacate's OWN settle is what cleared it.
   expect(
-    state.settledMarkdowns.some((text) => text.includes("recovered mid-rename")),
+    state.settledContents.some((text) => text.includes("recovered mid-rename")),
   ).toBe(true);
   await capture.stop();
 }, 25_000);
@@ -6035,7 +6035,7 @@ it("a watcher-captured external delete cancels a stood-down debt instead of leav
   const generationAtDelete = state.generation;
   await new Promise((resolve) => setTimeout(resolve, 1_600));
   expect(state.generation).toBe(generationAtDelete);
-  expect(state.settledMarkdowns).toEqual([]);
+  expect(state.settledContents).toEqual([]);
   await capture.stop();
 }, 20_000);
 
@@ -6461,7 +6461,7 @@ it("a settle refused because peers outran it keeps the write ladder alive", asyn
   // settle, the debt is still owed, and the edit reaches the artifact.
   state.settleFailure = null;
   await expect
-    .poll(() => state.settledMarkdowns, { timeout: 25_000 })
+    .poll(() => state.settledContents, { timeout: 25_000 })
     .toEqual(["outrun by a peer"]);
   await capture.stop();
 }, 60_000);

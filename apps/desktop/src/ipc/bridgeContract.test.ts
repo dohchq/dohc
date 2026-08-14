@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "./channels";
 import {
   ListChatChannelsResult,
   ListPersonalChatFeedResult,
@@ -14,12 +15,14 @@ import {
   ChatReactionRecord,
   DatabaseSnapshotResult,
   DesktopMarksResult,
+  CreateWorkspaceFilePayload,
   CreateFileChatPayload,
   CreateWorkspaceVersionPayload,
   EngineMomentDetailRecord,
   ApplyEngineYDocUpdatePayload,
   ApplyEngineYDocUpdateResult,
   OpenEngineYDocSessionResult,
+  ReadEngineYDocArtifactAssetResult,
   ExportDocumentFilePayload,
   ExportDocumentFileResult,
   InvokeSiteSdkPayload,
@@ -91,6 +94,7 @@ import {
   siteTabPath,
 } from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
+import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
 
 describe("workbench menu IPC contract", () => {
   it("carries a bounded editor group ID and the group-close capability", () => {
@@ -128,6 +132,46 @@ describe("workbench menu IPC contract", () => {
 
 describe("workspace text IPC contract", () => {
   const hash = "a".repeat(64);
+
+  it("bounds new and existing file writes by exact UTF-8 bytes", () => {
+    const exact = "\ud83d\udca1".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES / 4);
+    const over = `${exact}x`;
+    const base = {
+      workspaceId: "workspace-a",
+      relativePath: "notes/a.md",
+    };
+
+    expect(
+      CreateWorkspaceFilePayload.safeParse({
+        ...base,
+        initialText: exact,
+      }).success,
+    ).toBe(true);
+    expect(
+      WriteWorkspaceTextPayload.safeParse({
+        ...base,
+        text: exact,
+        expectedContentHash: hash,
+      }).success,
+    ).toBe(true);
+
+    for (const result of [
+      CreateWorkspaceFilePayload.safeParse({ ...base, initialText: over }),
+      WriteWorkspaceTextPayload.safeParse({
+        ...base,
+        text: over,
+        expectedContentHash: hash,
+      }),
+    ]) {
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues[0]?.message).toBe(
+          "Workspace text exceeds WORKSPACE_TEXT_EDITOR_MAX_BYTES: " +
+            `limit ${WORKSPACE_TEXT_EDITOR_MAX_BYTES} bytes, observed ${WORKSPACE_TEXT_EDITOR_MAX_BYTES + 1} bytes`,
+        );
+      }
+    }
+  });
 
   it("ties complete and truncated reads to an unambiguous content hash", () => {
     expect(
@@ -1843,6 +1887,46 @@ describe("document export IPC contract", () => {
 });
 
 describe("engine Y.Doc update IPC contract", () => {
+  it("carries every raw state admitted by the durable engine", () => {
+    expect(ENGINE_YDOC_UPDATE_MAX_BYTES).toBe(20 * 1024 * 1024);
+    const initialUpdate = new Uint8Array(ENGINE_YDOC_UPDATE_MAX_BYTES);
+
+    expect(
+      OpenEngineYDocSessionResult.parse({
+        available: true,
+        initialUpdate,
+      }).initialUpdate,
+    ).toBe(initialUpdate);
+  });
+
+  it("keeps bound document identity in the open result", () => {
+    expect(
+      OpenEngineYDocSessionResult.parse({
+        available: true,
+        initialUpdate: new Uint8Array(),
+        objectId: "object-1",
+        versionId: "main",
+      }),
+    ).toEqual({
+      available: true,
+      initialUpdate: new Uint8Array(),
+      objectId: "object-1",
+      versionId: "main",
+    });
+  });
+
+  it("keeps terminal invalid scene asset authority distinct from a retryable open", () => {
+    expect(
+      OpenEngineYDocSessionResult.parse({
+        available: false,
+        artifactAssetsInvalid: true,
+      }),
+    ).toEqual({
+      available: false,
+      artifactAssetsInvalid: true,
+    });
+  });
+
   it("keeps a removal-window open refusal operation-aware in the renderer", () => {
     expect(
       OpenEngineYDocSessionResult.parse({
@@ -1914,6 +1998,22 @@ describe("engine Y.Doc update IPC contract", () => {
         lineageGeneration: 0,
       }),
     ).toThrow();
+  });
+
+  it("names the update limit and observed bytes when an update is too large", () => {
+    const observedBytes = ENGINE_YDOC_UPDATE_MAX_BYTES + 1;
+    const result = ApplyEngineYDocUpdatePayload.safeParse({
+      sessionId: "s",
+      update: new Uint8Array(observedBytes),
+      seq: 1,
+    });
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.issues.map(({ message }) => message)).toContain(
+      `ENGINE_YDOC_UPDATE_MAX_BYTES is ${ENGINE_YDOC_UPDATE_MAX_BYTES} bytes; ` +
+        `the update is ${observedBytes} bytes.`,
+    );
   });
 
   it("distinguishes accepted updates from explicit main-process refusals", () => {
@@ -2020,6 +2120,25 @@ describe("partial-freshness marker on aggregate chat reads", () => {
         `MUTATION (${name}): "0 rows uncovered" is a full refresh reported as a partial one`,
       ).toThrow();
     }
+  });
+});
+
+describe("live document artifact asset IPC", () => {
+  it("carries a representative image above the former 48 KiB seed boundary", () => {
+    const bytes = new Uint8Array(49 * 1024);
+    bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const parsed = ReadEngineYDocArtifactAssetResult.parse({
+      descriptor: {
+        id: "image-file",
+        mimeType: "image/png",
+        created: 1,
+        ref: `assets/excalidraw/${"a".repeat(64)}/${"b".repeat(64)}.png`,
+        sha256: "b".repeat(64),
+      },
+      bytes,
+    });
+    expect(parsed.bytes.byteLength).toBe(49 * 1024);
+    expect(parsed.descriptor.id).toBe("image-file");
   });
 });
 

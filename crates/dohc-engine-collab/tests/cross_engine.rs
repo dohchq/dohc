@@ -49,7 +49,7 @@ fn setup_parity_store(tag: &str, regime: Regime) -> (TempStore, dohc_engine_coll
 }
 
 fn content_kind(fx: &Fixture) -> ContentKind {
-    ContentKind::parse(&fx.content_kind)
+    ContentKind::parse(&fx.content_kind).expect("fixture content kind")
 }
 
 /// Drive a fixture's yjs update lineage through the durable local-only pipeline
@@ -95,7 +95,7 @@ fn assert_matches_expectation(fx: &Fixture, doc: &Ydoc) {
             assert_eq!(
                 doc.project(ContentKind::Plaintext)
                     .expect("bounded plaintext projection")
-                    .markdown,
+                    .content,
                 expected,
                 "plaintext projection seed {}",
                 fx.seed
@@ -135,13 +135,14 @@ fn assert_matches_expectation(fx: &Fixture, doc: &Ydoc) {
                 assert_eq!(
                     doc.project(ContentKind::Richdoc)
                         .expect("bounded richdoc projection")
-                        .markdown,
+                        .content,
                     expected_markdown,
                     "richdoc markdown projection seed {}",
                     fx.seed
                 );
             }
         }
+        ContentKind::Scene => panic!("the legacy cross-engine corpus has no scene fixtures"),
     }
 }
 
@@ -163,6 +164,7 @@ fn every_fixture_converges_on_yjs_expectation() {
         match content_kind(fx) {
             ContentKind::Plaintext => plaintext += 1,
             ContentKind::Richdoc => richdoc += 1,
+            ContentKind::Scene => panic!("the legacy cross-engine corpus has no scene fixtures"),
         }
     }
     // Guard against a silently-empty corpus.
@@ -196,7 +198,7 @@ fn richdoc_projection_matches_typescript_byte_for_byte() {
         assert_eq!(
             doc.project(ContentKind::Richdoc)
                 .expect("bounded richdoc projection")
-                .markdown,
+                .content,
             expected,
             "projection fixture {kind}"
         );
@@ -973,7 +975,7 @@ fn nested_frontmatter_keys_are_sorted_deterministically() {
     let markdown = doc
         .project(ContentKind::Richdoc)
         .expect("bounded richdoc projection")
-        .markdown;
+        .content;
     let a = markdown.find("alpha").expect("alpha");
     let b = markdown.find("beta").expect("beta");
     let d = markdown.find("delta").expect("delta");

@@ -13,8 +13,10 @@ import type { WorkspaceVersionConflict } from "../../ipc/bridgeContract";
 // passed while twenty collapsed 10 MiB cards cost 750 ms on mount.
 const utf8ByteLengthSpy = vi.hoisted(() => vi.fn());
 const exceedsUtf8BytesSpy = vi.hoisted(() => vi.fn());
-vi.mock("./conflictPane", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./conflictPane")>();
+vi.mock("../../workspaces/workspaceTextLimits", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("../../workspaces/workspaceTextLimits")
+  >();
   utf8ByteLengthSpy.mockImplementation(actual.utf8ByteLength);
   exceedsUtf8BytesSpy.mockImplementation(actual.exceedsUtf8Bytes);
   return {

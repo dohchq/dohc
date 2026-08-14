@@ -190,7 +190,11 @@ describe("invokePluginSdkHost", () => {
     ],
     [
       "notes/canonical.md",
-      "files.write cannot overwrite canonical Markdown documents. Use a dohc document editing capability so locks, history, and collaboration are preserved.",
+      "files.write cannot overwrite live documents. Use a dohc document editing capability so locks, history, and collaboration are preserved.",
+    ],
+    [
+      "drawings/plan.excalidraw",
+      "files.write cannot overwrite live documents. Use a dohc document editing capability so locks, history, and collaboration are preserved.",
     ],
   ])("refuses raw writes to %s", async (path, message) => {
     const root = await workspaceRoot();

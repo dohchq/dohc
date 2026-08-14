@@ -465,6 +465,8 @@ const bridge: DohcDesktopBridge = {
   // session.
   openEngineYDocSession: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocOpen, payload),
+  readEngineYDocArtifactAsset: (payload) =>
+    ipcRenderer.invoke(CHANNELS.engineYDocReadArtifactAsset, payload),
   applyEngineYDocUpdate: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocApplyUpdate, payload),
   acknowledgeEngineYDocLineageReplacement: (payload) =>

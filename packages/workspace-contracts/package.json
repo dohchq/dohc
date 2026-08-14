@@ -10,6 +10,7 @@
     "./domain": "./src/domain.ts",
     "./domain-values": "./src/domainValues.ts",
     "./engine": "./src/engine.ts",
+    "./live-documents": "./src/liveDocuments.ts",
     "./relay": "./src/relay.ts",
     "./conformance": "./src/conformance.ts",
     "./workspace-settings": "./src/workspaceSettings.ts",

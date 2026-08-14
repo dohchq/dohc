@@ -13,6 +13,7 @@ import {
 import type {
   YdocApplyExternalMarkdownEditResult,
   YdocContentKind,
+  ArtifactAssetDescriptor,
   YdocSettleResult,
 } from "./ydocWireContract";
 
@@ -104,8 +105,14 @@ export interface EngineYdocProviderSessionOptions {
 export interface EngineYdocProviderSession {
   readonly doc: Y.Doc;
   readonly initialUpdate: Uint8Array;
+  // Injected test providers may omit these values. The daemon open response
+  // supplies objectId.
+  readonly objectId?: string;
+  // The provider echoes the requested versionId.
+  readonly versionId?: string;
   readonly lineageClaimId?: string | null;
   readonly contentKind: YdocContentKind;
+  readonly artifactAssets?: readonly ArtifactAssetDescriptor[];
   readonly path: string;
   // Whether the ENTERED VERSION has a committed snapshot for this path.
   // "absent" plus a lineage that is also absent means the daemon bound an
@@ -345,10 +352,15 @@ export async function openEngineYdocProviderSession(
       return session.doc;
     },
     initialUpdate: session.initialUpdate,
+    objectId: session.objectId,
+    versionId: options.versionId,
     get lineageClaimId() {
       return session.lineageClaimId;
     },
     contentKind: session.contentKind,
+    get artifactAssets() {
+      return session.artifactAssets;
+    },
     path: session.path,
     head: session.head,
     lineage: session.lineage,

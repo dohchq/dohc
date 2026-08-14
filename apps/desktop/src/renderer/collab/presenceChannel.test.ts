@@ -272,6 +272,45 @@ describe("createPresenceChannel", () => {
     await stopped;
     expect(leaves).toEqual([{ topic: "general", clientId: "c1" }]);
   });
+
+  it("serializes overlapping publishes and coalesces to the newest state", async () => {
+    const releases: Array<(snapshot: PresenceSnapshot) => void> = [];
+    const published: unknown[] = [];
+    const transport: PresenceTransport = {
+      publish: (input) => {
+        published.push(input.state);
+        return new Promise((resolve) => releases.push(resolve));
+      },
+      leave: async () => undefined,
+      poll: (input) =>
+        new Promise((resolve) => {
+          input.signal.addEventListener(
+            "abort",
+            () => resolve({ version: 0, peers: [] }),
+            { once: true },
+          );
+        }),
+    };
+    const channel = createPresenceChannel({
+      transport,
+      topic: "general",
+      clientId: "c1",
+      initialState: { n: 0 },
+      onPeers: vi.fn(),
+    });
+    // The initial publish is still in flight. Rapid updates must not start
+    // concurrent requests — they coalesce into ONE queued publish that reads
+    // the newest state when it runs.
+    channel.setState({ n: 1 });
+    channel.setState({ n: 2 });
+    channel.setState({ n: 3 });
+    expect(published).toEqual([{ n: 0 }]);
+    releases[0]!({ version: 1, peers: [] });
+    await flush();
+    expect(published).toEqual([{ n: 0 }, { n: 3 }]);
+    releases[1]!({ version: 2, peers: [] });
+    await channel.stop();
+  });
 });
 
 describe("createRelayPresenceTransport", () => {

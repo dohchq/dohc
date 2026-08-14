@@ -3,6 +3,7 @@ export * from "./chatMentions";
 export * from "./domain";
 export * from "./errors";
 export * from "./events";
+export * from "./liveDocuments";
 export * from "./path";
 export * from "./testHarness";
 export * from "./dataImport";

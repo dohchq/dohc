@@ -47,7 +47,7 @@ const rejectingTrash = async () => {
 
 describe("workspaceFiles through an in-workspace alias", () => {
   it("createFile refuses a write that lands in .dohc", async () => {
-    await expect(createFile(root, "meta/evil.md")).rejects.toThrow(
+    await expect(createFile(root, "meta/evil.md", "")).rejects.toThrow(
       /File path leads to a reserved area: meta\/evil\.md leads to \.dohc\/evil\.md/,
     );
     expect(existsSync(join(root, ".dohc", "evil.md"))).toBe(false);
@@ -114,14 +114,14 @@ describe("workspaceFiles through an in-workspace alias", () => {
 
   it("keeps a benign alias to an ordinary folder working", async () => {
     await symlink(join(root, "notes"), join(root, "inbox"), "dir");
-    expect(await createFile(root, "inbox/today.md")).toBe("inbox/today.md");
+    expect(await createFile(root, "inbox/today.md", "")).toBe("inbox/today.md");
     expect(existsSync(join(root, "notes", "today.md"))).toBe(true);
   });
 
   it("refuses a write that lands in the shared-with-me projection", async () => {
     await mkdir(join(root, "shared-with-me", "alex"), { recursive: true });
     await symlink(join(root, "shared-with-me"), join(root, "mine"), "dir");
-    await expect(createFile(root, "mine/alex/note.md")).rejects.toThrow(
+    await expect(createFile(root, "mine/alex/note.md", "")).rejects.toThrow(
       /File path leads to a reserved area/,
     );
     expect(existsSync(join(root, "shared-with-me", "alex", "note.md"))).toBe(false);

@@ -641,7 +641,7 @@ source of truth every orchestrator session loads first).
 - Behaviours: durable update append (bounded/validated/content-addressed/
   dedup-idempotent), convergence-neutral snapshot+compaction, per-doc leases
   (RAII, deterministic Drop), base-once claim (atomic re-check), idempotent +
-  echo-suppressed ydoc.update replication apply, settle→markdown projection
+  echo-suppressed ydoc.update replication apply, settle projection
   with provenance materialized via R04's job pipeline (deterministic job id,
   exactly-once).
 - All 5 binding yrs constraints enforced in code (see ydoc.rs module docs).

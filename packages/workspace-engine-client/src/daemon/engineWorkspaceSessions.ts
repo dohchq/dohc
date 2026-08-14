@@ -2,7 +2,11 @@ import {
   DaemonRefusalError,
   isDaemonReconnectError,
   isEngineStoreBusyRefusal,
+  isYdocOpenOperationCrashedRefusal,
+  isYdocOpenStorageFailureRefusal,
   isYdocSessionBusyRefusal,
+  isYdocArtifactAssetsPendingRefusal,
+  isYdocArtifactAssetsInvalidRefusal,
   WorkspaceDaemonRequester,
 } from "../live/daemonLiveAdapter";
 import type { AgentAuthor } from "../versioned/versionedWireContract";
@@ -206,7 +210,11 @@ export function isEngineWorkspaceOpenRefusedError(error: unknown): boolean {
     error instanceof EngineWorkspaceRetryDeadlineError ||
     error instanceof EngineWorkspaceShuttingDownError ||
     error instanceof YdocOpenTimedOutError ||
-    isYdocSessionBusyRefusal(error)
+    isYdocSessionBusyRefusal(error) ||
+    isYdocArtifactAssetsPendingRefusal(error) ||
+    isYdocArtifactAssetsInvalidRefusal(error) ||
+    isYdocOpenStorageFailureRefusal(error) ||
+    isYdocOpenOperationCrashedRefusal(error)
   );
 }
 
