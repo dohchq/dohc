@@ -375,6 +375,7 @@ import {
   assertSharedChannelMessageIdentity,
   joinedChannelMatchesCredentials,
   resolveChatRelayIdentity,
+  resolveShareViewRelayAuthorId,
   resolveWorkspaceRelayAuthorId,
   syncEnrollmentRemoteWorkspaceId,
   workspaceRemoteMatchesCredentials,
@@ -6470,7 +6471,16 @@ function registerIpcHandlers(
         workspace: RegistryEntry;
         capture: WorkspaceEngineCapture;
       }
-    | { kind: "share"; workspace: RegistryEntry; access: ShareAccess };
+    | {
+        kind: "share";
+        workspace: RegistryEntry;
+        access: ShareAccess;
+        // The account this recipient writes chat under. Absent when signed
+        // out, or signed into a relay that is not this share's — see
+        // `assertChatWritable`, which refuses rather than writing a comment
+        // that can never leave the machine.
+        authorUserId: string | undefined;
+      };
 
   async function requireChatScope(workspaceId: string): Promise<ChatScope> {
     const shareView = sharedViewOf(workspaceId);
@@ -6482,7 +6492,13 @@ function registerIpcHandlers(
     // Idempotent, and the same guarantee requireEngineCapture makes: the
     // workspace's daemon session is live before any store call reaches it.
     await openWorkspaceActivity(workspace);
-    return { kind: "share", workspace, access: shareView.grantedSelector.access };
+    await warmCredentialCache();
+    return {
+      kind: "share",
+      workspace,
+      access: shareView.grantedSelector.access,
+      authorUserId: resolveShareViewRelayAuthorId(shareView, cachedCredentials),
+    };
   }
 
   // The chat write gate, run BEFORE any durable row. A view share reads the
@@ -6490,8 +6506,14 @@ function registerIpcHandlers(
   // write. The relay refuses the push again with the same words, so the
   // renderer disabling its composer is honesty, not authorization.
   function assertChatWritable(scope: ChatScope): void {
-    if (scope.kind === "share" && scope.access === "view") {
-      throw new SharedFileReadOnlyError();
+    if (scope.kind !== "share") return;
+    if (scope.access === "view") throw new SharedFileReadOnlyError();
+    // A comment on someone else's share is only a comment once it reaches
+    // them, and a chat op replicates only when its author carries a user id.
+    // Without one this write would look sent and stay on this machine, which
+    // is worse than refusing it.
+    if (!scope.authorUserId) {
+      throw new Error("Sign in to dohc Cloud to chat about a shared file.");
     }
   }
 

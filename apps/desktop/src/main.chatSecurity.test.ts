@@ -737,5 +737,10 @@ describe("main-process chat authorization", () => {
     const gate = mainSource.slice(gateAt, mainSource.indexOf("\n  }", gateAt));
     expect(gate).toContain('scope.access === "view"');
     expect(gate).toContain("throw new SharedFileReadOnlyError()");
+    // The second half of the same gate: a chat op replicates only when its
+    // author carries a user id, so a share view with no resolvable relay
+    // identity must be refused, not written locally and called sent.
+    expect(gate).toContain("if (!scope.authorUserId)");
+    expect(scope).toContain("resolveShareViewRelayAuthorId(shareView, cachedCredentials)");
   });
 });
