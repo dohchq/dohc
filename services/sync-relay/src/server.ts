@@ -203,7 +203,11 @@ export function createSyncRelayHandler({
   const selectorAcceptsAppends = (selector: AnyShareSelector): boolean =>
     isChatChannelSelector(selector)
       ? selector.access === "read-write"
-      : selector.access === "comment" || selector.access === "edit";
+      : // Chat is the only thing a file share accepts in PR2, and chat follows
+        // PATHS only (#646). A version share — no paths — carries no chat, so
+        // it accepts no append either, at any level.
+        selector.paths.length > 0 &&
+        (selector.access === "comment" || selector.access === "edit");
 
   // Loads a share for RECIPIENT access. Every failure mode — no such share,
   // revoked share, caller is not the recipient, granter lost the workspace —
@@ -238,6 +242,7 @@ export function createSyncRelayHandler({
     const kindCache = new Map<string, ChatShareChannelKind | null | undefined>();
     const bindingCache = new Map<string, ThreadFileBinding | null | undefined>();
     const pathCache = new Map<string, string | null | undefined>();
+    const objectAtPathCache = new Map<string, string | undefined>();
     return {
       channelKind: (channelWireId) => {
         if (kindCache.has(channelWireId)) return kindCache.get(channelWireId);
@@ -265,6 +270,12 @@ export function createSyncRelayHandler({
         const path = storage.objectCurrentPath(workspaceId, objectId);
         pathCache.set(objectId, path);
         return path;
+      },
+      objectIdAtPath: (path) => {
+        if (objectAtPathCache.has(path)) return objectAtPathCache.get(path);
+        const objectId = storage.objectIdAtPath(workspaceId, path);
+        objectAtPathCache.set(path, objectId);
+        return objectId;
       },
     };
   };
@@ -510,6 +521,7 @@ export function createSyncRelayHandler({
           },
           objectCurrentPath: (objectId) =>
             storage.objectCurrentPath(share.workspaceId, objectId),
+          objectIdAtPath: (path) => storage.objectIdAtPath(share.workspaceId, path),
         };
         const ops = input.ops.map(parseLogOp);
         for (const op of ops) {
@@ -521,6 +533,12 @@ export function createSyncRelayHandler({
           // attachment's objectId/pathHint) must not survive the append.
           op.payloadJson = JSON.stringify(decision.payload);
           if (op.opKind === "chat.thread.create") {
+            // Read back from the SERVED copy assigned above, which carries the
+            // path this relay proved — never the pusher's own string. An
+            // honest client sends the canonical path anyway; a hand-crafted
+            // one would otherwise persist a spelling the granter can never
+            // resolve, leaving a conversation that keeps accepting messages
+            // and never lands.
             const created = JSON.parse(op.payloadJson) as {
               threadId?: unknown;
               linkedPath?: unknown;

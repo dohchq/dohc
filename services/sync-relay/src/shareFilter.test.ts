@@ -26,6 +26,7 @@ import {
 const NO_FILE_CHAT: ShareFileChatResolver = {
   threadFileBinding: () => undefined,
   objectCurrentPath: () => undefined,
+  objectIdAtPath: () => undefined,
 };
 
 function momentPayload(overrides: Record<string, unknown> = {}): string {
@@ -1156,6 +1157,14 @@ describe("file-chat share filter (#646 PR2)", () => {
           : objectId === "object-gone"
             ? null
             : undefined,
+    // The reverse lookup, consistent with the forward one above: exactly the
+    // two paths a live object sits at.
+    objectIdAtPath: (path) =>
+      path === "docs/in.md"
+        ? "object-in"
+        : path === "notes/out.md"
+          ? "object-out"
+          : undefined,
   };
   const resolver: ChatShareThreadResolver = {
     channelKind: () => undefined,
@@ -1397,6 +1406,7 @@ describe("file-chat share filter (#646 PR2)", () => {
       threadChannelWireId: () => undefined,
       threadFileBinding: () => ({ kind: "object", objectId: "object-secret" }),
       objectCurrentPath: () => ".env",
+      objectIdAtPath: () => "object-secret",
     };
     expect(
       filterOpForShare(poisoned, "chat.message.append", message("thread-secret"), secretResolver)

@@ -615,6 +615,165 @@ describe("chat over a file share (#646 PR2)", () => {
     expect(served.map((op) => op.payload.messageId)).not.toContain("m-tampered");
   });
 
+
+  // P1 (review of bcdc31e0). A version share has NO paths, and
+  // `pathVisibleThroughShare` reads an empty path list as "every tracked
+  // path". For files that is bounded by the version check; chat has no
+  // version to check, so the same rule would have served the live discussion
+  // about every file on main — including files created long after the version
+  // and never in it. Chat follows PATHS, and only paths.
+  it("serves no chat at all through a version share, at any level", async () => {
+    const { storage } = await testStorage();
+    const h = handler(storage);
+    await seedWorkspace(h);
+
+    const created = await json(
+      await h(
+        request(
+          GRANTER,
+          `/sync/${WORKSPACE}/shares`,
+          jsonBody({ recipientUserId: RECIPIENT, versionId: "v1", access: "comment" }),
+        ),
+      ),
+    );
+    const shareId = created.shareId as string;
+    const body = await (
+      await h(request(RECIPIENT, `/sync/shares/${shareId}/log?since=0&limit=500`))
+    ).text();
+
+    expect(
+      chatOps(JSON.parse(body).ops),
+      "MUTATION: a version share must carry no conversation about any file",
+    ).toHaveLength(0);
+    for (const sentinel of ["thread-in", "About the shared file", "docs/in.md"]) {
+      expect(body, sentinel).not.toContain(sentinel);
+    }
+
+    // And it accepts none either: chat is the only thing PR2 makes appendable,
+    // so a version share is not appendable at all.
+    const push = await h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${shareId}/log`,
+        jsonBody({ originId: "recipient-origin", ops: [] }),
+      ),
+    );
+    expect(push.status).toBe(403);
+    expect((await json(push)).code).toBe("share_read_only");
+  });
+
+  // P1 (the confirmed suspect). A recipient's own thread is bound by PATH, and
+  // serving that string verbatim pinned the discussion to the path it was
+  // created at. The file then moves out of the share and the conversation
+  // keeps flowing — in both directions — about a file the share no longer
+  // covers.
+  it("stops a RECIPIENT-created thread when its file is renamed out of the share", async () => {
+    const { storage } = await testStorage();
+    const h = handler(storage);
+    const log = await seedWorkspace(h);
+    const shareId = await createShare(h, "comment");
+
+    const push = await h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${shareId}/log`,
+        jsonBody({
+          originId: "recipient-origin",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "chat.thread.create",
+              recordedAtMs: 5000,
+              payload: {
+                threadId: "thread-recipient",
+                title: "A question",
+                createdAtMs: 5000,
+                linkedAtMs: 5000,
+                linkedPath: "docs/in.md",
+              },
+            },
+          ],
+        }),
+      ),
+    );
+    expect(push.status, await push.clone().text()).toBe(200);
+    expect(chatOps(await readShareLog(h, shareId)).length).toBeGreaterThan(0);
+
+    // The granter renames the file out of the selector.
+    await log.append(log.rename("object-in", "docs/in.md", "private/moved.md"));
+
+    const served = chatOps(await readShareLog(h, shareId));
+    expect(
+      served,
+      "MUTATION: a path-bound thread must follow the file out, not serve its create-time path forever",
+    ).toHaveLength(0);
+
+    // And the lane closes in the other direction too: a further message on
+    // that thread is refused rather than accepted into the granter's log.
+    const after = await h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${shareId}/log`,
+        jsonBody({
+          originId: "recipient-origin",
+          ops: [
+            {
+              originSeq: 1,
+              opKind: "chat.message.append",
+              recordedAtMs: 5001,
+              payload: {
+                messageId: "m-after-rename",
+                threadId: "thread-recipient",
+                authorKind: "human",
+                authorDisplayName: "Recipient",
+                authorUserId: RECIPIENT,
+                body: "should not land",
+                createdAtMs: 5001,
+              },
+            },
+          ],
+        }),
+      ),
+    );
+    expect(after.status).toBe(403);
+    expect((await json(after)).code).toBe("share_op_rejected");
+  });
+
+  // The same rule, one step further: a DELETED file takes its recipient
+  // thread with it. The reverse lookup answers "no object here" for both.
+  it("stops a RECIPIENT-created thread when its file is deleted", async () => {
+    const { storage } = await testStorage();
+    const h = handler(storage);
+    const log = await seedWorkspace(h);
+    const shareId = await createShare(h, "comment");
+
+    await h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${shareId}/log`,
+        jsonBody({
+          originId: "recipient-origin",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "chat.thread.create",
+              recordedAtMs: 5000,
+              payload: {
+                threadId: "thread-recipient",
+                title: "A question",
+                createdAtMs: 5000,
+                linkedAtMs: 5000,
+                linkedPath: "docs/in.md",
+              },
+            },
+          ],
+        }),
+      ),
+    );
+    await log.append(log.delete("object-in", "docs/in.md"));
+    expect(chatOps(await readShareLog(h, shareId))).toHaveLength(0);
+  });
+
   it("makes no blob reachable through a chat op", async () => {
     // Chat decisions carry `blobSha256s: []`, and the share-blob route reads
     // exactly that to decide reachability. The outside file has a REAL blob on

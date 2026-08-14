@@ -245,6 +245,9 @@ export interface SyncRelayStorage {
   // seen the object; null means its latest moment deleted it (or named no
   // readable path). Both deny.
   objectCurrentPath(workspaceId: string, objectId: string): string | null | undefined;
+  // The object at this path RIGHT NOW, or undefined when none is. The reverse
+  // of the lookup above; a thread bound by path is re-proved through it.
+  objectIdAtPath(workspaceId: string, path: string): string | undefined;
 }
 
 // The two wire shapes a file-linked thread create carries, kept apart because
@@ -252,7 +255,10 @@ export interface SyncRelayStorage {
 // its `linkedObjectId` is a granter-local id the relay resolves to a path.
 // `path` is a RECIPIENT's op, pushed back through the share log: a recipient's
 // object ids are its own and mean nothing here, so its create names the
-// granted path directly and the relay tests that path with no resolver hop.
+// granted path directly, and the relay re-proves that path against the log.
+//
+// Declared here, where it is read out of the log, and re-exported by
+// `shareFilter.ts` for the filter that consumes it.
 export type ThreadFileBinding =
   | { kind: "object"; objectId: string }
   | { kind: "path"; path: string };
@@ -439,7 +445,12 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         PRIMARY KEY (workspace_id, object_id),
         FOREIGN KEY (workspace_id)
           REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
-      );
+      ) STRICT;
+      -- The reverse lookup: which object sits at this path now. A thread bound
+      -- by PATH is re-proved through this on every serve, so it is on the
+      -- share read path and must not scan.
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_object_paths_path
+        ON sync_relay_object_paths(workspace_id, path);
 
       CREATE TABLE IF NOT EXISTS sync_relay_migrations (
         migration_id TEXT PRIMARY KEY,
@@ -1699,6 +1710,17 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       return null;
     }
     return undefined;
+  }
+
+  objectIdAtPath(workspaceId: string, path: string): string | undefined {
+    if (!path) return undefined;
+    const row = this.db
+      .prepare(
+        "SELECT object_id FROM sync_relay_object_paths \
+         WHERE workspace_id = ? AND path = ? LIMIT 1",
+      )
+      .get(workspaceId, path);
+    return typeof row?.object_id === "string" ? row.object_id : undefined;
   }
 
   objectCurrentPath(workspaceId: string, objectId: string): string | null | undefined {

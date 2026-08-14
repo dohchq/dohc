@@ -292,7 +292,7 @@ fn enforce_shared_channel_boundary(
 /// a file share has no channel. Everything not named here reaches
 /// `enforce_share_view_boundary` and is refused as a kind a share does not
 /// carry.
-const SHARE_VIEW_CHAT_KINDS: [&str; 5] = [
+pub(crate) const SHARE_VIEW_CHAT_KINDS: [&str; 5] = [
     "chat.thread.create",
     "chat.message.append",
     "chat.reaction.set",
@@ -302,6 +302,21 @@ const SHARE_VIEW_CHAT_KINDS: [&str; 5] = [
 
 pub(crate) fn is_share_view_chat_kind(op_kind: &str) -> bool {
     SHARE_VIEW_CHAT_KINDS.contains(&op_kind)
+}
+
+/// Whether a chat op about `path` is inside this grant (#646 PR2).
+///
+/// Chat follows PATHS, and only paths. A grant with no paths is a VERSION
+/// share, and `path_within_grant` reads an empty path list as "every tracked
+/// path" — which for chat would admit the live discussion about every file on
+/// main, including files that were never in the shared version. A version
+/// share is a snapshot; the conversation is not in it. The relay refuses the
+/// same shape (`services/sync-relay/src/shareFilter.ts`), and this is the
+/// recipient's own answer to the same question.
+pub(crate) fn chat_path_within_grant(path: &str, granted: &ShareGrant) -> bool {
+    !granted.paths.is_empty()
+        && classify_share_path(path) == PathClass::Tracked
+        && path_within_grant(path, granted)
 }
 
 /// The BEFORE-the-transaction half of the ShareView chat boundary, for the one
@@ -339,7 +354,7 @@ fn enforce_share_view_thread_create(
             .ok_or(SyncError::InvalidInput {
                 reason: "share-view chat.thread.create must carry a linkedPath string",
             })?;
-    if classify_share_path(path) != PathClass::Tracked || !path_within_grant(path, granted) {
+    if !chat_path_within_grant(path, granted) {
         return Err(SyncError::ShareBoundaryViolation);
     }
     Ok(())
@@ -377,9 +392,7 @@ fn enforce_share_view_chat_boundary(
                 .ok_or(SyncError::ShareBoundaryViolation)?;
             let path = thread_linked_path(tx, &op.workspace_id, thread_id)?
                 .ok_or(SyncError::ShareBoundaryViolation)?;
-            if classify_share_path(&path) != PathClass::Tracked
-                || !path_within_grant(&path, granted)
-            {
+            if !chat_path_within_grant(&path, granted) {
                 return Err(SyncError::ShareBoundaryViolation);
             }
             Ok(())

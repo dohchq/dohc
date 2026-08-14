@@ -21,6 +21,7 @@ import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 const NO_FILE_CHAT: ShareFileChatResolver = {
   threadFileBinding: () => undefined,
   objectCurrentPath: () => undefined,
+  objectIdAtPath: () => undefined,
 };
 
 // WS-MU-C3 — DM / chat-channel grants over the relay, riding MU-C4's

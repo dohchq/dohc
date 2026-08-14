@@ -71,14 +71,7 @@ export type AnyShareSelector = ShareSelector | ChatChannelShareSelector;
 
 export type ChatShareChannelKind = "channel" | "dm" | "agent";
 
-// The two wire shapes a FILE-linked thread create carries (#646 PR2). Restated
-// from `services/sync-relay/src/storage.ts`, which reads them out of the log:
-// `object` is the granter's own op, `path` a recipient's op pushed back
-// through the share log. A recipient's object ids are its own and mean nothing
-// on this side, so its create names the granted path directly.
-export type ThreadFileBinding =
-  | { kind: "object"; objectId: string }
-  | { kind: "path"; path: string };
+export type { ThreadFileBinding } from "./storage";
 
 // #646 PR2: how the file-chat branch answers "which file is this thread
 // about, and where is that file now?" from the workspace OWNER's log. Both
@@ -91,6 +84,10 @@ export interface ShareFileChatResolver {
   // The path of the LATEST moment.append for this object. undefined = the
   // relay has never seen the object; null = its latest moment deleted it.
   objectCurrentPath(objectId: string): string | null | undefined;
+  // The object sitting at this path RIGHT NOW, or undefined when none does.
+  // The reverse of the lookup above, and the liveness proof a path binding
+  // needs: a thread bound by path must not outlive the file it names.
+  objectIdAtPath(path: string): string | undefined;
 }
 
 // MU-C4: how the chat branch resolves channel and thread ownership from the
@@ -365,14 +362,26 @@ export function parseAnyShareSelectorJson(selectorJson: string): AnyShareSelecto
 // engine-tracked right now. Even a selector that somehow contained a secret
 // path (bug, hand-edited row) cannot leak secret ops through this check.
 function pathVisibleThroughShare(selector: ShareSelector, path: string): boolean {
+  return visibleSharePath(selector, path) !== null;
+}
+
+// The same gate, answering with the NORMALIZED path it proved. A caller that
+// serves or stores a path must serve this one: the check normalizes before
+// deciding, so serving the caller's own spelling would persist a string this
+// relay never validated — and one the granter may be unable to resolve.
+function visibleSharePath(selector: ShareSelector, path: string): string | null {
   const validated = validateUserWritePath(path);
-  if (!validated.ok) return false;
-  if (classifyEngineFilePath(validated.normalized).kind !== "tracked") return false;
-  if (selector.paths.length === 0) return selector.versionId !== null;
-  return selector.paths.some(
-    (selected) =>
-      validated.normalized === selected || validated.normalized.startsWith(`${selected}/`),
-  );
+  if (!validated.ok) return null;
+  if (classifyEngineFilePath(validated.normalized).kind !== "tracked") return null;
+  const selected =
+    selector.paths.length === 0
+      ? selector.versionId !== null
+      : selector.paths.some(
+          (granted) =>
+            validated.normalized === granted ||
+            validated.normalized.startsWith(`${granted}/`),
+        );
+  return selected ? validated.normalized : null;
 }
 
 // The ONE version a path/version share exposes, and the rule both sides
@@ -657,16 +666,29 @@ function threadCreateBinding(record: Record<string, unknown>): ThreadFileBinding
   return null;
 }
 
-// A binding resolved to the path the selector is tested against, or null when
-// it cannot be resolved. Fail closed on every tri-state: an unknown object
-// (undefined) and a deleted one (null) both deny. Hiding the discussion about
-// a deleted file is the fail-closed answer and the simple one to state.
+// A binding resolved to the file's path RIGHT NOW, or null when it cannot be
+// resolved. Fail closed on every tri-state: an unknown object (undefined) and
+// a deleted one (null) both deny. Hiding the discussion about a deleted file
+// is the fail-closed answer and the simple one to state.
+//
+// Both shapes are answered from the log, and neither is taken on trust. An
+// object binding reads the object's current path. A PATH binding — the shape a
+// recipient's own create carries — is re-proved by asking which object sits at
+// that path now: returning the stored string verbatim would pin the thread to
+// a path it was created at, and the discussion would keep serving after the
+// file was renamed out of the share or deleted.
+//
+// Residual, accepted: a NEW file later created at the same path re-attaches
+// the old discussion to it. The path is inside the selector either way, so
+// this is mis-association, not disclosure.
 function resolvedThreadPath(
   chat: ShareFileChatResolver,
   binding: ThreadFileBinding | null | undefined,
 ): string | null {
   if (!binding) return null;
-  if (binding.kind === "path") return binding.path;
+  if (binding.kind === "path") {
+    return chat.objectIdAtPath(binding.path) ? binding.path : null;
+  }
   const path = chat.objectCurrentPath(binding.objectId);
   return typeof path === "string" ? path : null;
 }
@@ -693,6 +715,13 @@ function filterFileChatOpForPathShare(
 ): ShareOpDecision {
   // No resolver wired = no way to resolve a thread to a file = nothing served.
   if (!chat) return { allowed: false };
+  // Chat follows PATHS, and only paths (#646 PR2). A selector with no paths is
+  // a VERSION share: it grants one frozen version's files, and
+  // `pathVisibleThroughShare` reads its empty path list as "every tracked
+  // path" — which for chat would serve the live discussion about every file on
+  // main, including files created long after the version and never in it. A
+  // version share is a snapshot; the conversation is not in it.
+  if (selector.paths.length === 0) return { allowed: false };
   const record = asRecord(payload);
   if (!record) return { allowed: false };
   const threadId = collectString(record.threadId);
@@ -716,14 +745,17 @@ function filterFileChatOpForPathShare(
   if (path === null) return { allowed: false };
   // Gate #2 unchanged: the path must be inside the selector AND classified
   // engine-tracked right now, so the chat lane inherits the secret-path floor.
-  if (!pathVisibleThroughShare(selector, path)) return { allowed: false };
+  // The NORMALIZED spelling it proved is what gets served and stored.
+  const servedPath = visibleSharePath(selector, path);
+  if (servedPath === null) return { allowed: false };
 
   if (opKind === "chat.thread.create") {
     const served = pickServed(record, ["threadId", "title", "createdAtMs", "linkedAtMs"]);
-    // The resolved path, not the payload's own field: the recipient re-tests
-    // this value against its pinned grant, and it must be the value the
-    // selector was tested against.
-    served.linkedPath = path;
+    // The resolved, normalized path — not the payload's own field. The
+    // recipient re-tests this value against its pinned grant, and the granter
+    // resolves it against its own store, so both must read the spelling this
+    // relay proved.
+    served.linkedPath = servedPath;
     return { allowed: true, payload: served, blobSha256s: [] };
   }
   if (opKind === "chat.message.append") {

@@ -22657,3 +22657,133 @@ fn a_recipient_thread_create_for_an_untracked_path_is_refused_on_the_owner_lane(
     );
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
 }
+
+/// P1 (review of bcdc31e0). A grant with NO paths is a version share, and
+/// `path_within_grant` reads an empty path list as "every tracked path". For
+/// files that is bounded by the version check; chat has no version to check,
+/// so the same rule would admit the discussion about every file on main.
+#[test]
+fn share_view_carries_no_chat_through_a_version_share() {
+    let (_scratch, _path, mut engine, _boundary) = share_view_chat_fixture();
+    let version_only = ShareBoundary {
+        share_id: "share-version".to_owned(),
+        surface: ShareSurface::ShareView,
+        channel_wire_id: None,
+        granted: Some(ShareGrant {
+            paths: Vec::new(),
+            version_id: Some("v1".to_owned()),
+            access: crate::ShareAccess::Comment,
+        }),
+    };
+    let create = thread_create(0, "thread-in", json!({ "linkedPath": "shared/docs/in.md" }));
+    assert!(
+        matches!(
+            apply_shared_envelope(&mut engine, &version_only, &create, &NoFaults),
+            Err(SyncError::ShareBoundaryViolation)
+        ),
+        "MUTATION: a version share must carry no conversation about any file",
+    );
+    assert_eq!(thread_row_path(&engine, "thread-in"), None);
+}
+
+/// P2 (review of bcdc31e0). The pinned level was carried and never read. A
+/// `view` grant carries chat to READ; this replica must offer none to push.
+#[test]
+fn share_view_push_offers_nothing_at_view_level() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    seed_text_head(&mut engine, "object-in", "shared/docs/in.md", "inside");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_threads \
+                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms,linked_object_id,linked_path_hint,linked_at_ms,channel_id) \
+                 VALUES ('ws','thread-in','Thread',1,1,'object-in',NULL,1,NULL)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<(), SyncError>(())
+        })
+        .expect("thread fixture");
+    journal_local_replication_op(
+        &mut engine,
+        "ws",
+        "local",
+        "epoch-1",
+        "stream-1",
+        "chat.message.append",
+        &json!({"threadId":"thread-in","messageId":"m-in"}),
+        1_001,
+        &NoFaults,
+    )
+    .expect("journal");
+
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    for (access, expected) in [
+        (crate::ShareAccess::View, 0_usize),
+        (crate::ShareAccess::Comment, 1),
+    ] {
+        let granted = ShareGrant {
+            paths: vec!["shared/docs".to_owned()],
+            version_id: None,
+            access,
+        };
+        let pushed = client
+            .push_share_view(
+                &mut engine,
+                "ws",
+                &format!("share-{access:?}"),
+                &granted,
+                &NoFaults,
+            )
+            .expect("share view push")
+            .pushed;
+        assert_eq!(
+            pushed, expected,
+            "MUTATION: the pinned level must decide what this replica offers ({access:?})",
+        );
+    }
+}
+
+/// The allowlist and the match arms that act on it must name the same kinds.
+/// The match keeps its own `_ => Err` floor, so a kind added to one and not
+/// the other fails closed — but silently, and this is what makes it loud.
+#[test]
+fn share_view_chat_kinds_and_the_boundary_match_agree() {
+    use crate::share::SHARE_VIEW_CHAT_KINDS;
+    let (_scratch, _path, mut engine, boundary) = share_view_chat_fixture();
+    for kind in SHARE_VIEW_CHAT_KINDS {
+        let op = if kind == "chat.thread.create" {
+            thread_create(
+                0,
+                "thread-kinds",
+                json!({ "linkedPath": "shared/docs/in.md" }),
+            )
+        } else {
+            envelope(
+                "granter",
+                0,
+                kind,
+                json!({"threadId":"thread-kinds","messageId":"m","attachmentId":"a","reactionId":"r","emoji":"x","authorId":"u","authorKind":"human","authorDisplayName":"G","body":"b","state":"open","targetKind":"file","createdAtMs":1,"atMs":1}),
+            )
+        };
+        // Every kind on the list must reach the CHAT branch, which answers with
+        // a scope or apply verdict — never the terminal "a share does not
+        // carry this kind" deny the match's floor produces.
+        let outcome = apply_shared_envelope(&mut engine, &boundary, &op, &NoFaults);
+        let reached_chat_branch = match &outcome {
+            Ok(_) => true,
+            Err(SyncError::ShareBoundaryViolation) => true,
+            Err(SyncError::InvalidInput { .. }) => true,
+            other => panic!("{kind} produced {other:?}"),
+        };
+        assert!(reached_chat_branch, "{kind} did not reach the chat branch");
+        assert!(
+            !matches!(outcome, Err(SyncError::UnsupportedOperation)),
+            "MUTATION: {kind} is on SHARE_VIEW_CHAT_KINDS but the match does not act on it",
+        );
+    }
+}

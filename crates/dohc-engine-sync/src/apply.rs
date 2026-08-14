@@ -1040,6 +1040,18 @@ fn linked_object_for_apply(
             payload.linked_path_hint.clone(),
         ));
     };
+    // The SECRET floor, applied where this op is applied. A `linkedPath` op
+    // reaches a granter over the ordinary owner lane, with no share and no
+    // grant in scope, so the relay's filter is the authority on what a share
+    // COVERS and remains so. This is the one rule this surface can state on
+    // its own: a secret path is never a file a thread may bind to, whoever
+    // asked. `validate_addressable_plaintext_path` refuses `Ignored` and
+    // accepts `Secret`, so it does not cover this.
+    if crate::classify_share_path(path) != crate::PathClass::Tracked {
+        return Err(SyncError::InvalidInput {
+            reason: "chat thread linked path is not a tracked file",
+        });
+    }
     let object_id: Option<String> = tx
         .query_row(
             "SELECT object_id FROM path_aliases \

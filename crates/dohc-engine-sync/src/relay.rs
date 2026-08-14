@@ -1883,18 +1883,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         outcome.into_primary_and_diagnostics();
                     // #646 PR2: a share-view CHAT op does mutate chat
                     // dependencies — that is what applying it means, and the
-                    // replay it unparks can refuse ops of its own. What must
-                    // still hold is that none of those refusals is a FILE op:
-                    // the chat lane must never reach back into the file
-                    // replay this pull owns. A refusal recorded there would be
-                    // a file op refused by a code path with no business
-                    // touching one.
-                    debug_assert!(
-                        nested_refusals
-                            .iter()
-                            .all(|refusal| refusal.op_kind.starts_with("chat.")),
-                        "share-view chat apply must not refuse a file op"
-                    );
+                    // replay it unparks can refuse ops of its own. Those
+                    // refusals are RECORDED below rather than asserted about:
+                    // every coordinate `chat_pending_replication` can hold is
+                    // a chat kind by construction, so an assertion that they
+                    // are chat kinds proves nothing and is absent in release
+                    // anyway.
                     for refusal in nested_refusals {
                         refusals.push(ShareViewRefusal::new(
                             refusal.origin_id,
@@ -3129,6 +3123,23 @@ enum SharePushScope<'a> {
 }
 
 impl SharePushScope<'_> {
+    /// Whether `op` is this share's to push, without building its payload.
+    fn is_eligible(
+        &self,
+        store: &EngineStore,
+        workspace_id: &str,
+        op: &ReplicationEnvelope,
+    ) -> Result<bool, RelayError> {
+        match self {
+            Self::Channel(channel_wire_id) => {
+                shared_channel_op_allowed(store, workspace_id, channel_wire_id, op)
+            }
+            Self::View(granted) => {
+                Ok(share_view_push_path(store, workspace_id, granted, op)?.is_some())
+            }
+        }
+    }
+
     /// The payload to push for `op`, or `None` when the op is not this
     /// share's to push.
     fn served_payload(
@@ -3158,13 +3169,24 @@ impl SharePushScope<'_> {
 /// granter mints its own object ids, so the local one this replica journaled
 /// would name nothing there, and the relay's own filter refuses a create that
 /// carries both shapes.
-fn share_view_push_payload(
+/// The in-grant path this op's thread is about, or `None` when the op is not
+/// this share's to push. Answers eligibility WITHOUT building a payload, so
+/// the dense-sequence walk can ask the same question cheaply.
+fn share_view_push_path(
     store: &EngineStore,
     workspace_id: &str,
     granted: &crate::ShareGrant,
     op: &ReplicationEnvelope,
-) -> Result<Option<serde_json::Value>, RelayError> {
+) -> Result<Option<String>, RelayError> {
     if !crate::share::is_share_view_chat_kind(&op.op_kind) {
+        return Ok(None);
+    }
+    // The PINNED level, read here rather than trusted from the relay's own
+    // refusal (#646 PR2). A `view` grant carries chat to read and nothing to
+    // write, so this replica offers none — the defence in depth the plan's
+    // enforcement table claims, and the one place the pinned level decides
+    // something by itself.
+    if granted.access == crate::ShareAccess::View {
         return Ok(None);
     }
     let object_id = if op.op_kind == "chat.thread.create" {
@@ -3194,11 +3216,23 @@ fn share_view_push_payload(
     let Some(path) = read_object_path(store, workspace_id, &object_id)? else {
         return Ok(None);
     };
-    if crate::classify_share_path(&path) != crate::PathClass::Tracked
-        || !crate::share::path_within_grant(&path, granted)
-    {
+    // Chat follows PATHS only, and the same containment rule the inbound
+    // boundary applies — so a version share pushes nothing either.
+    if !crate::share::chat_path_within_grant(&path, granted) {
         return Ok(None);
     }
+    Ok(Some(path))
+}
+
+fn share_view_push_payload(
+    store: &EngineStore,
+    workspace_id: &str,
+    granted: &crate::ShareGrant,
+    op: &ReplicationEnvelope,
+) -> Result<Option<serde_json::Value>, RelayError> {
+    let Some(path) = share_view_push_path(store, workspace_id, granted, op)? else {
+        return Ok(None);
+    };
     if op.op_kind != "chat.thread.create" {
         return Ok(Some(op.payload.clone()));
     }
@@ -3275,7 +3309,10 @@ fn shared_dense_seq_through(
             if op.origin_seq > scanned_seq {
                 return Ok(dense_seq);
             }
-            if scope.served_payload(store, workspace_id, &op)?.is_some() {
+            // Eligibility only — this walk never sends anything, and building
+            // a served payload per op just to drop it clones the whole
+            // payload for every op in the log on every push.
+            if scope.is_eligible(store, workspace_id, &op)? {
                 dense_seq = dense_seq
                     .checked_add(1)
                     .ok_or(RelayError::InvalidResponse)?;
