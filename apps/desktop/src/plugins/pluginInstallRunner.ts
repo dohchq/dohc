@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
-import { access } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { access, realpath } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { killProcessTreePosix } from "../process/posixSpawn";
 import { killProcessTreeWin32 } from "../process/windowsSpawn";
 import {
@@ -47,18 +47,21 @@ function buildPluginInstallEnv(pnpmPaths: PluginPnpmPaths): NodeJS.ProcessEnv {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
-  // A definitely-absent file: npm/pnpm treat a missing user/global config
-  // file as "no additional config" rather than an error, so this reliably
-  // disables both without depending on what this machine happens to have.
+  // A definitely-absent file: pnpm treats a missing user config file as "no
+  // additional config" rather than an error, so this reliably disables it
+  // without depending on what this machine happens to have.
   const disabledConfigFile = join(pnpmPaths.homeDir, ".npmrc-disabled");
   env.HOME = pnpmPaths.homeDir;
   env.USERPROFILE = pnpmPaths.homeDir;
-  env.npm_config_userconfig = disabledConfigFile;
-  env.npm_config_globalconfig = disabledConfigFile;
-  // Env-provided config outranks a project .npmrc in npm/pnpm's own
-  // resolution order, so this also stops a plugin-supplied .npmrc from
-  // silently redirecting the install at an attacker-controlled registry.
-  env.npm_config_registry = "https://registry.npmjs.org/";
+  env.PNPM_CONFIG_USERCONFIG = disabledConfigFile;
+  // PNPM_CONFIG_*, not npm_config_*: the pinned pnpm reads only its own
+  // prefix, so the npm_config_registry pin this used to carry set nothing at
+  // all and a plugin-supplied .npmrc chose the registry. Measured against the
+  // staged pnpm@11.20.0: with a snapshot .npmrc naming its own registry,
+  // npm_config_registry lost and pnpm fetched every dependency from it;
+  // PNPM_CONFIG_REGISTRY wins, because env outranks a project .npmrc
+  // (#779 round 8 D1).
+  env.PNPM_CONFIG_REGISTRY = "https://registry.npmjs.org/";
   env.PNPM_CONFIG_STORE_DIR = pnpmPaths.storeDir;
   env.PNPM_CONFIG_CACHE_DIR = pnpmPaths.cacheDir;
   env.PNPM_CONFIG_STATE_DIR = pnpmPaths.stateDir;
@@ -78,6 +81,16 @@ export const PLUGIN_INSTALL_ARGS = [
   "--ignore-workspace",
   "--frozen-lockfile",
   "--node-linker=isolated",
+  // pnpm's own defaults, restated where nothing can outrank them: a CLI flag
+  // beats every config layer. The pinned pnpm@11.20.0 takes these two
+  // settings from pnpm-workspace.yaml and pnpm 10 took them from a project
+  // .npmrc — both files are plugin-authored, and this install runs before any
+  // approval gate. Measured against the staged pnpm: with a malicious
+  // pnpm-workspace.yaml, either these flags or --ignore-workspace alone keeps
+  // the tree inside the snapshot, and removing both lets it out
+  // (#779 round 8 D1).
+  "--modules-dir=node_modules",
+  "--virtual-store-dir=node_modules/.pnpm",
 ] as const;
 
 export type PluginInstallLogStream = "stdout" | "stderr" | "system";
@@ -122,6 +135,7 @@ export type PluginInstallFailureCode =
   | "missing-lockfile"
   | "unreadable-lockfile"
   | "lockfile-mismatch"
+  | "escaped-snapshot"
   | "pnpm-exit"
   | "timeout"
   | "aborted"
@@ -340,6 +354,54 @@ async function inspectLockfile(
   }
 }
 
+function isInside(parent: string, child: string): boolean {
+  if (child === parent) return true;
+  const pathFromParent = relative(parent, child);
+  return (
+    pathFromParent.length > 0 &&
+    !isAbsolute(pathFromParent) &&
+    pathFromParent !== ".." &&
+    !pathFromParent.startsWith(`..${sep}`)
+  );
+}
+
+/**
+ * The backstop for the pinned output paths above: pnpm reported success, so
+ * confirm the tree it produced is really inside the snapshot. A redirected
+ * install leaves the snapshot with no node_modules at all, which the
+ * lifecycle scan cannot tell apart from a healthy zero-dependency install —
+ * so this check, not that one, is what makes the redirect visible
+ * (#779 round 8 D1).
+ */
+async function verifyContainedInstall(
+  input: InstallPluginDependenciesInput,
+  timeoutMs: number,
+  logs: PluginInstallLogEntry[],
+): Promise<PluginInstallResult | null> {
+  const snapshotRoot = resolve(input.snapshotRoot);
+  const modulesPath = join(snapshotRoot, "node_modules");
+  let realModulesPath: string;
+  try {
+    realModulesPath = await realpath(modulesPath);
+  } catch (error) {
+    // A frozen install with no dependencies writes no node_modules at all —
+    // the same measured pnpm@11.20.0 behavior pluginLifecycleScan documents.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const realSnapshotRoot = await realpath(snapshotRoot);
+  if (isInside(realSnapshotRoot, realModulesPath)) return null;
+  return failure(
+    "escaped-snapshot",
+    `Plugin "${input.pluginId}" dependency install must keep node_modules ` +
+      `inside the snapshot at ${snapshotRoot}; ${modulesPath} resolves to ` +
+      `${realModulesPath}.`,
+    timeoutMs,
+    logs,
+    0,
+  );
+}
+
 function abortedBeforeSpawn(
   input: InstallPluginDependenciesInput,
   timeoutMs: number,
@@ -506,7 +568,20 @@ async function runInstallJob(
         return;
       }
       if (exitCode === 0) {
-        resolveResult({ ok: true, exitCode: 0, logs: [...logs] });
+        void verifyContainedInstall(input, timeoutMs, logs).then(
+          (escaped) =>
+            resolveResult(escaped ?? { ok: true, exitCode: 0, logs: [...logs] }),
+          (error: unknown) =>
+            resolveResult(failure(
+              "escaped-snapshot",
+              `Plugin "${input.pluginId}" dependency install could not be ` +
+                `confirmed inside the snapshot at ${resolve(input.snapshotRoot)}: ` +
+                errorMessage(error),
+              timeoutMs,
+              logs,
+              exitCode,
+            )),
+        );
         return;
       }
       if (lockfileMismatch(logs)) {

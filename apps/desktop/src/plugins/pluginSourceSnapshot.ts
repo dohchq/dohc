@@ -377,6 +377,22 @@ function validatePackageJson(packagePath: string, value: unknown): void {
     );
   }
 
+  // pnpm reads devEngines.packageManager in preference to packageManager and
+  // downloads whatever it names, so the pin above is only a pin while this
+  // field is absent. Measured against the staged pnpm@11.20.0: a package.json
+  // declaring the pinned value alongside devEngines pnpm 10.15.0 ran 10.15.0,
+  // a release that still honors path settings from a plugin-authored .npmrc
+  // (#779 round 8 D1).
+  const devEngines = value.devEngines;
+  if (isRecord(devEngines) && devEngines.packageManager !== undefined) {
+    throw new SnapshotError(
+      "unsupported-package-manager",
+      `package.json field "devEngines.packageManager" overrides the pinned ` +
+        `package manager "${PINNED_PLUGIN_PACKAGE_MANAGER}". Remove it.`,
+      packagePath,
+    );
+  }
+
   const visited = new WeakSet<object>();
   for (const field of DEPENDENCY_FIELDS) {
     const match = scanDependencyMap(value[field], field, visited);

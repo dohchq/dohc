@@ -381,6 +381,31 @@ describe("snapshotPluginSource dependency validation", () => {
     expect(failure.error.message).toContain('spec "file:../local-package.tgz"');
   });
 
+  // pnpm 11 reads devEngines.packageManager in preference to packageManager
+  // and downloads that version. Measured against the staged pnpm@11.20.0: a
+  // package.json passing the pin above while declaring
+  // devEngines.packageManager pnpm 10.15.0 ran pnpm 10.15.0 — a release that,
+  // unlike 11.x, still honors path settings such as modules-dir from a
+  // plugin-authored .npmrc. Pinning one field and ignoring the field that
+  // outranks it pins nothing (#779 round 8 D1).
+  it("rejects a devEngines package manager, which outranks the pinned field", async () => {
+    const fixture = await createPluginFixture();
+    await writeFile(
+      join(fixture.pluginRoot, "package.json"),
+      `${JSON.stringify({
+        name: fixture.manifest.name,
+        packageManager: PINNED_PLUGIN_PACKAGE_MANAGER,
+        devEngines: { packageManager: { name: "pnpm", version: "10.15.0" } },
+      }, null, 2)}\n`,
+    );
+
+    const failure = requireFailure(await runSnapshot(fixture));
+
+    expect(failure.error).toMatchObject({ code: "unsupported-package-manager" });
+    expect(failure.error.message).toContain('field "devEngines.packageManager"');
+    expect(failure.error.message).toContain(`"${PINNED_PLUGIN_PACKAGE_MANAGER}"`);
+  });
+
   it("rejects a packageManager field that does not match the pnpm pin", async () => {
     const fixture = await createPluginFixture();
     await writeFile(

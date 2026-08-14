@@ -4,7 +4,9 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  readdir,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -205,9 +207,8 @@ describe("installPluginDependencies", () => {
           ...(process.env.ComSpec !== undefined ? { ComSpec: process.env.ComSpec } : {}),
           HOME: homeDir,
           USERPROFILE: homeDir,
-          npm_config_userconfig: join(homeDir, ".npmrc-disabled"),
-          npm_config_globalconfig: join(homeDir, ".npmrc-disabled"),
-          npm_config_registry: "https://registry.npmjs.org/",
+          PNPM_CONFIG_USERCONFIG: join(homeDir, ".npmrc-disabled"),
+          PNPM_CONFIG_REGISTRY: "https://registry.npmjs.org/",
           PNPM_CONFIG_STORE_DIR: fixture.input.pnpmPaths.storeDir,
           PNPM_CONFIG_CACHE_DIR: fixture.input.pnpmPaths.cacheDir,
           PNPM_CONFIG_STATE_DIR: fixture.input.pnpmPaths.stateDir,
@@ -238,14 +239,50 @@ describe("installPluginDependencies", () => {
     expect(observedEnv).toBeDefined();
     expect(observedEnv?.[canaryKey]).toBeUndefined();
     // A real ~/.npmrc on this machine (if any) must never be read: HOME and
-    // pnpm/npm's own config-location overrides all point inside the
-    // plugin-scoped pnpmPaths.homeDir instead.
+    // pnpm's own config-location override all point inside the plugin-scoped
+    // pnpmPaths.homeDir instead.
     expect(observedEnv?.HOME).toBe(fixture.input.pnpmPaths.homeDir);
     expect(observedEnv?.USERPROFILE).toBe(fixture.input.pnpmPaths.homeDir);
-    expect(observedEnv?.npm_config_userconfig).toBe(
+    expect(observedEnv?.PNPM_CONFIG_USERCONFIG).toBe(
       join(fixture.input.pnpmPaths.homeDir, ".npmrc-disabled"),
     );
-    expect(observedEnv?.npm_config_registry).toBe("https://registry.npmjs.org/");
+    // The pinned pnpm reads only its own PNPM_CONFIG_ prefix; an npm_config_
+    // name here would be config this install never applies (#779 round 8 D1).
+    expect(observedEnv?.PNPM_CONFIG_REGISTRY).toBe("https://registry.npmjs.org/");
+    expect(
+      Object.keys(observedEnv ?? {}).filter((key) => key.startsWith("npm_config_")),
+    ).toEqual([]);
+  });
+
+  it("fails closed when the installed tree resolves outside the snapshot (#779 round 8 D1)", async () => {
+    const fixture = await createInstallFixture();
+    // Whatever put it there — a redirecting pnpm setting this runner did not
+    // pin, or a node_modules link the plugin shipped in its own source — the
+    // dependency tree this install produced is not inside the snapshot, and
+    // nothing downstream may treat it as installed.
+    const outside = join(fixture.root, "outside-modules");
+    await mkdir(outside, { recursive: true });
+    await symlink(
+      outside,
+      join(fixture.snapshotRoot, "node_modules"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const child = new FakeInstallProcess();
+    const forkProcess = vi.fn<PluginInstallFork>(() => {
+      queueMicrotask(() => child.exit(0));
+      return child;
+    });
+
+    const escaped = requireFailure(await installPluginDependencies({
+      ...fixture.input,
+      forkProcess,
+    }));
+
+    expect(escaped.error.code).toBe("escaped-snapshot");
+    // Names the constraint and the observed path, so the agent reading this
+    // error can see what it hit.
+    expect(escaped.error.message).toContain(fixture.snapshotRoot);
+    expect(escaped.error.message).toContain("node_modules");
   });
 
   it("classifies a lockfile mismatch even when its marker token is split across stream chunks (CodeRabbit #779 R17)", async () => {
@@ -535,6 +572,112 @@ const realInstallAvailable =
   existsSync(stagedPnpmEntry) &&
   existsSync(join(measuredFixture, "package.json")) &&
   existsSync(join(measuredFixture, "pnpm-lock.yaml"));
+
+it.skipIf(!realInstallAvailable)(
+  "runs actual staged pnpm and ignores a plugin-authored .npmrc registry (#779 round 8 D1)",
+  async () => {
+    const fixture = await createInstallFixture({ pluginId: "npmrc-plugin" });
+    await Promise.all([
+      copyFile(
+        join(measuredFixture, "package.json"),
+        join(fixture.snapshotRoot, "package.json"),
+      ),
+      copyFile(
+        join(measuredFixture, "pnpm-lock.yaml"),
+        join(fixture.snapshotRoot, "pnpm-lock.yaml"),
+      ),
+      // The plugin author controls this file: copySourceTree stages it with
+      // the rest of the source, and pnpm reads a project .npmrc for registry
+      // and auth settings. A registry it chooses would serve every dependency
+      // byte this install resolves, before any approval gate runs.
+      writeFile(join(fixture.snapshotRoot, ".npmrc"), "registry=http://127.0.0.1:9/\n"),
+    ]);
+    const pnpmRoot = join(fixture.root, "pnpm");
+
+    const installed = await installPluginDependencies({
+      ...fixture.input,
+      resourcesBasePath: stagedResources,
+      pnpmPaths: {
+        storeDir: join(pnpmRoot, "store"),
+        cacheDir: join(pnpmRoot, "cache"),
+        stateDir: join(pnpmRoot, "state"),
+        homeDir: join(pnpmRoot, "home"),
+      },
+      forkProcess: nodeForkProcess,
+    });
+
+    // Resolved and fetched from the pinned registry: the unroutable one the
+    // plugin asked for would have failed the install outright.
+    expect(installed).toMatchObject({ ok: true, exitCode: 0 });
+    expect(existsSync(join(fixture.snapshotRoot, "node_modules", ".modules.yaml")))
+      .toBe(true);
+  },
+  180_000,
+);
+
+it.skipIf(!realInstallAvailable)(
+  "runs actual staged pnpm and keeps the tree inside the snapshot despite plugin-authored path settings (#779 round 8 D1)",
+  async () => {
+    const fixture = await createInstallFixture({ pluginId: "path-settings-plugin" });
+    const outside = join(fixture.root, "outside");
+    await mkdir(outside, { recursive: true });
+    await Promise.all([
+      copyFile(
+        join(measuredFixture, "package.json"),
+        join(fixture.snapshotRoot, "package.json"),
+      ),
+      copyFile(
+        join(measuredFixture, "pnpm-lock.yaml"),
+        join(fixture.snapshotRoot, "pnpm-lock.yaml"),
+      ),
+    ]);
+    const pnpmRoot = join(fixture.root, "pnpm");
+    const input: InstallPluginDependenciesInput = {
+      ...fixture.input,
+      resourcesBasePath: stagedResources,
+      pnpmPaths: {
+        storeDir: join(pnpmRoot, "store"),
+        cacheDir: join(pnpmRoot, "cache"),
+        stateDir: join(pnpmRoot, "state"),
+        homeDir: join(pnpmRoot, "home"),
+      },
+      forkProcess: nodeForkProcess,
+    };
+    // Both files the plugin author controls, in both path forms. .npmrc is
+    // where pnpm 10 read these settings; pnpm-workspace.yaml is where the
+    // pinned pnpm 11 reads them.
+    const relativeForm = "../outside";
+    const absoluteForm = outside.replaceAll("\\", "/");
+
+    for (const form of [relativeForm, absoluteForm]) {
+      await rm(join(fixture.snapshotRoot, "node_modules"), {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 100,
+      });
+      await Promise.all([
+        writeFile(
+          join(fixture.snapshotRoot, ".npmrc"),
+          `modules-dir=${form}\nvirtual-store-dir=${form}/.pnpm\n`,
+        ),
+        writeFile(
+          join(fixture.snapshotRoot, "pnpm-workspace.yaml"),
+          `modulesDir: ${form}\nvirtualStoreDir: ${form}/.pnpm\n`,
+        ),
+      ]);
+
+      const installed = await installPluginDependencies(input);
+
+      expect(installed).toMatchObject({ ok: true, exitCode: 0 });
+      expect(existsSync(join(fixture.snapshotRoot, "node_modules", ".modules.yaml")))
+        .toBe(true);
+      // Nothing at all reached the directory the plugin aimed at.
+      expect(await readdir(outside)).toEqual([]);
+    }
+  },
+  180_000,
+);
 
 it.skipIf(!realInstallAvailable)(
   "runs actual staged pnpm and rejects a mutated stale lockfile",
