@@ -571,6 +571,7 @@ import {
 } from "./plugins/pluginPanelStartLifecycle";
 import { createPluginPanelSdkAuthorityRegistry } from "./plugins/pluginPanelSdkAuthority";
 import {
+  forgetRemovedPlugin,
   forgetUninstalledPlugin,
   forgetWorkspaceRegistrations,
   loadPluginPanelRegistration,
@@ -792,6 +793,15 @@ function notifyPluginStatusChanged(
   workspaceId: string,
   event: PluginPipelineStatusEvent,
 ): void {
+  // A removed identity releases its panel registration and any panel claim
+  // on its host — before the schema guard below, which only protects the
+  // renderer send (#779 round 14 A5).
+  forgetRemovedPlugin({
+    registrations: pluginRegistrations,
+    panelStartedHosts,
+    workspaceId,
+    event,
+  });
   // Emitted from a queueMicrotask with no catch above it, so a payload that
   // fails the IPC schema is dropped and logged — it must never become an
   // uncaught main-process exception (#779 round 13 A2).

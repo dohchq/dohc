@@ -64,7 +64,10 @@ function writerInput(overrides: {
   capture: PluginAuthoredWriteCapture;
   pipeline?: {
     pluginIdForPath(absolutePath: string): string | null;
-    handleDoorWrittenSourceChange(pluginId: string): void;
+    handleDoorWrittenSourceChange(
+      pluginId: string,
+      write: { absolutePath: string; text: string },
+    ): void;
   };
 }) {
   return {
@@ -122,9 +125,12 @@ describe("createPluginAuthoredTextWriter", () => {
     expect(writes).toEqual([]);
   });
 
-  it("writes under the workspace root and reports an owned path as door-written (#779 A5)", async () => {
+  it("writes under the workspace root and reports an owned path as door-written with its path and bytes (#779 A5, round 14 A1)", async () => {
     const { capture, writes } = recordingCapture();
-    const doorWrites: string[] = [];
+    const doorWrites: {
+      pluginId: string;
+      write: { absolutePath: string; text: string };
+    }[] = [];
     const workspaceRoot = join("C:", "ws");
     const write = createPluginAuthoredTextWriter(writerInput({
       capture,
@@ -134,11 +140,12 @@ describe("createPluginAuthoredTextWriter", () => {
           absolutePath.startsWith(join(workspaceRoot, "plugins", "owned"))
             ? "owned-plugin"
             : null,
-        handleDoorWrittenSourceChange: (pluginId) => {
-          // The write must already have landed: the notification tells the
-          // pipeline to hash the tree that contains it.
+        handleDoorWrittenSourceChange: (pluginId, doorWrite) => {
+          // The write must already have landed: the notification carries
+          // the path and the exact bytes the pipeline may attribute to
+          // this door write — and nothing else.
           expect(writes).toHaveLength(doorWrites.length + 1);
-          doorWrites.push(pluginId);
+          doorWrites.push({ pluginId, write: doorWrite });
         },
       },
     }));
@@ -149,14 +156,20 @@ describe("createPluginAuthoredTextWriter", () => {
       { overwrite: true, author },
     );
     expect(owned).toEqual({ path: join("plugins", "owned", "src", "index.ts") });
-    expect(doorWrites).toEqual(["owned-plugin"]);
+    expect(doorWrites).toEqual([{
+      pluginId: "owned-plugin",
+      write: {
+        absolutePath: join(workspaceRoot, "plugins", "owned", "src", "index.ts"),
+        text: "export {};\n",
+      },
+    }]);
     expect(writes[0]).toMatchObject({
       absolutePath: join(workspaceRoot, "plugins", "owned", "src", "index.ts"),
       options: { createOnly: false },
     });
 
     await write("note.txt", "not plugin source\n", { overwrite: false, author });
-    expect(doorWrites).toEqual(["owned-plugin"]);
+    expect(doorWrites).toHaveLength(1);
     expect(writes[1]).toMatchObject({
       absolutePath: join(workspaceRoot, "note.txt"),
       options: { createOnly: true },

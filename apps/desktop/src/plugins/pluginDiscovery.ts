@@ -103,6 +103,13 @@ function classifyInstalledPlugins(
     for (const record of declaring) {
       if (record === owner) continue;
       record.valid = false;
+      // The loser keeps no claim on the shared id. Reporting it under that
+      // id gave two records one id — duplicate list keys, a status event
+      // for the owner collapsing the loser's diagnostics row, and id joins
+      // (status seeding, door-write attribution) handing the loser the
+      // owner's installation. Its directory names it instead, the same
+      // identity a manifest-less candidate gets (#779 round 14 A4).
+      record.id = record.directoryName.slice(0, PLUGIN_ID_MAX_LENGTH);
       record.diagnostics.push(
         `duplicate plugin id "${pluginId}": also declared at ${owner.rootPath}`,
       );

@@ -1,7 +1,7 @@
 import type { WatcherEvent } from "@dohc/workspace-core";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, readdir, rm } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import {
   PLUGIN_PIPELINE_ERROR_STAGES,
   PLUGIN_PIPELINE_STATUSES,
@@ -25,7 +25,8 @@ import { readPluginManifestFile } from "./pluginManifest";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
 import type { PluginRuntimeStatus } from "./pluginHostProtocol";
 import {
-  hashPluginSourceFiles,
+  canonicalPluginSourceHash,
+  EXCLUDED_SOURCE_NAMES,
   isPluginRootArtifact,
   pluginIdToSafePath,
   snapshotPluginSource,
@@ -33,11 +34,12 @@ import {
 } from "./pluginSourceSnapshot";
 import {
   pluginUninstallPreflight,
+  readPluginBaselineManifest,
   summarizeUninstallPreflight,
   writePluginBaselineManifest,
   type PluginUninstallPreflightSummary,
 } from "./pluginUninstallPreflight";
-import { errorMessage } from "./pluginShared";
+import { errorMessage, isInside } from "./pluginShared";
 
 export { PLUGIN_PIPELINE_ERROR_STAGES, PLUGIN_PIPELINE_STATUSES };
 
@@ -163,15 +165,16 @@ interface FullBuildOptions {
   freshInstall: boolean;
   /**
    * The source hash this build is allowed to approve. A caller that already
-   * decided this content is approvable — the door write, which compared the
-   * tree it wrote against the tree on disk, or a verify pass that confirmed
-   * the tree still matches its approved hash — passes what it verified. The
-   * build takes its own fresh snapshot, so without this an out-of-band change
-   * landing between that verification and the snapshot rode the caller's
-   * decision straight to auto-approval (#779 round 9 B2 on the door path,
-   * round 13 A1 on the reconcile/start paths). Only install and approve —
-   * whose entire point is a user gesture approving whatever is on disk right
-   * now — leave it unset and approve what they snapshot.
+   * decided this content is approvable — the door-write predicate
+   * (doorApprovedHash: the approved baseline plus the recorded door deltas)
+   * or a verify pass that confirmed the tree still matches its approved
+   * hash — passes what it verified. The build takes its own fresh snapshot,
+   * so without this an out-of-band change landing between that verification
+   * and the snapshot rode the caller's decision straight to auto-approval
+   * (#779 round 9 B2 on the door path, round 13 A1 on the reconcile/start
+   * paths). Only install and approve — whose entire point is a user gesture
+   * approving whatever is on disk right now — leave it unset and approve
+   * what they snapshot.
    */
   expectedHash?: string;
 }
@@ -198,12 +201,36 @@ const DEFAULT_OPERATIONS: PluginPipelineOperations = {
   readFile,
 };
 
+/**
+ * The bridge contract caps PluginPipelineError.message at 10,000 characters
+ * (min 1), and several producers join unbounded diagnostic lists — a noisy
+ * directory's discovery diagnostics (#779 round 13 A2), a drifted snapshot
+ * manifest's parse issues, a failed build's output (round 14 C1). One
+ * over-cap message made the whole plugin list and every status event for
+ * the candidate fail schema parsing, so every message is bounded here, in
+ * the one place all pipeline errors are built.
+ */
+const PIPELINE_ERROR_MESSAGE_MAX_CHARS = 8_000;
+
+function boundedErrorMessage(message: string): string {
+  if (message.length === 0) return "(no error detail)";
+  if (message.length <= PIPELINE_ERROR_MESSAGE_MAX_CHARS) return message;
+  const note = (shown: number): string =>
+    ` [${message.length - shown} of ${message.length} characters elided; ` +
+    `this message is capped at ${PIPELINE_ERROR_MESSAGE_MAX_CHARS} characters.]`;
+  // The note's own width shrinks (never grows) once the real shown count —
+  // no larger than the total — replaces the estimate, so the result stays
+  // inside the cap.
+  const shown = PIPELINE_ERROR_MESSAGE_MAX_CHARS - note(0).length;
+  return `${message.slice(0, shown)}${note(shown)}`;
+}
+
 function pipelineError(
   stage: PluginPipelineErrorStage,
   code: string,
   message: string,
 ): PluginPipelineError {
-  return { stage, code, message };
+  return { stage, code, message: boundedErrorMessage(message) };
 }
 
 function failureFromUnknown(
@@ -252,35 +279,16 @@ function notDiscoveredError(pluginId: string): PluginPipelineError {
   );
 }
 
-/**
- * The bridge contract caps PluginPipelineError.message at 10,000 characters
- * (min 1), and a noisy plugin directory can produce arbitrarily many
- * discovery diagnostics. An unbounded join here made the whole plugin list —
- * and every status event for the candidate — fail schema parsing over one
- * bad directory (#779 round 13 A2), so the join stops under this budget and
- * names what it elided.
- */
-const INVALID_PLUGIN_MESSAGE_MAX_CHARS = 8_000;
-
 function invalidPluginError(
   candidate: InstalledPluginRecord,
 ): PluginPipelineError | null {
   if (candidate.diagnostics.length === 0) return null;
-  const included: string[] = [];
-  let length = 0;
-  for (const diagnostic of candidate.diagnostics) {
-    if (length + diagnostic.length > INVALID_PLUGIN_MESSAGE_MAX_CHARS) break;
-    included.push(diagnostic);
-    length += diagnostic.length + 1;
-  }
-  const elided = candidate.diagnostics.length - included.length;
-  if (elided > 0) {
-    included.push(
-      `[${elided} of ${candidate.diagnostics.length} diagnostics elided; ` +
-        `this message is capped at ${INVALID_PLUGIN_MESSAGE_MAX_CHARS} characters.]`,
-    );
-  }
-  return pipelineError("discovery", "invalid-plugin", included.join(" "));
+  // pipelineError bounds the joined message (#779 round 13 A2, round 14 C1).
+  return pipelineError(
+    "discovery",
+    "invalid-plugin",
+    candidate.diagnostics.join(" "),
+  );
 }
 
 function generatedManifest(manifest: DohcPluginManifest): DohcPluginManifest {
@@ -312,8 +320,19 @@ export class PluginPipeline {
   private readonly statuses = new Map<string, PluginPipelinePluginStatus>();
   private readonly queues = new Map<string, PluginJobQueue>();
   private readonly uninstallConfirmations = new Map<string, UninstallConfirmation>();
-  /** The newest door write's tree hash per plugin — see handleDoorWrittenSourceChange. */
-  private readonly doorWrittenHashes = new Map<string, Promise<string | null>>();
+  /**
+   * Every door-written file since the approved baseline, per plugin:
+   * relPath (POSIX, root-relative) to the sha256 of the written bytes and
+   * the write's order in doorWriteSeq. See handleDoorWrittenSourceChange
+   * and doorApprovedHash — this overlay, applied to the persisted baseline
+   * manifest, is the only tree the door path may auto-approve.
+   */
+  private readonly doorWrittenDeltas = new Map<
+    string,
+    Map<string, { sha256: string; seq: number }>
+  >();
+  /** Orders door writes against each build's snapshot; see runFullBuild. */
+  private doorWriteSeq = 0;
   private discovery: InstalledPluginRecord[] = [];
   private discoveryTail: Promise<void> = Promise.resolve();
   private startPromise: Promise<void> | null = null;
@@ -400,12 +419,7 @@ export class PluginPipeline {
   pluginIdForPath(absolutePath: string): string | null {
     const target = resolve(absolutePath);
     for (const candidate of this.discovery) {
-      const root = resolve(candidate.rootPath);
-      if (target === root) return candidate.id;
-      const fromRoot = relative(root, target);
-      if (fromRoot.length > 0 && !fromRoot.startsWith("..") && !isAbsolute(fromRoot)) {
-        return candidate.id;
-      }
+      if (isInside(resolve(candidate.rootPath), target)) return candidate.id;
     }
     return null;
   }
@@ -553,75 +567,45 @@ export class PluginPipeline {
     });
   }
 
-  handleDoorWrittenSourceChange(pluginId: string): void {
+  /**
+   * Records one door-attributed write — per-operation authored bytes that
+   * arrived through main.ts's writeAuthoredText — and queues a source
+   * refresh. The write's own path and content are the only bytes this call
+   * attributes: the design doc's auto-approve predicate is attribution
+   * through the door, not topology, so the refresh auto-approves only when
+   * the live tree equals the approved baseline plus every recorded door
+   * delta (doorApprovedHash). Hashing the whole live tree here instead
+   * folded ambient, watcher-class bytes already on disk — a git checkout, a
+   * mirror delivery — into the door write's auto-approval (#779 round 14
+   * A1, security-grade). Deltas are recorded synchronously and keyed per
+   * plugin, so the dedup in enqueueSourceRefresh can drop this
+   * notification's queue entry and the surviving refresh still sees every
+   * write, newest content per path (#779 round 13 A3).
+   */
+  handleDoorWrittenSourceChange(
+    pluginId: string,
+    write: { absolutePath: string; text: string },
+  ): void {
     const candidate = this.validCandidate(pluginId);
     if (!candidate) return;
-    // Hashed synchronously, before this refresh waits in the per-plugin
-    // job queue: this is the tree's hash at door-write time. The queue
-    // delay is unbounded — another job for this plugin may already be
-    // running — so a disk-only write can land after the door write but
-    // before this refresh gets its turn. The queued job below re-hashes
-    // the live tree once it actually runs and holds for approval instead
-    // of building if the two disagree, so that interloping change can
-    // never ride the door write's auto-approval (#779 round 3 finding 1,
-    // security-grade). Keyed per plugin, not captured in the job's closure:
-    // enqueueSourceRefresh drops this notification when a refresh is
-    // already queued, and the surviving job must compare the NEWEST door
-    // write's hash — a stale first-write hash read a combined multi-write
-    // tree as an interloper (#779 round 13 A3).
-    this.doorWrittenHashes.set(
-      pluginId,
-      hashPluginSourceFiles(candidate.rootPath)
-        .then((digest) => digest.sourceHash)
-        .catch(() => null),
-    );
-
-    this.enqueueSourceRefresh(pluginId, async () => {
-      const freshCandidate = this.validCandidate(pluginId);
-      if (!freshCandidate) return;
-      const state = await this.localRecord(pluginId);
-      if (!state?.approvedHash) {
-        this.setStatus(freshCandidate, { status: "discovered" });
-        return;
-      }
-      // A disabled record only stays stopped when the user chose that. A
-      // hold created by the approval path also writes disabled: true, and a
-      // door write whose bytes all arrived through the door satisfies that
-      // hold — reading it as the user's own disable kept the plugin stopped
-      // under a "user" label the user never chose (#779 round 13 A3).
-      const priorDisabledReason = state.disabled === true
-        ? this.statuses.get(pluginId)?.disabledReason ?? "user"
-        : undefined;
-      const disabled = priorDisabledReason === "user";
-      const [expectedHash, liveDigest] = await Promise.all([
-        this.doorWrittenHashes.get(pluginId) ?? null,
-        hashPluginSourceFiles(freshCandidate.rootPath).catch(() => null),
-      ]);
-      if (
-        expectedHash === null ||
-        liveDigest === null ||
-        liveDigest.sourceHash !== expectedHash
-      ) {
-        await this.holdForApproval(
-          freshCandidate,
-          liveDigest?.sourceHash ?? state.approvedHash,
-          priorDisabledReason,
-        );
-        return;
-      }
-      await this.runFullBuild({
-        candidate: freshCandidate,
-        startRuntime: !disabled,
-        disabledReasonAfterBuild: disabled ? "user" : null,
-        resetCrashAccounting: !disabled,
-        freshInstall: false,
-        // The build snapshots the tree again, and this comparison is already
-        // stale by then. Binding the build to the hash this check passed on
-        // is what stops a change landing in that window from riding the door
-        // write to approval (#779 round 9 B2).
-        expectedHash,
-      });
+    const root = resolve(candidate.rootPath);
+    const target = resolve(write.absolutePath);
+    if (target === root || !isInside(root, target)) return;
+    const relPath = relative(root, target).replaceAll("\\", "/");
+    // node_modules and .dohc are excluded from every source digest, so a
+    // write under them cannot change the hash this predicate compares.
+    if (relPath.split("/").some((segment) => EXCLUDED_SOURCE_NAMES.has(segment))) {
+      return;
+    }
+    const deltas = this.doorWrittenDeltas.get(pluginId) ??
+      new Map<string, { sha256: string; seq: number }>();
+    deltas.set(relPath, {
+      sha256: createHash("sha256").update(write.text, "utf8").digest("hex"),
+      seq: ++this.doorWriteSeq,
     });
+    this.doorWrittenDeltas.set(pluginId, deltas);
+    this.enqueueSourceRefresh(pluginId, () =>
+      this.reconcileApprovedCandidate(pluginId, true));
   }
 
   handleWatcherEvents(events: readonly WatcherEvent[]): void {
@@ -833,7 +817,7 @@ export class PluginPipeline {
           () => undefined,
         );
         this.statuses.delete(pluginId);
-        this.doorWrittenHashes.delete(pluginId);
+        this.doorWrittenDeltas.delete(pluginId);
         // One directory is one discovery entry, so the deleted root — not the
         // id, which an invalid candidate does not share with its record — is
         // what identifies the entry that just went away.
@@ -1120,6 +1104,17 @@ export class PluginPipeline {
     }
   }
 
+  /**
+   * The one source-refresh ladder behind startup reconciliation, watcher
+   * batches, and door writes. Verify the live tree against the approved
+   * hash; when it changed, auto-approve iff the live tree equals the
+   * approved baseline plus the accumulated door-written deltas
+   * (doorApprovedHash) — the design doc's predicate — and hold for approval
+   * otherwise. A queued watcher reconcile can be the only refresh that
+   * survives enqueueSourceRefresh's dedup after a door write, so it must
+   * consult the same predicate rather than holding a pure door-write
+   * sequence for approval (#779 round 14 A2).
+   */
   private async reconcileApprovedCandidate(
     pluginId: string,
     startRuntime: boolean,
@@ -1131,17 +1126,36 @@ export class PluginPipeline {
       this.setStatus(candidate, { status: "discovered" });
       return;
     }
+    // The disabled bit is the user's own choice only when the user chose
+    // it: the approval path's hold also writes disabled: true, and a tree
+    // whose deviation from baseline is all door-written satisfies that
+    // hold — an out-of-band change on an explicitly disabled plugin must
+    // still never silently re-enable it (#779 round 3 finding 5, round 13
+    // A3).
+    const priorDisabledReason = record.disabled === true
+      ? this.statuses.get(pluginId)?.disabledReason ?? "user"
+      : undefined;
     const verified = await this.verifyApprovedSource(candidate, record.approvedHash);
     if (verified.kind === "failed") return;
     if (verified.kind === "changed") {
-      // The disabled bit is the user's own choice, orthogonal to whether
-      // this content is approved — an out-of-band change landing on an
-      // already-disabled plugin must not let a later approve() silently
-      // re-enable it (#779 round 3 finding 5).
-      const priorDisabledReason = record.disabled === true
-        ? this.statuses.get(pluginId)?.disabledReason ?? "user"
-        : undefined;
-      await this.holdForApproval(candidate, verified.sourceHash, priorDisabledReason);
+      const doorHash = await this.doorApprovedHash(pluginId, record.approvedHash);
+      if (doorHash === null || verified.sourceHash !== doorHash) {
+        await this.holdForApproval(candidate, verified.sourceHash, priorDisabledReason);
+        return;
+      }
+      const disabled = priorDisabledReason === "user";
+      await this.runFullBuild({
+        candidate,
+        startRuntime: !disabled,
+        disabledReasonAfterBuild: disabled ? "user" : null,
+        resetCrashAccounting: !disabled,
+        freshInstall: false,
+        // The build snapshots the tree again, and this comparison is
+        // already stale by then. Binding the build to the hash this check
+        // passed on is what stops a change landing in that window from
+        // riding the door write to approval (#779 round 9 B2).
+        expectedHash: doorHash,
+      });
       return;
     }
     this.setStatus(candidate, {
@@ -1150,10 +1164,29 @@ export class PluginPipeline {
       installedBaselineHash: record.installedBaselineHash ?? null,
     });
     if (record.disabled === true) {
-      this.setStatus(candidate, {
-        status: "disabled",
-        disabledReason: this.statuses.get(pluginId)?.disabledReason ?? "user",
-        runtimeStatus: null,
+      // A hold the approval path wrote (never the user's own disable) is
+      // satisfied when the live tree — here equal to the approved hash —
+      // also equals baseline plus door deltas: the door restored every
+      // interloped byte, so the plugin comes back instead of idling under
+      // a hold whose cause is gone (#779 round 14 A1 pin b).
+      const doorHash = priorDisabledReason === "user"
+        ? null
+        : await this.doorApprovedHash(pluginId, record.approvedHash);
+      if (doorHash !== record.approvedHash) {
+        this.setStatus(candidate, {
+          status: "disabled",
+          disabledReason: priorDisabledReason ?? "user",
+          runtimeStatus: null,
+        });
+        return;
+      }
+      await this.runFullBuild({
+        candidate,
+        startRuntime: true,
+        disabledReasonAfterBuild: null,
+        resetCrashAccounting: true,
+        freshInstall: false,
+        expectedHash: record.approvedHash,
       });
       return;
     }
@@ -1196,7 +1229,7 @@ export class PluginPipeline {
       );
       await this.removePluginData(candidate.id);
       this.statuses.delete(candidate.id);
-      this.doorWrittenHashes.delete(candidate.id);
+      this.doorWrittenDeltas.delete(candidate.id);
       this.uninstallConfirmations.delete(candidate.id);
       this.emit({ kind: "removed", pluginId: candidate.id });
     } catch (error) {
@@ -1208,6 +1241,35 @@ export class PluginPipeline {
       this.failure(candidate.id, detail);
       throw new PipelineFailure(detail);
     }
+  }
+
+  /**
+   * The one tree the door path may auto-approve: the approved per-file
+   * baseline overlaid with every door-written delta recorded since. Null
+   * when no baseline verifies against the approved hash — a fresh
+   * install's first approval is user-driven, and a baseline that cannot be
+   * read or does not describe the approved content proves nothing, so
+   * nothing auto-approves. Only handleDoorWrittenSourceChange writes
+   * deltas, so any other byte on disk — an interloper file, a
+   * watcher-class edit, an out-of-band delete — makes the live tree miss
+   * this hash and hold for approval. The SDK write surface has no delete,
+   * so a delta only ever adds or replaces one file.
+   */
+  private async doorApprovedHash(
+    pluginId: string,
+    approvedHash: string,
+  ): Promise<string | null> {
+    const baseline = await readPluginBaselineManifest(this.dohcDir, pluginId);
+    if (!baseline || baseline.sourceHash !== approvedHash) return null;
+    const files = new Map(
+      baseline.files.map((file) => [file.relPath, file.sha256]),
+    );
+    for (const [relPath, delta] of this.doorWrittenDeltas.get(pluginId) ?? []) {
+      files.set(relPath, delta.sha256);
+    }
+    return canonicalPluginSourceHash(
+      [...files].map(([relPath, sha256]) => ({ relPath, sha256 })),
+    );
   }
 
   private async runFullBuild(
@@ -1226,6 +1288,12 @@ export class PluginPipeline {
     // The staged source tree, until it is published or discarded. Anything
     // that throws below leaves it staged, so the catch has to drop it.
     let unpublishedSource: { discard: () => Promise<void> } | null = null;
+    // Sampled before the snapshot reads the tree: a delta at or below this
+    // mark is settled by this build's success (its bytes are in the new
+    // baseline, or a user gesture approved whatever superseded them); a
+    // delta above it landed after the snapshot and must survive for its own
+    // queued refresh (#779 round 14 A1).
+    const doorSeqAtSnapshot = this.doorWriteSeq;
     try {
       const snapshot = await this.snapshotOrThrow(validCandidate);
       unpublishedSource = snapshot;
@@ -1374,6 +1442,15 @@ export class PluginPipeline {
         });
       } catch (error) {
         throw failureFromUnknown("state", "state-write-failed", error);
+      }
+      const settledDeltas = this.doorWrittenDeltas.get(candidate.id);
+      if (settledDeltas) {
+        for (const [relPath, delta] of settledDeltas) {
+          if (delta.seq <= doorSeqAtSnapshot) settledDeltas.delete(relPath);
+        }
+        if (settledDeltas.size === 0) {
+          this.doorWrittenDeltas.delete(candidate.id);
+        }
       }
       const warnings = [
         ...scan.warningLines,
@@ -1745,7 +1822,7 @@ export class PluginPipeline {
         () => undefined,
       );
       this.statuses.delete(pluginId);
-      this.doorWrittenHashes.delete(pluginId);
+      this.doorWrittenDeltas.delete(pluginId);
       this.emit({ kind: "removed", pluginId });
       return {
         ok: true,

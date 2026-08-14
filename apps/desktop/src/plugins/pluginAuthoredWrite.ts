@@ -14,7 +14,10 @@ export interface PluginAuthoredWriteCapture {
 /** The slice of PluginPipeline a door-attributed write notifies. */
 export interface PluginDoorWritePipeline {
   pluginIdForPath(absolutePath: string): string | null;
-  handleDoorWrittenSourceChange(pluginId: string): void;
+  handleDoorWrittenSourceChange(
+    pluginId: string,
+    write: { absolutePath: string; text: string },
+  ): void;
 }
 
 export interface PluginAuthoredTextWriterInput {
@@ -41,10 +44,11 @@ export interface PluginAuthoredTextWriterInput {
 /**
  * The production writeAuthoredText the plugin SDK host calls (main.ts wires
  * it into invokeWorkspacePluginSdk). After the write lands, a path owned by a
- * plugin is reported to that plugin's pipeline as door-written — the plan
- * doc's auto-approve predicate is attribution through the door, not topology
- * — rather than waiting for the watcher to observe the same write as an
- * unattributed disk change.
+ * plugin is reported to that plugin's pipeline as door-written, carrying the
+ * path and the exact text that landed — the plan doc's auto-approve
+ * predicate is attribution through the door, not topology, and these bytes
+ * are the only ones this write attributes — rather than waiting for the
+ * watcher to observe the same write as an unattributed disk change.
  */
 export function createPluginAuthoredTextWriter(
   input: PluginAuthoredTextWriterInput,
@@ -65,7 +69,10 @@ export function createPluginAuthoredTextWriter(
     });
     const ownerId = input.pipeline()?.pluginIdForPath(absolutePath);
     if (ownerId) {
-      input.pipeline()?.handleDoorWrittenSourceChange(ownerId);
+      input.pipeline()?.handleDoorWrittenSourceChange(ownerId, {
+        absolutePath,
+        text,
+      });
     }
     return { path };
   };

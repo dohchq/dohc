@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
+  forgetRemovedPlugin,
   forgetUninstalledPlugin,
   forgetWorkspaceRegistrations,
   loadPluginPanelRegistration,
@@ -325,5 +326,77 @@ describe("plugin panel registration", () => {
         pluginRoot: join(workspace, "plugins", "elsewhere"),
       })
     ).toThrow(/already running from another root/);
+  });
+
+  it("releases a departed identity's registration on its removed event, so a rename plus reinstall can open panels again (#779 round 14 A5)", async () => {
+    const workspace = await scratch("dohc-plugin-panel-workspace-");
+    const oldRoot = join(workspace, "plugins", "foo");
+    await writePlugin(oldRoot);
+    const registration = await loadPluginPanelRegistration({
+      workspaceRoot: workspace,
+      pluginRoot: oldRoot,
+      pluginId: "hello-plugin",
+      panelId: "main",
+    });
+    const registrations = new Map<string, Map<string, RegisteredPlugin>>();
+    const panelStartedHosts = new Set([
+      pluginLifecycleKey("workspace-1", "hello-plugin"),
+    ]);
+    const remembered = rememberPluginRegistration(
+      registrations,
+      "workspace-1",
+      registration,
+    );
+
+    // Ordinary status traffic changes nothing.
+    forgetRemovedPlugin({
+      registrations,
+      panelStartedHosts,
+      workspaceId: "workspace-1",
+      event: {
+        kind: "changed",
+        plugin: {
+          id: "hello-plugin",
+          directoryName: "foo",
+          rootPath: oldRoot,
+          valid: true,
+          status: "ready",
+          disabledReason: null,
+          runtimeStatus: "ready",
+          sourceHash: null,
+          approvedHash: null,
+          installedBaselineHash: null,
+          diagnostics: [],
+          warnings: [],
+          error: null,
+        },
+      },
+    });
+    expect(registrations.get("workspace-1")?.get("hello-plugin"))
+      .toBe(remembered);
+
+    // The rename departs the old identity through the watcher path — not
+    // uninstall — and its removed event must release the registration, or
+    // every panel of the reinstalled plugin throws "already running from
+    // another root" until the workspace reopens.
+    forgetRemovedPlugin({
+      registrations,
+      panelStartedHosts,
+      workspaceId: "workspace-1",
+      event: { kind: "removed", pluginId: "hello-plugin" },
+    });
+    expect(panelStartedHosts.size).toBe(0);
+
+    const newRoot = join(workspace, "plugins", "bar");
+    await writePlugin(newRoot);
+    const reinstalled = await loadPluginPanelRegistration({
+      workspaceRoot: workspace,
+      pluginRoot: newRoot,
+      pluginId: "hello-plugin",
+      panelId: "main",
+    });
+    expect(
+      rememberPluginRegistration(registrations, "workspace-1", reinstalled),
+    ).toMatchObject({ pluginRoot: newRoot });
   });
 });

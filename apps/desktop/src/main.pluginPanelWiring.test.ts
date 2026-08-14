@@ -119,6 +119,26 @@ describe("plugin panel main-process wiring", () => {
     expect(pipelineAt).toBeGreaterThan(writerAt);
   });
 
+  it("releases a removed identity's registration from the status-event path (#779 round 14 A5)", () => {
+    // What forgetRemovedPlugin does — clearing the registration and the
+    // panel host claim only for a removed event — is pinned by behavior in
+    // pluginPanelRegistration.test.ts. This asserts only that main.ts's
+    // status-event handler calls it before the schema guard that protects
+    // the renderer send, so a departed identity (a rename, not an
+    // uninstall) still releases its registration.
+    const notifyStart = mainSource.indexOf("function notifyPluginStatusChanged(");
+    const notifyEnd = mainSource.indexOf("\n}\n", notifyStart);
+    expect(notifyEnd).toBeGreaterThan(-1);
+    const notify = mainSource.slice(notifyStart, notifyEnd);
+    const forgetAt = notify.indexOf("forgetRemovedPlugin({");
+    const guardAt = notify.indexOf("PluginStatusChangedEvent.safeParse(");
+
+    expect(forgetAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeGreaterThan(forgetAt);
+    expect(notify).toContain("registrations: pluginRegistrations,");
+    expect(notify).toContain("panelStartedHosts,");
+  });
+
   it("uses utilityProcess and tears plugin hosts down with their owners", () => {
     const hostStart = mainSource.indexOf("function createPluginPipeline");
     const hostEnd = mainSource.indexOf(

@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { resolveWorkspaceFile } from "../workspaces/workspaceAssets";
 import { readPluginManifestFile } from "./pluginManifest";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
+import type { PluginPipelineStatusEvent } from "./PluginPipeline";
 
 export interface PluginPanelRegistration {
   pluginRoot: string;
@@ -106,6 +107,30 @@ export function forgetUninstalledPlugin(input: {
   input.panelStartedHosts.delete(
     pluginLifecycleKey(input.workspaceId, input.pluginId),
   );
+}
+
+/**
+ * Forgets a plugin the pipeline reports as removed. Uninstall is not the
+ * only way an identity departs: a rename (`plugins/foo` to `plugins/bar`,
+ * same manifest name) removes the old identity through the watcher path,
+ * and its stale registration kept every panel of the reinstalled plugin
+ * throwing "already running from another root" until the workspace
+ * reopened (#779 round 14 A5).
+ */
+export function forgetRemovedPlugin(input: {
+  registrations: Map<string, Map<string, RegisteredPlugin>>;
+  panelStartedHosts: Set<string>;
+  workspaceId: string;
+  event: PluginPipelineStatusEvent;
+}): void {
+  if (input.event.kind !== "removed") return;
+  forgetUninstalledPlugin({
+    registrations: input.registrations,
+    panelStartedHosts: input.panelStartedHosts,
+    workspaceId: input.workspaceId,
+    pluginId: input.event.pluginId,
+    uninstalled: true,
+  });
 }
 
 /**

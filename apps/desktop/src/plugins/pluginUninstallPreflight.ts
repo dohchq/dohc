@@ -256,6 +256,26 @@ export async function writePluginBaselineManifest(
   return { path, manifest };
 }
 
+/**
+ * The persisted per-file baseline of the installed, approved source — or
+ * null when it is missing or does not verify. PluginPipeline's door-write
+ * predicate overlays door deltas on it, and a baseline it cannot prove
+ * simply never auto-approves (#779 round 14 A1).
+ */
+export async function readPluginBaselineManifest(
+  dohcDir: string,
+  pluginId: string,
+): Promise<PluginBaselineManifest | null> {
+  try {
+    const read = await readBaselineManifest(
+      pluginBaselineManifestPath(dohcDir, pluginId),
+    );
+    return read.kind === "ok" ? read.manifest : null;
+  } catch {
+    return null;
+  }
+}
+
 async function readBaselineManifest(path: string): Promise<BaselineManifestRead> {
   let stats: Awaited<ReturnType<typeof lstat>>;
   try {

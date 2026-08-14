@@ -94,7 +94,9 @@ describe("discoverInstalledPlugins", () => {
 
     expect(records.map((record) => record.directoryName)).toEqual(["alpha", "zeta"]);
     expect(records[0]).toMatchObject({ id: "shared-id", rootPath: alphaRoot, valid: true });
-    expect(records[1]).toMatchObject({ id: "shared-id", rootPath: zetaRoot, valid: false });
+    // The loser keeps no claim on the shared id: its directory names it, so
+    // no two records ever report one id (#779 round 14 A4).
+    expect(records[1]).toMatchObject({ id: "zeta", rootPath: zetaRoot, valid: false });
     expect(records[1]?.diagnostics).toContain(
       `duplicate plugin id "shared-id": also declared at ${alphaRoot}`,
     );
@@ -113,6 +115,7 @@ describe("discoverInstalledPlugins", () => {
     );
 
     expect(records[0]).toMatchObject({
+      id: "alpha",
       directoryName: "alpha",
       rootPath: alphaRoot,
       valid: false,

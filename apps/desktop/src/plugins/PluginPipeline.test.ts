@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { stop } from "esbuild";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  PluginActionResult,
   PluginStatusChangedEvent,
   PluginStatusRecord,
 } from "../ipc/bridgeContract";
@@ -289,6 +290,21 @@ async function waitFor(
   }
 }
 
+/**
+ * Writes authored text and reports it door-written, exactly like main.ts's
+ * writeAuthoredText -> handleDoorWrittenSourceChange call: the path and the
+ * bytes that landed are the attributed delta.
+ */
+async function doorWrite(
+  pipeline: PluginPipeline,
+  pluginId: string,
+  absolutePath: string,
+  text: string,
+): Promise<void> {
+  await writeFile(absolutePath, text);
+  pipeline.handleDoorWrittenSourceChange(pluginId, { absolutePath, text });
+}
+
 function fakeSpawnTransport(): PluginHostOptions["spawnTransport"] {
   return vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
     request: async <T = unknown>(method: string): Promise<T> => (
@@ -360,8 +376,16 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // handleDoorWrittenSourceChange instead of only the watcher path.
       expect(pipeline.pluginIdForPath(fixture.entryPath)).toBe("example-plugin");
       expect(pipeline.pluginIdForPath(fixture.pluginRoot)).toBe("example-plugin");
+      // A ".." that is not a whole segment is still inside the root: prefix
+      // containment left a "..cache/" write unattributed, and the plugin
+      // later held for its own door write (#779 round 14 A3, round 10 B5).
+      expect(pipeline.pluginIdForPath(join(fixture.pluginRoot, "..cache", "x.ts")))
+        .toBe("example-plugin");
       expect(pipeline.pluginIdForPath(join(fixture.workspaceRoot, "notes.md")))
         .toBeNull();
+      expect(pipeline.pluginIdForPath(
+        join(fixture.workspaceRoot, "plugins", "example-plugin-sibling", "x.ts"),
+      )).toBeNull();
 
       const installed = await pipeline.install("example-plugin");
       if (!installed.ok) {
@@ -380,22 +404,23 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         "utf8",
       )).toContain("one");
 
-      await writeFile(fixture.entryPath, [
+      await doorWrite(pipeline, "example-plugin", fixture.entryPath, [
         'export const marker = "two";',
         "export default { activate() {} };",
         "",
       ].join("\n"));
-      pipeline.handleDoorWrittenSourceChange("example-plugin");
       await waitFor(() => installCalls === 2, "Hot reload did not reach install.");
 
-      await writeFile(fixture.entryPath, [
+      const thirdText = [
         'export const marker = "three";',
         "export default { activate() {} };",
         "",
-      ].join("\n"));
-      pipeline.handleDoorWrittenSourceChange("example-plugin");
-      pipeline.handleDoorWrittenSourceChange("example-plugin");
-      pipeline.handleDoorWrittenSourceChange("example-plugin");
+      ].join("\n");
+      await writeFile(fixture.entryPath, thirdText);
+      const thirdWrite = { absolutePath: fixture.entryPath, text: thirdText };
+      pipeline.handleDoorWrittenSourceChange("example-plugin", thirdWrite);
+      pipeline.handleDoorWrittenSourceChange("example-plugin", thirdWrite);
+      pipeline.handleDoorWrittenSourceChange("example-plugin", thirdWrite);
       installGate.resolve();
 
       await waitFor(
@@ -1223,21 +1248,14 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await waitFor(() => installCalls === 2, "approve() never reached the gated install.");
 
       // The door write itself: authored content lands on disk, then the
-      // owning plugin is told about it immediately, exactly like
-      // main.ts's writeAuthoredText -> handleDoorWrittenSourceChange call.
-      await writeFile(fixture.entryPath, [
+      // owning plugin is told about it immediately — path and bytes —
+      // exactly like main.ts's writeAuthoredText ->
+      // handleDoorWrittenSourceChange call.
+      await doorWrite(pipeline, "example-plugin", fixture.entryPath, [
         'export const marker = "door-written";',
         "export default { activate() {} };",
         "",
       ].join("\n"));
-      pipeline.handleDoorWrittenSourceChange("example-plugin");
-      // Let the door-write hash capture actually read the file before the
-      // interloper below overwrites it — the capture itself is a real,
-      // unsynchronized filesystem read, not a snapshot; the property this
-      // fix defends is that it happens well before the queued refresh gets
-      // its turn (job Z is still blocked on the install gate), which a
-      // short pause here reflects without racing the capture itself.
-      await new Promise<void>((resolve) => setTimeout(resolve, 100));
 
       // Before that refresh gets a turn (it is still queued behind
       // approve()'s blocked install), an unrelated, non-door-authored actor
@@ -1890,6 +1908,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   it("holds a change that lands between a door write's check and the build's own snapshot (#779 round 9 B2)", async () => {
     const fixture = await createPluginWorkspace();
     let interloperArmed = false;
+    let armedSnapshotCalls = 0;
     let pipeline: PluginPipeline;
     const host = new PluginHost({
       stateDir: fixture.stateDir,
@@ -1908,10 +1927,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
-        // The window itself: the door write's equality check has already
-        // passed, and this fires as the build takes its own fresh snapshot.
+        // The window itself: the refresh's first snapshot passed the door
+        // predicate, and this fires as the build takes its own second,
+        // fresh snapshot.
         snapshot: async (input) => {
-          if (interloperArmed) {
+          if (interloperArmed && ++armedSnapshotCalls === 2) {
             interloperArmed = false;
             await writeFile(fixture.entryPath, [
               'export const marker = "window-interloper";',
@@ -1937,13 +1957,12 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         "Plugin did not reach ready after install.",
       );
 
-      await writeFile(fixture.entryPath, [
+      interloperArmed = true;
+      await doorWrite(pipeline, "example-plugin", fixture.entryPath, [
         'export const marker = "door-written";',
         "export default { activate() {} };",
         "",
       ].join("\n"));
-      interloperArmed = true;
-      pipeline.handleDoorWrittenSourceChange("example-plugin");
 
       await waitFor(
         () => pipeline.list()[0]?.status === "disabled-pending-approval",
@@ -2116,11 +2135,21 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         approvedHash: expect.any(String),
       });
       // Both interlopers are listed, but only as invalid duplicates: neither
-      // holds an approval or an installation of its own.
+      // holds an approval or an installation of its own. Each keeps its own
+      // directory-derived id — one id per row — and its duplicate
+      // diagnostics stay reachable on that row (#779 round 14 A4).
+      const listed = pipeline.list();
+      expect(new Set(listed.map((plugin) => plugin.id)).size).toBe(listed.length);
       for (const directoryName of ["alpha", "zzz"]) {
-        expect(pipeline.list().find((plugin) =>
-          plugin.directoryName === directoryName
-        )).toMatchObject({ valid: false, status: "invalid", approvedHash: null });
+        const row = listed.find((plugin) => plugin.directoryName === directoryName);
+        expect(row).toMatchObject({
+          id: directoryName,
+          valid: false,
+          status: "invalid",
+          approvedHash: null,
+        });
+        expect(row?.diagnostics.join(" "))
+          .toContain('duplicate plugin id "shared-id"');
       }
 
       const preflight = await pipeline.uninstallPreflight("shared-id");
@@ -2423,7 +2452,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       mismatchNextSnapshot = true;
       failNextDiscard = true;
-      pipeline.handleDoorWrittenSourceChange("example-plugin");
+      pipeline.handleDoorWrittenSourceChange("example-plugin", {
+        absolutePath: fixture.entryPath,
+        text: await readFile(fixture.entryPath, "utf8"),
+      });
 
       // The rejected discard is retried by the same job's cleanup, which runs
       // before the job reports its failure, so no staged bytes are left
@@ -2945,7 +2977,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
       const row = pipeline.list().find((entry) => entry.id === "noisy-plugin");
-      expect(row?.error?.message).toContain("diagnostics elided");
+      expect(row?.error?.message).toContain("characters elided");
+      expect(row?.error?.message).toContain(
+        "this message is capped at 8000 characters.",
+      );
+      expect(row?.error?.message.length ?? 0).toBeLessThanOrEqual(8_000);
       // The production oracle: the bridge schema every listed record and
       // every status event must pass to cross IPC at all.
       const parsedRow = PluginStatusRecord.safeParse(row);
@@ -3008,25 +3044,18 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       // A routine multi-file agent edit: two door writes in quick
       // succession. The dedup drops the second notification's queue entry,
-      // and the surviving refresh must still compare the hash of the tree
-      // that contains BOTH writes.
-      await writeFile(fixture.entryPath, [
+      // and the surviving refresh must still see the newest recorded delta
+      // — the tree that contains BOTH writes.
+      await doorWrite(pipeline, "example-plugin", fixture.entryPath, [
         'export const marker = "door-one";',
         "export default { activate() {} };",
         "",
       ].join("\n"));
-      pipeline.handleDoorWrittenSourceChange("example-plugin");
-      // Let the first door-write hash capture finish reading the file
-      // before the second write replaces it (same reasoning as the round-3
-      // finding-1 test above).
-      await new Promise<void>((resolve) => setTimeout(resolve, 100));
-      await writeFile(fixture.entryPath, [
+      await doorWrite(pipeline, "example-plugin", fixture.entryPath, [
         'export const marker = "door-two";',
         "export default { activate() {} };",
         "",
       ].join("\n"));
-      pipeline.handleDoorWrittenSourceChange("example-plugin");
-      await new Promise<void>((resolve) => setTimeout(resolve, 100));
 
       installGate.resolve();
       const approved = await approvePromise;
@@ -3091,13 +3120,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // holds for approval (the round-3 finding-1 behavior).
       const approvePromise = pipeline.approve("example-plugin");
       await waitFor(() => installCalls === 2, "approve() never reached the gated install.");
-      await writeFile(fixture.entryPath, [
+      await doorWrite(pipeline, "example-plugin", fixture.entryPath, [
         'export const marker = "door-held";',
         "export default { activate() {} };",
         "",
       ].join("\n"));
-      pipeline.handleDoorWrittenSourceChange("example-plugin");
-      await new Promise<void>((resolve) => setTimeout(resolve, 100));
       await writeFile(fixture.entryPath, [
         'export const marker = "disk-only-interloper";',
         "export default { activate() {} };",
@@ -3117,12 +3144,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // The hold's disabled bit came from the approval path, not the user,
       // so the plugin must come back running — not stay stopped under a
       // "user" label the user never chose.
-      await writeFile(fixture.entryPath, [
+      await doorWrite(pipeline, "example-plugin", fixture.entryPath, [
         'export const marker = "door-fixed";',
         "export default { activate() {} };",
         "",
       ].join("\n"));
-      pipeline.handleDoorWrittenSourceChange("example-plugin");
       await waitFor(
         () => pipeline.list()[0]?.status === "ready",
         `The settled door write did not bring the plugin back; status is ` +
@@ -3143,6 +3169,368 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.dispose();
     }
   }, 180_000);
+
+  it("holds ambient bytes already on disk when a door write lands, instead of folding them into its approval (#779 round 14 A1)", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      const approvedHash = pipeline.list()[0]?.approvedHash;
+
+      // A watcher-class change — a git checkout, a mirror delivery — that
+      // is already on disk when the door write arrives. Nothing raced: the
+      // door write is simply not the author of these bytes.
+      await writeFile(fixture.entryPath, [
+        'export const marker = "ambient-interloper";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      await doorWrite(
+        pipeline,
+        "example-plugin",
+        join(fixture.pluginRoot, "src", "extra.ts"),
+        'export const doorAuthored = true;\n',
+      );
+
+      await waitFor(
+        () => pipeline.list()[0]?.status === "disabled-pending-approval",
+        `The ambient bytes were not held for approval; status is ` +
+          `"${pipeline.list()[0]?.status}".`,
+        60_000,
+      );
+      // The interloper's bytes were never approved, recorded, or built.
+      expect(pipeline.list()[0]?.approvedHash).toBe(approvedHash);
+      const state = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      if (!state.ok) throw new Error(state.warning);
+      expect(state.state.plugins["example-plugin"]?.approvedHash).toBe(approvedHash);
+      expect(state.state.plugins["example-plugin"]?.installedBaselineHash)
+        .toBe(approvedHash);
+      expect(await readFile(liveBundlePath(fixture, "example-plugin"), "utf8"))
+        .not.toContain("ambient-interloper");
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 120_000);
+
+  it("keeps holding while an interloper file survives door writes, and releases once the tree is baseline plus door deltas (#779 round 14 A1)", async () => {
+    const fixture = await createPluginWorkspace();
+    let snapshotCalls = 0;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        snapshot: async (input) => {
+          snapshotCalls += 1;
+          return snapshotPluginSource(input);
+        },
+      },
+    });
+    const interloperPath = join(fixture.pluginRoot, "src", "evil.ts");
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      // An interloper FILE lands out of band and the watcher holds it.
+      await writeFile(interloperPath, "globalThis.evil = true;\n");
+      pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin/src/evil.ts",
+        operation: "create",
+      }]);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "disabled-pending-approval",
+        "The interloper file was not held for approval.",
+        60_000,
+      );
+
+      // A later door write that does NOT remove the interloper. The door
+      // cannot delete (the SDK write surface has no delete), so the
+      // interloper file survives — and it must keep the hold: under the
+      // whole-tree door hash it rode this write straight to approval.
+      const refreshesBefore = snapshotCalls;
+      await doorWrite(pipeline, "example-plugin", fixture.entryPath, [
+        'export const marker = "door-progress";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      await waitFor(
+        () => snapshotCalls > refreshesBefore,
+        "The door write's refresh never ran.",
+        60_000,
+      );
+      await waitFor(
+        () => pipeline.list()[0]?.status === "disabled-pending-approval",
+        `The surviving interloper did not keep the hold; status is ` +
+          `"${pipeline.list()[0]?.status}".`,
+        60_000,
+      );
+      expect(await readFile(liveBundlePath(fixture, "example-plugin"), "utf8"))
+        .not.toContain("door-progress");
+
+      // The interloper is removed out of band; the tree now equals the
+      // approved baseline plus the accumulated door deltas, so the next
+      // door write's refresh releases the hold and the plugin runs.
+      await rm(interloperPath);
+      await doorWrite(pipeline, "example-plugin", fixture.entryPath, [
+        'export const marker = "door-final";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        `The restored tree did not release the hold; status is ` +
+          `"${pipeline.list()[0]?.status}" ` +
+          `(disabledReason "${pipeline.list()[0]?.disabledReason}").`,
+        60_000,
+      );
+      expect(pipeline.list()[0]?.disabledReason).toBeNull();
+      const bundle = await readFile(
+        liveBundlePath(fixture, "example-plugin"),
+        "utf8",
+      );
+      expect(bundle).toContain("door-final");
+      expect(bundle).not.toContain("evil");
+
+      // Finally: an interloper overwrites a file and a door write restores
+      // its exact approved bytes. The live tree then equals the approved
+      // hash itself, and the hold — written by the approval path, never
+      // the user — releases through the same predicate.
+      const approvedText = [
+        'export const marker = "door-final";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n");
+      await writeFile(fixture.entryPath, [
+        'export const marker = "second-interloper";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin/src/index.ts",
+        operation: "update",
+      }]);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "disabled-pending-approval",
+        "The second interloper was not held for approval.",
+        60_000,
+      );
+      await doorWrite(pipeline, "example-plugin", fixture.entryPath, approvedText);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        `The door-restored approved bytes did not release the hold; status ` +
+          `is "${pipeline.list()[0]?.status}" ` +
+          `(disabledReason "${pipeline.list()[0]?.disabledReason}").`,
+        60_000,
+      );
+      expect(pipeline.list()[0]?.disabledReason).toBeNull();
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 180_000);
+
+  it("builds a door-write sequence whose second refresh was deduped behind a queued watcher reconcile (#779 round 14 A2)", async () => {
+    const fixture = await createPluginWorkspace();
+    const installGate = deferred();
+    let installCalls = 0;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: async (input) => {
+          installCalls += 1;
+          // The FIRST door write's own rebuild blocks here, occupying the
+          // queue while the watcher reconcile and the second door write
+          // arrive.
+          if (installCalls === 2) await installGate.promise;
+          return installPluginDependencies({ ...input, forkProcess: nodeForkProcess });
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      // Door write 1: its refresh starts building and blocks at install.
+      await doorWrite(pipeline, "example-plugin", fixture.entryPath, [
+        'export const marker = "door-one";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      await waitFor(() => installCalls === 2, "The first door rebuild never started.");
+
+      // The watcher observes door write 1's own disk change and queues a
+      // reconcile behind the running job.
+      pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin/src/index.ts",
+        operation: "update",
+      }]);
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+
+      // Door write 2: its refresh notification is dropped by the dedup —
+      // the watcher reconcile already holds the queue slot. The surviving
+      // reconcile must still take the door path: every deviation from the
+      // baseline arrived through the door.
+      await doorWrite(pipeline, "example-plugin", fixture.entryPath, [
+        'export const marker = "door-two";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+
+      installGate.resolve();
+      await waitFor(
+        () => {
+          const row = pipeline.list()[0];
+          return row?.status === "ready" &&
+            row.disabledReason === null;
+        },
+        `The deduped door sequence did not end ready; status is ` +
+          `"${pipeline.list()[0]?.status}" ` +
+          `(disabledReason "${pipeline.list()[0]?.disabledReason}").`,
+        120_000,
+      );
+      expect(await readFile(liveBundlePath(fixture, "example-plugin"), "utf8"))
+        .toContain("door-two");
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 180_000);
+
+  it("bounds a drifted snapshot manifest's diagnostics so the failure crosses the bridge schema (#779 round 14 C1)", async () => {
+    const fixture = await createPluginWorkspace();
+    // Every field bound is respected — 100 panels is the declared maximum —
+    // yet each empty panel entry yields several parse issues, so the joined
+    // diagnostics far exceed the bridge's 10,000-character message cap.
+    const noisyManifest = `${JSON.stringify({
+      version: 1,
+      name: "example-plugin",
+      entry: "src/index.ts",
+      panels: Array.from({ length: 100 }, () => ({})),
+    })}\n`;
+    let corruptNextSnapshot = false;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        // The manifest drifts inside the snapshot window — the same window
+        // an agent's partial write hits routinely.
+        snapshot: async (input) => {
+          const result = await snapshotPluginSource(input);
+          if (result.ok && corruptNextSnapshot) {
+            corruptNextSnapshot = false;
+            await writeFile(
+              join(result.snapshotRoot, "dohc-plugin.json"),
+              noisyManifest,
+            );
+          }
+          return result;
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      corruptNextSnapshot = true;
+      const installed = await pipeline.install("example-plugin");
+      expect(installed.ok).toBe(false);
+      if (installed.ok) throw new Error("unreachable");
+      expect(installed.error.code).toBe("invalid-manifest");
+      expect(installed.error.message.length).toBeLessThanOrEqual(8_000);
+      expect(installed.error.message).toContain("characters elided");
+      expect(installed.error.message).toContain(
+        "this message is capped at 8000 characters.",
+      );
+      // The production oracles: the bridge schemas the action result and
+      // every listed row must pass to cross IPC at all.
+      const parsedAction = PluginActionResult.safeParse(installed);
+      expect(parsedAction.success, parsedAction.error?.message).toBe(true);
+      for (const row of pipeline.list()) {
+        const parsedRow = PluginStatusRecord.safeParse(row);
+        expect(parsedRow.success, parsedRow.error?.message).toBe(true);
+      }
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 120_000);
 
   it("reconciles a scoped plugin in a differently named directory when its manifest returns (#779 round 13 D2)", async () => {
     const fixture = await createNamedPluginWorkspace("foo", "@scope/bar");
