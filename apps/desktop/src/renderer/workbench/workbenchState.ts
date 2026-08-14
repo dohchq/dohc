@@ -88,6 +88,14 @@ export function isSingletonEditorTabPath(path: string | null): boolean {
   );
 }
 
+export function canonicalSingletonEditorTabPath(path: string | null): string | null {
+  if (isChatsTabPath(path)) return CHATS_TAB_PATH;
+  const siteRoot = parseSiteTabPath(path);
+  if (siteRoot !== null) return siteTabPath(siteRoot);
+  const panel = parsePluginPanelTabPath(path);
+  return panel === null ? null : pluginPanelTabPath(panel.pluginId, panel.panelId);
+}
+
 export function parseSiteTabPath(path: string | null): string | null {
   if (typeof path !== "string" || !isSiteTabPath(path)) return null;
   try {
@@ -371,16 +379,28 @@ export function openTab(
   path: string,
   targetGroupId: string = state.activeEditorGroup,
 ): WorkbenchState {
-  if (isSingletonEditorTabPath(path)) {
+  const singletonPath = canonicalSingletonEditorTabPath(path);
+  if (isSingletonEditorTabPath(path) && singletonPath === null) return state;
+  const openedPath = singletonPath ?? path;
+  if (singletonPath !== null) {
     const existingGroup = state.editorGroups.find((group) =>
-      group.tabs.some((tab) => tab.path === path),
+      group.tabs.some(
+        (tab) => canonicalSingletonEditorTabPath(tab.path) === singletonPath,
+      ),
     );
-    if (existingGroup) return activateTab(state, existingGroup.id, path);
+    const existingTab = existingGroup?.tabs.find(
+      (tab) => canonicalSingletonEditorTabPath(tab.path) === singletonPath,
+    );
+    if (existingGroup && existingTab) {
+      return activateTab(state, existingGroup.id, existingTab.path);
+    }
   }
   const target = state.editorGroups.find((group) => group.id === targetGroupId)
     ? targetGroupId
     : state.activeEditorGroup;
-  if (findTabInGroup(state, target, path)) return activateTab(state, target, path);
+  if (findTabInGroup(state, target, openedPath)) {
+    return activateTab(state, target, openedPath);
+  }
 
   let next = state;
   if (allTabs(state).length >= MAX_OPEN_TABS) {
@@ -392,8 +412,8 @@ export function openTab(
   }
   next = replaceGroup(next, target, (group) => ({
     ...group,
-    tabs: [...group.tabs, { path }],
-    activeTab: path,
+    tabs: [...group.tabs, { path: openedPath }],
+    activeTab: openedPath,
   }));
   return next.activeEditorGroup === target
     ? next
@@ -939,34 +959,46 @@ export function parseUiState(raw: unknown): WorkbenchState {
       const tabPaths = new Set<string>();
       const rawTabs = groupOwn("tabs");
       const rawActiveTab = groupOwn("activeTab");
+      const normalizedActiveTab =
+        typeof rawActiveTab === "string"
+          ? (canonicalSingletonEditorTabPath(rawActiveTab) ??
+            (isSingletonEditorTabPath(rawActiveTab) ? null : rawActiveTab))
+          : null;
       if (Array.isArray(rawTabs)) {
         for (const tab of rawTabs) {
           if (tabCount >= MAX_OPEN_TABS) break;
           if (
             typeof tab !== "string" ||
             tab.length === 0 ||
-            tab.length > 4096 ||
-            tabPaths.has(tab)
+            tab.length > 4096
           ) {
             continue;
           }
-          const singletonOwner = isSingletonEditorTabPath(tab)
-            ? singletonOwnerGroups.get(tab)
-            : undefined;
-          if (singletonOwner !== undefined) {
-            if (rawActiveTab === tab) discardedActiveSingletons.set(id, tab);
+          const canonicalSingleton = canonicalSingletonEditorTabPath(tab);
+          if (isSingletonEditorTabPath(tab) && canonicalSingleton === null) {
             continue;
           }
-          tabPaths.add(tab);
-          if (isSingletonEditorTabPath(tab)) singletonOwnerGroups.set(tab, id);
+          const tabPath = canonicalSingleton ?? tab;
+          if (tabPaths.has(tabPath)) continue;
+          const singletonOwner = canonicalSingleton !== null
+            ? singletonOwnerGroups.get(tabPath)
+            : undefined;
+          if (singletonOwner !== undefined) {
+            if (normalizedActiveTab === tabPath) {
+              discardedActiveSingletons.set(id, tabPath);
+            }
+            continue;
+          }
+          tabPaths.add(tabPath);
+          if (canonicalSingleton !== null) singletonOwnerGroups.set(tabPath, id);
           tabCount += 1;
-          tabs.push({ path: tab });
+          tabs.push({ path: tabPath });
         }
       }
       const activeTab =
-        typeof rawActiveTab === "string" &&
-        tabs.some((tab) => tab.path === rawActiveTab)
-          ? rawActiveTab
+        normalizedActiveTab !== null &&
+        tabs.some((tab) => tab.path === normalizedActiveTab)
+          ? normalizedActiveTab
           : (tabs[0]?.path ?? null);
       const rawSize = groupOwn("size");
       const size =

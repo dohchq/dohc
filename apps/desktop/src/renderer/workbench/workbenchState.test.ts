@@ -325,9 +325,13 @@ describe("tabs", () => {
   });
 
   it.each([
-    ["site preview", siteTabPath("client-portal")],
-    ["plugin panel", pluginPanelTabPath("hello-plugin", "main")],
-  ])("keeps a process-owning %s in its existing editor group", (_label, path) => {
+    ["site preview", siteTabPath("client-portal"), "dohc://site/%63lient-portal"],
+    [
+      "plugin panel",
+      pluginPanelTabPath("hello-plugin", "main"),
+      "dohc://plugin-panel/%68ello-plugin/main",
+    ],
+  ])("keeps a process-owning %s in its existing editor group", (_label, path, alias) => {
     let state = withTabs(path, "a.md");
     state = moveTabToNewGroup(
       state,
@@ -336,9 +340,10 @@ describe("tabs", () => {
       "right",
     );
 
-    state = openTab(state, path, "right");
+    state = openTab(state, alias, "right");
 
     expect(allTabs(state).filter((tab) => tab.path === path)).toHaveLength(1);
+    expect(allTabs(state).some((tab) => tab.path === alias)).toBe(false);
     expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
     expect(activeTabPath(state)).toBe(path);
     expect(
@@ -847,9 +852,13 @@ describe("ui-state persistence round-trip", () => {
   });
 
   it.each([
-    ["site preview", siteTabPath("client-portal")],
-    ["plugin panel", pluginPanelTabPath("hello-plugin", "main")],
-  ])("keeps the first restored %s owner", (_label, path) => {
+    ["site preview", siteTabPath("client-portal"), "dohc://site/%63lient-portal"],
+    [
+      "plugin panel",
+      pluginPanelTabPath("hello-plugin", "main"),
+      "dohc://plugin-panel/%68ello-plugin/main",
+    ],
+  ])("keeps the first restored %s owner", (_label, path, alias) => {
     const state = parseUiState({
       version: 2,
       editorGroups: [
@@ -861,8 +870,8 @@ describe("ui-state persistence round-trip", () => {
         },
         {
           id: "right",
-          tabs: [path, "right.md"],
-          activeTab: path,
+          tabs: [alias, "right.md"],
+          activeTab: alias,
           size: 0.5,
         },
       ],

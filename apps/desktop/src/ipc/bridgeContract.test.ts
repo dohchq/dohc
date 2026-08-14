@@ -719,9 +719,13 @@ describe("workspace UI state IPC contract", () => {
   });
 
   it.each([
-    ["site preview", siteTabPath("client-portal")],
-    ["plugin panel", pluginPanelTabPath("hello-plugin", "main")],
-  ])("rejects one %s path in several editor groups", (_label, path) => {
+    ["site preview", siteTabPath("client-portal"), "dohc://site/%63lient-portal"],
+    [
+      "plugin panel",
+      pluginPanelTabPath("hello-plugin", "main"),
+      "dohc://plugin-panel/%68ello-plugin/main",
+    ],
+  ])("rejects one %s path in several editor groups", (_label, path, alias) => {
     const result = WorkspaceUiState.safeParse({
       ...validState,
       editorGroups: [
@@ -733,8 +737,8 @@ describe("workspace UI state IPC contract", () => {
         },
         {
           id: "right",
-          tabs: ["notes/a.md", path],
-          activeTab: path,
+          tabs: ["notes/a.md", alias],
+          activeTab: alias,
           size: 0.5,
         },
       ],
@@ -743,11 +747,11 @@ describe("workspace UI state IPC contract", () => {
 
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.error.issues).toEqual([
+      expect(result.error.issues).toContainEqual(
         expect.objectContaining({
           path: ["editorGroups", 1, "tabs", 1],
         }),
-      ]);
+      );
     }
   });
 

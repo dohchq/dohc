@@ -5,6 +5,7 @@ import {
 import { z } from "zod";
 import {
   CHATS_TAB_PATH,
+  canonicalSingletonEditorTabPath,
   isPluginPanelTabPath,
   isSingletonEditorTabPath,
   isSiteTabPath,
@@ -3228,9 +3229,17 @@ export const WorkspaceUiState = z.object({
     for (let tabIndex = 0; tabIndex < group.tabs.length; tabIndex++) {
       const tab = group.tabs[tabIndex];
       if (!isSingletonEditorTabPath(tab)) continue;
-      if (groupSingletons.has(tab)) continue;
-      groupSingletons.add(tab);
-      if (singletonOwners.has(tab)) {
+      const identity = canonicalSingletonEditorTabPath(tab);
+      if (identity === null || identity !== tab) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["editorGroups", groupIndex, "tabs", tabIndex],
+          message: "Process-owning preview tab paths must use canonical encoding.",
+        });
+      }
+      if (identity === null || groupSingletons.has(identity)) continue;
+      groupSingletons.add(identity);
+      if (singletonOwners.has(identity)) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["editorGroups", groupIndex, "tabs", tabIndex],
@@ -3244,7 +3253,7 @@ export const WorkspaceUiState = z.object({
                   : "This tab can be open in only one editor group.",
         });
       } else {
-        singletonOwners.add(tab);
+        singletonOwners.add(identity);
       }
     }
     totalSize += group.size;
