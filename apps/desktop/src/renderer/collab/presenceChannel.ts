@@ -159,12 +159,20 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
   let retryResolve: (() => void) | null = null;
   let pollController: AbortController | null = null;
   let loopDone: Promise<void> | null = null;
-  // The most recently STARTED publish, so stop() can wait it out before
-  // sending leave (#742 P2, round 5): awaiting transport.leave alone does not
-  // order it after a publish/heartbeat already in flight when stop() is
-  // called — a late-arriving publish can reach the transport AFTER leave
-  // does, reviving presence the instant after it left (ghost until TTL).
+  // The TAIL of the publish chain, so stop() can wait every outstanding
+  // publish out before sending leave (#742 P2, round 5): awaiting
+  // transport.leave alone does not order it after a publish already in
+  // flight when stop() is called — a late-arriving publish can reach the
+  // transport AFTER leave does, reviving presence the instant after it left
+  // (ghost until TTL). Publishes never overlap: rapid pointer updates used
+  // to start concurrent requests, and an older one finishing last could
+  // outlive the newest — the same ghost — or repaint an older cursor. An
+  // idle channel publishes synchronously; otherwise at most one publish
+  // waits behind the active one, and it reads `state` when it runs, so the
+  // coalesced publish always sends the newest.
   let inFlightPublish: Promise<void> = Promise.resolve();
+  let activePublish: Promise<void> | null = null;
+  let queuedPublish: Promise<void> | null = null;
 
   function emit(snapshot: PresenceSnapshot): void {
     if (stopped) return;
@@ -172,9 +180,9 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
     options.onPeers(snapshot.peers);
   }
 
-  function publishNow(): Promise<void> {
+  function startPublish(): Promise<void> {
     if (stopped) return Promise.resolve();
-    const publish = (async () => {
+    const publish: Promise<void> = (async () => {
       try {
         const snapshot = await options.transport.publish({
           topic: options.topic,
@@ -185,9 +193,27 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
       } catch {
         // Presence is best-effort; a failed publish just means we appear later.
       }
-    })();
+    })().finally(() => {
+      if (activePublish === publish) activePublish = null;
+    });
+    activePublish = publish;
     inFlightPublish = publish;
     return publish;
+  }
+
+  function publishNow(): Promise<void> {
+    if (stopped) return inFlightPublish;
+    if (queuedPublish) return queuedPublish;
+    if (activePublish) {
+      const queued = activePublish.then(() => {
+        queuedPublish = null;
+        return startPublish();
+      });
+      queuedPublish = queued;
+      inFlightPublish = queued;
+      return queued;
+    }
+    return startPublish();
   }
 
   function scheduleHeartbeat(): void {
