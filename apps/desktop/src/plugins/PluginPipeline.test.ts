@@ -1383,6 +1383,96 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
+  it("keeps uninstall available for an installed plugin whose manifest later broke (#779 round 8 D2)", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const newHost = () => {
+      const created = new PluginHost({
+        stateDir: fixture.stateDir,
+        workspaceRoot: fixture.workspaceRoot,
+        spawnTransport: fakeSpawnTransport(),
+        routeSdkRequest: async () => ({}),
+        onStatusChange: (pluginId, status) => {
+          pipeline.noteRuntimeStatus(pluginId, status);
+        },
+      });
+      return created;
+    };
+    const newPipeline = (host: PluginHost) =>
+      new PluginPipeline({
+        workspaceRoot: fixture.workspaceRoot,
+        stateDir: fixture.stateDir,
+        pluginHost: host,
+        resourcesBasePath,
+        operations: {
+          install: (input) =>
+            installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        },
+      });
+
+    pipeline = newPipeline(newHost());
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+    } finally {
+      await pipeline.dispose();
+    }
+
+    // The manifest breaks while dohc is not running, so no watcher event ever
+    // observes the transition — the next launch simply discovers an invalid
+    // candidate whose installed artifacts are all still on disk.
+    await writeFile(
+      join(fixture.pluginRoot, "dohc-plugin.json"),
+      "{ this is not valid JSON\n",
+    );
+
+    pipeline = newPipeline(newHost());
+    try {
+      await pipeline.start();
+      const row = pipeline.list()[0];
+      expect(row).toMatchObject({
+        id: "example-plugin",
+        valid: false,
+        status: "invalid",
+      });
+      // The installation identity is what Settings reads to offer Uninstall.
+      expect(row?.approvedHash).not.toBeNull();
+      expect(row?.error?.code).toBe("invalid-plugin");
+
+      const preflight = await pipeline.uninstallPreflight("example-plugin");
+      if (!preflight.ok) throw new Error(preflight.error.message);
+      const uninstalled = await pipeline.uninstall(
+        "example-plugin",
+        preflight.confirmationToken,
+      );
+      expect(uninstalled.ok).toBe(true);
+
+      // Every trace uninstall owns: the workspace source, the userData live
+      // root, and the local-state record.
+      await expect(lstat(fixture.pluginRoot)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(await readdir(pluginsDataRoot(fixture))).toEqual([]);
+      const state = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      if (!state.ok) throw new Error(state.warning);
+      expect(state.state.plugins["example-plugin"]).toBeUndefined();
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
   it("rebuilds instead of starting stale bytes after a failed publish (#779 round 7 A3)", async () => {
     const fixture = await createPluginWorkspace();
     let failPublish = false;

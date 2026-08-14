@@ -198,6 +198,14 @@ function cloneStatus(status: PluginPipelinePluginStatus): PluginPipelinePluginSt
   };
 }
 
+function invalidPluginError(
+  candidate: InstalledPluginRecord,
+): PluginPipelineError | null {
+  return candidate.diagnostics.length > 0
+    ? pipelineError("discovery", "invalid-plugin", candidate.diagnostics.join(" "))
+    : null;
+}
+
 function generatedManifest(manifest: DohcPluginManifest): DohcPluginManifest {
   return { ...manifest, entry: "bundle.mjs" };
 }
@@ -260,6 +268,18 @@ export class PluginPipeline {
     const included = new Set<string>();
     for (const candidate of this.discovery) {
       if (!candidate.valid || !candidate.manifest) {
+        // A seeded status for this same root means the plugin was installed
+        // before its manifest broke. Report that installation identity so
+        // Settings still offers Uninstall (#779 round 8 D2).
+        const installed = this.statuses.get(candidate.id);
+        if (
+          installed && !installed.valid &&
+          resolve(installed.rootPath) === resolve(candidate.rootPath)
+        ) {
+          listed.push(cloneStatus(installed));
+          included.add(candidate.id);
+          continue;
+        }
         listed.push({
           id: candidate.id,
           directoryName: candidate.directoryName,
@@ -273,13 +293,7 @@ export class PluginPipeline {
           installedBaselineHash: null,
           diagnostics: [...candidate.diagnostics],
           warnings: [],
-          error: candidate.diagnostics.length > 0
-            ? pipelineError(
-              "discovery",
-              "invalid-plugin",
-              candidate.diagnostics.join(" "),
-            )
-            : null,
+          error: invalidPluginError(candidate),
         });
         continue;
       }
@@ -562,8 +576,8 @@ export class PluginPipeline {
   ): Promise<PluginPipelineUninstallPreflightResult> {
     return this.enqueueActionValue(pluginId, async () => {
       try {
-        const candidate = this.requireValidCandidate(pluginId);
         const record = await this.localRecord(pluginId);
+        const candidate = this.requireUninstallableCandidate(pluginId, record);
         const preflight = await this.operations.uninstallPreflight({
           dohcDir: this.dohcDir,
           pluginId,
@@ -613,7 +627,8 @@ export class PluginPipeline {
         );
       }
 
-      const candidate = this.requireValidCandidate(pluginId);
+      const record = await this.localRecord(pluginId);
+      const candidate = this.requireUninstallableCandidate(pluginId, record);
       if (resolve(candidate.rootPath) !== confirmation.pluginRoot) {
         return this.failure(
           pluginId,
@@ -624,7 +639,6 @@ export class PluginPipeline {
           ),
         );
       }
-      const record = await this.localRecord(pluginId);
       const currentPreflight = await this.operations.uninstallPreflight({
         dohcDir: this.dohcDir,
         pluginId,
@@ -785,20 +799,48 @@ export class PluginPipeline {
       );
     }
     for (const candidate of this.discovery) {
-      if (!candidate.valid || !candidate.manifest) continue;
-      const record = stateResult.state.plugins[candidate.id];
-      this.setStatus(candidate, {
-        status: record?.approvedHash
-          ? record.disabled === true
-            ? "disabled"
-            : "queued"
-          : "discovered",
-        disabledReason: record?.disabled === true ? "user" : null,
-        approvedHash: record?.approvedHash ?? null,
-        installedBaselineHash: record?.installedBaselineHash ?? null,
-        diagnostics: [...candidate.diagnostics],
-      });
+      this.seedCandidateStatus(candidate, stateResult.state.plugins[candidate.id]);
     }
+  }
+
+  /**
+   * The status a candidate starts a session with. An invalid candidate that
+   * still has a persisted installation keeps that installation identity
+   * instead of reading as never installed: its live root, plugin data, and
+   * state record are all still on disk, and uninstall — which derives every
+   * path it deletes from the plugin id, never from the manifest — stays the
+   * visible way back. Without this the user has to delete the source folder
+   * and the app's own plugin data by hand (#779 round 8 D2).
+   */
+  private seedCandidateStatus(
+    candidate: InstalledPluginRecord,
+    record: PluginRecordShape | undefined,
+  ): void {
+    if (!candidate.valid || !candidate.manifest) {
+      if (!record?.approvedHash) return;
+      this.setStatus(candidate, {
+        status: "invalid",
+        disabledReason: null,
+        runtimeStatus: null,
+        sourceHash: null,
+        approvedHash: record.approvedHash,
+        installedBaselineHash: record.installedBaselineHash ?? null,
+        diagnostics: [...candidate.diagnostics],
+        error: invalidPluginError(candidate),
+      });
+      return;
+    }
+    this.setStatus(candidate, {
+      status: record?.approvedHash
+        ? record.disabled === true
+          ? "disabled"
+          : "queued"
+        : "discovered",
+      disabledReason: record?.disabled === true ? "user" : null,
+      approvedHash: record?.approvedHash ?? null,
+      installedBaselineHash: record?.installedBaselineHash ?? null,
+      diagnostics: [...candidate.diagnostics],
+    });
   }
 
   private async processWatcherBatch(events: readonly WatcherEvent[]): Promise<void> {
@@ -891,20 +933,8 @@ export class PluginPipeline {
     candidates: readonly InstalledPluginRecord[],
   ): Promise<void> {
     for (const candidate of candidates) {
-      if (!candidate.valid || !candidate.manifest || this.statuses.has(candidate.id)) {
-        continue;
-      }
-      const record = await this.localRecord(candidate.id);
-      this.setStatus(candidate, {
-        status: record?.approvedHash
-          ? record.disabled === true
-            ? "disabled"
-            : "queued"
-          : "discovered",
-        disabledReason: record?.disabled === true ? "user" : null,
-        approvedHash: record?.approvedHash ?? null,
-        installedBaselineHash: record?.installedBaselineHash ?? null,
-      });
+      if (this.statuses.has(candidate.id)) continue;
+      this.seedCandidateStatus(candidate, await this.localRecord(candidate.id));
     }
   }
 
@@ -1305,6 +1335,33 @@ export class PluginPipeline {
       );
     }
     return candidate;
+  }
+
+  /**
+   * The candidate uninstall may act on: normally a valid discovered plugin,
+   * and also an invalid one that still carries a persisted installation.
+   * Uninstall reads nothing from the manifest — it deletes the discovered
+   * root, the live root and plugin data keyed by plugin id, and the state
+   * record — so a broken manifest must not remove the way back (#779 round 8
+   * D2).
+   */
+  private requireUninstallableCandidate(
+    pluginId: string,
+    record: PluginRecordShape | undefined,
+  ): InstalledPluginRecord {
+    const valid = this.validCandidate(pluginId);
+    if (valid) return valid;
+    const installed = record?.approvedHash
+      ? this.discovery.find((entry) => entry.id === pluginId)
+      : undefined;
+    if (installed) return installed;
+    throw new PipelineFailure(
+      pipelineError(
+        "discovery",
+        "plugin-not-found",
+        `Plugin "${pluginId}" is not a valid discovered plugin.`,
+      ),
+    );
   }
 
   private engineCaptureAvailable(): boolean {
