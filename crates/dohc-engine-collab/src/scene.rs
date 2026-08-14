@@ -1165,7 +1165,12 @@ pub fn fold_scene(
         let Some(element) = canonical_json(raw_element) else {
             continue;
         };
-        if !valid_element_snapshot(&element, &key) {
+        if !valid_element_snapshot(&element, &key)
+            || element
+                .get("index")
+                .and_then(Value::as_str)
+                .is_some_and(|index| validate_order_key(index).is_err())
+        {
             continue;
         }
 
@@ -1634,6 +1639,15 @@ mod tests {
                 revision("other-id", 4, 5, Map::new()),
             ),
             (revision_key("c", 1, 1), "not JSON".to_owned()),
+            (
+                revision_key("malformed-index", 1, 1),
+                revision(
+                    "malformed-index",
+                    1,
+                    1,
+                    Map::from_iter([("index".to_owned(), json!("bad!"))]),
+                ),
+            ),
         ]);
 
         let folded = fold_scene(&revisions, &BTreeMap::new(), &BTreeMap::new());
@@ -1867,33 +1881,33 @@ mod tests {
     }
 
     #[test]
-    fn element_order_uses_unicode_scalar_values_not_utf16_code_units() {
+    fn element_tie_break_uses_unicode_scalar_values_not_utf16_code_units() {
         let bmp = "\u{e000}";
         let astral = "\u{10000}";
         let revisions = BTreeMap::from([
             (
-                revision_key("astral", 1, 1),
+                revision_key(astral, 1, 1),
                 revision(
-                    "astral",
+                    astral,
                     1,
                     1,
-                    Map::from_iter([("index".to_owned(), json!(astral))]),
+                    Map::from_iter([("index".to_owned(), json!("a0"))]),
                 ),
             ),
             (
-                revision_key("bmp", 1, 1),
+                revision_key(bmp, 1, 1),
                 revision(
-                    "bmp",
+                    bmp,
                     1,
                     1,
-                    Map::from_iter([("index".to_owned(), json!(bmp))]),
+                    Map::from_iter([("index".to_owned(), json!("a0"))]),
                 ),
             ),
         ]);
 
         let folded = fold_scene(&revisions, &BTreeMap::new(), &BTreeMap::new());
-        assert_eq!(folded.elements[0]["id"], "bmp");
-        assert_eq!(folded.elements[1]["id"], "astral");
+        assert_eq!(folded.elements[0]["id"], bmp);
+        assert_eq!(folded.elements[1]["id"], astral);
     }
 
     #[test]
