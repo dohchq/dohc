@@ -82,6 +82,12 @@ export function isPluginPanelTabPath(path: string | null): boolean {
   return typeof path === "string" && path.startsWith(PLUGIN_PANEL_TAB_PREFIX);
 }
 
+export function isSingletonEditorTabPath(path: string | null): boolean {
+  return (
+    isChatsTabPath(path) || isSiteTabPath(path) || isPluginPanelTabPath(path)
+  );
+}
+
 export function parseSiteTabPath(path: string | null): string | null {
   if (typeof path !== "string" || !isSiteTabPath(path)) return null;
   try {
@@ -365,7 +371,7 @@ export function openTab(
   path: string,
   targetGroupId: string = state.activeEditorGroup,
 ): WorkbenchState {
-  if (isChatsTabPath(path)) {
+  if (isSingletonEditorTabPath(path)) {
     const existingGroup = state.editorGroups.find((group) =>
       group.tabs.some((tab) => tab.path === path),
     );
@@ -584,7 +590,7 @@ export function createEditorGroupRight(
   const requestedSource = state.editorGroups.find(
     (group) => group.id === sourceGroupId,
   );
-  if (isChatsTabPath(requestedSource?.activeTab ?? null)) return state;
+  if (isSingletonEditorTabPath(requestedSource?.activeTab ?? null)) return state;
   let base: WorkbenchState = {
     ...state,
     editorGroups: normalizeEditorGroupSizes(
@@ -904,8 +910,8 @@ export function parseUiState(raw: unknown): WorkbenchState {
   };
   const editorGroups: EditorGroup[] = [];
   const groupIds = new Set<string>();
-  const discardedActiveChatsGroups = new Set<string>();
-  let chatsOwnerGroupId: string | null = null;
+  const singletonOwnerGroups = new Map<string, string>();
+  const discardedActiveSingletons = new Map<string, string>();
   let tabCount = 0;
   const rawGroups = own("editorGroups");
   if (Array.isArray(rawGroups)) {
@@ -933,7 +939,6 @@ export function parseUiState(raw: unknown): WorkbenchState {
       const tabPaths = new Set<string>();
       const rawTabs = groupOwn("tabs");
       const rawActiveTab = groupOwn("activeTab");
-      let discardedChats = false;
       if (Array.isArray(rawTabs)) {
         for (const tab of rawTabs) {
           if (tabCount >= MAX_OPEN_TABS) break;
@@ -945,22 +950,18 @@ export function parseUiState(raw: unknown): WorkbenchState {
           ) {
             continue;
           }
-          if (tab === CHATS_TAB_PATH && chatsOwnerGroupId !== null) {
-            discardedChats = true;
+          const singletonOwner = isSingletonEditorTabPath(tab)
+            ? singletonOwnerGroups.get(tab)
+            : undefined;
+          if (singletonOwner !== undefined) {
+            if (rawActiveTab === tab) discardedActiveSingletons.set(id, tab);
             continue;
           }
           tabPaths.add(tab);
-          if (tab === CHATS_TAB_PATH) chatsOwnerGroupId = id;
+          if (isSingletonEditorTabPath(tab)) singletonOwnerGroups.set(tab, id);
           tabCount += 1;
           tabs.push({ path: tab });
         }
-      }
-      if (
-        discardedChats &&
-        rawActiveTab === CHATS_TAB_PATH &&
-        chatsOwnerGroupId !== null
-      ) {
-        discardedActiveChatsGroups.add(id);
       }
       const activeTab =
         typeof rawActiveTab === "string" &&
@@ -985,14 +986,16 @@ export function parseUiState(raw: unknown): WorkbenchState {
     typeof rawActiveEditorGroup === "string" && groupIds.has(rawActiveEditorGroup)
       ? rawActiveEditorGroup
       : normalizedGroups[0].id;
-  if (
-    discardedActiveChatsGroups.has(activeEditorGroup) &&
-    chatsOwnerGroupId !== null
-  ) {
-    activeEditorGroup = chatsOwnerGroupId;
+  const discardedActiveSingleton = discardedActiveSingletons.get(activeEditorGroup);
+  const singletonOwnerGroup = discardedActiveSingleton
+    ? singletonOwnerGroups.get(discardedActiveSingleton)
+    : undefined;
+  if (discardedActiveSingleton && singletonOwnerGroup) {
+    activeEditorGroup = singletonOwnerGroup;
     normalizedGroups = normalizedGroups.map((group) =>
-      group.id === chatsOwnerGroupId && group.activeTab !== CHATS_TAB_PATH
-        ? { ...group, activeTab: CHATS_TAB_PATH }
+      group.id === singletonOwnerGroup &&
+      group.activeTab !== discardedActiveSingleton
+        ? { ...group, activeTab: discardedActiveSingleton }
         : group,
     );
   }

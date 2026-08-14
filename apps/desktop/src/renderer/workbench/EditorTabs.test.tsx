@@ -2,7 +2,11 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorTabs } from "./EditorTabs";
-import { CHATS_TAB_PATH, pluginPanelTabPath } from "./workbenchState";
+import {
+  CHATS_TAB_PATH,
+  pluginPanelTabPath,
+  siteTabPath,
+} from "./workbenchState";
 
 beforeEach(() => {
   // jsdom doesn't implement scrollIntoView; the strip reveals the active
@@ -429,14 +433,18 @@ describe("EditorTabs overlay scrollbar", () => {
     expect(onCloseGroup).toHaveBeenCalledOnce();
   });
 
-  it("disables Split Right when Chats is the active tab", () => {
+  it.each([
+    ["Chats", CHATS_TAB_PATH],
+    ["a site preview", siteTabPath("client-portal")],
+    ["a plugin panel", pluginPanelTabPath("hello-plugin", "main")],
+  ])("disables Split Right when %s is the active tab", (_label, path) => {
     const onCreateGroupRight = vi.fn();
     render(
       <EditorTabs
         groupId="left"
         groupNumber={1}
-        tabs={[{ path: CHATS_TAB_PATH }, { path: "a.md" }]}
-        activeTab={CHATS_TAB_PATH}
+        tabs={[{ path }, { path: "a.md" }]}
+        activeTab={path}
         activeTabDirty={false}
         recoveryPaths={new Set<string>()}
         onActivate={noop}

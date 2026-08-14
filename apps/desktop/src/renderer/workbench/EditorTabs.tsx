@@ -7,6 +7,7 @@ import {
   isHistoryDiffTabPath,
   isHistoryTabPath,
   isPluginPanelTabPath,
+  isSingletonEditorTabPath,
   isVersionCompareTabPath,
   parseHistoryDiffTabPath,
   parsePluginPanelTabPath,
@@ -459,7 +460,7 @@ export function EditorTabs(props: {
         data-testid="create-editor-group-right"
         aria-label="New editor group right"
         title="New editor group right"
-        disabled={empty || isChatsTabPath(props.activeTab)}
+        disabled={empty || isSingletonEditorTabPath(props.activeTab)}
         onClick={props.onCreateGroupRight}
         className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:bg-line/50 hover:text-ink disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-subtle"
       >

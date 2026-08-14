@@ -506,6 +506,28 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     }
   });
 
+  it("reports a synchronous terminal-recovery failure before destroying the mirror", async () => {
+    const mock = mockTransport();
+    const recoveryError = new Error("recovery storage unavailable");
+    let closed = false;
+    mock.transport.applyLocalUpdate = async () => {
+      throw new EngineYDocDeliveryRefusedError("session-unavailable");
+    };
+    mock.transport.close = async () => {
+      closed = true;
+    };
+    const binding = await bindEngineYDoc(mock.transport, {
+      onDeliveryFailure() {
+        throw recoveryError;
+      },
+    });
+
+    typeIntoBody(binding.doc!, "Keep this edit.");
+
+    await expect(binding.destroy()).rejects.toBe(recoveryError);
+    expect(closed).toBe(true);
+  });
+
   it("stops retrying when a full-state repair receives a terminal refusal", async () => {
     vi.useFakeTimers();
     try {

@@ -5,6 +5,9 @@ import {
 import { z } from "zod";
 import {
   CHATS_TAB_PATH,
+  isPluginPanelTabPath,
+  isSingletonEditorTabPath,
+  isSiteTabPath,
   MAX_EXPANDED_FOLDERS,
   MAX_EDITOR_GROUPS,
   MAX_EDITOR_GROUP_ID_CHARS,
@@ -3208,7 +3211,7 @@ export const WorkspaceUiState = z.object({
   recentFiles: z.array(PATH_STRING).max(MAX_RECENT_FILES).optional(),
 }).superRefine((state, context) => {
   const groupIds = new Set<string>();
-  let chatsOwnerSeen = false;
+  const singletonOwners = new Set<string>();
   let tabCount = 0;
   let totalSize = 0;
   for (let groupIndex = 0; groupIndex < state.editorGroups.length; groupIndex++) {
@@ -3221,16 +3224,27 @@ export const WorkspaceUiState = z.object({
       });
     }
     groupIds.add(group.id);
-    const chatsTabIndex = group.tabs.indexOf(CHATS_TAB_PATH);
-    if (chatsTabIndex !== -1) {
-      if (chatsOwnerSeen) {
+    const groupSingletons = new Set<string>();
+    for (let tabIndex = 0; tabIndex < group.tabs.length; tabIndex++) {
+      const tab = group.tabs[tabIndex];
+      if (!isSingletonEditorTabPath(tab)) continue;
+      if (groupSingletons.has(tab)) continue;
+      groupSingletons.add(tab);
+      if (singletonOwners.has(tab)) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
-          path: ["editorGroups", groupIndex, "tabs", chatsTabIndex],
-          message: "Chats can be open in only one editor group.",
+          path: ["editorGroups", groupIndex, "tabs", tabIndex],
+          message:
+            tab === CHATS_TAB_PATH
+              ? "Chats can be open in only one editor group."
+              : isSiteTabPath(tab)
+                ? "A site preview can be open in only one editor group."
+                : isPluginPanelTabPath(tab)
+                  ? "A plugin panel can be open in only one editor group."
+                  : "This tab can be open in only one editor group.",
         });
       } else {
-        chatsOwnerSeen = true;
+        singletonOwners.add(tab);
       }
     }
     totalSize += group.size;

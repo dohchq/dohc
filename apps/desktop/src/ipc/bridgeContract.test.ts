@@ -87,6 +87,8 @@ import {
   CHATS_TAB_PATH,
   MAX_EDITOR_GROUPS,
   MAX_EDITOR_GROUP_ID_CHARS,
+  pluginPanelTabPath,
+  siteTabPath,
 } from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 
@@ -711,6 +713,39 @@ describe("workspace UI state IPC contract", () => {
         expect.objectContaining({
           path: ["editorGroups", 1, "tabs", 1],
           message: "Chats can be open in only one editor group.",
+        }),
+      ]);
+    }
+  });
+
+  it.each([
+    ["site preview", siteTabPath("client-portal")],
+    ["plugin panel", pluginPanelTabPath("hello-plugin", "main")],
+  ])("rejects one %s path in several editor groups", (_label, path) => {
+    const result = WorkspaceUiState.safeParse({
+      ...validState,
+      editorGroups: [
+        {
+          id: "left",
+          tabs: [path, "notes/a.md"],
+          activeTab: path,
+          size: 0.5,
+        },
+        {
+          id: "right",
+          tabs: ["notes/a.md", path],
+          activeTab: path,
+          size: 0.5,
+        },
+      ],
+      activeEditorGroup: "left",
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toEqual([
+        expect.objectContaining({
+          path: ["editorGroups", 1, "tabs", 1],
         }),
       ]);
     }

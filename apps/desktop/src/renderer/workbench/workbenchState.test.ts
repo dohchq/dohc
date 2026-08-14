@@ -324,6 +324,32 @@ describe("tabs", () => {
     ).toBe(state);
   });
 
+  it.each([
+    ["site preview", siteTabPath("client-portal")],
+    ["plugin panel", pluginPanelTabPath("hello-plugin", "main")],
+  ])("keeps a process-owning %s in its existing editor group", (_label, path) => {
+    let state = withTabs(path, "a.md");
+    state = moveTabToNewGroup(
+      state,
+      DEFAULT_EDITOR_GROUP_ID,
+      "a.md",
+      "right",
+    );
+
+    state = openTab(state, path, "right");
+
+    expect(allTabs(state).filter((tab) => tab.path === path)).toHaveLength(1);
+    expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
+    expect(activeTabPath(state)).toBe(path);
+    expect(
+      createEditorGroupRight(
+        state,
+        DEFAULT_EDITOR_GROUP_ID,
+        "split",
+      ),
+    ).toBe(state);
+  });
+
   it("repeated single-tab splits replace the obsolete empty drop target", () => {
     let state = moveTabToNewGroup(
       withTabs("a.md"),
@@ -818,6 +844,35 @@ describe("ui-state persistence round-trip", () => {
     expect(
       allTabs(state).filter((tab) => tab.path === CHATS_TAB_PATH),
     ).toHaveLength(1);
+  });
+
+  it.each([
+    ["site preview", siteTabPath("client-portal")],
+    ["plugin panel", pluginPanelTabPath("hello-plugin", "main")],
+  ])("keeps the first restored %s owner", (_label, path) => {
+    const state = parseUiState({
+      version: 2,
+      editorGroups: [
+        {
+          id: "left",
+          tabs: [path, "left.md"],
+          activeTab: "left.md",
+          size: 0.5,
+        },
+        {
+          id: "right",
+          tabs: [path, "right.md"],
+          activeTab: path,
+          size: 0.5,
+        },
+      ],
+      activeEditorGroup: "right",
+    });
+
+    expect(allTabs(state).filter((tab) => tab.path === path)).toHaveLength(1);
+    expect(state.activeEditorGroup).toBe("left");
+    expect(state.editorGroups[0].activeTab).toBe(path);
+    expect(state.editorGroups[1].activeTab).toBe("right.md");
   });
 
   it("does not charge discarded duplicate Chats entries against the tab cap", () => {

@@ -309,9 +309,8 @@ export async function bindEngineYDoc(
     repairNeeded = false;
     repairRequested = false;
     clearRepairRetry();
-    const recovery = Promise.resolve(
-      options.onDeliveryFailure?.(snapshot, error, source),
-    )
+    const recovery = Promise.resolve()
+      .then(() => options.onDeliveryFailure?.(snapshot, error, source))
       .catch((captureError: unknown) => {
         terminalRecoveryError = captureError;
       })
@@ -461,6 +460,7 @@ export async function bindEngineYDoc(
           await Promise.allSettled([replacementHandoff]);
         }
         await drainDeliveries();
+        recoveryError ??= terminalRecoveryError;
         if (terminalDeliveryError !== null) {
           deliveryError = terminalDeliveryError;
         } else if (repairNeeded) {
