@@ -44,6 +44,7 @@ describe("RelayShareDialog", () => {
     expect(bridgeMock.createRelayShare).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       recipientEmail: "friend@dohc.test",
+      access: "view",
       paths: ["docs/plan.md"],
     });
     const code = await screen.findByTestId("share-code");
@@ -71,8 +72,66 @@ describe("RelayShareDialog", () => {
     expect(bridgeMock.createRelayShare).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       recipientEmail: "friend@dohc.test",
+      access: "view",
       versionId: "version-7",
     });
+  });
+
+  // The level is stated, not implied. PR1 grants the same reads at every
+  // level, so the dialog offers only View and says so plainly — an enabled
+  // Comment option would promise chat rights the relay still refuses.
+  it("offers View only, states why, and sends the level it showed", async () => {
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ path: "docs/plan.md" }}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByTestId("share-access-view").getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    expect(screen.getByTestId("share-access-view").hasAttribute("disabled")).toBe(false);
+    for (const level of ["comment", "edit"]) {
+      expect(
+        screen.getByTestId(`share-access-${level}`).hasAttribute("disabled"),
+        level,
+      ).toBe(true);
+    }
+    expect(screen.getByTestId("share-access-helper").textContent).toBe(
+      "They can read what you selected.",
+    );
+    expect(screen.getByTestId("share-access-pending").textContent).toBe(
+      "Comment and Edit are not ready yet.",
+    );
+
+    // Clicking a disabled option changes nothing. The dialog holds no level
+    // state in PR1, so it cannot send a level it never showed.
+    await user.click(screen.getByTestId("share-access-comment"));
+    expect(screen.getByTestId("share-access-view").getAttribute("aria-checked")).toBe(
+      "true",
+    );
+
+    await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
+    await user.click(screen.getByTestId("share-create"));
+    expect(bridgeMock.createRelayShare).toHaveBeenCalledWith(
+      expect.objectContaining({ access: "view" }),
+    );
+  });
+
+  // The dialog no longer promises a level in prose: at Edit that sentence
+  // would be false, and the level now has its own control.
+  it("drops the read-only claim from the lead sentence", () => {
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ path: "docs/plan.md" }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByText(/read-only live view/)).toBeNull();
   });
 
   it("creates a multi-path site artifact share with a simple label", async () => {
@@ -94,6 +153,7 @@ describe("RelayShareDialog", () => {
     expect(bridgeMock.createRelayShare).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       recipientEmail: "friend@dohc.test",
+      access: "view",
       paths: ["index.html", "assets/logo.png"],
     });
   });

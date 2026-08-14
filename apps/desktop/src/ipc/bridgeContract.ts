@@ -1,3 +1,4 @@
+import { SHARE_ACCESS_VALUES } from "@dohc/security-contract/share-selector";
 import {
   WORKSPACE_KINDS,
   WORKSPACE_MODES,
@@ -151,6 +152,13 @@ const MODE_ENUM = z.enum(WORKSPACE_MODES);
 export const PickWorkspaceRootResult = PATH_STRING.nullable();
 export type PickWorkspaceRootResult = z.infer<typeof PickWorkspaceRootResult>;
 
+// The level a recipient holds on a path/version share (#646), from the same
+// one place the relay and the engine read it. All three levels read the same
+// files today; PR2 opens comment and edit to chat, PR3 opens edit to writes.
+// The chat-channel grant's own binary access is a different field.
+export const SHARE_ACCESS = z.enum(SHARE_ACCESS_VALUES);
+export type ShareAccess = z.infer<typeof SHARE_ACCESS>;
+
 // Ops a share pull skipped, and why. Durable state, not a status: the pull
 // commits its cursor past a refused op, so that content never arrives again
 // unless the granter writes the same path a second time.
@@ -191,8 +199,23 @@ export const WorkspaceSummary = z.object({
   // carries who shared it for honest copy. `ended` marks a revoked share.
   shareView: z
     .object({
-      shareId: z.string().min(1).max(200),
+      // Absent ONLY on a `damaged` marker whose stored record had no readable
+      // id. Never invented: a placeholder id is a lie the rest of the app
+      // could act on. A marker WITHOUT one is damaged by definition — every
+      // live-share action (refresh, dismiss) is addressed by share id, so a
+      // marker that cannot name itself cannot be presented as a live share.
+      shareId: z.string().min(1).max(200).optional(),
       granterEmail: z.string().min(3).max(320).nullable(),
+      // The pinned level (#646). Absent ONLY when `damaged` says the stored
+      // grant could not be read. The banner states the level; it never
+      // decides anything with it.
+      access: SHARE_ACCESS.optional(),
+      // The stored grant is unreadable. The marker still stands, because a
+      // share view whose grant cannot be read must not present as an ordinary
+      // workspace: the restrictive stance is what fails closed. The shell
+      // keeps the view read-only, keeps the share surfaces hidden, skips the
+      // refresh it has no grant to pull with, and says so in the banner.
+      damaged: z.literal(true).optional(),
       ended: z.boolean().optional(),
       skippedOps: ShareSkippedOpsSummary.optional(),
     })
@@ -203,9 +226,22 @@ export const WorkspaceSummary = z.object({
   shareMounts: z
     .array(
       z.object({
+        // Both REQUIRED, damaged or not: they are what the Remove action is
+        // addressed by (`shareId`) and what names the folder on disk
+        // (`label`). A row that cannot supply them cannot be acted on, so it
+        // is the one shape that is dropped instead of kept.
         shareId: z.string().min(1).max(200),
         label: z.string().min(1).max(64),
         granterEmail: z.string().min(3).max(320).nullable(),
+        // The pinned level (#646), so a mount the relay no longer lists can
+        // still say what it grants. Absent ONLY when `damaged` says the
+        // stored grant could not be read.
+        access: SHARE_ACCESS.optional(),
+        // The stored grant is unreadable. The row is KEPT so the mount stays
+        // removable: its folder is on disk, and dropping the row would strand
+        // it with no way back through the UI. It shows no level, refreshes
+        // nothing, and says what happened.
+        damaged: z.literal(true).optional(),
         ended: z.boolean().optional(),
         skippedOps: ShareSkippedOpsSummary.optional(),
       }),
@@ -2547,6 +2583,7 @@ export type CloudJoinWorkspaceResult = z.infer<typeof CloudJoinWorkspaceResult>;
 export const RelayShareSelector = z.object({
   paths: z.array(PATH_STRING).max(100),
   versionId: z.string().min(1).max(128).nullable(),
+  access: SHARE_ACCESS,
 });
 export type RelayShareSelector = z.infer<typeof RelayShareSelector>;
 
@@ -2559,7 +2596,11 @@ export const RelayShareGrantedRow = z.object({
   // account yet); the recipientEmail carries who it was shared with (PR 18).
   recipientUserId: z.string().min(1).max(256).nullable(),
   recipientEmail: EMAIL_STRING.nullable(),
-  selector: RelayShareSelector,
+  // null when the relay could not read this row's stored selector. The row
+  // stays listed so ending the share remains possible; it states the damage
+  // rather than a level nobody granted (#646).
+  selector: RelayShareSelector.nullable(),
+  damaged: z.literal(true).optional(),
   createdAtMs: z.number().int().nonnegative(),
   revokedAtMs: z.number().int().nonnegative().nullable(),
   shareCode: z.string().min(1).max(4096),
@@ -2572,7 +2613,9 @@ export type RelayShareGrantedRow = z.infer<typeof RelayShareGrantedRow>;
 export const RelayShareReceivedRow = z.object({
   shareId: SHARE_ID,
   granterEmail: EMAIL_STRING.nullable(),
-  selector: RelayShareSelector,
+  // null when the relay could not read this row's stored selector (#646).
+  selector: RelayShareSelector.nullable(),
+  damaged: z.literal(true).optional(),
   createdAtMs: z.number().int().nonnegative(),
   shareCode: z.string().min(1).max(4096),
 });
@@ -2591,6 +2634,11 @@ export const CreateRelaySharePayload = z.object({
   recipientEmail: EMAIL_STRING,
   paths: z.array(PATH_STRING).min(1).max(100).optional(),
   versionId: z.string().min(1).max(128).optional(),
+  // Required (#646). There is no default at either boundary: the relay
+  // refuses a create that names no level, and so does this one. A caller that
+  // sends nothing has not chosen `view`, it has failed to say what the share
+  // grants.
+  access: SHARE_ACCESS,
 });
 export type CreateRelaySharePayload = z.infer<typeof CreateRelaySharePayload>;
 
@@ -2861,7 +2909,11 @@ export type MountSharePayload = z.infer<typeof MountSharePayload>;
 export const ShareMountStatusRow = z.object({
   shareId: SHARE_ID,
   label: z.string().min(1).max(64),
-  status: z.enum(["updated", "unchanged", "ended"]),
+  // "damaged": this mount's stored pin cannot be read, so it will never
+  // refresh again. Permanent, like an ended share, and reported per ROW so
+  // one damaged record cannot stop the other mounts refreshing — which it
+  // could not do at all until this schema carried the word.
+  status: z.enum(["updated", "unchanged", "ended", "damaged"]),
   changedPaths: z.number().int().nonnegative(),
 });
 export type ShareMountStatusRow = z.infer<typeof ShareMountStatusRow>;
@@ -2890,6 +2942,12 @@ export type UnmountSharePayload = z.infer<typeof UnmountSharePayload>;
 
 export const UnmountShareResult = z.object({
   workspace: WorkspaceSummary,
+  // The registry record was removed but its folder was LEFT on disk, because
+  // the record's label is not one this app would ever materialize through.
+  // Removing a folder named by an unusable label is exactly what the label
+  // validator exists to prevent, so the record is cleaned up and the folder
+  // is reported instead of touched (#646).
+  folderLeft: z.literal(true).optional(),
 });
 export type UnmountShareResult = z.infer<typeof UnmountShareResult>;
 

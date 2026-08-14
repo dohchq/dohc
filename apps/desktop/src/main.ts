@@ -342,6 +342,15 @@ import {
 } from "./workspaces/WorkspaceRegistry";
 import type { JoinedSharedChannel } from "./workspaces/registryStore";
 import {
+  shareViewGranterEmail,
+  shareViewIsPresent,
+} from "./workspaces/shareViewMarker";
+import { pathShareLanes } from "./workspaces/relayShareLanes";
+import {
+  workspaceSummariesFrom,
+  workspaceSummaryFor,
+} from "./workspaces/workspaceSummaryProjection";
+import {
   assertSharedChannelWritable,
   createKeyedSerializer,
   createPassCoverageReporter,
@@ -437,7 +446,10 @@ import {
   mountStoreWorkspaceIdFor,
   relayTargetForShareMount,
   refreshShareMountOnce,
+  classifyShareMountRefreshError,
   removeMountFolder,
+  shareMountResultRow,
+  validMountLabel,
 } from "./workspaces/shareMounts";
 import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
 import {
@@ -697,7 +709,15 @@ function requireWorkspace(workspaceId: string) {
 // renderer also hides its edit affordances; this main-process layer is the
 // enforcement that cannot be skipped.
 function sharedViewOf(workspaceId: string): { granterEmail: string | null } | null {
-  return findWorkspace(workspaceId)?.shareView ?? null;
+  const entry = findWorkspace(workspaceId);
+  if (!entry) return null;
+  // PRESENCE, not truthiness. A stored `shareView: null` is a share view
+  // whose marker lost its value, not a workspace that never had one, and
+  // `?? null` read the two as the same thing — which made someone else's
+  // files writable here (#646). Only an ABSENT field is an ordinary
+  // workspace; anything else stays refused, readable marker or not.
+  if (!shareViewIsPresent(entry.shareView)) return null;
+  return { granterEmail: shareViewGranterEmail(entry.shareView) };
 }
 
 function assertWritableWorkspace(workspace: { workspaceId: string }): void {
@@ -1135,7 +1155,7 @@ function notifyCloudSessionChangedWithKey(
 }
 
 function workspaceSummaries(): WorkspaceSummary[] {
-  return listWorkspaces().map((workspace) => WorkspaceSummary.parse(workspace));
+  return workspaceSummariesFrom(listWorkspaces());
 }
 
 function nativeWorkspaceSummaries(): WorkspaceSummary[] {
@@ -1752,7 +1772,9 @@ async function mcpRuntimeConfigFor(rootPath: string): Promise<{
   // Defense in depth: managed agent runs are already refused on shared views,
   // but if a runtime MCP is ever spawned for one it must be the read-only
   // profile — never the write-capable server.
-  const config = mcpConfigFor(rootPath, { readOnly: !!workspace?.shareView });
+  const config = mcpConfigFor(rootPath, {
+    readOnly: shareViewIsPresent(workspace?.shareView),
+  });
   const env = mcpCloudEnvironment({
     workspace,
     credentials: cachedCredentials,
@@ -1868,7 +1890,9 @@ const activity = createWorkspaceActivity(notifyRenderer, {
       {
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
-        shareView: !!findWorkspace(workspace.workspaceId)?.shareView,
+        shareView: shareViewIsPresent(
+          findWorkspace(workspace.workspaceId)?.shareView,
+        ),
       },
       hooks,
       requireEngineSessions(),
@@ -4152,7 +4176,7 @@ function registerIpcHandlers(
       // the renderer. Sharing itself is offered only on synced, non-shared
       // workspaces (a share needs a relay-side workspace to grant from).
       const registryEntry = findWorkspace(input.workspaceId);
-      const isSharedView = !!registryEntry?.shareView;
+      const isSharedView = shareViewIsPresent(registryEntry?.shareView);
       // Share-mount paths (shared-with-me/…) are a read-only projection of
       // someone else's files: no create/rename/delete/import/share — main
       // owns the menu, so the reduction cannot be bypassed by the renderer.
@@ -4988,7 +5012,7 @@ function registerIpcHandlers(
       );
     }
     const entry = requireWorkspace(input.workspaceId);
-    if (entry.shareView) {
+    if (shareViewIsPresent(entry.shareView)) {
       throw new Error("This is a shared view — only the original workspace can be shared.");
     }
     const { remote } = await remoteForWorkspace(input.workspaceId);
@@ -4998,6 +5022,7 @@ function registerIpcHandlers(
         method: "POST",
         body: JSON.stringify({
           recipientEmail: input.recipientEmail,
+          access: input.access,
           ...(input.paths ? { paths: input.paths } : {}),
           ...(input.versionId ? { versionId: input.versionId } : {}),
         }),
@@ -5021,16 +5046,15 @@ function registerIpcHandlers(
       received?: Array<Record<string, unknown>>;
     }>("/sync/shares");
     const relayUrl = cachedCredentials?.relayUrl;
-    // Chat-channel grants (MU-C4) are listed through listChatChannelShares;
-    // this surface stays the path/version share manager (grant AND receive).
-    const notChatChannel = (row: Record<string, unknown>) =>
-      (row.selector as { kind?: unknown } | undefined)?.kind !== "chat-channel";
     const withCode = (row: Record<string, unknown>) => ({
       ...row,
       shareCode: buildShareCode({ shareId: String(row.shareId), relayUrl: relayUrl! }),
     });
-    const granted = (result.granted ?? []).filter(notChatChannel).map(withCode);
-    const received = (result.received ?? []).filter(notChatChannel).map(withCode);
+    // The two managers split this listing; see relayShareLanes for why a
+    // damaged row stays in the granted lane.
+    const lanes = pathShareLanes(result);
+    const granted = lanes.granted.map(withCode);
+    const received = lanes.received.map(withCode);
     return ListRelaySharesResult.parse({ granted, received });
   });
 
@@ -5280,7 +5304,7 @@ function registerIpcHandlers(
       "Chats",
     );
     const entry = requireWorkspace(input.workspaceId);
-    if (entry.shareView) {
+    if (shareViewIsPresent(entry.shareView)) {
       throw new Error("Shared views are read-only — join channels from a workspace you own.");
     }
     await warmCredentialCache();
@@ -5356,7 +5380,7 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = DismissShareSkipsPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    if (input.shareId === undefined && !workspace.shareView) {
+    if (input.shareId === undefined && !shareViewIsPresent(workspace.shareView)) {
       throw new Error("This workspace is not a shared view.");
     }
     if (
@@ -5537,7 +5561,10 @@ function registerIpcHandlers(
       );
     }
     notifyRenderer();
-    const summary = WorkspaceSummary.parse(findWorkspace(created.workspaceId));
+    // Through the PROJECTION, not a raw parse: the level lives under the
+    // record's pinned grant, and a raw parse would strip it and hand the
+    // renderer a fresh share view with no level to state.
+    const summary = workspaceSummaryFor(requireWorkspace(created.workspaceId));
     return OpenSharedViewResult.parse({ workspace: summary });
   });
 
@@ -5759,7 +5786,10 @@ function registerIpcHandlers(
       refreshNativeWorkspaceSurfaces();
       notifyRenderer();
       return MountShareResult.parse({
-        workspace: WorkspaceSummary.parse(findWorkspace(workspace.workspaceId)),
+        // Through the PROJECTION: a raw registry record nests each mount's
+        // level under its pinned grant, so a raw parse cannot satisfy the
+        // wire schema and every mount would fail here and roll back.
+        workspace: workspaceSummaryFor(requireWorkspace(workspace.workspaceId)),
         mount: {
           shareId: mount.shareId,
           label: mount.label,
@@ -5804,9 +5834,25 @@ function registerIpcHandlers(
     const results: Array<{
       shareId: string;
       label: string;
-      status: "updated" | "unchanged" | "ended";
+      status: "updated" | "unchanged" | "ended" | "damaged";
       changedPaths: number;
     }> = [];
+    // Every row goes through the bounded builder. A record whose identity the
+    // wire schema cannot carry is dropped from the REPORT rather than allowed
+    // to fail the parse at the end and discard every other mount's status.
+    const pushMountResult = (
+      mount: { shareId: unknown; label: unknown },
+      status: "updated" | "unchanged" | "ended" | "damaged",
+      changedPaths: number,
+    ): void => {
+      const row = shareMountResultRow({
+        shareId: mount.shareId,
+        label: mount.label,
+        status,
+        changedPaths,
+      });
+      if (row) results.push(row);
+    };
     if (mounts.length === 0) {
       return RefreshShareMountsResult.parse({ results });
     }
@@ -5821,7 +5867,7 @@ function registerIpcHandlers(
     try {
     for (const mount of mounts) {
       if (mount.ended) {
-        results.push({ shareId: mount.shareId, label: mount.label, status: "ended", changedPaths: 0 });
+        pushMountResult(mount, "ended", 0);
         continue;
       }
       // Offline, signed out, signed into a DIFFERENT relay, or signed into a
@@ -5835,7 +5881,7 @@ function registerIpcHandlers(
           credentials.email != null &&
           credentials.email !== mount.recipientEmail)
       ) {
-        results.push({ shareId: mount.shareId, label: mount.label, status: "unchanged", changedPaths: 0 });
+        pushMountResult(mount, "unchanged", 0);
         continue;
       }
       try {
@@ -5880,34 +5926,16 @@ function registerIpcHandlers(
             current.map((m) => (m.shareId === mount.shareId ? { ...m, ended: true } : m)),
           );
         }
-        results.push({
-          shareId: mount.shareId,
-          label: mount.label,
-          status: outcome.status,
-          changedPaths: outcome.changedPaths,
-        });
+        pushMountResult(mount, outcome.status, outcome.changedPaths);
       } catch (error) {
         // An expired session must SURFACE, not read as "refreshed, nothing
         // new" — a manual Refresh Share would otherwise report success
         // forever while every pull 401s (codex P2).
-        if (error instanceof RelayUnauthorizedError) {
-          throw new Error(
-            "Your dohc Cloud session expired. Sign in again, then refresh shares.",
-          );
-        }
-        // A damaged pin is permanent, like the expired session above: no
-        // later refresh repairs it, and the relay must not be asked for a
-        // replacement scope. Reporting "unchanged" would hide it forever.
-        if (error instanceof SharePinInvalidError) {
-          throw new Error(
-            `The record for the share in "${mount.label}" is damaged, so it can't ` +
-              "refresh safely. Remove that share, then add it again.",
-          );
-        }
-        // One mount's network failure must not stop the others; report it
-        // as unchanged and move on.
+        const verdict = classifyShareMountRefreshError(error);
+        if (verdict.kind === "abort") throw new Error(verdict.message);
+        // One mount's failure must not stop the others.
         console.error(`[desktop] share-mount refresh failed for ${mount.label}:`, error);
-        results.push({ shareId: mount.shareId, label: mount.label, status: "unchanged", changedPaths: 0 });
+        pushMountResult(mount, verdict.status, 0);
       }
     }
     return RefreshShareMountsResult.parse({ results });
@@ -5934,7 +5962,15 @@ function registerIpcHandlers(
     await closeRelayTransportWorkspace(
       mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId),
     );
-    await removeMountFolder(workspace.rootPath, mount.label);
+    // A record whose label this app would never materialize through gets
+    // RECORD cleanup only. Deleting a folder named by an unusable label is
+    // the exact move the validator exists to refuse, so the record goes and
+    // the folder is reported, never touched. Without this the record could
+    // not be removed at all: the folder path would throw and strand it.
+    const folderRemovable = validMountLabel(mount.label);
+    if (folderRemovable) {
+      await removeMountFolder(workspace.rootPath, mount.label);
+    }
     const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
     setWorkspaceShareMounts(
       workspace.workspaceId,
@@ -5943,7 +5979,8 @@ function registerIpcHandlers(
     refreshNativeWorkspaceSurfaces();
     notifyRenderer();
     return UnmountShareResult.parse({
-      workspace: WorkspaceSummary.parse(findWorkspace(workspace.workspaceId)),
+      workspace: workspaceSummaryFor(requireWorkspace(workspace.workspaceId)),
+      ...(folderRemovable ? {} : { folderLeft: true as const }),
     });
     });
   });
@@ -8009,7 +8046,7 @@ function registerIpcHandlers(
     const input = AcceptDmPayload.parse(payload);
     const { workspace } = await requireEngineCapture(input.workspaceId, "Chats");
     const entry = requireWorkspace(input.workspaceId);
-    if (entry.shareView) {
+    if (shareViewIsPresent(entry.shareView)) {
       throw new Error(
         "Shared views are read-only — add this conversation to a workspace you own.",
       );

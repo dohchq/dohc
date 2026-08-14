@@ -19,7 +19,7 @@ const ACTIVE_SHARE = {
   workspaceId: "ws-remote",
   recipientUserId: "friend",
   recipientEmail: "friend@dohc.test",
-  selector: { paths: ["docs"], versionId: null },
+  selector: { paths: ["docs"], versionId: null, access: "view" },
   createdAtMs: 1000,
   revokedAtMs: null,
   shareCode: "dohc-share:share-1:http://relay.test",
@@ -55,6 +55,52 @@ describe("SharedByMeList", () => {
     // After the refresh the row reads as ended, with no revoke affordance.
     await screen.findByText("Ended — was shared with friend@dohc.test");
     expect(screen.queryByTestId("shared-by-me-revoke")).toBeNull();
+  });
+
+  // Every row carries its level (#646). A badge shown only on some rows
+  // teaches the reader nothing when it is absent.
+  it("shows the level on every row, at whatever level the share carries", async () => {
+    bridgeMock.listRelayShares.mockResolvedValue({
+      granted: [
+        ACTIVE_SHARE,
+        {
+          ...ACTIVE_SHARE,
+          shareId: "share-2",
+          selector: { paths: ["notes"], versionId: null, access: "comment" },
+        },
+        {
+          ...ACTIVE_SHARE,
+          shareId: "share-3",
+          selector: { paths: ["plans"], versionId: null, access: "edit" },
+        },
+      ],
+    });
+    render(<SharedByMeList />);
+
+    const badges = await screen.findAllByTestId("share-access-badge");
+    expect(badges.map((badge) => badge.textContent)).toEqual([
+      "View",
+      "Comment",
+      "Edit",
+    ]);
+  });
+
+  // A row the relay cannot read has no code worth handing out: the
+  // recipient's own open would refuse it. Ending the share must survive,
+  // because a share you cannot end is worse than one you cannot copy.
+  it("hides Copy code for an unreadable row but keeps End share", async () => {
+    bridgeMock.listRelayShares.mockResolvedValue({
+      granted: [{ ...ACTIVE_SHARE, selector: null, damaged: true }],
+    });
+    render(<SharedByMeList />);
+
+    await screen.findByTestId("shared-by-me-row");
+    expect(
+      screen.queryByTestId("shared-by-me-copy"),
+      "MUTATION: handing out a code for a share the relay cannot read",
+    ).toBeNull();
+    expect(screen.queryByTestId("shared-by-me-revoke")).not.toBeNull();
+    expect(screen.queryByTestId("share-access-badge")).toBeNull();
   });
 
   it("copies the share code for re-sending", async () => {

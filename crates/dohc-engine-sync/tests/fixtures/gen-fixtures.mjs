@@ -55,7 +55,12 @@ const {
 } = await import(
   pathToFileURL(join(repoRoot, "packages/security-contract/src/index.ts")).href
 );
-const { MAX_SHARE_VERSION_ID_CHARS, isValidShareVersionId } = await import(
+const {
+  MAX_SHARE_VERSION_ID_CHARS,
+  SHARE_ACCESS_VALUES,
+  isShareAccessValue,
+  isValidShareVersionId,
+} = await import(
   pathToFileURL(
     join(repoRoot, "packages/security-contract/src/shareSelector.ts"),
   ).href
@@ -145,6 +150,28 @@ const versionIdInputs = [
   "\u{1f600}".repeat(MAX_SHARE_VERSION_ID_CHARS / 2 + 1),
 ];
 
+// The share-access level rule, asked of the same oracle. Both sides must
+// accept EXACTLY the three lowercase values the relay issues and refuse
+// everything else — case variants, padding, and unrelated strings included
+// — so a widened or narrowed rule on either side moves a vector here.
+const shareAccessInputs = [
+  "view",
+  "comment",
+  "edit",
+  "View",
+  "COMMENT",
+  "Edit",
+  " view",
+  "view ",
+  "\tview",
+  "edit\n",
+  "",
+  "viewer",
+  "read-write",
+  "read-only",
+  "none",
+];
+
 const fixture = {
   wireIds: {
     agent: AGENT_CHANNEL_WIRE_ID,
@@ -160,6 +187,13 @@ const fixture = {
       // it reports and not only on the verdict. `String.length` counts UTF-16
       // code units, so one astral character spends two.
       utf16Length: value.length,
+    })),
+  },
+  shareAccess: {
+    values: [...SHARE_ACCESS_VALUES],
+    vectors: shareAccessInputs.map((value) => ({
+      value,
+      valid: isShareAccessValue(value),
     })),
   },
 };

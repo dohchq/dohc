@@ -1,7 +1,8 @@
 use dohc_engine_domain::{AGENT_CHANNEL_WIRE_ID, GENERAL_CHANNEL_WIRE_ID};
 use dohc_engine_files::policy::{PathClassification, classify_engine_file_path};
 use dohc_engine_sync::{
-    MAX_SHARE_VERSION_ID_CHARS, PathClass, classify_share_path, is_valid_share_version_id,
+    MAX_SHARE_VERSION_ID_CHARS, PathClass, ShareAccess, classify_share_path,
+    is_valid_share_version_id,
 };
 use serde::Deserialize;
 
@@ -11,6 +12,21 @@ struct Fixture {
     wire_ids: WireIds,
     vectors: Vec<Vector>,
     share_version_ids: ShareVersionIds,
+    share_access: ShareAccessFixture,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareAccessFixture {
+    values: Vec<String>,
+    vectors: Vec<ShareAccessVector>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareAccessVector {
+    value: String,
+    valid: bool,
 }
 
 #[derive(Deserialize)]
@@ -179,6 +195,44 @@ fn generated_ts_share_version_id_rule_matches_the_rust_twin() {
             vector.value.encode_utf16().count(),
             vector.utf16_length,
             "the version-id length unit disagrees with the TypeScript oracle for {:?}",
+            vector.value
+        );
+    }
+}
+
+/// The file-share access level (#646, S7): both sides must accept EXACTLY
+/// `view`, `comment`, `edit` and refuse everything else, including the case
+/// variants and padded values a lax parser would let through. This holds the
+/// Rust twin (`ShareAccess::parse`) to the TypeScript oracle
+/// (`isShareAccessValue` in `packages/security-contract/src/shareSelector.ts`)
+/// vector by vector — a level added, removed, or renamed on either side moves
+/// a vector and fails here.
+#[test]
+fn generated_ts_share_access_rule_matches_the_rust_twin() {
+    let fixture = fixture();
+    // The level SET, not just the parse rule: each value the TypeScript side
+    // offers must name a distinct Rust variant, in the same order. A level
+    // added on one side only cannot pass this.
+    let parsed: Vec<Option<ShareAccess>> = fixture
+        .share_access
+        .values
+        .iter()
+        .map(|value| ShareAccess::parse(value))
+        .collect();
+    assert_eq!(
+        parsed,
+        vec![
+            Some(ShareAccess::View),
+            Some(ShareAccess::Comment),
+            Some(ShareAccess::Edit)
+        ],
+        "the accepted level set must be the same three levels, in the same order, on both sides"
+    );
+    for vector in fixture.share_access.vectors {
+        assert_eq!(
+            ShareAccess::parse(&vector.value).is_some(),
+            vector.valid,
+            "the share access rule disagrees with the TypeScript oracle for {:?}",
             vector.value
         );
     }

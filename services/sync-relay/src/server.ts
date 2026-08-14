@@ -15,6 +15,7 @@ import {
   validateChatChannelShareSelector,
   validateShareSelector,
   type AnyShareSelector,
+  type ChatChannelShareSelector,
   type ChatShareChannelKind,
   type ChatShareThreadResolver,
 } from "./shareFilter";
@@ -104,6 +105,27 @@ const MAX_EMAIL_CHARS = 320;
 const MAX_SHARE_ID_CHARS = 128;
 const MAX_IDENTITY_BYTES = 512;
 
+// The selector KIND from a stored row, without trusting the rest of it. A
+// row can be damaged in every other dimension and still say honestly which
+// manager owns it; `undefined` means even that could not be read.
+function storedSelectorKind(
+  selectorJson: string,
+): { selectorKind: "chat-channel" } | Record<string, never> {
+  try {
+    const parsed: unknown = JSON.parse(selectorJson);
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      (parsed as { kind?: unknown }).kind === "chat-channel"
+    ) {
+      return { selectorKind: "chat-channel" };
+    }
+  } catch {
+    // Unreadable JSON names no kind.
+  }
+  return {};
+}
+
 export function createSyncRelayHandler({
   storage,
   resolveActor,
@@ -172,6 +194,16 @@ export function createSyncRelayHandler({
     return channelKind === "agent" || channelKind === null;
   };
 
+  // Whether a recipient may append through this selector at all. A read-write
+  // chat-channel grant may. A path/version selector may not, at ANY level
+  // (#646): view, comment, and edit all refuse here with the same
+  // shareNotAppendable() code, because a level-specific refusal would tell a
+  // probing recipient the selector's level. PR2 opens comment and edit.
+  const selectorAcceptsAppends = (
+    selector: AnyShareSelector,
+  ): selector is ChatChannelShareSelector =>
+    isChatChannelSelector(selector) && selector.access === "read-write";
+
   // Loads a share for RECIPIENT access. Every failure mode — no such share,
   // revoked share, caller is not the recipient, granter lost the workspace —
   // is the same generic 404 the relay uses for absent workspaces, so probing
@@ -237,7 +269,20 @@ export function createSyncRelayHandler({
     const selector = parseAnyShareSelectorJson(share.selectorJson);
     const base = {
       shareId: share.shareId,
-      selector: selector ?? { paths: [], versionId: null },
+      // An unreadable row says so. It does NOT get a stand-in selector: a
+      // fabricated `view` would state a level nobody granted, on a row whose
+      // own reads answer 404. The row stays listed because it is the
+      // caller's own share and ending it must remain possible — the reverse
+      // path is the invariant here, and listing it reveals nothing the
+      // caller did not already have.
+      selector,
+      // The KIND survives the damage when it can be read at all. It is what
+      // routes a row to the right manager, and losing it made a damaged
+      // chat-channel grant surface in the path/version lists as an unreadable
+      // path share. A kind that cannot be read is not invented.
+      ...(selector
+        ? {}
+        : { damaged: true as const, ...storedSelectorKind(share.selectorJson) }),
       createdAtMs: share.createdAtMs,
     };
     if (side === "granted") {
@@ -396,6 +441,9 @@ export function createSyncRelayHandler({
       //      access; a read-only member (and any path/version share) is
       //      REFUSED with an explicit 403 — the member legitimately knows the
       //      share exists, so this is a refusal, not a 404.
+      //      #646: a path/version selector is refused at EVERY level, with
+      //      one code. A level-specific refusal would tell a probing
+      //      recipient the selector's level. PR2 opens comment and edit.
       //   3. MU-C0 verified authorship: every authored chat op must claim the
       //      AUTHENTICATED pusher (assertChatAuthorship verifies it) — a
       //      member cannot forge a message or reaction as another member.
@@ -412,8 +460,7 @@ export function createSyncRelayHandler({
       if (route.route === "share-log" && request.method === "POST") {
         await claimPendingShares(actor.userId);
         const share = shareForRecipient(route.shareId, actor.userId);
-        if (!isChatChannelSelector(share.selector)) throw shareNotAppendable();
-        if (share.selector.access !== "read-write") throw shareNotAppendable();
+        if (!selectorAcceptsAppends(share.selector)) throw shareNotAppendable();
         const input = await readJsonObject(request);
         const originId = parseString(input.originId, "originId", MAX_ORIGIN_ID_CHARS);
         if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
@@ -468,8 +515,7 @@ export function createSyncRelayHandler({
           guard: () => {
             const fresh = shareForRecipient(route.shareId, actor.userId);
             if (fresh.workspaceId !== share.workspaceId) throw notFound();
-            if (!isChatChannelSelector(fresh.selector)) throw shareNotAppendable();
-            if (fresh.selector.access !== "read-write") throw shareNotAppendable();
+            if (!selectorAcceptsAppends(fresh.selector)) throw shareNotAppendable();
           },
         });
         return jsonResponse({
@@ -652,6 +698,7 @@ export function createSyncRelayHandler({
           const validation = validateShareSelector({
             paths: input.paths,
             versionId: input.versionId,
+            access: input.access,
           });
           if (!validation.ok) {
             throw relayHttpError(RELAY_ERRORS[validation.code], validation.message);

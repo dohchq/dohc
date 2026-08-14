@@ -835,7 +835,7 @@ async fn every_relay_rpc_round_trips_through_dispatch_against_fake_transport() {
         json!({
             "workspaceId": workspace_id,
             "shareId": "roundtrip-view",
-            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" },
+            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version", "access": "view" },
         }),
     )
     .await;
@@ -1479,7 +1479,7 @@ async fn every_new_rpc_refuses_a_cross_workspace_handle_before_transport() {
         ),
         (
             "share.view.pull",
-            json!({ "workspaceId": "other", "shareId": "share", "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" } }),
+            json!({ "workspaceId": "other", "shareId": "share", "grantedSelector": { "paths": ["notes"], "versionId": "shared-version", "access": "view" } }),
         ),
     ];
     for (index, (method, params)) in methods.into_iter().enumerate() {
@@ -1761,7 +1761,7 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
         json!({
             "workspaceId": workspace_id,
             "shareId": share_id,
-            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" },
+            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version", "access": "view" },
         }),
     )
     .await;
@@ -1840,12 +1840,20 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
     assert_eq!(cursor, "2");
 }
 
-/// `grantedSelector` has exactly two unscoped-looking wire states — absent,
-/// and an explicit `null` that a permissive `Option` would read as absent
-/// while looking declared. Both are refused BEFORE the relay is called, so a
-/// pull that enforces no containment cannot be requested at all.
+/// Four wire states a permissive parser would let through, all refused
+/// BEFORE the relay is called, so a pull that enforces no containment cannot
+/// be requested at all:
+///
+/// 1. `grantedSelector` absent.
+/// 2. `grantedSelector` explicitly `null` — what a permissive `Option` would
+///    read as absent while looking declared.
+/// 3. `access` absent (#646).
+/// 4. `access` naming a level this process cannot read (#646).
+///
+/// A grant whose level cannot be read is not a narrower grant, it is an
+/// unreadable one — see `ShareAccess::parse`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn share_view_pull_refuses_a_missing_or_null_granted_selector() {
+async fn share_view_pull_refuses_an_unreadable_granted_selector() {
     let workspace_id = "rpc-share-view-no-selector";
     let relay = FakeRelay::start(RelayState::default());
     let scratch = ScratchDir::new().expect("scratch");
@@ -1856,6 +1864,16 @@ async fn share_view_pull_refuses_a_missing_or_null_granted_selector() {
     let unscoped = [
         json!({ "workspaceId": workspace_id, "shareId": "share" }),
         json!({ "workspaceId": workspace_id, "shareId": "share", "grantedSelector": null }),
+        json!({
+            "workspaceId": workspace_id,
+            "shareId": "share",
+            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" },
+        }),
+        json!({
+            "workspaceId": workspace_id,
+            "shareId": "share",
+            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version", "access": "View" },
+        }),
     ];
     for params in unscoped {
         id += 1;
@@ -1917,7 +1935,7 @@ async fn share_view_pull_skips_a_malformed_entry_and_reports_the_skip() {
         json!({
             "workspaceId": workspace_id,
             "shareId": share_id,
-            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" },
+            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version", "access": "view" },
         }),
     )
     .await;
@@ -1977,7 +1995,7 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
         json!({
             "workspaceId": workspace_id,
             "shareId": share_id,
-            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" },
+            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version", "access": "view" },
         }),
     )
     .await;
@@ -2031,7 +2049,7 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
                 json!({
                     "workspaceId": workspace_id,
                     "shareId": share_id,
-                    "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" },
+                    "grantedSelector": { "paths": ["notes"], "versionId": "shared-version", "access": "view" },
                 }),
             ),
         )
@@ -2067,7 +2085,7 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
         json!({
             "workspaceId": workspace_id,
             "shareId": share_id,
-            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version" },
+            "grantedSelector": { "paths": ["notes"], "versionId": "shared-version", "access": "view" },
         }),
     )
     .await;

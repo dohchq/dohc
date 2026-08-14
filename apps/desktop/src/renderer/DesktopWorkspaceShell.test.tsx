@@ -72,7 +72,10 @@ import {
   graphChatOpenTarget,
   pendingHeadingTargetForOpen,
   resolveCanonicalDm,
+  goneMountProjections,
   runCanonicalDmNavigation,
+  shareRefreshSummary,
+  shareUnmountProjection,
   versionCompareOffCopy,
   type Workspace,
 } from "./DesktopWorkspaceShell";
@@ -629,7 +632,11 @@ const SHARE_STATUS = {
 };
 const SHARE_VIEW: Workspace = {
   ...WORKSPACE,
-  shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+  shareView: {
+    shareId: "share-1",
+    granterEmail: "granter@dohc.test",
+    access: "view",
+  },
 };
 
 // A bridge that answers the way MAIN answers for a shared view: the capture
@@ -2993,7 +3000,11 @@ describe("ui-state merge-on-load", () => {
     bridge.refreshSharedView = vi.fn(() => pull.promise);
     renderShell(bridge, {
       ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
     });
 
     // It survives that listing: nothing has said the file is gone yet.
@@ -3054,7 +3065,11 @@ describe("ui-state merge-on-load", () => {
     }));
     renderShell(bridge, {
       ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
     });
 
     const refused = await screen.findByTestId("shared-view-refused");
@@ -3115,7 +3130,11 @@ describe("ui-state merge-on-load", () => {
     // Mounts with NO skip record: the shell's boot snapshot is healthy.
     renderShell(bridge, {
       ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
     });
 
     const refused = await screen.findByTestId("shared-view-refused");
@@ -3173,6 +3192,7 @@ describe("ui-state merge-on-load", () => {
       shareView: {
         shareId: "share-1",
         granterEmail: "granter@dohc.test",
+        access: "view",
         skippedOps: SKIPPED_RECORD,
       },
     });
@@ -5380,8 +5400,196 @@ describe("active file sharing", () => {
     expect(bridge.createRelayShare).toHaveBeenCalledWith({
       workspaceId: "ws-shell-test",
       recipientEmail: "friend@dohc.test",
+      access: "view",
       paths: ["a.md"],
     });
+  });
+});
+
+// In PR1 every level grants exactly these rights, so the banner reads the
+// same at every level (#646). The per-level sentences the design specifies
+// ship with the rights they describe — PR2 for chat, PR3 for edits — because
+// a banner that promised chat now would lie until PR2 opens the append gate.
+// Removing a mount reprojects path-keyed UI state only when the folder
+// actually went. Record-only cleanup leaves the files exactly where they
+// were, so their tabs, pins and drafts must survive it.
+// The closing line a manual refresh leaves behind. Damage has to reach it:
+// reporting damage in a separate notice meant the summary replaced it, and
+// the user was left with "Shares refreshed" — the wrong half.
+describe("share refresh summary", () => {
+  const row = (over: Partial<{ label: string; status: string; changedPaths: number }>) => ({
+    label: "alex",
+    status: "updated" as const,
+    changedPaths: 0,
+    ...over,
+  }) as Parameters<typeof shareRefreshSummary>[0][number];
+
+  it("states damage and how to fix it, alongside the refresh result", () => {
+    const summary = shareRefreshSummary([
+      row({ label: "kim", changedPaths: 2 }),
+      row({ label: "alex", status: "damaged" }),
+    ]);
+    expect(summary).toContain("Shares refreshed — 2 files updated.");
+    expect(
+      summary,
+      "MUTATION: the summary replaces the damage notice and the fix is lost",
+    ).toContain("dohc can't read what alex grants. Remove it and add the share again.");
+    expect(summary).not.toContain("grant.");
+  });
+
+  it("says nothing about damage when every mount is healthy", () => {
+    const summary = shareRefreshSummary([row({ changedPaths: 1 })]);
+    expect(summary).toBe("Shares refreshed — 1 file updated.");
+    expect(summary).not.toContain("can't read");
+  });
+
+  it("keeps the ended report when damage is present too", () => {
+    const summary = shareRefreshSummary([
+      row({ label: "kim", status: "ended" }),
+      row({ label: "alex", status: "damaged" }),
+      row({ label: "sam", status: "damaged" }),
+    ]);
+    expect(summary).toContain("kim ended");
+    // Plural subjects take the plural verb; the singular case keeps "grants".
+    expect(
+      summary,
+      "MUTATION: two shares reading as one — \"what alex, sam grants\"",
+    ).toContain("what alex, sam grant. Remove them and add those shares again.");
+  });
+
+  it("says so when there is nothing to refresh", () => {
+    expect(shareRefreshSummary([])).toBe("No shares are added to this workspace.");
+  });
+});
+
+describe("share unmount projection", () => {
+  it("reprojects like a folder delete when the folder went", () => {
+    expect(
+      shareUnmountProjection({
+        shareId: "share-1",
+        label: "alex",
+        folderLeft: false,
+      }),
+    ).toEqual([
+      {
+        id: "unmount-share-1",
+        kind: "delete-folder",
+        path: "shared-with-me/alex",
+      },
+    ]);
+  });
+
+  // Both removal surfaces funnel here. The Explorer records the share id
+  // itself; Settings reports it through the files-changed callback. Either
+  // way the reload must not delete state for files still on disk.
+  it("skips a vanished mount whose folder stayed, whichever surface removed it", () => {
+    const previous = [
+      { shareId: "s-gone", label: "alex" },
+      { shareId: "s-left", label: "sam" },
+      { shareId: "s-stays", label: "kim" },
+    ];
+    const next = [{ shareId: "s-stays" }];
+    const foldersLeftBehind = new Set(["s-left"]);
+
+    expect(
+      goneMountProjections({ previous, next, foldersLeftBehind }),
+      "MUTATION: projecting a delete for a mount whose folder is still there",
+    ).toEqual([
+      {
+        id: "unmount-s-gone",
+        kind: "delete-folder",
+        path: "shared-with-me/alex",
+      },
+    ]);
+    // Consumed, so an unrelated later reload cannot read a stale exemption.
+    expect(foldersLeftBehind.has("s-left")).toBe(false);
+  });
+
+  it("projects nothing when nothing vanished", () => {
+    expect(
+      goneMountProjections({
+        previous: [{ shareId: "s-1", label: "alex" }],
+        next: [{ shareId: "s-1" }],
+        foldersLeftBehind: new Set(),
+      }),
+    ).toEqual([]);
+  });
+
+  it("projects nothing when the folder stayed", () => {
+    expect(
+      shareUnmountProjection({
+        shareId: "share-1",
+        label: "alex",
+        folderLeft: true,
+      }),
+      "MUTATION: deleting path-keyed state for files that are still on disk",
+    ).toEqual([]);
+  });
+});
+
+describe("shared view banner", () => {
+  for (const access of ["view", "comment", "edit"] as const) {
+    it(`tells a ${access} recipient the view is read-only, because in PR1 it is`, async () => {
+      const bridge = makeShareBridge();
+      renderShell(bridge, {
+        ...SHARE_VIEW,
+        shareView: {
+          shareId: "share-1",
+          granterEmail: "sam@dohc.test",
+          access,
+        },
+      });
+
+      const banner = await screen.findByTestId("shared-view-banner");
+      expect(banner.textContent, access).toContain(
+        "Shared view from sam@dohc.test — read-only. Ask sam@dohc.test for changes.",
+      );
+      // MUTATION: shipping the PR2 sentences early would promise chat rights
+      // the relay's append route still refuses at every level.
+      expect(banner.textContent, access).not.toContain("You can chat about");
+      expect(banner.textContent, access).not.toContain("You can edit these files");
+    });
+  }
+});
+
+// A share view whose stored grant cannot be read keeps its RESTRICTIVE
+// marker (#646). Dropping it would present someone else's files as an
+// ordinary writable workspace — damage failing OPEN, which is the one
+// direction this must never fail in.
+describe("shared view with an unreadable grant", () => {
+  const damaged = {
+    ...SHARE_VIEW,
+    shareView: {
+      shareId: "share-1",
+      granterEmail: "sam@dohc.test",
+      damaged: true as const,
+    },
+  };
+
+  it("keeps the read-only stance and says what happened", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, damaged);
+
+    const banner = await screen.findByTestId("shared-view-banner");
+    expect(banner.textContent).toContain(
+      "dohc can't read what this share grants. Open the share again to restore it.",
+    );
+    // No level is stated, because none could be read.
+    expect(banner.textContent).not.toContain("read-only. Ask");
+  });
+
+  // There is no grant to pull with, so the refresh is skipped rather than
+  // fired and failed. Offering it would promise a recovery it cannot do.
+  it("does not offer or fire a refresh", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, damaged);
+
+    await screen.findByTestId("shared-view-banner");
+    expect(
+      screen.queryByTestId("shared-view-refresh"),
+      "MUTATION: a share with no readable grant must not offer a refresh",
+    ).toBeNull();
+    expect(bridge.refreshSharedView).not.toHaveBeenCalled();
   });
 });
 
@@ -6474,7 +6682,11 @@ describe("history page", () => {
     const user = userEvent.setup();
     renderShell(bridge, {
       ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
     });
 
     await user.click(screen.getByTestId("activity-history"));
@@ -6503,7 +6715,11 @@ describe("history page", () => {
     const user = userEvent.setup();
     renderShell(bridge, {
       ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
     });
 
     await user.click(screen.getByTestId("activity-history"));
@@ -6552,6 +6768,7 @@ describe("history page", () => {
       shareView: {
         shareId: "share-1",
         granterEmail: "granter@dohc.test",
+        access: "view",
         ended: true,
       },
     });

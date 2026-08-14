@@ -2325,6 +2325,19 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: ShareViewParams = parse(params)?;
+        // Parsed BEFORE the relay round trip: a grant whose level this
+        // process cannot read must never pin (#646) — refusing early is the
+        // same posture as every other unreadable-field refusal here.
+        let access = dohc_engine_sync::ShareAccess::parse(&params.granted_selector.access)
+            .ok_or_else(|| {
+                // Names the constraint and the accepted set, like the relay's
+                // own refusal: the caller is an agent reading this error, and
+                // "unknown share access" told it nothing it could act on.
+                wire(
+                    ErrorCode::InvalidParams,
+                    r#"access must be "view", "comment", or "edit""#,
+                )
+            })?;
         let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let outcome = self
@@ -2335,7 +2348,11 @@ impl EngineService {
                 RelayOperation::PullShareView {
                     workspace_id: open.workspace_id.clone(),
                     share_id: params.share_id,
-                    granted: params.granted_selector.into(),
+                    granted: dohc_engine_sync::ShareGrant {
+                        paths: params.granted_selector.paths,
+                        version_id: params.granted_selector.version_id,
+                        access,
+                    },
                 },
                 "share.view.pull",
             )
@@ -8811,15 +8828,11 @@ struct GrantedSelectorParams {
     paths: Vec<String>,
     #[serde(default)]
     version_id: Option<String>,
-}
-
-impl From<GrantedSelectorParams> for dohc_engine_sync::ShareGrant {
-    fn from(params: GrantedSelectorParams) -> Self {
-        Self {
-            paths: params.paths,
-            version_id: params.version_id,
-        }
-    }
+    // REQUIRED (#646 PR1): the level the caller pinned from the relay's own
+    // selector. No default here — a grant whose level cannot be read is not
+    // a narrower grant, it is an unreadable one, and `share_view_pull` below
+    // refuses it rather than substituting a default.
+    access: String,
 }
 
 #[derive(Deserialize)]

@@ -9,7 +9,11 @@ import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floo
 import type { SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import type { ShareMountRecord } from "./registryStore";
+import type { ShareViewSelector } from "./shareViewInfo";
+import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
+import { ShareMountStatusRow } from "../ipc/bridgeContract";
 import {
+  SharePinInvalidError,
   refreshSharedViewOnce,
   repairSharedViewProjection,
   type RefreshSharedViewOutcome,
@@ -138,8 +142,8 @@ export async function createMountDirectory(
 // because softening one into "grants everything" is exactly the widening this
 // containment exists to stop.
 export function assertMountableSelector(
-  selector: { paths: readonly string[]; versionId: string | null } | null,
-): asserts selector is { paths: readonly string[]; versionId: string | null } {
+  selector: ShareViewSelector | null,
+): asserts selector is ShareViewSelector {
   if (selector === null) {
     throw new Error(
       "This code is for a shared chat channel — join it from Chats instead of mounting it.",
@@ -180,6 +184,69 @@ export function relayTargetForShareMount(
     rootPath: mountRootFor(hostRoot, mount.label),
     shareMount: true,
   };
+}
+
+/**
+ * One refresh result row, built so the wire schema can always carry it.
+ *
+ * The loop used to push the registry's raw `shareId` and `label` and parse
+ * the whole array at the end, so ONE record with a 65-character label threw
+ * after every pull had already run — no row survived, and the user was told
+ * "Couldn't refresh shares." while the healthy mounts had in fact refreshed.
+ *
+ * Identity damage is contained exactly like grant damage: a row that cannot
+ * state its own identity is dropped from the report rather than allowed to
+ * take the whole report with it. Nothing is invented — a fabricated id or
+ * label would be a lie the UI could act on.
+ *
+ * Validated against the ACTUAL wire schema rather than a restatement of its
+ * bounds, because a restatement drifts and this function exists precisely to
+ * stop a row the schema refuses from reaching it.
+ */
+export function shareMountResultRow(input: {
+  shareId: unknown;
+  label: unknown;
+  status: "updated" | "unchanged" | "ended" | "damaged";
+  changedPaths: number;
+}): ShareMountStatusRow | null {
+  // A count that is not a number claims the minimum rather than carrying a
+  // value the schema refuses — NaN and Infinity both survive `Math.trunc`
+  // and would fail the final parse, which is the wholesale throw returning.
+  const changedPaths = Number.isFinite(input.changedPaths)
+    ? Math.max(0, Math.trunc(input.changedPaths))
+    : 0;
+  const parsed = ShareMountStatusRow.safeParse({
+    shareId: input.shareId,
+    label: input.label,
+    status: input.status,
+    changedPaths,
+  });
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * What one mount's refresh failure does to the REST of the refresh.
+ *
+ * Only a failure that makes every remaining pull pointless may abandon them.
+ * An expired session is that: nothing else can succeed until the user signs
+ * in. A damaged pin is not — it is permanent for ONE mount, and throwing it
+ * stopped healthy shares from refreshing at all.
+ *
+ * It gets a status of its own rather than "unchanged", because "unchanged"
+ * would hide a mount that can never refresh again behind a word that means
+ * everything is fine.
+ */
+export function classifyShareMountRefreshError(
+  error: unknown,
+): { kind: "abort"; message: string } | { kind: "row"; status: "damaged" | "unchanged" } {
+  if (error instanceof RelayUnauthorizedError) {
+    return {
+      kind: "abort",
+      message: "Your dohc Cloud session expired. Sign in again, then refresh shares.",
+    };
+  }
+  if (error instanceof SharePinInvalidError) return { kind: "row", status: "damaged" };
+  return { kind: "row", status: "unchanged" };
 }
 
 // One refresh pass for one mount: pull the share's filtered ops into the

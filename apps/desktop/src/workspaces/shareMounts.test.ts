@@ -1,3 +1,9 @@
+import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
+import {
+  RefreshShareMountsResult,
+  ShareMountStatusRow,
+} from "../ipc/bridgeContract";
+import { SharePinInvalidError } from "./sharedView";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises";
@@ -9,6 +15,8 @@ import {
 } from "../testing/shareViewLoopbackTransport";
 import {
   assertMountableSelector,
+  classifyShareMountRefreshError,
+  shareMountResultRow,
   createMountDirectory,
   mountLabelFor,
   mountRootFor,
@@ -23,7 +31,11 @@ import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStor
 // These tests drive the pull with the selector a mount record pins. No paths
 // selects the whole tracked workspace only WITH a version — no paths and no
 // version selects nothing at all, which the engine refuses.
-const PINNED_SELECTOR = { paths: [], versionId: "shared-version" };
+const PINNED_SELECTOR = {
+  paths: [],
+  versionId: "shared-version",
+  access: "view",
+} as const;
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
 
@@ -599,10 +611,18 @@ describe("refreshShareMountOnce", () => {
   it("refuses to mount a selector with no file content (chat-channel codes)", () => {
     expect(() => assertMountableSelector(null)).toThrow(/shared chat channel/);
     expect(() =>
-      assertMountableSelector({ paths: ["docs"], versionId: null }),
+      assertMountableSelector({
+        paths: ["docs"],
+        versionId: null,
+        access: "view",
+      }),
     ).not.toThrow();
     expect(() =>
-      assertMountableSelector({ paths: [], versionId: "main" }),
+      assertMountableSelector({
+        paths: [],
+        versionId: "main",
+        access: "comment",
+      }),
     ).not.toThrow();
   });
 
@@ -639,5 +659,193 @@ describe("removeMountFolder", () => {
     await expect(removeMountFolder(host, "..")).rejects.toThrow(
       /Invalid share mount label/,
     );
+  });
+});
+
+// One mount's permanent failure must stay ONE mount's failure. A damaged pin
+// used to throw out of the refresh loop, so a single damaged record stopped
+// every healthy share after it from refreshing at all.
+describe("share mount refresh failures", () => {
+  it("contains a damaged pin to its own row and keeps the loop going", () => {
+    expect(
+      classifyShareMountRefreshError(new SharePinInvalidError("share-1")),
+      "MUTATION: a damaged pin abandons every mount after it",
+    ).toEqual({ kind: "row", status: "damaged" });
+  });
+
+  it("does not hide a damaged mount behind unchanged", () => {
+    const verdict = classifyShareMountRefreshError(new SharePinInvalidError("s"));
+    expect(verdict.kind === "row" && verdict.status).not.toBe("unchanged");
+  });
+
+  // The one failure that DOES make every remaining pull pointless.
+  it("abandons the refresh only when the session expired", () => {
+    expect(classifyShareMountRefreshError(new RelayUnauthorizedError())).toEqual({
+      kind: "abort",
+      message: "Your dohc Cloud session expired. Sign in again, then refresh shares.",
+    });
+  });
+
+  it("reports an ordinary failure as unchanged and moves on", () => {
+    for (const error of [new Error("offline"), "nonsense", null]) {
+      expect(classifyShareMountRefreshError(error)).toEqual({
+        kind: "row",
+        status: "unchanged",
+      });
+    }
+  });
+});
+
+// The wire schema is the seam a status has to survive, and it is where the
+// mount handler bug hid too: main built a value the schema could not carry,
+// unit suites tested each side alone, and nothing drove one through the
+// other. A status main can emit but the result cannot parse is containment
+// that defeats itself at the boundary.
+describe("refresh result wire shape", () => {
+  const row = (status: string) => ({
+    shareId: "share-1",
+    label: "alex",
+    status,
+    changedPaths: 0,
+  });
+
+  it("carries every status the refresh loop can emit", () => {
+    for (const status of ["updated", "unchanged", "ended", "damaged"]) {
+      expect(
+        RefreshShareMountsResult.safeParse({ results: [row(status)] }).success,
+        `MUTATION: main emits ${status} but the wire schema drops the whole result`,
+      ).toBe(true);
+    }
+  });
+
+  it("still refuses a status nothing emits", () => {
+    expect(RefreshShareMountsResult.safeParse({ results: [row("invented")] }).success).toBe(
+      false,
+    );
+  });
+
+  // The classifier and the schema must agree: whatever the classifier can
+  // return as a row status has to be a status the result can carry.
+  it("carries whatever the classifier decides a row is", () => {
+    for (const error of [
+      new SharePinInvalidError("s"),
+      new Error("offline"),
+      null,
+    ]) {
+      const verdict = classifyShareMountRefreshError(error);
+      if (verdict.kind !== "row") continue;
+      expect(
+        RefreshShareMountsResult.safeParse({ results: [row(verdict.status)] }).success,
+        `MUTATION: the classifier returns ${verdict.status}, which the wire cannot carry`,
+      ).toBe(true);
+    }
+  });
+});
+
+// Identity damage is contained per ROW, like grant damage. The loop used to
+// push raw registry values and parse the whole array at the end, so one
+// record with a 65-character label threw AFTER every pull had run: no row
+// survived, and the user was told the refresh failed while the healthy
+// mounts had in fact refreshed.
+describe("share mount result rows", () => {
+  it("carries a row the schema can hold", () => {
+    expect(
+      shareMountResultRow({
+        shareId: "s-1",
+        label: "alex",
+        status: "updated",
+        changedPaths: 3,
+      }),
+    ).toEqual({ shareId: "s-1", label: "alex", status: "updated", changedPaths: 3 });
+  });
+
+  it("drops a row whose identity the schema cannot carry, and nothing else", () => {
+    for (const bad of [
+      { shareId: "s-1", label: "x".repeat(65) },
+      { shareId: "s-1", label: "" },
+      { shareId: "s-1", label: 7 },
+      { shareId: "", label: "alex" },
+      { shareId: null, label: "alex" },
+      { shareId: "s".repeat(201), label: "alex" },
+    ]) {
+      expect(
+        shareMountResultRow({ ...bad, status: "unchanged", changedPaths: 0 }),
+        `MUTATION: ${JSON.stringify(bad).slice(0, 40)} fails the whole refresh report`,
+      ).toBeNull();
+    }
+  });
+
+  // A count the schema cannot carry must not cost the mount its STATUS. The
+  // schema parse alone would drop the whole row, so the count is clamped
+  // first: the row survives, and it claims the minimum rather than a number
+  // nobody can trust.
+  it("keeps a mount's status when its changed count is unusable", () => {
+    for (const changedPaths of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      -4,
+      1.7,
+    ]) {
+      const row = shareMountResultRow({
+        shareId: "s-1",
+        label: "alex",
+        status: "damaged",
+        changedPaths,
+      });
+      expect(
+        row,
+        `MUTATION: ${String(changedPaths)} drops the row, losing the mount's status`,
+      ).not.toBeNull();
+      expect(row?.status).toBe("damaged");
+      // Derived from the SCHEMA, not from a restatement of its bounds.
+      expect(ShareMountStatusRow.safeParse(row).success).toBe(true);
+    }
+  });
+
+  // The bounds are the schema's, so the guard is checked against the schema
+  // rather than against numbers copied out of it.
+  it("returns only rows the wire schema accepts, for every identity shape", () => {
+    for (const identity of [
+      { shareId: "s-1", label: "alex" },
+      { shareId: "s-1", label: "x".repeat(64) },
+      { shareId: "s-1", label: "x".repeat(65) },
+      { shareId: "s".repeat(200), label: "alex" },
+      { shareId: "s".repeat(201), label: "alex" },
+      { shareId: "", label: "alex" },
+      { shareId: null, label: "alex" },
+      { shareId: "s-1", label: 7 },
+      { shareId: "s-1", label: undefined },
+    ]) {
+      const row = shareMountResultRow({
+        ...identity,
+        status: "unchanged",
+        changedPaths: 0,
+      });
+      const schemaAccepts = ShareMountStatusRow.safeParse({
+        ...identity,
+        status: "unchanged",
+        changedPaths: 0,
+      }).success;
+      expect(
+        row !== null,
+        `MUTATION: builder and schema disagree for ${JSON.stringify(identity).slice(0, 40)}`,
+      ).toBe(schemaAccepts);
+    }
+  });
+
+  // The seam rule: whatever this builder produces, the wire must carry.
+  it("produces rows the refresh result always parses", () => {
+    for (const status of ["updated", "unchanged", "ended", "damaged"] as const) {
+      const row = shareMountResultRow({
+        shareId: "s-1",
+        label: "alex",
+        status,
+        changedPaths: 1,
+      });
+      expect(RefreshShareMountsResult.safeParse({ results: [row] }).success, status).toBe(
+        true,
+      );
+    }
   });
 });

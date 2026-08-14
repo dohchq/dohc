@@ -191,6 +191,83 @@ import {
 // refuses every write to the reserved prefix regardless — but it uses the
 // same alias-normalizing predicate as main so a case-variant path arriving
 // from an agent/open flow ("Shared-With-Me/…") renders read-only too.
+// What a removed mount does to path-keyed UI state.
+//
+// A folder that went takes its tabs, pins and drafts with it — the same
+// reprojection an Explorer folder delete makes. A folder that STAYED must
+// take nothing: record cleanup left the files exactly where they were, and
+// projecting a delete over them would discard state for files the user still
+// has open.
+export function shareUnmountProjection(input: {
+  shareId: string;
+  label: string;
+  folderLeft: boolean;
+}): Array<{ id: string; kind: "delete-folder"; path: string }> {
+  if (input.folderLeft) return [];
+  return [
+    {
+      id: `unmount-${input.shareId}`,
+      kind: "delete-folder",
+      path: `shared-with-me/${input.label}`,
+    },
+  ];
+}
+
+// Which vanished mounts reproject, given the ones whose FOLDER stayed.
+//
+// Both removal surfaces land here: the Explorer's own unmount records the
+// share id before it reloads, and the Settings list reports its id through
+// the files-changed callback. Either way the rule is the same one, and a
+// share whose folder stayed projects nothing. Consuming the id keeps a later
+// unrelated reload from reading a stale exemption.
+export function goneMountProjections(input: {
+  previous: ReadonlyArray<{ shareId: string; label: string }>;
+  next: ReadonlyArray<{ shareId: string }>;
+  foldersLeftBehind: Set<string>;
+}): Array<{ id: string; kind: "delete-folder"; path: string }> {
+  return input.previous
+    .filter(
+      (mount) => !input.next.some((candidate) => candidate.shareId === mount.shareId),
+    )
+    .flatMap((mount) =>
+      shareUnmountProjection({
+        shareId: mount.shareId,
+        label: mount.label,
+        folderLeft: input.foldersLeftBehind.delete(mount.shareId),
+      }),
+    );
+}
+
+// The one closing line a manual "Refresh shares" leaves behind.
+//
+// ONE line, because a second call replaces the first: damage reported before
+// the summary was overwritten by it, and the user saw only "Shares
+// refreshed", which is exactly the wrong half. Damage is carried INTO the
+// summary, and the instruction that fixes it survives.
+export function shareRefreshSummary(
+  results: ReadonlyArray<{
+    label: string;
+    status: "updated" | "unchanged" | "ended" | "damaged";
+    changedPaths: number;
+  }>,
+): string {
+  if (results.length === 0) return "No shares are added to this workspace.";
+  const changed = results.reduce((sum, row) => sum + row.changedPaths, 0);
+  const ended = results.filter((row) => row.status === "ended");
+  const damaged = results.filter((row) => row.status === "damaged");
+  const refreshed = `Shares refreshed — ${changed} ${
+    changed === 1 ? "file" : "files"
+  } updated${
+    ended.length > 0 ? `; ${ended.map((row) => row.label).join(", ")} ended` : ""
+  }.`;
+  if (damaged.length === 0) return refreshed;
+  return `${refreshed} dohc can't read what ${damaged
+    .map((row) => row.label)
+    .join(", ")} ${damaged.length === 1 ? "grants" : "grant"}. Remove ${
+    damaged.length === 1 ? "it" : "them"
+  } and add ${damaged.length === 1 ? "the share" : "those shares"} again.`;
+}
+
 function isMountedSharePath(path: string | null): boolean {
   return !!path && isSharedWithMePath(path);
 }
@@ -3513,6 +3590,10 @@ export function DesktopWorkspaceShell(props: {
   // slower, earlier-started reload must never clobber a fresher one — a
   // stale registry snapshot could resurrect a just-removed mount or fire a
   // spurious delete-folder projection against a still-valid one.
+  // Shares this shell removed whose FOLDER stayed on disk. Their records are
+  // gone, so the next reload sees them vanish; without this it would project
+  // a folder delete over files that are still there.
+  const foldersLeftBehind = useRef(new Set<string>());
   const shareMountsToken = useRef(0);
   const reloadShareMounts = useCallback(async () => {
     const token = ++shareMountsToken.current;
@@ -3526,18 +3607,12 @@ export function DesktopWorkspaceShell(props: {
       // A mount that vanished (removed from Settings or another surface)
       // reprojects tabs/pins exactly like the Explorer unmount path — open
       // tabs under the deleted folder must not linger with stale content.
-      const gone = shareMountsRef.current.filter(
-        (mount) => !next.some((candidate) => candidate.shareId === mount.shareId),
-      );
-      if (gone.length > 0) {
-        onExplorerPathsChanged(
-          gone.map((mount) => ({
-            id: `unmount-${mount.shareId}`,
-            kind: "delete-folder" as const,
-            path: `shared-with-me/${mount.label}`,
-          })),
-        );
-      }
+      const gone = goneMountProjections({
+        previous: shareMountsRef.current,
+        next,
+        foldersLeftBehind: foldersLeftBehind.current,
+      });
+      if (gone.length > 0) onExplorerPathsChanged(gone);
       setShareMounts(next);
     } catch {
       // Keep the last known set; the next reload corrects it.
@@ -3551,7 +3626,7 @@ export function DesktopWorkspaceShell(props: {
     async (announce = false) => {
       let results: Array<{
         label: string;
-        status: "updated" | "unchanged" | "ended";
+        status: "updated" | "unchanged" | "ended" | "damaged";
         changedPaths: number;
       }>;
       try {
@@ -3566,18 +3641,7 @@ export function DesktopWorkspaceShell(props: {
         await refreshFiles().catch(() => undefined);
       }
       if (results.some((row) => row.status === "ended")) void reloadShareMounts();
-      if (announce) {
-        const ended = results.filter((row) => row.status === "ended");
-        showShellNotice(
-          results.length === 0
-            ? "No shares are added to this workspace."
-            : `Shares refreshed — ${changed} ${changed === 1 ? "file" : "files"} updated${
-                ended.length > 0
-                  ? `; ${ended.map((row) => row.label).join(", ")} ended`
-                  : ""
-              }.`,
-        );
-      }
+      if (announce) showShellNotice(shareRefreshSummary(results));
     },
     [workspaceId, refreshFiles, reportShellError, showShellNotice, reloadShareMounts],
   );
@@ -3605,23 +3669,40 @@ export function DesktopWorkspaceShell(props: {
       const label = path.split("/")[1] ?? "";
       const mount = shareMounts.find((m) => m.label === label);
       if (!mount) return;
+      let folderLeft = false;
       try {
-        await bridge().unmountShare({ workspaceId, shareId: mount.shareId });
+        const result = await bridge().unmountShare({
+          workspaceId,
+          shareId: mount.shareId,
+        });
+        folderLeft = result?.folderLeft === true;
       } catch (error) {
         reportShellError("Couldn't remove the share.", error);
         return;
       }
-      // Reproject tabs/pins exactly like a folder delete, then re-list.
-      onExplorerPathsChanged([
-        {
-          id: `unmount-${mount.shareId}`,
-          kind: "delete-folder",
-          path: `shared-with-me/${label}`,
-        },
-      ]);
+      // Reproject tabs/pins exactly like a folder delete — but ONLY when the
+      // folder actually went. When removal could clean up the record alone,
+      // the files are still on disk, and projecting a delete would throw away
+      // path-keyed state (tabs, pins, drafts) for files the user still has.
+      if (folderLeft) {
+        // The record is gone, so the next mount reload sees this share vanish
+        // and would project the delete this branch just refused. Remembered
+        // until that reload consumes it.
+        foldersLeftBehind.current.add(mount.shareId);
+      }
+      onExplorerPathsChanged(
+        shareUnmountProjection({ shareId: mount.shareId, label, folderLeft }),
+      );
       await refreshFiles().catch(() => undefined);
       void reloadShareMounts();
-      showShellNotice(`Removed ${label} from this workspace.`);
+      // The record went but its folder stayed, because its label is not one
+      // this app would ever address a folder through. The files are still on
+      // disk, so say where they are and leave the choice to the user.
+      showShellNotice(
+        folderLeft
+          ? `Removed ${label} from this workspace. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.`
+          : `Removed ${label} from this workspace.`,
+      );
     },
     [
       workspaceId,
@@ -4257,6 +4338,11 @@ export function DesktopWorkspaceShell(props: {
   // shared-view placeholder's next step depends on whether the share is
   // still live (#540 — Refresh exists only while it is).
   const shareView = props.workspace.shareView ?? null;
+  // The stored grant could not be read (#646). The marker still stands — a
+  // share view must never present as an ordinary workspace — but there is no
+  // grant to pull with, so the refresh is skipped rather than failed, and the
+  // banner says so instead of showing a level nobody can read.
+  const shareViewDamaged = !!shareView?.damaged;
   const [shareViewEnded, setShareViewEnded] = useState(!!shareView?.ended);
   const [shareRefreshing, setShareRefreshing] = useState(false);
   // Ops this share's pulls skipped, read from the RECORD, not from the last
@@ -4287,7 +4373,7 @@ export function DesktopWorkspaceShell(props: {
     setShareSkipped(hasUnacknowledgedShareSkips(skipped) ? skipped : null);
   }, [workspaceId]);
   const refreshShareView = useCallback(async () => {
-    if (!shareView || shareViewEnded) return;
+    if (!shareView || shareViewEnded || shareViewDamaged) return;
     setShareRefreshing(true);
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
@@ -4316,7 +4402,7 @@ export function DesktopWorkspaceShell(props: {
   }, [shareView?.shareId, shareViewEnded, workspaceId, reloadShareSkipped]);
   useEffect(() => {
     // One automatic refresh when a shared view opens; afterwards on demand.
-    if (shareView && !shareViewEnded) void refreshShareView();
+    if (shareView && !shareViewEnded && !shareViewDamaged) void refreshShareView();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
@@ -4590,7 +4676,9 @@ export function DesktopWorkspaceShell(props: {
           <span className="min-w-0 flex-1 truncate">
             {shareViewEnded
               ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
-              : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
+              : shareViewDamaged
+                ? "dohc can't read what this share grants. Open the share again to restore it."
+                : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
           </span>
           {shareSkipped
             ? shareSkipNoticeLines(shareSkipped, shareView.granterEmail).map(
@@ -4634,7 +4722,7 @@ export function DesktopWorkspaceShell(props: {
                 ),
               )
             : null}
-          {!shareViewEnded ? (
+          {!shareViewEnded && !shareViewDamaged ? (
             <button
               type="button"
               data-testid="shared-view-refresh"
@@ -5334,7 +5422,14 @@ export function DesktopWorkspaceShell(props: {
             initialSection={settingsSection}
             onClose={closeSettings}
             onAgentActiveChange={onSettingsAgentActiveChange}
-            onWorkspaceFilesChanged={() => {
+            onWorkspaceFilesChanged={(outcome) => {
+              // A Settings removal that left its folder behind reports the
+              // share id here, BEFORE the reload below sees the record
+              // vanish — otherwise that reload projects a folder delete over
+              // files that are still on disk.
+              if (outcome?.folderLeftShareId) {
+                foldersLeftBehind.current.add(outcome.folderLeftShareId);
+              }
               void reloadShareMounts();
               void refreshFiles().catch(() => undefined);
             }}

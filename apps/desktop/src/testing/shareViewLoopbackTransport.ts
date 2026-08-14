@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import type {
   PullShareViewResult,
   SyncRelayConnection,
@@ -552,7 +553,11 @@ export interface ShareViewDaemonHarness {
     shareMount?: true;
   }): (input: {
     shareId: string;
-    grantedSelector: { paths: string[]; versionId: string | null };
+    grantedSelector: {
+      paths: string[];
+      versionId: string | null;
+      access: ShareAccess;
+    };
   }) => Promise<PullShareViewResult>;
   closeAll(): Promise<void>;
 }

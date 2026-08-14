@@ -99,7 +99,12 @@ describe("desktop relay helpers", () => {
         shareId: "share-a",
         granterUserId: "user-a",
         granterEmail: "owner@example.test",
-        selector: { paths: ["docs"], versionId: "version-a", ignored: true },
+        selector: {
+          paths: ["docs"],
+          versionId: "version-a",
+          access: "comment",
+          ignored: true,
+        },
         createdAtMs: 42,
       }),
     );
@@ -113,7 +118,7 @@ describe("desktop relay helpers", () => {
       shareId: "share-a",
       granterUserId: "user-a",
       granterEmail: "owner@example.test",
-      selector: { paths: ["docs"], versionId: "version-a" },
+      selector: { paths: ["docs"], versionId: "version-a", access: "comment" },
       createdAtMs: 42,
     });
   });
@@ -128,13 +133,48 @@ describe("desktop relay helpers", () => {
       { shareId: "share-a" }, // selector missing entirely
       { shareId: "share-a", selector: null },
       { shareId: "share-a", selector: "docs" },
-      { shareId: "share-a", selector: { versionId: "v1" } }, // no paths array
-      { shareId: "share-a", selector: { paths: ["docs", 7], versionId: null } },
-      { shareId: "share-a", selector: { paths: [""], versionId: null } },
-      { shareId: "share-a", selector: { paths: ["docs"], versionId: "" } },
+      // Each row below carries a VALID access, so it is refused for the
+      // reason it names and not for a missing level.
+      { shareId: "share-a", selector: { versionId: "v1", access: "view" } }, // no paths array
+      {
+        shareId: "share-a",
+        selector: { paths: ["docs", 7], versionId: null, access: "view" },
+      },
+      {
+        shareId: "share-a",
+        selector: { paths: [""], versionId: null, access: "view" },
+      },
+      {
+        shareId: "share-a",
+        selector: { paths: ["docs"], versionId: "", access: "view" },
+      },
       // Selects nothing at all: the relay refuses to CREATE this one, so a
       // response carrying it is not a grant.
-      { shareId: "share-a", selector: { paths: [], versionId: null } },
+      {
+        shareId: "share-a",
+        selector: { paths: [], versionId: null, access: "view" },
+      },
+      // The level dimension (#646). An otherwise perfect selector whose level
+      // is missing or unreadable is refused too: the level is pinned with the
+      // grant, and reading an unreadable one as "view" would invent a grant
+      // the relay never stated.
+      { shareId: "share-a", selector: { paths: ["docs"], versionId: null } },
+      {
+        shareId: "share-a",
+        selector: { paths: ["docs"], versionId: null, access: "View" },
+      },
+      {
+        shareId: "share-a",
+        selector: { paths: ["docs"], versionId: null, access: " view" },
+      },
+      {
+        shareId: "share-a",
+        selector: { paths: ["docs"], versionId: null, access: "read-only" },
+      },
+      {
+        shareId: "share-a",
+        selector: { paths: ["docs"], versionId: null, access: null },
+      },
     ];
     for (const body of unreadable) {
       await expect(
