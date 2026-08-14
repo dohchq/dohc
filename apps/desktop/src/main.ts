@@ -474,7 +474,10 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
-import type { ShareAccess } from "@dohc/security-contract/share-selector";
+import {
+  isShareAccessValue,
+  type ShareAccess,
+} from "@dohc/security-contract/share-selector";
 import type {
   ChannelThreadSummary,
   ChatChannelSummary,
@@ -6474,7 +6477,11 @@ function registerIpcHandlers(
     | {
         kind: "share";
         workspace: RegistryEntry;
-        access: ShareAccess;
+        // The pinned level, or undefined when the stored grant names none
+        // this process can read. The registry file is DATA, not a contract
+        // (see workspaceSummaryProjection.ts), so the level is validated here
+        // rather than trusted from the record's type.
+        access: ShareAccess | undefined;
         // The account this recipient writes chat under. Absent when signed
         // out, or signed into a relay that is not this share's — see
         // `assertChatWritable`, which refuses rather than writing a comment
@@ -6496,7 +6503,9 @@ function registerIpcHandlers(
     return {
       kind: "share",
       workspace,
-      access: shareView.grantedSelector.access,
+      access: isShareAccessValue(shareView.grantedSelector?.access)
+        ? shareView.grantedSelector.access
+        : undefined,
       authorUserId: resolveShareViewRelayAuthorId(shareView, cachedCredentials),
     };
   }
@@ -6507,7 +6516,9 @@ function registerIpcHandlers(
   // renderer disabling its composer is honesty, not authorization.
   function assertChatWritable(scope: ChatScope): void {
     if (scope.kind !== "share") return;
-    if (scope.access === "view") throw new SharedFileReadOnlyError();
+    if (scope.access !== "comment" && scope.access !== "edit") {
+      throw new SharedFileReadOnlyError();
+    }
     // A comment on someone else's share is only a comment once it reaches
     // them, and a chat op replicates only when its author carries a user id.
     // Without one this write would look sent and stay on this machine, which

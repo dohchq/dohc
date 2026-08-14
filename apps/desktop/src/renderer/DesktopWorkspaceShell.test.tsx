@@ -5607,6 +5607,23 @@ describe("shared view with an unreadable grant", () => {
     expect(banner.textContent).not.toContain("read-only. Ask");
   });
 
+  // The chat half of the same stance (#646 PR2). A grant that names no
+  // readable level grants no writes: the panel opens read-only, exactly as a
+  // `view` share does. Asking whether the level is NOT `view` would answer
+  // "writable" for a level nobody can read.
+  it("opens chat read-only, because an unreadable grant grants no writes", async () => {
+    const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge, damaged);
+
+    await settleEngineOnRead(bridge);
+    await screen.findByTestId("chats-panel");
+    expect(
+      (await screen.findByTestId("linked-chat-readonly-note")).textContent,
+      "MUTATION: an unreadable level must not open the composer",
+    ).toBe("This shared file is read-only for you.");
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
+  });
+
   // There is no grant to pull with, so the refresh is skipped rather than
   // fired and failed. Offering it would promise a recovery it cannot do.
   it("does not offer or fire a refresh", async () => {

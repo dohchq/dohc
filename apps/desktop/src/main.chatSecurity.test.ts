@@ -735,12 +735,19 @@ describe("main-process chat authorization", () => {
 
     const gateAt = mainSource.indexOf("function assertChatWritable(");
     const gate = mainSource.slice(gateAt, mainSource.indexOf("\n  }", gateAt));
-    expect(gate).toContain('scope.access === "view"');
+    // Positive recognition, not `!== "view"`: the registry file is DATA,
+    // so a stored grant can name a level this process cannot read, and the
+    // one direction this must never fail is reading that as writable.
+    expect(gate).toContain('scope.access !== "comment" && scope.access !== "edit"');
     expect(gate).toContain("throw new SharedFileReadOnlyError()");
     // The second half of the same gate: a chat op replicates only when its
     // author carries a user id, so a share view with no resolvable relay
     // identity must be refused, not written locally and called sent.
     expect(gate).toContain("if (!scope.authorUserId)");
     expect(scope).toContain("resolveShareViewRelayAuthorId(shareView, cachedCredentials)");
+    expect(
+      scope,
+      "MUTATION: an unvalidated level lets a damaged grant read as one that grants writes",
+    ).toContain("isShareAccessValue(shareView.grantedSelector?.access)");
   });
 });
