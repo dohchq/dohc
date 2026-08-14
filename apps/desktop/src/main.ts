@@ -3932,6 +3932,24 @@ function registerIpcHandlers(
         // rename). Anything the engine declines — folders, binary, untracked —
         // returns a no-op finisher and is captured as delete+write as before.
         const capture = activity.engineCaptureFor(workspace.workspaceId);
+        // An engine rename preserves the stable object and its Y.Doc kind,
+        // but the editor for the new path is chosen by suffix. A cross-kind
+        // rename would strand the document between a lineage of one kind and
+        // an editor of another — a drawing renamed `.md` would hand its
+        // portable JSON to a raw autosave editor beside the still-canonical
+        // scene. Kind changes go through a new file, not a rename.
+        const fromKind = liveDocumentKindForPath(input.fromPath);
+        const toKind = liveDocumentKindForPath(input.toPath);
+        if (
+          capture &&
+          fromKind !== null &&
+          toKind !== null &&
+          fromKind !== toKind
+        ) {
+          throw new Error(
+            `A rename cannot change a live document's kind from ${fromKind} to ${toKind}. Create a new file and copy the content instead.`,
+          );
+        }
         const finishRename = capture
           ? await capture.beginFileRename(input.fromPath, input.toPath)
           : null;

@@ -65,6 +65,21 @@ describe("engine Y.Doc save-state reporting in main", () => {
     }
   });
 
+  it("refuses a rename that would change a live document's kind", () => {
+    const handler = handlerSource("moveWorkspacePath");
+    // An engine rename preserves the stable object's Y.Doc kind while the
+    // editor for the new path is chosen by suffix — a cross-kind rename
+    // would strand the document between them. The guard must run before the
+    // engine records the rename moment.
+    expect(handler).toContain("liveDocumentKindForPath(input.fromPath)");
+    expect(handler).toContain("liveDocumentKindForPath(input.toPath)");
+    const guardAt = handler.indexOf("fromKind !== toKind");
+    const renameAt = handler.indexOf("capture.beginFileRename(");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(renameAt);
+    expect(handler).toContain("cannot change a live document's kind");
+  });
+
   it("admits unconditional file and folder creation through stale-sensitive workspace scheduling", () => {
     for (const [channel, mutation] of [
       ["createWorkspaceFile", "await createFile("],
