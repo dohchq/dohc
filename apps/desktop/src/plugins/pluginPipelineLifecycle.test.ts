@@ -201,6 +201,93 @@ describe("workspace plugin pipeline lifecycle", () => {
     expect(disposals.size).toBe(0);
   });
 
+  it("keeps a workspace switch's disposal registered when the create fails (#779 round 16)", async () => {
+    const live = new Map<string, FakePipeline>();
+    const disposals = new Map<string, Promise<void>>();
+    const events: string[] = [];
+    let created = 0;
+    let blockNextStart = true;
+    const opening = deferred();
+    const teardown = deferred();
+    // PluginPipeline.dispose() marks itself disposed before it drains, so a
+    // second call on the same pipeline resolves at once and tears down nothing.
+    const dispose = async (pipeline: FakePipeline) => {
+      if (pipeline.disposed) return;
+      pipeline.disposed = true;
+      events.push(`dispose start ${pipeline.id}`);
+      await teardown.promise;
+      events.push(`dispose end ${pipeline.id}`);
+    };
+    const ensure = () =>
+      ensureWorkspacePipeline<FakePipeline>({
+        live,
+        disposals,
+        workspaceId: "workspace-1",
+        create: () => {
+          const pipeline = { id: ++created, started: false, disposed: false };
+          events.push(`create ${pipeline.id}`);
+          return pipeline;
+        },
+        start: async (pipeline) => {
+          if (blockNextStart) {
+            blockNextStart = false;
+            await opening.promise;
+          }
+          pipeline.started = true;
+        },
+        dispose,
+      });
+
+    // A warmup create for A is still inside start() when the user switches
+    // away, so the switch's teardown owns A's drain from here on.
+    const warmup = ensure();
+    warmup.catch(() => undefined);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(events).toEqual(["create 1"]);
+
+    const stopping = disposeWorkspacePipeline<FakePipeline>({
+      live,
+      disposals,
+      workspaceId: "workspace-1",
+      dispose,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(events).toEqual(["create 1", "dispose start 1"]);
+    const switchDisposal = disposals.get("workspace-1");
+    expect(switchDisposal).toBeDefined();
+
+    // start() settles after the switch, so the create fails its liveness
+    // check. Its own dispose() would resolve at once, so publishing it would
+    // drop the switch's teardown from the map while that teardown still runs.
+    opening.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(disposals.get("workspace-1")).toBe(switchDisposal);
+    expect(live.size).toBe(0);
+
+    // Switching straight back to A must still wait for the real teardown.
+    const reopening = ensure();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(events).toEqual(["create 1", "dispose start 1"]);
+
+    teardown.resolve();
+    await stopping;
+    await expect(warmup).rejects.toThrow(
+      "Plugin pipeline closed while the workspace was opening.",
+    );
+    const second = await reopening;
+
+    expect(events).toEqual([
+      "create 1",
+      "dispose start 1",
+      "dispose end 1",
+      "create 2",
+    ]);
+    expect(second.id).toBe(2);
+    expect(second.started).toBe(true);
+    expect(live.get("workspace-1")).toBe(second);
+    expect(disposals.size).toBe(0);
+  });
+
   it("disposes nothing for a workspace with no pipeline", async () => {
     const live = new Map<string, FakePipeline>();
     const disposals = new Map<string, Promise<void>>();

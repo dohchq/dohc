@@ -45,14 +45,21 @@ export async function ensureWorkspacePipeline<T>(input: {
     if (live.get(input.workspaceId) === pipeline) {
       live.delete(input.workspaceId);
     }
-    // Registered like any other teardown: a retry landing while this failed
-    // pipeline still drains would otherwise construct a second one over the
-    // same userData roots — the exact overlap this module exists to close.
-    await trackDisposal(
-      disposals,
-      input.workspaceId,
-      input.dispose(pipeline).catch(() => undefined),
-    );
+    // A retry landing while this pipeline still drains would otherwise
+    // construct a second one over the same userData roots — the exact overlap
+    // this module exists to close. A workspace switch that already registered
+    // the teardown owns it, and dispose() is idempotent, so wait for that
+    // entry instead of replacing it with a no-op that resolves at once.
+    const foreign = disposals.get(input.workspaceId);
+    if (foreign) {
+      await foreign.catch(() => undefined);
+    } else {
+      await trackDisposal(
+        disposals,
+        input.workspaceId,
+        input.dispose(pipeline).catch(() => undefined),
+      );
+    }
     throw error;
   }
 }
