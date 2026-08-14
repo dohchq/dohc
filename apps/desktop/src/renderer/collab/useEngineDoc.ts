@@ -565,6 +565,7 @@ export function useEngineDoc(input: {
     let deletionPending = false;
     let releaseStarted = false;
     let recoveryRevision = 0;
+    let recoveryStatusRevision = 0;
     const recoveryAssetReads = new Map<
       string,
       Promise<BinaryFileData | null>
@@ -678,6 +679,9 @@ export function useEngineDoc(input: {
       sceneRecovery: SceneRecoveryWork | null = null,
     ): void => {
       const revision = ++recoveryRevision;
+      const statusRevision = transition && sceneRecovery
+        ? ++recoveryStatusRevision
+        : null;
       if (transition && sceneRecovery) {
         setSceneRecoveryAssets(
           sceneRecovery.requiredAssetCount === 0
@@ -720,7 +724,11 @@ export function useEngineDoc(input: {
               recoveryDraftId,
               recovered.text,
             );
-            if (transition && token === openTokenRef.current) {
+            if (
+              transition &&
+              statusRevision === recoveryStatusRevision &&
+              token === openTokenRef.current
+            ) {
               setSceneRecoveryAssets(
                 recovered.missingAssetCount === 0
                   ? null
@@ -956,6 +964,7 @@ export function useEngineDoc(input: {
         const bytes = Y.encodeStateAsUpdate(retired);
         if (documentKind === "scene") {
           const revision = ++retiredRecoveryRevision;
+          const statusRevision = ++recoveryStatusRevision;
           const sceneRecovery = prepareSceneRecovery(bytes, retiredBinding);
           if (draftId === null) {
             draftId = captureOrphanedDraft(
@@ -990,7 +999,10 @@ export function useEngineDoc(input: {
                 capturedDraftId,
                 recovered.text,
               );
-              if (token === openTokenRef.current) {
+              if (
+                statusRevision === recoveryStatusRevision &&
+                token === openTokenRef.current
+              ) {
                 setSceneRecoveryAssets(
                   recovered.missingAssetCount === 0
                     ? null
@@ -1066,6 +1078,11 @@ export function useEngineDoc(input: {
           return;
         }
         binding = bound;
+        if (documentKind === "scene") {
+          for (const descriptor of bound.artifactAssets) {
+            cacheSceneAssetRead(descriptor, bound);
+          }
+        }
         bound.onDocumentReplaced((replacement) => {
           if (cancelled || token !== openTokenRef.current) return;
           writesRefused.current = false;

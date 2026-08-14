@@ -628,11 +628,30 @@ it("does not reuse a losing lineage asset when the winner reuses its file ID", a
     ref: "assets/winner.png",
     sha256: "b".repeat(64),
   };
-  let activeDescriptor = loser;
-  const readAsset = vi.fn(async () => ({
-    descriptor: activeDescriptor,
-    bytes: new Uint8Array(activeDescriptor === loser ? [9] : [1, 2, 3]),
-  }));
+  let resolveLoser!: (value: {
+    descriptor: typeof loser;
+    bytes: Uint8Array;
+  }) => void;
+  let resolveWinner!: (value: {
+    descriptor: typeof winner;
+    bytes: Uint8Array;
+  }) => void;
+  const loserRead = new Promise<{ descriptor: typeof loser; bytes: Uint8Array }>(
+    (resolve) => {
+      resolveLoser = resolve;
+    },
+  );
+  const winnerRead = new Promise<{
+    descriptor: typeof winner;
+    bytes: Uint8Array;
+  }>((resolve) => {
+    resolveWinner = resolve;
+  });
+  const readAsset = vi.fn((assetId: string) =>
+    assetId === loser.id && readAsset.mock.calls.length === 1
+      ? loserRead
+      : winnerRead,
+  );
   harness.setArtifactReader([loser], readAsset);
   putSceneAsset(harness.sourceDoc, loser);
   insertElementRevision(harness.sourceDoc, {
@@ -656,11 +675,7 @@ it("does not reuse a losing lineage asset when the winner reuses its file ID", a
   act(() => screen.getByTestId("type").click());
   harness.emitLineageReplacement("unused", [winner]);
   await waitFor(() => expect(readAsset).toHaveBeenCalledTimes(1));
-  await waitFor(() =>
-    expect(screen.getByTestId("asset-recovery").textContent).toBe("none"),
-  );
 
-  activeDescriptor = winner;
   act(() =>
     insertElementRevision(retired, {
       id: "lineage-image",
@@ -673,24 +688,22 @@ it("does not reuse a losing lineage asset when the winner reuses its file ID", a
       x: 77,
     }),
   );
-  await waitFor(() => {
-    const recovered = parseExcalidrawDocument(
-      screen.getByTestId("draft").textContent!,
-    );
-    expect(recovered.elements).toContainEqual(
-      expect.objectContaining({ id: "lineage-image", x: 77 }),
-    );
-    expect(recovered.files[loser.id]).toMatchObject({
-      dataURL: "data:image/png;base64,CQ==",
-    });
-  });
-  expect(readAsset).toHaveBeenCalledTimes(1);
-
   act(() => screen.getByTestId("type").click());
   await flushLocalBatch();
   harness.emit("deleted", harness.applied.at(-1)!.seq);
 
   await waitFor(() => expect(readAsset).toHaveBeenCalledTimes(2));
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("loading:1");
+  await act(async () => {
+    resolveLoser({ descriptor: loser, bytes: new Uint8Array([9]) });
+    await loserRead;
+  });
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("loading:1");
+
+  await act(async () => {
+    resolveWinner({ descriptor: winner, bytes: new Uint8Array([1, 2, 3]) });
+    await winnerRead;
+  });
   await waitFor(() => {
     const recovered = parseExcalidrawDocument(
       screen.getByTestId("draft").textContent!,
@@ -699,6 +712,7 @@ it("does not reuse a losing lineage asset when the winner reuses its file ID", a
       dataURL: "data:image/png;base64,AQID",
     });
   });
+  expect(screen.getByTestId("asset-recovery").textContent).toBe("none");
   expect(screen.getByTestId("draft").textContent).not.toContain("CQ==");
 });
 
