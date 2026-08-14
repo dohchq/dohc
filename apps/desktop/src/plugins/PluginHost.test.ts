@@ -1989,12 +1989,8 @@ describe("PluginHost", () => {
   });
 
   it("does not hang when a child exits during an sdk.request", async () => {
-    // No generation bump here: onStatusChange is deferred, so a listener can
-    // no longer race ahead of accountForFailure's own respawn decision the
-    // way bumping the generation synchronously used to rely on. The crash's
-    // own immediate respawn is now free to happen — correct policy for one
-    // fast failure — and stop() must still not hang, on whichever spawn
-    // (the crashed one or its respawn) happens to be current when it runs.
+    // No generation bump here: one fast failure must recover even while the
+    // dead child's sdk.request handler remains pending.
     const root = await workspaceRoot();
     const harness = createProcessHarness({
       modes: { "hello-plugin": "crash-after-activate" },
@@ -2030,15 +2026,16 @@ describe("PluginHost", () => {
       () => harness.exitedPluginIds.includes("hello-plugin"),
       "Plugin host did not report the child exit.",
     );
+    await waitFor(
+      () =>
+        harness.spawnedPluginIds.length === 2 &&
+        host.getStatus("hello-plugin") === "ready",
+      "Plugin did not recover after the child exit.",
+    );
 
-    await expect(
-      Promise.race([
-        host.stop("hello-plugin"),
-        delay(2_000).then(() => {
-          throw new Error("PluginHost stop hung after child exit.");
-        }),
-      ]),
-    ).resolves.toBeUndefined();
+    await host.stop("hello-plugin");
+
+    expect(host.getStatus("hello-plugin")).toBeUndefined();
   });
 
   it("logs, instead of leaving unhandled, a spawn teardown rejection (CodeRabbit #779 R13)", async () => {

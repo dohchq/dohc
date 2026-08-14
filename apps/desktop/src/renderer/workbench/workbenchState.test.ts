@@ -12,7 +12,6 @@ import {
   createEditorGroupRight,
   defaultWorkbenchState,
   DEFAULT_EDITOR_GROUP_ID,
-  findTab,
   CHATS_DEFAULT_WIDTH,
   historyDiffTabPath,
   CHATS_MAX_WIDTH,
@@ -61,6 +60,7 @@ import {
   resizeEditorGroups,
   setFolderExpanded,
   siteTabPath,
+  moveTabToGroup,
   pluginPanelTabPath,
   moveTabToNewGroup,
   focusEditorGroup,
@@ -81,16 +81,6 @@ describe("tabs", () => {
     ]);
     expect(activeGroup(state).id).toBe(DEFAULT_EDITOR_GROUP_ID);
     expect(activeTabPath(state)).toBeNull();
-  });
-
-  it("finds a tab with its group and ordered index", () => {
-    const state = withTabs("a.md", "b.md");
-    expect(findTab(state, "b.md")).toEqual({
-      group: state.editorGroups[0],
-      tab: state.editorGroups[0].tabs[1],
-      index: 1,
-    });
-    expect(findTab(state, "missing.md")).toBeNull();
   });
 
   it("openTab appends and activates; re-opening never duplicates", () => {
@@ -155,9 +145,10 @@ describe("tabs", () => {
     expect(activeTabPath(state)).toBe("b.md");
   });
 
-  it("creates and focuses an empty group right without hiding the current tab", () => {
+  it("copies the active tab into a focused group right without hiding the source", () => {
+    const original = withTabs("a.md");
     const state = createEditorGroupRight(
-      withTabs("a.md"),
+      original,
       DEFAULT_EDITOR_GROUP_ID,
       "right",
     );
@@ -166,8 +157,202 @@ describe("tabs", () => {
       "right",
     ]);
     expect(state.editorGroups[0].activeTab).toBe("a.md");
-    expect(state.editorGroups[1]).toMatchObject({ tabs: [], activeTab: null });
+    expect(state.editorGroups[1]).toMatchObject({
+      tabs: [{ path: "a.md" }],
+      activeTab: "a.md",
+    });
+    expect(state.editorGroups[1].tabs[0]).not.toBe(
+      original.editorGroups[0].tabs[0],
+    );
     expect(state.activeEditorGroup).toBe("right");
+  });
+
+  it("keeps the current tab focused when a delayed split completes", () => {
+    const original: WorkbenchState = {
+      ...defaultWorkbenchState(),
+      editorGroups: [
+        { id: "left", tabs: [{ path: "a.md" }], activeTab: "a.md", size: 0.5 },
+        { id: "right", tabs: [{ path: "b.md" }], activeTab: "b.md", size: 0.5 },
+      ],
+      activeEditorGroup: "right",
+    };
+
+    const state = createEditorGroupRight(original, "left", "split", "preserve");
+
+    expect(state.editorGroups.map((group) => group.id)).toEqual([
+      "left",
+      "split",
+      "right",
+    ]);
+    expect(state.activeEditorGroup).toBe("right");
+    expect(activeTabPath(state)).toBe("b.md");
+  });
+
+  it("keeps the current tab focused when a delayed move creates a group", () => {
+    const original = withTabs("a.md", "b.md");
+
+    const state = moveTabToNewGroup(
+      original,
+      DEFAULT_EDITOR_GROUP_ID,
+      "a.md",
+      "right",
+      "preserve",
+    );
+
+    expect(state.editorGroups[0].activeTab).toBe("b.md");
+    expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
+    expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual(["a.md"]);
+  });
+
+  it("keeps a delayed move within the group cap when an empty group gained focus", () => {
+    const editorGroups = Array.from(
+      { length: MAX_OPEN_TABS },
+      (_, index) => ({
+        id: `group-${index}`,
+        tabs: [{ path: `file-${index}.md` }],
+        activeTab: `file-${index}.md`,
+        size: 1 / MAX_EDITOR_GROUPS,
+      }),
+    );
+    const state: WorkbenchState = {
+      ...defaultWorkbenchState(),
+      editorGroups: [
+        ...editorGroups,
+        {
+          id: "focused-empty",
+          tabs: [],
+          activeTab: null,
+          size: 1 / MAX_EDITOR_GROUPS,
+        },
+      ],
+      activeEditorGroup: "focused-empty",
+    };
+
+    const moved = moveTabToNewGroup(
+      state,
+      "group-0",
+      "file-0.md",
+      "delayed-split",
+      "preserve",
+    );
+
+    expect(moved.editorGroups).toHaveLength(MAX_EDITOR_GROUPS);
+    expect(moved.editorGroups.some((group) => group.id === "group-0")).toBe(
+      false,
+    );
+    expect(
+      moved.editorGroups.find((group) => group.id === "delayed-split"),
+    ).toMatchObject({
+      tabs: [{ path: "file-0.md" }],
+      activeTab: "file-0.md",
+    });
+    expect(allTabs(moved)).toHaveLength(MAX_OPEN_TABS);
+    expect(new Set(allTabs(moved).map((tab) => tab.path))).toEqual(
+      new Set(
+        Array.from(
+          { length: MAX_OPEN_TABS },
+          (_, index) => `file-${index}.md`,
+        ),
+      ),
+    );
+    expect(moved.activeEditorGroup).toBe("focused-empty");
+    expect(activeTabPath(moved)).toBeNull();
+    expect(
+      moved.editorGroups.reduce((sum, group) => sum + group.size, 0),
+    ).toBeCloseTo(1);
+    expect(serializeUiState(moved).editorGroups).toHaveLength(
+      MAX_EDITOR_GROUPS,
+    );
+  });
+
+  it("keeps the destination tab focused when a delayed cross-group move completes", () => {
+    const original: WorkbenchState = {
+      ...defaultWorkbenchState(),
+      editorGroups: [
+        { id: "left", tabs: [{ path: "a.md" }], activeTab: "a.md", size: 0.5 },
+        {
+          id: "right",
+          tabs: [{ path: "b.md" }, { path: "c.md" }],
+          activeTab: "c.md",
+          size: 0.5,
+        },
+      ],
+      activeEditorGroup: "right",
+    };
+
+    const state = moveTabToGroup(
+      original,
+      "left",
+      "right",
+      "a.md",
+      0,
+      "preserve",
+    );
+
+    expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual([
+      "a.md",
+      "b.md",
+      "c.md",
+    ]);
+    expect(state.editorGroups[1].activeTab).toBe("c.md");
+    expect(state.activeEditorGroup).toBe("right");
+    expect(state.editorGroups[0].tabs).toEqual([]);
+  });
+
+  it("keeps Chats in its existing editor group", () => {
+    let state = withTabs(CHATS_TAB_PATH, "a.md");
+    state = moveTabToNewGroup(
+      state,
+      DEFAULT_EDITOR_GROUP_ID,
+      "a.md",
+      "right",
+    );
+
+    state = openTab(state, CHATS_TAB_PATH, "right");
+
+    expect(
+      allTabs(state).filter((tab) => tab.path === CHATS_TAB_PATH),
+    ).toHaveLength(1);
+    expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
+    expect(activeTabPath(state)).toBe(CHATS_TAB_PATH);
+    expect(
+      createEditorGroupRight(
+        state,
+        DEFAULT_EDITOR_GROUP_ID,
+        "split",
+      ),
+    ).toBe(state);
+  });
+
+  it.each([
+    ["site preview", siteTabPath("client-portal"), "dohc://site/%63lient-portal"],
+    [
+      "plugin panel",
+      pluginPanelTabPath("hello-plugin", "main"),
+      "dohc://plugin-panel/%68ello-plugin/main",
+    ],
+  ])("keeps a process-owning %s in its existing editor group", (_label, path, alias) => {
+    let state = withTabs(path, "a.md");
+    state = moveTabToNewGroup(
+      state,
+      DEFAULT_EDITOR_GROUP_ID,
+      "a.md",
+      "right",
+    );
+
+    state = openTab(state, alias, "right");
+
+    expect(allTabs(state).filter((tab) => tab.path === path)).toHaveLength(1);
+    expect(allTabs(state).some((tab) => tab.path === alias)).toBe(false);
+    expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
+    expect(activeTabPath(state)).toBe(path);
+    expect(
+      createEditorGroupRight(
+        state,
+        DEFAULT_EDITOR_GROUP_ID,
+        "split",
+      ),
+    ).toBe(state);
   });
 
   it("repeated single-tab splits replace the obsolete empty drop target", () => {
@@ -191,7 +376,7 @@ describe("tabs", () => {
     expect(state.editorGroups.reduce((sum, group) => sum + group.size, 0)).toBe(1);
   });
 
-  it("re-opening a path in another group focuses its owner without duplicating it", () => {
+  it("opens the same path once per group and focuses the requested group", () => {
     let state = moveTabToNewGroup(
       withTabs("a.md", "b.md"),
       DEFAULT_EDITOR_GROUP_ID,
@@ -200,8 +385,123 @@ describe("tabs", () => {
     );
     state = focusEditorGroup(state, DEFAULT_EDITOR_GROUP_ID);
     state = openTab(state, "b.md");
-    expect(allTabs(state).filter((tab) => tab.path === "b.md")).toHaveLength(1);
-    expect(state.activeEditorGroup).toBe("right");
+    expect(allTabs(state).filter((tab) => tab.path === "b.md")).toHaveLength(2);
+    expect(state.editorGroups[0].tabs.map((tab) => tab.path)).toEqual([
+      "a.md",
+      "b.md",
+    ]);
+    expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual(["b.md"]);
+    expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
+    expect(openTab(state, "b.md")).toBe(state);
+  });
+
+  it("evicts an inactive tab instance even when its path is active elsewhere", () => {
+    const editorGroups = Array.from({ length: MAX_OPEN_TABS / 2 }, (_, index) => ({
+      id: `group-${index}`,
+      tabs: [
+        { path: `file-${index}.md` },
+        { path: `file-${(index + 1) % (MAX_OPEN_TABS / 2)}.md` },
+      ],
+      activeTab: `file-${index}.md`,
+      size: 2 / MAX_OPEN_TABS,
+    }));
+    const state: WorkbenchState = {
+      ...defaultWorkbenchState(),
+      editorGroups,
+      activeEditorGroup: "group-0",
+    };
+    const next = openTab(state, "new.md", "group-0");
+    expect(allTabs(next)).toHaveLength(MAX_OPEN_TABS);
+    expect(next.editorGroups[0].tabs.map((tab) => tab.path)).toEqual([
+      "file-0.md",
+      "new.md",
+    ]);
+    expect(next.editorGroups[1].activeTab).toBe("file-1.md");
+  });
+
+  it("returns the same state when every group has one active tab at the cap", () => {
+    const editorGroups = Array.from({ length: MAX_OPEN_TABS }, (_, index) => ({
+      id: `group-${index}`,
+      tabs: [{ path: `file-${index}.md` }],
+      activeTab: `file-${index}.md`,
+      size: 1 / MAX_OPEN_TABS,
+    }));
+    const state: WorkbenchState = {
+      ...defaultWorkbenchState(),
+      editorGroups,
+      activeEditorGroup: "group-0",
+    };
+
+    expect(openTab(state, "new.md", "group-0")).toBe(state);
+  });
+
+  it("splits at the tab cap by evicting the oldest inactive tab instance", () => {
+    let state = defaultWorkbenchState();
+    for (let index = 0; index < MAX_OPEN_TABS; index++) {
+      state = openTab(state, `file-${index}.md`);
+    }
+    const active = state.editorGroups[0].tabs.at(-1)!;
+    const split = createEditorGroupRight(
+      state,
+      DEFAULT_EDITOR_GROUP_ID,
+      "right",
+    );
+    expect(allTabs(split)).toHaveLength(MAX_OPEN_TABS);
+    expect(split.editorGroups[0].tabs.some((tab) => tab.path === "file-0.md")).toBe(
+      false,
+    );
+    expect(split.editorGroups[1].tabs[0].path).toBe(active.path);
+    expect(split.editorGroups[1].tabs[0]).not.toBe(active);
+  });
+
+  it("moves a tab between groups, repairs focus, and inserts at the drop slot", () => {
+    let state = withTabs("a.md", "b.md", "c.md", "d.md");
+    state = moveTabToNewGroup(
+      state,
+      DEFAULT_EDITOR_GROUP_ID,
+      "d.md",
+      "right",
+    );
+    state = activateTab(state, DEFAULT_EDITOR_GROUP_ID, "b.md");
+    const moved = state.editorGroups[0].tabs[1];
+    const next = moveTabToGroup(
+      state,
+      DEFAULT_EDITOR_GROUP_ID,
+      "right",
+      "b.md",
+      0,
+    );
+    expect(next.editorGroups[0].tabs.map((tab) => tab.path)).toEqual([
+      "a.md",
+      "c.md",
+    ]);
+    expect(next.editorGroups[0].activeTab).toBe("c.md");
+    expect(next.editorGroups[1].tabs.map((tab) => tab.path)).toEqual([
+      "b.md",
+      "d.md",
+    ]);
+    expect(next.editorGroups[1].tabs[0]).toBe(moved);
+    expect(next.editorGroups[1].activeTab).toBe("b.md");
+    expect(next.activeEditorGroup).toBe("right");
+  });
+
+  it("moves onto an existing destination copy without duplicating it", () => {
+    const split = createEditorGroupRight(
+      withTabs("a.md"),
+      DEFAULT_EDITOR_GROUP_ID,
+      "right",
+    );
+    const destination = split.editorGroups[1].tabs[0];
+    const next = moveTabToGroup(
+      split,
+      DEFAULT_EDITOR_GROUP_ID,
+      "right",
+      "a.md",
+      1,
+    );
+    expect(next.editorGroups[0]).toMatchObject({ tabs: [], activeTab: null });
+    expect(next.editorGroups[1].tabs).toEqual([destination]);
+    expect(next.activeEditorGroup).toBe("right");
   });
 
   it("resizes adjacent groups without changing their combined size", () => {
@@ -454,6 +754,7 @@ describe("ui-state persistence round-trip", () => {
   it("serialize → parse restores the workbench state", () => {
     let state = withTabs("notes/a.md", "notes/b.md");
     state = moveTabToNewGroup(state, DEFAULT_EDITOR_GROUP_ID, "notes/b.md", "right");
+    state = openTab(state, "notes/a.md", "right");
     state = resizeEditorGroups(state, DEFAULT_EDITOR_GROUP_ID, "right", 0.35);
     state = setView(state, "history");
     state = setSidebarWidth(state, 333);
@@ -521,10 +822,110 @@ describe("ui-state persistence round-trip", () => {
     expect(state.editorGroups.map((group) => group.id)).toEqual(["left", "right"]);
     expect(state.editorGroups[0].tabs.map((tab) => tab.path)).toEqual(["a.md", "b.md"]);
     expect(state.editorGroups[0].activeTab).toBe("a.md");
-    expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual(["c.md"]);
+    expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual([
+      "b.md",
+      "c.md",
+    ]);
     expect(state.editorGroups[1].activeTab).toBe("c.md");
     expect(state.editorGroups.map((group) => group.size)).toEqual([0.75, 0.25]);
     expect(state.activeEditorGroup).toBe("left");
+  });
+
+  it("keeps the first restored Chats owner and repairs duplicate Chats focus", () => {
+    const state = parseUiState({
+      version: 2,
+      editorGroups: [
+        {
+          id: "left",
+          tabs: [CHATS_TAB_PATH, "shared.md"],
+          activeTab: "shared.md",
+          size: 0.5,
+        },
+        {
+          id: "right",
+          tabs: ["shared.md", CHATS_TAB_PATH, "right.md"],
+          activeTab: CHATS_TAB_PATH,
+          size: 0.5,
+        },
+      ],
+      activeEditorGroup: "right",
+    });
+
+    expect(state.editorGroups[0].tabs.map((tab) => tab.path)).toEqual([
+      CHATS_TAB_PATH,
+      "shared.md",
+    ]);
+    expect(state.editorGroups[0].activeTab).toBe(CHATS_TAB_PATH);
+    expect(state.editorGroups[1].tabs.map((tab) => tab.path)).toEqual([
+      "shared.md",
+      "right.md",
+    ]);
+    expect(state.editorGroups[1].activeTab).toBe("shared.md");
+    expect(state.activeEditorGroup).toBe("left");
+    expect(
+      allTabs(state).filter((tab) => tab.path === CHATS_TAB_PATH),
+    ).toHaveLength(1);
+  });
+
+  it.each([
+    ["site preview", siteTabPath("client-portal"), "dohc://site/%63lient-portal"],
+    [
+      "plugin panel",
+      pluginPanelTabPath("hello-plugin", "main"),
+      "dohc://plugin-panel/%68ello-plugin/main",
+    ],
+  ])("keeps the first restored %s owner", (_label, path, alias) => {
+    const state = parseUiState({
+      version: 2,
+      editorGroups: [
+        {
+          id: "left",
+          tabs: [path, "left.md"],
+          activeTab: "left.md",
+          size: 0.5,
+        },
+        {
+          id: "right",
+          tabs: [alias, "right.md"],
+          activeTab: alias,
+          size: 0.5,
+        },
+      ],
+      activeEditorGroup: "right",
+    });
+
+    expect(allTabs(state).filter((tab) => tab.path === path)).toHaveLength(1);
+    expect(state.activeEditorGroup).toBe("left");
+    expect(state.editorGroups[0].activeTab).toBe(path);
+    expect(state.editorGroups[1].activeTab).toBe("right.md");
+  });
+
+  it("does not charge discarded duplicate Chats entries against the tab cap", () => {
+    const realFiles = Array.from(
+      { length: MAX_OPEN_TABS - 1 },
+      (_, index) => `file-${index}.md`,
+    );
+    const state = parseUiState({
+      version: 2,
+      editorGroups: [
+        {
+          id: "left",
+          tabs: [CHATS_TAB_PATH],
+          activeTab: CHATS_TAB_PATH,
+          size: 0.5,
+        },
+        {
+          id: "right",
+          tabs: [CHATS_TAB_PATH, ...realFiles],
+          activeTab: realFiles[0],
+          size: 0.5,
+        },
+      ],
+      activeEditorGroup: "right",
+    });
+
+    expect(allTabs(state)).toHaveLength(MAX_OPEN_TABS);
+    expect(state.editorGroups[1].tabs.at(-1)?.path).toBe(realFiles.at(-1));
   });
 
   it("parse reads only OWN fields — inherited (prototype) fields never become state", () => {
@@ -548,7 +949,7 @@ describe("ui-state persistence round-trip", () => {
 
   it("parse stops collecting tabs at the total cap across adversarial groups", () => {
     // 100k entries, junk interleaved: the collector must stop once it has
-    // MAX_OPEN_TABS valid unique paths (never filter/dedupe the whole array)
+    // MAX_OPEN_TABS valid group-local paths (never filter/dedupe the whole array)
     // and keep the first valid entries in order.
     const huge: unknown[] = [];
     for (let i = 0; i < 100_000; i++) {
@@ -746,6 +1147,22 @@ describe("remapWorkbenchPaths (rename/move/delete projection)", () => {
     const remapped = remapWorkbenchPaths(state, () => "same.md");
     expect(allTabs(remapped).map((tab) => tab.path)).toEqual(["same.md"]);
     expect(activeTabPath(remapped)).toBe("same.md");
+  });
+
+  it("keeps the same remapped path open once in each group", () => {
+    const state = createEditorGroupRight(
+      withTabs("a.md"),
+      DEFAULT_EDITOR_GROUP_ID,
+      "right",
+    );
+    const remapped = remapWorkbenchPaths(state, () => "renamed.md");
+    expect(
+      remapped.editorGroups.map((group) => group.tabs.map((tab) => tab.path)),
+    ).toEqual([["renamed.md"], ["renamed.md"]]);
+    expect(remapped.editorGroups.map((group) => group.activeTab)).toEqual([
+      "renamed.md",
+      "renamed.md",
+    ]);
   });
 });
 

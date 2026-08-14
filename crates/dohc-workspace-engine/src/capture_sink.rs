@@ -409,15 +409,20 @@ impl StoreCaptureSink {
         // sink is never called — deliberately NOT a retire: the ratified CAL-3
         // delta (BEHAVIOR_DELTA.md §7.1) keeps last-known-good rather than
         // false-deleting live user data behind an operational scan bound.
-        if metadata.len() > MAX_CAPTURE_BINARY_BYTES {
+        let text_media = is_text_media_type(media_type, path);
+        let content_cap = if text_media {
+            MAX_CAPTURE_TEXT_BYTES
+        } else {
+            MAX_CAPTURE_BINARY_BYTES
+        };
+        if metadata.len() > content_cap {
             return Ok(CurrentContent::NonOwnable);
         }
-        let text_media = is_text_media_type(media_type, path);
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        file.take(MAX_CAPTURE_BINARY_BYTES.saturating_add(1))
+        file.take(content_cap.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|_| READ_FAILED)?;
-        if bytes.len() as u64 > MAX_CAPTURE_BINARY_BYTES {
+        if bytes.len() as u64 > content_cap {
             return Ok(CurrentContent::NonOwnable);
         }
         if !text_media {
@@ -436,6 +441,12 @@ impl StoreCaptureSink {
             Ok(text) => Ok(CurrentContent::Text(text)),
             // A text-suffixed path can be binary in disguise (invalid UTF-8);
             // the store accepts that as binary up to the binary cap.
+            Err(err)
+                if path.to_ascii_lowercase().ends_with(".excalidraw")
+                    || err.as_bytes().len() as u64 > MAX_CAPTURE_BINARY_BYTES =>
+            {
+                Ok(CurrentContent::NonOwnable)
+            }
             Err(err) => Ok(CurrentContent::Binary(err.into_bytes())),
         }
     }
@@ -669,7 +680,7 @@ impl StoreCaptureSink {
         summary: Option<String>,
         allow_ydoc_origin: bool,
     ) -> Result<(), CaptureError> {
-        match self.actor.capture_retire_blocking(
+        match self.actor.capture_retire_materialized_blocking(
             CaptureRetire {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -682,6 +693,8 @@ impl StoreCaptureSink {
                 only_if_capture_origin: true,
                 allow_ydoc_origin,
             },
+            self.shadow_root.clone(),
+            Arc::new(self.self_writes.clone()),
             self.leases.clone(),
             Arc::new(NoFaults),
         ) {
@@ -1574,6 +1587,77 @@ mod tests {
         drop(sink);
         supervisor.close(&db).expect("close actor");
         assert!(snapshot(&db, "oversized.md").is_none());
+    }
+
+    #[test]
+    fn image_heavy_excalidraw_is_utf8_text_up_to_max_text_bytes() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        // Three representative 2 MiB image payloads become 8 MiB of base64.
+        // The portable JSON remains below MAX_TEXT_BYTES (10,485,760 bytes)
+        // and above the 5 MiB binary cap, proving classification selects the
+        // text ceiling before the read.
+        let encoded = "A".repeat(2_700_000);
+        let portable = format!(
+            r#"{{"type":"excalidraw","version":2,"source":"https://excalidraw.com","elements":[{{"id":"ea","type":"image","version":1,"versionNonce":1,"isDeleted":false,"index":"a0","fileId":"a"}},{{"id":"eb","type":"image","version":1,"versionNonce":2,"isDeleted":false,"index":"a1","fileId":"b"}},{{"id":"ec","type":"image","version":1,"versionNonce":3,"isDeleted":false,"index":"a2","fileId":"c"}}],"appState":{{}},"files":{{"a":{{"id":"a","mimeType":"image/png","created":1,"dataURL":"data:image/png;base64,{encoded}"}},"b":{{"id":"b","mimeType":"image/jpeg","created":2,"dataURL":"data:image/jpeg;base64,{encoded}"}},"c":{{"id":"c","mimeType":"image/webp","created":3,"dataURL":"data:image/webp;base64,{encoded}"}}}}}}"#
+        );
+        assert!(portable.len() > MAX_CAPTURE_BINARY_BYTES as usize);
+        assert!(portable.len() < MAX_CAPTURE_TEXT_BYTES as usize);
+        let imported = dohc_engine_collab::import_portable_scene(&portable)
+            .expect("representative healthy scene imports");
+        assert_eq!(imported.files.len(), 3);
+        write_file(
+            scratch.path(),
+            "image-heavy.excalidraw",
+            portable.as_bytes(),
+        );
+        assert!(matches!(
+            ingest_as(&mut sink, "image-heavy.excalidraw", "application/json")
+                .expect("image-heavy scene capture"),
+            IngestOutcome::Captured { .. }
+        ));
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(
+            snapshot(&db, "image-heavy.excalidraw")
+                .expect("captured portable scene")
+                .text
+                .len(),
+            portable.len()
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_and_over_max_text_bytes_excalidraw_are_not_binary() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+
+        write_file(scratch.path(), "invalid.excalidraw", &[0xff, 0xfe]);
+        assert_eq!(
+            ingest_as(&mut sink, "invalid.excalidraw", "application/json")
+                .expect("invalid UTF-8 refusal"),
+            IngestOutcome::NotOwned
+        );
+        assert!(binary_head(&db, "invalid.excalidraw").is_none());
+
+        let observed = MAX_CAPTURE_TEXT_BYTES + 1;
+        write_file(
+            scratch.path(),
+            "over-cap.excalidraw",
+            &vec![b'x'; observed as usize],
+        );
+        assert_eq!(MAX_CAPTURE_TEXT_BYTES, 10_485_760);
+        assert_eq!(observed, 10_485_761);
+        assert_eq!(
+            ingest_as(&mut sink, "over-cap.excalidraw", "application/json")
+                .expect("MAX_TEXT_BYTES 10,485,760-byte capture refusal at 10,485,761 bytes"),
+            IngestOutcome::NotOwned
+        );
+        assert!(binary_head(&db, "over-cap.excalidraw").is_none());
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
     }
 
     #[test]

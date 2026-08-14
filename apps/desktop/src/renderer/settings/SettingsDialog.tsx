@@ -104,7 +104,11 @@ export function SettingsDialog(props: {
     mutated: boolean;
   }) => void;
   onOpenCloud?: () => void;
-  onWorkspaceFilesChanged?: () => void;
+  onWorkspaceFilesChanged?: (outcome?: {
+    // The removal cleaned up the record but left its folder on disk. The
+    // shell needs the id before its reload sees the record vanish.
+    folderLeftShareId?: string;
+  }) => void;
 }) {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);

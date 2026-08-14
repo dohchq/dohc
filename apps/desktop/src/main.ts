@@ -5,6 +5,7 @@ import {
   validateUserWritePath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
   CHATS_METHOD,
   VersionedLiveAdapter,
@@ -12,6 +13,7 @@ import {
   WorkspaceDaemonRequester,
   decodeGranularChatMessageSearchResponse,
   decodeUnreadFileThreads,
+  isYdocArtifactAssetsInvalidRefusal,
 } from "@dohc/workspace-engine-client";
 import {
   app,
@@ -30,6 +32,7 @@ import {
   utilityProcess,
   type IpcMainInvokeEvent,
 } from "electron";
+import * as Y from "yjs";
 import { existsSync, statSync } from "node:fs";
 import { mkdir, readdir } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -252,9 +255,15 @@ import {
   SearchResultsEventSchema,
   OpenEngineYDocSessionPayload,
   OpenEngineYDocSessionResult,
+  ReadEngineYDocArtifactAssetPayload,
+  ReadEngineYDocArtifactAssetResult,
   ApplyEngineYDocUpdatePayload,
+  ApplyEngineYDocUpdateResult,
+  AcknowledgeEngineYDocLineageReplacementPayload,
+  AcknowledgeEngineYDocLineageReplacementResult,
   CloseEngineYDocSessionPayload,
   EngineYDocRemoteUpdateEventSchema,
+  EngineYDocLineageReplacementEventSchema,
   EngineYDocSaveStateEventSchema,
   UpdateActionResult,
   UpdateCheckResult,
@@ -339,6 +348,15 @@ import {
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
 import type { JoinedSharedChannel } from "./workspaces/registryStore";
+import {
+  shareViewGranterEmail,
+  shareViewIsPresent,
+} from "./workspaces/shareViewMarker";
+import { pathShareLanes } from "./workspaces/relayShareLanes";
+import {
+  workspaceSummariesFrom,
+  workspaceSummaryFor,
+} from "./workspaces/workspaceSummaryProjection";
 import {
   assertSharedChannelWritable,
   createKeyedSerializer,
@@ -435,7 +453,10 @@ import {
   mountStoreWorkspaceIdFor,
   relayTargetForShareMount,
   refreshShareMountOnce,
+  classifyShareMountRefreshError,
   removeMountFolder,
+  shareMountResultRow,
+  validMountLabel,
 } from "./workspaces/shareMounts";
 import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
 import {
@@ -464,6 +485,7 @@ import {
 import { fetchSharedChannelInfo } from "./workspaces/sharedChannelInfo";
 import { installWorkspaceDataKey } from "./workspaces/workspaceDataKey";
 import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
+import { bootstrapJoinedWorkspace } from "./workspaces/workspaceJoinEnrollment";
 import {
   readWorkspaceDataKeyForEnrollment,
   readWorkspaceSecretState,
@@ -706,17 +728,6 @@ function requireWorkspace(workspaceId: string) {
   return workspace;
 }
 
-// WS-G2-C-2: only RICH (markdown) files bind to an engine Y.Doc — that is the
-// editor surface the Collaboration extension drives. Plain source/CSV/JSON/text
-// files keep the local autosave editor, and secret paths never open as a Y.Doc
-// (the driver refuses one anyway). The renderer already gates on the same
-// classifier; this is the main-side authority.
-function isRichEnginePath(path: string): boolean {
-  const dot = path.lastIndexOf(".");
-  const ext = dot === -1 ? "" : path.slice(dot + 1).toLowerCase();
-  return ext === "md" || ext === "markdown";
-}
-
 // PR 18 read-only shared views: a shared view is a read-only local workspace.
 // `sharedViewOf` is the ONE authoritative predicate; every mutation surface
 // (file writes, agent runs, code-executing site previews, and the MCP config)
@@ -724,7 +735,15 @@ function isRichEnginePath(path: string): boolean {
 // renderer also hides its edit affordances; this main-process layer is the
 // enforcement that cannot be skipped.
 function sharedViewOf(workspaceId: string): { granterEmail: string | null } | null {
-  return findWorkspace(workspaceId)?.shareView ?? null;
+  const entry = findWorkspace(workspaceId);
+  if (!entry) return null;
+  // PRESENCE, not truthiness. A stored `shareView: null` is a share view
+  // whose marker lost its value, not a workspace that never had one, and
+  // `?? null` read the two as the same thing — which made someone else's
+  // files writable here (#646). Only an ABSENT field is an ordinary
+  // workspace; anything else stays refused, readable marker or not.
+  if (!shareViewIsPresent(entry.shareView)) return null;
+  return { granterEmail: shareViewGranterEmail(entry.shareView) };
 }
 
 function assertWritableWorkspace(workspace: { workspaceId: string }): void {
@@ -1302,7 +1321,7 @@ function notifyCloudSessionChangedWithKey(
 }
 
 function workspaceSummaries(): WorkspaceSummary[] {
-  return listWorkspaces().map((workspace) => WorkspaceSummary.parse(workspace));
+  return workspaceSummariesFrom(listWorkspaces());
 }
 
 function nativeWorkspaceSummaries(): WorkspaceSummary[] {
@@ -1919,7 +1938,9 @@ async function mcpRuntimeConfigFor(rootPath: string): Promise<{
   // Defense in depth: managed agent runs are already refused on shared views,
   // but if a runtime MCP is ever spawned for one it must be the read-only
   // profile — never the write-capable server.
-  const config = mcpConfigFor(rootPath, { readOnly: !!workspace?.shareView });
+  const config = mcpConfigFor(rootPath, {
+    readOnly: shareViewIsPresent(workspace?.shareView),
+  });
   const env = mcpCloudEnvironment({
     workspace,
     credentials: cachedCredentials,
@@ -1986,7 +2007,7 @@ function engineForWorkspace(
     relay,
     operations: {
       push: () => daemonRelay.push(),
-      pull: () => daemonRelay.pull(),
+      pull: (materializePage) => daemonRelay.pull(materializePage),
       recoverOrigin: () => daemonRelay.recoverOrigin(),
     },
     capture,
@@ -2035,7 +2056,9 @@ const activity = createWorkspaceActivity(notifyRenderer, {
       {
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
-        shareView: !!findWorkspace(workspace.workspaceId)?.shareView,
+        shareView: shareViewIsPresent(
+          findWorkspace(workspace.workspaceId)?.shareView,
+        ),
       },
       hooks,
       requireEngineSessions(),
@@ -3163,6 +3186,25 @@ const searchRegistry = createSearchRegistry({ rgPath });
 // Senders whose 'destroyed' cleanup hook is already attached.
 const searchCleanupHooked = new WeakSet<Electron.WebContents>();
 
+type EngineYDocArtifactAsset = NonNullable<
+  WorkspaceEngineYDocProviderSession["artifactAssets"]
+>[number];
+
+function sameEngineYDocArtifactAsset(
+  left: EngineYDocArtifactAsset,
+  right: EngineYDocArtifactAsset,
+): boolean {
+  return (
+    left.id === right.id &&
+    left.mimeType === right.mimeType &&
+    left.created === right.created &&
+    left.ref === right.ref &&
+    left.sha256 === right.sha256 &&
+    left.lastRetrieved === right.lastRetrieved &&
+    left.version === right.version
+  );
+}
+
 // WS-G2-C-2 engine Y.Doc editor binding: the live node-only sessions main owns
 // on the renderer's behalf, keyed by engineYDocSessionKey — the renderer-minted
 // sessionId under the sender main owns. Each holds the single-canonical
@@ -3182,19 +3224,47 @@ interface EngineYDocSessionEntry {
   // before pushing a save state back.
   sender: Electron.WebContents;
   generation: number;
+  // Session-local renderer generation. It changes only when the daemon
+  // replaces the durable lineage, so updates from the retired Y.Doc cannot
+  // be journaled into the winner.
+  lineageGeneration: number;
   // Edit/settle bookkeeping for the honest save indicator. Several settles
   // are routinely in flight at once, so this is a FIFO, not a scalar — see
   // engineYDocSaveSeq.ts.
   saveSeq: EngineYDocSaveSeqState;
+  artifactAssetsById: ReadonlyMap<string, EngineYDocArtifactAsset>;
+  // Descriptors from every lineage this session already replaced. A retired
+  // document's recovery can retry a failed asset read after the
+  // acknowledgement swapped `artifactAssetsById` to the winner, so losing
+  // descriptors stay readable until the normal session close. Kept per
+  // descriptor identity, not per id: successive replacements can reuse one
+  // file id for different content, and each retired lineage's recovery needs
+  // its own descriptor. The current lineage wins an id collision.
+  retiredArtifactAssets: EngineYDocArtifactAsset[];
   // Set by releaseEngineYDocSession when a close failed. The next open of this
   // document retries the release before it binds anything.
   closeFailed?: boolean;
+  // The session is closing and no longer accepts renderer updates. The entry
+  // stays registered until close settles so a failed release remains owned.
+  releasing?: boolean;
   // A successful delete removed this path after capture closed the engine
   // session. Main keeps the renderer entry until its normal close, but every
   // later update is an inert no-op and repeats the deleted state.
   deleted?: boolean;
 }
 const engineYDocSessions = new Map<string, EngineYDocSessionEntry>();
+type EngineYDocLineageHandoff = {
+  lineageGeneration: number;
+  remoteUpdates: Uint8Array[];
+  artifactAssets: readonly NonNullable<
+    WorkspaceEngineYDocProviderSession["artifactAssets"]
+  >[number][];
+  acknowledge: () => AcknowledgeEngineYDocLineageReplacementResult;
+};
+const pendingEngineYDocLineageHandoffs = new Map<
+  string,
+  EngineYDocLineageHandoff
+>();
 
 // Every NON-QUIT teardown of an engine Y.Doc session goes through here: a
 // discarded open, the close IPC, the renderer teardown. What a failed close
@@ -3205,6 +3275,8 @@ function releaseEngineYDocSessionEntry(
   entry: EngineYDocSessionEntry,
   reason: string,
 ): Promise<boolean> {
+  entry.releasing = true;
+  pendingEngineYDocLineageHandoffs.delete(sessionKey);
   return releaseEngineYDocSession({
     sessions: engineYDocSessions,
     sessionKey,
@@ -3976,7 +4048,11 @@ function registerIpcHandlers(
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
     return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async () => {
-      const path = await createFile(workspace.rootPath, input.relativePath);
+      const path = await createFile(
+        workspace.rootPath,
+        input.relativePath,
+        input.initialText,
+      );
       return CreateWorkspaceFileResult.parse({ path });
     });
   });
@@ -4005,6 +4081,20 @@ function registerIpcHandlers(
         // rename). Anything the engine declines — folders, binary, untracked —
         // returns a no-op finisher and is captured as delete+write as before.
         const capture = activity.engineCaptureFor(workspace.workspaceId);
+        // An engine rename preserves the stable object and its Y.Doc kind,
+        // but the editor for the new path is chosen by suffix. A rename out
+        // of a live kind strands the document between them: a drawing
+        // renamed `.md` hands its portable JSON to a raw autosave editor
+        // beside the still-canonical scene, and a drawing renamed `.txt`
+        // keeps a scene lineage no text editor or Markdown fold can update.
+        // Kind changes go through a new file, not a rename.
+        const fromKind = liveDocumentKindForPath(input.fromPath);
+        const toKind = liveDocumentKindForPath(input.toPath);
+        if (capture && fromKind !== null && fromKind !== toKind) {
+          throw new Error(
+            `A rename cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`,
+          );
+        }
         const finishRename = capture
           ? await capture.beginFileRename(input.fromPath, input.toPath)
           : null;
@@ -4206,7 +4296,7 @@ function registerIpcHandlers(
       // the renderer. Sharing itself is offered only on synced, non-shared
       // workspaces (a share needs a relay-side workspace to grant from).
       const registryEntry = findWorkspace(input.workspaceId);
-      const isSharedView = !!registryEntry?.shareView;
+      const isSharedView = shareViewIsPresent(registryEntry?.shareView);
       // Share-mount paths (shared-with-me/…) are a read-only projection of
       // someone else's files: no create/rename/delete/import/share — main
       // owns the menu, so the reduction cannot be bypassed by the renderer.
@@ -4429,6 +4519,18 @@ function registerIpcHandlers(
     const input = WriteWorkspaceTextPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
+    const writePath = validateUserWritePath(input.relativePath);
+    for (const entry of engineYDocSessions.values()) {
+      if (
+        writePath.ok &&
+        entry.workspaceId === workspace.workspaceId &&
+        entry.path === writePath.normalized
+      ) {
+        throw new Error(
+          "The engine owns this live document. Close its editor before writing the file directly.",
+        );
+      }
+    }
     return WriteWorkspaceTextResult.parse(
       await writeWorkspaceText(
         workspace.rootPath,
@@ -4949,7 +5051,16 @@ function registerIpcHandlers(
         rootPath: created.rootPath,
         relay,
       });
-      await daemonRelay.bootstrapJoinIdentity(probe.identity);
+      await bootstrapJoinedWorkspace({
+        workspaceId: parsed.workspaceId,
+        identity: probe.identity,
+        ...(input.passphrase === undefined
+          ? {}
+          : { passphrase: input.passphrase }),
+        transport: daemonRelay,
+        installDataKey: async (unwrapped) =>
+          await installWorkspaceDataKey(created.rootPath, unwrapped),
+      });
 
       registerWorkspace({ ...created, joinBootstrapPending: true });
       refreshNativeWorkspaceSurfaces();
@@ -4986,6 +5097,12 @@ function registerIpcHandlers(
       await resetFailedJoinFolder(rootPath).catch(() => undefined);
       refreshNativeWorkspaceSurfaces();
       notifyRenderer();
+      if (
+        error instanceof Error &&
+        /^(?:Passphrase required|Passphrase could not)\b/u.test(error.message)
+      ) {
+        throw error;
+      }
       throw new Error(
         "Couldn't download the workspace. Nothing was added on this machine — check your connection and try again.",
       );
@@ -5015,7 +5132,7 @@ function registerIpcHandlers(
       );
     }
     const entry = requireWorkspace(input.workspaceId);
-    if (entry.shareView) {
+    if (shareViewIsPresent(entry.shareView)) {
       throw new Error("This is a shared view — only the original workspace can be shared.");
     }
     const { remote } = await remoteForWorkspace(input.workspaceId);
@@ -5025,6 +5142,7 @@ function registerIpcHandlers(
         method: "POST",
         body: JSON.stringify({
           recipientEmail: input.recipientEmail,
+          access: input.access,
           ...(input.paths ? { paths: input.paths } : {}),
           ...(input.versionId ? { versionId: input.versionId } : {}),
         }),
@@ -5048,16 +5166,15 @@ function registerIpcHandlers(
       received?: Array<Record<string, unknown>>;
     }>("/sync/shares");
     const relayUrl = cachedCredentials?.relayUrl;
-    // Chat-channel grants (MU-C4) are listed through listChatChannelShares;
-    // this surface stays the path/version share manager (grant AND receive).
-    const notChatChannel = (row: Record<string, unknown>) =>
-      (row.selector as { kind?: unknown } | undefined)?.kind !== "chat-channel";
     const withCode = (row: Record<string, unknown>) => ({
       ...row,
       shareCode: buildShareCode({ shareId: String(row.shareId), relayUrl: relayUrl! }),
     });
-    const granted = (result.granted ?? []).filter(notChatChannel).map(withCode);
-    const received = (result.received ?? []).filter(notChatChannel).map(withCode);
+    // The two managers split this listing; see relayShareLanes for why a
+    // damaged row stays in the granted lane.
+    const lanes = pathShareLanes(result);
+    const granted = lanes.granted.map(withCode);
+    const received = lanes.received.map(withCode);
     return ListRelaySharesResult.parse({ granted, received });
   });
 
@@ -5307,7 +5424,7 @@ function registerIpcHandlers(
       "Chats",
     );
     const entry = requireWorkspace(input.workspaceId);
-    if (entry.shareView) {
+    if (shareViewIsPresent(entry.shareView)) {
       throw new Error("Shared views are read-only — join channels from a workspace you own.");
     }
     await warmCredentialCache();
@@ -5383,7 +5500,7 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = DismissShareSkipsPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    if (input.shareId === undefined && !workspace.shareView) {
+    if (input.shareId === undefined && !shareViewIsPresent(workspace.shareView)) {
       throw new Error("This workspace is not a shared view.");
     }
     if (
@@ -5564,7 +5681,10 @@ function registerIpcHandlers(
       );
     }
     notifyRenderer();
-    const summary = WorkspaceSummary.parse(findWorkspace(created.workspaceId));
+    // Through the PROJECTION, not a raw parse: the level lives under the
+    // record's pinned grant, and a raw parse would strip it and hand the
+    // renderer a fresh share view with no level to state.
+    const summary = workspaceSummaryFor(requireWorkspace(created.workspaceId));
     return OpenSharedViewResult.parse({ workspace: summary });
   });
 
@@ -5786,7 +5906,10 @@ function registerIpcHandlers(
       refreshNativeWorkspaceSurfaces();
       notifyRenderer();
       return MountShareResult.parse({
-        workspace: WorkspaceSummary.parse(findWorkspace(workspace.workspaceId)),
+        // Through the PROJECTION: a raw registry record nests each mount's
+        // level under its pinned grant, so a raw parse cannot satisfy the
+        // wire schema and every mount would fail here and roll back.
+        workspace: workspaceSummaryFor(requireWorkspace(workspace.workspaceId)),
         mount: {
           shareId: mount.shareId,
           label: mount.label,
@@ -5831,9 +5954,25 @@ function registerIpcHandlers(
     const results: Array<{
       shareId: string;
       label: string;
-      status: "updated" | "unchanged" | "ended";
+      status: "updated" | "unchanged" | "ended" | "damaged";
       changedPaths: number;
     }> = [];
+    // Every row goes through the bounded builder. A record whose identity the
+    // wire schema cannot carry is dropped from the REPORT rather than allowed
+    // to fail the parse at the end and discard every other mount's status.
+    const pushMountResult = (
+      mount: { shareId: unknown; label: unknown },
+      status: "updated" | "unchanged" | "ended" | "damaged",
+      changedPaths: number,
+    ): void => {
+      const row = shareMountResultRow({
+        shareId: mount.shareId,
+        label: mount.label,
+        status,
+        changedPaths,
+      });
+      if (row) results.push(row);
+    };
     if (mounts.length === 0) {
       return RefreshShareMountsResult.parse({ results });
     }
@@ -5848,7 +5987,7 @@ function registerIpcHandlers(
     try {
     for (const mount of mounts) {
       if (mount.ended) {
-        results.push({ shareId: mount.shareId, label: mount.label, status: "ended", changedPaths: 0 });
+        pushMountResult(mount, "ended", 0);
         continue;
       }
       // Offline, signed out, signed into a DIFFERENT relay, or signed into a
@@ -5862,7 +6001,7 @@ function registerIpcHandlers(
           credentials.email != null &&
           credentials.email !== mount.recipientEmail)
       ) {
-        results.push({ shareId: mount.shareId, label: mount.label, status: "unchanged", changedPaths: 0 });
+        pushMountResult(mount, "unchanged", 0);
         continue;
       }
       try {
@@ -5907,34 +6046,16 @@ function registerIpcHandlers(
             current.map((m) => (m.shareId === mount.shareId ? { ...m, ended: true } : m)),
           );
         }
-        results.push({
-          shareId: mount.shareId,
-          label: mount.label,
-          status: outcome.status,
-          changedPaths: outcome.changedPaths,
-        });
+        pushMountResult(mount, outcome.status, outcome.changedPaths);
       } catch (error) {
         // An expired session must SURFACE, not read as "refreshed, nothing
         // new" — a manual Refresh Share would otherwise report success
         // forever while every pull 401s (codex P2).
-        if (error instanceof RelayUnauthorizedError) {
-          throw new Error(
-            "Your dohc Cloud session expired. Sign in again, then refresh shares.",
-          );
-        }
-        // A damaged pin is permanent, like the expired session above: no
-        // later refresh repairs it, and the relay must not be asked for a
-        // replacement scope. Reporting "unchanged" would hide it forever.
-        if (error instanceof SharePinInvalidError) {
-          throw new Error(
-            `The record for the share in "${mount.label}" is damaged, so it can't ` +
-              "refresh safely. Remove that share, then add it again.",
-          );
-        }
-        // One mount's network failure must not stop the others; report it
-        // as unchanged and move on.
+        const verdict = classifyShareMountRefreshError(error);
+        if (verdict.kind === "abort") throw new Error(verdict.message);
+        // One mount's failure must not stop the others.
         console.error(`[desktop] share-mount refresh failed for ${mount.label}:`, error);
-        results.push({ shareId: mount.shareId, label: mount.label, status: "unchanged", changedPaths: 0 });
+        pushMountResult(mount, verdict.status, 0);
       }
     }
     return RefreshShareMountsResult.parse({ results });
@@ -5961,7 +6082,15 @@ function registerIpcHandlers(
     await closeRelayTransportWorkspace(
       mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId),
     );
-    await removeMountFolder(workspace.rootPath, mount.label);
+    // A record whose label this app would never materialize through gets
+    // RECORD cleanup only. Deleting a folder named by an unusable label is
+    // the exact move the validator exists to refuse, so the record goes and
+    // the folder is reported, never touched. Without this the record could
+    // not be removed at all: the folder path would throw and strand it.
+    const folderRemovable = validMountLabel(mount.label);
+    if (folderRemovable) {
+      await removeMountFolder(workspace.rootPath, mount.label);
+    }
     const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
     setWorkspaceShareMounts(
       workspace.workspaceId,
@@ -5970,7 +6099,8 @@ function registerIpcHandlers(
     refreshNativeWorkspaceSurfaces();
     notifyRenderer();
     return UnmountShareResult.parse({
-      workspace: WorkspaceSummary.parse(findWorkspace(workspace.workspaceId)),
+      workspace: workspaceSummaryFor(requireWorkspace(workspace.workspaceId)),
+      ...(folderRemovable ? {} : { folderLeft: true as const }),
     });
     });
   });
@@ -8193,7 +8323,7 @@ function registerIpcHandlers(
     const input = AcceptDmPayload.parse(payload);
     const { workspace } = await requireEngineCapture(input.workspaceId, "Chats");
     const entry = requireWorkspace(input.workspaceId);
-    if (entry.shareView) {
+    if (shareViewIsPresent(entry.shareView)) {
       throw new Error(
         "Shared views are read-only — add this conversation to a workspace you own.",
       );
@@ -9077,7 +9207,7 @@ function registerIpcHandlers(
   // (constructed through the workspace's engine capture, which reuses its store)
   // and forwards remote CRDT deltas back to the sender that opened it. No
   // websocket or token is needed. Gated on an engine-flagged workspace + a
-  // rich (markdown) path; a
+  // classified live-document path; a
   // secret/already-live throw surfaces as available:false so the renderer falls
   // back to the plain local autosave editor. The ONE refusal that must not fall
   // back that way is path-not-in-version (#534): the plain editor is writable
@@ -9099,9 +9229,15 @@ function registerIpcHandlers(
     const sender = event.sender;
     const generation = rendererGeneration(sender.id);
     const capture = activity.engineCaptureFor(workspace.workspaceId);
-    // Only engine-flagged workspaces have a capture; only rich (markdown) files
-    // bind to a Y.Doc. Everything else stays on the plain editor.
-    if (!capture || !isRichEnginePath(input.path)) {
+    const validatedPath = validateUserWritePath(input.path);
+    if (!validatedPath.ok) {
+      return OpenEngineYDocSessionResult.parse({ available: false });
+    }
+    const path = validatedPath.normalized;
+    const requestedKind = liveDocumentKindForPath(path);
+    // Only engine-flagged workspaces have a capture. The shared classifier is
+    // the main-side authority for which paths bind to a Y.Doc.
+    if (!capture || requestedKind === null) {
       return OpenEngineYDocSessionResult.parse({ available: false });
     }
     // PENDING FROM THE FIRST AWAIT, not from the open. A renderer reload waits
@@ -9144,7 +9280,7 @@ function registerIpcHandlers(
       for (const [failedKey, entry] of [...engineYDocSessions]) {
         if (!entry.closeFailed) continue;
         if (entry.workspaceId !== workspace.workspaceId) continue;
-        if (entry.path !== input.path) continue;
+        if (entry.path !== path) continue;
         if (
           !(await releaseEngineYDocSessionEntry(
             failedKey,
@@ -9163,17 +9299,115 @@ function registerIpcHandlers(
       const saveSeq = createEngineYDocSaveSeqState();
       // Stop callbacks after this open loses its session id to another document.
       let refused = false;
+      let lineageGeneration = 1;
+      let registeredEntry: EngineYDocSessionEntry | null = null;
+      let queuedLineageReplacement: {
+        update: Uint8Array;
+        recoveredPaths: string[];
+        remoteUpdates: Uint8Array[];
+        artifactAssets: readonly NonNullable<
+          WorkspaceEngineYDocProviderSession["artifactAssets"]
+        >[number][];
+      } | null = null;
+      const announceLineageReplacement = (replacement: {
+        update: Uint8Array;
+        recoveredPaths: string[];
+        remoteUpdates: Uint8Array[];
+        artifactAssets: readonly NonNullable<
+          WorkspaceEngineYDocProviderSession["artifactAssets"]
+        >[number][];
+      }): void => {
+        if (
+          refused ||
+          sender.isDestroyed() ||
+          rendererGeneration(sender.id) !== generation
+        ) {
+          return;
+        }
+        const nextLineageGeneration = lineageGeneration + 1;
+        const handoff: EngineYDocLineageHandoff = {
+          lineageGeneration: nextLineageGeneration,
+          remoteUpdates: replacement.remoteUpdates,
+          artifactAssets: replacement.artifactAssets,
+          acknowledge: () => {
+            if (pendingEngineYDocLineageHandoffs.get(sessionKey) !== handoff) {
+              return { updates: [] };
+            }
+            lineageGeneration = nextLineageGeneration;
+            if (registeredEntry !== null) {
+              registeredEntry.lineageGeneration = nextLineageGeneration;
+              for (const asset of registeredEntry.artifactAssetsById.values()) {
+                if (
+                  !registeredEntry.retiredArtifactAssets.some((retired) =>
+                    sameEngineYDocArtifactAsset(retired, asset),
+                  )
+                ) {
+                  registeredEntry.retiredArtifactAssets.push(asset);
+                }
+              }
+              registeredEntry.artifactAssetsById = new Map(
+                handoff.artifactAssets.map((asset) => [asset.id, asset]),
+              );
+            }
+            pendingEngineYDocLineageHandoffs.delete(sessionKey);
+            const queued = queuedLineageReplacement;
+            queuedLineageReplacement = null;
+            if (queued !== null) {
+              announceLineageReplacement(queued);
+              // The queued full snapshot supersedes every delta from the
+              // intermediate lineage. Its own later deltas travel with its
+              // acknowledgement instead.
+              return { updates: [] };
+            }
+            return { updates: handoff.remoteUpdates };
+          },
+        };
+        // From this point until acknowledgement, neither lineage may accept
+        // renderer updates. The losing CRDT cannot merge into the independent
+        // winner, and the winner is not editable until its mirror has replaced
+        // the losing document.
+        pendingEngineYDocLineageHandoffs.set(sessionKey, handoff);
+        try {
+          sender.send(
+            CHANNELS.engineYDocLineageReplacement,
+            EngineYDocLineageReplacementEventSchema.parse({
+              sessionId: input.sessionId,
+              update: replacement.update,
+              recoveredPaths: replacement.recoveredPaths,
+              artifactAssets: replacement.artifactAssets,
+              lineageGeneration: nextLineageGeneration,
+            }),
+          );
+        } catch (error) {
+          // The provider already installed the winner, so the retired lineage
+          // cannot safely resume. Release this session instead of leaving an
+          // unacknowledgeable handoff armed forever.
+          if (pendingEngineYDocLineageHandoffs.get(sessionKey) === handoff) {
+            pendingEngineYDocLineageHandoffs.delete(sessionKey);
+          }
+          refused = true;
+          console.error(
+            `[desktop] could not announce the engine Y.Doc lineage replacement for ${input.path}:`,
+            error,
+          );
+          if (registeredEntry !== null) {
+            void releaseEngineYDocSessionEntry(
+              sessionKey,
+              registeredEntry,
+              "lineage replacement announcement failed",
+            );
+          }
+        }
+      };
       let session: WorkspaceEngineYDocProviderSession;
       try {
         session = await capture.openYDocSession({
-          path: input.path,
+          path,
           // Explicit, because the daemon defaults an unspecified session to
           // PLAINTEXT (actor.rs requested_content_kind.unwrap_or(Plaintext)).
-          // The gate above admits only rich markdown paths, and a plaintext
-          // session seeds/projects the plainText root while the editor binds
-          // the body fragment — the doc opens empty and every typed edit
-          // settles back to the pre-edit file while the UI shows "Saved".
-          contentKind: "richdoc",
+          // The requested kind must match the editor selected for this path.
+          // A mismatched session binds the editor to the wrong Y.Doc root.
+          contentKind: requestedKind,
           // The document's REAL save state. A settle failure used to reach
           // nothing at all while the editor's own timer kept saying "Saved" —
           // three dogfood journeys watched a doc report Saved over a
@@ -9208,15 +9442,48 @@ function registerIpcHandlers(
             ) {
               return;
             }
+            const handoff = pendingEngineYDocLineageHandoffs.get(sessionKey);
+            if (handoff) {
+              (queuedLineageReplacement?.remoteUpdates ?? handoff.remoteUpdates).push(
+                update,
+              );
+              return;
+            }
             try {
               sender.send(
                 CHANNELS.engineYDocRemoteUpdate,
-                EngineYDocRemoteUpdateEventSchema.parse({ sessionId: input.sessionId, update }),
+                EngineYDocRemoteUpdateEventSchema.parse({
+                  sessionId: input.sessionId,
+                  update,
+                  lineageGeneration,
+                }),
               );
             } catch {
               // A malformed delta is DROPPED, never thrown through the session's
               // update observer (an uncaught throw there would wedge main).
             }
+          },
+          onLineageReplaced: (update, recoveredPaths) => {
+            if (
+              refused ||
+              sender.isDestroyed() ||
+              rendererGeneration(sender.id) !== generation
+            ) {
+              return;
+            }
+            const replacement = {
+              update,
+              recoveredPaths,
+              remoteUpdates: [],
+              artifactAssets: session.artifactAssets ?? [],
+            };
+            if (pendingEngineYDocLineageHandoffs.has(sessionKey)) {
+              // Keep only the newest full snapshot. It contains every earlier
+              // lineage; deltas observed after it are buffered on this object.
+              queuedLineageReplacement = replacement;
+              return;
+            }
+            announceLineageReplacement(replacement);
           },
         });
       } catch (error) {
@@ -9234,7 +9501,7 @@ function registerIpcHandlers(
         // is really on disk, so it keeps the plain editor: claiming the
         // version does not have it would be false.
         console.error(
-          `[desktop] engine Y.Doc open refused for ${input.path}:`,
+          `[desktop] engine Y.Doc open refused for ${path}:`,
           error,
         );
         return OpenEngineYDocSessionResult.parse({
@@ -9248,10 +9515,12 @@ function registerIpcHandlers(
                 },
               }
             : {}),
-          ...(isEngineWorkspaceOpenRefusedError(error) ||
-          isYDocSessionUnreleasedError(error)
-            ? { engineMayHoldDocument: true }
-            : {}),
+          ...(isYdocArtifactAssetsInvalidRefusal(error)
+            ? { artifactAssetsInvalid: true }
+            : isEngineWorkspaceOpenRefusedError(error) ||
+                isYDocSessionUnreleasedError(error)
+              ? { engineMayHoldDocument: true }
+              : {}),
         });
       }
       const entry: EngineYDocSessionEntry = {
@@ -9259,17 +9528,30 @@ function registerIpcHandlers(
         sessionId: input.sessionId,
         senderId: sender.id,
         workspaceId: workspace.workspaceId,
-        path: input.path,
+        path,
         sender,
         generation,
+        lineageGeneration,
         saveSeq,
+        artifactAssetsById: new Map(
+          (session.artifactAssets ?? []).map((asset) => [asset.id, asset]),
+        ),
+        retiredArtifactAssets: [],
       };
+      registeredEntry = entry;
       // Every path below that refuses this session releases it through the
       // same helper, and answers read-only unless the release succeeded.
       const release = (reason: string): Promise<boolean> => {
         refused = true;
         return releaseEngineYDocSessionEntry(sessionKey, entry, reason);
       };
+      if (refused) {
+        const released = await release("lineage replacement announcement failed");
+        return OpenEngineYDocSessionResult.parse({
+          available: false,
+          ...(released ? {} : { engineMayHoldDocument: true }),
+        });
+      }
       // The renderer can die or reload DURING the await above. Close the stale
       // session before crash cleanup completes so its reservation cannot block
       // the replacement renderer's open.
@@ -9293,14 +9575,13 @@ function registerIpcHandlers(
         });
       }
       // The daemon honors the requested kind only for state-free markers; a
-      // lineage with durable state keeps its own. Binding the rich editor's
-      // body fragment onto a plaintext session is silent data loss (empty doc
-      // over a non-empty file, typed edits pruned at close) — refuse loudly,
-      // and fall back to the plain editor only once the session is released.
-      if (session.contentKind !== "richdoc") {
+      // lineage with durable state keeps its own. Binding an editor to a
+      // different content kind is silent data loss. Refuse the session and
+      // fall back to the plain editor only once the session is released.
+      if (session.contentKind !== requestedKind) {
         console.error(
-          `[desktop] engine Y.Doc open for ${input.path} came back ${session.contentKind}; ` +
-            "refusing the rich editor (kind-mismatched lineage).",
+          `[desktop] engine Y.Doc open for ${path} came back ${session.contentKind}; ` +
+            `the editor requested ${requestedKind} (kind-mismatched lineage).`,
         );
         const released = await release("kind-mismatched lineage");
         return OpenEngineYDocSessionResult.parse({
@@ -9326,23 +9607,93 @@ function registerIpcHandlers(
       }
       return OpenEngineYDocSessionResult.parse({
         available: true,
-        initialUpdate: session.initialUpdate,
+        initialUpdate: Y.encodeStateAsUpdate(session.doc),
+        ...(session.objectId ? { objectId: session.objectId } : {}),
+        ...(session.versionId ? { versionId: session.versionId } : {}),
+        artifactAssets: session.artifactAssets ?? [],
+        lineageGeneration,
       });
     } finally {
       finishPendingOpen();
     }
   });
 
+  ipcMain.handle(
+    CHANNELS.engineYDocReadArtifactAsset,
+    async (event, payload) => {
+      assertTrustedSender(event);
+      const input = ReadEngineYDocArtifactAssetPayload.parse(payload);
+      const entry = engineYDocSessions.get(
+        engineYDocSessionKey(event.sender.id, input.sessionId),
+      );
+      // Deletion marks this entry before the renderer can capture its recovery
+      // draft. Keep the version-bound asset reader available until the normal
+      // session close so an image-bearing drawing can finish that recovery.
+      if (
+        !entry ||
+        entry.sender !== event.sender ||
+        entry.generation !== rendererGeneration(event.sender.id)
+      ) {
+        throw new Error(
+          "The live document session is no longer available. Open the file again.",
+        );
+      }
+      // The renderer's descriptor only selects among the descriptors this
+      // session has pinned; the read hydrates from the pinned copy. One id
+      // can name the winner's asset and a retired lineage's, so the match is
+      // field-exact and the current lineage is tried first.
+      const requested = input.descriptor;
+      const descriptor = [
+        entry.artifactAssetsById.get(requested.id),
+        ...entry.retiredArtifactAssets,
+      ].find(
+        (candidate) =>
+          candidate !== undefined &&
+          sameEngineYDocArtifactAsset(candidate, requested),
+      );
+      if (!descriptor) {
+        throw new Error(
+          `The live document does not reference artifact asset ${requested.id}.`,
+        );
+      }
+      const hydrated = await entry.session.readArtifactAsset(descriptor);
+      return ReadEngineYDocArtifactAssetResult.parse(hydrated);
+    },
+  );
+
   ipcMain.handle(CHANNELS.engineYDocApplyUpdate, (event, payload) => {
     assertTrustedSender(event);
     const input = ApplyEngineYDocUpdatePayload.parse(payload);
     // Owner-scoped BY THE KEY: the sender comes from the event, so a renderer
-    // can only ever reach a session it opened. A no-op for an unknown, closed,
-    // or foreign session (this boundary never throws to the caller).
-    const entry = engineYDocSessions.get(
-      engineYDocSessionKey(event.sender.id, input.sessionId),
-    );
-    if (!entry) return;
+    // can only ever reach a session it opened. Refusals are returned as data so
+    // the renderer can preserve its canonical mirror.
+    const sessionKey = engineYDocSessionKey(event.sender.id, input.sessionId);
+    const entry = engineYDocSessions.get(sessionKey);
+    if (!entry) {
+      return ApplyEngineYDocUpdateResult.parse({
+        accepted: false,
+        reason: "session-unavailable",
+      });
+    }
+    if (entry.releasing) {
+      return ApplyEngineYDocUpdateResult.parse({
+        accepted: false,
+        reason: "session-unavailable",
+      });
+    }
+    // Main has installed an independent winner, but the renderer may still be
+    // inside a transaction on the losing mirror. Never merge that update into
+    // the winner and never accept winner edits before the renderer has exposed
+    // it. The renderer persists the losing mirror before acknowledging.
+    if (
+      pendingEngineYDocLineageHandoffs.has(sessionKey) ||
+      input.lineageGeneration !== entry.lineageGeneration
+    ) {
+      return ApplyEngineYDocUpdateResult.parse({
+        accepted: false,
+        reason: "lineage-transition",
+      });
+    }
     if (entry.deleted) {
       sendEngineYDocSaveState(
         entry.sender,
@@ -9351,7 +9702,10 @@ function registerIpcHandlers(
         "deleted",
         input.seq,
       );
-      return;
+      return ApplyEngineYDocUpdateResult.parse({
+        accepted: false,
+        reason: "deleted",
+      });
     }
     // WS-G2-C-2 (gate fix 4): RE-CHECK the shared-view guard before applying — a
     // workspace can become a read-only shared view after a session opened, and
@@ -9366,7 +9720,10 @@ function registerIpcHandlers(
         "read-only",
         input.seq,
       );
-      return;
+      return ApplyEngineYDocUpdateResult.parse({
+        accepted: false,
+        reason: "read-only",
+      });
     }
     // Count the edit when it REACHES the settle, not when it arrives here.
     // The session queues updates, so hand-over runs ahead of journaling: a
@@ -9376,7 +9733,24 @@ function registerIpcHandlers(
     entry.session.applyLocalUpdate(input.update, () =>
       noteLocalEdit(entry.saveSeq, input.seq),
     );
+    return ApplyEngineYDocUpdateResult.parse({ accepted: true });
   });
+
+  ipcMain.handle(
+    CHANNELS.engineYDocAcknowledgeLineageReplacement,
+    (event, payload) => {
+      assertTrustedSender(event);
+      const input = AcknowledgeEngineYDocLineageReplacementPayload.parse(payload);
+      const sessionKey = engineYDocSessionKey(event.sender.id, input.sessionId);
+      const handoff = pendingEngineYDocLineageHandoffs.get(sessionKey);
+      if (!handoff || handoff.lineageGeneration !== input.lineageGeneration) {
+        return AcknowledgeEngineYDocLineageReplacementResult.parse({ updates: [] });
+      }
+      return AcknowledgeEngineYDocLineageReplacementResult.parse(
+        handoff.acknowledge(),
+      );
+    },
+  );
 
   ipcMain.handle(CHANNELS.engineYDocClose, async (event, payload) => {
     assertTrustedSender(event);

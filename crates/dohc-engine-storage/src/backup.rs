@@ -61,12 +61,16 @@ const COMPARED_TABLES: &[&str] = &[
     "snapshots",
     "fork_base_snapshots",
     "moments",
+    "scene_asset_delete_authorities",
+    "scene_asset_delete_authority_items",
     "materialization_jobs",
     "ydoc_docs",
     "ydoc_updates",
     "ydoc_snapshots",
     "ydoc_deferred_updates",
     "ydoc_inactive_lineages",
+    "ydoc_base_relay_candidates",
+    "ydoc_recovery_decisions",
     "replication_pending_conflict_bundles",
     "replication_pending_conflict_ops",
     "replication_pending_conflict_moments",
@@ -472,6 +476,16 @@ mod tests {
             "replication_pending_conflict_text_blobs",
             "replication_pending_conflict_binary_blobs",
         ] {
+            assert!(
+                COMPARED_TABLES.contains(&table),
+                "backup restore verification must compare {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn backup_compares_ydoc_arbitration_tables() {
+        for table in ["ydoc_base_relay_candidates", "ydoc_recovery_decisions"] {
             assert!(
                 COMPARED_TABLES.contains(&table),
                 "backup restore verification must compare {table}"

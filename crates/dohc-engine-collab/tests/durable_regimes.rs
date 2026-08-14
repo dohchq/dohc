@@ -8,20 +8,35 @@ mod common;
 use common::*;
 use dohc_engine_collab::ContentKind;
 use dohc_engine_collab::{
-    apply_remote_update, claim_base, close_session, ensure_marker, fresh_successor_base,
-    load_persisted, read_marker, record_local_update, record_local_update_creating_marker_guarded,
-    replace_lineage_with_successor, settle, ClaimOutcome, CloseOutcome, CollabError, DocKey,
-    LeaseRegistry, LineageClaimStatus, Regime, RemoteUpdate, ReplicationApplyOutcome,
+    apply_remote_update, claim_base, claim_base_at_relay, close_session, ensure_marker,
+    fresh_successor_base, load_persisted, read_marker, record_base_coordinate, record_local_update,
+    record_local_update_creating_marker_guarded,
+    record_local_update_creating_marker_guarded_for_lineage, replace_lineage_with_successor,
+    settle, BaseCoordinateRecord, BaseRelayCoordinate, ClaimOutcome, CloseOutcome, CollabError,
+    DocKey, LeaseRegistry, LineageClaimStatus, Regime, RemoteUpdate, ReplicationApplyOutcome,
     SettleOutcome, SuccessorIdentity, SuccessorIdentityInput, SuccessorInstallOutcome,
     SuccessorReplacement, Ydoc,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
+use rusqlite::OptionalExtension;
 
 fn committed<T>(o: TxnOutcome<T>) -> T {
     match o {
         TxnOutcome::Committed(v) => v,
         TxnOutcome::Crashed { .. } => panic!("expected committed, got crashed"),
     }
+}
+
+#[test]
+fn base_coordinate_reports_the_origin_id_byte_limit() {
+    let origin_id = "x".repeat(dohc_engine_storage::MAX_IDENTIFIER_BYTES + 1);
+    let error = BaseRelayCoordinate::new(origin_id, 0, 0).expect_err("oversized origin id");
+
+    assert_eq!(error.code(), "invalid-identifier");
+    assert_eq!(
+        error.to_string(),
+        "invalid identifier: origin_id is 513 bytes; the limit is 512 bytes"
+    );
 }
 
 /// Mark a `settle()` call's OWN materialization job complete. Every test
@@ -56,8 +71,20 @@ fn plaintext_base_and_delta() -> (Vec<u8>, Vec<u8>) {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct StoredMarkerFingerprint {
+    content_kind: String,
+    regime: String,
+    updated_at_ms: i64,
+    base_origin_id: Option<String>,
+    base_origin_seq: Option<i64>,
+    base_relay_seq: Option<i64>,
+    base_relay_confirmed_absent: i64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct LineageStorageFingerprint {
     active_claim: Option<String>,
+    marker: Option<StoredMarkerFingerprint>,
     base: Option<(String, String)>,
     updates: i64,
     snapshots: i64,
@@ -75,6 +102,29 @@ fn lineage_storage_fingerprint(store: &EngineStore, key: &DocKey) -> LineageStor
                     rusqlite::params![key.workspace_id, key.version_id, key.object_id],
                     |row| row.get(0),
                 )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?;
+            let marker = conn
+                .query_row(
+                    "SELECT content_kind,regime,updated_at_ms,base_origin_id,
+                            base_origin_seq,base_relay_seq,base_relay_confirmed_absent
+                       FROM ydoc_docs
+                      WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| {
+                        Ok(StoredMarkerFingerprint {
+                            content_kind: row.get(0)?,
+                            regime: row.get(1)?,
+                            updated_at_ms: row.get(2)?,
+                            base_origin_id: row.get(3)?,
+                            base_origin_seq: row.get(4)?,
+                            base_relay_seq: row.get(5)?,
+                            base_relay_confirmed_absent: row.get(6)?,
+                        })
+                    },
+                )
+                .optional()
                 .map_err(|error| CollabError::Corrupt {
                     reason: error.to_string(),
                 })?;
@@ -110,6 +160,7 @@ fn lineage_storage_fingerprint(store: &EngineStore, key: &DocKey) -> LineageStor
                 })?;
             Ok(LineageStorageFingerprint {
                 active_claim,
+                marker,
                 base: snapshot.0.zip(snapshot.1),
                 updates: count("ydoc_updates")?,
                 snapshots: count("ydoc_snapshots")?,
@@ -260,6 +311,62 @@ fn record_update_request_identity_binds_path_before_any_mutation() {
     );
 }
 
+#[test]
+fn record_update_lineage_guard_refuses_stale_sessions_before_any_mutation() {
+    let mut ts = fresh_store("record-update-lineage-guard");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    let (base, _) = plaintext_base_and_delta();
+    let claim_id = match committed(
+        claim_base(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &base,
+            &NoFaults,
+            1_050,
+        )
+        .expect("claim active lineage"),
+    ) {
+        ClaimOutcome::Claimed { base_snapshot_sha } => base_snapshot_sha,
+        other => panic!("unexpected claim outcome: {other:?}"),
+    };
+    let peer = Ydoc::wire();
+    peer.apply(&base).expect("load active lineage");
+    let update = peer.plaintext_insert(6, "session edit");
+    let before = record_update_transaction_fingerprint(&ts.store, &key);
+
+    let error = record_local_update_creating_marker_guarded_for_lineage(
+        &mut ts.store,
+        &key,
+        Some("notes/stale-session.md"),
+        ContentKind::Plaintext,
+        Regime::LocalOnly,
+        &update,
+        Some("local-origin"),
+        Some(&"0".repeat(64)),
+        true,
+        false,
+        Some("stale-session-request"),
+        &NoFaults,
+        1_100,
+        |_tx, _outcome| panic!("a stale lineage must not reach post-append"),
+    )
+    .expect_err("stale session claim must refuse the write");
+    assert!(matches!(
+        error,
+        CollabError::LineageWriteStale {
+            expected: Some(expected),
+            observed: Some(observed),
+        } if expected == "0".repeat(64) && observed == claim_id
+    ));
+    assert_eq!(
+        record_update_transaction_fingerprint(&ts.store, &key),
+        before,
+        "the lineage guard runs before path, parent, blob, update, request, and log mutation"
+    );
+}
+
 // ---- regimes ----------------------------------------------------------------
 
 #[test]
@@ -358,7 +465,7 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
         .expect("seed the colliding cross-workspace job");
 
     let out = committed(
-        close_session(&mut ts.store, &key, false, &NoFaults, 1_400)
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400)
             .expect("another workspace's backlog must not block this close"),
     );
     assert!(
@@ -439,7 +546,7 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
         .expect("seed this workspace's own pending job");
     assert!(
         matches!(
-            close_session(&mut ts2.store, &key2, false, &NoFaults, 1_400),
+            close_session(&mut ts2.store, &key2, false, None, &NoFaults, 1_400),
             Err(CollabError::UnsettledClose)
         ),
         "this workspace's own pending job must still hold the prune"
@@ -539,7 +646,7 @@ fn assert_pending_job_of_kind_blocks_close(job_id_prefix: &str) {
 
     assert!(
         matches!(
-            close_session(&mut ts.store, &key, false, &NoFaults, 1_400),
+            close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400),
             Err(CollabError::UnsettledClose)
         ),
         "a pending '{job_id_prefix}' job must hold the prune"
@@ -586,7 +693,7 @@ fn local_only_close_prunes_the_cache() {
 
     // A close BEFORE settling refuses to prune (would discard unsettled edits).
     assert!(matches!(
-        close_session(&mut ts.store, &key, false, &NoFaults, 1_500),
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 1_500),
         Err(CollabError::UnsettledClose)
     ));
     assert_eq!(
@@ -597,13 +704,14 @@ fn local_only_close_prunes_the_cache() {
 
     // Settle the head, THEN close — now the .md covers the head, safe to prune.
     committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_800).expect("settle"));
-    let out =
-        committed(close_session(&mut ts.store, &key, false, &NoFaults, 2_000).expect("close"));
+    let out = committed(
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 2_000).expect("close"),
+    );
     assert!(
         matches!(out, CloseOutcome::Pruned { .. }),
         "local-only prunes"
     );
-    // The CRDT cache is gone; the marker survives (markdown-is-the-artifact).
+    // The CRDT cache is gone; the marker survives (the workspace file is the artifact).
     assert_eq!(count(&ts.store, "ydoc_updates", &key), 0, "updates pruned");
     assert_eq!(
         count(&ts.store, "ydoc_snapshots", &key),
@@ -714,8 +822,9 @@ fn a_captured_head_lets_a_never_settled_local_close_prune() {
     committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
     seed_head(&mut ts.store, &key, "what the user typed", None);
 
-    let out =
-        committed(close_session(&mut ts.store, &key, false, &NoFaults, 1_400).expect("close"));
+    let out = committed(
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400).expect("close"),
+    );
     assert!(
         matches!(out, CloseOutcome::Pruned { .. }),
         "a head that already holds the projection covers the prune: {out:?}"
@@ -750,7 +859,7 @@ fn a_head_holding_other_bytes_still_refuses_the_local_close() {
 
     assert!(
         matches!(
-            close_session(&mut ts.store, &key, false, &NoFaults, 1_400),
+            close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400),
             Err(CollabError::UnsettledClose)
         ),
         "a head that holds OTHER bytes proves nothing about this document"
@@ -806,7 +915,7 @@ fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
 
     assert!(
         matches!(
-            close_session(&mut ts.store, &key, false, &NoFaults, 1_400),
+            close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400),
             Err(CollabError::UnsettledClose)
         ),
         "a head whose materialization conflicted is not on disk, whatever it holds"
@@ -847,7 +956,7 @@ fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
     );
     assert!(
         matches!(
-            close_session(&mut settled.store, &key2, false, &NoFaults, 1_400),
+            close_session(&mut settled.store, &key2, false, None, &NoFaults, 1_400,),
             Err(CollabError::UnsettledClose)
         ),
         "an engine-written head answers through the settle marker, not this fallback"
@@ -897,8 +1006,9 @@ fn a_captured_reversion_discharges_despite_a_leftover_completed_job_row() {
     // reproduces exactly that, leaving the completed job row untouched.
     seed_head(&mut ts.store, &key, "what the user typed", None);
 
-    let out =
-        committed(close_session(&mut ts.store, &key, false, &NoFaults, 1_400).expect("close"));
+    let out = committed(
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400).expect("close"),
+    );
     assert!(
         matches!(out, CloseOutcome::Pruned { .. }),
         "a genuine capture discharges despite a leftover completed job row: {out:?}"
@@ -963,7 +1073,7 @@ fn a_binary_head_refuses_the_close_by_name_instead_of_failing_internally() {
 
     assert!(
         matches!(
-            close_session(&mut ts.store, &key, false, &NoFaults, 1_400),
+            close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400),
             Err(CollabError::UnsettledClose)
         ),
         "a binary head holds none of this document's text, and the refusal must say so"
@@ -995,8 +1105,9 @@ fn replicated_close_never_prunes_the_lineage() {
         .expect("m")
         .doc
         .canonical_content_sha256();
-    let out =
-        committed(close_session(&mut ts.store, &key, false, &NoFaults, 2_000).expect("close"));
+    let out = committed(
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 2_000).expect("close"),
+    );
     assert!(
         matches!(out, CloseOutcome::Compacted(_)),
         "replicated compacts, not prunes"
@@ -1061,8 +1172,9 @@ fn local_to_shared_transition_keeps_the_base() {
     assert_eq!(count(&ts.store, "ydoc_snapshots", &key), 1, "base claimed");
 
     // Close must now COMPACT (not prune), preserving the base for peers.
-    let out =
-        committed(close_session(&mut ts.store, &key, false, &NoFaults, 2_000).expect("close"));
+    let out = committed(
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 2_000).expect("close"),
+    );
     assert!(
         matches!(out, CloseOutcome::Compacted(_)),
         "shared close compacts"
@@ -1149,6 +1261,7 @@ fn base_is_claimed_exactly_once() {
     let first_sha = match first {
         ClaimOutcome::Claimed { base_snapshot_sha } => base_snapshot_sha,
         ClaimOutcome::Resumed => panic!("first claim must mint the base"),
+        other => panic!("local first claim cannot arbitrate: {other:?}"),
     };
     assert_eq!(
         read_marker(&ts.store, &key)
@@ -1194,7 +1307,7 @@ fn base_is_claimed_exactly_once() {
         .expect("append before base-proof compaction"),
     );
     let compacted = committed(
-        close_session(&mut ts.store, &key, false, &NoFaults, 1_475)
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 1_475)
             .expect("compact claimed lineage"),
     );
     assert!(matches!(compacted, CloseOutcome::Compacted(_)));
@@ -1263,6 +1376,139 @@ fn base_is_claimed_exactly_once() {
 }
 
 #[test]
+fn relay_base_arbitration_is_ordered_and_claim_safe() {
+    let mut ts = fresh_store("relay-base-arbitration");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    let (first_base, _) = plaintext_base_and_delta();
+    let first_claim = match committed(
+        claim_base(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &first_base,
+            &NoFaults,
+            1_000,
+        )
+        .expect("claim local base"),
+    ) {
+        ClaimOutcome::Claimed { base_snapshot_sha } => base_snapshot_sha,
+        other => panic!("unexpected first claim: {other:?}"),
+    };
+    committed(
+        record_base_coordinate(
+            &mut ts.store,
+            BaseCoordinateRecord {
+                key: &key,
+                lineage_claim_id: &first_claim,
+                origin_id: "first-origin",
+                origin_seq: 7,
+                relay_seq: Some(10),
+                now_ms: 1_010,
+            },
+            &NoFaults,
+        )
+        .expect("stamp first relay coordinate"),
+    );
+
+    let later = Ydoc::wire();
+    later.plaintext_insert(0, "later base");
+    let later_base = later.encode_full_state();
+    let before_later = lineage_storage_fingerprint(&ts.store, &key);
+    let already_won = committed(
+        claim_base_at_relay(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &later_base,
+            &BaseRelayCoordinate::new("later-origin", 2, 20).expect("later coordinate"),
+            &NoFaults,
+            1_020,
+        )
+        .expect("earlier base wins"),
+    );
+    match already_won {
+        ClaimOutcome::AlreadyWon { winner } => {
+            assert_eq!(
+                winner.lineage_claim_id.as_deref(),
+                Some(first_claim.as_str())
+            );
+            assert_eq!(winner.content_kind, ContentKind::Plaintext);
+        }
+        other => panic!("expected AlreadyWon, got {other:?}"),
+    }
+    assert_eq!(lineage_storage_fingerprint(&ts.store, &key), before_later);
+
+    let collision = claim_base_at_relay(
+        &mut ts.store,
+        &key,
+        ContentKind::Plaintext,
+        &later_base,
+        &BaseRelayCoordinate::new("collision-origin", 4, 10).expect("collision coordinate"),
+        &NoFaults,
+        1_030,
+    )
+    .expect_err("one relay position cannot name different base bytes");
+    assert!(matches!(
+        collision,
+        CollabError::BaseRelaySequenceCollision { relay_seq: 10 }
+    ));
+
+    let earlier = Ydoc::wire();
+    earlier.plaintext_insert(0, "earlier base");
+    let earlier_base = earlier.encode_full_state();
+    let earlier_claim = dohc_engine_collab::hex_sha256(&earlier_base);
+    let replaced = committed(
+        claim_base_at_relay(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &earlier_base,
+            &BaseRelayCoordinate::new("earlier-origin", 3, 5).expect("earlier coordinate"),
+            &NoFaults,
+            1_040,
+        )
+        .expect("lower relay position replaces"),
+    );
+    match replaced {
+        ClaimOutcome::Replaced {
+            losing_lineage_claim_id,
+            winner,
+        } => {
+            assert_eq!(losing_lineage_claim_id, first_claim);
+            assert_eq!(
+                winner.lineage_claim_id.as_deref(),
+                Some(earlier_claim.as_str())
+            );
+        }
+        other => panic!("expected Replaced, got {other:?}"),
+    }
+
+    let replay = committed(
+        claim_base_at_relay(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &earlier_base,
+            &BaseRelayCoordinate::new("earlier-origin", 3, 5).expect("replay coordinate"),
+            &NoFaults,
+            1_050,
+        )
+        .expect("replay winner"),
+    );
+    assert!(matches!(replay, ClaimOutcome::Resumed));
+    assert_eq!(
+        read_marker(&ts.store, &key)
+            .expect("read winner")
+            .expect("winner marker")
+            .lineage_claim_id
+            .as_deref(),
+        Some(earlier_claim.as_str()),
+        "replay must not change the durable live-lineage token"
+    );
+}
+
+#[test]
 fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
     let scratch = unique_dir("successor-cas");
     let mut store = open_at(&scratch, 1_000);
@@ -1282,6 +1528,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
     ) {
         ClaimOutcome::Claimed { base_snapshot_sha } => base_snapshot_sha,
         ClaimOutcome::Resumed => panic!("the first base must be claimed"),
+        other => panic!("local first claim cannot arbitrate: {other:?}"),
     };
     committed(
         apply_remote_update(
@@ -1318,7 +1565,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
             .doc
             .project(ContentKind::Plaintext)
             .expect("project predecessor")
-            .markdown,
+            .content,
         "hello world"
     );
     let predecessor_state_vector_sha256 =
@@ -1368,6 +1615,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
             expected_predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
             path: "notes/a.txt",
             successor: &cross_bound,
+            scene_result: None,
             now_ms: 1_150,
         },
         &NoFaults,
@@ -1399,6 +1647,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
                 expected_predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
                 path: "notes/a.txt",
                 successor: &successor,
+                scene_result: None,
                 now_ms: 1_200,
             },
             &NoFaults,
@@ -1438,7 +1687,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
             .doc
             .project(ContentKind::Plaintext)
             .expect("project successor")
-            .markdown,
+            .content,
         successor_text
     );
 
@@ -1463,7 +1712,8 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
         .expect("append to the successor"),
     );
     let compacted = committed(
-        close_session(&mut store, &key, false, &NoFaults, 1_250).expect("compact the successor"),
+        close_session(&mut store, &key, false, None, &NoFaults, 1_250)
+            .expect("compact the successor"),
     );
     assert!(matches!(compacted, CloseOutcome::Compacted(_)));
     let snapshot_shape: (i64, i64, i64) = store
@@ -1550,7 +1800,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
         archived_doc
             .project(ContentKind::Plaintext)
             .expect("project archived predecessor")
-            .markdown,
+            .content,
         "hello world"
     );
     assert_eq!(archived_doc.encode_state_vector(), archived_state_vector);
@@ -1585,6 +1835,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
             expected_predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
             path: "notes/a.txt",
             successor: &successor,
+            scene_result: None,
             now_ms: 1_275,
         },
         &NoFaults,
@@ -1647,6 +1898,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
             expected_predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
             path: "notes/a.txt",
             successor: &successor,
+            scene_result: None,
             now_ms: 1_280,
         },
         &NoFaults,
@@ -1688,6 +1940,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
                 expected_predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
                 path: "notes/a.txt",
                 successor: &successor,
+                scene_result: None,
                 now_ms: 1_300,
             },
             &NoFaults,
@@ -1733,6 +1986,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
             expected_predecessor_state_vector_sha256: &wrong_state_vector,
             path: "notes/a.txt",
             successor: &next,
+            scene_result: None,
             now_ms: 1_350,
         },
         &NoFaults,
@@ -1775,6 +2029,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
             expected_predecessor_state_vector_sha256: &predecessor_state_vector_sha256,
             path: "notes/a.txt",
             successor: &other,
+            scene_result: None,
             now_ms: 1_400,
         },
         &NoFaults,
@@ -2156,6 +2411,128 @@ fn leases_are_process_local_per_registry() {
 // ---- settle -----------------------------------------------------------------
 
 #[test]
+fn scene_content_kind_is_stored_without_bypassing_the_schema_check() {
+    let mut ts = fresh_store("scene-marker-kind");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Scene,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("scene marker"),
+    );
+
+    assert_eq!(
+        read_marker(&ts.store, &key)
+            .expect("read marker")
+            .expect("marker exists")
+            .content_kind,
+        ContentKind::Scene
+    );
+}
+
+fn assert_unknown_content_kind(error: CollabError) {
+    assert_eq!(error.code(), "unsupported-content-kind");
+    assert_eq!(
+        error.to_string(),
+        "unsupported durable Y.Doc content kind `spatial`; supported kinds are `plaintext`, `richdoc`, and `scene`"
+    );
+}
+
+#[test]
+fn unknown_marker_content_kind_cannot_project_append_or_settle_as_richdoc() {
+    let mut ts = fresh_store("unknown-marker-kind");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Richdoc,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("richdoc marker"),
+    );
+    let doc = Ydoc::wire();
+    let first_update = doc.richdoc_append_paragraph("existing drawing-shaped state");
+    committed(
+        record_local_update(&mut ts.store, &key, &first_update, &NoFaults, 1_100)
+            .expect("richdoc update"),
+    );
+    let rejected_update = doc.richdoc_append_paragraph("must not land");
+
+    committed(
+        ts.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute_batch("PRAGMA ignore_check_constraints = ON")
+                    .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                tx.execute(
+                    "UPDATE ydoc_docs SET content_kind = 'spatial' \
+                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                tx.execute_batch("PRAGMA ignore_check_constraints = OFF")
+                    .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .expect("replace marker content kind"),
+    );
+
+    assert_unknown_content_kind(read_marker(&ts.store, &key).expect_err("marker must refuse"));
+    assert_unknown_content_kind(
+        load_persisted(&ts.store, &key).expect_err("projection source must refuse"),
+    );
+    assert_unknown_content_kind(
+        record_local_update(&mut ts.store, &key, &rejected_update, &NoFaults, 1_200)
+            .expect_err("append must refuse"),
+    );
+    assert_unknown_content_kind(
+        settle(
+            &mut ts.store,
+            &key,
+            "notes/drawing.excalidraw",
+            &NoFaults,
+            1_300,
+        )
+        .expect_err("settle must refuse"),
+    );
+
+    assert_eq!(
+        count(&ts.store, "ydoc_updates", &key),
+        1,
+        "the rejected append must not mutate the lineage"
+    );
+    assert_eq!(
+        ts.store.pending_materialization_count().expect("jobs"),
+        0,
+        "the rejected settle must not enqueue artifact materialization"
+    );
+    let (settle_seq, last_settled_sha): (i64, Option<String>) = ts
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT settle_seq, last_settled_sha FROM ydoc_docs \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("settle marker state");
+    assert_eq!(settle_seq, 0);
+    assert_eq!(last_settled_sha, None);
+}
+
+#[test]
 fn settle_projects_and_enqueues_an_idempotent_job() {
     let mut ts = fresh_store("settle");
     let key = test_key();
@@ -2178,7 +2555,7 @@ fn settle_projects_and_enqueues_an_idempotent_job() {
     let first =
         committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 5_000).expect("settle"));
     assert!(!first.deduped);
-    assert_eq!(first.projection.markdown, "the settled markdown body");
+    assert_eq!(first.projection.content, "the settled markdown body");
     assert_eq!(
         first.projection.source_state_vector_sha256.len(),
         64,

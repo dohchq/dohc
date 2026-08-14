@@ -152,7 +152,11 @@ async function appendOwner(h: SyncRelayHandler, rawOps: RawOp[]): Promise<void> 
 }
 
 async function createShare(h: SyncRelayHandler, body: Record<string, unknown>): Promise<string> {
-  const response = await h(request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody(body)));
+  // The level is required at create (#646). These cases are about isolation,
+  // not levels, so they mint at the narrowest one unless they say otherwise.
+  const response = await h(
+    request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({ access: "view", ...body })),
+  );
   expect(response.status).toBe(200);
   return (await json(response)).shareId as string;
 }

@@ -1,9 +1,17 @@
+import { SHARE_ACCESS_VALUES } from "@dohc/security-contract/share-selector";
 import {
   WORKSPACE_KINDS,
   WORKSPACE_MODES,
 } from "@dohc/workspace-core";
 import { z } from "zod";
+import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
+import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
 import {
+  CHATS_TAB_PATH,
+  canonicalSingletonEditorTabPath,
+  isPluginPanelTabPath,
+  isSingletonEditorTabPath,
+  isSiteTabPath,
   MAX_EXPANDED_FOLDERS,
   MAX_EDITOR_GROUPS,
   MAX_EDITOR_GROUP_ID_CHARS,
@@ -34,6 +42,7 @@ import {
   WORKBENCH_MENU_COMMANDS,
   ENGINE_YDOC_SAVE_STATES,
   type EngineYDocRemoteUpdateEvent,
+  type EngineYDocLineageReplacementEvent,
   type EngineYDocSaveStateEvent,
   type SearchResultsEvent,
 } from "./channels";
@@ -55,6 +64,11 @@ import type {
   WorkspaceSettings as WorkspaceSettingsType,
   WorkspaceSettingsResult as WorkspaceSettingsResultType,
 } from "../workspaces/workspaceSettings";
+import {
+  utf8ByteLength,
+  WORKSPACE_TEXT_EDITOR_MAX_BYTES,
+  workspaceTextLimitReason,
+} from "../workspaces/workspaceTextLimits";
 
 // Typed contract for everything the preload bridge exposes. Main-process
 // handlers validate payloads on arrival and results before returning them.
@@ -73,6 +87,14 @@ const WORKSPACE_ID = z
   .max(200)
   .regex(/^[a-z0-9][a-z0-9-]*$/, "workspace id must be lowercase alphanumeric/hyphens");
 const PATH_STRING = z.string().min(1).max(4096);
+const WORKSPACE_EDITOR_TEXT = z.string().superRefine((text, ctx) => {
+  const observedBytes = utf8ByteLength(text);
+  if (observedBytes <= WORKSPACE_TEXT_EDITOR_MAX_BYTES) return;
+  ctx.addIssue({
+    code: "custom",
+    message: workspaceTextLimitReason(observedBytes),
+  });
+});
 
 // Stored-body fields are the exception to the caps above. Every RESPONSE field
 // on this schema carries text the ENGINE already accepted, not text a renderer
@@ -133,6 +155,13 @@ const MODE_ENUM = z.enum(WORKSPACE_MODES);
 export const PickWorkspaceRootResult = PATH_STRING.nullable();
 export type PickWorkspaceRootResult = z.infer<typeof PickWorkspaceRootResult>;
 
+// The level a recipient holds on a path/version share (#646), from the same
+// one place the relay and the engine read it. All three levels read the same
+// files today; PR2 opens comment and edit to chat, PR3 opens edit to writes.
+// The chat-channel grant's own binary access is a different field.
+export const SHARE_ACCESS = z.enum(SHARE_ACCESS_VALUES);
+export type ShareAccess = z.infer<typeof SHARE_ACCESS>;
+
 // Ops a share pull skipped, and why. Durable state, not a status: the pull
 // commits its cursor past a refused op, so that content never arrives again
 // unless the granter writes the same path a second time.
@@ -173,8 +202,23 @@ export const WorkspaceSummary = z.object({
   // carries who shared it for honest copy. `ended` marks a revoked share.
   shareView: z
     .object({
-      shareId: z.string().min(1).max(200),
+      // Absent ONLY on a `damaged` marker whose stored record had no readable
+      // id. Never invented: a placeholder id is a lie the rest of the app
+      // could act on. A marker WITHOUT one is damaged by definition — every
+      // live-share action (refresh, dismiss) is addressed by share id, so a
+      // marker that cannot name itself cannot be presented as a live share.
+      shareId: z.string().min(1).max(200).optional(),
       granterEmail: z.string().min(3).max(320).nullable(),
+      // The pinned level (#646). Absent ONLY when `damaged` says the stored
+      // grant could not be read. The banner states the level; it never
+      // decides anything with it.
+      access: SHARE_ACCESS.optional(),
+      // The stored grant is unreadable. The marker still stands, because a
+      // share view whose grant cannot be read must not present as an ordinary
+      // workspace: the restrictive stance is what fails closed. The shell
+      // keeps the view read-only, keeps the share surfaces hidden, skips the
+      // refresh it has no grant to pull with, and says so in the banner.
+      damaged: z.literal(true).optional(),
       ended: z.boolean().optional(),
       skippedOps: ShareSkippedOpsSummary.optional(),
     })
@@ -185,9 +229,22 @@ export const WorkspaceSummary = z.object({
   shareMounts: z
     .array(
       z.object({
+        // Both REQUIRED, damaged or not: they are what the Remove action is
+        // addressed by (`shareId`) and what names the folder on disk
+        // (`label`). A row that cannot supply them cannot be acted on, so it
+        // is the one shape that is dropped instead of kept.
         shareId: z.string().min(1).max(200),
         label: z.string().min(1).max(64),
         granterEmail: z.string().min(3).max(320).nullable(),
+        // The pinned level (#646), so a mount the relay no longer lists can
+        // still say what it grants. Absent ONLY when `damaged` says the
+        // stored grant could not be read.
+        access: SHARE_ACCESS.optional(),
+        // The stored grant is unreadable. The row is KEPT so the mount stays
+        // removable: its folder is on disk, and dropping the row would strand
+        // it with no way back through the UI. It shows no level, refreshes
+        // nothing, and says what happened.
+        damaged: z.literal(true).optional(),
         ended: z.boolean().optional(),
         skippedOps: ShareSkippedOpsSummary.optional(),
       }),
@@ -248,6 +305,7 @@ export type ListWorkspaceFilesResult = z.infer<typeof ListWorkspaceFilesResult>;
 export const CreateWorkspaceFilePayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
+  initialText: WORKSPACE_EDITOR_TEXT,
 });
 export type CreateWorkspaceFilePayload = z.infer<
   typeof CreateWorkspaceFilePayload
@@ -438,8 +496,8 @@ export type OpenFileExternallyPayload = z.infer<
 export const WriteWorkspaceTextPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
-  // Editor saves are bounded like reads (2MB); the handler re-checks bytes.
-  text: z.string().max(2 * 1024 * 1024),
+  // Editor saves are bounded like reads; the handler re-checks UTF-8 bytes.
+  text: WORKSPACE_EDITOR_TEXT,
   // SHA-256 of the exact bytes returned by the last complete read. Main uses
   // it for optimistic conflict detection immediately before replacement.
   expectedContentHash: WORKSPACE_TEXT_CONTENT_HASH,
@@ -1628,6 +1686,9 @@ const PRESENCE_STATE_MAX_DEPTH = 32;
 // moment it exceeds the cap — so an oversized payload is rejected WITHOUT a full
 // JSON.stringify. Returns false for cycles, over-depth nesting, and non-JSON
 // values (bigint), which the relay would reject or main would throw on anyway.
+// Printable ASCII minus `"` and `\` — characters JSON serializes verbatim.
+const SAFE_JSON_STRING_CHARS = /^[ !#-\[\]-~]*$/;
+
 export function presenceStateWithinCap(
   value: unknown,
   maxBytes: number = PRESENCE_STATE_MAX_BYTES,
@@ -1647,9 +1708,14 @@ export function presenceStateWithinCap(
       case "number":
         return spend(v && Number.isFinite(v) ? 24 : 4); // non-finite → "null"
       case "string":
-        // Upper bound: a JSON string is the UTF-8 bytes plus quotes/escapes; 6
-        // bytes per char covers the worst-case "\uXXXX" escape.
-        return spend(2 + v.length * 6);
+        // Every JSON string costs at least its quotes plus one byte per
+        // UTF-16 code unit — charge that floor first so a huge string still
+        // bails without being scanned. Safe printable ASCII (the base64
+        // awareness update) serializes at exactly the floor; anything else
+        // may need a "\uXXXX" escape or multi-byte UTF-8, and 6 bytes per
+        // code unit covers the worst case.
+        if (!spend(2 + v.length)) return false;
+        return SAFE_JSON_STRING_CHARS.test(v) || spend(v.length * 5);
       case "object": {
         const obj = v as object;
         if (seen.has(obj)) return false; // cycle → reject as over-cap
@@ -2633,6 +2699,7 @@ export type CloudEnableSyncPayload = z.infer<typeof CloudEnableSyncPayload>;
 export const CloudJoinWorkspacePayload = z.object({
   syncCode: z.string().min(1).max(4096),
   rootPath: z.string().min(1).max(4096),
+  passphrase: z.string().max(4096).optional(),
 });
 export type CloudJoinWorkspacePayload = z.infer<typeof CloudJoinWorkspacePayload>;
 
@@ -2653,6 +2720,7 @@ export type CloudJoinWorkspaceResult = z.infer<typeof CloudJoinWorkspaceResult>;
 export const RelayShareSelector = z.object({
   paths: z.array(PATH_STRING).max(100),
   versionId: z.string().min(1).max(128).nullable(),
+  access: SHARE_ACCESS,
 });
 export type RelayShareSelector = z.infer<typeof RelayShareSelector>;
 
@@ -2665,7 +2733,11 @@ export const RelayShareGrantedRow = z.object({
   // account yet); the recipientEmail carries who it was shared with (PR 18).
   recipientUserId: z.string().min(1).max(256).nullable(),
   recipientEmail: EMAIL_STRING.nullable(),
-  selector: RelayShareSelector,
+  // null when the relay could not read this row's stored selector. The row
+  // stays listed so ending the share remains possible; it states the damage
+  // rather than a level nobody granted (#646).
+  selector: RelayShareSelector.nullable(),
+  damaged: z.literal(true).optional(),
   createdAtMs: z.number().int().nonnegative(),
   revokedAtMs: z.number().int().nonnegative().nullable(),
   shareCode: z.string().min(1).max(4096),
@@ -2678,7 +2750,9 @@ export type RelayShareGrantedRow = z.infer<typeof RelayShareGrantedRow>;
 export const RelayShareReceivedRow = z.object({
   shareId: SHARE_ID,
   granterEmail: EMAIL_STRING.nullable(),
-  selector: RelayShareSelector,
+  // null when the relay could not read this row's stored selector (#646).
+  selector: RelayShareSelector.nullable(),
+  damaged: z.literal(true).optional(),
   createdAtMs: z.number().int().nonnegative(),
   shareCode: z.string().min(1).max(4096),
 });
@@ -2697,6 +2771,11 @@ export const CreateRelaySharePayload = z.object({
   recipientEmail: EMAIL_STRING,
   paths: z.array(PATH_STRING).min(1).max(100).optional(),
   versionId: z.string().min(1).max(128).optional(),
+  // Required (#646). There is no default at either boundary: the relay
+  // refuses a create that names no level, and so does this one. A caller that
+  // sends nothing has not chosen `view`, it has failed to say what the share
+  // grants.
+  access: SHARE_ACCESS,
 });
 export type CreateRelaySharePayload = z.infer<typeof CreateRelaySharePayload>;
 
@@ -2967,7 +3046,11 @@ export type MountSharePayload = z.infer<typeof MountSharePayload>;
 export const ShareMountStatusRow = z.object({
   shareId: SHARE_ID,
   label: z.string().min(1).max(64),
-  status: z.enum(["updated", "unchanged", "ended"]),
+  // "damaged": this mount's stored pin cannot be read, so it will never
+  // refresh again. Permanent, like an ended share, and reported per ROW so
+  // one damaged record cannot stop the other mounts refreshing — which it
+  // could not do at all until this schema carried the word.
+  status: z.enum(["updated", "unchanged", "ended", "damaged"]),
   changedPaths: z.number().int().nonnegative(),
 });
 export type ShareMountStatusRow = z.infer<typeof ShareMountStatusRow>;
@@ -2996,6 +3079,12 @@ export type UnmountSharePayload = z.infer<typeof UnmountSharePayload>;
 
 export const UnmountShareResult = z.object({
   workspace: WorkspaceSummary,
+  // The registry record was removed but its folder was LEFT on disk, because
+  // the record's label is not one this app would ever materialize through.
+  // Removing a folder named by an unusable label is exactly what the label
+  // validator exists to prevent, so the record is cleaned up and the folder
+  // is reported instead of touched (#646).
+  folderLeft: z.literal(true).optional(),
 });
 export type UnmountShareResult = z.infer<typeof UnmountShareResult>;
 
@@ -3342,7 +3431,7 @@ export const WorkspaceUiState = z.object({
   recentFiles: z.array(PATH_STRING).max(MAX_RECENT_FILES).optional(),
 }).superRefine((state, context) => {
   const groupIds = new Set<string>();
-  const tabPaths = new Set<string>();
+  const singletonOwners = new Set<string>();
   let tabCount = 0;
   let totalSize = 0;
   for (let groupIndex = 0; groupIndex < state.editorGroups.length; groupIndex++) {
@@ -3355,19 +3444,39 @@ export const WorkspaceUiState = z.object({
       });
     }
     groupIds.add(group.id);
-    totalSize += group.size;
+    const groupSingletons = new Set<string>();
     for (let tabIndex = 0; tabIndex < group.tabs.length; tabIndex++) {
-      const path = group.tabs[tabIndex];
-      tabCount += 1;
-      if (tabPaths.has(path)) {
+      const tab = group.tabs[tabIndex];
+      if (!isSingletonEditorTabPath(tab)) continue;
+      const identity = canonicalSingletonEditorTabPath(tab);
+      if (identity === null || identity !== tab) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["editorGroups", groupIndex, "tabs", tabIndex],
-          message: "Open tab paths must be unique across editor groups.",
+          message: "Process-owning preview tab paths must use canonical encoding.",
         });
       }
-      tabPaths.add(path);
+      if (identity === null || groupSingletons.has(identity)) continue;
+      groupSingletons.add(identity);
+      if (singletonOwners.has(identity)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["editorGroups", groupIndex, "tabs", tabIndex],
+          message:
+            tab === CHATS_TAB_PATH
+              ? "Chats can be open in only one editor group."
+              : isSiteTabPath(tab)
+                ? "A site preview can be open in only one editor group."
+                : isPluginPanelTabPath(tab)
+                  ? "A plugin panel can be open in only one editor group."
+                  : "This tab can be open in only one editor group.",
+        });
+      } else {
+        singletonOwners.add(identity);
+      }
     }
+    totalSize += group.size;
+    tabCount += group.tabs.length;
   }
   if (tabCount > MAX_OPEN_TABS) {
     context.addIssue({
@@ -3467,17 +3576,41 @@ const ENGINE_YDOC_SESSION_ID = z.string().min(1).max(ENGINE_YDOC_SESSION_ID_MAX_
 // z.custom (not z.instanceof) so the inferred type is a plain `Uint8Array`
 // (ArrayBufferLike) — matching yjs's update type and the transport — rather than
 // the ArrayBuffer-narrowed shape z.instanceof yields.
-const ENGINE_YDOC_UPDATE = z.custom<Uint8Array>(
-  (value) =>
-    value instanceof Uint8Array &&
-    value.byteLength > 0 &&
-    value.byteLength <= ENGINE_YDOC_UPDATE_MAX_BYTES,
-  "Y.Doc update is not a Uint8Array within the IPC byte bound.",
-);
+const ENGINE_YDOC_UPDATE = z
+  .custom<Uint8Array>(
+    (value) => value instanceof Uint8Array,
+    "Y.Doc update must be a Uint8Array.",
+  )
+  .superRefine((value, context) => {
+    if (value.byteLength === 0) {
+      context.addIssue({
+        code: "custom",
+        message: "Y.Doc update must not be empty.",
+      });
+    }
+    if (value.byteLength > ENGINE_YDOC_UPDATE_MAX_BYTES) {
+      context.addIssue({
+        code: "custom",
+        message:
+          `ENGINE_YDOC_UPDATE_MAX_BYTES is ${ENGINE_YDOC_UPDATE_MAX_BYTES} bytes; ` +
+          `the update is ${value.byteLength} bytes.`,
+      });
+    }
+  });
 const ENGINE_YDOC_INITIAL_UPDATE = z.custom<Uint8Array>(
   (value) => value instanceof Uint8Array && value.byteLength <= ENGINE_YDOC_UPDATE_MAX_BYTES,
   "Y.Doc initial update is not a Uint8Array within the IPC byte bound.",
 );
+
+const ARTIFACT_ASSET_DESCRIPTOR: z.ZodType<ArtifactAssetDescriptor> = z.object({
+  id: z.string().min(1),
+  mimeType: z.string().min(1),
+  created: z.number().int().nonnegative(),
+  ref: PATH_STRING,
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  lastRetrieved: z.number().int().nonnegative().optional(),
+  version: z.number().int().nonnegative().optional(),
+});
 
 export const OpenEngineYDocSessionPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -3489,6 +3622,10 @@ export type OpenEngineYDocSessionPayload = z.infer<typeof OpenEngineYDocSessionP
 export const OpenEngineYDocSessionResult = z.object({
   available: z.boolean(),
   initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
+  objectId: z.string().min(1).optional(),
+  versionId: z.string().min(1).optional(),
+  artifactAssets: z.array(ARTIFACT_ASSET_DESCRIPTOR).optional(),
+  lineageGeneration: z.number().int().positive().optional(),
   // The path is not in the version the workspace is on — a version switch
   // removed it while this open was queued behind that switch (#534). Every
   // other available:false reason downgrades the document to the writable plain
@@ -3504,6 +3641,10 @@ export const OpenEngineYDocSessionResult = z.object({
   // closed. The caller stays read-only, states the reason, and offers a retry —
   // which is also what discharges what the failure left behind.
   engineMayHoldDocument: z.boolean().optional(),
+  // The engine committed the drawing, but its image records conflict with
+  // authoritative storage. The drawing stays read-only. Retrying cannot
+  // repair this terminal state.
+  artifactAssetsInvalid: z.boolean().optional(),
   // A delete or move owns this path for an interval. The renderer must stay
   // read-only and offer a retry, without claiming that the operation finished.
   removalInProgress: z
@@ -3515,9 +3656,35 @@ export const OpenEngineYDocSessionResult = z.object({
 });
 export type OpenEngineYDocSessionResult = z.infer<typeof OpenEngineYDocSessionResult>;
 
+export const ReadEngineYDocArtifactAssetPayload = z.object({
+  sessionId: ENGINE_YDOC_SESSION_ID,
+  // The full descriptor, not just the id: after a lineage replacement one id
+  // can name both the winner's asset and a retired lineage's. The descriptor
+  // SELECTS among the descriptors main has pinned for this session — main
+  // hydrates from its own pinned copy, never from these fields.
+  descriptor: ARTIFACT_ASSET_DESCRIPTOR,
+});
+export type ReadEngineYDocArtifactAssetPayload = z.infer<
+  typeof ReadEngineYDocArtifactAssetPayload
+>;
+
+export const ReadEngineYDocArtifactAssetResult = z.object({
+  descriptor: ARTIFACT_ASSET_DESCRIPTOR,
+  bytes: z.custom<Uint8Array>(
+    (value) =>
+      value instanceof Uint8Array &&
+      value.byteLength <= MAX_VERSIONED_BINARY_FILE_BYTES,
+    `Artifact asset bytes must fit the engine's MAX_VERSIONED_BINARY_FILE_BYTES limit of ${MAX_VERSIONED_BINARY_FILE_BYTES} bytes.`,
+  ),
+});
+export type ReadEngineYDocArtifactAssetResult = z.infer<
+  typeof ReadEngineYDocArtifactAssetResult
+>;
+
 export const ApplyEngineYDocUpdatePayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
   update: ENGINE_YDOC_UPDATE,
+  lineageGeneration: z.number().int().positive(),
   // Monotonic per-session local-edit counter. Main echoes the seq a settle
   // STARTED at back on the save-state channel so the renderer never shows
   // "Saved" for a settle that predates the user's latest keystroke.
@@ -3530,6 +3697,36 @@ export const ApplyEngineYDocUpdatePayload = z.object({
 });
 export type ApplyEngineYDocUpdatePayload = z.infer<typeof ApplyEngineYDocUpdatePayload>;
 
+export const ApplyEngineYDocUpdateResult = z.discriminatedUnion("accepted", [
+  z.object({ accepted: z.literal(true) }),
+  z.object({
+    accepted: z.literal(false),
+    reason: z.enum([
+      "session-unavailable",
+      "lineage-transition",
+      "deleted",
+      "read-only",
+    ]),
+  }),
+]);
+export type ApplyEngineYDocUpdateResult = z.infer<
+  typeof ApplyEngineYDocUpdateResult
+>;
+
+export const AcknowledgeEngineYDocLineageReplacementPayload = z.object({
+  sessionId: ENGINE_YDOC_SESSION_ID,
+  lineageGeneration: z.number().int().positive(),
+});
+export type AcknowledgeEngineYDocLineageReplacementPayload = z.infer<
+  typeof AcknowledgeEngineYDocLineageReplacementPayload
+>;
+export const AcknowledgeEngineYDocLineageReplacementResult = z.object({
+  updates: z.array(ENGINE_YDOC_UPDATE),
+});
+export type AcknowledgeEngineYDocLineageReplacementResult = z.infer<
+  typeof AcknowledgeEngineYDocLineageReplacementResult
+>;
+
 export const CloseEngineYDocSessionPayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
 });
@@ -3538,6 +3735,15 @@ export type CloseEngineYDocSessionPayload = z.infer<typeof CloseEngineYDocSessio
 export const EngineYDocRemoteUpdateEventSchema = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
   update: ENGINE_YDOC_UPDATE,
+  lineageGeneration: z.number().int().positive(),
+});
+
+export const EngineYDocLineageReplacementEventSchema = z.object({
+  sessionId: ENGINE_YDOC_SESSION_ID,
+  update: ENGINE_YDOC_UPDATE,
+  recoveredPaths: z.array(PATH_STRING),
+  artifactAssets: z.array(ARTIFACT_ASSET_DESCRIPTOR),
+  lineageGeneration: z.number().int().positive(),
 });
 
 export const EngineYDocSaveStateEventSchema = z.object({
@@ -3915,7 +4121,7 @@ export interface DohcDesktopBridge {
   // batches that belong to a superseded search.
   onSearchResults(listener: (batch: SearchResultsEvent) => void): () => void;
   // WS-G2-C-2 engine Y.Doc editor binding. The renderer mints a sessionId and
-  // opens a live engine Y.Doc session for a rich file; main constructs the
+  // opens a live engine Y.Doc session for a supported live file; main constructs the
   // node-only session through the workspace's engine capture (reusing its
   // store). available:false => not engine-backed
   // (unflagged workspace, secret path, missing file, or already live) — the
@@ -3924,9 +4130,20 @@ export interface DohcDesktopBridge {
   openEngineYDocSession(
     payload: OpenEngineYDocSessionPayload,
   ): Promise<OpenEngineYDocSessionResult>;
+  readEngineYDocArtifactAsset(
+    payload: ReadEngineYDocArtifactAssetPayload,
+  ): Promise<ReadEngineYDocArtifactAssetResult>;
   // Ship a local editor CRDT update to main (journaled via recordUpdate +
-  // debounced settle). A no-op if the session is unknown/closed.
-  applyEngineYDocUpdate(payload: ApplyEngineYDocUpdatePayload): Promise<void>;
+  // debounced settle). A refusal is explicit so the renderer can preserve the
+  // mirror instead of treating a dropped update as durable.
+  applyEngineYDocUpdate(
+    payload: ApplyEngineYDocUpdatePayload,
+  ): Promise<ApplyEngineYDocUpdateResult>;
+  // Completes the replacement handoff only after the renderer detached the
+  // losing mirror and durably preserved any edit that did not reach main.
+  acknowledgeEngineYDocLineageReplacement(
+    payload: AcknowledgeEngineYDocLineageReplacementPayload,
+  ): Promise<AcknowledgeEngineYDocLineageReplacementResult>;
   // Settle + close the session in main (releases the single-canonical
   // reservation so the same object can reopen on a version/file switch).
   closeEngineYDocSession(payload: CloseEngineYDocSessionPayload): Promise<void>;
@@ -3936,6 +4153,9 @@ export interface DohcDesktopBridge {
   // session currently bound. Returns an unsubscribe function.
   onEngineYDocRemoteUpdate(
     listener: (event: EngineYDocRemoteUpdateEvent) => void,
+  ): () => void;
+  onEngineYDocLineageReplacement(
+    listener: (event: EngineYDocLineageReplacementEvent) => void,
   ): () => void;
   // The document's REAL save state, pushed on every settle outcome. The editor
   // must never claim "Saved" from anything else: a settle can fail (and used to

@@ -1,4 +1,8 @@
-// The share selector's VERSION dimension, as one rule in one place.
+import { validateUserWritePath } from "@dohc/workspace-core";
+import { classifyEngineFilePath } from "./enginePathFloor";
+
+// The share selector's VERSION and ACCESS dimensions, as one rule in one
+// place.
 //
 // The relay applies it when it creates a selector (`validateShareSelector` in
 // services/sync-relay/src/shareFilter.ts). Every recipient surface that reads
@@ -34,5 +38,84 @@ export function isValidShareVersionId(value: unknown): value is string {
     value.length > 0 &&
     value.trim() === value &&
     value.length <= MAX_SHARE_VERSION_ID_CHARS
+  );
+}
+
+/**
+ * Whether `value` is a path the relay could have issued in a share selector.
+ *
+ * The relay accepts a path only if it is a non-empty string that validates,
+ * normalizes to itself, and classifies as tracked — it stores the NORMALIZED
+ * form, so anything else is a path it never wrote (`validateShareSelector` in
+ * `services/sync-relay/src/shareFilter.ts`, which expands the same rule into
+ * separate branches because it owes distinct error codes at create time).
+ *
+ * The length cap lives here too, so the minting side and every reading side
+ * agree on one number instead of two that can drift.
+ *
+ * Every surface that reads a selector BACK applies this, for the same reason
+ * the version rule lives here: a reader that accepts more than the writer
+ * issues will accept damage, and `""` is the path-shaped version of the empty
+ * version id that got through once already.
+ */
+/**
+ * How many paths one selector may carry, and how long each may be.
+ *
+ * Both live here so the minting side and every reading side agree on one
+ * number. A reader that ignores a cap the writer enforces will accept a
+ * selector the relay would never have issued — the count is the same class of
+ * gap as the length, and a 101-path grant read back as healthy is a grant
+ * nobody could have made.
+ */
+export const MAX_SHARE_PATHS = 100;
+
+export const MAX_SHARE_PATH_CHARS = 1024;
+
+/**
+ * Whether `paths` is a path LIST the relay could have issued: within the
+ * count cap, and every entry a path it could have issued.
+ */
+export function isShareablePathList(paths: readonly unknown[]): boolean {
+  return paths.length <= MAX_SHARE_PATHS && paths.every(isShareablePath);
+}
+
+export function isShareablePath(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_SHARE_PATH_CHARS
+  ) {
+    return false;
+  }
+  const validated = validateUserWritePath(value);
+  if (!validated.ok || validated.normalized !== value) return false;
+  return classifyEngineFilePath(validated.normalized).kind === "tracked";
+}
+
+/**
+ * The file-share access levels (issue #646, S7), in the order the UI offers
+ * them. `view` is the narrowest.
+ *
+ * The chat-channel selector's own binary `access` is a different field on a
+ * different selector kind. It is not this rule.
+ */
+export const SHARE_ACCESS_VALUES = ["view", "comment", "edit"] as const;
+
+export type ShareAccess = (typeof SHARE_ACCESS_VALUES)[number];
+
+/**
+ * Whether `value` is a level the relay could have issued: exactly one of the
+ * three lowercase strings above. No case folding and no trimming — a level a
+ * surface cannot read is not a narrower grant, it is an unreadable one.
+ *
+ * The engine twin (`ShareAccess::parse` in
+ * `crates/dohc-engine-sync/src/share.rs`) accepts the same set, held to this
+ * function vector by vector in
+ * `crates/dohc-engine-sync/tests/security_contract.rs`.
+ */
+export function isShareAccessValue(value: unknown): value is ShareAccess {
+  return (
+    typeof value === "string" &&
+    (SHARE_ACCESS_VALUES as readonly string[]).includes(value)
   );
 }

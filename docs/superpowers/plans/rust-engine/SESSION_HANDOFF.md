@@ -721,7 +721,7 @@ Position now (supersedes §3/§4 below where they conflict):
   applyExternalMarkdownEdit live (client/server doc divergence hole),
   settle = ONE domain moment-minting path (moment_order namespace, never
   collab settle_seq), daemon-side lastSettledSha suppression (settle→
-  capture re-ingest loop), open returns lineage+seedMarkdown (client
+  capture re-ingest loop), open returns lineage+seedContent (client
   seeds; server guard refuses seed-onto-existing-head), no in-memory
   LiveDoc in C1, no idempotency ledger (content-dedup returns original
   seq). RICHDOC AT CUTOVER is an Ice decision (Rust projection is a

@@ -1,4 +1,8 @@
 import type { MomentAuthor } from "@dohc/workspace-contracts";
+import type {
+  MaterializeRelayPullPage,
+  RelayMaterializedPath,
+} from "@dohc/workspace-contracts/relay";
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
@@ -30,6 +34,7 @@ import {
 } from "./workspaceEngineCapture";
 import {
   DaemonRefusalError,
+  type ArtifactAssetDescriptor,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
   VERSIONED_METHOD,
@@ -45,6 +50,7 @@ import {
   type CaptureVersionedTextStore,
 } from "./workspaceEngineCaptureLiveStore";
 import * as Y from "yjs";
+import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
 
 const roots: string[] = [];
 
@@ -527,7 +533,7 @@ describe("workspaceEngineCapture batch capture", () => {
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
-            ({ sha256: "a".repeat(64), markdown: "" }) as never,
+            ({ sha256: "a".repeat(64), content: "" }) as never,
           applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
           close: async () => undefined,
         };
@@ -548,7 +554,7 @@ describe("workspaceEngineCapture batch capture", () => {
   });
 
   // #338. The engine owns the .md: it materializes a changed projection and
-  // leaves a drifted file alone. The desktop mirrored the settled markdown
+  // leaves a drifted file alone. The desktop mirrored the settled content
   // over the file anyway, so an edit made outside dohc while the document was
   // open vanished from disk. The desktop no longer writes here at all, and
   // every case below drives the REAL onSettled against a REAL file; only the
@@ -556,7 +562,7 @@ describe("workspaceEngineCapture batch capture", () => {
   // ydocProviderSession's runSettle does.
   function driftFixture(settled: {
     sha256: string;
-    markdown: string | null;
+    content: string | null;
     path?: string;
   }) {
     return async (options: EngineYdocProviderSessionOptions) => {
@@ -589,7 +595,7 @@ describe("workspaceEngineCapture batch capture", () => {
   // states that settle produced.
   async function settleOnClose(
     root: string,
-    settled: { sha256: string; markdown: string | null },
+    settled: { sha256: string; content: string | null },
     onError?: (context: string, error: unknown) => void,
   ): Promise<string[]> {
     const states: string[] = [];
@@ -618,7 +624,7 @@ describe("workspaceEngineCapture batch capture", () => {
     // the outside edit is gone from disk.
     const states = await settleOnClose(root, {
       sha256: sha256Utf8(EDITOR_TEXT),
-      markdown: EDITOR_TEXT,
+      content: EDITOR_TEXT,
     });
 
     expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
@@ -636,7 +642,7 @@ describe("workspaceEngineCapture batch capture", () => {
 
     const states = await settleOnClose(root, {
       sha256: sha256Utf8(EDITOR_TEXT),
-      markdown: EDITOR_TEXT,
+      content: EDITOR_TEXT,
     });
 
     expect((await readFile(join(root, "note.md"), "utf8")).length).toBe(
@@ -652,25 +658,25 @@ describe("workspaceEngineCapture batch capture", () => {
 
     const states = await settleOnClose(root, {
       sha256: sha256Utf8(EDITOR_TEXT),
-      markdown: EDITOR_TEXT,
+      content: EDITOR_TEXT,
     });
 
     expect(existsSync(join(root, "note.md"))).toBe(false);
     expect(states).toEqual(["changed-on-disk"]);
   });
 
-  // markdown === null: the body is past the engine's in-band response cap, so
+  // content === null: the body is past the engine's in-band response cap, so
   // it never rode back over the wire. The settle still reports its sha, so
   // drift is just as answerable there — the old code returned "Saved" without
   // looking.
-  it("reports the drift for an over-cap settle whose markdown never crossed the wire", async () => {
+  it("reports the drift for an over-cap settle whose content never crossed the wire", async () => {
     const root = await tempRoot();
     const outside = "written outside dohc\n";
     await write(root, "note.md", outside);
 
     const states = await settleOnClose(root, {
       sha256: sha256Utf8("a body far past the in-band cap"),
-      markdown: null,
+      content: null,
     });
 
     expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
@@ -691,7 +697,7 @@ describe("workspaceEngineCapture batch capture", () => {
     try {
       const states = await settleOnClose(root, {
         sha256: sha256Utf8(EDITOR_TEXT),
-        markdown: EDITOR_TEXT,
+        content: EDITOR_TEXT,
       });
 
       expect(states).toEqual(["changed-on-disk"]);
@@ -714,7 +720,7 @@ describe("workspaceEngineCapture batch capture", () => {
     try {
       const states = await settleOnClose(
         root,
-        { sha256: sha256Utf8(EDITOR_TEXT), markdown: EDITOR_TEXT },
+        { sha256: sha256Utf8(EDITOR_TEXT), content: EDITOR_TEXT },
         (context, error) => errors.push({ context, error }),
       );
 
@@ -752,7 +758,7 @@ describe("workspaceEngineCapture batch capture", () => {
       onError: (context, error) => errors.push({ context, error }),
       openRustYDocProviderSession: driftFixture({
         sha256: sha256Utf8(EDITOR_TEXT),
-        markdown: EDITOR_TEXT,
+        content: EDITOR_TEXT,
         path: "notes/note.md",
       }),
     });
@@ -777,7 +783,7 @@ describe("workspaceEngineCapture batch capture", () => {
 
     const states = await settleOnClose(root, {
       sha256: sha256Utf8(EDITOR_TEXT),
-      markdown: EDITOR_TEXT,
+      content: EDITOR_TEXT,
     });
 
     expect(await readFile(join(root, "note.md"), "utf8")).toBe(EDITOR_TEXT);
@@ -804,7 +810,7 @@ describe("workspaceEngineCapture batch capture", () => {
       requests,
       openRustYDocProviderSession: driftFixture({
         sha256: sha256Utf8(EDITOR_TEXT),
-        markdown: EDITOR_TEXT,
+        content: EDITOR_TEXT,
       }),
     });
 
@@ -1143,6 +1149,23 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it.each(["drawing.excalidraw", "drawing.EXCALIDRAW"])(
+    "does not demote invalid UTF-8 scene %s to a binary head",
+    async (path) => {
+      const root = await tempRoot();
+      const bytes = Buffer.from([0xff, 0xfe, 0xfd]);
+      await write(root, path, bytes);
+      const loopback = new VersionedLoopbackEngine();
+      const engine = liveCapture(root, loopback);
+      engine.captureBatch([{ path, operation: "update" }]);
+      await engine.flush();
+
+      expect(await liveTrackedFiles(loopback)).toEqual([]);
+      expect(await liveMoments(engine)).toHaveLength(0);
+      await engine.stop();
+    },
+  );
+
   it("retires an over-text-cap valid-UTF-8 text file instead of demoting it to binary", async () => {
     const root = await tempRoot();
     await write(root, "big.md", "small\n");
@@ -1154,7 +1177,7 @@ describe("workspaceEngineCapture batch capture", () => {
     // Genuine text over the text cap is untracked content (established
     // behavior): the previously tracked path is retired, never stored as
     // binary bytes.
-    await write(root, "big.md", "x".repeat(1024 * 1024));
+    await write(root, "big.md", "x".repeat(MAX_ENGINE_CAPTURE_TEXT_BYTES + 1));
     engine.captureBatch([{ path: "big.md", operation: "update" }]);
     await engine.flush();
 
@@ -1615,6 +1638,142 @@ describe("workspaceEngineCapture expected engine events", () => {
 });
 
 describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
+  async function deliverRelayPage<T extends {
+    fastForwardedPaths: readonly RelayMaterializedPath[];
+  }>(
+    materializePage: MaterializeRelayPullPage,
+    result: T,
+    commit: () => Promise<void> = async () => undefined,
+  ): Promise<T> {
+    await materializePage(result.fastForwardedPaths);
+    await commit();
+    return result;
+  }
+
+  async function protectedVersionFixture(mainText: string) {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedSecretFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: ".env",
+      text: mainText,
+      origin: "sync",
+    });
+    await write(root, ".env", mainText);
+    const engine = liveCapture(root, loopback);
+    const draftId = (await engine.createVersion("Draft")).activeVersionId;
+    loopback.seedSecretFile({
+      workspace: WORKSPACE_ID,
+      versionId: draftId,
+      path: ".env",
+      text: "VALUE=draft engine\n",
+      origin: "local-file",
+    });
+    await engine.switchVersion("main");
+    return { root, loopback, engine, draftId };
+  }
+
+  it("initializes the main version before the first relay task", async () => {
+    const root = await tempRoot();
+    const requests: Request[] = [];
+    const engine = liveCapture(root, new VersionedLoopbackEngine(), {
+      daemonOwnsCapture: true,
+      requests,
+    });
+
+    let initializedWhenTaskRan = false;
+    await engine.runRelaySync(async (materializePage) => {
+      initializedWhenTaskRan = requests.some(
+        (request) => request.method === VERSIONED_METHOD.versionsEnsureMain,
+      );
+      return await deliverRelayPage(materializePage, {
+        fastForwardedPaths: [],
+      });
+    });
+
+    expect(initializedWhenTaskRan).toBe(true);
+    await engine.stop();
+  });
+
+  it("settles daemon capture after relay materialization before committing the cursor", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    let settled = true;
+    const engine = capture(root, {
+      daemonOwnsCapture: true,
+      rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
+        settled,
+        running: true,
+        degraded: !settled,
+      })),
+    });
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "notes/remote.md",
+      text: "remote machine wrote this\n",
+      origin: "sync",
+    });
+    let flushedWhenCommitted = false;
+
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(
+        materializePage,
+        {
+          fastForwardedPaths: [
+            {
+              versionId: "main",
+              path: "notes/remote.md",
+              operation: "write" as const,
+              contentKind: "text" as const,
+            },
+          ],
+        },
+        async () => {
+        flushedWhenCommitted = requests.some(
+          (request) => request.method === "capture.reconcile",
+        );
+        },
+      ),
+    );
+
+    expect(flushedWhenCommitted).toBe(true);
+
+    settled = false;
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "notes/remote.md",
+      text: "new remote text\n",
+      origin: "sync",
+    });
+    const commitWhileUnsettled = vi.fn(async () => {});
+    await expect(
+      engine.runRelaySync(async (materializePage) =>
+        await deliverRelayPage(
+          materializePage,
+          {
+            fastForwardedPaths: [
+              {
+                versionId: "main",
+                path: "notes/remote.md",
+                operation: "write" as const,
+                contentKind: "text" as const,
+              },
+            ],
+          },
+          commitWhileUnsettled,
+        ),
+      ),
+    ).rejects.toThrow("did not settle");
+    expect(commitWhileUnsettled).not.toHaveBeenCalled();
+
+    settled = true;
+    await engine.stop();
+  });
+
   it("materializes pull-fast-forwarded paths to disk and suppresses the watcher echo", async () => {
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
@@ -1631,11 +1790,18 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     });
     const momentsBefore = (await liveMoments(engine)).length;
 
-    const result = await engine.runRelaySync(async () => ({
-      fastForwardedPaths: [
-        { path: "notes/remote.md", operation: "write" as const, contentKind: "text" as const },
-      ],
-    }));
+    const result = await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(materializePage, {
+        fastForwardedPaths: [
+          {
+            versionId: "main",
+            path: "notes/remote.md",
+            operation: "write" as const,
+            contentKind: "text" as const,
+          },
+        ],
+      }),
+    );
     expect(result.fastForwardedPaths).toHaveLength(1);
     expect(await readFile(join(root, "notes/remote.md"), "utf8")).toBe(
       "remote machine wrote this\n",
@@ -1654,6 +1820,38 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     const moments = await liveMoments(engine);
     expect(moments).toHaveLength(momentsBefore + 1);
     expect(moments[moments.length - 1].text).toBe("user follow-up\n");
+    await engine.stop();
+  });
+
+  it("materializes a pull-fast-forwarded binary path from authoritative bytes", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
+    const bytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    loopback.seedBinaryFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "assets/excalidraw/abc/asset.png",
+      bytes,
+      origin: "sync",
+    });
+
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(materializePage, {
+        fastForwardedPaths: [
+          {
+            versionId: "main",
+            path: "assets/excalidraw/abc/asset.png",
+            operation: "write" as const,
+            contentKind: "binary" as const,
+          },
+        ],
+      }),
+    );
+
+    expect(await readFile(join(root, "assets/excalidraw/abc/asset.png"))).toEqual(
+      Buffer.from(bytes),
+    );
     await engine.stop();
   });
 
@@ -1680,20 +1878,191 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     });
     const momentsBefore = (await liveMoments(engine)).length;
 
-    await engine.runRelaySync(async () => ({
-      fastForwardedPaths: [
-        { path: "doomed.md", operation: "delete" as const, contentKind: "text" as const },
-      ],
-    }));
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(materializePage, {
+        fastForwardedPaths: [
+          {
+            versionId: "main",
+            path: "doomed.md",
+            operation: "delete" as const,
+            contentKind: "text" as const,
+          },
+        ],
+      }),
+    );
     expect(existsSync(join(root, "doomed.md"))).toBe(false);
     engine.captureBatch([{ path: "doomed.md", operation: "delete" }]);
     await engine.flush();
     expect(await liveMoments(engine)).toHaveLength(momentsBefore);
 
     // A quiescent pass (no fast-forwarded paths) touches nothing.
-    await engine.runRelaySync(async () => ({ fastForwardedPaths: [] }));
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(materializePage, { fastForwardedPaths: [] }),
+    );
     await engine.flush();
     expect(await liveMoments(engine)).toHaveLength(momentsBefore);
+    await engine.stop();
+  });
+
+  it("materializes protected writes and deletes before committing the relay cursor", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    const engine = liveCapture(root, loopback);
+    loopback.seedSecretFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: ".env",
+      text: "ACCESS_TOKEN=protected\r\n",
+      origin: "sync",
+    });
+    const commitOrder: string[] = [];
+
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(
+        materializePage,
+        {
+          fastForwardedPaths: [
+            {
+              versionId: "main",
+              path: ".env",
+              operation: "write" as const,
+              contentKind: "secret" as const,
+            },
+          ],
+        },
+        async () => {
+        expect(await readFile(join(root, ".env"), "utf8")).toBe(
+          "ACCESS_TOKEN=protected\r\n",
+        );
+        commitOrder.push("write");
+        },
+      ),
+    );
+
+    await loopback.sendRequest({
+      id: -3,
+      method: VERSIONED_METHOD.secretsDelete,
+      workspace: WORKSPACE_ID,
+      params: {
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        origin: "sync",
+        momentId: "remote-secret-delete",
+      },
+    });
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(
+        materializePage,
+        {
+          fastForwardedPaths: [
+            {
+              versionId: "main",
+              path: ".env",
+              operation: "delete" as const,
+              contentKind: "secret" as const,
+            },
+          ],
+        },
+        async () => {
+        expect(existsSync(join(root, ".env"))).toBe(false);
+        commitOrder.push("delete");
+        },
+      ),
+    );
+
+    expect(commitOrder).toEqual(["write", "delete"]);
+    await engine.stop();
+  });
+
+  it("does not replay a protected write into a version entered after materialization failed", async () => {
+    const { root, engine, draftId } = await protectedVersionFixture(
+      "VALUE=main remote\n",
+    );
+
+    await rm(join(root, ".env"), { force: true });
+    await mkdir(join(root, ".env"));
+    const commit = vi.fn(async () => {});
+    const replay = () => ({
+      fastForwardedPaths: [
+        {
+          versionId: "main",
+          path: ".env",
+          operation: "write" as const,
+          contentKind: "secret" as const,
+        },
+      ],
+    });
+    await expect(
+      engine.runRelaySync(async (materializePage) =>
+        await deliverRelayPage(materializePage, replay(), commit),
+      ),
+    ).rejects.toThrow(/Could not update \.env/u);
+    expect(commit).not.toHaveBeenCalled();
+
+    await rm(join(root, ".env"), { recursive: true, force: true });
+    await write(root, ".env", "VALUE=main remote\n");
+    await engine.switchVersion(draftId);
+    await write(root, ".env", "VALUE=draft local drift\n");
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(materializePage, replay(), commit),
+    );
+
+    expect(await readFile(join(root, ".env"), "utf8")).toBe(
+      "VALUE=draft local drift\n",
+    );
+    expect(commit).toHaveBeenCalledTimes(1);
+    await engine.stop();
+  });
+
+  it("does not replay a protected delete into a version entered after materialization failed", async () => {
+    const { root, loopback, engine, draftId } = await protectedVersionFixture(
+      "VALUE=main\n",
+    );
+    await loopback.sendRequest({
+      id: -4,
+      method: VERSIONED_METHOD.secretsDelete,
+      workspace: WORKSPACE_ID,
+      params: {
+        workspaceId: WORKSPACE_ID,
+        versionId: "main",
+        path: ".env",
+        origin: "sync",
+        momentId: "remote-secret-delete-before-version-switch",
+      },
+    });
+
+    await rm(join(root, ".env"), { force: true });
+    await mkdir(join(root, ".env"));
+    const commit = vi.fn(async () => {});
+    const replay = () => ({
+      fastForwardedPaths: [
+        {
+          versionId: "main",
+          path: ".env",
+          operation: "delete" as const,
+          contentKind: "secret" as const,
+        },
+      ],
+    });
+    await expect(
+      engine.runRelaySync(async (materializePage) =>
+        await deliverRelayPage(materializePage, replay(), commit),
+      ),
+    ).rejects.toThrow(/Could not update \.env/u);
+    expect(commit).not.toHaveBeenCalled();
+
+    await rm(join(root, ".env"), { recursive: true, force: true });
+    await engine.switchVersion(draftId);
+    await write(root, ".env", "VALUE=draft local drift\n");
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(materializePage, replay(), commit),
+    );
+
+    expect(await readFile(join(root, ".env"), "utf8")).toBe(
+      "VALUE=draft local drift\n",
+    );
+    expect(commit).toHaveBeenCalledTimes(1);
     await engine.stop();
   });
 
@@ -1717,18 +2086,26 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     const commit = vi.fn(async () => {});
     const pullResult = () => ({
       fastForwardedPaths: [
-        { path: "notes/remote.md", operation: "write" as const, contentKind: "text" as const },
+        {
+          versionId: "main",
+          path: "notes/remote.md",
+          operation: "write" as const,
+          contentKind: "text" as const,
+        },
       ],
-      commitFetchCursor: commit,
     });
-    await expect(engine.runRelaySync(async () => pullResult())).rejects.toThrow(
-      /Could not update notes\/remote\.md/u,
-    );
+    await expect(
+      engine.runRelaySync(async (materializePage) =>
+        await deliverRelayPage(materializePage, pullResult(), commit),
+      ),
+    ).rejects.toThrow(/Could not update notes\/remote\.md/u);
     expect(commit).not.toHaveBeenCalled();
 
     // Unblock the path: the retry pass materializes and THEN commits.
     await rm(join(root, "notes/remote.md"), { recursive: true, force: true });
-    await engine.runRelaySync(async () => pullResult());
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(materializePage, pullResult(), commit),
+    );
     expect(commit).toHaveBeenCalledTimes(1);
     expect(await readFile(join(root, "notes/remote.md"), "utf8")).toBe(
       "remote machine wrote this\n",
@@ -1737,10 +2114,13 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     // A quiescent pass (chat-only or own-origin ops) still commits: cursor
     // progress must not depend on file materialization work existing.
     const quiescentCommit = vi.fn(async () => {});
-    await engine.runRelaySync(async () => ({
-      fastForwardedPaths: [],
-      commitFetchCursor: quiescentCommit,
-    }));
+    await engine.runRelaySync(async (materializePage) =>
+      await deliverRelayPage(
+        materializePage,
+        { fastForwardedPaths: [] },
+        quiescentCommit,
+      ),
+    );
     await engine.stop();
     expect(quiescentCommit).toHaveBeenCalledTimes(1);
   });
@@ -2718,18 +3098,18 @@ describe("workspaceEngineCapture agent attribution", () => {
     await expect(
       engine.writeAuthoredTextFile(
         join(root, "at-limit.txt"),
-        "x".repeat(MAX_ENGINE_CAPTURE_TEXT_BYTES),
+        "x".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES),
         author,
       ),
     ).resolves.toBeUndefined();
     await expect(
       engine.writeAuthoredTextFile(
         join(root, "over-limit.txt"),
-        "x".repeat(MAX_ENGINE_CAPTURE_TEXT_BYTES + 1),
+        "x".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES + 1),
         author,
       ),
     ).rejects.toThrow(
-      `Authored text exceeds the capture limit: limit ${MAX_ENGINE_CAPTURE_TEXT_BYTES} bytes, observed ${MAX_ENGINE_CAPTURE_TEXT_BYTES + 1} bytes.`,
+      `Authored text exceeds the in-band write limit: limit ${MAX_DESKTOP_CAPTURE_TEXT_BYTES} bytes, observed ${MAX_DESKTOP_CAPTURE_TEXT_BYTES + 1} bytes.`,
     );
     await engine.stop();
   });
@@ -2938,7 +3318,7 @@ describe("Rust engine session selection", () => {
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
-            ({ sha256: "b".repeat(64), markdown: "daemon" }) as never,
+            ({ sha256: "b".repeat(64), content: "daemon" }) as never,
           close: async () => undefined,
         } as never;
       },
@@ -3004,11 +3384,170 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
         evict: async () => undefined,
         applyLocalUpdate: async () => undefined,
         settleNow: async () =>
-          ({ sha256: "c".repeat(64), markdown: "" }) as never,
+          ({ sha256: "c".repeat(64), content: "" }) as never,
         close: async () => undefined,
       } as never;
     };
   }
+
+  it("hydrates a live artifact asset by its workspace-scoped blob after its head is retired", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    const path = "drawings/asset-recovery.excalidraw";
+    const assetPath = `assets/excalidraw/${"a".repeat(64)}/${"b".repeat(64)}.png`;
+    const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47]);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path,
+      text: '{"type":"excalidraw","elements":[],"appState":{},"files":{}}',
+    });
+    loopback.seedBinaryFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: assetPath,
+      bytes: Array.from(bytes),
+      origin: "sync",
+    });
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      daemonOwnsCapture: true,
+      openRustYDocProviderSession: async (options) => {
+        const doc = new Y.Doc();
+        return {
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          contentKind: "scene",
+          path: options.path,
+          head: "present",
+          lineage: "existing",
+          artifactAssets: [
+            {
+              id: "image-file",
+              mimeType: "image/png",
+              created: 1,
+              ref: assetPath,
+              sha256,
+            },
+          ],
+          evict: async () => undefined,
+          applyLocalUpdate: async () => undefined,
+          settleNow: async () => ({ sha256: "c".repeat(64), content: "" }) as never,
+          close: async () => undefined,
+        } as never;
+      },
+    });
+    const session = await engine.openYDocSession({ path, onRemoteUpdate: () => undefined });
+    await loopback.sendRequest({
+      id: -1,
+      method: VERSIONED_METHOD.textDelete,
+      workspace: WORKSPACE_ID,
+      params: { versionId: "main", path: assetPath, origin: "api" },
+    });
+
+    const descriptor = session.artifactAssets?.[0];
+    expect(descriptor).toBeDefined();
+    await expect(session.readArtifactAsset(descriptor!)).resolves.toEqual({
+      descriptor,
+      bytes,
+    });
+    await session.close({ settle: false });
+    await engine.stop();
+  });
+
+  it("exposes replacement assets after a live lineage resync", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    const path = "drawings/replaced-assets.excalidraw";
+    const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47]);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const losing: ArtifactAssetDescriptor = {
+      id: "losing-image",
+      mimeType: "image/png",
+      created: 1,
+      ref: `assets/excalidraw/${"a".repeat(64)}/${"b".repeat(64)}.png`,
+      sha256: "a".repeat(64),
+    };
+    const winning: ArtifactAssetDescriptor = {
+      id: "winning-image",
+      mimeType: "image/png",
+      created: 2,
+      ref: `assets/excalidraw/${"c".repeat(64)}/${sha256}.png`,
+      sha256,
+    };
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path,
+      text: '{"type":"excalidraw","elements":[],"appState":{},"files":{}}',
+    });
+    loopback.seedBinaryFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: winning.ref,
+      bytes: Array.from(bytes),
+      origin: "sync",
+    });
+    let replaceLineage!: () => void;
+    let activeAssets: readonly ArtifactAssetDescriptor[] = [losing];
+    let lineageClaimId = "losing-claim";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      daemonOwnsCapture: true,
+      openRustYDocProviderSession: async (options) => {
+        const doc = new Y.Doc();
+        const provider = {
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          get lineageClaimId() {
+            return lineageClaimId;
+          },
+          contentKind: "scene" as const,
+          path: options.path,
+          head: "present" as const,
+          lineage: "existing" as const,
+          get artifactAssets() {
+            return activeAssets;
+          },
+          evict: async () => undefined,
+          applyLocalUpdate: async () => undefined,
+          applyExternalMarkdownEdit: async (markdown: string) => ({
+            kind: "merged" as const,
+            markdown,
+          }),
+          settleNow: async () => ({
+            sha256: "c".repeat(64),
+            content: "",
+          }) as never,
+          close: async () => undefined,
+        } satisfies EngineYdocProviderSession;
+        replaceLineage = () => {
+          activeAssets = [winning];
+          lineageClaimId = "winning-claim";
+          options.onLineageReplaced?.(new Y.Doc(), []);
+        };
+        return provider;
+      },
+    });
+    const replacements: Uint8Array[] = [];
+    const session = await engine.openYDocSession({
+      path,
+      onRemoteUpdate: () => undefined,
+      onLineageReplaced: (update) => replacements.push(update),
+    });
+
+    replaceLineage();
+
+    expect(replacements).toHaveLength(1);
+    expect(session.artifactAssets).toEqual([winning]);
+    await expect(session.readArtifactAsset(winning)).resolves.toEqual({
+      descriptor: winning,
+      bytes,
+    });
+    await session.close({ settle: false });
+    await engine.stop();
+  });
 
   it("opens a session against the version a running switch is ENTERING, never the one it is leaving", async () => {
     const root = await tempRoot();
@@ -3241,7 +3780,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
             settles.push("settle");
-            return { sha256: "d".repeat(64), markdown: "written by a peer" } as never;
+            return { sha256: "d".repeat(64), content: "written by a peer" } as never;
           },
           close: async (closeOptions?: { settle?: boolean }) => {
             closedWithSettle = closeOptions?.settle;
@@ -3318,7 +3857,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
             settles.push("settle");
-            return { sha256: "e".repeat(64), markdown: "arrived from a peer" } as never;
+            return { sha256: "e".repeat(64), content: "arrived from a peer" } as never;
           },
           close: async (closeOptions?: {
             settle?: boolean;
@@ -3423,7 +3962,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           },
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
-            ({ sha256: "f".repeat(64), markdown: "" }) as never,
+            ({ sha256: "f".repeat(64), content: "" }) as never,
           applyExternalMarkdownEdit: async (markdown: string) =>
             ({ kind: "merged", markdown }) as const,
           close: async () => {
@@ -3488,7 +4027,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
             settles.push("settle");
             return {
               sha256: "f".repeat(64),
-              markdown: "arrived from a peer",
+              content: "arrived from a peer",
             } as never;
           },
           close: async (closeOptions?: {
@@ -3563,7 +4102,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
         applyLocalUpdate: async () => undefined,
         settleNow: async () => {
           settles.push("settle");
-          return { sha256: "a".repeat(64), markdown: "" } as never;
+          return { sha256: "a".repeat(64), content: "" } as never;
         },
         close: async () => {
           // The agent's write lands while the release is in flight.
@@ -3628,7 +4167,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           applyLocalUpdate: async () => undefined,
           settleNow: async () => {
             settles.push("settle");
-            return { sha256: "f".repeat(64), markdown: "arrived from a peer" } as never;
+            return { sha256: "f".repeat(64), content: "arrived from a peer" } as never;
           },
           close: async (closeOptions?: {
             settle?: boolean;
@@ -3694,7 +4233,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           settleNow: async () => {
             settled.push(resurrected);
             await writeFile(join(root, path), resurrected, "utf8");
-            return { sha256: "7".repeat(64), markdown: resurrected } as never;
+            return { sha256: "7".repeat(64), content: resurrected } as never;
           },
           close: async () => {
             throw new DaemonRefusalError(

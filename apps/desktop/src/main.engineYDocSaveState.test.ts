@@ -21,6 +21,17 @@ function handlerSource(channel: string): string {
 }
 
 describe("engine Y.Doc save-state reporting in main", () => {
+  it("pairs the open generation with the live document state at hand-over", () => {
+    const handler = handlerSource("engineYDocOpen");
+    const answerAt = handler.lastIndexOf(
+      "return OpenEngineYDocSessionResult.parse({",
+    );
+    const answer = handler.slice(answerAt, handler.indexOf("});", answerAt) + 3);
+    expect(answer).toContain("initialUpdate: Y.encodeStateAsUpdate(session.doc)");
+    expect(answer).toContain("lineageGeneration");
+    expect(answer).not.toContain("initialUpdate: session.initialUpdate");
+  });
+
   it("keeps each move and delete capture lifecycle inside one exclusive workspace operation", () => {
     for (const channel of ["moveWorkspacePath", "deleteWorkspacePath"]) {
       const handler = handlerSource(channel);
@@ -52,6 +63,23 @@ describe("engine Y.Doc save-state reporting in main", () => {
       expect(successAt).toBeGreaterThan(mutationAt);
       expect(failureAt).toBeGreaterThan(successAt);
     }
+  });
+
+  it("refuses a rename that would change a live document's kind", () => {
+    const handler = handlerSource("moveWorkspacePath");
+    // An engine rename preserves the stable object's Y.Doc kind while the
+    // editor for the new path is chosen by suffix — a cross-kind rename
+    // would strand the document between them. The guard must run before the
+    // engine records the rename moment.
+    expect(handler).toContain("liveDocumentKindForPath(input.fromPath)");
+    expect(handler).toContain("liveDocumentKindForPath(input.toPath)");
+    // Including a rename OUT of a live kind: a drawing renamed `.txt` keeps
+    // a scene lineage nothing at the new path can update.
+    const guardAt = handler.indexOf("fromKind !== null && fromKind !== toKind");
+    const renameAt = handler.indexOf("capture.beginFileRename(");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(renameAt);
+    expect(handler).toContain("cannot change a live document's kind");
   });
 
   it("admits unconditional file and folder creation through stale-sensitive workspace scheduling", () => {
@@ -157,6 +185,87 @@ describe("engine Y.Doc save-state reporting in main", () => {
     );
   });
 
+  it("blocks updates until the renderer acknowledges a lineage replacement", () => {
+    const open = handlerSource("engineYDocOpen");
+    expect(open).toContain("pendingEngineYDocLineageHandoffs.set(");
+    const acknowledgeAt = open.indexOf("acknowledge: ()");
+    const advanceAt = open.indexOf(
+      "registeredEntry.lineageGeneration = nextLineageGeneration",
+    );
+    expect(acknowledgeAt).toBeGreaterThan(-1);
+    expect(acknowledgeAt).toBeLessThan(advanceAt);
+    expect(open).toContain("queuedLineageReplacement = replacement");
+
+    const apply = handlerSource("engineYDocApplyUpdate");
+    const lineageAt = apply.indexOf(
+      "pendingEngineYDocLineageHandoffs.has(sessionKey)",
+    );
+    const generationAt = apply.indexOf(
+      "input.lineageGeneration !== entry.lineageGeneration",
+      lineageAt,
+    );
+    const applyAt = apply.indexOf("entry.session.applyLocalUpdate(");
+    expect(lineageAt).toBeGreaterThan(-1);
+    expect(lineageAt).toBeLessThan(generationAt);
+    expect(generationAt).toBeLessThan(applyAt);
+    expect(apply.slice(lineageAt, applyAt)).toContain(
+      'reason: "lineage-transition"',
+    );
+    expect(apply.slice(applyAt)).toContain("accepted: true");
+
+    const acknowledge = handlerSource("engineYDocAcknowledgeLineageReplacement");
+    expect(acknowledge).toContain("handoff.acknowledge()");
+  });
+
+  it("atomically replaces artifact asset authority when the handoff is acknowledged", () => {
+    const open = handlerSource("engineYDocOpen");
+    const acknowledgeAt = open.indexOf("acknowledge: ()");
+    const replaceAssetsAt = open.indexOf(
+      "registeredEntry.artifactAssetsById = new Map(",
+      acknowledgeAt,
+    );
+    const deleteHandoffAt = open.indexOf(
+      "pendingEngineYDocLineageHandoffs.delete(sessionKey)",
+      acknowledgeAt,
+    );
+    expect(replaceAssetsAt).toBeGreaterThan(acknowledgeAt);
+    expect(replaceAssetsAt).toBeLessThan(deleteHandoffAt);
+    expect(open.slice(replaceAssetsAt, deleteHandoffAt)).toContain(
+      "handoff.artifactAssets.map",
+    );
+  });
+
+  it("reports an unknown update session as refused instead of acknowledging a drop", () => {
+    const handler = handlerSource("engineYDocApplyUpdate");
+    const lookupAt = handler.indexOf("const entry = engineYDocSessions.get(sessionKey)");
+    const missingAt = handler.indexOf("if (!entry)", lookupAt);
+    const handoffAt = handler.indexOf(
+      "pendingEngineYDocLineageHandoffs.has(sessionKey)",
+      missingAt,
+    );
+    expect(handler.slice(missingAt, handoffAt)).toContain("accepted: false");
+    expect(handler.slice(missingAt, handoffAt)).toContain(
+      'reason: "session-unavailable"',
+    );
+  });
+
+  it("refuses updates while an asynchronous session release is pending", () => {
+    const release = mainSource.slice(
+      mainSource.indexOf("function releaseEngineYDocSessionEntry"),
+      mainSource.indexOf("function sendEngineYDocSaveState"),
+    );
+    expect(release).toContain("entry.releasing = true;");
+
+    const handler = handlerSource("engineYDocApplyUpdate");
+    const releasingAt = handler.indexOf("if (entry.releasing)");
+    const applyAt = handler.indexOf("entry.session.applyLocalUpdate(");
+    expect(releasingAt).toBeGreaterThan(-1);
+    expect(releasingAt).toBeLessThan(applyAt);
+    expect(handler.slice(releasingAt, applyAt)).toContain(
+      'reason: "session-unavailable"',
+    );
+  });
+
   it("makes updates inert after a successful delete and repeats the deleted state", () => {
     const handler = handlerSource("engineYDocApplyUpdate");
     const deletedAt = handler.indexOf("if (entry.deleted)");
@@ -213,15 +322,36 @@ describe("engine Y.Doc save-state reporting in main", () => {
       handler.indexOf("onSaveState:"),
       handler.indexOf("onRemoteUpdate:"),
     );
+    const remoteUpdateAt = handler.indexOf("onRemoteUpdate:");
     const forwarder = handler.slice(
-      handler.indexOf("onRemoteUpdate:"),
-      handler.indexOf("} catch (error) {"),
+      remoteUpdateAt,
+      handler.indexOf("} catch (error) {", remoteUpdateAt),
     );
     expect(reporter).toContain("if (refused) return;");
     expect(forwarder).toContain("refused ||");
     // One flag, set where every post-open refusal already goes.
     const releaseAt = handler.indexOf("const release = (reason: string)");
     expect(handler.slice(releaseAt)).toContain("refused = true;");
+  });
+
+  it("releases a session when its lineage replacement cannot be announced", () => {
+    const handler = handlerSource("engineYDocOpen");
+    const announceAt = handler.indexOf("const announceLineageReplacement");
+    const registrationAt = handler.indexOf(
+      "pendingEngineYDocLineageHandoffs.set(sessionKey, handoff)",
+      announceAt,
+    );
+    const sendAt = handler.indexOf("sender.send(", registrationAt);
+    const catchAt = handler.indexOf("} catch (error) {", sendAt);
+    const catchBody = handler.slice(catchAt, handler.indexOf("};", catchAt));
+    expect(registrationAt).toBeGreaterThan(announceAt);
+    expect(sendAt).toBeGreaterThan(registrationAt);
+    expect(catchBody).toContain("pendingEngineYDocLineageHandoffs.delete(sessionKey)");
+    expect(catchBody).toContain("refused = true;");
+    expect(catchBody).toContain("releaseEngineYDocSessionEntry(");
+    expect(handler.slice(handler.indexOf("const release = (reason: string)"))).toContain(
+      'release("lineage replacement announcement failed")',
+    );
   });
 
   // The defaulted seq is pinned BEHAVIORALLY in ipc/bridgeContract.test.ts

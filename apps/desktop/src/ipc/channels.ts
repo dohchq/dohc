@@ -403,29 +403,117 @@ export function parseSearchResultsEvent(value: unknown): SearchResultsEvent | nu
 // searchId): the renderer applies a forwarded delta only when it matches the
 // session currently bound, so a slow/stale session can never repaint another.
 export const ENGINE_YDOC_SESSION_ID_MAX_CHARS = 64;
-// A single Yjs update crossing IPC is bounded well above a normal keystroke
-// delta yet below anything abusive; the driver's recordUpdate independently
-// rejects an oversized update, so this is a preload sanity bound, not the
-// authority.
-export const ENGINE_YDOC_UPDATE_MAX_BYTES = 16 * 1024 * 1024;
+// Raw bytes cross renderer IPC by structured clone. Admit the durable engine's
+// measured raw-update range so an engine-owned session can always hand its
+// accepted state to the renderer. The daemon's base64 JSON frame remains a
+// separate, smaller transport bound.
+export const ENGINE_YDOC_UPDATE_MAX_BYTES = 20 * 1024 * 1024;
 
 export interface EngineYDocRemoteUpdateEvent {
   sessionId: string;
   update: Uint8Array;
+  lineageGeneration: number;
 }
 
 export function parseEngineYDocRemoteUpdateEvent(
   value: unknown,
 ): EngineYDocRemoteUpdateEvent | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  if (!Object.hasOwn(value, "sessionId") || !Object.hasOwn(value, "update")) return null;
-  const { sessionId, update } = value as { sessionId?: unknown; update?: unknown };
+  if (
+    !Object.hasOwn(value, "sessionId") ||
+    !Object.hasOwn(value, "update") ||
+    !Object.hasOwn(value, "lineageGeneration")
+  ) {
+    return null;
+  }
+  const { sessionId, update, lineageGeneration } = value as {
+    sessionId?: unknown;
+    update?: unknown;
+    lineageGeneration?: unknown;
+  };
   if (!isBoundedString(sessionId, ENGINE_YDOC_SESSION_ID_MAX_CHARS)) return null;
   // Structured clone preserves a Uint8Array as a real Uint8Array; anything else
   // (a plain object, an ArrayBuffer, a tampered value) is rejected.
   if (!(update instanceof Uint8Array)) return null;
   if (update.byteLength === 0 || update.byteLength > ENGINE_YDOC_UPDATE_MAX_BYTES) return null;
-  return { sessionId, update };
+  if (
+    typeof lineageGeneration !== "number" ||
+    !Number.isSafeInteger(lineageGeneration) ||
+    lineageGeneration < 1
+  ) {
+    return null;
+  }
+  return { sessionId, update, lineageGeneration };
+}
+
+export interface EngineYDocLineageReplacementEvent {
+  sessionId: string;
+  update: Uint8Array;
+  recoveredPaths: string[];
+  artifactAssets: EngineYDocArtifactAssetDescriptor[];
+  lineageGeneration: number;
+}
+
+export function parseEngineYDocLineageReplacementEvent(
+  value: unknown,
+): EngineYDocLineageReplacementEvent | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { sessionId, update, recoveredPaths, artifactAssets, lineageGeneration } = value as {
+    sessionId?: unknown;
+    update?: unknown;
+    recoveredPaths?: unknown;
+    artifactAssets?: unknown;
+    lineageGeneration?: unknown;
+  };
+  if (!isBoundedString(sessionId, ENGINE_YDOC_SESSION_ID_MAX_CHARS)) return null;
+  if (!(update instanceof Uint8Array)) return null;
+  if (update.byteLength === 0 || update.byteLength > ENGINE_YDOC_UPDATE_MAX_BYTES) return null;
+  if (!Array.isArray(recoveredPaths) || !recoveredPaths.every(isSafeRelativePath)) return null;
+  if (!Array.isArray(artifactAssets) || !artifactAssets.every(isArtifactAssetDescriptor)) {
+    return null;
+  }
+  if (
+    typeof lineageGeneration !== "number" ||
+    !Number.isSafeInteger(lineageGeneration) ||
+    lineageGeneration < 1
+  ) {
+    return null;
+  }
+  return { sessionId, update, recoveredPaths, artifactAssets, lineageGeneration };
+}
+
+interface EngineYDocArtifactAssetDescriptor {
+  [key: string]: string | number | undefined;
+  id: string;
+  mimeType: string;
+  created: number;
+  ref: string;
+  sha256: string;
+  lastRetrieved?: number;
+  version?: number;
+}
+
+function isArtifactAssetDescriptor(
+  value: unknown,
+): value is EngineYDocArtifactAssetDescriptor {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const asset = value as Record<string, unknown>;
+  return (
+    typeof asset.id === "string" &&
+    asset.id.length > 0 &&
+    typeof asset.mimeType === "string" &&
+    asset.mimeType.length > 0 &&
+    Number.isSafeInteger(asset.created) &&
+    (asset.created as number) >= 0 &&
+    isSafeRelativePath(asset.ref) &&
+    typeof asset.sha256 === "string" &&
+    /^[0-9a-f]{64}$/.test(asset.sha256) &&
+    (asset.lastRetrieved === undefined ||
+      (Number.isSafeInteger(asset.lastRetrieved) &&
+        (asset.lastRetrieved as number) >= 0)) &&
+    (asset.version === undefined ||
+      (Number.isSafeInteger(asset.version) && (asset.version as number) >= 0))
+  );
 }
 
 // The editor's save indicator, pushed from main on every real settle outcome.
@@ -677,9 +765,13 @@ export const CHANNELS = {
   cancelWorkspaceSearch: "desktop:cancel-workspace-search",
   searchResults: "desktop:search-results",
   engineYDocOpen: "desktop:engine-ydoc-open",
+  engineYDocReadArtifactAsset: "desktop:engine-ydoc-read-artifact-asset",
   engineYDocApplyUpdate: "desktop:engine-ydoc-apply-update",
+  engineYDocAcknowledgeLineageReplacement:
+    "desktop:engine-ydoc-acknowledge-lineage-replacement",
   engineYDocClose: "desktop:engine-ydoc-close",
   engineYDocRemoteUpdate: "desktop:engine-ydoc-remote-update",
+  engineYDocLineageReplacement: "desktop:engine-ydoc-lineage-replacement",
   engineYDocSaveState: "desktop:engine-ydoc-save-state",
   menuCommand: "desktop:menu-command",
   workspaceActivated: "desktop:workspace-activated",

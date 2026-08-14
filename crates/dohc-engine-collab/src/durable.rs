@@ -7,9 +7,10 @@
 //!
 //! ## Two regimes (never conflated — plan correction)
 //!
-//! [`Regime::LocalOnly`] keeps the log as a PRUNABLE fast-resume cache: markdown
-//! is the durable canonical, and a closed session prunes every CRDT row to the
-//! bare marker. [`Regime::Replicated`] makes the CRDT lineage durable canonical:
+//! [`Regime::LocalOnly`] keeps the log as a PRUNABLE fast-resume cache. The
+//! workspace file is the durable artifact, and a closed session prunes every
+//! CRDT row to the bare marker. [`Regime::Replicated`] makes the CRDT lineage
+//! durable canonical:
 //! the base is emitted exactly once, local edits journal `ydoc.update` ops
 //! (surfaced via [`AppendOutcome::emit_outbound`]), and close NEVER prunes — a
 //! peer bootstraps from the persisted lineage.
@@ -28,7 +29,7 @@ use crate::DocKey;
 /// Which durability regime a lineage lives under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Regime {
-    /// Prunable fast-resume cache; markdown is durable canonical.
+    /// Prunable fast-resume cache; the workspace file is the durable artifact.
     LocalOnly,
     /// Durable canonical CRDT lineage; base-once, never pruned on close.
     Replicated,
@@ -108,6 +109,10 @@ pub struct Marker {
     pub lineage_parent_claim_id: Option<String>,
     pub lineage_epoch_tag: Option<String>,
     pub path: Option<String>,
+    pub base_origin_id: Option<String>,
+    pub base_origin_seq: Option<i64>,
+    pub base_relay_seq: Option<i64>,
+    pub base_relay_confirmed_absent: bool,
 }
 
 /// A reconstructed durable doc plus the lineage metadata it was rebuilt from.
@@ -163,6 +168,66 @@ pub enum ClaimOutcome {
     /// A base already existed: the caller resumes the winner and emits NO second
     /// base (base-once). The existing base is left byte-intact.
     Resumed,
+    /// A lower relay position replaced this machine's active lineage.
+    Replaced {
+        losing_lineage_claim_id: String,
+        winner: Marker,
+    },
+    /// The active lineage owns the lower relay position. No bytes changed.
+    AlreadyWon { winner: Marker },
+}
+
+/// The authenticated relay coordinate of one base envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseRelayCoordinate {
+    pub origin_id: String,
+    pub origin_seq: i64,
+    pub relay_seq: i64,
+}
+
+/// The exact base coordinate to persist for an active lineage claim.
+#[derive(Debug, Clone, Copy)]
+pub struct BaseCoordinateRecord<'a> {
+    pub key: &'a DocKey,
+    pub lineage_claim_id: &'a str,
+    pub origin_id: &'a str,
+    pub origin_seq: i64,
+    pub relay_seq: Option<i64>,
+    pub now_ms: i64,
+}
+
+impl BaseRelayCoordinate {
+    pub fn new(
+        origin_id: impl Into<String>,
+        origin_seq: i64,
+        relay_seq: i64,
+    ) -> Result<Self, CollabError> {
+        let origin_id = origin_id.into();
+        if origin_id.is_empty() || origin_id.bytes().any(|byte| byte.is_ascii_control()) {
+            return Err(CollabError::InvalidIdentifier {
+                reason: "origin_id must be non-empty and contain no control bytes".to_owned(),
+            });
+        }
+        if origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES {
+            return Err(CollabError::InvalidIdentifier {
+                reason: format!(
+                    "origin_id is {} bytes; the limit is {} bytes",
+                    origin_id.len(),
+                    dohc_engine_storage::MAX_IDENTIFIER_BYTES
+                ),
+            });
+        }
+        if origin_seq < 0 || relay_seq < 0 {
+            return Err(CollabError::InvalidIdentifier {
+                reason: "base relay coordinates must be nonnegative".to_owned(),
+            });
+        }
+        Ok(Self {
+            origin_id,
+            origin_seq,
+            relay_seq,
+        })
+    }
 }
 
 /// The result of an exact predecessor-claim/state-vector successor CAS.
@@ -180,12 +245,12 @@ pub enum SuccessorInstallOutcome {
 /// The outcome of a settle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettleOutcome {
-    /// The markdown projection with provenance.
+    /// The artifact content projection with provenance.
     pub projection: Projection,
     /// The durable materialization job id (deterministic; a crash-retry with the
     /// same content is an idempotent no-op).
     pub job_id: String,
-    /// Lowercase-hex sha-256 of the projected markdown (its `binary_blobs` key).
+    /// Lowercase-hex sha-256 of the projected content (its `binary_blobs` key).
     pub content_sha256: String,
     /// True when the job was already enqueued for this content+generation.
     pub deduped: bool,
@@ -516,6 +581,85 @@ pub fn record_local_update_creating_marker_guarded<F>(
 where
     F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
 {
+    record_local_update_creating_marker_guarded_inner(
+        store,
+        key,
+        path,
+        content_kind,
+        regime,
+        update,
+        actor_origin_id,
+        None,
+        ensure_parent_row,
+        require_empty_lineage,
+        request_id,
+        faults,
+        now_ms,
+        post_append,
+    )
+}
+
+/// [`record_local_update_creating_marker_guarded`] with an active-lineage CAS.
+/// `None` means the caller is bound to an unclaimed lineage, not "skip the
+/// guard". The idempotency hash binds the expected claim before replay.
+#[allow(clippy::too_many_arguments)]
+pub fn record_local_update_creating_marker_guarded_for_lineage<F>(
+    store: &mut EngineStore,
+    key: &DocKey,
+    path: Option<&str>,
+    content_kind: ContentKind,
+    regime: Regime,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    expected_lineage_claim_id: Option<&str>,
+    ensure_parent_row: bool,
+    require_empty_lineage: bool,
+    request_id: Option<&str>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+    post_append: F,
+) -> Result<TxnOutcome<AppendOutcome>, CollabError>
+where
+    F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
+{
+    record_local_update_creating_marker_guarded_inner(
+        store,
+        key,
+        path,
+        content_kind,
+        regime,
+        update,
+        actor_origin_id,
+        Some(expected_lineage_claim_id),
+        ensure_parent_row,
+        require_empty_lineage,
+        request_id,
+        faults,
+        now_ms,
+        post_append,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_local_update_creating_marker_guarded_inner<F>(
+    store: &mut EngineStore,
+    key: &DocKey,
+    path: Option<&str>,
+    content_kind: ContentKind,
+    regime: Regime,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    lineage_guard: Option<Option<&str>>,
+    ensure_parent_row: bool,
+    require_empty_lineage: bool,
+    request_id: Option<&str>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+    post_append: F,
+) -> Result<TxnOutcome<AppendOutcome>, CollabError>
+where
+    F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
+{
     // The caller's idempotency key hashes over the DOC COORDINATES and the
     // update bytes: content-addressed dedupe alone only holds while the
     // original row survives compaction — a retry after the fold would
@@ -528,11 +672,16 @@ where
         };
         crate::hex_sha256(
             format!(
-                "ydoc-record-v2{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}",
+                "ydoc-record-v3{sep}{}{sep}{}{sep}{}{sep}{path_identity}{sep}{}{sep}{}",
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
                 crate::hex_sha256(update),
+                match lineage_guard {
+                    None => "unguarded".to_owned(),
+                    Some(None) => "unclaimed".to_owned(),
+                    Some(Some(claim)) => format!("claim:{claim}"),
+                },
                 sep = char::from(0),
             )
             .as_bytes(),
@@ -559,6 +708,15 @@ where
                     seq: -result_seq,
                     deduped: true,
                     emit_outbound: false,
+                });
+            }
+        }
+        if let Some(expected) = lineage_guard {
+            let observed = query_marker(tx, key)?.and_then(|marker| marker.lineage_claim_id);
+            if observed.as_deref() != expected {
+                return Err(CollabError::LineageWriteStale {
+                    expected: expected.map(ToOwned::to_owned),
+                    observed,
                 });
             }
         }
@@ -630,6 +788,10 @@ where
                     lineage_parent_claim_id: None,
                     lineage_epoch_tag: None,
                     path: path.map(str::to_owned),
+                    base_origin_id: None,
+                    base_origin_seq: None,
+                    base_relay_seq: None,
+                    base_relay_confirmed_absent: false,
                 }
             }
         };
@@ -805,10 +967,10 @@ pub fn maybe_compact(
 }
 
 /// Claim the single BASE snapshot for a replicated lineage (base-once). The base
-/// bytes are a full-state re-encode of the doc seeded from markdown at first
-/// creation. The transaction rechecks the lineage claim status. In a concurrent
-/// first-open race, the loser observes the winner and returns
-/// [`ClaimOutcome::Resumed`] without a second base.
+/// bytes are a full-state re-encode of the document after its initial artifact
+/// seed. Re-checks the lineage claim inside the transaction so a cross-process
+/// first-open race resolves to exactly one base: the loser observes the winner's
+/// base and returns [`ClaimOutcome::Resumed`] (emitting no second base).
 pub fn claim_base(
     store: &mut EngineStore,
     key: &DocKey,
@@ -830,6 +992,34 @@ pub fn claim_base(
     })
 }
 
+/// Claim or arbitrate a base observed at an authenticated relay coordinate.
+/// Lower relay position wins.
+pub fn claim_base_at_relay(
+    store: &mut EngineStore,
+    key: &DocKey,
+    content_kind: ContentKind,
+    base_bytes: &[u8],
+    coordinate: &BaseRelayCoordinate,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<ClaimOutcome>, CollabError> {
+    validate_update_bytes(base_bytes)?;
+    let doc = Ydoc::wire();
+    doc.apply(base_bytes)?;
+    let sv_bytes = doc.encode_state_vector();
+    store.write_with(faults, |tx| {
+        claim_base_at_relay_in_tx(
+            tx,
+            key,
+            content_kind,
+            base_bytes,
+            &sv_bytes,
+            coordinate,
+            now_ms,
+        )
+    })
+}
+
 /// Transaction-composable form of [`claim_base`] for callers that must claim
 /// a REMOTE base atomically with the imported coordinate's admission and ack
 /// (a standalone claim before admission would persist a marker for an
@@ -840,6 +1030,39 @@ pub fn claim_base_in_tx(
     content_kind: ContentKind,
     base_bytes: &[u8],
     sv_bytes: &[u8],
+    now_ms: i64,
+) -> Result<ClaimOutcome, CollabError> {
+    claim_base_with_coordinate_in_tx(tx, key, content_kind, base_bytes, sv_bytes, None, now_ms)
+}
+
+/// Transaction-composable form of [`claim_base_at_relay`].
+pub fn claim_base_at_relay_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    content_kind: ContentKind,
+    base_bytes: &[u8],
+    sv_bytes: &[u8],
+    coordinate: &BaseRelayCoordinate,
+    now_ms: i64,
+) -> Result<ClaimOutcome, CollabError> {
+    claim_base_with_coordinate_in_tx(
+        tx,
+        key,
+        content_kind,
+        base_bytes,
+        sv_bytes,
+        Some(coordinate),
+        now_ms,
+    )
+}
+
+fn claim_base_with_coordinate_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    content_kind: ContentKind,
+    base_bytes: &[u8],
+    sv_bytes: &[u8],
+    coordinate: Option<&BaseRelayCoordinate>,
     now_ms: i64,
 ) -> Result<ClaimOutcome, CollabError> {
     validate_update_bytes(base_bytes)?;
@@ -859,8 +1082,12 @@ pub fn claim_base_in_tx(
               head_update_seq, head_snapshot_seq, lineage_claim_status, updated_at_ms) \
              VALUES (?1, ?2, ?3, ?4, 'replicated', 0, 0, 'unclaimed', ?5) \
              ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET \
-               regime = 'replicated', content_kind = excluded.content_kind, \
-               updated_at_ms = excluded.updated_at_ms",
+               regime = CASE WHEN lineage_claim_status='unclaimed' \
+                             THEN 'replicated' ELSE regime END, \
+               content_kind = CASE WHEN lineage_claim_status='unclaimed' \
+                                   THEN excluded.content_kind ELSE content_kind END, \
+               updated_at_ms = CASE WHEN lineage_claim_status='unclaimed' \
+                                    THEN excluded.updated_at_ms ELSE updated_at_ms END",
             rusqlite::params![
                 key.workspace_id,
                 key.version_id,
@@ -880,9 +1107,76 @@ pub fn claim_base_in_tx(
         match marker.lineage_claim_status {
             LineageClaimStatus::Unclaimed => {}
             LineageClaimStatus::Exact => {
-                return match marker.lineage_claim_id {
-                    Some(stored) if stored == incoming_claim_id => Ok(ClaimOutcome::Resumed),
-                    Some(_) => Err(CollabError::BaseStateDiverged),
+                return match marker.lineage_claim_id.clone() {
+                    Some(stored) if stored == incoming_claim_id => {
+                        if let Some(coordinate) = coordinate {
+                            record_base_coordinate_in_tx(
+                                tx,
+                                BaseCoordinateRecord {
+                                    key,
+                                    lineage_claim_id: &incoming_claim_id,
+                                    origin_id: &coordinate.origin_id,
+                                    origin_seq: coordinate.origin_seq,
+                                    relay_seq: Some(coordinate.relay_seq),
+                                    now_ms,
+                                },
+                            )?;
+                        }
+                        Ok(ClaimOutcome::Resumed)
+                    }
+                    Some(stored) => {
+                        let Some(coordinate) = coordinate else {
+                            return Err(CollabError::BaseStateDiverged);
+                        };
+                        let local_relay_seq = match marker.base_relay_seq {
+                            Some(relay_seq) => relay_seq,
+                            None if marker.base_relay_confirmed_absent => {
+                                replace_base_snapshot(
+                                    tx,
+                                    BaseSnapshotReplacement {
+                                        key,
+                                        content_kind,
+                                        base_bytes,
+                                        state_vector_bytes: sv_bytes,
+                                        coordinate,
+                                        incoming_claim_id: &incoming_claim_id,
+                                        now_ms,
+                                    },
+                                )?;
+                                let winner = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+                                return Ok(ClaimOutcome::Replaced {
+                                    losing_lineage_claim_id: stored,
+                                    winner,
+                                });
+                            }
+                            None => return Err(CollabError::BaseRelaySequencePending),
+                        };
+                        if coordinate.relay_seq == local_relay_seq {
+                            return Err(CollabError::BaseRelaySequenceCollision {
+                                relay_seq: coordinate.relay_seq,
+                            });
+                        }
+                        if coordinate.relay_seq > local_relay_seq {
+                            return Ok(ClaimOutcome::AlreadyWon { winner: marker });
+                        }
+                        replace_base_snapshot(
+                            tx,
+                            BaseSnapshotReplacement {
+                                key,
+                                content_kind,
+                                base_bytes,
+                                state_vector_bytes: sv_bytes,
+                                coordinate,
+                                incoming_claim_id: &incoming_claim_id,
+                                now_ms,
+                            },
+                        )?;
+                        let winner = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+                        Ok(ClaimOutcome::Replaced {
+                            losing_lineage_claim_id: stored,
+                            winner,
+                        })
+                    }
                     None => Err(CollabError::Corrupt {
                         reason: "exact Y.Doc lineage claim is missing its claim id".to_owned(),
                     }),
@@ -917,13 +1211,17 @@ pub fn claim_base_in_tx(
         tx.execute(
             "UPDATE ydoc_docs SET lineage_claim_status='exact', \
              lineage_claim_id=?4, lineage_parent_claim_id=NULL, lineage_epoch_tag=NULL, \
-             updated_at_ms = ?5 \
+             base_origin_id=?5,base_origin_seq=?6,base_relay_seq=?7, \
+             base_relay_confirmed_absent=0,updated_at_ms=?8 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             rusqlite::params![
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
                 incoming_claim_id,
+                coordinate.map(|value| value.origin_id.as_str()),
+                coordinate.map(|value| value.origin_seq),
+                coordinate.map(|value| value.relay_seq),
                 now_ms
             ],
         )
@@ -932,6 +1230,175 @@ pub fn claim_base_in_tx(
             base_snapshot_sha: base_sha,
         })
     })()
+}
+
+/// Persist an exact base origin and, when supplied, its authenticated relay
+/// position. The claim id must still be active in this transaction.
+pub fn record_base_coordinate(
+    store: &mut EngineStore,
+    record: BaseCoordinateRecord<'_>,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<()>, CollabError> {
+    store.write_with(faults, |tx| record_base_coordinate_in_tx(tx, record))
+}
+
+pub fn record_base_coordinate_in_tx(
+    tx: &Transaction<'_>,
+    record: BaseCoordinateRecord<'_>,
+) -> Result<(), CollabError> {
+    let BaseCoordinateRecord {
+        key,
+        lineage_claim_id,
+        origin_id,
+        origin_seq,
+        relay_seq,
+        now_ms,
+    } = record;
+    if origin_id.is_empty()
+        || origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+        || origin_id.bytes().any(|byte| byte.is_ascii_control())
+        || origin_seq < 0
+        || relay_seq.is_some_and(|value| value < 0)
+    {
+        return Err(CollabError::InvalidIdentifier {
+            reason: "base relay coordinates must be bounded and nonnegative".to_owned(),
+        });
+    }
+    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.lineage_claim_id.as_deref() != Some(lineage_claim_id) {
+        return Err(CollabError::LineageWriteStale {
+            expected: Some(lineage_claim_id.to_owned()),
+            observed: marker.lineage_claim_id,
+        });
+    }
+    let replace = marker.base_origin_id.is_none()
+        || marker.base_origin_seq.is_none()
+        || matches!((relay_seq, marker.base_relay_seq), (Some(new), Some(old)) if new < old)
+        || matches!((relay_seq, marker.base_relay_seq), (Some(_), None));
+    if replace {
+        tx.execute(
+            "UPDATE ydoc_docs SET base_origin_id=?4,base_origin_seq=?5, \
+             base_relay_seq=COALESCE(?6,base_relay_seq), \
+             base_relay_confirmed_absent=CASE WHEN ?6 IS NULL \
+               THEN base_relay_confirmed_absent ELSE 0 END,updated_at_ms=?7 \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            rusqlite::params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                origin_id,
+                origin_seq,
+                relay_seq,
+                now_ms,
+            ],
+        )
+        .map_err(map_sql)?;
+    }
+    Ok(())
+}
+
+/// Mark a stored exact coordinate as authoritatively absent at the relay.
+pub fn mark_base_coordinate_absent_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    lineage_claim_id: &str,
+    origin_id: &str,
+    origin_seq: i64,
+    now_ms: i64,
+) -> Result<(), CollabError> {
+    let changed = tx
+        .execute(
+            "UPDATE ydoc_docs SET base_relay_confirmed_absent=1,updated_at_ms=?7 \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+               AND lineage_claim_id=?4 AND base_origin_id=?5 AND base_origin_seq=?6 \
+               AND base_relay_seq IS NULL",
+            rusqlite::params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                lineage_claim_id,
+                origin_id,
+                origin_seq,
+                now_ms,
+            ],
+        )
+        .map_err(map_sql)?;
+    if changed != 1 {
+        return Err(CollabError::BaseStateDiverged);
+    }
+    Ok(())
+}
+
+struct BaseSnapshotReplacement<'a> {
+    key: &'a DocKey,
+    content_kind: ContentKind,
+    base_bytes: &'a [u8],
+    state_vector_bytes: &'a [u8],
+    coordinate: &'a BaseRelayCoordinate,
+    incoming_claim_id: &'a str,
+    now_ms: i64,
+}
+
+fn replace_base_snapshot(
+    tx: &Transaction<'_>,
+    replacement: BaseSnapshotReplacement<'_>,
+) -> Result<(), CollabError> {
+    let BaseSnapshotReplacement {
+        key,
+        content_kind,
+        base_bytes,
+        state_vector_bytes,
+        coordinate,
+        incoming_claim_id,
+        now_ms,
+    } = replacement;
+    tx.execute(
+        "DELETE FROM ydoc_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(map_sql)?;
+    tx.execute(
+        "DELETE FROM ydoc_snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(map_sql)?;
+    let base_sha = put_binary_blob(tx, base_bytes)?;
+    let sv_sha = put_binary_blob(tx, state_vector_bytes)?;
+    tx.execute(
+        "INSERT INTO ydoc_snapshots (workspace_id,version_id,object_id,up_to_seq, \
+         snapshot_blob_sha256,state_vector_blob_sha256,recorded_at_ms) \
+         VALUES (?1,?2,?3,0,?4,?5,?6)",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            base_sha,
+            sv_sha,
+            now_ms,
+        ],
+    )
+    .map_err(map_sql)?;
+    tx.execute(
+        "UPDATE ydoc_docs SET content_kind=?4,regime='replicated',head_update_seq=0, \
+         head_snapshot_seq=0,last_settled_sha=NULL,lineage_claim_status='exact', \
+         lineage_claim_id=?5,lineage_parent_claim_id=NULL,lineage_epoch_tag=NULL, \
+         base_origin_id=?6,base_origin_seq=?7,base_relay_seq=?8, \
+         base_relay_confirmed_absent=0,updated_at_ms=?9 \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        rusqlite::params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            content_kind.as_str(),
+            incoming_claim_id,
+            coordinate.origin_id,
+            coordinate.origin_seq,
+            coordinate.relay_seq,
+            now_ms,
+        ],
+    )
+    .map_err(map_sql)?;
+    Ok(())
 }
 
 /// Atomically archive an exact active predecessor and install a fresh
@@ -945,6 +1412,10 @@ pub struct SuccessorReplacement<'a> {
     pub expected_predecessor_state_vector_sha256: &'a str,
     pub path: &'a str,
     pub successor: &'a SuccessorBase,
+    /// The selected portable artifact for a scene successor. Scene Y.Docs keep
+    /// asset references, not bytes, so validating the canonical artifact needs
+    /// the exact text whose embedded files supply those bytes.
+    pub scene_result: Option<&'a str>,
     pub now_ms: i64,
 }
 
@@ -953,7 +1424,7 @@ pub fn replace_lineage_with_successor(
     replacement: SuccessorReplacement<'_>,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<SuccessorInstallOutcome>, CollabError> {
-    validate_successor_base(replacement.successor)?;
+    validate_successor_base(replacement.successor, replacement.scene_result)?;
     store.write_with(faults, |tx| {
         replace_lineage_with_successor_in_tx(tx, replacement)
     })
@@ -970,9 +1441,10 @@ pub fn replace_lineage_with_successor_in_tx(
         expected_predecessor_state_vector_sha256,
         path,
         successor,
+        scene_result,
         now_ms,
     } = replacement;
-    validate_successor_base(successor)?;
+    validate_successor_base(successor, scene_result)?;
     if successor.predecessor_state_vector_sha256 != expected_predecessor_state_vector_sha256 {
         return Err(CollabError::InvalidSuccessorBase {
             constraint: "predecessor state vector matches the successor CAS",
@@ -1210,7 +1682,10 @@ fn load_exact_active_lineage(
     Ok((marker, doc, state_vector))
 }
 
-fn validate_successor_base(successor: &SuccessorBase) -> Result<(), CollabError> {
+fn validate_successor_base(
+    successor: &SuccessorBase,
+    scene_result: Option<&str>,
+) -> Result<(), CollabError> {
     validate_update_bytes(&successor.update)?;
     let observed_claim = crate::hex_sha256(&successor.update);
     if observed_claim != successor.lineage_claim_id {
@@ -1247,7 +1722,47 @@ fn validate_successor_base(successor: &SuccessorBase) -> Result<(), CollabError>
             observed: crate::hex_sha256(&observed_state_vector),
         });
     }
-    let projected = doc.project(successor.content_kind)?.markdown;
+    let projected = if successor.content_kind == ContentKind::Scene {
+        let scene_result = scene_result.ok_or_else(|| CollabError::InvalidSuccessorBase {
+            constraint: "scene successor portable artifact",
+            expected: successor.result_sha256.clone(),
+            observed: "missing".to_owned(),
+        })?;
+        let parsed = crate::scene::parse_portable_scene(scene_result).map_err(|error| {
+            CollabError::InvalidSuccessorBase {
+                constraint: "scene successor portable artifact",
+                expected: successor.result_sha256.clone(),
+                observed: error.to_string(),
+            }
+        })?;
+        let folded = doc.fold_scene();
+        for (id, file) in &parsed.files {
+            let asset = folded
+                .assets
+                .get(id)
+                .ok_or_else(|| CollabError::InvalidSuccessorBase {
+                    constraint: "scene successor asset digest",
+                    expected: "a durable asset record".to_owned(),
+                    observed: "missing".to_owned(),
+                })?;
+            let observed = crate::hex_sha256(&file.bytes);
+            if observed != asset.sha256 {
+                return Err(CollabError::InvalidSuccessorBase {
+                    constraint: "scene successor asset digest",
+                    expected: asset.sha256.clone(),
+                    observed,
+                });
+            }
+        }
+        let asset_bytes = parsed
+            .files
+            .into_iter()
+            .map(|(id, file)| (id, file.bytes))
+            .collect();
+        folded.portable_json_with_asset_bytes(&asset_bytes)?
+    } else {
+        doc.project(successor.content_kind)?.content
+    };
     let observed_result = crate::hex_sha256(projected.as_bytes());
     if observed_result != successor.result_sha256 {
         return Err(CollabError::InvalidSuccessorBase {
@@ -1267,14 +1782,35 @@ pub fn read_marker_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
 ) -> Result<Option<Marker>, CollabError> {
-    query_marker(tx, key)
+    read_marker_from_connection(tx, key)
+}
+
+/// Read a doc's marker from the caller's SQLite connection.
+///
+/// This is the read-only counterpart to [`read_marker_in_tx`]. Callers that
+/// need a stable multi-query view must supply a connection inside their own
+/// transaction.
+pub fn read_marker_from_connection(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<Option<Marker>, CollabError> {
+    query_marker(conn, key)
 }
 
 /// Reconstruct the persisted doc inside the caller's transaction (marker
 /// required). The conflict-resolution fold reads, rewrites, and appends under
 /// ONE transaction so the folded update extends exactly the lineage it read.
 pub fn load_doc_in_tx(tx: &Transaction<'_>, key: &DocKey) -> Result<Ydoc, CollabError> {
-    load_for_replay_gate(tx, key)
+    load_doc_from_connection(tx, key)
+}
+
+/// Reconstruct a persisted doc from the caller's SQLite connection.
+///
+/// This is the read-only counterpart to [`load_doc_in_tx`]. Callers that need
+/// the marker and update rows to share one snapshot must supply a connection
+/// inside their own transaction.
+pub fn load_doc_from_connection(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError> {
+    load_for_replay_gate(conn, key)
 }
 
 /// Append one locally-produced update inside the caller's transaction — the
@@ -1293,12 +1829,33 @@ pub fn record_update_in_tx(
     append_local_update(tx, key, &marker, update, &sha, None, now_ms)
 }
 
+/// Append only if the active claim matches the lineage an open session bound
+/// to. The check runs before any blob, update, or journal mutation.
+pub fn record_update_for_lineage_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    expected_lineage_claim_id: Option<&str>,
+    update: &[u8],
+    now_ms: i64,
+) -> Result<AppendOutcome, CollabError> {
+    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.lineage_claim_id.as_deref() != expected_lineage_claim_id {
+        return Err(CollabError::LineageWriteStale {
+            expected: expected_lineage_claim_id.map(ToOwned::to_owned),
+            observed: marker.lineage_claim_id,
+        });
+    }
+    validate_update_bytes(update)?;
+    let sha = crate::hex_sha256(update);
+    append_local_update(tx, key, &marker, update, &sha, None, now_ms)
+}
+
 /// Encode the base bytes (and their state vector) that ORIGINATE `key`'s
 /// replicated lineage, from the state persisted inside the caller's
 /// transaction.
 ///
 /// The encode is a full state of the lineage as it stands right now, never a
-/// fresh markdown seed. A promoted lineage therefore publishes the update rows
+/// fresh artifact seed. A promoted lineage therefore publishes the update rows
 /// it already holds: a fresh seed would mint new Yjs item ids, leave those rows
 /// on the origin alone, and every clean peer would be permanently missing them.
 ///
@@ -1320,8 +1877,8 @@ pub fn encode_origination_base_in_tx(
     }))
 }
 
-/// Settle: project the reconstructed Y.Doc to markdown (with provenance),
-/// content-address the markdown into `binary_blobs`, and enqueue a durable
+/// Settle: project the reconstructed Y.Doc to artifact content (with provenance),
+/// content-address the projection in `binary_blobs`, and enqueue a durable
 /// materialization job (R04's pipeline) in the SAME transaction.
 ///
 /// **Clock-independent exactly-once.** The generation is a DURABLE, monotone
@@ -1344,13 +1901,13 @@ pub fn settle(
         None => return Err(CollabError::NoMarker),
     };
     let projection = persisted.doc.project(persisted.marker.content_kind)?;
-    let markdown_bytes = projection.markdown.clone().into_bytes();
-    let content_sha = crate::hex_sha256(&markdown_bytes);
+    let content_bytes = projection.content.clone().into_bytes();
+    let content_sha = crate::hex_sha256(&content_bytes);
     let sv_bytes = persisted.doc.encode_state_vector();
 
     store.write_with(faults, |tx| {
-        // Persist the markdown + the provenance state vector as content blobs.
-        put_binary_blob(tx, &markdown_bytes)?;
+        // Persist the content and its provenance state vector as blobs.
+        put_binary_blob(tx, &content_bytes)?;
         put_binary_blob(tx, &sv_bytes)?;
 
         // Durable per-doc settle counter + last-materialized content.
@@ -1444,11 +2001,14 @@ pub fn settle(
 
 /// Close a session: regime-dependent. Replicated (or persist-closed-state)
 /// compacts and KEEPS the lineage durable; local-only prunes every CRDT row to
-/// the bare marker (markdown-is-the-artifact).
+/// the bare marker (the workspace file is the artifact). A caller that uses a
+/// store-backed projector supplies its digest; scenes refuse the generic
+/// projection because their portable files resolve from versioned storage.
 pub fn close_session(
     store: &mut EngineStore,
     key: &DocKey,
     persist_closed_state: bool,
+    authoritative_projection_sha256: Option<&str>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<CloseOutcome>, CollabError> {
@@ -1464,18 +2024,26 @@ pub fn close_session(
         });
     }
     // Local-only prune would DISCARD the CRDT cache. Refuse unless the artifact
-    // already holds the head's bytes (markdown-is-the-artifact: the artifact
+    // already holds the head's bytes (the workspace file is the artifact: it
     // must exist before the cache is thrown away). A doc with no edits
     // (`head_update_seq == 0`) has nothing to lose and prunes freely.
     if marker.head_update_seq > 0 {
-        let persisted = load_persisted(store, key)?.ok_or(CollabError::NoMarker)?;
-        let content_sha = crate::hex_sha256(
-            persisted
-                .doc
-                .project(marker.content_kind)?
-                .markdown
-                .as_bytes(),
-        );
+        let content_sha = match authoritative_projection_sha256 {
+            Some(content_sha) => content_sha.to_owned(),
+            None if marker.content_kind == ContentKind::Scene => {
+                return Err(CollabError::UnsettledClose);
+            }
+            None => {
+                let persisted = load_persisted(store, key)?.ok_or(CollabError::NoMarker)?;
+                crate::hex_sha256(
+                    persisted
+                        .doc
+                        .project(marker.content_kind)?
+                        .content
+                        .as_bytes(),
+                )
+            }
+        };
         // TWO ways the artifact can already hold these bytes, and both count.
         // A settle records itself in `last_settled_sha`. A CAPTURE of the file
         // moves the HEAD to them and touches no marker column — it reads the
@@ -1646,6 +2214,10 @@ struct MarkerRow {
     lineage_parent_claim_id: Option<String>,
     lineage_epoch_tag: Option<String>,
     path: Option<String>,
+    base_origin_id: Option<String>,
+    base_origin_seq: Option<i64>,
+    base_relay_seq: Option<i64>,
+    base_relay_confirmed_absent: bool,
 }
 
 pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Marker>, CollabError> {
@@ -1653,7 +2225,8 @@ pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Mar
         .query_row(
             "SELECT content_kind, regime, head_update_seq, head_snapshot_seq, \
              lineage_claim_status, lineage_claim_id, lineage_parent_claim_id, \
-             lineage_epoch_tag, path FROM ydoc_docs \
+             lineage_epoch_tag, path, base_origin_id, base_origin_seq, base_relay_seq, \
+             base_relay_confirmed_absent FROM ydoc_docs \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id],
             |row| {
@@ -1667,6 +2240,10 @@ pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Mar
                     lineage_parent_claim_id: row.get(6)?,
                     lineage_epoch_tag: row.get(7)?,
                     path: row.get(8)?,
+                    base_origin_id: row.get(9)?,
+                    base_origin_seq: row.get(10)?,
+                    base_relay_seq: row.get(11)?,
+                    base_relay_confirmed_absent: row.get(12)?,
                 })
             },
         )
@@ -1674,7 +2251,7 @@ pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Mar
         .map_err(map_sql)?;
     row.map(|row| {
         Ok(Marker {
-            content_kind: ContentKind::parse(&row.content_kind),
+            content_kind: ContentKind::parse(&row.content_kind)?,
             regime: Regime::parse(&row.regime),
             head_update_seq: row.head_update_seq,
             head_snapshot_seq: row.head_snapshot_seq,
@@ -1683,6 +2260,10 @@ pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Mar
             lineage_parent_claim_id: row.lineage_parent_claim_id,
             lineage_epoch_tag: row.lineage_epoch_tag,
             path: row.path,
+            base_origin_id: row.base_origin_id,
+            base_origin_seq: row.base_origin_seq,
+            base_relay_seq: row.base_relay_seq,
+            base_relay_confirmed_absent: row.base_relay_confirmed_absent,
         })
     })
     .transpose()
@@ -1891,5 +2472,119 @@ fn updates_after(
 fn map_sql(e: rusqlite::Error) -> CollabError {
     CollabError::Corrupt {
         reason: e.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod successor_validation_tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::{
+        encode_scene_asset_record, import_portable_scene, scene_asset_ref, SceneAsset,
+        SuccessorIdentity, SuccessorIdentityInput,
+    };
+
+    fn canonical_image_scene(key: &DocKey) -> String {
+        let source = serde_json::to_string(&json!({
+            "type": "excalidraw",
+            "elements": [{
+                "id": "image-element",
+                "type": "image",
+                "version": 1,
+                "versionNonce": 1,
+                "isDeleted": false,
+                "index": "a0",
+                "fileId": "image-file"
+            }],
+            "files": {
+                "image-file": {
+                    "id": "image-file",
+                    "mimeType": "image/png",
+                    "created": 4,
+                    "dataURL": "data:image/png;base64,AQID"
+                }
+            }
+        }))
+        .expect("scene source");
+        let imported = import_portable_scene(&source).expect("import scene");
+        let file = imported.files.get("image-file").expect("image file");
+        let sha256 = crate::hex_sha256(&file.bytes);
+        let record = encode_scene_asset_record(&SceneAsset {
+            id: file.id.clone(),
+            mime_type: file.mime_type.clone(),
+            created: file.created,
+            path: scene_asset_ref(
+                &key.workspace_id,
+                &key.version_id,
+                &key.object_id,
+                &sha256,
+                &file.mime_type,
+            )
+            .expect("asset ref"),
+            sha256,
+            last_retrieved: file.last_retrieved,
+            version: file.version,
+        })
+        .expect("asset record");
+        let doc = Ydoc::wire();
+        doc.apply(&imported.initial_update).expect("scene seed");
+        doc.seed_scene_maps(
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::from([("image-file".to_owned(), record)]),
+        );
+        doc.fold_scene()
+            .portable_json_with_asset_bytes(&BTreeMap::from([(
+                "image-file".to_owned(),
+                file.bytes.clone(),
+            )]))
+            .expect("canonical scene")
+    }
+
+    #[test]
+    fn scene_successor_rejects_asset_bytes_that_miss_the_declared_digest() {
+        let key = DocKey::new("ws", "main", "drawing-object").expect("key");
+        let artifact = canonical_image_scene(&key);
+        let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &"a".repeat(64),
+            predecessor_state_vector_sha256: &"b".repeat(64),
+            artifact_op_kind: "conflict.resolve",
+            artifact_id: "conflict",
+            artifact_preimage_sha256: &"c".repeat(64),
+            content_kind: ContentKind::Scene,
+            result_sha256: &crate::hex_sha256(artifact.as_bytes()),
+        });
+        let valid = crate::fresh_successor_base(&identity, &artifact).expect("valid successor");
+        let doc = Ydoc::wire();
+        doc.apply(&valid.update).expect("successor update");
+        let mut asset = doc.fold_scene().assets["image-file"].clone();
+        asset.sha256 = "f".repeat(64);
+        let record = encode_scene_asset_record(&asset).expect("tampered asset record");
+        doc.seed_scene_maps(
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::from([("image-file".to_owned(), record)]),
+        );
+        let update = doc.encode_full_state();
+        let tampered = SuccessorBase {
+            lineage_claim_id: crate::hex_sha256(&update),
+            state_vector: doc.encode_state_vector(),
+            update,
+            ..valid
+        };
+
+        let error = validate_successor_base(&tampered, Some(&artifact))
+            .expect_err("asset bytes must match the durable digest");
+        assert!(matches!(
+            error,
+            CollabError::InvalidSuccessorBase {
+                constraint: "scene successor asset digest",
+                ..
+            }
+        ));
     }
 }

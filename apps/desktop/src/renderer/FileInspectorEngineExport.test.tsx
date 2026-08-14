@@ -18,6 +18,7 @@ vi.mock("./editor/MarkdownEditor", () => new Promise(() => {}));
 import { markdownToYDoc } from "./editor/import-export";
 import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
+import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
 
 configure({ asyncUtilTimeout: 5_000 });
 vi.setConfig({ testTimeout: 15_000 });
@@ -47,11 +48,16 @@ function engineBridge(
       }
       return options?.available === false
         ? { available: false }
-        : { available: true, initialUpdate: Y.encodeStateAsUpdate(serverDoc) };
+        : {
+            available: true,
+            initialUpdate: Y.encodeStateAsUpdate(serverDoc),
+            lineageGeneration: 1,
+          };
     }),
-    applyEngineYDocUpdate: vi.fn(async () => undefined),
+    applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
     closeEngineYDocSession: vi.fn(async () => undefined),
     onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+    onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
     onEngineYDocSaveState: vi.fn(() => () => undefined),
     exportDocumentFile: vi.fn(
       async (_payload: {
@@ -77,8 +83,9 @@ function stubEditorGlobals() {
 
 beforeEach(stubEditorGlobals);
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await disposeEngineDocLeasesForTests();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -202,7 +209,15 @@ describe("engine-mode export with no mounted serializer", () => {
 
     // No engine session: the file on disk IS the document, so the plain
     // editor's own serializer answers and the export must still work.
-    await screen.findByTestId("markdown-edit-toggle", {}, { timeout: 5_000 });
+    const toggle = await screen.findByTestId(
+      "markdown-edit-toggle",
+      {},
+      { timeout: 5_000 },
+    );
+    await vi.waitFor(
+      () => expect(toggle.hasAttribute("disabled")).toBe(false),
+      { timeout: 5_000 },
+    );
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
 

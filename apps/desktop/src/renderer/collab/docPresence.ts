@@ -40,7 +40,9 @@ interface DocPresenceState {
 export interface DocPresenceBinding {
   // The Awareness bound to the doc (for a future caret extension).
   readonly awareness: Awareness;
-  destroy(): void;
+  // Resolves once the channel's leave reached the transport, so a rebinding
+  // with the same topic and client id can wait it out instead of racing it.
+  destroy(): Promise<void>;
 }
 
 export interface DocPresenceOptions {
@@ -202,11 +204,12 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
     awareness,
     destroy() {
       awareness.off("update", onLocalChange);
-      void channel?.stop();
+      const stopped = channel?.stop() ?? Promise.resolve();
       channel = null;
       // Clear the local awareness entry (peers prune us on their next poll).
       removeAwarenessStates(awareness, [awareness.clientID], "presence-local");
       awareness.destroy();
+      return stopped.catch(() => undefined);
     },
   };
 }

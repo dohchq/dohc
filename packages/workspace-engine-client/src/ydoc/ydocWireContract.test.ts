@@ -6,7 +6,7 @@ import {
 } from "./ydocWireContract";
 
 // AUDIT-SILENTSAVE round 2 (D4). The settle result grew two fields that carry
-// safety meaning — `markdown: string | null` (null = the body was past the
+// safety meaning — `content: string | null` (null = the artifact was past the
 // in-band cap, read the file instead) and `materialized: boolean` (false = the
 // settle committed but the file never moved). The daemon test proves the engine
 // EMITS them and the capture test proves the desktop HANDLES them; this pins
@@ -16,7 +16,7 @@ function settleResult(overrides: Record<string, unknown> = {}) {
   return {
     momentId: "moment-1",
     path: "notes/big.md",
-    markdown: "# Body\n",
+    content: "# Body\n",
     sha256: "a".repeat(64),
     materialized: true,
     projection: {
@@ -31,34 +31,34 @@ function settleResult(overrides: Record<string, unknown> = {}) {
 describe("decodeYdocSettleResult", () => {
   it("accepts a normal in-band settle", () => {
     const decoded = decodeYdocSettleResult(settleResult());
-    expect(decoded.markdown).toBe("# Body\n");
+    expect(decoded.content).toBe("# Body\n");
     expect(decoded.materialized).toBe(true);
   });
 
-  it("accepts markdown: null — the over-cap answer", () => {
-    const decoded = decodeYdocSettleResult(settleResult({ markdown: null }));
+  it("accepts content: null — the over-cap answer", () => {
+    const decoded = decodeYdocSettleResult(settleResult({ content: null }));
     // null must survive as null: coercing it to "" here would hand the capture
     // layer an empty body to mirror onto disk, which is the data loss this
     // whole change exists to stop.
-    expect(decoded.markdown).toBeNull();
+    expect(decoded.content).toBeNull();
   });
 
-  it("REJECTS an absent markdown key — null means something, missing is a violation", () => {
-    const { markdown: _omitted, ...withoutMarkdown } = settleResult();
-    expect(() => decodeYdocSettleResult(withoutMarkdown)).toThrow(
+  it("REJECTS an absent content key — null means something, missing is a violation", () => {
+    const { content: _omitted, ...withoutContent } = settleResult();
+    expect(() => decodeYdocSettleResult(withoutContent)).toThrow(
       YdocProtocolShapeError,
     );
   });
 
-  it("rejects a non-string, non-null markdown", () => {
-    expect(() => decodeYdocSettleResult(settleResult({ markdown: 12 }))).toThrow(
+  it("rejects non-string, non-null content", () => {
+    expect(() => decodeYdocSettleResult(settleResult({ content: 12 }))).toThrow(
       YdocProtocolShapeError,
     );
   });
 
   it("carries materialized: false through", () => {
     const decoded = decodeYdocSettleResult(
-      settleResult({ materialized: false, markdown: null }),
+      settleResult({ materialized: false, content: null }),
     );
     expect(decoded.materialized).toBe(false);
   });
@@ -111,11 +111,71 @@ function openResult(overrides: Record<string, unknown> = {}) {
     initialUpdateBase64: "AAA=",
     head: "present",
     lineage: "existing",
+    lineageClaimId: null,
     ...overrides,
   };
 }
 
 describe("decodeYdocOpenResult", () => {
+  it("accepts scene sessions", () => {
+    expect(
+      decodeYdocOpenResult(openResult({ contentKind: "scene" })).contentKind,
+    ).toBe("scene");
+  });
+
+  it("carries optional seed content through", () => {
+    expect(decodeYdocOpenResult(openResult({ seedContent: "# Seed\n" }))).toMatchObject({
+      seedContent: "# Seed\n",
+    });
+  });
+
+  it("carries validated artifact asset descriptors through", () => {
+    const descriptor = {
+      id: "image-1",
+      mimeType: "image/png",
+      created: 12,
+      lastRetrieved: 13,
+      version: 1,
+      ref: "drawings/board.assets/image-1-aabbccdd.png",
+      sha256: "a".repeat(64),
+    };
+    expect(
+      decodeYdocOpenResult(openResult({
+        contentKind: "scene",
+        artifactAssets: [descriptor],
+      })).artifactAssets,
+    ).toEqual([descriptor]);
+  });
+
+  it("rejects malformed artifact asset authority", () => {
+    const asset = {
+      id: "image-1",
+      mimeType: "image/png",
+      created: 12,
+      ref: "drawings/board.assets/image.png",
+      sha256: "a".repeat(64),
+    };
+    for (const invalid of [
+      { ...asset, ref: "../outside.png" },
+      { ...asset, ref: "drawings/bad:name.png" },
+      { ...asset, ref: "drawings/bad\u0000name.png" },
+      { ...asset, ref: "drawings/bad\u0085name.png" },
+      { ...asset, ref: "drawings/bad\ud800name.png" },
+      { ...asset, ref: "drawings/bad\udc00name.png" },
+      { ...asset, sha256: "A".repeat(64) },
+      { ...asset, created: -1 },
+      { ...asset, created: Number.MAX_SAFE_INTEGER + 1 },
+      { ...asset, lastRetrieved: Number.MAX_SAFE_INTEGER + 1 },
+      { ...asset, version: Number.MAX_SAFE_INTEGER + 1 },
+      { ...asset, id: "" },
+      { ...asset, mimeType: "" },
+    ]) {
+      expect(() =>
+        decodeYdocOpenResult(openResult({ artifactAssets: [invalid] })),
+      ).toThrow(YdocProtocolShapeError);
+    }
+  });
+
   it("carries head and lineage through independently", () => {
     const decoded = decodeYdocOpenResult(
       openResult({ head: "absent", lineage: "existing" }),

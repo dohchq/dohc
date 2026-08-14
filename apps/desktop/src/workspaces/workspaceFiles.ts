@@ -36,6 +36,11 @@ import {
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
+import {
+  utf8ByteLength,
+  WORKSPACE_TEXT_EDITOR_MAX_BYTES,
+  workspaceTextLimitReason,
+} from "./workspaceTextLimits";
 import type { ZipEntry } from "./zipWriter";
 
 // Deepest already-existing ancestor of a (possibly not-yet-created) path —
@@ -216,10 +221,15 @@ export async function listFiles(
 export async function createFile(
   rootPath: string,
   relativePath: string,
+  initialText: string,
 ): Promise<string> {
   const validated = validateUserMaterializePath(relativePath);
   if (!validated.ok) {
     throw new Error(`Invalid file path (${validated.reason}): ${relativePath}`);
+  }
+  const observedBytes = utf8ByteLength(initialText);
+  if (observedBytes > WORKSPACE_TEXT_EDITOR_MAX_BYTES) {
+    throw new Error(workspaceTextLimitReason(observedBytes));
   }
   const absolute = join(rootPath, validated.normalized);
   // Lexical validation can't see symlinks, and it read the path as SPELLED.
@@ -243,7 +253,7 @@ export async function createFile(
   if (!isInside(realRoot, await realpath(dirname(target)))) {
     throw new Error(`Invalid file path (escapes workspace): ${relativePath}`);
   }
-  await writeFile(target, "", { flag: "wx" }).catch((error: unknown) => {
+  await writeFile(target, initialText, { flag: "wx" }).catch((error: unknown) => {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   });
   return validated.normalized;
@@ -978,9 +988,9 @@ const MAX_ZIP_TOTAL_BYTES = 256 * 1024 * 1024;
 
 // Gathers the zip entries for a workspace export: the whole workspace, one
 // folder, or one file. Ignored segments (.dohc, .git, node_modules) and
-// symlinks never export — the same walk rules as listFiles — and
-// secret-classified files (the .env family) never leave in an archive: the
-// walk skips them, and an explicitly targeted secret refuses loudly (zips
+// symlinks never export. Secret-classified files (the .env family) never
+// leave in an archive: the walk skips them, and an explicitly targeted secret
+// refuses loudly (zips
 // get shared onward; the effective-policy posture is that secrets stay out
 // of everything that leaves the workspace). Bounded: more than
 // MAX_ZIP_ENTRIES files or MAX_ZIP_TOTAL_BYTES refuses (loudly, before

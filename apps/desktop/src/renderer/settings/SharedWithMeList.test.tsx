@@ -64,6 +64,173 @@ afterEach(() => {
 });
 
 describe("SharedWithMeList", () => {
+  // The level is the RECIPIENT's own right, so it belongs on the recipient's
+  // surface too — on relay-listed rows and on a mount the relay no longer
+  // lists, which reads its level from the pinned grant.
+  // The PIN is the authority the recipient's own pulls enforce. A relay that
+  // restates a wider level must not get to announce it here, so a mounted row
+  // shows what it pinned, not what the relay now says.
+  // Removing a mount whose label is unusable cleans up the RECORD only: the
+  // folder is left exactly where it is, because addressing a folder through
+  // that label is the move the validator refuses. The user is the only one
+  // who can decide what happens to those files, so they have to be told.
+  it("says the folder stayed when removal could only clean up the record", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listRelayShares.mockResolvedValue({ received: [] });
+    bridgeMock.getWorkspaceRegistry.mockResolvedValue({
+      workspaces: [
+        {
+          workspaceId: WORKSPACE_ID,
+          shareMounts: [
+            {
+              shareId: "share-1",
+              label: "alex",
+              granterEmail: "alex@dohc.test",
+              damaged: true,
+            },
+          ],
+        },
+      ],
+    });
+    bridgeMock.unmountShare.mockResolvedValue({ folderLeft: true });
+
+    const onFilesChanged = vi.fn();
+    render(
+      <SharedWithMeList
+        workspaceId={WORKSPACE_ID}
+        onWorkspaceFilesChanged={onFilesChanged}
+      />,
+    );
+    await screen.findByTestId("shared-with-me-row");
+    await user.click(screen.getByTestId("shared-with-me-unmount"));
+
+    const notice = await screen.findByTestId("shared-with-me-folder-left");
+    // Reported upward too: the shell reloads after this and would otherwise
+    // project a folder delete over files that are still on disk.
+    expect(
+      onFilesChanged,
+      "MUTATION: the shell never learns the folder stayed",
+    ).toHaveBeenCalledWith({ folderLeftShareId: "share-1" });
+    expect(
+      notice.textContent,
+      "MUTATION: dropping folderLeft leaves the files on disk with nothing said",
+    ).toBe(
+      "Removed the share from this workspace. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.",
+    );
+  });
+
+  it("says nothing extra when the folder went with the record", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listRelayShares.mockResolvedValue({ received: [] });
+    bridgeMock.getWorkspaceRegistry.mockResolvedValue({
+      workspaces: [
+        {
+          workspaceId: WORKSPACE_ID,
+          shareMounts: [
+            {
+              shareId: "share-1",
+              label: "alex",
+              granterEmail: "alex@dohc.test",
+              access: "view",
+            },
+          ],
+        },
+      ],
+    });
+    bridgeMock.unmountShare.mockResolvedValue({});
+
+    const onFilesChangedHealthy = vi.fn();
+    render(
+      <SharedWithMeList
+        workspaceId={WORKSPACE_ID}
+        onWorkspaceFilesChanged={onFilesChangedHealthy}
+      />,
+    );
+    await screen.findByTestId("shared-with-me-row");
+    await user.click(screen.getByTestId("shared-with-me-unmount"));
+
+    await waitFor(() => expect(bridgeMock.unmountShare).toHaveBeenCalled());
+    expect(screen.queryByTestId("shared-with-me-folder-left")).toBeNull();
+    // No exemption reported, so the shell projects the delete as usual.
+    await waitFor(() =>
+      expect(onFilesChangedHealthy).toHaveBeenCalledWith(undefined),
+    );
+  });
+
+  it("shows the pinned level, not a wider one the relay restates", async () => {
+    bridgeMock.listRelayShares.mockResolvedValue({
+      received: [
+        {
+          shareId: "share-1",
+          granterEmail: "sam@dohc.test",
+          selector: { paths: ["docs"], versionId: null, access: "edit" },
+          createdAtMs: 1,
+          shareCode: "dohc-share:share-1:http://relay.test",
+        },
+      ],
+    });
+    bridgeMock.getWorkspaceRegistry.mockResolvedValue({
+      workspaces: [
+        {
+          workspaceId: WORKSPACE_ID,
+          shareMounts: [
+            {
+              shareId: "share-1",
+              label: "alex",
+              granterEmail: "sam@dohc.test",
+              access: "view",
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<SharedWithMeList workspaceId={WORKSPACE_ID} />);
+
+    const badge = await screen.findByTestId("share-access-badge");
+    expect(
+      badge.textContent,
+      "MUTATION: the relay's wider level must not display over the pin",
+    ).toBe("View");
+  });
+
+  it("shows the level on a received row and on a registry-only mount", async () => {
+    bridgeMock.listRelayShares.mockResolvedValue({
+      received: [
+        {
+          shareId: "share-listed",
+          granterEmail: "sam@dohc.test",
+          selector: { paths: ["docs"], versionId: null, access: "comment" },
+          createdAtMs: 1,
+          shareCode: "dohc-share:share-listed:http://relay.test",
+        },
+      ],
+    });
+    bridgeMock.getWorkspaceRegistry.mockResolvedValue({
+      workspaces: [
+        {
+          workspaceId: WORKSPACE_ID,
+          shareMounts: [
+            {
+              shareId: "share-unlisted",
+              label: "alex",
+              granterEmail: "alex@dohc.test",
+              access: "edit",
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<SharedWithMeList workspaceId={WORKSPACE_ID} />);
+
+    const badges = await screen.findAllByTestId("share-access-badge");
+    expect(badges.map((badge) => badge.textContent).sort()).toEqual([
+      "Comment",
+      "Edit",
+    ]);
+  });
+
   // A mounted share's pull skips a refused op and keeps going, so the mount
   // goes on looking healthy while it stops carrying part of what the granter
   // shares. The mount row is where a recipient sees that — the workspace
@@ -78,6 +245,7 @@ describe("SharedWithMeList", () => {
               shareId: "share-1",
               label: "alex",
               granterEmail: "alex@dohc.test",
+              access: "view",
               skippedOps: SKIPPED,
             },
           ],
@@ -199,6 +367,7 @@ describe("SharedWithMeList", () => {
               shareId: "share-1",
               label: "alex",
               granterEmail: "alex@dohc.test",
+              access: "view",
               skippedOps: SKIPPED,
             },
           ],
@@ -313,7 +482,7 @@ describe("SharedWithMeList", () => {
         {
           shareId: "share-2",
           granterEmail: "sam@dohc.test",
-          selector: { paths: ["docs"], versionId: null },
+          selector: { paths: ["docs"], versionId: null, access: "view" },
           createdAtMs: 1,
           shareCode: "dohc-share:share-2:http://relay.test",
         },
@@ -339,6 +508,7 @@ describe("SharedWithMeList", () => {
               shareId: "share-1",
               label: "alex",
               granterEmail: "alex@dohc.test",
+              access: "view",
               skippedOps: {
                 ...SKIPPED,
                 ops: [
@@ -374,7 +544,12 @@ describe("SharedWithMeList", () => {
         {
           workspaceId: WORKSPACE_ID,
           shareMounts: [
-            { shareId: "share-1", label: "alex", granterEmail: "alex@dohc.test" },
+            {
+              shareId: "share-1",
+              label: "alex",
+              granterEmail: "alex@dohc.test",
+              access: "view",
+            },
           ],
         },
       ],

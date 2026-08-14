@@ -13,6 +13,7 @@ import {
 import type {
   YdocApplyExternalMarkdownEditResult,
   YdocContentKind,
+  ArtifactAssetDescriptor,
   YdocSettleResult,
 } from "./ydocWireContract";
 
@@ -83,6 +84,7 @@ export interface EngineYdocProviderSessionOptions {
   onRemoteApplyError?: (error: RemoteYdocApplyError) => void;
   onLocalEditError?: (error: unknown) => void;
   onResyncNeeded?: (error: YdocResyncNeededError) => void;
+  onLineageReplaced?: (doc: Y.Doc, recoveredPaths: string[]) => void;
   onSessionError?: (error: unknown) => void;
   // A settle is going to the engine now, identified by `token`. Every
   // outcome below echoes the SAME token, so a caller pairs start to outcome
@@ -103,7 +105,14 @@ export interface EngineYdocProviderSessionOptions {
 export interface EngineYdocProviderSession {
   readonly doc: Y.Doc;
   readonly initialUpdate: Uint8Array;
+  // Injected test providers may omit these values. The daemon open response
+  // supplies objectId.
+  readonly objectId?: string;
+  // The provider echoes the requested versionId.
+  readonly versionId?: string;
+  readonly lineageClaimId?: string | null;
   readonly contentKind: YdocContentKind;
+  readonly artifactAssets?: readonly ArtifactAssetDescriptor[];
   readonly path: string;
   // Whether the ENTERED VERSION has a committed snapshot for this path.
   // "absent" plus a lineage that is also absent means the daemon bound an
@@ -314,6 +323,11 @@ export async function openEngineYdocProviderSession(
   const unsubscribeResync = session.onResyncNeeded((error) => {
     options.onResyncNeeded?.(error);
   });
+  const unsubscribeReplacement = session.onLineageReplaced(
+    (replacement, recoveredPaths) => {
+      options.onLineageReplaced?.(replacement, recoveredPaths);
+    },
+  );
   const unsubscribeSessionError = session.onSessionError((error) => {
     notifyError(options.onSessionError, error);
   });
@@ -326,6 +340,7 @@ export async function openEngineYdocProviderSession(
     unsubscribeRemote();
     unsubscribeRemoteError();
     unsubscribeResync();
+    unsubscribeReplacement();
     unsubscribeSessionError();
     await journalChain.catch(() => undefined);
     await settleChain.catch(() => undefined);
@@ -333,9 +348,19 @@ export async function openEngineYdocProviderSession(
   }
 
   return {
-    doc: session.doc,
+    get doc() {
+      return session.doc;
+    },
     initialUpdate: session.initialUpdate,
+    objectId: session.objectId,
+    versionId: options.versionId,
+    get lineageClaimId() {
+      return session.lineageClaimId;
+    },
     contentKind: session.contentKind,
+    get artifactAssets() {
+      return session.artifactAssets;
+    },
     path: session.path,
     head: session.head,
     lineage: session.lineage,

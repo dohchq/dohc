@@ -7,6 +7,7 @@ import {
   ShareUnavailableError,
   SharedChannelReadOnlyError,
   type CommitRelayCursorResult,
+  type MaterializeRelayPullPage,
   type ProbeRelayWorkspaceResult,
   type RelayWorkspaceBootstrapResult,
   type RelayWorkspaceIdentity,
@@ -21,6 +22,7 @@ import {
   type RecoverRelayOriginResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
+import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { probeRelayWorkspace } from "./relayWorkspaceProbe";
 import {
   DaemonRefusalError,
@@ -373,16 +375,39 @@ function assertRelayPullProgress(
 function changedPaths(
   value: JsonValue | undefined,
   label: string,
+  allowSecret: true,
+): Array<{
+  versionId: string;
+  path: string;
+  operation: "write" | "delete";
+  contentKind: "text" | "binary" | "secret";
+}>;
+function changedPaths(
+  value: JsonValue | undefined,
+  label: string,
+  allowSecret?: false,
 ): Array<{
   path: string;
   operation: "write" | "delete";
   contentKind: "text" | "binary";
+}>;
+function changedPaths(
+  value: JsonValue | undefined,
+  label: string,
+  allowSecret = false,
+): Array<{
+  path: string;
+  operation: "write" | "delete";
+  contentKind: "text" | "binary" | "secret";
 }> {
   if (!Array.isArray(value)) {
     throw new Error(`Rust engine ${label}.changedPaths must be an array.`);
   }
   return value.map((entry, index) => {
     const record = resultRecord(entry, `${label}.changedPaths[${index}]`);
+    const versionId = allowSecret
+      ? stringField(record, "versionId", `${label}.changedPaths[${index}]`)
+      : undefined;
     const path = stringField(record, "path", `${label}.changedPaths[${index}]`);
     const operation = record.operation;
     const contentKind = record.contentKind;
@@ -391,12 +416,21 @@ function changedPaths(
         `Rust engine ${label}.changedPaths[${index}].operation is invalid.`,
       );
     }
-    if (contentKind !== "text" && contentKind !== "binary") {
+    if (
+      contentKind !== "text" &&
+      contentKind !== "binary" &&
+      !(allowSecret && contentKind === "secret")
+    ) {
       throw new Error(
         `Rust engine ${label}.changedPaths[${index}].contentKind is invalid.`,
       );
     }
-    return { path, operation, contentKind };
+    return {
+      ...(versionId !== undefined ? { versionId } : {}),
+      path,
+      operation,
+      contentKind,
+    };
   });
 }
 
@@ -491,13 +525,18 @@ function translateRelayError(method: string, error: unknown): never {
 
 export interface EngineRelayWorkspaceClient {
   push(): Promise<PushWorkspaceToRelayResult>;
-  pull(): Promise<PullWorkspaceFromRelayResult>;
+  pull(
+    materializePage: MaterializeRelayPullPage,
+  ): Promise<PullWorkspaceFromRelayResult>;
   commitCursor(
     cursor: Record<string, JsonValue | undefined>,
   ): Promise<CommitRelayCursorResult>;
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
   claim(): Promise<void>;
-  bootstrapJoinIdentity(identity: RelayWorkspaceIdentity | null): Promise<void>;
+  bootstrapJoinIdentity(
+    identity: RelayWorkspaceIdentity | null,
+    initialize?: () => Promise<void>,
+  ): Promise<void>;
   probe(): Promise<ProbeRelayWorkspaceResult>;
   uploadKeyEnvelope(input: {
     envelopeJson: string;
@@ -517,7 +556,11 @@ export interface EngineRelayWorkspaceClient {
     // The selector the relay stated for this share, pinned on first read.
     // Required, because the engine has no unscoped pull: a caller that cannot
     // resolve a selector must skip its refresh, not widen it.
-    grantedSelector: { paths: readonly string[]; versionId: string | null };
+    grantedSelector: {
+      paths: readonly string[];
+      versionId: string | null;
+      access: ShareAccess;
+    };
     // Called with each page's refusals BEFORE that page's cursor is
     // committed. A refusal is a durable fact — the commit moves permanently
     // past the op — so it has to be recorded first, or a later page that
@@ -695,21 +738,21 @@ export class EngineRelayClient {
           ),
         };
       },
-      pull: async () => {
+      pull: async (materializePage) => {
         let fetched = 0;
         let applied = 0;
         let skipped = 0;
         let conflictsOpened = 0;
         let nextCursor = 0;
         let previousCursor: number | null = null;
-        let finalCursor: Record<string, JsonValue | undefined> | null = null;
         const declines: SharingDeclined[] = [];
         const changed = new Map<
           string,
           {
+            versionId: string;
             path: string;
             operation: "write" | "delete";
-            contentKind: "text" | "binary";
+            contentKind: "text" | "binary" | "secret";
           }
         >();
         for (;;) {
@@ -740,17 +783,17 @@ export class EngineRelayClient {
             declines,
             sharingDeclined(result.sharingDeclined, "sync.pull"),
           );
-          for (const path of changedPaths(result.changedPaths, "sync.pull")) {
-            changed.set(path.path, path);
+          const pageChangedPaths = changedPaths(
+            result.changedPaths,
+            "sync.pull",
+            true,
+          );
+          for (const path of pageChangedPaths) {
+            changed.set(`${path.versionId}\0${path.path}`, path);
           }
-          if (!hasMore) {
-            finalCursor = cursor;
-            break;
-          }
+          await materializePage(pageChangedPaths);
           appendDeclines(declines, (await commitCursor(cursor)).sharingDeclined);
-        }
-        if (!finalCursor) {
-          throw new Error("Rust engine sync.pull returned no final cursor.");
+          if (!hasMore) break;
         }
         return {
           fetched,
@@ -760,12 +803,6 @@ export class EngineRelayClient {
           sharingDeclined: declines,
           fastForwardedPaths: [...changed.values()],
           nextCursor,
-          commitFetchCursor: async () => {
-            appendDeclines(
-              declines,
-              (await commitCursor(finalCursor)).sharingDeclined,
-            );
-          },
         };
       },
       commitCursor,
@@ -800,13 +837,17 @@ export class EngineRelayClient {
         };
       },
       claim,
-      bootstrapJoinIdentity: async (identity) => {
+      bootstrapJoinIdentity: async (identity, initialize) => {
         try {
           if (identity === null) {
             await claimWith(bootstrapRequest);
-            return;
+          } else {
+            await adoptJoinIdentity(identity, bootstrapRequest);
           }
-          await adoptJoinIdentity(identity, bootstrapRequest);
+          // Join-only initialization shares the capture-free binding. This
+          // lets the product download and install a wrapped workspace key
+          // before capture opens and before the first pull materializes files.
+          await initialize?.();
         } finally {
           // The bootstrap session is intentionally capture-free. Close it so
           // activity.open creates the ordinary captured session only after the
@@ -923,12 +964,14 @@ export class EngineRelayClient {
             await request("share.view.pull", {
               workspaceId: workspace.workspaceId,
               shareId,
-              // Both dimensions, always. Dropping the paths leaves a grant
+              // Every dimension, always. Dropping the paths leaves a grant
               // that selects everything under a version; dropping the version
-              // leaves one the engine refuses outright.
+              // leaves one the engine refuses outright; dropping the level
+              // leaves one the engine cannot read and refuses too.
               grantedSelector: {
                 paths: [...grantedSelector.paths],
                 versionId: grantedSelector.versionId,
+                access: grantedSelector.access,
               },
             }),
             "share.view.pull",

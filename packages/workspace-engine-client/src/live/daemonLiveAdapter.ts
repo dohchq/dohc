@@ -196,6 +196,67 @@ export function isYdocRemoteUpdatesPendingRefusal(error: unknown): boolean {
   return refusalMessageOf(error) === "ydoc-remote-updates-pending";
 }
 
+const REFUSAL_DETAIL_DELIMITER = ": ";
+
+function refusalMessageMatchesToken(
+  message: string | null,
+  token: string,
+): boolean {
+  if (message === token) return true;
+  const detailPrefix = `${token}${REFUSAL_DETAIL_DELIMITER}`;
+  return (
+    message?.startsWith(detailPrefix) === true &&
+    message.length > detailPrefix.length
+  );
+}
+
+function causeChainHasRefusal(
+  error: unknown,
+  code: DaemonErrorCode,
+  token: string,
+): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current !== null && typeof current === "object" && !seen.has(current)) {
+    if (refusalMessageMatchesToken(refusalMessageOf(current, code), token)) {
+      return true;
+    }
+    seen.add(current);
+    current = "cause" in current ? current.cause : null;
+  }
+  return false;
+}
+
+// Scene seeding has committed the canonical lineage, but one or more linked
+// binary files are still waiting for their durable materialization job. A
+// writable file fallback would race that lineage. Retry only the engine open.
+export function isYdocArtifactAssetsPendingRefusal(error: unknown): boolean {
+  return causeChainHasRefusal(
+    error,
+    "OVERLOADED",
+    "ydoc-artifact-assets-pending",
+  );
+}
+
+// A durable scene's linked-asset record conflicts with authoritative storage.
+// Retrying cannot repair this state, but a writable disk fallback would still
+// race the canonical Y.Doc. Keep the document read-only and surface recovery.
+export function isYdocArtifactAssetsInvalidRefusal(error: unknown): boolean {
+  return causeChainHasRefusal(error, "INTERNAL", "ydoc-artifact-assets-invalid");
+}
+
+export function isYdocOpenStorageFailureRefusal(error: unknown): boolean {
+  return causeChainHasRefusal(error, "INTERNAL", "ydoc-open-storage-failed");
+}
+
+export function isYdocOpenOperationCrashedRefusal(error: unknown): boolean {
+  return causeChainHasRefusal(
+    error,
+    "INTERNAL",
+    "ydoc-open-operation-crashed",
+  );
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }

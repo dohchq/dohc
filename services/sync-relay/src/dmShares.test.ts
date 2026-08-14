@@ -238,10 +238,17 @@ describe("chat-channel share selector (DM grants)", () => {
         JSON.stringify({ kind: "chat-channel", channelWireId: DM_WIRE, access: "read-write" }),
       ),
     ).toEqual({ kind: "chat-channel", channelWireId: DM_WIRE, access: "read-write" });
-    expect(parseAnyShareSelectorJson(JSON.stringify({ paths: ["docs"], versionId: null }))).toEqual({
+    expect(
+      parseAnyShareSelectorJson(JSON.stringify({ paths: ["docs"], versionId: null, access: "view" })),
+    ).toEqual({
       paths: ["docs"],
       versionId: null,
+      access: "view",
     });
+    // A persisted path row with no explicit access fails closed the same way.
+    expect(
+      parseAnyShareSelectorJson(JSON.stringify({ paths: ["docs"], versionId: null })),
+    ).toBeNull();
     expect(parseAnyShareSelectorJson(JSON.stringify({ kind: "everything" }))).toBeNull();
     // A persisted chat row with no explicit access must NOT be promoted to
     // read-write — it fails closed to null (the generic 404).
@@ -311,7 +318,7 @@ describe("chat-channel share selector (DM grants)", () => {
   });
 
   it("keeps chat ops excluded from PATH shares (the PR-18 posture is unchanged)", () => {
-    const pathSelector: ShareSelector = { paths: ["docs"], versionId: null };
+    const pathSelector: ShareSelector = { paths: ["docs"], versionId: null, access: "view" };
     for (const opKind of [
       "chat.channel.create",
       "chat.thread.create",
@@ -606,7 +613,7 @@ describe("DM grants over the relay", () => {
     // learns nothing distinguishing (share_read_only, like any non-appendable).
     const pathShareId = (await json(
       await h(
-        request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientEmail: `${MEMBER}@dohc.test`, paths: ["docs"] })),
+        request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientEmail: `${MEMBER}@dohc.test`, paths: ["docs"], access: "view" })),
       ),
     )).shareId as string;
     const pathPost = await memberAppend(h, pathShareId, [memberMessage(0)]);

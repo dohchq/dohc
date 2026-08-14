@@ -39,6 +39,7 @@ fn envelope(origin: &str, seq: i64, workspace_id: &str, payload: Value) -> Repli
         op_kind: "moment.append".to_owned(),
         payload,
         recorded_at_ms: 2_000 + seq,
+        relay_seq: None,
     }
 }
 
@@ -285,10 +286,12 @@ fn moment_after_equivalent_ydoc_projection_fast_forwards() {
             "objectId": "ydoc-settle-object",
             "path": "notes/settled.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": base_sha,
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha.clone(),
             "isBaseState": true
         }),
         recorded_at_ms: 1_500,
+        relay_seq: Some(0),
     };
     apply_ydoc_envelope(&mut peer, &base, &NoFaults, &NoLiveLeases).expect("peer Y.Doc projection");
     let peer_head: String = peer
@@ -322,9 +325,11 @@ fn moment_after_equivalent_ydoc_projection_fast_forwards() {
                 "path": "notes/settled.md",
                 "contentKind": "plaintext",
                 "updateBlobSha256": update_sha,
+                "lineageClaimId": base_sha.clone(),
                 "isBaseState": false
             }),
             recorded_at_ms: 1_600 + index as i64,
+            relay_seq: Some(index as i64 + 1),
         };
         apply_ydoc_envelope(&mut peer, &delta, &NoFaults, &NoLiveLeases)
             .expect("peer Y.Doc rewrite");
@@ -480,10 +485,12 @@ fn moment_delete_retires_the_receiver_ydoc_lineage() {
                 "objectId": "ydoc-delete-object",
                 "path": "notes/deleted.md",
                 "contentKind": "plaintext",
-                "updateBlobSha256": base_sha,
+                "updateBlobSha256": base_sha.clone(),
+                "lineageClaimId": base_sha,
                 "isBaseState": true
             }),
             recorded_at_ms: 1_500,
+            relay_seq: Some(0),
         },
         &NoFaults,
         &NoLiveLeases,
@@ -644,6 +651,98 @@ fn moment_delete_with_unsettled_lineage_stays_unacked() {
 }
 
 #[test]
+fn moment_delete_with_orphan_scene_lineage_stays_unacked() {
+    let (_scratch, mut store) = test_store();
+    store
+        .read_with(|tx| {
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+                 VALUES ('ws','orphan-scene-object',1)",
+                [],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .expect("seed orphan scene object");
+    let key = DocKey::new("ws", "main", "orphan-scene-object").expect("scene key");
+    let imported = dohc_engine_collab::import_portable_scene(
+        &json!({
+            "type": "excalidraw",
+            "version": 2,
+            "source": "https://excalidraw.com",
+            "elements": [],
+            "appState": {},
+            "files": {}
+        })
+        .to_string(),
+    )
+    .expect("import scene");
+    dohc_engine_collab::record_local_update_creating_marker(
+        &mut store,
+        &key,
+        Some("drawings/orphan.excalidraw"),
+        YdocContentKind::Scene,
+        Regime::LocalOnly,
+        &imported.initial_update,
+        None,
+        &NoFaults,
+        1_500,
+    )
+    .expect("seed orphan scene lineage");
+    hydrate_texts(&mut store, &["remote scene", ""]);
+    let delete = envelope(
+        "orphan-scene-delete-peer",
+        0,
+        "ws",
+        present_text_payload(
+            "moment-delete-orphan-scene",
+            "orphan-scene-object",
+            "delete",
+            "drawings/orphan.excalidraw",
+            "drawings/orphan.excalidraw",
+            "remote scene",
+            "remote-scene-head",
+            "",
+        ),
+    );
+
+    assert!(matches!(
+        apply_replication_envelope(&mut store, &delete, &NoFaults, &NoLiveLeases),
+        Err(SyncError::RetryableState {
+            reason: "ydoc-lineage-unsettled"
+        })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "orphan-scene-delete-peer").expect("ack"),
+        -1
+    );
+    let (snapshots, authorities): (i64, i64) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots WHERE workspace_id='ws' \
+                     AND version_id='main' AND object_id='orphan-scene-object'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM scene_asset_delete_authorities WHERE workspace_id='ws' \
+                     AND version_id='main' AND drawing_object_id='orphan-scene-object'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("inspect orphan scene");
+    assert_eq!((snapshots, authorities), (0, 0));
+    assert!(
+        dohc_engine_collab::read_marker(&store, &key)
+            .expect("read orphan scene marker")
+            .is_some(),
+        "the unacknowledged delete must preserve the orphan scene"
+    );
+}
+
+#[test]
 fn moment_delete_from_absent_sender_head_preserves_unsettled_lineage() {
     let (_scratch, mut store) = test_store();
     store
@@ -755,6 +854,7 @@ fn malformed_moment_append_is_refused_and_acked_before_the_origin_continues() {
             "createdAtMs": 2_001
         }),
         recorded_at_ms: 2_001,
+        relay_seq: Some(1),
     };
     assert!(matches!(
         apply_replication_envelope(&mut store, &next, &NoFaults, &crate::NoLiveLeases),
@@ -1596,6 +1696,7 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
             }]
         }),
         recorded_at_ms: 1_500,
+        relay_seq: Some(0),
     };
     apply_replication_envelope(&mut store, &version, &NoFaults, &crate::NoLiveLeases)
         .expect("materialize shipped fork");
@@ -1802,6 +1903,7 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
             conflict: None,
             conflicts_opened: 0,
             materialization_changes: vec![crate::MomentMaterializationChange {
+                version_id: "main".to_owned(),
                 path: "active-at-apply.md".to_owned(),
                 operation: "write",
                 content_kind: "text",
@@ -1822,6 +1924,7 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
         crate::moment_apply::redelivered_materialization_changes(&store, &incoming)
             .expect("read durable decision"),
         [crate::MomentMaterializationChange {
+            version_id: "main".to_owned(),
             path: "active-at-apply.md".to_owned(),
             operation: "write",
             content_kind: "text",
@@ -2015,6 +2118,7 @@ fn moment_append_requires_version_create_ordering_and_never_acks_a_missing_targe
             "forkSnapshots": []
         }),
         recorded_at_ms: 1_500,
+        relay_seq: Some(0),
     };
     assert!(matches!(
         apply_replication_envelope(&mut store, &version, &NoFaults, &crate::NoLiveLeases),

@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import type { RelayShareReceivedRow } from "../../ipc/bridgeContract";
+import type {
+  RelayShareReceivedRow,
+  ShareAccess,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import {
   hasUnacknowledgedShareSkips,
   shareSkipNoticeLines,
 } from "../shareSkipNotice";
+import { ShareAccessBadge } from "./ShareAccessBadge";
 
 // "Shared with me" (share mounts): the receive-side inventory. Lives in
 // Settings → Cloud beside SharedByMeList. Each row is a path/version share
@@ -16,6 +20,12 @@ type MountInfo = {
   shareId: string;
   label: string;
   granterEmail?: string | null;
+  // The pinned level (#646), so a mount the relay no longer lists still says
+  // what it grants. Absent when `damaged` says the grant could not be read.
+  access?: ShareAccess;
+  // The stored grant is unreadable. The row stays so the mount can still be
+  // removed; it shows no level and says what happened instead.
+  damaged?: true;
   ended?: boolean;
   // Ops this mount's pulls skipped. Durable: the cursor committed past them.
   skippedOps?: {
@@ -32,12 +42,18 @@ type LoadState =
   | { status: "ready"; shares: RelayShareReceivedRow[]; mounts: MountInfo[] }
   | { status: "error"; message: string };
 
+// Removal left the folder behind. States what changed, where the files are,
+// and the one thing left for the user to do.
+const FOLDER_LEFT_NOTICE =
+  "Removed the share from this workspace. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.";
+
 function errorMessage(cause: unknown): string {
   const text = cause instanceof Error ? cause.message : String(cause);
   return text.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
 }
 
 function selectorLabel(share: RelayShareReceivedRow): string {
+  if (!share.selector) return "Unreadable share";
   if (share.selector.versionId) {
     const suffix =
       share.selector.paths.length > 0 ? ` (${share.selector.paths.join(", ")})` : "";
@@ -89,10 +105,15 @@ function SkippedLine(props: {
 export function SharedWithMeList(props: {
   workspaceId: string;
   // Mount/unmount change the explorer tree; the settings host refreshes it.
-  onWorkspaceFilesChanged?: () => void;
+  onWorkspaceFilesChanged?: (outcome?: {
+    // The removal cleaned up the record but left its folder on disk. The
+    // shell needs the id before its reload sees the record vanish.
+    folderLeftShareId?: string;
+  }) => void;
 }) {
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [busyShareId, setBusyShareId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   // Response token (repo invariant for workspace-scoped async loads): a
   // slower older refresh must never overwrite a newer list, and nothing may
   // set state after unmount or a workspace switch.
@@ -256,10 +277,24 @@ export function SharedWithMeList(props: {
     const live = () => epoch === workspaceEpoch.current;
     setBusyShareId(shareId);
     try {
-      await bridge().unmountShare({ workspaceId: props.workspaceId, shareId });
+      const result = await bridge().unmountShare({
+        workspaceId: props.workspaceId,
+        shareId,
+      });
       if (!live()) return;
+      // The record went but its folder stayed, because its label is not one
+      // this app would ever address a folder through. Saying so is the whole
+      // point: the files are still on disk, and only the user can decide.
+      const folderLeft = result?.folderLeft === true;
+      setNotice(folderLeft ? FOLDER_LEFT_NOTICE : null);
       await refresh();
-      if (live()) props.onWorkspaceFilesChanged?.();
+      // Reported so the shell does not project a folder delete over files
+      // that are still on disk when its own reload sees the record vanish.
+      if (live()) {
+        props.onWorkspaceFilesChanged?.(
+          folderLeft ? { folderLeftShareId: shareId } : undefined,
+        );
+      }
     } catch (cause) {
       if (live()) setLoad({ status: "error", message: errorMessage(cause) });
     } finally {
@@ -292,6 +327,15 @@ export function SharedWithMeList(props: {
     );
   }
   return (
+    <>
+    {notice ? (
+      <p
+        data-testid="shared-with-me-folder-left"
+        className="m-0 mb-1.5 text-[11px] leading-relaxed text-warning"
+      >
+        {notice}
+      </p>
+    ) : null}
     <ul
       className="m-0 list-none divide-y divide-line overflow-hidden rounded-lg border border-line p-0"
       data-testid="shared-with-me-list"
@@ -305,14 +349,19 @@ export function SharedWithMeList(props: {
           className="flex items-center gap-2 bg-panel px-2.5 py-2"
         >
           <div className="min-w-0 flex-1">
-            <div className="truncate font-mono text-[11px] text-ink">
-              {`shared-with-me/${mount.label}`}
+            <div className="flex items-center gap-1.5">
+              <span className="truncate font-mono text-[11px] text-ink">
+                {`shared-with-me/${mount.label}`}
+              </span>
+              {mount.access ? <ShareAccessBadge access={mount.access} /> : null}
             </div>
             <div className="truncate text-[11px] text-subtle">
               {`From ${mount.granterEmail ?? "another dohc user"}`}
-              {mount.ended
-                ? " — ended; your copy stays readable but won't update"
-                : " — not listed by the relay right now"}
+              {mount.damaged
+                ? " — dohc can't read what this share grants"
+                : mount.ended
+                  ? " — ended; your copy stays readable but won't update"
+                  : " — not listed by the relay right now"}
             </div>
             <SkippedLine mount={mount} onDismiss={dismissSkips} />
           </div>
@@ -337,13 +386,35 @@ export function SharedWithMeList(props: {
             className="flex items-center gap-2 bg-panel px-2.5 py-2"
           >
             <div className="min-w-0 flex-1">
-              <div className="truncate font-mono text-[11px] text-ink">
-                {selectorLabel(share)}
+              <div className="flex items-center gap-1.5">
+                <span className="truncate font-mono text-[11px] text-ink">
+                  {selectorLabel(share)}
+                </span>
+                {/* The PINNED level wins whenever this share is mounted. The
+                    pin is what the recipient's own pulls enforce, so a relay
+                    restating a wider level must not get to announce itself
+                    here — including by standing in for a pin that could not be
+                    read. A mounted row shows the pin or nothing. Unmounted
+                    rows have no pin yet, so the relay's statement is all there
+                    is. */}
+                {mounted ? (
+                  mounted.access ? (
+                    <ShareAccessBadge access={mounted.access} />
+                  ) : null
+                ) : share.selector ? (
+                  <ShareAccessBadge access={share.selector.access} />
+                ) : null}
               </div>
               <div className="truncate text-[11px] text-subtle">
                 {`From ${share.granterEmail ?? "another dohc user"}`}
                 {mounted
-                  ? ` — in this workspace as shared-with-me/${mounted.label}${mounted.ended ? " (ended)" : ""}`
+                  ? ` — in this workspace as shared-with-me/${mounted.label}${
+                      mounted.damaged
+                        ? "; dohc can't read what this share grants"
+                        : mounted.ended
+                          ? " (ended)"
+                          : ""
+                    }`
                   : ""}
               </div>
               {mounted ? (
@@ -364,7 +435,9 @@ export function SharedWithMeList(props: {
               <button
                 type="button"
                 data-testid="shared-with-me-mount"
-                disabled={busyShareId === share.shareId}
+                // A share whose grant the relay cannot read cannot be
+                // mounted: the pin would have nothing to enforce.
+                disabled={busyShareId === share.shareId || !share.selector}
                 onClick={() => void mount(share)}
                 className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
               >
@@ -375,5 +448,6 @@ export function SharedWithMeList(props: {
         );
       })}
     </ul>
+    </>
   );
 }

@@ -36,8 +36,9 @@ use crate::search::{
 };
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
-    AppendOutcome, CloseOutcome, ContentKind, DocKey, LeaseRegistry, LineageClaimStatus,
-    Projection, Regime, Ydoc,
+    AppendOutcome, CloseOutcome, CollabError, ContentKind, DocKey, LeaseRegistry,
+    LineageClaimStatus, Projection, Regime, SceneAsset, Ydoc, encode_scene_asset_record,
+    encode_scene_asset_records, import_portable_scene,
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -68,9 +69,10 @@ use dohc_engine_domain::{
     enqueue_binary_rename, enqueue_write, fork_version_keyless_with, get_secret_moment_keyless,
     has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
     list_secret_files_keyless_page, list_secret_moments_page_keyless,
-    restore_secret_file_verbatim_with_metadata_and_after, secret_file_len_keyless,
-    select_snapshot_by_path_in_tx, validate_addressable_plaintext_path, write_binary_in_tx,
-    write_projected_text_in_tx, write_text_in_tx,
+    restore_secret_file_verbatim_with_metadata_and_after, rollback_compensating_moment_id,
+    secret_file_len_keyless, select_snapshot_by_path_in_tx, validate_addressable_plaintext_path,
+    validate_plaintext_storable_path, write_binary_in_tx, write_projected_text_in_tx,
+    write_text_in_tx,
 };
 use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, MaterializeError, ProjectionTargetKind, ProjectionTargetState,
@@ -86,17 +88,17 @@ use dohc_engine_sync::{
     ApplyOutcome, BlobDownloadRequest, BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse,
     BlobUploadRequest, ClaimRequest, ClaimResponse, ConflictApplyResult, EpochRequest,
     EpochResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
-    KeyEnvelopeResponse, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
-    PushResponse, RecoverResponse, RelayCursor, RelayError, RelaySyncClient, RelayTransport,
-    ReplicationEnvelope, ShareBlobRequest, ShareCursor, ShareViewPullOutcome, ShareViewRequest,
-    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRequest,
-    SharedChannelResponse, SyncPassOutcome, adopt_join_identity, apply_conflict_envelope,
-    read_replayed_refusal, read_sync_identity, retain_refusal_for_direct_retry,
-    ydoc_update_payload,
+    KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, ProbeRequest, ProbeResponse,
+    PullRequest, PullResponse, PushRequest, PushResponse, RecoverResponse, RelayCursor, RelayError,
+    RelaySyncClient, RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareCursor,
+    ShareViewPullOutcome, ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome,
+    SharedChannelPushOutcome, SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
+    adopt_join_identity, apply_conflict_envelope, read_replayed_refusal, read_sync_identity,
+    retain_refusal_for_direct_retry, ydoc_update_payload,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use rusqlite::{OptionalExtension, params};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::sync_channel as std_sync_channel;
@@ -227,7 +229,28 @@ pub struct YdocOpenState {
     /// the session's settle preimage expectation until its first settle.
     pub head_blob_sha256: Option<String>,
     pub lineage_existing: bool,
-    pub seed_markdown: Option<String>,
+    pub lineage_claim_id: Option<String>,
+    pub seed_content: Option<String>,
+    pub artifact_assets: Vec<ArtifactAssetDescriptor>,
+    pub seed_materialization_jobs: Vec<String>,
+}
+
+pub type ArtifactAssetDescriptor = SceneAsset;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct YdocSeedMaterialization {
+    pub materialized: bool,
+    pub incomplete_jobs: usize,
+    pub invalid_jobs: usize,
+}
+
+/// Actor-owned state returned when a live session refreshes its Y.Doc.
+#[derive(Debug)]
+pub struct YdocResyncState {
+    pub initial_update: Vec<u8>,
+    pub lineage_claim_id: Option<String>,
+    pub recovered_paths: Vec<String>,
+    pub artifact_assets: Vec<ArtifactAssetDescriptor>,
 }
 
 /// Result of the single moment+snapshot+materialization settlement path.
@@ -235,10 +258,10 @@ pub struct YdocOpenState {
 pub struct YdocSettlement {
     pub moment_id: String,
     pub path: String,
-    /// The settled markdown, or `None` when it is larger than the in-band
+    /// The settled artifact content, or `None` when it exceeds the in-band
     /// response cap. The cap bounds the RESPONSE, never durability: the file
     /// is written to disk and the moment committed either way.
-    pub markdown: Option<String>,
+    pub content: Option<String>,
     pub sha256: String,
     /// Whether the file on disk actually received these bytes. `false` means
     /// the settle committed durably (marker, moment, snapshot) but
@@ -249,10 +272,10 @@ pub struct YdocSettlement {
     pub projection: Projection,
 }
 
-/// The settled markdown as the response may carry it: `None` once past the
+/// The settled content as the response may carry it: `None` once past the
 /// in-band cap, where the caller reads the artifact from disk instead.
-fn inband_settled_markdown(markdown: String) -> Option<String> {
-    (markdown.len() <= dohc_engine_domain::INBAND_CONTENT_CAP_BYTES).then_some(markdown)
+fn inband_settled_content(content: String) -> Option<String> {
+    (content.len() <= dohc_engine_domain::INBAND_CONTENT_CAP_BYTES).then_some(content)
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -346,6 +369,7 @@ const RELAY_IO_PENDING: &str = "relay-io-pending";
 enum RelayIoRequest {
     Push(PushRequest),
     Pull(PullRequest),
+    LookupCoordinate(LogCoordinateRequest),
     Probe(ProbeRequest),
     Claim(ClaimRequest),
     RotateEpoch(EpochRequest),
@@ -364,6 +388,7 @@ enum RelayIoRequest {
 enum RelayIoResponse {
     Push(PushResponse),
     Pull(PullResponse),
+    LookupCoordinate(LogCoordinateResponse),
     Probe(ProbeResponse),
     Claim(ClaimResponse),
     RotateEpoch(EpochResponse),
@@ -506,6 +531,13 @@ macro_rules! relay_transport_method {
 impl RelayTransport for DeferredRelayTransport {
     relay_transport_method!(push, PushRequest, Push, PushResponse, Push);
     relay_transport_method!(pull, PullRequest, Pull, PullResponse, Pull);
+    relay_transport_method!(
+        lookup_log_coordinate,
+        LogCoordinateRequest,
+        LookupCoordinate,
+        LogCoordinateResponse,
+        LookupCoordinate
+    );
     relay_transport_method!(probe, ProbeRequest, Probe, ProbeResponse, Probe);
     relay_transport_method!(claim_workspace, ClaimRequest, Claim, ClaimResponse, Claim);
     relay_transport_method!(
@@ -598,6 +630,7 @@ mod deferred_relay_tests {
                     workspace_id: "workspace".to_owned(),
                     origin_id: "origin".to_owned(),
                     origin_seq: i64::try_from(origin_seq).expect("sequence"),
+                    relay_seq: None,
                     op_kind: "probe".to_owned(),
                     payload: serde_json::json!({"body": "retained until consumed"}),
                     recorded_at_ms: 1_000,
@@ -807,6 +840,11 @@ pub trait SelfWriteRecorder: Send + Sync {
     fn retract(&self, workspace_id: &str, path: &str, sha256: &str);
 }
 
+struct YdocCloseMaterialization {
+    root_dir: PathBuf,
+    self_writes: Arc<dyn SelfWriteRecorder>,
+}
+
 enum Command {
     Write {
         write: CompoundWrite,
@@ -927,6 +965,8 @@ enum Command {
     },
     CaptureRetire {
         input: CaptureRetire,
+        root_dir: Option<PathBuf>,
+        self_writes: Option<Arc<dyn SelfWriteRecorder>>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
@@ -1166,6 +1206,7 @@ enum Command {
         version_id: String,
         path: String,
         content_kind: Option<ContentKind>,
+        seed_from_artifact: bool,
         token: CancellationToken,
         reply: oneshot::Sender<Result<YdocOpenState, RuntimeError>>,
     },
@@ -1176,6 +1217,14 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<Option<ContentKind>, RuntimeError>>,
     },
+    YdocMaterializeSceneSeedAssets {
+        root_dir: PathBuf,
+        workspace_id: String,
+        job_ids: Vec<String>,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<YdocSeedMaterialization, RuntimeError>>,
+    },
     YdocRecordUpdate {
         key: DocKey,
         path: String,
@@ -1184,6 +1233,7 @@ enum Command {
         update: Vec<u8>,
         request_id: Option<String>,
         actor_origin_id: Option<String>,
+        expected_lineage_claim_id: Option<String>,
         require_empty_lineage: bool,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
@@ -1195,6 +1245,7 @@ enum Command {
         key: DocKey,
         path: String,
         content_kind: ContentKind,
+        expected_lineage_claim_id: Option<String>,
         expected_head_sha: Option<String>,
         session_id: String,
         self_writes: Arc<dyn SelfWriteRecorder>,
@@ -1205,15 +1256,25 @@ enum Command {
     },
     YdocResync {
         key: DocKey,
+        expected_lineage_claim_id: Option<String>,
         token: CancellationToken,
-        reply: oneshot::Sender<Result<Vec<u8>, RuntimeError>>,
+        reply: oneshot::Sender<Result<YdocResyncState, RuntimeError>>,
     },
     YdocCloseSession {
         key: DocKey,
+        materialization: Option<YdocCloseMaterialization>,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Option<CloseOutcome>, RuntimeError>>,
+    },
+    RepairConflictedYdocRecoveries {
+        workspace_id: String,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<
+            Result<Vec<dohc_engine_sync::YdocRecoveryMaterialization>, RuntimeError>,
+        >,
     },
     MaterializeReplayPending {
         root_dir: PathBuf,
@@ -1225,6 +1286,14 @@ enum Command {
         root_dir: PathBuf,
         workspace_id: String,
         self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<(), RuntimeError>>,
+    },
+    MaterializeReplaySelectedForFence {
+        root_dir: PathBuf,
+        workspace_id: String,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        materialization_job_ids: Vec<String>,
         now_ms: i64,
         reply: oneshot::Sender<Result<(), RuntimeError>>,
     },
@@ -2143,6 +2212,36 @@ impl ActorHandle {
         self.tx
             .blocking_send(Command::CaptureRetire {
                 input,
+                root_dir: None,
+                self_writes: None,
+                leases,
+                faults,
+                token: CancellationToken::new(),
+                reply,
+            })
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Retire a captured path and immediately apply any durable disk cleanup
+    /// that the mutation creates.
+    pub fn capture_retire_materialized_blocking(
+        &self,
+        input: CaptureRetire,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        leases: LeaseRegistry,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<CaptureRetireResult, RuntimeError> {
+        debug_assert_sync_context();
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::CaptureRetire {
+                input,
+                root_dir: Some(root_dir),
+                self_writes: Some(self_writes),
                 leases,
                 faults,
                 token: CancellationToken::new(),
@@ -3200,6 +3299,8 @@ impl ActorHandle {
         self.tx
             .send(Command::CaptureRetire {
                 input,
+                root_dir: None,
+                self_writes: None,
                 leases,
                 faults,
                 token,
@@ -3263,6 +3364,33 @@ impl ActorHandle {
         content_kind: Option<ContentKind>,
         token: CancellationToken,
     ) -> Result<YdocOpenState, RuntimeError> {
+        self.ydoc_open_state_with_artifact_seed(
+            workspace_id,
+            now_ms,
+            drain_deferred,
+            expected_key,
+            version_id,
+            path,
+            content_kind,
+            false,
+            token,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ydoc_open_state_with_artifact_seed(
+        &self,
+        workspace_id: String,
+        now_ms: i64,
+        drain_deferred: bool,
+        expected_key: Option<DocKey>,
+        version_id: String,
+        path: String,
+        content_kind: Option<ContentKind>,
+        seed_from_artifact: bool,
+        token: CancellationToken,
+    ) -> Result<YdocOpenState, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::YdocOpenState {
@@ -3273,6 +3401,7 @@ impl ActorHandle {
                 version_id,
                 path,
                 content_kind,
+                seed_from_artifact,
                 token,
                 reply,
             })
@@ -3304,6 +3433,29 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    pub async fn ydoc_materialize_scene_seed_assets(
+        &self,
+        root_dir: PathBuf,
+        workspace_id: String,
+        job_ids: Vec<String>,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+    ) -> Result<YdocSeedMaterialization, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocMaterializeSceneSeedAssets {
+                root_dir,
+                workspace_id,
+                job_ids,
+                self_writes,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn ydoc_record_update(
         &self,
@@ -3313,6 +3465,7 @@ impl ActorHandle {
         regime: Regime,
         update: Vec<u8>,
         actor_origin_id: Option<String>,
+        expected_lineage_claim_id: Option<String>,
         require_empty_lineage: bool,
         request_id: Option<String>,
         now_ms: i64,
@@ -3329,6 +3482,7 @@ impl ActorHandle {
                 update,
                 request_id,
                 actor_origin_id,
+                expected_lineage_claim_id,
                 require_empty_lineage,
                 now_ms,
                 faults,
@@ -3347,6 +3501,7 @@ impl ActorHandle {
         key: DocKey,
         path: String,
         content_kind: ContentKind,
+        expected_lineage_claim_id: Option<String>,
         expected_head_sha: Option<String>,
         session_id: String,
         self_writes: Arc<dyn SelfWriteRecorder>,
@@ -3361,6 +3516,7 @@ impl ActorHandle {
                 key,
                 path,
                 content_kind,
+                expected_lineage_claim_id,
                 expected_head_sha,
                 session_id,
                 self_writes,
@@ -3377,11 +3533,17 @@ impl ActorHandle {
     pub async fn ydoc_resync(
         &self,
         key: DocKey,
+        expected_lineage_claim_id: Option<String>,
         token: CancellationToken,
-    ) -> Result<Vec<u8>, RuntimeError> {
+    ) -> Result<YdocResyncState, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
-            .send(Command::YdocResync { key, token, reply })
+            .send(Command::YdocResync {
+                key,
+                expected_lineage_claim_id,
+                token,
+                reply,
+            })
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
@@ -3394,11 +3556,69 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<Option<CloseOutcome>, RuntimeError> {
+        self.ydoc_close_session_inner(key, None, now_ms, faults, token)
+            .await
+    }
+
+    /// Close a live Y.Doc and materialize only the projection jobs created by
+    /// deferred updates that the close releases.
+    pub async fn ydoc_close_session_materialized(
+        &self,
+        root_dir: PathBuf,
+        key: DocKey,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Option<CloseOutcome>, RuntimeError> {
+        self.ydoc_close_session_inner(
+            key,
+            Some(YdocCloseMaterialization {
+                root_dir,
+                self_writes,
+            }),
+            now_ms,
+            faults,
+            token,
+        )
+        .await
+    }
+
+    async fn ydoc_close_session_inner(
+        &self,
+        key: DocKey,
+        materialization: Option<YdocCloseMaterialization>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Option<CloseOutcome>, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::YdocCloseSession {
                 key,
+                materialization,
                 now_ms,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Move disk-conflicted Y.Doc recovery artifacts to deterministic free
+    /// paths after capture has ingested the unexpected occupants.
+    pub async fn repair_conflicted_ydoc_recoveries(
+        &self,
+        workspace_id: String,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Vec<dohc_engine_sync::YdocRecoveryMaterialization>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::RepairConflictedYdocRecoveries {
+                workspace_id,
                 faults,
                 token,
                 reply,
@@ -3446,6 +3666,31 @@ impl ActorHandle {
                 root_dir,
                 workspace_id,
                 self_writes,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Strictly replay one caller-owned set of pending materialization jobs.
+    /// Jobs outside this set retain their existing status for ordinary replay.
+    pub async fn materialize_replay_selected_for_fence(
+        &self,
+        root_dir: PathBuf,
+        workspace_id: String,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        materialization_job_ids: Vec<String>,
+        now_ms: i64,
+    ) -> Result<(), RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::MaterializeReplaySelectedForFence {
+                root_dir,
+                workspace_id,
+                self_writes,
+                materialization_job_ids,
                 now_ms,
                 reply,
             })
@@ -6300,6 +6545,9 @@ fn execute_http_request(
     match request {
         RelayIoRequest::Push(request) => transport.push(request).map(RelayIoResponse::Push),
         RelayIoRequest::Pull(request) => transport.pull(request).map(RelayIoResponse::Pull),
+        RelayIoRequest::LookupCoordinate(request) => transport
+            .lookup_log_coordinate(request)
+            .map(RelayIoResponse::LookupCoordinate),
         RelayIoRequest::Probe(request) => transport.probe(request).map(RelayIoResponse::Probe),
         RelayIoRequest::Claim(request) => transport
             .claim_workspace(request)
@@ -7279,13 +7527,22 @@ fn worker_main(
             }
             Command::CaptureRetire {
                 input,
+                root_dir,
+                self_writes,
                 leases,
                 faults,
                 token,
                 reply,
             } => {
-                let outcome =
-                    capture_retire_on_store(&mut store, &input, &leases, faults.as_ref(), &token);
+                let outcome = capture_retire_on_store(
+                    &mut store,
+                    &input,
+                    root_dir.as_deref(),
+                    self_writes.as_deref(),
+                    &leases,
+                    faults.as_ref(),
+                    &token,
+                );
                 let _ = reply.send(outcome);
             }
             Command::VersionedTextRead {
@@ -7323,6 +7580,7 @@ fn worker_main(
                 version_id,
                 path,
                 content_kind,
+                seed_from_artifact,
                 token,
                 reply,
             } => {
@@ -7335,6 +7593,7 @@ fn worker_main(
                     &version_id,
                     &path,
                     content_kind,
+                    seed_from_artifact,
                     &token,
                 );
                 let _ = reply.send(outcome);
@@ -7355,6 +7614,48 @@ fn worker_main(
                 );
                 let _ = reply.send(outcome);
             }
+            Command::YdocMaterializeSceneSeedAssets {
+                root_dir,
+                workspace_id,
+                job_ids,
+                self_writes,
+                now_ms,
+                reply,
+            } => {
+                let selected: HashSet<String> = job_ids.into_iter().collect();
+                let outcome = reconcile_scene_asset_materialization_conflicts(
+                    &store, &root_dir, &selected, now_ms,
+                )
+                .and_then(|invalid_jobs| {
+                    replay_pending_materializations(
+                        &mut store,
+                        &root_dir,
+                        MaterializationReplayScope {
+                            workspace_id: &workspace_id,
+                            self_writes: Some(self_writes.as_ref()),
+                        },
+                        now_ms,
+                        &NoFaults,
+                        Some(&selected),
+                        false,
+                    )?;
+                    let completed = selected.iter().try_fold(0_usize, |count, job_id| {
+                        store.load_materialization_job(job_id).map(|job| {
+                            count
+                                + usize::from(
+                                    job.is_some_and(|job| job.status == JobStatus::Complete),
+                                )
+                        })
+                    })?;
+                    let incomplete_jobs = selected.len().saturating_sub(completed);
+                    Ok(YdocSeedMaterialization {
+                        materialized: invalid_jobs == 0 && incomplete_jobs == 0,
+                        incomplete_jobs,
+                        invalid_jobs,
+                    })
+                });
+                let _ = reply.send(outcome);
+            }
             Command::YdocRecordUpdate {
                 key,
                 path,
@@ -7363,6 +7664,7 @@ fn worker_main(
                 update,
                 request_id,
                 actor_origin_id,
+                expected_lineage_claim_id,
                 require_empty_lineage,
                 now_ms,
                 faults,
@@ -7377,6 +7679,7 @@ fn worker_main(
                     regime,
                     &update,
                     actor_origin_id,
+                    expected_lineage_claim_id,
                     require_empty_lineage,
                     request_id,
                     now_ms,
@@ -7390,6 +7693,7 @@ fn worker_main(
                 key,
                 path,
                 content_kind,
+                expected_lineage_claim_id,
                 expected_head_sha,
                 session_id,
                 self_writes,
@@ -7404,6 +7708,7 @@ fn worker_main(
                     &key,
                     &path,
                     content_kind,
+                    expected_lineage_claim_id.as_deref(),
                     expected_head_sha,
                     &session_id,
                     self_writes.as_ref(),
@@ -7413,19 +7718,54 @@ fn worker_main(
                 );
                 let _ = reply.send(outcome);
             }
-            Command::YdocResync { key, token, reply } => {
-                let outcome = ydoc_resync_on_store(&mut store, &key, &token);
+            Command::YdocResync {
+                key,
+                expected_lineage_claim_id,
+                token,
+                reply,
+            } => {
+                let outcome = ydoc_resync_on_store(
+                    &mut store,
+                    &key,
+                    expected_lineage_claim_id.as_deref(),
+                    &token,
+                );
                 let _ = reply.send(outcome);
             }
             Command::YdocCloseSession {
                 key,
+                materialization,
                 now_ms,
                 faults,
                 token,
                 reply,
             } => {
-                let outcome =
-                    ydoc_close_session_on_store(&mut store, &key, now_ms, faults.as_ref(), &token);
+                let outcome = ydoc_close_session_on_store(
+                    &mut store,
+                    &key,
+                    materialization.as_ref(),
+                    now_ms,
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::RepairConflictedYdocRecoveries {
+                workspace_id,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    dohc_engine_sync::repair_conflicted_ydoc_recoveries(
+                        &mut store,
+                        &workspace_id,
+                        faults.as_ref(),
+                    )
+                    .map_err(RuntimeError::from)
+                };
                 let _ = reply.send(outcome);
             }
             Command::MaterializeReplayPending {
@@ -7478,6 +7818,38 @@ fn worker_main(
                         Err(RuntimeError::ActiveVersionMaterializationIncomplete {
                             failed_jobs: summary.failed,
                         })
+                    }
+                });
+                let _ = reply.send(outcome);
+            }
+            Command::MaterializeReplaySelectedForFence {
+                root_dir,
+                workspace_id,
+                self_writes,
+                materialization_job_ids,
+                now_ms,
+                reply,
+            } => {
+                let selected: HashSet<String> = materialization_job_ids.into_iter().collect();
+                let outcome = replay_pending_materializations(
+                    &mut store,
+                    &root_dir,
+                    MaterializationReplayScope {
+                        workspace_id: &workspace_id,
+                        self_writes: Some(self_writes.as_ref()),
+                    },
+                    now_ms,
+                    &NoFaults,
+                    Some(&selected),
+                    false,
+                )
+                .and_then(|summary| {
+                    let failed_jobs =
+                        summary.failed + selected.len().saturating_sub(summary.selected_seen);
+                    if failed_jobs == 0 {
+                        Ok(())
+                    } else {
+                        Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs })
                     }
                 });
                 let _ = reply.send(outcome);
@@ -8664,6 +9036,36 @@ fn worker_main(
     drop(store);
 }
 
+fn reconcile_scene_asset_materialization_conflicts(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    selected: &HashSet<String>,
+    now_ms: i64,
+) -> Result<usize, RuntimeError> {
+    let mut invalid_jobs = 0;
+    for job_id in selected {
+        let Some(job) = store.load_materialization_job(job_id)? else {
+            invalid_jobs += 1;
+            continue;
+        };
+        if job.status != JobStatus::Conflict {
+            continue;
+        }
+        match probe_projection_target(root_dir, &job.target_path, ProjectionTargetKind::Plaintext) {
+            ProjectionTargetState::Absent => {
+                if !store.requeue_materialization_conflict(job_id)? {
+                    invalid_jobs += 1;
+                }
+            }
+            ProjectionTargetState::Binary { sha256 } if sha256 == job.content_sha256 => {
+                store.mark_materialization_complete(job_id, now_ms)?;
+            }
+            _ => invalid_jobs += 1,
+        }
+    }
+    Ok(invalid_jobs)
+}
+
 /// Durable Y.Doc state exists when the lineage holds updates OR snapshots.
 /// A pruned local-only marker (both zero) has NO durable state: opens report
 /// it absent and settles refuse it (an empty projection must never clobber
@@ -8688,7 +9090,7 @@ fn ydoc_version_unsettled_content_kind_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    let lineages: Vec<(String, ContentKind, bool)> = store.read_with(|conn| {
+    let raw_lineages: Vec<(String, String, bool)> = store.read_with(|conn| {
         let mut statement = conn
             .prepare(
                 "SELECT docs.object_id, docs.content_kind, EXISTS ( \
@@ -8710,13 +9112,22 @@ fn ydoc_version_unsettled_content_kind_on_store(
             .map_err(StorageError::corrupt_public)?;
         let rows = statement
             .query_map(params![workspace_id, version_id], |row| {
-                let content_kind = row.get::<_, String>(1)?;
-                Ok((row.get(0)?, ContentKind::parse(&content_kind), row.get(2)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })
             .map_err(StorageError::corrupt_public)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::corrupt_public)
     })?;
+    let lineages = raw_lineages
+        .into_iter()
+        .map(|(object_id, content_kind, has_deferred_updates)| {
+            Ok((
+                object_id,
+                ContentKind::parse(&content_kind)?,
+                has_deferred_updates,
+            ))
+        })
+        .collect::<Result<Vec<_>, CollabError>>()?;
 
     for (object_id, content_kind, has_deferred_updates) in lineages {
         if token.is_cancelled() {
@@ -8744,8 +9155,8 @@ fn ydoc_version_unsettled_content_kind_on_store(
             return Ok(Some(content_kind));
         }
         let content_kind = persisted.marker.content_kind;
-        let projected = persisted.doc.project(content_kind)?;
-        let projected_sha = hex_sha256(projected.markdown.as_bytes());
+        let projected = project_ydoc_on_store(store, &key, &persisted.doc, content_kind)?;
+        let projected_sha = hex_sha256(projected.content.as_bytes());
         let materialized_sha: Option<String> = store.read_with(|conn| {
             conn.query_row(
                 "SELECT blob_sha256 FROM snapshots \
@@ -8786,6 +9197,328 @@ fn ensure_mutation_version_on_store(
     Ok(())
 }
 
+#[derive(Debug)]
+struct SceneSeedAsset {
+    descriptor: ArtifactAssetDescriptor,
+    bytes: Vec<u8>,
+    object_id: String,
+    moment_id: String,
+}
+
+fn plan_scene_seed_assets(
+    key: &DocKey,
+    drawing_path: &str,
+    drawing_moment_id: &str,
+    files: BTreeMap<String, dohc_engine_collab::ImportedSceneFile>,
+) -> Result<Vec<SceneSeedAsset>, RuntimeError> {
+    files
+        .into_values()
+        .map(|file| {
+            if file.bytes.len() > dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES {
+                return Err(DomainError::PayloadTooLarge {
+                    constraint: "MAX_CAPTURE_BINARY_FILE_BYTES",
+                    limit_bytes: dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES,
+                    observed_bytes: file.bytes.len(),
+                }
+                .into());
+            }
+            let sha256 = hex_sha256(&file.bytes);
+            let path = validate_plaintext_storable_path(
+                &dohc_engine_collab::scene_asset_ref(
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
+                    &sha256,
+                    &file.mime_type,
+                )
+                .map_err(|error| DomainError::InvalidInput {
+                    reason: match error {
+                        dohc_engine_collab::SceneImportError::Invalid { reason } => reason,
+                    },
+                })?,
+            )?;
+            let descriptor = ArtifactAssetDescriptor {
+                id: file.id,
+                mime_type: file.mime_type,
+                created: file.created,
+                path: path.clone(),
+                sha256: sha256.clone(),
+                last_retrieved: file.last_retrieved,
+                version: file.version,
+            };
+            let identity = format!(
+                "{}\0{}\0{}\0{}\0{}",
+                key.workspace_id, key.version_id, drawing_path, drawing_moment_id, descriptor.id
+            );
+            Ok(SceneSeedAsset {
+                descriptor,
+                bytes: file.bytes,
+                object_id: format!(
+                    "scene-asset-object-{}",
+                    hex_sha256(
+                        format!(
+                            "{}\0{}\0{}\0{}",
+                            key.workspace_id, key.version_id, path, drawing_moment_id
+                        )
+                        .as_bytes()
+                    )
+                ),
+                moment_id: format!("moment-scene-asset-{}", hex_sha256(identity.as_bytes())),
+            })
+        })
+        .collect()
+}
+
+fn scene_asset_records(
+    assets: &[SceneSeedAsset],
+) -> Result<BTreeMap<String, String>, RuntimeError> {
+    assets
+        .iter()
+        .map(|asset| {
+            let descriptor = &asset.descriptor;
+            encode_scene_asset_record(descriptor)
+                .map(|record| (descriptor.id.clone(), record))
+                .map_err(|error| {
+                    let dohc_engine_collab::SceneImportError::Invalid { reason } = error;
+                    RuntimeError::Domain(DomainError::InvalidInput { reason })
+                })
+        })
+        .collect()
+}
+
+fn map_scene_asset_validation_error(error: dohc_engine_sync::SyncError) -> RuntimeError {
+    match error {
+        dohc_engine_sync::SyncError::RetryableState { .. } => {
+            RuntimeError::YdocArtifactAssetsPending
+        }
+        error @ dohc_engine_sync::SyncError::ProjectionTooLarge { .. } => RuntimeError::Sync(error),
+        dohc_engine_sync::SyncError::Storage(storage) => RuntimeError::Storage(storage),
+        dohc_engine_sync::SyncError::FaultCrash => RuntimeError::OperationCrashed,
+        _ => RuntimeError::YdocArtifactAssetsInvalid,
+    }
+}
+
+fn validate_scene_artifact_assets_on_store(
+    store: &EngineStore,
+    key: &DocKey,
+    doc: &Ydoc,
+    assets: &[ArtifactAssetDescriptor],
+) -> Result<Vec<String>, RuntimeError> {
+    store.read_with(|conn| {
+        dohc_engine_sync::project_ydoc_with_store(conn, key, doc, ContentKind::Scene)
+            .map_err(map_scene_asset_validation_error)?;
+        let folded = doc.fold_scene();
+        let live_asset_ids: HashSet<&str> = folded
+            .elements
+            .iter()
+            .filter(|element| {
+                element.get("type").and_then(serde_json::Value::as_str) == Some("image")
+            })
+            .filter_map(|element| element.get("fileId").and_then(serde_json::Value::as_str))
+            .collect();
+        for asset in assets {
+            if live_asset_ids.contains(asset.id.as_str()) {
+                continue;
+            }
+            let folded_asset = folded
+                .assets
+                .get(&asset.id)
+                .ok_or(RuntimeError::YdocArtifactAssetsInvalid)?;
+            dohc_engine_sync::validate_scene_asset_with_store(conn, key, folded_asset)
+                .map_err(map_scene_asset_validation_error)?;
+        }
+        let mut pending_jobs = Vec::new();
+        for asset in assets {
+            let mut statement = conn
+                .prepare(
+                    "SELECT job_id,status FROM materialization_jobs \
+                     WHERE workspace_id = ?1 AND target_path = ?2 \
+                       AND content_sha256 = ?3 AND operation = 'write' \
+                       AND status != 'complete' \
+                     ORDER BY job_id",
+                )
+                .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+            let jobs = statement
+                .query_map(params![key.workspace_id, asset.path, asset.sha256], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+            for job in jobs {
+                let (job_id, status) =
+                    job.map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+                if status == "cancelled" {
+                    return Err(RuntimeError::YdocArtifactAssetsInvalid);
+                }
+                pending_jobs.push(job_id);
+            }
+        }
+        Ok::<_, RuntimeError>(pending_jobs)
+    })
+}
+
+fn scene_asset_descriptors_for_open(doc: &Ydoc) -> Vec<ArtifactAssetDescriptor> {
+    let folded = doc.fold_scene();
+    folded
+        .referenced_asset_ids
+        .iter()
+        .filter_map(|id| folded.assets.get(id))
+        .cloned()
+        .collect()
+}
+
+fn project_ydoc_on_store(
+    store: &EngineStore,
+    key: &DocKey,
+    doc: &Ydoc,
+    content_kind: ContentKind,
+) -> Result<Projection, RuntimeError> {
+    store.read_with(|conn| {
+        dohc_engine_sync::project_ydoc_with_store(conn, key, doc, content_kind)
+            .map_err(RuntimeError::from)
+    })
+}
+
+fn seed_scene_from_artifact_on_store(
+    store: &mut EngineStore,
+    key: &DocKey,
+    path: &str,
+    artifact: &str,
+    artifact_moment_id: &str,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<Vec<String>, RuntimeError> {
+    const EMPTY_SCENE: &str = r#"{"type":"excalidraw","version":2,"source":"https://excalidraw.com","elements":[],"appState":{},"files":{}}"#;
+    let imported = import_portable_scene(if artifact.trim().is_empty() {
+        EMPTY_SCENE
+    } else {
+        artifact
+    })
+    .map_err(|error| match error {
+        dohc_engine_collab::SceneImportError::Invalid { reason } => {
+            RuntimeError::Domain(DomainError::InvalidInput { reason })
+        }
+    })?;
+    let assets = plan_scene_seed_assets(key, path, artifact_moment_id, imported.files)?;
+    let asset_update = encode_scene_asset_records(&scene_asset_records(&assets)?).map_err(
+        |error| match error {
+            dohc_engine_collab::SceneImportError::Invalid { reason } => {
+                RuntimeError::Domain(DomainError::InvalidInput { reason })
+            }
+        },
+    )?;
+    let seed_update = dohc_engine_collab::merge_updates(&[imported.initial_update, asset_update])?;
+    let request_id = format!(
+        "ydoc-scene-seed-{}",
+        hex_sha256(
+            format!(
+                "{}\0{}\0{}\0{}\0{}",
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                artifact_moment_id,
+                hex_sha256(artifact.as_bytes())
+            )
+            .as_bytes()
+        )
+    );
+    // Only the moment ids whose head writes were actually enqueued: a planned
+    // asset whose content-addressed path already holds matching content takes
+    // the `continue` below and creates no moment, and counting it as a
+    // materialization job would reject the open as pending forever. The
+    // guarded closure can run again after a crash retry, so it rebuilds the
+    // list from scratch each attempt.
+    let mut created_moment_ids: Vec<String> = Vec::new();
+    let outcome = dohc_engine_collab::record_local_update_creating_marker_guarded(
+        store,
+        key,
+        Some(path),
+        ContentKind::Scene,
+        Regime::LocalOnly,
+        &seed_update,
+        None,
+        true,
+        true,
+        Some(&request_id),
+        faults,
+        now_ms,
+        |tx, _| {
+            created_moment_ids.clear();
+            let version_is_active: bool = tx
+                .query_row(
+                    "SELECT ?2 = COALESCE( \
+                         (SELECT version_id FROM active_versions WHERE workspace_id = ?1), \
+                         (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id = ?1))",
+                    params![key.workspace_id, key.version_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: format!("scene asset active-version lookup failed: {error}"),
+                })?;
+            for asset in &assets {
+                let existing: Option<(String, Option<String>)> = tx
+                    .query_row(
+                        "SELECT COALESCE(s.content_kind, 'text'), s.binary_sha256 \
+                         FROM path_aliases a JOIN snapshots s \
+                           ON s.workspace_id = a.workspace_id \
+                          AND s.version_id = a.version_id AND s.object_id = a.object_id \
+                         WHERE a.workspace_id = ?1 AND a.version_id = ?2 AND a.path = ?3",
+                        params![key.workspace_id, key.version_id, asset.descriptor.path],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(|error| CollabError::Corrupt {
+                        reason: format!("scene asset head lookup failed: {error}"),
+                    })?;
+                if let Some((kind, sha256)) = existing {
+                    if kind == "binary" && sha256.as_deref() == Some(&asset.descriptor.sha256) {
+                        continue;
+                    }
+                    return Err(CollabError::Corrupt {
+                        reason: "scene asset path is already bound to different content".to_owned(),
+                    });
+                }
+                let stored_sha = put_binary_blob(tx, &asset.bytes)?;
+                if stored_sha != asset.descriptor.sha256 {
+                    return Err(CollabError::Corrupt {
+                        reason: "scene asset content address changed while storing bytes"
+                            .to_owned(),
+                    });
+                }
+                dohc_engine_domain::write_binary_file_in_tx(
+                    tx,
+                    &dohc_engine_domain::WriteBinaryFile {
+                        workspace_id: key.workspace_id.clone(),
+                        version_id: key.version_id.clone(),
+                        object_id: asset.object_id.clone(),
+                        path: asset.descriptor.path.clone(),
+                        binary_sha256: asset.descriptor.sha256.clone(),
+                        moment_id: asset.moment_id.clone(),
+                        metadata_origin: "ydoc".to_owned(),
+                        metadata_summary: Some("Imported drawing asset".to_owned()),
+                        metadata_correlation_id: Some(request_id.clone()),
+                        author_json: None,
+                        materialize: version_is_active.then_some(Preimage::Absent),
+                        now_ms,
+                    },
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: format!("scene asset head write failed: {error}"),
+                })?;
+                journal_moment_outbound_in_tx(tx, &key.workspace_id, &asset.moment_id, false)
+                    .map_err(|error| CollabError::Corrupt {
+                        reason: format!("scene asset outbound journal failed: {error}"),
+                    })?;
+                created_moment_ids.push(asset.moment_id.clone());
+            }
+            Ok(())
+        },
+    )?;
+    if matches!(outcome, TxnOutcome::Crashed { .. }) {
+        return Err(RuntimeError::OperationCrashed);
+    }
+    Ok(created_moment_ids)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ydoc_open_state_on_store(
     store: &mut EngineStore,
@@ -8796,6 +9529,7 @@ fn ydoc_open_state_on_store(
     version_id: &str,
     path: &str,
     requested_content_kind: Option<ContentKind>,
+    seed_from_artifact: bool,
     token: &CancellationToken,
 ) -> Result<YdocOpenState, RuntimeError> {
     if token.is_cancelled() {
@@ -8930,22 +9664,57 @@ fn ydoc_open_state_on_store(
         }
         .into());
     }
-    let persisted = dohc_engine_collab::load_persisted(store, &key)?;
+    let mut persisted = dohc_engine_collab::load_persisted(store, &key)?;
     // "Existing" means durable DOC STATE, not a bare marker: a local-only
     // close prunes every CRDT row and leaves head_update_seq == 0
-    // (markdown-is-the-artifact). Reporting such a lineage as existing would
-    // hand the client an EMPTY doc with no seedMarkdown — its next settle
+    // (the workspace file is the artifact). Reporting it as existing would
+    // hand the client an EMPTY doc with no seedContent — its next settle
     // would clobber the settled file. A pruned marker is seed-eligible
     // (the recordUpdate guard checks head_update_seq > 0), so the artifact
     // re-seeds the cache exactly like a first open. "Durable doc state"
     // means updates OR snapshots: a replicated lineage holding only its
     // base snapshot (head_update_seq == 0, head_snapshot_seq > 0) is
     // EXISTING — reporting it absent would hand the client the base state
-    // AND a markdown seed, duplicating content on the first seed apply.
-    let lineage_existing = persisted
+    // AND a content seed, duplicating the artifact on the first seed apply.
+    let mut lineage_existing = persisted
         .as_ref()
         .is_some_and(|persisted| ydoc_marker_has_durable_state(&persisted.marker));
-    let (content_kind, regime, initial_update) = match persisted {
+    let mut seed_materialization_jobs = Vec::new();
+    if drain_deferred
+        && expected_key_matches
+        && seed_from_artifact
+        && requested_content_kind == Some(ContentKind::Scene)
+        && !lineage_existing
+        && let Some(artifact) = head.as_ref()
+    {
+        seed_materialization_jobs = seed_scene_from_artifact_on_store(
+            store,
+            &key,
+            path,
+            &artifact.text,
+            &artifact.latest_moment_id,
+            now_ms,
+            &NoFaults,
+        )?;
+        persisted = dohc_engine_collab::load_persisted(store, &key)?;
+        lineage_existing = persisted
+            .as_ref()
+            .is_some_and(|persisted| ydoc_marker_has_durable_state(&persisted.marker));
+        if !lineage_existing {
+            return Err(DomainError::StateCorrupt {
+                reason: "scene artifact seed committed without durable Y.Doc state",
+            }
+            .into());
+        }
+    }
+    let (
+        content_kind,
+        regime,
+        initial_update,
+        lineage_claim_id,
+        artifact_assets,
+        pending_asset_jobs,
+    ) = match persisted {
         Some(persisted) => {
             let marker = &persisted.marker;
             let mut kind = marker.content_kind;
@@ -8974,7 +9743,29 @@ fn ydoc_open_state_on_store(
                     }
                 }
             }
-            (kind, marker.regime, persisted.doc.encode_full_state())
+            let artifact_assets = if kind == ContentKind::Scene {
+                scene_asset_descriptors_for_open(&persisted.doc)
+            } else {
+                Vec::new()
+            };
+            let pending_asset_jobs = if kind == ContentKind::Scene {
+                validate_scene_artifact_assets_on_store(
+                    store,
+                    &key,
+                    &persisted.doc,
+                    &artifact_assets,
+                )?
+            } else {
+                Vec::new()
+            };
+            (
+                kind,
+                marker.regime,
+                persisted.doc.encode_full_state(),
+                marker.lineage_claim_id.clone(),
+                artifact_assets,
+                pending_asset_jobs,
+            )
         }
         None => {
             let doc = Ydoc::wire();
@@ -8986,8 +9777,31 @@ fn ydoc_open_state_on_store(
                 requested_content_kind.unwrap_or(ContentKind::Plaintext),
                 Regime::LocalOnly,
                 doc.encode_full_state(),
+                None,
+                Vec::new(),
+                Vec::new(),
             )
         }
+    };
+    let seed_materialization_jobs = if content_kind == ContentKind::Scene {
+        if !seed_materialization_jobs.is_empty() {
+            let expected: HashSet<&str> = seed_materialization_jobs
+                .iter()
+                .map(String::as_str)
+                .collect();
+            if !pending_asset_jobs
+                .iter()
+                .all(|job| expected.contains(job.as_str()))
+            {
+                return Err(DomainError::StateCorrupt {
+                    reason: "a seeded scene asset has an unexpected pending materialization",
+                }
+                .into());
+            }
+        }
+        pending_asset_jobs
+    } else {
+        Vec::new()
     };
     Ok(YdocOpenState {
         head_blob_sha256: head_sha,
@@ -8996,9 +9810,12 @@ fn ydoc_open_state_on_store(
         regime,
         initial_update,
         lineage_existing,
-        seed_markdown: (!lineage_existing)
+        lineage_claim_id,
+        seed_content: (content_kind != ContentKind::Scene && !lineage_existing)
             .then(|| head.map(|snapshot| snapshot.text))
             .flatten(),
+        artifact_assets,
+        seed_materialization_jobs,
     })
 }
 
@@ -9011,6 +9828,7 @@ fn ydoc_record_update_on_store(
     regime: Regime,
     update: &[u8],
     actor_origin_id: Option<String>,
+    expected_lineage_claim_id: Option<String>,
     require_empty_lineage: bool,
     request_id: Option<String>,
     now_ms: i64,
@@ -9030,13 +9848,13 @@ fn ydoc_record_update_on_store(
     let mut sharing_declined: Option<SharingDeclined> = None;
     // An exact replicated lineage journals the ydoc.update delta in the same
     // transaction as the append. This keeps blob-before-log order and TS
-    // parity. Local-only lineages journal nothing; their Markdown is the
+    // parity. Local-only lineages journal nothing; their workspace file is the
     // artifact.
     let update_sha = dohc_engine_storage::hex_sha256(update);
     let journal_key = key.clone();
     let journal_path = path.to_owned();
     let journal_kind = content_kind;
-    match dohc_engine_collab::record_local_update_creating_marker_guarded(
+    match dohc_engine_collab::record_local_update_creating_marker_guarded_for_lineage(
         store,
         key,
         Some(path),
@@ -9044,6 +9862,7 @@ fn ydoc_record_update_on_store(
         regime,
         update,
         actor_origin_id.as_deref(),
+        expected_lineage_claim_id.as_deref(),
         // Parent row, seed guard, marker, append, and outbound journal all
         // commit in ONE transaction — no bare-parent crash window, and a
         // timed-out-commit seed retry DEDUPES inside the guard instead of
@@ -9076,6 +9895,11 @@ fn ydoc_record_update_on_store(
                 dohc_engine_sync::BaseOrigination::NothingToDo => false,
             };
             if !base_originated && outcome.emit_outbound {
+                let lineage_claim_id = dohc_engine_collab::read_marker_in_tx(tx, &journal_key)?
+                    .and_then(|marker| marker.lineage_claim_id)
+                    .ok_or_else(|| dohc_engine_collab::CollabError::Corrupt {
+                        reason: "exact Y.Doc lineage has no claim id".to_owned(),
+                    })?;
                 dohc_engine_sync::journal_local_op_in_tx(
                     tx,
                     &journal_key.workspace_id,
@@ -9085,6 +9909,7 @@ fn ydoc_record_update_on_store(
                         &journal_path,
                         journal_kind,
                         &update_sha,
+                        &lineage_claim_id,
                         false,
                     ),
                     now_ms,
@@ -9104,10 +9929,15 @@ fn ydoc_record_update_on_store(
             Ok(())
         },
     )? {
-        TxnOutcome::Committed(outcome) => Ok(YdocAppend {
-            outcome,
-            sharing_declined,
-        }),
+        TxnOutcome::Committed(outcome) => {
+            let lineage_claim_id = dohc_engine_collab::read_marker(store, key)?
+                .and_then(|marker| marker.lineage_claim_id);
+            Ok(YdocAppend {
+                outcome,
+                sharing_declined,
+                lineage_claim_id,
+            })
+        }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
 }
@@ -9122,6 +9952,7 @@ fn ydoc_record_update_on_store(
 pub struct YdocAppend {
     pub outcome: AppendOutcome,
     pub sharing_declined: Option<dohc_engine_sync::SharingDeclined>,
+    pub lineage_claim_id: Option<String>,
 }
 
 fn ydoc_settle_disk_preimage(
@@ -9164,6 +9995,7 @@ fn ydoc_settle_on_store(
     key: &DocKey,
     path: &str,
     content_kind: ContentKind,
+    expected_lineage_claim_id: Option<&str>,
     expected_head_sha: Option<String>,
     session_id: &str,
     self_writes: &dyn SelfWriteRecorder,
@@ -9186,6 +10018,13 @@ fn ydoc_settle_on_store(
         Some(marker) => {
             if !ydoc_marker_has_durable_state(&marker) {
                 return Err(dohc_engine_collab::CollabError::NoMarker.into());
+            }
+            if marker.lineage_claim_id.as_deref() != expected_lineage_claim_id {
+                return Err(dohc_engine_collab::CollabError::LineageWriteStale {
+                    expected: expected_lineage_claim_id.map(ToOwned::to_owned),
+                    observed: marker.lineage_claim_id,
+                }
+                .into());
             }
             // An open sync conflict on this object FREEZES the settle: the
             // lineage may hold a peer's base the user has not reviewed, and
@@ -9215,7 +10054,12 @@ fn ydoc_settle_on_store(
             // never saw while they keep editing stale state. Refuse; the
             // client resyncs (which also drains) and settles again.
             if marker.regime == Regime::Replicated {
-                let drained = drain_deferred_ydoc_for_local_rpc(store, key, faults)?;
+                let drained = drain_deferred_ydoc_for_live_session_rpc(
+                    store,
+                    key,
+                    expected_lineage_claim_id,
+                    faults,
+                )?;
                 if drained.drained > 0 {
                     return Err(dohc_engine_domain::DomainError::InvalidInput {
                         reason: "ydoc-remote-updates-pending",
@@ -9236,13 +10080,13 @@ fn ydoc_settle_on_store(
     if doc.has_pending_dependencies() {
         return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
     }
-    let projection = doc.project(content_kind)?;
+    let projection = project_ydoc_on_store(store, key, &doc, content_kind)?;
     // The in-band cap bounds only what the RESPONSE can carry as one wire
     // string — it must never gate the settle itself. Materialization writes
-    // the file from `projection.markdown` down here, so an over-cap doc
+    // the file from `projection.content` down here, so an over-cap doc
     // settles and lands on disk exactly like any other; the response reports
-    // `markdown: None` and the caller reads the file. (Refusing here instead
-    // left the user's content in the CRDT and the .md at zero bytes.)
+    // `content: None` and the caller reads the file. (Refusing here instead
+    // left the user's content in the CRDT and the workspace file at zero bytes.)
     //
     // The stale-head guard runs BEFORE the idempotent no-op: an external
     // capture ingest (or any same-object writer) must surface as
@@ -9379,7 +10223,7 @@ fn ydoc_settle_on_store(
             }
         }
     }
-    let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
+    let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
     // Classify the exact disk preimage through the same contained projection
     // probe that materialization uses. This must precede the settle transaction:
     // compensating only the marker after a rival is found would leave the new
@@ -9399,7 +10243,7 @@ fn ydoc_settle_on_store(
         return Ok(YdocSettlement {
             moment_id: current.latest_moment_id,
             path: current.path,
-            markdown: inband_settled_markdown(current.text),
+            content: inband_settled_content(current.text),
             sha256: current.blob_sha256,
             // Any pending job for this head was replayed above, and a Blocked
             // replay returns Err rather than reaching here.
@@ -9463,7 +10307,7 @@ fn ydoc_settle_on_store(
                 version_id: key.version_id.clone(),
                 object_id: key.object_id.clone(),
                 path: path.to_owned(),
-                text: projection_for_write.markdown.clone(),
+                text: projection_for_write.content.clone(),
                 moment_id,
                 metadata_origin: "ydoc".to_owned(),
                 metadata_summary: None,
@@ -9634,7 +10478,7 @@ fn ydoc_settle_on_store(
     Ok(YdocSettlement {
         moment_id: write.moment.moment_id,
         path: write.snapshot.path,
-        markdown: inband_settled_markdown(write.snapshot.text),
+        content: inband_settled_content(write.snapshot.text),
         sha256: write.snapshot.blob_sha256,
         materialized,
         projection,
@@ -9644,28 +10488,67 @@ fn ydoc_settle_on_store(
 fn ydoc_resync_on_store(
     store: &mut EngineStore,
     key: &DocKey,
+    expected_lineage_claim_id: Option<&str>,
     token: &CancellationToken,
-) -> Result<Vec<u8>, RuntimeError> {
+) -> Result<YdocResyncState, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
     // Resync is the staleness RECOVERY path: an envelope acked-but-deferred
     // because THIS session held the lease may be the very edit that made the
     // client stale — drain it first or the recovery response still misses it.
-    if dohc_engine_collab::read_marker(store, key)?
+    let marker = dohc_engine_collab::read_marker(store, key)?;
+    let observed_lineage_claim_id = marker
+        .as_ref()
+        .and_then(|marker| marker.lineage_claim_id.as_deref());
+    // A claim mismatch means arbitration already replaced the generation the
+    // session opened. Resync is the explicit replacement handshake: return
+    // the winner below, but do not consume any queued foreign coordinate while
+    // the old session still owns its lease.
+    let drained = if marker
+        .as_ref()
         .is_some_and(|marker| marker.regime == Regime::Replicated)
+        && observed_lineage_claim_id == expected_lineage_claim_id
     {
-        drain_deferred_ydoc_for_local_rpc(store, key, &NoFaults)?;
+        drain_deferred_ydoc_for_live_session_rpc(store, key, expected_lineage_claim_id, &NoFaults)?
+    } else {
+        dohc_engine_sync::YdocDrainResult::default()
+    };
+    let persisted = dohc_engine_collab::load_persisted(store, key)?;
+    let lineage_claim_id = persisted
+        .as_ref()
+        .and_then(|persisted| persisted.marker.lineage_claim_id.clone());
+    let artifact_assets = persisted
+        .as_ref()
+        .filter(|persisted| persisted.marker.content_kind == ContentKind::Scene)
+        .map(|persisted| scene_asset_descriptors_for_open(&persisted.doc))
+        .unwrap_or_default();
+    if let Some(persisted) = persisted.as_ref()
+        && persisted.marker.content_kind == ContentKind::Scene
+    {
+        validate_scene_artifact_assets_on_store(store, key, &persisted.doc, &artifact_assets)?;
     }
-    Ok(match dohc_engine_collab::load_persisted(store, key)? {
-        Some(persisted) => persisted.doc.encode_full_state(),
-        None => Ydoc::wire().encode_full_state(),
+    let initial_update = persisted.map_or_else(
+        || Ydoc::wire().encode_full_state(),
+        |persisted| persisted.doc.encode_full_state(),
+    );
+    let recovered_paths = drained
+        .lineage_replacements
+        .into_iter()
+        .flat_map(|replacement| replacement.recovered_paths)
+        .collect();
+    Ok(YdocResyncState {
+        initial_update,
+        lineage_claim_id,
+        recovered_paths,
+        artifact_assets,
     })
 }
 
 fn ydoc_close_session_on_store(
     store: &mut EngineStore,
     key: &DocKey,
+    materialization: Option<&YdocCloseMaterialization>,
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
@@ -9677,15 +10560,26 @@ fn ydoc_close_session_on_store(
         return Ok(None);
     };
     // Richdoc settles like plaintext now, so the local-only close follows the
-    // same markdown-is-the-artifact prune (close_session refuses a DIRTY local
+    // same workspace-file artifact rule (close_session refuses a DIRTY local
     // prune either way, and persists every replicated lineage internally).
-    // Keeping the closed CRDT authoritative here would shadow external .md
-    // edits on reopen: existing lineage, no seedMarkdown, stale document.
+    // Keeping the closed CRDT authoritative here would shadow external file
+    // edits on reopen: existing lineage, no seedContent, stale document.
     let persist_closed_state = false;
+    let authoritative_projection_sha256 = if marker.regime == Regime::LocalOnly
+        && marker.head_update_seq > 0
+    {
+        let persisted = dohc_engine_collab::load_persisted(store, key)?
+            .ok_or(dohc_engine_collab::CollabError::NoMarker)?;
+        let projection = project_ydoc_on_store(store, key, &persisted.doc, marker.content_kind)?;
+        Some(hex_sha256(projection.content.as_bytes()))
+    } else {
+        None
+    };
     let outcome = match dohc_engine_collab::close_session(
         store,
         key,
         persist_closed_state,
+        authoritative_projection_sha256.as_deref(),
         faults,
         now_ms,
     )? {
@@ -9696,9 +10590,86 @@ fn ydoc_close_session_on_store(
         // The drain PROJECTS internally now (idempotent-by-sha, dependency-
         // gated): drained remote content reaches the visible head with no
         // session left to settle it.
-        drain_deferred_ydoc_for_local_rpc(store, key, faults)?;
+        let drained = drain_deferred_ydoc_for_local_rpc(store, key, faults)?;
+        if let Some(materialization) = materialization {
+            materialize_ydoc_drain(store, key, &drained, materialization, now_ms, faults)?;
+        }
     }
     Ok(Some(outcome))
+}
+
+fn materialize_ydoc_drain(
+    store: &mut EngineStore,
+    key: &DocKey,
+    drained: &dohc_engine_sync::YdocDrainResult,
+    materialization: &YdocCloseMaterialization,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    if drained.drained == 0 {
+        return Ok(());
+    }
+    let selected = store.read_with(|conn| {
+        let mut selected = HashSet::new();
+        let winner_job: Option<String> = conn
+            .query_row(
+                "SELECT job.job_id FROM snapshots AS snapshot \
+                 JOIN materialization_jobs AS job \
+                   ON job.job_id='ydoc-mat_' || snapshot.latest_moment_id \
+                  AND job.workspace_id=snapshot.workspace_id \
+                  AND job.status='pending' \
+                 WHERE snapshot.workspace_id=?1 AND snapshot.version_id=?2 \
+                   AND snapshot.object_id=?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::corrupt_public)?;
+        selected.extend(winner_job);
+        for recovered_path in drained
+            .lineage_replacements
+            .iter()
+            .flat_map(|replacement| &replacement.recovered_paths)
+        {
+            let recovery_job: Option<String> = conn
+                .query_row(
+                    "SELECT job.job_id FROM snapshots AS snapshot \
+                     JOIN materialization_jobs AS job \
+                       ON job.job_id='sync-mat_' || snapshot.latest_moment_id \
+                      AND job.workspace_id=snapshot.workspace_id \
+                      AND job.status='pending' \
+                     WHERE snapshot.workspace_id=?1 AND snapshot.version_id=?2 \
+                       AND snapshot.path=?3",
+                    params![key.workspace_id, key.version_id, recovered_path],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(StorageError::corrupt_public)?;
+            selected.extend(recovery_job);
+        }
+        Ok::<_, StorageError>(selected)
+    })?;
+    if selected.is_empty() {
+        return Ok(());
+    }
+    let replay = replay_pending_materializations(
+        store,
+        &materialization.root_dir,
+        MaterializationReplayScope {
+            workspace_id: &key.workspace_id,
+            self_writes: Some(materialization.self_writes.as_ref()),
+        },
+        now_ms,
+        faults,
+        Some(&selected),
+        false,
+    )?;
+    let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
+    if failed_jobs == 0 {
+        Ok(())
+    } else {
+        Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs })
+    }
 }
 
 /// Local Y.Doc RPCs have no sync-pass result. Keep an actionable origination
@@ -9709,6 +10680,27 @@ fn drain_deferred_ydoc_for_local_rpc(
     faults: &dyn FaultInjector,
 ) -> Result<dohc_engine_sync::YdocDrainResult, RuntimeError> {
     let drained = dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?;
+    for declined in &drained.sharing_declined {
+        eprintln!("engine: {declined}");
+    }
+    Ok(drained)
+}
+
+/// Live sessions can consume only coordinates for the lineage they opened.
+/// A foreign base and every row behind it stay queued until close releases the
+/// lease, so resync cannot replace the lineage behind the active editor.
+fn drain_deferred_ydoc_for_live_session_rpc(
+    store: &mut EngineStore,
+    key: &DocKey,
+    expected_lineage_claim_id: Option<&str>,
+    faults: &dyn FaultInjector,
+) -> Result<dohc_engine_sync::YdocDrainResult, RuntimeError> {
+    let drained = dohc_engine_sync::drain_deferred_ydoc_for_live_session(
+        store,
+        key,
+        expected_lineage_claim_id,
+        faults,
+    )?;
     for declined in &drained.sharing_declined {
         eprintln!("engine: {declined}");
     }
@@ -10162,7 +11154,7 @@ fn versioned_text_delete_on_store(
     let outcome = store.write_with(faults, |tx| {
         let result =
             dohc_engine_domain::delete_text_in_tx(tx, input).map_err(RuntimeError::from)?;
-        if !result.deduped {
+        let asset_jobs = if !result.deduped {
             delete_file_search_index(
                 tx,
                 &input.workspace_id,
@@ -10171,8 +11163,9 @@ fn versioned_text_delete_on_store(
             )
             .map_err(RuntimeError::from)?;
             enqueue_binary_delete(tx, &result).map_err(RuntimeError::from)?;
-            // A closed Y.Doc has no lease to block this delete. Retire its
-            // canonical rows with the snapshot so nothing can restore it.
+            journal_moment_outbound_in_tx(tx, &input.workspace_id, &result.moment.moment_id, false)
+                .map_err(RuntimeError::from)?;
+            let asset_jobs = delete_owned_scene_assets_in_tx(tx, &result)?;
             dohc_engine_sync::retire_ydoc_lineage_in_tx(
                 tx,
                 &input.workspace_id,
@@ -10180,18 +11173,16 @@ fn versioned_text_delete_on_store(
                 &result.object.object_id,
             )
             .map_err(RuntimeError::from)?;
-        }
-        journal_moment_outbound_in_tx(
-            tx,
-            &input.workspace_id,
-            &result.moment.moment_id,
-            result.deduped,
-        )
-        .map_err(RuntimeError::from)?;
-        Ok::<_, RuntimeError>(result)
+            asset_jobs
+        } else {
+            journal_moment_outbound_in_tx(tx, &input.workspace_id, &result.moment.moment_id, true)
+                .map_err(RuntimeError::from)?;
+            scene_asset_delete_jobs_in_tx(tx, &result)?
+        };
+        Ok::<_, RuntimeError>((result, asset_jobs))
     })?;
     match outcome {
-        TxnOutcome::Committed(result) => {
+        TxnOutcome::Committed((result, asset_jobs)) => {
             if result.moment.before_content_kind == "binary" {
                 materialize_expected_job(
                     store,
@@ -10203,9 +11194,310 @@ fn versioned_text_delete_on_store(
                     faults,
                 );
             }
+            materialize_scene_asset_deletes(
+                store,
+                root_dir,
+                &input.workspace_id,
+                &asset_jobs,
+                self_writes,
+                faults,
+            );
             Ok(result)
         }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn delete_owned_scene_assets_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    drawing_delete: &DeleteResult,
+) -> Result<Vec<(String, i64)>, RuntimeError> {
+    if drawing_delete.moment.before_content_kind != "text" {
+        return Ok(Vec::new());
+    }
+    let is_scene = drawing_delete
+        .before
+        .path
+        .to_ascii_lowercase()
+        .ends_with(".excalidraw")
+        || tx
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM ydoc_docs WHERE workspace_id = ?1 \
+                 AND version_id = ?2 AND object_id = ?3 AND content_kind = 'scene')",
+                params![
+                    drawing_delete.before.workspace_id,
+                    drawing_delete.before.version_id,
+                    drawing_delete.object.object_id
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                RuntimeError::Domain(DomainError::Storage(StorageError::corrupt_public(error)))
+            })?;
+    if !is_scene {
+        return Ok(Vec::new());
+    }
+    let key = DocKey::new(
+        &drawing_delete.before.workspace_id,
+        &drawing_delete.before.version_id,
+        &drawing_delete.object.object_id,
+    )?;
+    let candidates = dohc_engine_collab::freeze_scene_asset_delete_authority_in_tx(
+        tx,
+        &key,
+        &drawing_delete.moment.moment_id,
+    )?;
+    let mut jobs = Vec::new();
+    for candidate in candidates {
+        let asset_delete = dohc_engine_domain::delete_text_in_tx(
+            tx,
+            &DeleteTextFile {
+                workspace_id: drawing_delete.before.workspace_id.clone(),
+                version_id: drawing_delete.before.version_id.clone(),
+                path: candidate.path,
+                moment_id: candidate.asset_delete_moment_id,
+                request_id: None,
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: Some("Deleted drawing asset".to_owned()),
+                metadata_correlation_id: Some(drawing_delete.moment.moment_id.clone()),
+                author_json: drawing_delete.moment.author_json.clone(),
+                now_ms: drawing_delete.moment.recorded_at_ms,
+            },
+        )
+        .map_err(RuntimeError::from)?;
+        delete_file_search_index(
+            tx,
+            &asset_delete.before.workspace_id,
+            &asset_delete.before.version_id,
+            &asset_delete.object.object_id,
+        )
+        .map_err(search_domain)?;
+        if enqueue_binary_delete(tx, &asset_delete).map_err(RuntimeError::from)? {
+            jobs.push((
+                binary_delete_job_id(&asset_delete.moment.moment_id),
+                asset_delete.moment.recorded_at_ms,
+            ));
+        }
+        journal_moment_outbound_in_tx(
+            tx,
+            &asset_delete.before.workspace_id,
+            &asset_delete.moment.moment_id,
+            false,
+        )
+        .map_err(RuntimeError::from)?;
+    }
+    Ok(jobs)
+}
+
+fn scene_asset_restore_identity(
+    workspace_id: &str,
+    version_id: &str,
+    drawing_rollback_moment_id: &str,
+    asset_delete_moment_id: &str,
+) -> String {
+    format!("{workspace_id}\0{version_id}\0{drawing_rollback_moment_id}\0{asset_delete_moment_id}")
+}
+
+fn scene_asset_restore_moment_id(
+    workspace_id: &str,
+    version_id: &str,
+    drawing_rollback_moment_id: &str,
+    asset_delete_moment_id: &str,
+) -> String {
+    format!(
+        "moment-scene-asset-rollback-{}",
+        hex_sha256(
+            scene_asset_restore_identity(
+                workspace_id,
+                version_id,
+                drawing_rollback_moment_id,
+                asset_delete_moment_id,
+            )
+            .as_bytes()
+        )
+    )
+}
+
+fn scene_asset_delete_moments(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    version_id: &str,
+    drawing_delete_moment_id: &str,
+    drawing_object_id: &str,
+) -> Result<Vec<(String, String, String, i64)>, DomainError> {
+    let key = DocKey::new(workspace_id, version_id, drawing_object_id)
+        .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+    let authorities =
+        dohc_engine_collab::read_scene_asset_delete_authority(conn, &key, drawing_delete_moment_id)
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+    let mut moments = Vec::with_capacity(authorities.len());
+    for authority in authorities {
+        let recorded_at_ms = conn
+            .query_row(
+                "SELECT recorded_at_ms FROM moments WHERE workspace_id=?1 AND version_id=?2 \
+                 AND moment_id=?3 AND operation='delete' AND before_content_kind='binary' \
+                 AND metadata_origin IN ('ydoc','local-file') AND metadata_correlation_id=?4 \
+                 AND path=?5 AND before_binary_sha256=?6",
+                params![
+                    workspace_id,
+                    version_id,
+                    authority.asset_delete_moment_id,
+                    drawing_delete_moment_id,
+                    authority.path,
+                    authority.sha256
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+        moments.push((
+            authority.asset_delete_moment_id,
+            authority.path,
+            authority.sha256,
+            recorded_at_ms,
+        ));
+    }
+    Ok(moments)
+}
+
+fn scene_asset_deletes_ready_for_rollback(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    version_id: &str,
+    drawing_delete_moment_id: &str,
+) -> Result<bool, DomainError> {
+    let drawing_object_id = conn
+        .query_row(
+            "SELECT drawing_object_id FROM scene_asset_delete_authorities \
+             WHERE workspace_id=?1 AND version_id=?2 AND drawing_delete_moment_id=?3",
+            params![workspace_id, version_id, drawing_delete_moment_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+    let Some(drawing_object_id) = drawing_object_id else {
+        return Ok(true);
+    };
+    let key = DocKey::new(workspace_id, version_id, &drawing_object_id)
+        .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+    let authorities =
+        dohc_engine_collab::read_scene_asset_delete_authority(conn, &key, drawing_delete_moment_id)
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+    for authority in authorities {
+        let exact: bool = conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM moments WHERE workspace_id=?1 AND version_id=?2 \
+                 AND moment_id=?3 AND operation='delete' AND before_content_kind='binary' \
+                 AND metadata_origin IN ('ydoc','local-file') AND metadata_correlation_id=?4 \
+                 AND path=?5 AND before_binary_sha256=?6)",
+                params![
+                    workspace_id,
+                    version_id,
+                    authority.asset_delete_moment_id,
+                    drawing_delete_moment_id,
+                    authority.path,
+                    authority.sha256
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+        if exact {
+            continue;
+        }
+        let collides: bool = conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM moments WHERE workspace_id=?1 AND moment_id=?2)",
+                params![workspace_id, authority.asset_delete_moment_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+        if collides {
+            return Err(DomainError::StateCorrupt {
+                reason: "scene asset delete moment id belongs to different history",
+            });
+        }
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn consume_scene_asset_delete_authority_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    drawing_delete_moment_id: &str,
+    drawing_object_id: &str,
+) -> Result<(), DomainError> {
+    let deleted = tx
+        .execute(
+            "DELETE FROM scene_asset_delete_authorities WHERE workspace_id=?1 \
+             AND version_id=?2 AND drawing_delete_moment_id=?3 AND drawing_object_id=?4",
+            params![
+                workspace_id,
+                version_id,
+                drawing_delete_moment_id,
+                drawing_object_id
+            ],
+        )
+        .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
+    if deleted != 1 {
+        return Err(DomainError::StateCorrupt {
+            reason: "scene asset delete authority was not consumed exactly once",
+        });
+    }
+    Ok(())
+}
+
+fn scene_asset_delete_jobs_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    drawing_delete: &DeleteResult,
+) -> Result<Vec<(String, i64)>, RuntimeError> {
+    let moments = scene_asset_delete_moments(
+        tx,
+        &drawing_delete.before.workspace_id,
+        &drawing_delete.before.version_id,
+        &drawing_delete.moment.moment_id,
+        &drawing_delete.object.object_id,
+    )?;
+    let mut jobs = Vec::with_capacity(moments.len());
+    for (moment_id, path, sha256, recorded_at_ms) in moments {
+        let job_id = binary_delete_job_id(&moment_id);
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM materialization_jobs \
+                 WHERE workspace_id = ?1 AND job_id = ?2 AND operation = 'delete' \
+                   AND target_path = ?3 AND content_sha256 = ?4)",
+                params![drawing_delete.before.workspace_id, job_id, path, sha256],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                RuntimeError::Domain(DomainError::Storage(StorageError::corrupt_public(error)))
+            })?;
+        if exists {
+            jobs.push((job_id, recorded_at_ms));
+        }
+    }
+    jobs.sort();
+    Ok(jobs)
+}
+
+fn materialize_scene_asset_deletes(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    workspace_id: &str,
+    jobs: &[(String, i64)],
+    self_writes: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+) {
+    for (job_id, recorded_at_ms) in jobs {
+        materialize_expected_job(
+            store,
+            root_dir,
+            workspace_id,
+            job_id,
+            self_writes,
+            *recorded_at_ms,
+            faults,
+        );
     }
 }
 
@@ -10255,10 +11547,31 @@ fn versioned_text_rollback_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    let scene_asset_deletes_ready = store.read_with(|conn| {
+        scene_asset_deletes_ready_for_rollback(
+            conn,
+            &input.workspace_id,
+            &input.version_id,
+            &input.mutation_moment_id,
+        )
+    })?;
+    if !scene_asset_deletes_ready {
+        return Err(RuntimeError::SceneAssetDeletePending);
+    }
+    let mut restored_asset_jobs = Vec::new();
     let deduped = VersionedTextStore::new(store).rollback_text_file_mutation_with(
         input,
         faults,
         |tx, object_id, restored_text, compensating_moment_id, recorded_at_ms| {
+            restored_asset_jobs = restore_deleted_scene_assets_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &input.mutation_moment_id,
+                object_id,
+                compensating_moment_id,
+                input.author_json.as_deref(),
+            )?;
             let resulting = restored_text.map_or(
                 dohc_engine_sync::ResultingHead::BinaryOrAbsent,
                 |(path, text)| dohc_engine_sync::ResultingHead::Text { path, text },
@@ -10290,6 +11603,33 @@ fn versioned_text_rollback_on_store(
             Ok(())
         },
     )?;
+    if deduped && restored_asset_jobs.is_empty() {
+        restored_asset_jobs = match restored_scene_asset_jobs_on_store(
+            store,
+            &input.workspace_id,
+            &input.version_id,
+            &input.mutation_moment_id,
+            &rollback_compensating_moment_id(
+                &input.workspace_id,
+                &input.version_id,
+                &input.mutation_moment_id,
+            ),
+        ) {
+            Ok(jobs) => jobs,
+            Err(error) => {
+                eprintln!(
+                    "engine: rollback committed but loading its drawing asset restore jobs failed: \
+                     {error}"
+                );
+                return Ok(RollbackExecutionResult {
+                    deduped,
+                    materialize_enqueued: true,
+                    materialized: false,
+                    materialize_outcome: PostCommitMaterializeOutcome::Error,
+                });
+            }
+        };
+    }
     let job_id = binary_rollback_job_identity(
         &input.workspace_id,
         &input.version_id,
@@ -10411,17 +11751,39 @@ fn versioned_text_rollback_on_store(
         }
         return Ok(RollbackExecutionResult {
             deduped,
-            materialize_enqueued: has_jobs,
+            materialize_enqueued: has_jobs || !restored_asset_jobs.is_empty(),
             materialized: false,
             materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
+    }
+    let asset_materialize_outcome = materialize_restored_scene_assets(
+        store,
+        root_dir,
+        &input.workspace_id,
+        &restored_asset_jobs,
+        self_writes,
+        faults,
+    );
+    if asset_materialize_outcome != PostCommitMaterializeOutcome::Applied
+        && !restored_asset_jobs.is_empty()
+    {
+        return Ok(RollbackExecutionResult {
+            deduped,
+            materialize_enqueued: true,
+            materialized: false,
+            materialize_outcome: asset_materialize_outcome,
         });
     }
     if !has_jobs {
         return Ok(RollbackExecutionResult {
             deduped,
-            materialize_enqueued: false,
-            materialized: false,
-            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+            materialize_enqueued: !restored_asset_jobs.is_empty(),
+            materialized: !restored_asset_jobs.is_empty(),
+            materialize_outcome: if restored_asset_jobs.is_empty() {
+                PostCommitMaterializeOutcome::Skipped
+            } else {
+                PostCommitMaterializeOutcome::Applied
+            },
         });
     }
 
@@ -10542,6 +11904,280 @@ fn versioned_text_rollback_on_store(
         materialize_enqueued: true,
         materialized,
         materialize_outcome,
+    })
+}
+
+fn restore_deleted_scene_assets_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    drawing_delete_moment_id: &str,
+    drawing_object_id: &str,
+    drawing_rollback_moment_id: &str,
+    author_json: Option<&str>,
+) -> Result<Vec<String>, DomainError> {
+    let has_authority: bool = tx
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM scene_asset_delete_authorities \
+             WHERE workspace_id=?1 AND version_id=?2 AND drawing_delete_moment_id=?3 \
+               AND drawing_object_id=?4)",
+            params![
+                workspace_id,
+                version_id,
+                drawing_delete_moment_id,
+                drawing_object_id
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+    if !has_authority {
+        return Ok(Vec::new());
+    }
+    let deleted_assets = scene_asset_delete_moments(
+        tx,
+        workspace_id,
+        version_id,
+        drawing_delete_moment_id,
+        drawing_object_id,
+    )?;
+    // Materialization jobs write into the ACTIVE workspace directory. A
+    // rollback in a version the user has switched away from must restore the
+    // heads without enqueueing jobs, or the general pending replay would
+    // write the inactive version's asset files into the active tree and a
+    // later capture would adopt them into the wrong version.
+    let version_is_active: bool = tx
+        .query_row(
+            "SELECT ?2 = COALESCE(                  (SELECT version_id FROM active_versions WHERE workspace_id = ?1),                  (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id = ?1))",
+            params![workspace_id, version_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+    let mut jobs = Vec::with_capacity(deleted_assets.len());
+    for (delete_moment_id, path, sha256, recorded_at_ms) in deleted_assets {
+        let occupied: bool = tx
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM path_aliases \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3)",
+                params![workspace_id, version_id, path],
+                |row| row.get(0),
+            )
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+        if occupied {
+            return Err(DomainError::TargetPathExists);
+        }
+        let identity = scene_asset_restore_identity(
+            workspace_id,
+            version_id,
+            drawing_rollback_moment_id,
+            &delete_moment_id,
+        );
+        let restore_moment_id = scene_asset_restore_moment_id(
+            workspace_id,
+            version_id,
+            drawing_rollback_moment_id,
+            &delete_moment_id,
+        );
+        // The retained delete moment owns the old object id. The compensating
+        // head needs a new stable id because object ids are globally unique.
+        let restore_object_id = format!(
+            "scene-asset-rollback-object-{}",
+            hex_sha256(format!("{identity}\0{path}").as_bytes())
+        );
+        dohc_engine_domain::write_binary_file_in_tx(
+            tx,
+            &dohc_engine_domain::WriteBinaryFile {
+                workspace_id: workspace_id.to_owned(),
+                version_id: version_id.to_owned(),
+                object_id: restore_object_id,
+                path: path.clone(),
+                binary_sha256: sha256.clone(),
+                moment_id: restore_moment_id.clone(),
+                metadata_origin: "ydoc".to_owned(),
+                metadata_summary: Some("Restored drawing asset".to_owned()),
+                metadata_correlation_id: Some(drawing_rollback_moment_id.to_owned()),
+                author_json: author_json.map(str::to_owned),
+                materialize: version_is_active.then_some(Preimage::Absent),
+                now_ms: recorded_at_ms,
+            },
+        )?;
+        tx.execute(
+            "DELETE FROM materialization_jobs WHERE job_id = ?1 AND operation = 'delete' \
+             AND workspace_id = ?2 AND target_path = ?3 AND content_sha256 = ?4 \
+             AND status = 'pending'",
+            params![
+                binary_delete_job_id(&delete_moment_id),
+                workspace_id,
+                path,
+                sha256
+            ],
+        )
+        .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
+        journal_moment_outbound_in_tx(tx, workspace_id, &restore_moment_id, false)?;
+        let materializes: bool = tx
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM materialization_jobs WHERE job_id = ?1)",
+                [&restore_moment_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+        if materializes {
+            jobs.push(restore_moment_id);
+        }
+    }
+    consume_scene_asset_delete_authority_in_tx(
+        tx,
+        workspace_id,
+        version_id,
+        drawing_delete_moment_id,
+        drawing_object_id,
+    )?;
+    Ok(jobs)
+}
+
+fn materialize_restored_scene_assets(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    workspace_id: &str,
+    job_ids: &[String],
+    self_writes: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+) -> PostCommitMaterializeOutcome {
+    let mut outcome = PostCommitMaterializeOutcome::Applied;
+    for job_id in job_ids {
+        let Some(job) = store.load_materialization_job(job_id).ok().flatten() else {
+            return PostCommitMaterializeOutcome::Error;
+        };
+        let current = match job.status {
+            JobStatus::Complete => PostCommitMaterializeOutcome::Applied,
+            JobStatus::Pending => {
+                materialize_pending_job(
+                    store,
+                    root_dir,
+                    workspace_id,
+                    &job,
+                    self_writes,
+                    job.created_at_ms,
+                    faults,
+                )
+                .1
+            }
+            JobStatus::Conflict | JobStatus::Cancelled => PostCommitMaterializeOutcome::Conflict,
+        };
+        outcome = worse_materialize_outcome(outcome, current);
+    }
+    outcome
+}
+
+fn worse_materialize_outcome(
+    left: PostCommitMaterializeOutcome,
+    right: PostCommitMaterializeOutcome,
+) -> PostCommitMaterializeOutcome {
+    if materialize_outcome_severity(right) > materialize_outcome_severity(left) {
+        right
+    } else {
+        left
+    }
+}
+
+const fn materialize_outcome_severity(outcome: PostCommitMaterializeOutcome) -> u8 {
+    match outcome {
+        PostCommitMaterializeOutcome::Applied => 0,
+        PostCommitMaterializeOutcome::Superseded => 1,
+        PostCommitMaterializeOutcome::Skipped => 2,
+        PostCommitMaterializeOutcome::Conflict => 3,
+        PostCommitMaterializeOutcome::Error => 4,
+    }
+}
+
+fn restored_scene_asset_jobs_on_store(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    drawing_delete_moment_id: &str,
+    rollback_moment_id: &str,
+) -> Result<Vec<String>, DomainError> {
+    store.read_with(|conn| {
+        let mut statement = conn
+            .prepare(
+                "SELECT moment_id,object_id,path,after_binary_sha256 FROM moments WHERE workspace_id=?1 \
+                 AND version_id=?2 AND object_id LIKE 'scene-asset-rollback-object-%' \
+                 AND operation='write' AND after_content_kind='binary' \
+                 AND metadata_origin='ydoc' AND metadata_correlation_id=?3 ORDER BY path",
+            )
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+        let rows = statement
+            .query_map(
+                params![workspace_id, version_id, rollback_moment_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+        let restores = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+        let mut jobs = Vec::with_capacity(restores.len());
+        for (actual_restore_moment_id, actual_restore_object_id, path, sha256) in restores {
+            let delete_moment_id = dohc_engine_collab::scene_asset_delete_moment_id(
+                workspace_id,
+                version_id,
+                drawing_delete_moment_id,
+                &path,
+            );
+            let restore_moment_id = scene_asset_restore_moment_id(
+                workspace_id,
+                version_id,
+                rollback_moment_id,
+                &delete_moment_id,
+            );
+            let identity = scene_asset_restore_identity(
+                workspace_id,
+                version_id,
+                rollback_moment_id,
+                &delete_moment_id,
+            );
+            let restore_object_id = format!(
+                "scene-asset-rollback-object-{}",
+                hex_sha256(format!("{identity}\0{path}").as_bytes())
+            );
+            if actual_restore_moment_id != restore_moment_id
+                || actual_restore_object_id != restore_object_id
+            {
+                continue;
+            }
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM moments m \
+                     JOIN materialization_jobs j ON j.workspace_id = m.workspace_id \
+                       AND j.job_id = m.moment_id \
+                     WHERE m.workspace_id = ?1 AND m.version_id = ?2 \
+                       AND m.moment_id = ?3 AND m.metadata_correlation_id = ?4 \
+                       AND m.operation = 'write' AND m.after_content_kind = 'binary' \
+                       AND m.metadata_origin = 'ydoc' AND m.path = ?5 \
+                       AND m.after_binary_sha256 = ?6 AND j.operation = 'write' \
+                       AND j.target_path = ?5 AND j.content_sha256 = ?6)",
+                    params![
+                        workspace_id,
+                        version_id,
+                        restore_moment_id,
+                        rollback_moment_id,
+                        path,
+                        sha256
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(|error| DomainError::Storage(StorageError::corrupt_public(error)))?;
+            if exists {
+                jobs.push(restore_moment_id);
+            }
+        }
+        jobs.sort();
+        Ok(jobs)
     })
 }
 
@@ -10933,6 +12569,8 @@ fn capture_secret_retire_on_store(
 fn capture_retire_on_store(
     store: &mut EngineStore,
     input: &CaptureRetire,
+    root_dir: Option<&std::path::Path>,
+    self_writes: Option<&dyn SelfWriteRecorder>,
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
@@ -10952,6 +12590,7 @@ fn capture_retire_on_store(
     }
     let outcome = store.write_with(faults, |tx| {
         let result = capture_retire_in_tx(tx, input).map_err(RuntimeError::from)?;
+        let mut asset_jobs = Vec::new();
         if !result.deduped
             && let Some(retired) = result.retired.as_ref()
         {
@@ -10974,27 +12613,50 @@ fn capture_retire_on_store(
                 &retired.object.object_id,
             )
             .map_err(RuntimeError::from)?;
-            dohc_engine_sync::retire_ydoc_lineage_in_tx(
-                tx,
-                &input.workspace_id,
-                &input.version_id,
-                &retired.object.object_id,
-            )
-            .map_err(RuntimeError::from)?;
         }
         if let Some(retired) = result.retired.as_ref() {
-            journal_moment_outbound_in_tx(
-                tx,
-                &input.workspace_id,
-                &retired.moment.moment_id,
-                result.deduped || retired.deduped,
-            )
-            .map_err(RuntimeError::from)?;
+            if !result.deduped && !retired.deduped {
+                journal_moment_outbound_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &retired.moment.moment_id,
+                    false,
+                )
+                .map_err(RuntimeError::from)?;
+                asset_jobs = delete_owned_scene_assets_in_tx(tx, retired)?;
+                dohc_engine_sync::retire_ydoc_lineage_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &input.version_id,
+                    &retired.object.object_id,
+                )
+                .map_err(RuntimeError::from)?;
+            } else {
+                journal_moment_outbound_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &retired.moment.moment_id,
+                    true,
+                )
+                .map_err(RuntimeError::from)?;
+            }
         }
-        Ok::<_, RuntimeError>(result)
+        Ok::<_, RuntimeError>((result, asset_jobs))
     })?;
     match outcome {
-        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Committed((result, asset_jobs)) => {
+            if let (Some(root_dir), Some(self_writes)) = (root_dir, self_writes) {
+                materialize_scene_asset_deletes(
+                    store,
+                    root_dir,
+                    &input.workspace_id,
+                    &asset_jobs,
+                    self_writes,
+                    faults,
+                );
+            }
+            Ok(result)
+        }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
 }
@@ -11172,4 +12834,378 @@ fn snapshot(store: &EngineStore) -> Result<StoreSnapshot, StorageError> {
         request_ledger: store.request_ledger_len()?,
         migration_ledger: store.migration_ledger_len()?,
     })
+}
+
+#[cfg(test)]
+mod scene_seed_transaction_tests {
+    use super::*;
+    use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+
+    #[test]
+    fn scene_seed_asset_records_use_the_canonical_scene_encoding() {
+        let records = scene_asset_records(&[SceneSeedAsset {
+            descriptor: ArtifactAssetDescriptor {
+                id: "image-file".to_owned(),
+                mime_type: "image/png".to_owned(),
+                created: 12,
+                path: "assets/excalidraw/owner/hash.png".to_owned(),
+                sha256: "a".repeat(64),
+                last_retrieved: Some(13),
+                version: Some(2),
+            },
+            bytes: Vec::new(),
+            object_id: "asset-object".to_owned(),
+            moment_id: "asset-moment".to_owned(),
+        }])
+        .expect("encode asset record");
+
+        assert_eq!(
+            records.get("image-file").map(String::as_str),
+            Some(
+                r#"{"created":12,"id":"image-file","lastRetrieved":13,"mimeType":"image/png","ref":"assets/excalidraw/owner/hash.png","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":2}"#
+            )
+        );
+        encode_scene_asset_records(&records).expect("canonical record remains codec-valid");
+    }
+
+    #[test]
+    fn scene_asset_validation_keeps_projection_limit_measurements() {
+        let error =
+            map_scene_asset_validation_error(dohc_engine_sync::SyncError::ProjectionTooLarge {
+                constraint: "MAX_PROJECTION_BYTES",
+                actual_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES + 1,
+                limit_bytes: dohc_engine_collab::limits::MAX_PROJECTION_BYTES,
+            });
+
+        assert!(matches!(
+            error,
+            RuntimeError::Sync(dohc_engine_sync::SyncError::ProjectionTooLarge {
+                constraint: "MAX_PROJECTION_BYTES",
+                actual_bytes,
+                limit_bytes,
+            }) if actual_bytes == limit_bytes + 1
+        ));
+    }
+
+    #[test]
+    fn scene_asset_validation_preserves_storage_and_crash_failures() {
+        let storage = map_scene_asset_validation_error(dohc_engine_sync::SyncError::Storage(
+            StorageError::StateCorrupt { source: None },
+        ));
+        assert_eq!(storage.code(), "state-corrupt");
+        assert!(matches!(
+            storage,
+            RuntimeError::Storage(StorageError::StateCorrupt { .. })
+        ));
+
+        let crash = map_scene_asset_validation_error(dohc_engine_sync::SyncError::FaultCrash);
+        assert_eq!(crash.code(), "operation-crashed");
+        assert!(matches!(crash, RuntimeError::OperationCrashed));
+    }
+
+    #[test]
+    fn scene_asset_validation_keeps_asset_state_taxonomy() {
+        assert!(matches!(
+            map_scene_asset_validation_error(dohc_engine_sync::SyncError::RetryableState {
+                reason: "asset pending",
+            }),
+            RuntimeError::YdocArtifactAssetsPending
+        ));
+        assert!(matches!(
+            map_scene_asset_validation_error(dohc_engine_sync::SyncError::InvalidInput {
+                reason: "asset invalid",
+            }),
+            RuntimeError::YdocArtifactAssetsInvalid
+        ));
+    }
+
+    #[test]
+    fn restored_asset_outcomes_keep_the_worst_failure_in_any_order() {
+        for outcomes in [
+            [
+                PostCommitMaterializeOutcome::Conflict,
+                PostCommitMaterializeOutcome::Skipped,
+            ],
+            [
+                PostCommitMaterializeOutcome::Skipped,
+                PostCommitMaterializeOutcome::Conflict,
+            ],
+        ] {
+            assert_eq!(
+                outcomes.into_iter().fold(
+                    PostCommitMaterializeOutcome::Applied,
+                    worse_materialize_outcome,
+                ),
+                PostCommitMaterializeOutcome::Conflict
+            );
+        }
+        assert_eq!(
+            [
+                PostCommitMaterializeOutcome::Error,
+                PostCommitMaterializeOutcome::Skipped,
+                PostCommitMaterializeOutcome::Conflict,
+            ]
+            .into_iter()
+            .fold(
+                PostCommitMaterializeOutcome::Applied,
+                worse_materialize_outcome,
+            ),
+            PostCommitMaterializeOutcome::Error
+        );
+    }
+
+    #[test]
+    fn scene_seed_rolls_back_lineage_assets_and_outbound_work_as_one_unit() {
+        let scratch = ScratchDir::new().expect("scratch directory");
+        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
+            .expect("open engine store");
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
+            .expect("ensure main version");
+        let key = DocKey::new("workspace", "main", "drawing-object").expect("document key");
+        let artifact = serde_json::json!({
+            "type": "excalidraw",
+            "version": 2,
+            "source": "https://excalidraw.com",
+            "elements": [{
+                "id": "image-element",
+                "type": "image",
+                "x": 0,
+                "y": 0,
+                "width": 10,
+                "height": 10,
+                "angle": 0,
+                "strokeColor": "transparent",
+                "backgroundColor": "transparent",
+                "fillStyle": "solid",
+                "strokeWidth": 1,
+                "strokeStyle": "solid",
+                "roughness": 0,
+                "opacity": 100,
+                "groupIds": [],
+                "frameId": null,
+                "index": "a0",
+                "roundness": null,
+                "seed": 1,
+                "version": 1,
+                "versionNonce": 1,
+                "isDeleted": false,
+                "boundElements": null,
+                "updated": 1,
+                "link": null,
+                "locked": false,
+                "status": "saved",
+                "fileId": "image-file",
+                "scale": [1, 1],
+                "crop": null
+            }],
+            "appState": {},
+            "files": {
+                "image-file": {
+                    "id": "image-file",
+                    "mimeType": "image/png",
+                    "created": 1,
+                    "dataURL": "data:image/png;base64,AQIDBA=="
+                }
+            }
+        })
+        .to_string();
+        let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
+
+        let result = seed_scene_from_artifact_on_store(
+            &mut store,
+            &key,
+            "drawing.excalidraw",
+            &artifact,
+            "drawing-write",
+            2,
+            faults.as_ref(),
+        );
+        assert!(matches!(result, Err(RuntimeError::OperationCrashed)));
+        assert!(faults.fired());
+
+        store
+            .read_with(|conn| {
+                for table in [
+                    "ydoc_docs",
+                    "ydoc_updates",
+                    "snapshots",
+                    "moments",
+                    "materialization_jobs",
+                    "replication_log",
+                ] {
+                    let count: i64 = conn
+                        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                            row.get(0)
+                        })
+                        .map_err(StorageError::corrupt_public)?;
+                    assert_eq!(count, 0, "{table} must roll back with the scene seed");
+                }
+                Ok::<_, StorageError>(())
+            })
+            .expect("inspect rolled-back transaction");
+    }
+
+    #[test]
+    fn duplicate_content_scene_assets_return_only_created_jobs() {
+        let scratch = ScratchDir::new().expect("scratch directory");
+        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
+            .expect("open engine store");
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
+            .expect("ensure main version");
+        let key = DocKey::new("workspace", "main", "drawing-object").expect("document key");
+        // Two file ids with IDENTICAL bytes and mime type resolve to one
+        // content-addressed path. Counting the skipped duplicate as a
+        // materialization job would reject the first open as
+        // ydoc-artifact-assets-pending forever.
+        let artifact = serde_json::json!({
+            "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+            "elements": [
+                {
+                    "id": "first-image", "type": "image", "version": 1,
+                    "versionNonce": 1, "isDeleted": false, "index": "a0",
+                    "fileId": "image-a"
+                },
+                {
+                    "id": "second-image", "type": "image", "version": 1,
+                    "versionNonce": 2, "isDeleted": false, "index": "a1",
+                    "fileId": "image-b"
+                }
+            ],
+            "appState": {},
+            "files": {
+                "image-a": {
+                    "id": "image-a", "mimeType": "image/png", "created": 1,
+                    "dataURL": "data:image/png;base64,AQIDBA=="
+                },
+                "image-b": {
+                    "id": "image-b", "mimeType": "image/png", "created": 2,
+                    "dataURL": "data:image/png;base64,AQIDBA=="
+                }
+            }
+        })
+        .to_string();
+        let jobs = seed_scene_from_artifact_on_store(
+            &mut store,
+            &key,
+            "drawing.excalidraw",
+            &artifact,
+            "drawing-write",
+            2,
+            &NoFaults,
+        )
+        .expect("seed scene");
+        // Every returned moment id must name a job that actually exists.
+        for job_id in &jobs {
+            assert!(
+                store
+                    .load_materialization_job(job_id)
+                    .expect("load job")
+                    .is_some(),
+                "returned moment id {job_id} has no materialization job",
+            );
+        }
+    }
+
+    #[test]
+    fn scene_asset_materialization_conflict_stays_closed_until_disk_is_resolved() {
+        let scratch = ScratchDir::new().expect("scratch directory");
+        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
+            .expect("open engine store");
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
+            .expect("ensure main version");
+        let key = DocKey::new("workspace", "main", "drawing-object").expect("document key");
+        let artifact = serde_json::json!({
+            "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+            "elements": [{
+                "id": "image-element", "type": "image", "version": 1,
+                "versionNonce": 1, "isDeleted": false, "index": "a0",
+                "fileId": "image-file"
+            }],
+            "appState": {},
+            "files": {
+                "image-file": {
+                    "id": "image-file", "mimeType": "image/png", "created": 1,
+                    "dataURL": "data:image/png;base64,AQIDBA=="
+                }
+            }
+        })
+        .to_string();
+        let jobs = seed_scene_from_artifact_on_store(
+            &mut store,
+            &key,
+            "drawing.excalidraw",
+            &artifact,
+            "drawing-write",
+            2,
+            &NoFaults,
+        )
+        .expect("seed scene");
+        let selected: HashSet<String> = jobs.into_iter().collect();
+        let job = store
+            .load_materialization_job(selected.iter().next().expect("job id"))
+            .expect("load job")
+            .expect("seed materialization job");
+        let target = scratch.path().join(&job.target_path);
+        std::fs::create_dir_all(target.parent().expect("asset parent")).expect("create parent");
+        std::fs::write(&target, b"foreign bytes").expect("write conflict");
+
+        let first = replay_pending_materializations(
+            &mut store,
+            scratch.path(),
+            MaterializationReplayScope {
+                workspace_id: "workspace",
+                self_writes: None,
+            },
+            3,
+            &NoFaults,
+            Some(&selected),
+            false,
+        )
+        .expect("first replay");
+        assert_eq!(first.failed, 1);
+        assert_eq!(
+            store
+                .load_materialization_job(&job.job_id)
+                .expect("load conflict")
+                .expect("conflict job")
+                .status,
+            JobStatus::Conflict
+        );
+        assert_eq!(
+            reconcile_scene_asset_materialization_conflicts(&store, scratch.path(), &selected, 4)
+                .expect("first refusal"),
+            1
+        );
+        assert_eq!(
+            reconcile_scene_asset_materialization_conflicts(&store, scratch.path(), &selected, 5)
+                .expect("repeated refusal"),
+            1,
+            "repeated opens must not clear a live disk conflict"
+        );
+
+        std::fs::remove_file(&target).expect("remove conflicting disk file");
+        assert_eq!(
+            reconcile_scene_asset_materialization_conflicts(&store, scratch.path(), &selected, 6)
+                .expect("recover conflict"),
+            0
+        );
+        let recovered = replay_pending_materializations(
+            &mut store,
+            scratch.path(),
+            MaterializationReplayScope {
+                workspace_id: "workspace",
+                self_writes: None,
+            },
+            7,
+            &NoFaults,
+            Some(&selected),
+            false,
+        )
+        .expect("recovery replay");
+        assert_eq!(recovered.completed, 1);
+        assert_eq!(
+            std::fs::read(target).expect("materialized asset"),
+            [1, 2, 3, 4]
+        );
+    }
 }

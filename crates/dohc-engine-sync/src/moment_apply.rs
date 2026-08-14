@@ -94,6 +94,7 @@ pub(crate) enum ContentKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MomentMaterializationChange {
+    pub version_id: String,
     pub path: String,
     pub operation: &'static str,
     pub content_kind: &'static str,
@@ -289,6 +290,11 @@ pub(crate) fn stored_materialization_changes(
     values
         .into_iter()
         .map(|value| {
+            let version_id = value
+                .get("versionId")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(SyncError::CoordinateDiverged)?
+                .to_owned();
             let path = value
                 .get("path")
                 .and_then(serde_json::Value::as_str)
@@ -302,9 +308,11 @@ pub(crate) fn stored_materialization_changes(
             let content_kind = match value.get("contentKind").and_then(serde_json::Value::as_str) {
                 Some("text") => "text",
                 Some("binary") => "binary",
+                Some("secret") => "secret",
                 _ => return Err(SyncError::CoordinateDiverged),
             };
             Ok(MomentMaterializationChange {
+                version_id,
                 path,
                 operation,
                 content_kind,
@@ -337,6 +345,7 @@ pub(crate) fn record_materialization_changes(
             .iter()
             .map(|change| {
                 serde_json::json!({
+                    "versionId": change.version_id,
                     "path": change.path,
                     "operation": change.operation,
                     "contentKind": change.content_kind,
@@ -473,7 +482,7 @@ fn apply_moment_append(
         .map_err(|_| SyncError::InvalidInput {
             reason: "moment.append Y.Doc coordinates are invalid",
         })?;
-        if crate::ydoc_apply::ydoc_lineage_has_durable_state_in_tx(tx, &key)? {
+        if crate::ydoc_apply::ydoc_lineage_blocks_absent_delete_in_tx(tx, &key)? {
             return Err(SyncError::RetryableState {
                 reason: "ydoc-lineage-unsettled",
             });
@@ -511,6 +520,9 @@ fn apply_moment_append(
         ensure_file_object(tx, &envelope.workspace_id, payload)?;
         insert_moment(tx, &envelope.workspace_id, payload, &adopted_before, false)?;
         if payload.operation == "delete" {
+            if mode == MomentApplyMode::Ordinary {
+                freeze_incoming_scene_delete_authority(tx, envelope, payload)?;
+            }
             let alias_path = local
                 .as_ref()
                 .map_or(payload.path.as_str(), |snapshot| snapshot.path.as_str());
@@ -546,6 +558,7 @@ fn apply_moment_append(
             )?;
             let materialization_changes = active
                 .then(|| MomentMaterializationChange {
+                    version_id: payload.version_id.clone(),
                     path: payload.path.clone(),
                     operation: "delete",
                     content_kind: after_kind.as_str(),
@@ -634,12 +647,14 @@ fn apply_moment_append(
                 && before_path != payload.payload_after_path
             {
                 materialization_changes.push(MomentMaterializationChange {
+                    version_id: payload.version_id.clone(),
                     path: before_path.to_owned(),
                     operation: "delete",
                     content_kind: after_kind.as_str(),
                 });
             }
             materialization_changes.push(MomentMaterializationChange {
+                version_id: payload.version_id.clone(),
                 path: payload.payload_after_path.clone(),
                 operation: "write",
                 content_kind: after_kind.as_str(),
@@ -739,6 +754,33 @@ fn apply_moment_append(
         conflicts_opened: opened,
         materialization_changes: Vec::new(),
     })
+}
+
+fn freeze_incoming_scene_delete_authority(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    payload: &MomentAppendPayload,
+) -> Result<(), SyncError> {
+    if ContentKind::from_wire(payload.before_content_kind.as_deref()) != ContentKind::Text {
+        return Ok(());
+    }
+    let key = dohc_engine_collab::DocKey::new(
+        &envelope.workspace_id,
+        &payload.version_id,
+        &payload.object_id,
+    )
+    .map_err(|_| SyncError::InvalidInput {
+        reason: "moment.append scene delete identity is invalid",
+    })?;
+    dohc_engine_collab::freeze_scene_asset_delete_authority_in_tx(tx, &key, &payload.moment_id)
+        .map(|_| ())
+        .map_err(|error| match error {
+            dohc_engine_collab::CollabError::Storage(error) => SyncError::Storage(error),
+            dohc_engine_collab::CollabError::MissingDependencies => SyncError::RetryableState {
+                reason: "scene asset authority is waiting for the complete Y.Doc lineage",
+            },
+            _ => SyncError::CoordinateDiverged,
+        })
 }
 
 pub(crate) fn conflict_effect_owner(

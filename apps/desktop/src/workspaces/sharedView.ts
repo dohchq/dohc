@@ -3,7 +3,12 @@ import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promise
 import { dirname, resolve, sep } from "node:path";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
-import { isValidShareVersionId } from "@dohc/security-contract/share-selector";
+import {
+  isShareAccessValue,
+  isShareablePathList,
+  isValidShareVersionId,
+} from "@dohc/security-contract/share-selector";
+import type { ShareViewSelector } from "./shareViewInfo";
 import {
   ShareUnavailableError,
   type PullShareViewResult,
@@ -32,17 +37,6 @@ export interface RefreshSharedViewOutcome {
 }
 
 /**
- * The selector the RELAY stated for a share, pinned locally the first time
- * this client could read it and enforced against every later pull (trust on
- * first use). The user never sees or chooses this scope — pinning only stops
- * the relay from restating a wider one on a later pull.
- */
-export interface PinnedShareSelector {
-  paths: string[];
-  versionId: string | null;
-}
-
-/**
  * Raised when a share record carries no readable pinned selector, so the
  * refresh did NOT pull.
  *
@@ -68,16 +62,25 @@ export class SharePinInvalidError extends Error {
  * defensively, against the relay's OWN rules for the selector it issued.
  * Anything the relay could not have issued is damage and reads as null, which
  * fails the refresh closed rather than reaching the engine.
+ *
+ * The user never sees or chooses this scope. Pinning only stops the relay
+ * from restating a wider one on a later pull.
  */
 export function recordedShareSelector(
   value: unknown,
-): PinnedShareSelector | null {
+): ShareViewSelector | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
-  const candidate = value as { paths?: unknown; versionId?: unknown };
+  const candidate = value as {
+    paths?: unknown;
+    versionId?: unknown;
+    access?: unknown;
+  };
   if (!Array.isArray(candidate.paths)) return null;
-  if (!candidate.paths.every((path) => typeof path === "string")) return null;
+  // One rule, one place: a path the relay could not have issued (empty,
+  // unnormalized, untracked, secret) must not read back as a granted one.
+  if (!isShareablePathList(candidate.paths)) return null;
   // The version dimension decides whether a no-paths selector grants the whole
   // tracked workspace, so a version id the relay could not have issued ("",
   // " v1", or an unbounded one) must never read as one. Same rule, same place,
@@ -89,11 +92,16 @@ export function recordedShareSelector(
   // to create a selector with neither a path nor a version, and
   // `pathVisibleThroughShare` serves nothing through one.
   if (candidate.paths.length === 0 && candidate.versionId === null) return null;
+  // The level is part of the pin (#646). A record whose level the relay could
+  // not have issued is damaged the same way a bad version id is, and the
+  // refresh fails closed rather than pulling at a level nobody granted.
+  if (!isShareAccessValue(candidate.access)) return null;
   return {
     paths: [...(candidate.paths as string[])],
     versionId: isValidShareVersionId(candidate.versionId)
       ? candidate.versionId
       : null,
+    access: candidate.access,
   };
 }
 
@@ -317,7 +325,7 @@ export async function refreshSharedViewOnce(input: {
     workspaceId: string;
     relay: SyncRelayConnection;
     shareId: string;
-    grantedSelector: PinnedShareSelector;
+    grantedSelector: ShareViewSelector;
     recordRefusals: (refusals: ShareViewRefusal[]) => Promise<void>;
   }) => Promise<PullShareViewResult>;
   // Required at the factory boundary for the same reason: every rooted caller

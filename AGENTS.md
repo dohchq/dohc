@@ -99,6 +99,21 @@ material tradeoffs in the PR or a decision document.
 Push back when you see a more obvious way. Obvious solutions are the defaults
 that agents and the next reader expect. Ask another reader when uncertain.
 
+### Ambitious ideas, simple systems
+
+I like ambitious ideas, simple systems, and software that feels obvious. This
+does not fight "boil the ocean" — that section is about what we dare to build,
+this one is about how we build it.
+
+Do not preserve complexity just because it already exists. Do not introduce
+machinery because it looks architecturally impressive. Understand the real
+constraint, then fight for the smallest model that makes the correct behavior
+unsurprising.
+
+Hold "measure twice, cut once" and "yagni" at the same time. Fight scope
+creep. Honor the developer's intent in the most minimal and realistic way that
+still delivers it.
+
 ### Don't be afraid to lie (to agents) if it makes working easier
 
 This might seem counter-intuitive, so hear me out.
@@ -405,7 +420,11 @@ These are meant to steer us in the right direction. They are not hard-set, but w
 
 - After a PR is merged, delete its remote branch from GitHub unless the user
   explicitly asks to keep it or another open PR still depends on it. Verify the
-  remote ref is gone. Do not delete the local branch or worktree unless asked.
+  remote ref is gone. Do not delete the local branch unless asked.
+- After a PR is merged or its task is abandoned, delete the worktree you or
+  your campaign created for it, then run `git worktree prune`. Stale worktrees
+  keep multi-gigabyte build artifacts. Never delete the main tree, a worktree
+  you did not create, or a worktree another session still uses.
 - Never stop a process by name, command-line pattern, or worktree path. Stop
   only a PID this task started. Verify a port owner's working directory before
   stopping it.

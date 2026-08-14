@@ -68,13 +68,15 @@ fn seed_divergent_base(
         workspace_id: WS.to_owned(),
         origin_id: "winner-origin".to_owned(),
         origin_seq: 0,
+        relay_seq: Some(0),
         op_kind: "ydoc.update".to_owned(),
         payload: serde_json::json!({
             "versionId": "main",
             "objectId": "object-plan",
             "path": PATH,
             "contentKind": "plaintext",
-            "updateBlobSha256": winner_sha,
+            "updateBlobSha256": winner_sha.clone(),
+            "lineageClaimId": winner_sha.clone(),
             "isBaseState": true
         }),
         recorded_at_ms: 3,
@@ -115,7 +117,7 @@ async fn an_open_base_conflict_freezes_the_settle() {
     // projection.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
-    let (key, _winner_base, _winner_doc, _conflict_id) = {
+    let (key, winner_base, _winner_doc, _conflict_id) = {
         let mut store = EngineStore::open(&db, 1).expect("open store");
         seed_divergent_base(&mut store)
     };
@@ -124,12 +126,14 @@ async fn an_open_base_conflict_freezes_the_settle() {
 
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 5).expect("open actor").actor;
+    let lineage_claim_id = dohc_engine_storage::hex_sha256(&winner_base);
     let refused = handle
         .ydoc_settle(
             scratch.path().to_path_buf(),
             key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
+            Some(lineage_claim_id),
             None,
             "freeze-session".to_owned(),
             Arc::new(NoRecorder),
@@ -250,7 +254,7 @@ async fn positioned_keep_current_rotates_the_lineage_and_journals_one_compound_r
         .doc
         .project(ContentKind::Plaintext)
         .expect("project successor");
-    assert_eq!(projection.markdown, "local truth");
+    assert_eq!(projection.content, "local truth");
 
     let (local_ops, inactive, pending, dead_resolve): (
         Vec<(i64, String, serde_json::Value)>,
@@ -386,12 +390,27 @@ async fn a_pending_resolution_job_replays_before_the_next_settle() {
         "local truth"
     );
 
+    let state = handle
+        .ydoc_open_state(
+            WS.to_owned(),
+            12,
+            false,
+            None,
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("resolved lineage state");
+
     handle
         .ydoc_settle(
             scratch.path().to_path_buf(),
             key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
+            state.lineage_claim_id,
             None,
             "replay-session".to_owned(),
             Arc::new(NoRecorder),
@@ -525,7 +544,7 @@ async fn a_resolution_fold_self_bounds_the_update_log() {
     let db = scratch.engine_db_path().expect("db");
     let (_key, winner_doc, conflict_id) = {
         let mut store = EngineStore::open(&db, 1).expect("open store");
-        let (key, _winner_base, winner_doc, conflict_id) = seed_divergent_base(&mut store);
+        let (key, winner_base, winner_doc, conflict_id) = seed_divergent_base(&mut store);
         // One short of DEFAULT_COMPACTION_THRESHOLD, so the applies' own
         // self-bounding stays quiet and the FOLD's append is the row that
         // crosses the line.
@@ -536,6 +555,7 @@ async fn a_resolution_fold_self_bounds_the_update_log() {
                 workspace_id: WS.to_owned(),
                 origin_id: "winner-origin".to_owned(),
                 origin_seq: seq + 1,
+                relay_seq: Some(seq + 1),
                 op_kind: "ydoc.update".to_owned(),
                 payload: serde_json::json!({
                     "versionId": "main",
@@ -543,6 +563,7 @@ async fn a_resolution_fold_self_bounds_the_update_log() {
                     "path": PATH,
                     "contentKind": "plaintext",
                     "updateBlobSha256": delta_sha,
+                    "lineageClaimId": dohc_engine_storage::hex_sha256(&winner_base),
                     "isBaseState": false
                 }),
                 recorded_at_ms: 100 + seq,
@@ -1014,7 +1035,7 @@ async fn a_reviewed_deletion_retires_the_lineage_instead_of_being_reversed() {
         archived
             .project(ContentKind::Plaintext)
             .expect("project archived predecessor")
-            .markdown,
+            .content,
         "remote truth"
     );
 }
@@ -1216,7 +1237,7 @@ async fn moved_text_and_binary_results_archive_the_full_predecessor_without_a_su
             archived
                 .project(ContentKind::Plaintext)
                 .expect("project predecessor")
-                .markdown,
+                .content,
             "remote truth"
         );
     }

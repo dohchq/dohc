@@ -29,6 +29,9 @@ pub(crate) fn redelivered_materialization_changes(
         "conflict.resolve" => {
             crate::conflict_apply::redelivered_materialization_changes(store, envelope)
         }
+        "secret.file.put" | "secret.file.delete" | "secret.version.fork" => {
+            crate::secret_apply::redelivered_materialization_changes(store, envelope)
+        }
         _ => Ok(Vec::new()),
     }
 }
@@ -113,7 +116,13 @@ pub fn apply_replication_envelope(
     };
     match route {
         OwnedRoute::Chat => plain(crate::apply_chat_envelope(store, envelope, faults)),
-        OwnedRoute::Secret => plain(crate::apply_secret_envelope(store, envelope, faults)),
+        OwnedRoute::Secret => map_applied(
+            crate::secret_apply::apply_secret_envelope_detailed(store, envelope, faults),
+            |secret| RoutedApply {
+                materialization_changes: secret.materialization_changes,
+                ..RoutedApply::default()
+            },
+        ),
         OwnedRoute::Ydoc => map_applied(
             crate::apply_ydoc_envelope(store, envelope, faults, leases),
             |ydoc| RoutedApply {

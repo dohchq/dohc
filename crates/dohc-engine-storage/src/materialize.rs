@@ -415,6 +415,19 @@ pub fn mark_conflict(conn: &Connection, job_id: &str, now_ms: i64) -> Result<(),
     set_status(conn, job_id, JobStatus::Conflict, now_ms)
 }
 
+/// Requeue a conflict after the caller has proved that its conflicting disk
+/// preimage is gone. The status predicate prevents an older recovery attempt
+/// from reviving a job that another writer already completed or cancelled.
+pub fn requeue_conflict(conn: &Connection, job_id: &str) -> Result<bool, StorageError> {
+    conn.execute(
+        "UPDATE materialization_jobs SET status = 'pending', completed_at_ms = NULL \
+         WHERE job_id = ?1 AND status = 'conflict'",
+        [job_id],
+    )
+    .map(|changed| changed == 1)
+    .map_err(StorageError::persist)
+}
+
 /// The number of pending jobs (cheap gauge for tests / startup logging).
 pub fn pending_job_count(conn: &Connection) -> Result<i64, StorageError> {
     conn.query_row(

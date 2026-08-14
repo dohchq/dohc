@@ -47,7 +47,10 @@ import {
 } from "./shareSkipNotice";
 import { buildChatCollaboration } from "./collab/chatCollaboration";
 import type { SearchResultsEventEntry } from "../ipc/channels";
-import { rendererMarks } from "../performance/rendererMarks";
+import {
+  fileOpenStartMark,
+  rendererMarks,
+} from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import { useSnapshotLane } from "./snapshotLane";
 import { momentDiffSides } from "./workbench/momentDiffSides";
@@ -150,9 +153,12 @@ import {
   isHistoryDiffTabPath,
   isHistoryTabPath,
   isPluginPanelTabPath,
+  isSingletonEditorTabPath,
   isSiteTabPath,
   isVirtualTabPath,
+  MAX_OPEN_TABS,
   moveTab,
+  moveTabToGroup,
   openTab,
   resizeEditorGroups,
   moveTabToNewGroup,
@@ -185,8 +191,99 @@ import {
 // refuses every write to the reserved prefix regardless — but it uses the
 // same alias-normalizing predicate as main so a case-variant path arriving
 // from an agent/open flow ("Shared-With-Me/…") renders read-only too.
+// What a removed mount does to path-keyed UI state.
+//
+// A folder that went takes its tabs, pins and drafts with it — the same
+// reprojection an Explorer folder delete makes. A folder that STAYED must
+// take nothing: record cleanup left the files exactly where they were, and
+// projecting a delete over them would discard state for files the user still
+// has open.
+export function shareUnmountProjection(input: {
+  shareId: string;
+  label: string;
+  folderLeft: boolean;
+}): Array<{ id: string; kind: "delete-folder"; path: string }> {
+  if (input.folderLeft) return [];
+  return [
+    {
+      id: `unmount-${input.shareId}`,
+      kind: "delete-folder",
+      path: `shared-with-me/${input.label}`,
+    },
+  ];
+}
+
+// Which vanished mounts reproject, given the ones whose FOLDER stayed.
+//
+// Both removal surfaces land here: the Explorer's own unmount records the
+// share id before it reloads, and the Settings list reports its id through
+// the files-changed callback. Either way the rule is the same one, and a
+// share whose folder stayed projects nothing. Consuming the id keeps a later
+// unrelated reload from reading a stale exemption.
+export function goneMountProjections(input: {
+  previous: ReadonlyArray<{ shareId: string; label: string }>;
+  next: ReadonlyArray<{ shareId: string }>;
+  foldersLeftBehind: Set<string>;
+}): Array<{ id: string; kind: "delete-folder"; path: string }> {
+  return input.previous
+    .filter(
+      (mount) => !input.next.some((candidate) => candidate.shareId === mount.shareId),
+    )
+    .flatMap((mount) =>
+      shareUnmountProjection({
+        shareId: mount.shareId,
+        label: mount.label,
+        folderLeft: input.foldersLeftBehind.delete(mount.shareId),
+      }),
+    );
+}
+
+// The one closing line a manual "Refresh shares" leaves behind.
+//
+// ONE line, because a second call replaces the first: damage reported before
+// the summary was overwritten by it, and the user saw only "Shares
+// refreshed", which is exactly the wrong half. Damage is carried INTO the
+// summary, and the instruction that fixes it survives.
+export function shareRefreshSummary(
+  results: ReadonlyArray<{
+    label: string;
+    status: "updated" | "unchanged" | "ended" | "damaged";
+    changedPaths: number;
+  }>,
+): string {
+  if (results.length === 0) return "No shares are added to this workspace.";
+  const changed = results.reduce((sum, row) => sum + row.changedPaths, 0);
+  const ended = results.filter((row) => row.status === "ended");
+  const damaged = results.filter((row) => row.status === "damaged");
+  const refreshed = `Shares refreshed — ${changed} ${
+    changed === 1 ? "file" : "files"
+  } updated${
+    ended.length > 0 ? `; ${ended.map((row) => row.label).join(", ")} ended` : ""
+  }.`;
+  if (damaged.length === 0) return refreshed;
+  return `${refreshed} dohc can't read what ${damaged
+    .map((row) => row.label)
+    .join(", ")} ${damaged.length === 1 ? "grants" : "grant"}. Remove ${
+    damaged.length === 1 ? "it" : "them"
+  } and add ${damaged.length === 1 ? "the share" : "those shares"} again.`;
+}
+
 function isMountedSharePath(path: string | null): boolean {
   return !!path && isSharedWithMePath(path);
+}
+
+function groupsMountingNewDocument(
+  current: WorkbenchState,
+  next: WorkbenchState,
+): string[] {
+  return next.editorGroups.flatMap((after) => {
+    const before = current.editorGroups.find((group) => group.id === after.id);
+    return after.activeTab !== before?.activeTab &&
+      after.activeTab !== null &&
+      !isVirtualTabPath(after.activeTab)
+      ? [after.id]
+      : [];
+  });
 }
 
 function chatsDestinationKey(nav: ChatsNav | null): string {
@@ -578,17 +675,23 @@ function ancestorDirs(path: string): string[] {
   return segments.slice(0, -1).map((_, i) => segments.slice(0, i + 1).join("/"));
 }
 
-function uniqueUntitledTextPath(
+function uniqueUntitledPath(
   files: WorkspaceFileEntry[],
   folders: string[],
+  extension: string,
 ): string {
-  const occupied = new Set([...files.map((file) => file.path), ...folders]);
-  if (!occupied.has("Untitled.txt")) return "Untitled.txt";
+  const occupied = new Set(
+    [...files.map((file) => file.path), ...folders].map((path) =>
+      path.toLowerCase(),
+    ),
+  );
+  const base = `Untitled.${extension}`;
+  if (!occupied.has(base.toLowerCase())) return base;
   for (let index = 2; index < 10_000; index += 1) {
-    const candidate = `Untitled ${index}.txt`;
-    if (!occupied.has(candidate)) return candidate;
+    const candidate = `Untitled ${index}.${extension}`;
+    if (!occupied.has(candidate.toLowerCase())) return candidate;
   }
-  return `Untitled ${Date.now()}.txt`;
+  return `Untitled ${Date.now()}.${extension}`;
 }
 
 function isEditableShortcutTarget(target: EventTarget | null) {
@@ -632,6 +735,24 @@ type EditorRegistrationCallbacks = {
   registerSourceToggle: (toggle: (() => void) | null) => void;
   registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
 };
+
+type EditorFocus = {
+  groupId: string;
+  tab: WorkbenchTab | null;
+};
+
+function editorFocus(state: WorkbenchState): EditorFocus {
+  const group = activeGroup(state);
+  return {
+    groupId: group.id,
+    tab: group.tabs.find((tab) => tab.path === group.activeTab) ?? null,
+  };
+}
+
+function hasEditorFocus(state: WorkbenchState, focus: EditorFocus): boolean {
+  const current = editorFocus(state);
+  return current.groupId === focus.groupId && current.tab === focus.tab;
+}
 
 // Engine history diff page (PR 0M-5, flagged workspaces): one MOMENT's
 // before/after through the shared unified-diff rendering, with engine-routed
@@ -1285,7 +1406,42 @@ export function DesktopWorkspaceShell(props: {
   const [shellError, setShellError] = useState<{
     message: string;
     retry: (() => void) | null;
+    kind?: "singleton-tab-split" | "tab-limit";
   } | null>(null);
+  const showTabLimitError = useCallback(
+    (
+      openTabCount: number,
+      nextAction: "open this file" | "open another tab" | "create an editor group",
+    ) => {
+      setShellError({
+        message: `This workspace has ${openTabCount} open tabs; the limit is ${MAX_OPEN_TABS}. Close a tab to ${nextAction}.`,
+        retry: null,
+        kind: "tab-limit",
+      });
+    },
+    [],
+  );
+  const clearTabLimitError = useCallback(() => {
+    setShellError((currentError) =>
+      currentError?.kind === "tab-limit" ? null : currentError,
+    );
+  }, []);
+  const showSingletonTabSplitError = useCallback(() => {
+    setShellError({
+      message:
+        "This tab owns its process and cannot be split. Open another tab before you create an editor group.",
+      retry: null,
+      kind: "singleton-tab-split",
+    });
+  }, []);
+  const clearEditorGroupRefusalError = useCallback(() => {
+    setShellError((currentError) =>
+      currentError?.kind === "singleton-tab-split" ||
+      currentError?.kind === "tab-limit"
+        ? null
+        : currentError,
+    );
+  }, []);
   // Inline-create requests routed INTO the explorer (palette/menu/header).
   const [createRequest, setCreateRequest] = useState<{
     kind: "file" | "folder";
@@ -1665,13 +1821,74 @@ export function DesktopWorkspaceShell(props: {
 
   // A clicked search result: open the file AND land at the line. The target
   // is consumed (cleared) by the inspector once a mounted view applied it.
-  const [searchScrollTarget, setSearchScrollTarget] = useState<ScrollTarget | null>(
-    null,
-  );
+  const [searchScrollTarget, setSearchScrollTarget] = useState<
+    (ScrollTarget & { groupId: string }) | null
+  >(null);
   const [headingTarget, setHeadingTarget] = useState<{
+    groupId: string;
     path: string;
     target: HeadingTarget;
   } | null>(null);
+  const fileOpenRequests = useRef({
+    workspaceId,
+    sequenceByGroup: new Map<string, number>(),
+  });
+  if (fileOpenRequests.current.workspaceId !== workspaceId) {
+    fileOpenRequests.current = {
+      workspaceId,
+      sequenceByGroup: new Map<string, number>(),
+    };
+  }
+  const invalidateDeferredFileOpen = useCallback((groupId: string) => {
+    const requests = fileOpenRequests.current;
+    const sequence = (requests.sequenceByGroup.get(groupId) ?? 0) + 1;
+    requests.sequenceByGroup.set(groupId, sequence);
+    setHeadingTarget((current) =>
+      current?.groupId === groupId ? null : current,
+    );
+    setSearchScrollTarget((current) =>
+      current?.groupId === groupId ? null : current,
+    );
+    return sequence;
+  }, []);
+  const invalidateDeferredFileOpenForGroupChange = useCallback(
+    (previousGroupId: string, nextGroupId: string) => {
+      invalidateDeferredFileOpen(previousGroupId);
+      if (nextGroupId !== previousGroupId) {
+        invalidateDeferredFileOpen(nextGroupId);
+      }
+    },
+    [invalidateDeferredFileOpen],
+  );
+  const invalidateDeferredFileOpensForTabTransition = useCallback(
+    (
+      previous: WorkbenchState,
+      next: WorkbenchState,
+      requestSequencesAtIssue: ReadonlyMap<string, number>,
+    ) => {
+      const previousGroups = new Map(
+        previous.editorGroups.map((group) => [group.id, group] as const),
+      );
+      const nextGroups = new Map(
+        next.editorGroups.map((group) => [group.id, group] as const),
+      );
+      for (const groupId of new Set([...previousGroups.keys(), ...nextGroups.keys()])) {
+        const activeDocumentChanged =
+          (previousGroups.get(groupId)?.activeTab ?? null) !==
+          (nextGroups.get(groupId)?.activeTab ?? null);
+        const requestSequenceIsFresh =
+          fileOpenRequests.current.sequenceByGroup.get(groupId) ===
+          requestSequencesAtIssue.get(groupId);
+        if (
+          requestSequenceIsFresh &&
+          (activeDocumentChanged || groupId === previous.activeEditorGroup)
+        ) {
+          invalidateDeferredFileOpen(groupId);
+        }
+      }
+    },
+    [invalidateDeferredFileOpen],
+  );
   const scrollNonce = useRef(0);
   const consumeSearchScrollTarget = useCallback((nonce: number) => {
     setSearchScrollTarget((current) => (current?.nonce === nonce ? null : current));
@@ -1731,11 +1948,17 @@ export function DesktopWorkspaceShell(props: {
     () =>
       bridge().onPluginPanelOpened((event) => {
         if (event.workspaceId !== workspaceId) return;
+        const targetGroupId = wbRef.current.activeEditorGroup;
+        invalidateDeferredFileOpen(targetGroupId);
         mutateWb((state) =>
-          openTab(state, pluginPanelTabPath(event.pluginId, event.panelId)),
+          openTab(
+            state,
+            pluginPanelTabPath(event.pluginId, event.panelId),
+            targetGroupId,
+          ),
         );
       }),
-    [mutateWb, workspaceId],
+    [invalidateDeferredFileOpen, mutateWb, workspaceId],
   );
 
   useEffect(() => {
@@ -1896,6 +2119,7 @@ export function DesktopWorkspaceShell(props: {
     const current = wbRef.current;
     const next = pruneMissingRestoredTabs(current, closable, fileExists);
     if (next === current) return;
+    const groupsOpeningFiles = groupsMountingNewDocument(current, next);
     if (
       next.activeEditorGroup !== current.activeEditorGroup ||
       activeTabPath(next) !== activeTabPath(current)
@@ -1906,13 +2130,12 @@ export function DesktopWorkspaceShell(props: {
       // — otherwise an in-flight DM navigation still passes its isCurrent()
       // check and lands its destination on top of the tab we just activated.
       invalidateDmNavigation(dmNavigationRequest);
-      // Activating a neighbour remounts the keyed inspector — that is an OPEN
-      // (closeFileTab idiom). Without the mark, the inspector's mount measure
-      // brackets whatever stale mark came before it.
-      const nextActiveTab = activeTabPath(next);
-      if (nextActiveTab !== null && !isVirtualTabPath(nextActiveTab)) {
-        rendererMarks.mark("file-open-start");
-      }
+    }
+    // Activating a neighbour remounts the keyed inspector — that is an OPEN
+    // (closeFileTab idiom). Without the mark, the inspector's mount measure
+    // brackets whatever stale mark came before it.
+    for (const groupId of groupsOpeningFiles) {
+      rendererMarks.mark(fileOpenStartMark(groupId));
     }
     setWb((state) => pruneMissingRestoredTabs(state, closable, fileExists));
   }, [
@@ -2576,13 +2799,6 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
-  const openVersionCompareTab = useCallback(
-    (versionId: string) => {
-      mutateWb((state) => openTab(state, versionCompareTabPath(versionId)));
-    },
-    [mutateWb],
-  );
-
   // One import seam for the dialog flow AND the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
   // ImportWorkspaceFilesPayload). targetDir aims the import at a folder ("" /
@@ -2635,7 +2851,17 @@ export function DesktopWorkspaceShell(props: {
   // the mark fires once, OUTSIDE the functional updater — updaters must stay
   // side-effect-free (StrictMode/concurrent replays would re-fire them).
   const openFile = useCallback(
-    (path: string, target?: HeadingTarget) => {
+    (
+      path: string,
+      target?: HeadingTarget,
+      scrollTarget?: Omit<ScrollTarget, "path">,
+    ) => {
+      const targetGroupId = wbRef.current.activeEditorGroup;
+      const requestSequence = invalidateDeferredFileOpen(targetGroupId);
+      const isCurrentRequest = () =>
+        fileOpenRequests.current.workspaceId === workspaceId &&
+        fileOpenRequests.current.sequenceByGroup.get(targetGroupId) ===
+          requestSequence;
       // A heading jump is a destination change mutateWb's tab check cannot
       // see: the file may already BE the active tab, and the user still went
       // somewhere new inside it.
@@ -2643,15 +2869,90 @@ export function DesktopWorkspaceShell(props: {
       // Heading jumps are one open command, never durable tab state. Every
       // ordinary explorer/tab open therefore clears a prior jump before the
       // file can become active again.
-      setHeadingTarget(pendingHeadingTargetForOpen(path, target));
+      const pendingHeading = pendingHeadingTargetForOpen(path, target);
+      setHeadingTarget(
+        pendingHeading ? { ...pendingHeading, groupId: targetGroupId } : null,
+      );
+      setSearchScrollTarget(
+        scrollTarget ? { ...scrollTarget, path, groupId: targetGroupId } : null,
+      );
       if (/\.(md|markdown)$/i.test(path)) preloadMarkdownEditor();
-      if (openTab(wbRef.current, path) !== wbRef.current) {
-        rendererMarks.mark("file-open-start");
+      const commitOpen = () => {
+        if (!isCurrentRequest()) return;
+        const current = wbRef.current;
+        if (!current.editorGroups.some((group) => group.id === targetGroupId)) return;
+        const next = openTab(current, path, targetGroupId);
+        const targetAlreadyOwnsPath = current.editorGroups
+          .find((group) => group.id === targetGroupId)
+          ?.tabs.some((tab) => tab.path === path);
+        if (
+          next === current &&
+          !targetAlreadyOwnsPath &&
+          allTabs(current).length >= MAX_OPEN_TABS
+        ) {
+          showTabLimitError(allTabs(current).length, "open this file");
+          return;
+        }
+        if (next !== current) {
+          rendererMarks.mark(fileOpenStartMark(targetGroupId));
+        }
+        clearTabLimitError();
+        // Every open also records recency (quick-open ranking, Phase E5.0).
+        mutateWb((state) => {
+          const opened = state === current ? next : openTab(state, path, targetGroupId);
+          const rebasedTargetAlreadyOwnsPath = state.editorGroups
+            .find((group) => group.id === targetGroupId)
+            ?.tabs.some((tab) => tab.path === path);
+          if (
+            opened === state &&
+            !rebasedTargetAlreadyOwnsPath &&
+            allTabs(state).length >= MAX_OPEN_TABS
+          ) {
+            return state;
+          }
+          return recordRecentFile(opened, path);
+        });
+      };
+
+      const targetGroup = wbRef.current.editorGroups.find(
+        (group) => group.id === targetGroupId,
+      );
+      const targetAlreadyOwnsPath = targetGroup?.tabs.some(
+        (tab) => tab.path === path,
+      );
+      const needsFlush =
+        !targetAlreadyOwnsPath &&
+        [...mountedEditorsRef.current.entries()].some(
+          ([groupId, registration]) =>
+            groupId !== targetGroupId &&
+            registration.tab.path === path &&
+            registration.flush,
+        );
+      if (!needsFlush) {
+        commitOpen();
+        return;
       }
-      // Every open also records recency (quick-open ranking, Phase E5.0).
-      mutateWb((state) => recordRecentFile(openTab(state, path), path));
+      void flushStableDrafts(
+        (groupId, tab) => groupId !== targetGroupId && tab.path === path,
+      )
+        .then(commitOpen)
+        .catch((error) => {
+          if (!isCurrentRequest()) return;
+          reportShellError(
+            "dohc could not save this file. The file did not open in this editor group.",
+            error,
+          );
+        });
     },
-    [mutateWb],
+    [
+      flushStableDrafts,
+      clearTabLimitError,
+      invalidateDeferredFileOpen,
+      mutateWb,
+      reportShellError,
+      showTabLimitError,
+      workspaceId,
+    ],
   );
   const openPathWithHeading = useCallback(
     (path: string, target?: string | HeadingTarget) => {
@@ -2664,12 +2965,47 @@ export function DesktopWorkspaceShell(props: {
     },
     [openFile],
   );
+  const openVirtualTab = useCallback(
+    (path: string) => {
+      const targetGroupId = wbRef.current.activeEditorGroup;
+      invalidateDeferredFileOpen(targetGroupId);
+      const current = wbRef.current;
+      const next = openTab(current, path, targetGroupId);
+      const targetAlreadyOwnsPath = current.editorGroups
+        .find((group) => group.id === targetGroupId)
+        ?.tabs.some((tab) => tab.path === path);
+      if (
+        next === current &&
+        !targetAlreadyOwnsPath &&
+        allTabs(current).length >= MAX_OPEN_TABS
+      ) {
+        showTabLimitError(allTabs(current).length, "open another tab");
+        return;
+      }
+      clearTabLimitError();
+      mutateWb((state) =>
+        state === current ? next : openTab(state, path, targetGroupId),
+      );
+    },
+    [
+      clearTabLimitError,
+      invalidateDeferredFileOpen,
+      mutateWb,
+      showTabLimitError,
+    ],
+  );
+  const openVersionCompareTab = useCallback(
+    (versionId: string) => {
+      openVirtualTab(versionCompareTabPath(versionId));
+    },
+    [openVirtualTab],
+  );
   const openGraphTab = useCallback(() => {
-    mutateWb((state) => openTab(state, GRAPH_TAB_PATH));
-  }, [mutateWb]);
+    openVirtualTab(GRAPH_TAB_PATH);
+  }, [openVirtualTab]);
   const openHistoryTab = useCallback(() => {
-    mutateWb((state) => openTab(state, HISTORY_TAB_PATH));
-  }, [mutateWb]);
+    openVirtualTab(HISTORY_TAB_PATH);
+  }, [openVirtualTab]);
   // The editor owns the live conversation while the right panel remains a
   // lightweight Slack-style navigator. The ref seeds editor remounts without
   // making draft keystrokes rerender the shell; selectedNav is only updated on
@@ -2724,8 +3060,8 @@ export function DesktopWorkspaceShell(props: {
     chatsDrafts.current = drafts;
   }, []);
   const openChatsTab = useCallback(() => {
-    mutateWb((state) => openTab(state, CHATS_TAB_PATH));
-  }, [mutateWb]);
+    openVirtualTab(CHATS_TAB_PATH);
+  }, [openVirtualTab]);
   const openChatsNavInTab = useCallback(
     (nav: ChatsNav) => {
       // Read before the write: both answers are about the destination the
@@ -2750,9 +3086,9 @@ export function DesktopWorkspaceShell(props: {
       if (shouldRemount) {
         setChatsPageRevision((current) => current + 1);
       }
-      mutateWb((state) => openTab(state, CHATS_TAB_PATH));
+      openVirtualTab(CHATS_TAB_PATH);
     },
-    [mutateWb, setChatsDestination],
+    [openVirtualTab, setChatsDestination],
   );
   const openCanonicalDmInTab = useCallback(
     async (locator: DmChatLocator) => {
@@ -2843,15 +3179,35 @@ export function DesktopWorkspaceShell(props: {
   // Engine history diff (flagged workspaces): one tab per moment.
   const openMomentDiffTab = useCallback(
     (momentId: string) => {
+      const targetGroupId = wbRef.current.activeEditorGroup;
+      const requestSequence = invalidateDeferredFileOpen(targetGroupId);
+      const isCurrentRequest = () =>
+        fileOpenRequests.current.workspaceId === workspaceId &&
+        fileOpenRequests.current.sequenceByGroup.get(targetGroupId) ===
+          requestSequence;
       void flushActiveDraft()
         .then(() => {
-          mutateWb((state) => openTab(state, momentDiffTabPath(momentId)));
+          if (!isCurrentRequest()) return;
+          const current = wbRef.current;
+          if (!current.editorGroups.some((group) => group.id === targetGroupId)) {
+            return;
+          }
+          mutateWb((state) =>
+            openTab(state, momentDiffTabPath(momentId), targetGroupId),
+          );
         })
         .catch((error) => {
+          if (!isCurrentRequest()) return;
           reportShellError("Could not save the active draft before opening history.", error);
         });
     },
-    [flushActiveDraft, mutateWb, reportShellError],
+    [
+      flushActiveDraft,
+      invalidateDeferredFileOpen,
+      mutateWb,
+      reportShellError,
+      workspaceId,
+    ],
   );
   const refreshAfterHistoryRestore = useCallback(
     () => {
@@ -2866,24 +3222,46 @@ export function DesktopWorkspaceShell(props: {
   );
   const activateEditorTab = useCallback(
     (groupId: string, path: string) => {
+      const current = wbRef.current;
+      const group = current.editorGroups.find(
+        (candidate) => candidate.id === groupId,
+      );
+      if (!group?.tabs.some((tab) => tab.path === path)) return;
+      invalidateDeferredFileOpenForGroupChange(
+        current.activeEditorGroup,
+        groupId,
+      );
       if (isVirtualTabPath(path)) {
         mutateWb((state) => activateTab(state, groupId, path));
         return;
       }
       setHeadingTarget(null);
       if (/\.(md|markdown)$/i.test(path)) preloadMarkdownEditor();
-      const group = wbRef.current.editorGroups.find(
-        (candidate) => candidate.id === groupId,
-      );
-      if (!group?.tabs.some((tab) => tab.path === path)) return;
       if (group.activeTab !== path) {
-        rendererMarks.mark("file-open-start");
+        rendererMarks.mark(fileOpenStartMark(groupId));
       }
       mutateWb((state) =>
         recordRecentFile(activateTab(state, groupId, path), path),
       );
     },
-    [mutateWb],
+    [invalidateDeferredFileOpenForGroupChange, mutateWb],
+  );
+  const focusWorkbenchEditorGroup = useCallback(
+    (groupId: string) => {
+      const current = wbRef.current;
+      if (
+        current.activeEditorGroup === groupId ||
+        !current.editorGroups.some((group) => group.id === groupId)
+      ) {
+        return;
+      }
+      invalidateDeferredFileOpenForGroupChange(
+        current.activeEditorGroup,
+        groupId,
+      );
+      mutateWb((state) => focusEditorGroup(state, groupId));
+    },
+    [invalidateDeferredFileOpenForGroupChange, mutateWb],
   );
 
   // Chats view "Files" grouping cross-link: a file-linked Chat opens where
@@ -2918,8 +3296,10 @@ export function DesktopWorkspaceShell(props: {
       // below cannot see it, because the result may be in the file the user is
       // already reading.
       invalidateDmNavigation(dmNavigationRequest);
-      setSearchScrollTarget({ path, line, nonce: ++scrollNonce.current });
-      openFile(path);
+      openFile(path, undefined, {
+        line,
+        nonce: ++scrollNonce.current,
+      });
     },
     [openChatThreadInPanel, openFile],
   );
@@ -2954,17 +3334,16 @@ export function DesktopWorkspaceShell(props: {
       const commitClose = () => {
         const current = wbRef.current;
         const next = closeRequestedTabs(current);
-        const mountsNewDocument = current.editorGroups.some((before) => {
-          const after = next.editorGroups.find((group) => group.id === before.id);
-          return (
-            after !== undefined &&
-            after.activeTab !== before.activeTab &&
-            after.activeTab !== null &&
-            !isVirtualTabPath(after.activeTab)
+        for (const group of current.editorGroups) {
+          const nextGroup = next.editorGroups.find(
+            (candidate) => candidate.id === group.id,
           );
-        });
-        if (mountsNewDocument) {
-          rendererMarks.mark("file-open-start");
+          if (nextGroup?.activeTab !== group.activeTab) {
+            invalidateDeferredFileOpen(group.id);
+          }
+        }
+        for (const groupId of groupsMountingNewDocument(current, next)) {
+          rendererMarks.mark(fileOpenStartMark(groupId));
         }
         mutateWb(closeRequestedTabs);
       };
@@ -2991,7 +3370,12 @@ export function DesktopWorkspaceShell(props: {
           );
         });
     },
-    [flushStableDrafts, mutateWb, reportShellError],
+    [
+      flushStableDrafts,
+      invalidateDeferredFileOpen,
+      mutateWb,
+      reportShellError,
+    ],
   );
 
   const closeFileTab = useCallback(
@@ -3003,6 +3387,28 @@ export function DesktopWorkspaceShell(props: {
       if (tab) void closeTabsAfterFlush([{ groupId, tab }]);
     },
     [closeTabsAfterFlush],
+  );
+
+  const commitAfterTabFlush = useCallback(
+    (
+      groupId: string,
+      tab: WorkbenchTab,
+      failureMessage: string,
+      commit: () => void,
+    ) => {
+      const registration = mountedEditorsRef.current.get(groupId);
+      if (registration?.tab !== tab || !registration.flush) {
+        commit();
+        return;
+      }
+      void flushStableDrafts(
+        (candidateGroupId, candidateTab) =>
+          candidateGroupId === groupId && candidateTab === tab,
+      )
+        .then(commit)
+        .catch((error) => reportShellError(failureMessage, error));
+    },
+    [flushStableDrafts, reportShellError],
   );
 
   const closeActiveTab = useCallback(() => {
@@ -3054,6 +3460,78 @@ export function DesktopWorkspaceShell(props: {
     [mutateWb],
   );
 
+  const moveFileTabToGroup = useCallback(
+    (
+      sourceGroupId: string,
+      targetGroupId: string,
+      path: string,
+      toIndex: number,
+    ) => {
+      if (sourceGroupId === targetGroupId) return;
+      const sourceGroup = wbRef.current.editorGroups.find(
+        (group) => group.id === sourceGroupId,
+      );
+      const tab = sourceGroup?.tabs.find((candidate) => candidate.path === path);
+      if (!tab) return;
+      const focus = editorFocus(wbRef.current);
+      const requestSequencesAtIssue = new Map(
+        fileOpenRequests.current.sequenceByGroup,
+      );
+
+      const commitMove = () => {
+        const current = wbRef.current;
+        const live = current.editorGroups
+          .find((group) => group.id === sourceGroupId)
+          ?.tabs.find((candidate) => candidate.path === path);
+        if (
+          live !== tab ||
+          !current.editorGroups.some((group) => group.id === targetGroupId)
+        ) {
+          return;
+        }
+        const moveState = (state: WorkbenchState) =>
+          moveTabToGroup(
+            state,
+            sourceGroupId,
+            targetGroupId,
+            path,
+            toIndex,
+            hasEditorFocus(state, focus) ? "target" : "preserve",
+          );
+        const next = moveState(current);
+        if (next === current) return;
+        invalidateDeferredFileOpensForTabTransition(
+          current,
+          next,
+          requestSequencesAtIssue,
+        );
+        for (const groupId of groupsMountingNewDocument(current, next)) {
+          const nextActiveTab = next.editorGroups.find(
+            (group) => group.id === groupId,
+          )?.activeTab;
+          if (nextActiveTab === undefined || nextActiveTab === null) continue;
+          const viewKind = classifyForView(nextActiveTab);
+          if (viewKind === "markdown" || viewKind === "database") {
+            rendererMarks.mark(fileOpenStartMark(groupId));
+          }
+        }
+        mutateWb(moveState);
+      };
+
+      commitAfterTabFlush(
+        sourceGroupId,
+        tab,
+        "dohc could not save this file. The tab stayed in its current editor group.",
+        commitMove,
+      );
+    },
+    [
+      commitAfterTabFlush,
+      invalidateDeferredFileOpensForTabTransition,
+      mutateWb,
+    ],
+  );
+
   const showPathInExplorer = useCallback(
     (path: string) => {
       mutateWb((state) =>
@@ -3083,11 +3561,8 @@ export function DesktopWorkspaceShell(props: {
       const next = remapWorkbenchPaths(current, (path) =>
         projectTreePath(path, changes),
       );
-      if (
-        activeTabPath(next) !== activeTabPath(current) &&
-        activeTabPath(next) !== null
-      ) {
-        rendererMarks.mark("file-open-start");
+      for (const groupId of groupsMountingNewDocument(current, next)) {
+        rendererMarks.mark(fileOpenStartMark(groupId));
       }
       mutateWb((state) =>
         remapWorkbenchPaths(state, (path) => projectTreePath(path, changes)),
@@ -3115,6 +3590,10 @@ export function DesktopWorkspaceShell(props: {
   // slower, earlier-started reload must never clobber a fresher one — a
   // stale registry snapshot could resurrect a just-removed mount or fire a
   // spurious delete-folder projection against a still-valid one.
+  // Shares this shell removed whose FOLDER stayed on disk. Their records are
+  // gone, so the next reload sees them vanish; without this it would project
+  // a folder delete over files that are still there.
+  const foldersLeftBehind = useRef(new Set<string>());
   const shareMountsToken = useRef(0);
   const reloadShareMounts = useCallback(async () => {
     const token = ++shareMountsToken.current;
@@ -3128,18 +3607,12 @@ export function DesktopWorkspaceShell(props: {
       // A mount that vanished (removed from Settings or another surface)
       // reprojects tabs/pins exactly like the Explorer unmount path — open
       // tabs under the deleted folder must not linger with stale content.
-      const gone = shareMountsRef.current.filter(
-        (mount) => !next.some((candidate) => candidate.shareId === mount.shareId),
-      );
-      if (gone.length > 0) {
-        onExplorerPathsChanged(
-          gone.map((mount) => ({
-            id: `unmount-${mount.shareId}`,
-            kind: "delete-folder" as const,
-            path: `shared-with-me/${mount.label}`,
-          })),
-        );
-      }
+      const gone = goneMountProjections({
+        previous: shareMountsRef.current,
+        next,
+        foldersLeftBehind: foldersLeftBehind.current,
+      });
+      if (gone.length > 0) onExplorerPathsChanged(gone);
       setShareMounts(next);
     } catch {
       // Keep the last known set; the next reload corrects it.
@@ -3153,7 +3626,7 @@ export function DesktopWorkspaceShell(props: {
     async (announce = false) => {
       let results: Array<{
         label: string;
-        status: "updated" | "unchanged" | "ended";
+        status: "updated" | "unchanged" | "ended" | "damaged";
         changedPaths: number;
       }>;
       try {
@@ -3168,18 +3641,7 @@ export function DesktopWorkspaceShell(props: {
         await refreshFiles().catch(() => undefined);
       }
       if (results.some((row) => row.status === "ended")) void reloadShareMounts();
-      if (announce) {
-        const ended = results.filter((row) => row.status === "ended");
-        showShellNotice(
-          results.length === 0
-            ? "No shares are added to this workspace."
-            : `Shares refreshed — ${changed} ${changed === 1 ? "file" : "files"} updated${
-                ended.length > 0
-                  ? `; ${ended.map((row) => row.label).join(", ")} ended`
-                  : ""
-              }.`,
-        );
-      }
+      if (announce) showShellNotice(shareRefreshSummary(results));
     },
     [workspaceId, refreshFiles, reportShellError, showShellNotice, reloadShareMounts],
   );
@@ -3207,23 +3669,40 @@ export function DesktopWorkspaceShell(props: {
       const label = path.split("/")[1] ?? "";
       const mount = shareMounts.find((m) => m.label === label);
       if (!mount) return;
+      let folderLeft = false;
       try {
-        await bridge().unmountShare({ workspaceId, shareId: mount.shareId });
+        const result = await bridge().unmountShare({
+          workspaceId,
+          shareId: mount.shareId,
+        });
+        folderLeft = result?.folderLeft === true;
       } catch (error) {
         reportShellError("Couldn't remove the share.", error);
         return;
       }
-      // Reproject tabs/pins exactly like a folder delete, then re-list.
-      onExplorerPathsChanged([
-        {
-          id: `unmount-${mount.shareId}`,
-          kind: "delete-folder",
-          path: `shared-with-me/${label}`,
-        },
-      ]);
+      // Reproject tabs/pins exactly like a folder delete — but ONLY when the
+      // folder actually went. When removal could clean up the record alone,
+      // the files are still on disk, and projecting a delete would throw away
+      // path-keyed state (tabs, pins, drafts) for files the user still has.
+      if (folderLeft) {
+        // The record is gone, so the next mount reload sees this share vanish
+        // and would project the delete this branch just refused. Remembered
+        // until that reload consumes it.
+        foldersLeftBehind.current.add(mount.shareId);
+      }
+      onExplorerPathsChanged(
+        shareUnmountProjection({ shareId: mount.shareId, label, folderLeft }),
+      );
       await refreshFiles().catch(() => undefined);
       void reloadShareMounts();
-      showShellNotice(`Removed ${label} from this workspace.`);
+      // The record went but its folder stayed, because its label is not one
+      // this app would ever address a folder through. The files are still on
+      // disk, so say where they are and leave the choice to the user.
+      showShellNotice(
+        folderLeft
+          ? `Removed ${label} from this workspace. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.`
+          : `Removed ${label} from this workspace.`,
+      );
     },
     [
       workspaceId,
@@ -3271,12 +3750,29 @@ export function DesktopWorkspaceShell(props: {
     try {
       const result = await bridge().createWorkspaceFile({
         workspaceId,
-        relativePath: uniqueUntitledTextPath(files, folders),
+        relativePath: uniqueUntitledPath(files, folders, "txt"),
+        initialText: "",
       });
       await refreshFiles();
       openFile(result.path);
     } catch (error) {
       reportShellError("Could not create an untitled text file.", error);
+    }
+  }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
+  const createUntitledDrawing = useCallback(async () => {
+    try {
+      const result = await bridge().createWorkspaceFile({
+        workspaceId,
+        relativePath: uniqueUntitledPath(files, folders, "excalidraw"),
+        // The engine's absent-head contract admits a new path only while its
+        // artifact is empty. The scene session initializes its own Y.Doc;
+        // DrawingView supplies portable JSON when the engine is unavailable.
+        initialText: "",
+      });
+      await refreshFiles();
+      openFile(result.path);
+    } catch (error) {
+      reportShellError("Could not create a drawing.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
   const openHistoryView = useCallback(() => {
@@ -3324,42 +3820,129 @@ export function DesktopWorkspaceShell(props: {
       if (!group || !tabPath) return;
       const tab = group.tabs.find((candidate) => candidate.path === tabPath);
       if (!tab) return;
+      const focus = editorFocus(current);
+      const requestSequencesAtIssue = new Map(
+        fileOpenRequests.current.sequenceByGroup,
+      );
       // Mint outside mutateWb: that seam probes the updater before React calls
       // it, so generating inside would produce two IDs for one command.
       const newGroupId = crypto.randomUUID();
       const commitMove = () => {
-        const live = wbRef.current.editorGroups
+        const current = wbRef.current;
+        const live = current.editorGroups
           .find((candidate) => candidate.id === groupId)
           ?.tabs.find((candidate) => candidate.path === tabPath);
         if (live !== tab) return;
-        mutateWb((state) => moveTabToNewGroup(state, groupId, tabPath, newGroupId));
-      };
-      const registration = mountedEditorsRef.current.get(groupId);
-      if (registration?.tab !== tab || !registration.flush) {
-        commitMove();
-        return;
-      }
-      void flushStableDrafts(
-        (candidateGroupId, candidateTab) =>
-          candidateGroupId === groupId && candidateTab === tab,
-      )
-        .then(commitMove)
-        .catch((error) =>
-          reportShellError(
-            "Could not save the draft, so the tab stays in this group.",
-            error,
-          ),
+        const moveState = (state: WorkbenchState) =>
+          moveTabToNewGroup(
+            state,
+            groupId,
+            tabPath,
+            newGroupId,
+            hasEditorFocus(state, focus) ? "target" : "preserve",
+          );
+        const next = moveState(current);
+        if (next === current) return;
+        invalidateDeferredFileOpensForTabTransition(
+          current,
+          next,
+          requestSequencesAtIssue,
         );
+        for (const mountingGroupId of groupsMountingNewDocument(current, next)) {
+          const nextActiveTab = next.editorGroups.find(
+            (candidate) => candidate.id === mountingGroupId,
+          )?.activeTab;
+          if (nextActiveTab === undefined || nextActiveTab === null) continue;
+          const viewKind = classifyForView(nextActiveTab);
+          if (viewKind === "markdown" || viewKind === "database") {
+            rendererMarks.mark(fileOpenStartMark(mountingGroupId));
+          }
+        }
+        mutateWb(moveState);
+      };
+      commitAfterTabFlush(
+        groupId,
+        tab,
+        "Could not save the draft, so the tab stays in this group.",
+        commitMove,
+      );
     },
-    [flushStableDrafts, mutateWb, reportShellError],
+    [
+      commitAfterTabFlush,
+      invalidateDeferredFileOpensForTabTransition,
+      mutateWb,
+    ],
   );
 
   const openEditorGroupRight = useCallback(
     (groupId: string = wbRef.current.activeEditorGroup) => {
+      const group = wbRef.current.editorGroups.find(
+        (candidate) => candidate.id === groupId,
+      );
+      const tab = group?.tabs.find(
+        (candidate) => candidate.path === group.activeTab,
+      );
+      if (!group || !tab) return;
+      if (isSingletonEditorTabPath(tab.path)) {
+        showSingletonTabSplitError();
+        return;
+      }
+      const focus = editorFocus(wbRef.current);
       const newGroupId = crypto.randomUUID();
-      mutateWb((state) => createEditorGroupRight(state, groupId, newGroupId));
+      const requestSequencesAtIssue = new Map(
+        fileOpenRequests.current.sequenceByGroup,
+      );
+      const commitSplit = () => {
+        const current = wbRef.current;
+        const liveGroup = current.editorGroups.find(
+          (candidate) => candidate.id === groupId,
+        );
+        const liveTab = liveGroup?.tabs.find(
+          (candidate) => candidate.path === liveGroup.activeTab,
+        );
+        if (liveTab !== tab) return;
+        const splitState = (state: WorkbenchState) =>
+          createEditorGroupRight(
+            state,
+            groupId,
+            newGroupId,
+            hasEditorFocus(state, focus) ? "target" : "preserve",
+          );
+        const next = splitState(current);
+        if (next === current) {
+          const openTabCount = allTabs(current).length;
+          if (openTabCount >= MAX_OPEN_TABS) {
+            showTabLimitError(openTabCount, "create an editor group");
+          }
+          return;
+        }
+        invalidateDeferredFileOpensForTabTransition(
+          current,
+          next,
+          requestSequencesAtIssue,
+        );
+        const viewKind = classifyForView(tab.path);
+        if (viewKind === "markdown" || viewKind === "database") {
+          rendererMarks.mark(fileOpenStartMark(newGroupId));
+        }
+        clearEditorGroupRefusalError();
+        mutateWb(splitState);
+      };
+      commitAfterTabFlush(
+        groupId,
+        tab,
+        "dohc could not save this file. The editor group was not created.",
+        commitSplit,
+      );
     },
-    [mutateWb],
+    [
+      clearEditorGroupRefusalError,
+      commitAfterTabFlush,
+      invalidateDeferredFileOpensForTabTransition,
+      mutateWb,
+      showSingletonTabSplitError,
+      showTabLimitError,
+    ],
   );
 
   const closeGroupAfterFlush = useCallback(
@@ -3610,6 +4193,11 @@ export function DesktopWorkspaceShell(props: {
         run: () => setNewFileOpen(true),
       },
       {
+        id: "new-drawing",
+        label: "New drawing",
+        run: () => void createUntitledDrawing(),
+      },
+      {
         id: "new-folder",
         label: "New folder",
         run: () => requestExplorerCreate("folder"),
@@ -3721,6 +4309,7 @@ export function DesktopWorkspaceShell(props: {
     ],
     [
       activeDocumentPath,
+      createUntitledDrawing,
       openWorkspaceFolder,
       closeActiveTab,
       importFiles,
@@ -3749,6 +4338,11 @@ export function DesktopWorkspaceShell(props: {
   // shared-view placeholder's next step depends on whether the share is
   // still live (#540 — Refresh exists only while it is).
   const shareView = props.workspace.shareView ?? null;
+  // The stored grant could not be read (#646). The marker still stands — a
+  // share view must never present as an ordinary workspace — but there is no
+  // grant to pull with, so the refresh is skipped rather than failed, and the
+  // banner says so instead of showing a level nobody can read.
+  const shareViewDamaged = !!shareView?.damaged;
   const [shareViewEnded, setShareViewEnded] = useState(!!shareView?.ended);
   const [shareRefreshing, setShareRefreshing] = useState(false);
   // Ops this share's pulls skipped, read from the RECORD, not from the last
@@ -3779,7 +4373,7 @@ export function DesktopWorkspaceShell(props: {
     setShareSkipped(hasUnacknowledgedShareSkips(skipped) ? skipped : null);
   }, [workspaceId]);
   const refreshShareView = useCallback(async () => {
-    if (!shareView || shareViewEnded) return;
+    if (!shareView || shareViewEnded || shareViewDamaged) return;
     setShareRefreshing(true);
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
@@ -3808,7 +4402,7 @@ export function DesktopWorkspaceShell(props: {
   }, [shareView?.shareId, shareViewEnded, workspaceId, reloadShareSkipped]);
   useEffect(() => {
     // One automatic refresh when a shared view opens; afterwards on demand.
-    if (shareView && !shareViewEnded) void refreshShareView();
+    if (shareView && !shareViewEnded && !shareViewDamaged) void refreshShareView();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
@@ -4082,7 +4676,9 @@ export function DesktopWorkspaceShell(props: {
           <span className="min-w-0 flex-1 truncate">
             {shareViewEnded
               ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
-              : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
+              : shareViewDamaged
+                ? "dohc can't read what this share grants. Open the share again to restore it."
+                : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
           </span>
           {shareSkipped
             ? shareSkipNoticeLines(shareSkipped, shareView.granterEmail).map(
@@ -4126,7 +4722,7 @@ export function DesktopWorkspaceShell(props: {
                 ),
               )
             : null}
-          {!shareViewEnded ? (
+          {!shareViewEnded && !shareViewDamaged ? (
             <button
               type="button"
               data-testid="shared-view-refresh"
@@ -4295,13 +4891,17 @@ export function DesktopWorkspaceShell(props: {
               const groupSiteRoot = parseSiteTabPath(tabPath);
               const groupPluginPanel = parsePluginPanelTabPath(tabPath);
               const groupScrollTarget =
-                searchScrollTarget?.path === tabPath ? searchScrollTarget : undefined;
+                searchScrollTarget?.groupId === editorGroup.id &&
+                searchScrollTarget.path === tabPath
+                  ? searchScrollTarget
+                  : undefined;
               return {
                 id: editorGroup.id,
                 size: editorGroup.size,
                 content: (
                   <>
                     <EditorTabs
+                      groupId={editorGroup.id}
                       tabs={editorGroup.tabs}
                       activeTab={tabPath}
                       activeTabDirty={!!tabPath && dirtyPaths.has(tabPath)}
@@ -4314,6 +4914,14 @@ export function DesktopWorkspaceShell(props: {
                       }
                       onMove={(path, toIndex) =>
                         moveFileTab(editorGroup.id, path, toIndex)
+                      }
+                      onMoveToGroup={(path, targetGroupId, toIndex) =>
+                        moveFileTabToGroup(
+                          editorGroup.id,
+                          targetGroupId,
+                          path,
+                          toIndex,
+                        )
                       }
                       onCreateGroupRight={() => openEditorGroupRight(editorGroup.id)}
                       {...(wb.editorGroups.length > 1
@@ -4549,6 +5157,7 @@ export function DesktopWorkspaceShell(props: {
                 key={tabPath}
                 workspaceId={workspaceId}
                 path={tabPath}
+                fileOpenStartMark={fileOpenStartMark(editorGroup.id)}
                 // History growth, version switches, AND share-mount pulls all
                 // re-read the open file (every counter only ever increases).
                 refreshKey={historyRefreshCounter + versionEpoch + mountContentEpoch}
@@ -4562,9 +5171,11 @@ export function DesktopWorkspaceShell(props: {
                 // is a Chats call like any other (#615) — same gate as the
                 // panel, the tab and the graph's toggle.
                 chatMentionsAvailable={captureAvailable}
+                drawingCollaboration={chatCollaboration}
                 scrollTarget={groupScrollTarget}
                 headingTarget={
-                  headingTarget?.path === tabPath
+                  headingTarget?.groupId === editorGroup.id &&
+                  headingTarget.path === tabPath
                     ? headingTarget.target
                     : undefined
                 }
@@ -4617,9 +5228,7 @@ export function DesktopWorkspaceShell(props: {
               };
             })}
             activeGroupId={wb.activeEditorGroup}
-            onFocusGroup={(groupId) =>
-              mutateWb((state) => focusEditorGroup(state, groupId))
-            }
+            onFocusGroup={focusWorkbenchEditorGroup}
             onResizeGroups={(leftGroupId, rightGroupId, leftSize) =>
               mutateWb((state) =>
                 resizeEditorGroups(state, leftGroupId, rightGroupId, leftSize),
@@ -4813,7 +5422,14 @@ export function DesktopWorkspaceShell(props: {
             initialSection={settingsSection}
             onClose={closeSettings}
             onAgentActiveChange={onSettingsAgentActiveChange}
-            onWorkspaceFilesChanged={() => {
+            onWorkspaceFilesChanged={(outcome) => {
+              // A Settings removal that left its folder behind reports the
+              // share id here, BEFORE the reload below sees the record
+              // vanish — otherwise that reload projects a folder delete over
+              // files that are still on disk.
+              if (outcome?.folderLeftShareId) {
+                foldersLeftBehind.current.add(outcome.folderLeftShareId);
+              }
               void reloadShareMounts();
               void refreshFiles().catch(() => undefined);
             }}

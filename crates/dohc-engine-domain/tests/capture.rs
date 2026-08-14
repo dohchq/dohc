@@ -1,7 +1,7 @@
 use dohc_engine_domain::{
     CaptureIngest, CaptureIngestBinary, CaptureRetire, DomainError, ListMomentsQuery, NoFaults,
-    RenameTextFile, VersionedTextStore, binary_rollback_job_identity, derive_capture_moment_id,
-    derive_capture_object_id,
+    RenameTextFile, VersionedTextStore, WriteText, binary_rollback_job_identity,
+    derive_capture_moment_id, derive_capture_object_id, write_text_in_tx,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
@@ -49,6 +49,21 @@ fn open_store() -> (ScratchDir, EngineStore) {
         .ensure_main_version(WS, VERSION, 1, &NO_FAULTS)
         .expect("ensure main");
     (scratch, store)
+}
+
+fn seed_sync_origin(store: &mut EngineStore, origin_id: &str) {
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "INSERT INTO sync_identity \
+                 (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+                 VALUES (?1, ?2, 'epoch', 'stream', 1)",
+                [WS, origin_id],
+            )
+            .expect("seed sync identity");
+            Ok::<_, DomainError>(())
+        })
+        .expect("write sync identity");
 }
 
 fn moment_count(store: &mut EngineStore) -> usize {
@@ -257,18 +272,6 @@ fn retire_then_recapture_reuses_the_object_and_appends_new_history() {
     assert_ne!(first.moment.moment_id, retired.moment.moment_id);
     assert_ne!(first.moment.moment_id, recreated.moment.moment_id);
     assert_ne!(retired.moment.moment_id, recreated.moment.moment_id);
-    assert_eq!(
-        first.moment.moment_id,
-        derive_capture_moment_id(WS, &first.snapshot.object_id, first.moment.moment_order)
-    );
-    assert_eq!(
-        retired.moment.moment_id,
-        derive_capture_moment_id(WS, &first.snapshot.object_id, retired.moment.moment_order)
-    );
-    assert_eq!(
-        recreated.moment.moment_id,
-        derive_capture_moment_id(WS, &first.snapshot.object_id, recreated.moment.moment_order)
-    );
     assert_eq!(recreated.snapshot.text, "X");
     assert_eq!(moment_count(&mut store), 3);
 
@@ -334,16 +337,121 @@ fn retire_removes_the_head_and_repeated_or_unknown_paths_are_clean_no_ops() {
 
 #[test]
 fn moment_id_derivation_is_deterministic_for_equal_inputs() {
-    let first = derive_capture_moment_id("workspace", "object-id", 42);
-    let second = derive_capture_moment_id("workspace", "object-id", 42);
+    let first = derive_capture_moment_id("producer", "workspace", "object-id", 42, "write", "sha");
+    let second = derive_capture_moment_id("producer", "workspace", "object-id", 42, "write", "sha");
 
     assert_eq!(first, second);
     assert_eq!(first.len(), "moment-".len() + 64);
     assert_ne!(
         first,
-        derive_capture_moment_id("workspace", "object-id", 43)
+        derive_capture_moment_id("producer", "workspace", "object-id", 43, "write", "sha")
     );
-    assert_ne!(first, derive_capture_moment_id("other", "object-id", 42));
+    assert_ne!(
+        first,
+        derive_capture_moment_id("producer", "other", "object-id", 42, "write", "sha")
+    );
+    assert_ne!(
+        first,
+        derive_capture_moment_id(
+            "other-producer",
+            "workspace",
+            "object-id",
+            42,
+            "write",
+            "sha"
+        )
+    );
+    assert_ne!(
+        first,
+        derive_capture_moment_id(
+            "producer",
+            "workspace",
+            "object-id",
+            42,
+            "write",
+            "other-sha"
+        )
+    );
+}
+
+#[test]
+fn concurrent_capture_moment_ids_are_namespaced_by_replica_origin() {
+    let (_scratch_a, mut store_a) = open_store();
+    let (_scratch_b, mut store_b) = open_store();
+    seed_sync_origin(&mut store_a, "origin-a");
+    seed_sync_origin(&mut store_b, "origin-b");
+
+    let captured_a = VersionedTextStore::new(&mut store_a)
+        .capture_ingest(&ingest("same.md", "edit from A", 10), &NO_FAULTS)
+        .expect("capture A");
+    let captured_b = VersionedTextStore::new(&mut store_b)
+        .capture_ingest(&ingest("same.md", "edit from B", 10), &NO_FAULTS)
+        .expect("capture B");
+
+    assert_eq!(captured_a.snapshot.object_id, captured_b.snapshot.object_id);
+    assert_eq!(
+        captured_a.moment.moment_order,
+        captured_b.moment.moment_order
+    );
+    assert_ne!(captured_a.moment.moment_id, captured_b.moment.moment_id);
+}
+
+#[test]
+fn local_capture_does_not_collide_with_an_imported_replica_moment() {
+    let (_scratch, mut store) = open_store();
+    seed_sync_origin(&mut store, "origin-b");
+    let path = "same.md";
+    let object_id = derive_capture_object_id(WS, VERSION, path);
+    let imported_moment_id = derive_capture_moment_id(
+        "origin-a",
+        WS,
+        &object_id,
+        1,
+        "write",
+        &dohc_engine_storage::hex_sha256(b"shared base"),
+    );
+
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            write_text_in_tx(
+                tx,
+                &WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: VERSION.to_owned(),
+                    object_id: object_id.clone(),
+                    path: path.to_owned(),
+                    text: "shared base".to_owned(),
+                    moment_id: imported_moment_id.clone(),
+                    request_id: None,
+                    metadata_origin: "replication".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                },
+            )?;
+            tx.execute(
+                "DELETE FROM materialization_jobs WHERE workspace_id = ?1 AND job_id = ?2",
+                [WS, imported_moment_id.as_str()],
+            )
+            .expect("remove local materialization artifact");
+            tx.execute(
+                "UPDATE moments SET moment_order = 0 \
+                 WHERE workspace_id = ?1 AND moment_id = ?2",
+                [WS, imported_moment_id.as_str()],
+            )
+            .expect("assign imported local order");
+            Ok::<_, DomainError>(())
+        })
+        .expect("import remote moment");
+
+    let captured = VersionedTextStore::new(&mut store)
+        .capture_ingest(&ingest(path, "local edit", 20), &NO_FAULTS)
+        .expect("capture local edit after import");
+
+    assert_eq!(captured.moment.moment_order, 1);
+    assert_ne!(captured.moment.moment_id, imported_moment_id);
+    assert_eq!(captured.snapshot.text, "local edit");
 }
 
 #[test]
@@ -1054,6 +1162,54 @@ fn disk_driven_retire_owns_materialized_ydoc_heads() {
         )
         .expect("protected retire is a no-op");
     assert!(protected.retired.is_none(), "RPC heads stay protected");
+}
+
+#[test]
+fn capture_manifest_excludes_pending_conflict_installed_ydoc_asset() {
+    use dohc_engine_domain::{WriteBinaryFile, capture_manifest_seed, write_binary_file_in_tx};
+    use dohc_engine_storage::{Preimage, hex_sha256, put_binary_blob};
+
+    let (scratch, mut store) = open_store();
+    let path = "assets/excalidraw/drawing/asset.png";
+    let bytes = [1, 2, 3, 4];
+    let sha256 = hex_sha256(&bytes);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            put_binary_blob(tx, &bytes).map_err(DomainError::from)?;
+            write_binary_file_in_tx(
+                tx,
+                &WriteBinaryFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: VERSION.to_owned(),
+                    object_id: "scene-asset-object-conflict".to_owned(),
+                    path: path.to_owned(),
+                    binary_sha256: sha256.clone(),
+                    moment_id: "moment-scene-conflict-asset-unprefixed".to_owned(),
+                    metadata_origin: "ydoc".to_owned(),
+                    metadata_summary: Some("Imported drawing asset".to_owned()),
+                    metadata_correlation_id: Some("scene-successor-claim".to_owned()),
+                    author_json: None,
+                    materialize: Some(Preimage::Absent),
+                    now_ms: 10,
+                },
+            )
+        })
+        .expect("install conflict scene asset");
+    assert!(!scratch.path().join(path).exists());
+
+    let seed = capture_manifest_seed(&store, WS, VERSION).expect("capture manifest seed");
+    assert!(
+        seed.iter().all(|entry| entry.path != path),
+        "capture must not claim an asset that has not reached disk"
+    );
+    assert_eq!(
+        VersionedTextStore::new(&mut store)
+            .read_binary(WS, VERSION, path)
+            .expect("read canonical asset")
+            .expect("pending asset remains canonical")
+            .bytes,
+        bytes
+    );
 }
 
 #[test]

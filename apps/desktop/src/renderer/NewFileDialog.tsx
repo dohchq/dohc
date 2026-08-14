@@ -28,6 +28,7 @@ export function NewFileDialog(props: {
       const result = await bridge().createWorkspaceFile({
         workspaceId: props.workspaceId,
         relativePath,
+        initialText: "",
       });
       props.onCreated(result.path);
     } catch (cause) {

@@ -196,7 +196,7 @@ it.skipIf(engine.missing)(
       await session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before));
       const settled = await session.settleNow();
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(
-        settled.markdown,
+        settled.content,
       );
 
       // The outside writer replaces the file. Nothing is typed afterwards, so
@@ -559,10 +559,12 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       expect(errors).toEqual(["ydoc settle of note.md"]);
       expect(await readFile(absolute, "utf8")).toBe("base\n");
 
-      await release();
-      release = null;
+      // The retry can finish while the holder exits. Clear first so this test
+      // does not erase the recovery state it is waiting for.
       states.length = 0;
       errors.length = 0;
+      await release();
+      release = null;
 
       // The item's second claim, closed (#554): the provider retries the
       // settle on a doubling delay, so releasing the lock is followed by the

@@ -2,6 +2,7 @@ import { Copy, Check } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { RelayShareGrantedRow } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { ShareAccessBadge } from "./ShareAccessBadge";
 
 // "Shared by me" (PR 18): the management list for relay share grants. Lives
 // in Settings → Cloud. Calm inventory: what's shared, with whom, and one
@@ -18,6 +19,8 @@ function errorMessage(cause: unknown): string {
 }
 
 function selectorLabel(share: RelayShareGrantedRow): string {
+  // A row the relay could not read still lists, so ending it stays possible.
+  if (!share.selector) return "Unreadable share";
   if (share.selector.versionId) {
     const suffix = share.selector.paths.length > 0
       ? ` (${share.selector.paths.join(", ")})`
@@ -100,17 +103,27 @@ export function SharedByMeList() {
           className="flex items-center gap-2 bg-panel px-2.5 py-2"
         >
           <div className="min-w-0 flex-1">
-            <div className="truncate font-mono text-[11px] text-ink">
-              {selectorLabel(share)}
+            <div className="flex items-center gap-1.5">
+              <span className="truncate font-mono text-[11px] text-ink">
+                {selectorLabel(share)}
+              </span>
+              {share.selector ? (
+                <ShareAccessBadge access={share.selector.access} />
+              ) : null}
             </div>
             <div className="truncate text-[11px] text-subtle">
               {share.revokedAtMs !== null
                 ? `Ended — was shared with ${share.recipientEmail ?? share.recipientUserId}`
                 : `Shared with ${share.recipientEmail ?? share.recipientUserId}`}
+              {share.selector ? "" : " — dohc can't read what this share grants"}
             </div>
           </div>
           {share.revokedAtMs === null ? (
             <>
+              {/* No code to hand out for a row the relay cannot read: the
+                  recipient's own open would refuse it. Ending the share
+                  stays available — the reverse path must not disappear. */}
+              {share.selector ? (
               <button
                 type="button"
                 data-testid="shared-by-me-copy"
@@ -124,6 +137,7 @@ export function SharedByMeList() {
                 )}
                 {copiedShareId === share.shareId ? "Copied" : "Copy code"}
               </button>
+              ) : null}
               <button
                 type="button"
                 data-testid="shared-by-me-revoke"

@@ -1,6 +1,11 @@
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
+  MAX_SHARE_PATHS,
+  MAX_SHARE_PATH_CHARS,
+  isShareablePathList,
   MAX_SHARE_VERSION_ID_CHARS,
+  type ShareAccess,
+  isShareAccessValue,
   isValidShareVersionId,
 } from "@dohc/security-contract/share-selector";
 import { validateUserWritePath } from "@dohc/workspace-core";
@@ -24,8 +29,8 @@ import { RELAY_ERRORS } from "./errorCodes";
 // forkSnapshots). It still never interprets content, and any op kind or
 // payload shape it does not positively recognize is EXCLUDED.
 
-export const MAX_SHARE_PATHS = 100;
-export const MAX_SHARE_PATH_CHARS = 1024;
+export { MAX_SHARE_PATHS, MAX_SHARE_PATH_CHARS };
+
 export const MAX_CHANNEL_WIRE_ID_CHARS = 256;
 
 export const MAIN_VERSION_ID = "main";
@@ -37,6 +42,11 @@ export interface ShareSelector {
   paths: string[];
   // null = live-follow of the main version; otherwise the shared version id.
   versionId: string | null;
+  // The level the recipient holds on this selector (#646). Required: a
+  // selector without one is not a legacy grant, it is unreadable. All three
+  // levels grant the same reads today; PR2 opens comment and edit to chat,
+  // PR3 opens edit to document writes.
+  access: ShareAccess;
 }
 
 // MU-C4 shared channels: a BIDIRECTIONAL chat-channel grant. Unlike the
@@ -156,7 +166,8 @@ export type ShareSelectorValidation =
         | typeof RELAY_ERRORS.too_many_paths.code
         | typeof RELAY_ERRORS.invalid_path.code
         | typeof RELAY_ERRORS.secret_path.code
-        | typeof RELAY_ERRORS.invalid_version.code;
+        | typeof RELAY_ERRORS.invalid_version.code
+        | typeof RELAY_ERRORS.invalid_access.code;
       message: string;
     };
 
@@ -168,7 +179,21 @@ export type ShareSelectorValidation =
 export function validateShareSelector(input: {
   paths?: unknown;
   versionId?: unknown;
+  access?: unknown;
 }): ShareSelectorValidation {
+  const access = input.access;
+  if (!isShareAccessValue(access)) {
+    return {
+      ok: false,
+      code: RELAY_ERRORS.invalid_access.code,
+      message: 'access must be "view", "comment", or "edit"',
+    };
+  }
+  // FIRST, before paths or version. A share is minted here and the level is
+  // required (#646, decision G at the minting boundary): a caller that names
+  // no level has not chosen `view`, it has failed to say what it grants. It
+  // is checked first so that answer is the SAME whatever else is wrong —
+  // otherwise a bad path decided which of two refusals a caller saw.
   const rawPaths = input.paths ?? [];
   if (!Array.isArray(rawPaths)) {
     return {
@@ -249,18 +274,40 @@ export function validateShareSelector(input: {
     };
   }
   const deduped = [...new Set(paths)].sort();
-  return { ok: true, selector: { paths: deduped, versionId } };
+  return { ok: true, selector: { paths: deduped, versionId, access } };
 }
 
+// A persisted row must carry an EXPLICIT, valid access, the same rule create
+// applies. A row missing the field, or carrying a value the relay never
+// issues, fails closed to null and the routes answer that with the generic
+// 404 — decision G, stated plainly: no migration shim, no implicit upgrade,
+// and no level invented for a row that never named one.
 export function parseShareSelectorJson(selectorJson: string): ShareSelector | null {
   try {
     const parsed = JSON.parse(selectorJson) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    const candidate = parsed as { paths?: unknown; versionId?: unknown };
+    const candidate = parsed as { paths?: unknown; versionId?: unknown; access?: unknown };
     if (!Array.isArray(candidate.paths)) return null;
-    if (!candidate.paths.every((path) => typeof path === "string" && path.length > 0)) return null;
-    if (candidate.versionId !== null && typeof candidate.versionId !== "string") return null;
-    return { paths: candidate.paths as string[], versionId: candidate.versionId as string | null };
+    // The SAME rule every other selector reader applies. This was the last
+    // reader on its own check, and a laxer reader than the writer accepts
+    // damage the writer would never have issued: a stored row the desktop
+    // refuses must not load here either, or the two ends disagree about what
+    // a share grants.
+    if (!isShareablePathList(candidate.paths)) return null;
+    // The SAME version rule as create and as every recipient reader. A
+    // stored `""` is not a version this relay could have issued, and it is
+    // not harmless: `pathVisibleThroughShare` reads any non-null version on a
+    // no-paths selector as "the whole tracked workspace", so a row carrying
+    // one grants everything — including presence topics.
+    if (candidate.versionId !== null && !isValidShareVersionId(candidate.versionId)) {
+      return null;
+    }
+    if (!isShareAccessValue(candidate.access)) return null;
+    return {
+      paths: candidate.paths as string[],
+      versionId: candidate.versionId as string | null,
+      access: candidate.access,
+    };
   } catch {
     return null;
   }

@@ -30,6 +30,7 @@ mod share;
 mod version_apply;
 mod ydoc_apply;
 mod ydoc_origination;
+mod ydoc_recovery;
 
 pub use apply::{
     ApplyOutcome, RefusalReason, ReplicationRefusal, apply_chat_envelope, apply_envelope_with,
@@ -72,28 +73,32 @@ pub use relay::{
     BlobDownloadRequest, BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse,
     BlobUploadRequest, ClaimRequest, ClaimResponse, EpochRequest, EpochResponse,
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
-    KeyEnvelopeResponse, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
-    PushResponse, RecoverResponse, RelaySyncClient, RelayTransport, ShareBlobRequest,
-    ShareReplicationEnvelope, ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal,
-    ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome,
-    SharedChannelRejection, SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
+    KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, ProbeRequest, ProbeResponse,
+    PullRequest, PullResponse, PushRequest, PushResponse, RecoverResponse, RelaySyncClient,
+    RelayTransport, ShareBlobRequest, ShareReplicationEnvelope, ShareViewChangedPath,
+    ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest, ShareViewResponse,
+    SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
+    SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
 };
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;
 pub use share::{
-    MAX_SHARE_VERSION_ID_CHARS, ShareBoundary, ShareGrant, ShareSurface, apply_shared_envelope,
-    is_valid_share_version_id,
+    MAX_SHARE_VERSION_ID_CHARS, ShareAccess, ShareBoundary, ShareGrant, ShareSurface,
+    apply_shared_envelope, is_valid_share_version_id,
 };
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{
-    LeaseProbe, NoLiveLeases, ResultingHead, YdocApplyResult, YdocDrainResult, apply_ydoc_envelope,
-    drain_deferred_ydoc_for_key, fold_resolution_into_ydoc_in_tx, open_sync_conflict_for_object,
-    project_and_write_in_tx, reconcile_imported_resulting_head_in_tx,
-    reconcile_local_resulting_head_in_tx, retire_ydoc_lineage_in_tx,
+    LeaseProbe, NoLiveLeases, ResultingHead, YdocApplyResult, YdocDrainResult,
+    YdocLineageReplacement, apply_ydoc_envelope, drain_deferred_ydoc_for_key,
+    drain_deferred_ydoc_for_live_session, fold_resolution_into_ydoc_in_tx,
+    open_sync_conflict_for_object, project_and_write_in_tx, project_ydoc_with_store,
+    reconcile_imported_resulting_head_in_tx, reconcile_local_resulting_head_in_tx,
+    retire_ydoc_lineage_in_tx, validate_scene_asset_with_store,
 };
 pub use ydoc_origination::{
     BaseOrigination, SharingDeclined, originate_ydoc_base_in_tx, ydoc_update_payload,
 };
+pub use ydoc_recovery::{YdocRecoveryMaterialization, repair_conflicted_ydoc_recoveries};
 
 pub use dohc_engine_storage::{FaultInjector, FaultPoint, NoFaults};
 

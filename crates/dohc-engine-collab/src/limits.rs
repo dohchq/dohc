@@ -16,10 +16,10 @@
 /// reached by a rich document holding roughly 3.5 MiB of markdown.
 ///
 /// `ydoc_full_state_size.rs` encodes the full state of representative documents
-/// against their markdown projection. At `MAX_TEXT_BYTES` — the largest body
+/// against their projected content. At `MAX_TEXT_BYTES` — the largest body
 /// the engine accepts — the measured full state was:
 ///
-/// | document | markdown | full state | ratio |
+/// | document | content | full state | ratio |
 /// | --- | ---: | ---: | ---: |
 /// | plaintext | 10,486,884 | 10,486,912 | 1.000 |
 /// | rich, 700 B paragraphs | 10,486,321 | 11,263,557 | 1.074 |
@@ -58,7 +58,7 @@ pub const DEFAULT_COMPACTION_THRESHOLD: u32 = 64;
 /// Do not assume it is enforced until a batch entrypoint wires it.
 pub const MAX_REPLICATION_APPLY_BATCH: usize = 4096;
 
-/// Maximum size of a settled markdown projection materialized in one settle, in
+/// Maximum projected artifact size materialized in one settle, in
 /// bytes. Mirrors the storage blob cap posture: bounded, generous, never
 /// unbounded.
 pub const MAX_PROJECTION_BYTES: usize = 16 * 1024 * 1024;

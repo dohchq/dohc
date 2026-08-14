@@ -17,7 +17,11 @@ import { createTestScratch } from "./testTemp";
 // These tests drive the pull with the selector a share record pins. It is a
 // REAL selector — no paths and no version selects nothing at all, which the
 // engine refuses.
-const PINNED_SELECTOR = { paths: ["docs"], versionId: null };
+const PINNED_SELECTOR = {
+  paths: ["docs"],
+  versionId: null,
+  access: "view",
+} as const;
 
 const WORKSPACE = "shared-view-ws";
 const SHARE_ID = "share-1";
@@ -310,19 +314,34 @@ describe("shared view refresh", () => {
     ["absent — the record was never written with one", undefined],
     ["null", null],
     ["not an object", "docs"],
-    ["no paths array", { versionId: "v1" }],
-    ["a non-string path", { paths: ["docs", 7], versionId: null }],
+    // Every row below carries a VALID access, so each is refused for the
+    // reason it names rather than for a missing level.
+    ["no paths array", { versionId: "v1", access: "view" }],
+    ["a non-string path", { paths: ["docs", 7], versionId: null, access: "view" }],
     // Selects NOTHING: the relay refuses to create this one
     // (`empty_selector`) and serves nothing through it.
-    ["selects nothing", { paths: [], versionId: null }],
+    ["selects nothing", { paths: [], versionId: null, access: "view" }],
     // A version id the relay could not have issued. These are the dangerous
     // ones: the engine reads any version-bearing selector with no paths as
     // granting every tracked path, so a damaged version must never be read as
     // a version at all.
-    ["an empty version id", { paths: [], versionId: "" }],
-    ["a whitespace-only version id", { paths: [], versionId: "   " }],
-    ["a padded version id", { paths: [], versionId: " v1 " }],
-    ["an unbounded version id", { paths: [], versionId: "v".repeat(129) }],
+    ["an empty version id", { paths: [], versionId: "", access: "view" }],
+    ["a whitespace-only version id", { paths: [], versionId: "   ", access: "view" }],
+    ["a padded version id", { paths: [], versionId: " v1 ", access: "view" }],
+    [
+      "an unbounded version id",
+      { paths: [], versionId: "v".repeat(129), access: "view" },
+    ],
+    // The level dimension (#646). A record whose level is missing or
+    // unreadable is damaged the same way, and its refresh must not pull at a
+    // level nobody granted.
+    ["no access at all", { paths: ["docs"], versionId: null }],
+    ["a cased access", { paths: ["docs"], versionId: null, access: "View" }],
+    ["a padded access", { paths: ["docs"], versionId: null, access: "edit " }],
+    [
+      "a chat-channel access value",
+      { paths: ["docs"], versionId: null, access: "read-write" },
+    ],
   ];
 
   for (const [label, pinnedSelector] of damagedPins) {
@@ -471,7 +490,7 @@ describe("shared view refresh", () => {
       rootDir,
       workspaceId: WORKSPACE,
       shareId: SHARE_ID,
-      pinnedSelector: { paths: ["docs"], versionId: null },
+      pinnedSelector: { paths: ["docs"], versionId: null, access: "view" },
       recordRefusals: async () => undefined,
     });
     expect(first).toEqual({
@@ -487,7 +506,7 @@ describe("shared view refresh", () => {
       rootDir,
       workspaceId: WORKSPACE,
       shareId: SHARE_ID,
-      pinnedSelector: { paths: ["docs"], versionId: null },
+      pinnedSelector: { paths: ["docs"], versionId: null, access: "view" },
       recordRefusals: async () => undefined,
     });
     expect(second).toEqual({

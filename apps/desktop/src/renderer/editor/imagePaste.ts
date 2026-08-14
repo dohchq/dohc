@@ -1,4 +1,6 @@
 import { validateUserWritePath } from "@dohc/workspace-core/paths";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { StepMap } from "@tiptap/pm/transform";
 import type { EditorView } from "@tiptap/pm/view";
 import { documentDir } from "./imageSrc";
 
@@ -181,6 +183,9 @@ export type ImagePasteContext = {
   // Absent → the per-document/"assets" default, so callers that never set it
   // (and any failure to read) keep working.
   readAttachments?: () => Promise<AttachmentSettings>;
+  // Reconcile any peer edit that landed while an async picker, read, or asset
+  // write was pending. The insertion then applies to the current document.
+  onBeforeInsert?: () => void;
   // Opens the native `/image` picker (a main-process dialog at the workspace
   // root). Absent → `/image` simply cannot pick; paste and drop are unaffected.
   pickImages?: PickImages;
@@ -279,8 +284,526 @@ export function insertImageAtPosition(
   if (!imageType) return pos;
   const node = imageType.create(attrs);
   const clamped = Math.max(0, Math.min(pos, view.state.doc.content.size));
-  view.dispatch(view.state.tr.insert(clamped, node));
-  return clamped + node.nodeSize;
+  const transaction = view.state.tr.insert(clamped, node);
+  if (!transaction.docChanged) {
+    console.warn(
+      `[dohc] skipped image asset "${attrs.src}" at document position ${clamped}; the editor rejected the insertion.`,
+    );
+    return clamped;
+  }
+  view.dispatch(transaction);
+  return transaction.mapping.map(clamped, 1);
+}
+
+type DiffComponent = {
+  count: number;
+  added: boolean;
+  removed: boolean;
+  previous?: DiffComponent;
+};
+
+type DiffPath = {
+  oldPos: number;
+  last?: DiffComponent;
+};
+
+type DiffBudget = {
+  remaining: number;
+};
+
+// This bounds the quadratic part of Myers's algorithm by diagonal visits, not
+// by document size. The focused measurement keeps all precise ranges for 32
+// independent substitutions within this budget. A rewrite that needs more
+// work switches to unique anchors and coarse ranges between them. Text anchors
+// use fixed-width windows; child anchors use serialized node values. The
+// fallback is O(n log n), never rejects the update, and keeps positions outside
+// each changed range exact.
+const SEQUENCE_DIFF_WORK_BUDGET = 4_096;
+const FALLBACK_TEXT_ANCHOR_LENGTH = 8;
+
+// Myers's sequence diff gives us every unchanged island, not only the common
+// prefix and suffix. Converting its changed runs to StepMap ranges lets both
+// cursors and async image anchors stay attached to unchanged content between
+// independent peer edits.
+function sequenceDiff<T>(
+  before: readonly T[],
+  after: readonly T[],
+  equal: (left: T, right: T) => boolean,
+  budget: DiffBudget,
+): DiffComponent[] | null {
+  const addToPath = (
+    path: DiffPath,
+    added: boolean,
+    removed: boolean,
+    oldPosIncrement: number,
+  ): DiffPath => {
+    const last = path.last;
+    return {
+      oldPos: path.oldPos + oldPosIncrement,
+      last:
+        last && last.added === added && last.removed === removed
+          ? { ...last, count: last.count + 1 }
+          : { count: 1, added, removed, previous: last },
+    };
+  };
+  const extractCommon = (path: DiffPath, diagonal: number): number => {
+    let oldPos = path.oldPos;
+    let newPos = oldPos - diagonal;
+    let count = 0;
+    while (
+      oldPos + 1 < before.length &&
+      newPos + 1 < after.length &&
+      equal(before[oldPos + 1], after[newPos + 1])
+    ) {
+      oldPos += 1;
+      newPos += 1;
+      count += 1;
+    }
+    if (count > 0) {
+      path.last = {
+        count,
+        added: false,
+        removed: false,
+        previous: path.last,
+      };
+    }
+    path.oldPos = oldPos;
+    return newPos;
+  };
+  const components = (path: DiffPath): DiffComponent[] => {
+    const result: DiffComponent[] = [];
+    for (let component = path.last; component; component = component.previous) {
+      result.push(component);
+    }
+    return result.reverse();
+  };
+
+  const paths: Record<number, DiffPath | undefined> = {
+    0: { oldPos: -1 },
+  };
+  let newPos = extractCommon(paths[0]!, 0);
+  if (paths[0]!.oldPos + 1 >= before.length && newPos + 1 >= after.length) {
+    return components(paths[0]!);
+  }
+
+  let minDiagonal = -Infinity;
+  let maxDiagonal = Infinity;
+  for (
+    let editLength = 1;
+    editLength <= before.length + after.length;
+    editLength += 1
+  ) {
+    for (
+      let diagonal = Math.max(minDiagonal, -editLength);
+      diagonal <= Math.min(maxDiagonal, editLength);
+      diagonal += 2
+    ) {
+      if (budget.remaining === 0) return null;
+      budget.remaining -= 1;
+      const removePath = paths[diagonal - 1];
+      const insertPath = paths[diagonal + 1];
+      if (removePath) paths[diagonal - 1] = undefined;
+      const insertNewPos = insertPath
+        ? insertPath.oldPos - diagonal
+        : -1;
+      const canInsert =
+        insertPath !== undefined &&
+        insertNewPos >= 0 &&
+        insertNewPos < after.length;
+      const canRemove =
+        removePath !== undefined && removePath.oldPos + 1 < before.length;
+      if (!canInsert && !canRemove) {
+        paths[diagonal] = undefined;
+        continue;
+      }
+      const path =
+        !canRemove ||
+        (canInsert && removePath!.oldPos < insertPath!.oldPos)
+          ? addToPath(insertPath!, true, false, 0)
+          : addToPath(removePath!, false, true, 1);
+      newPos = extractCommon(path, diagonal);
+      if (path.oldPos + 1 >= before.length && newPos + 1 >= after.length) {
+        return components(path);
+      }
+      paths[diagonal] = path;
+      if (path.oldPos + 1 >= before.length) {
+        maxDiagonal = Math.min(maxDiagonal, diagonal - 1);
+      }
+      if (newPos + 1 >= after.length) {
+        minDiagonal = Math.max(minDiagonal, diagonal + 1);
+      }
+    }
+  }
+  return [
+    ...(before.length > 0
+      ? [{ count: before.length, added: false, removed: true }]
+      : []),
+    ...(after.length > 0
+      ? [{ count: after.length, added: true, removed: false }]
+      : []),
+  ];
+}
+
+function appendRange(
+  ranges: number[],
+  start: number,
+  oldSize: number,
+  newSize: number,
+): void {
+  if (oldSize === 0 && newSize === 0) return;
+  const previous = ranges.length - 3;
+  if (
+    previous >= 0 &&
+    ranges[previous]! + ranges[previous + 1]! === start
+  ) {
+    ranges[previous + 1] += oldSize;
+    ranges[previous + 2] += newSize;
+    return;
+  }
+  ranges.push(start, oldSize, newSize);
+}
+
+type DiffAnchor = {
+  oldStart: number;
+  newStart: number;
+  length: number;
+};
+
+function uniqueItemIndices<T, Key>(
+  items: readonly T[],
+  keyOf: (item: T) => Key,
+): Map<Key, number> {
+  const indices = new Map<Key, number>();
+  for (let index = 0; index < items.length; index += 1) {
+    const key = keyOf(items[index]!);
+    indices.set(key, indices.has(key) ? -1 : index);
+  }
+  return indices;
+}
+
+function increasingAnchors<T, Key>(
+  before: readonly T[],
+  after: readonly T[],
+  keyOf: (item: T) => Key,
+): DiffAnchor[] {
+  const oldIndices = uniqueItemIndices(before, keyOf);
+  const newIndices = uniqueItemIndices(after, keyOf);
+  const candidates: DiffAnchor[] = [];
+  for (const [key, oldStart] of oldIndices) {
+    const newStart = newIndices.get(key);
+    if (oldStart >= 0 && newStart !== undefined && newStart >= 0) {
+      candidates.push({ oldStart, newStart, length: 1 });
+    }
+  }
+
+  const tails: number[] = [];
+  const previous = new Array<number>(candidates.length).fill(-1);
+  for (let index = 0; index < candidates.length; index += 1) {
+    let low = 0;
+    let high = tails.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (candidates[tails[middle]!]!.newStart < candidates[index]!.newStart) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    if (low > 0) previous[index] = tails[low - 1]!;
+    tails[low] = index;
+  }
+
+  const anchors: DiffAnchor[] = [];
+  for (
+    let index = tails.length === 0 ? -1 : tails[tails.length - 1]!;
+    index >= 0;
+    index = previous[index]!
+  ) {
+    anchors.push(candidates[index]!);
+  }
+  anchors.reverse();
+  return anchors;
+}
+
+function textWindows(text: string): string[] {
+  const windows: string[] = [];
+  for (
+    let index = 0;
+    index + FALLBACK_TEXT_ANCHOR_LENGTH <= text.length;
+    index += 1
+  ) {
+    windows.push(text.slice(index, index + FALLBACK_TEXT_ANCHOR_LENGTH));
+  }
+  return windows;
+}
+
+function increasingTextAnchors(
+  before: string,
+  after: string,
+): DiffAnchor[] {
+  const anchors = increasingAnchors(
+    textWindows(before),
+    textWindows(after),
+    (window) => window,
+  ).map((anchor) => ({
+    ...anchor,
+    length: FALLBACK_TEXT_ANCHOR_LENGTH,
+  }));
+
+  const normalized: DiffAnchor[] = [];
+  for (const anchor of anchors) {
+    const last = normalized[normalized.length - 1];
+    if (!last) {
+      normalized.push({ ...anchor });
+      continue;
+    }
+    const sameOffset =
+      anchor.newStart - anchor.oldStart === last.newStart - last.oldStart;
+    const overlaps =
+      anchor.oldStart <= last.oldStart + last.length &&
+      anchor.newStart <= last.newStart + last.length;
+    if (sameOffset && overlaps) {
+      last.length = Math.max(
+        last.length,
+        anchor.oldStart + anchor.length - last.oldStart,
+      );
+    } else if (
+      anchor.oldStart >= last.oldStart + last.length &&
+      anchor.newStart >= last.newStart + last.length
+    ) {
+      normalized.push({ ...anchor });
+    }
+  }
+  return normalized;
+}
+
+function diffWithAnchors<T>(
+  before: readonly T[],
+  after: readonly T[],
+  anchors: readonly DiffAnchor[],
+  start: number,
+  ranges: number[],
+  sizeOf: (item: T) => number,
+): void {
+  let oldCursor = 0;
+  let newCursor = 0;
+  let pos = start;
+  for (const anchor of anchors) {
+    let oldSize = 0;
+    let newSize = 0;
+    while (oldCursor < anchor.oldStart) {
+      oldSize += sizeOf(before[oldCursor++]!);
+    }
+    while (newCursor < anchor.newStart) {
+      newSize += sizeOf(after[newCursor++]!);
+    }
+    appendRange(ranges, pos, oldSize, newSize);
+    pos += oldSize;
+    for (let count = 0; count < anchor.length; count += 1) {
+      pos += sizeOf(before[oldCursor++]!);
+      newCursor += 1;
+    }
+  }
+  let oldSize = 0;
+  let newSize = 0;
+  while (oldCursor < before.length) {
+    oldSize += sizeOf(before[oldCursor++]!);
+  }
+  while (newCursor < after.length) {
+    newSize += sizeOf(after[newCursor++]!);
+  }
+  appendRange(ranges, pos, oldSize, newSize);
+}
+
+function diffTextWithAnchors(
+  before: string,
+  after: string,
+  start: number,
+  ranges: number[],
+): void {
+  diffWithAnchors(
+    before.split(""),
+    after.split(""),
+    increasingTextAnchors(before, after),
+    start,
+    ranges,
+    () => 1,
+  );
+}
+
+function diffText(
+  before: string,
+  after: string,
+  start: number,
+  ranges: number[],
+  budget: DiffBudget,
+): void {
+  let pos = start;
+  let oldSize = 0;
+  let newSize = 0;
+  const components = sequenceDiff(
+    before.split(""),
+    after.split(""),
+    (a, b) => a === b,
+    budget,
+  );
+  if (components === null) {
+    diffTextWithAnchors(before, after, start, ranges);
+    return;
+  }
+  for (const component of components) {
+    if (!component.added && !component.removed) {
+      appendRange(ranges, pos, oldSize, newSize);
+      pos += oldSize + component.count;
+      oldSize = 0;
+      newSize = 0;
+    } else if (component.added) {
+      newSize += component.count;
+    } else {
+      oldSize += component.count;
+    }
+  }
+  appendRange(ranges, pos, oldSize, newSize);
+}
+
+function diffNode(
+  before: ProseMirrorNode,
+  after: ProseMirrorNode,
+  start: number,
+  ranges: number[],
+  budget: DiffBudget,
+): void {
+  if (before.eq(after)) return;
+  if (!before.sameMarkup(after)) {
+    appendRange(ranges, start, before.nodeSize, after.nodeSize);
+    return;
+  }
+  if (before.isText && after.isText) {
+    diffText(before.text ?? "", after.text ?? "", start, ranges, budget);
+    return;
+  }
+  if (before.isLeaf || after.isLeaf) {
+    appendRange(ranges, start, before.nodeSize, after.nodeSize);
+    return;
+  }
+  diffContent(before, after, start + 1, ranges, budget);
+}
+
+function diffContent(
+  before: ProseMirrorNode,
+  after: ProseMirrorNode,
+  start: number,
+  ranges: number[],
+  budget: DiffBudget,
+): void {
+  const oldChildren: ProseMirrorNode[] = [];
+  const newChildren: ProseMirrorNode[] = [];
+  before.forEach((node) => oldChildren.push(node));
+  after.forEach((node) => newChildren.push(node));
+  let oldIndex = 0;
+  let newIndex = 0;
+  let pos = start;
+  let changedOld: ProseMirrorNode[] = [];
+  let changedNew: ProseMirrorNode[] = [];
+
+  const flush = () => {
+    if (changedOld.length === 0 && changedNew.length === 0) return;
+    const oldText = changedOld.every((node) => node.isText)
+      ? changedOld.map((node) => node.text ?? "").join("")
+      : null;
+    const newText = changedNew.every((node) => node.isText)
+      ? changedNew.map((node) => node.text ?? "").join("")
+      : null;
+    if (oldText !== null && oldText === newText) {
+      diffText(oldText, newText, pos, ranges, budget);
+    } else if (
+      changedOld.length === changedNew.length &&
+      changedOld.every((node, index) => node.sameMarkup(changedNew[index]!))
+    ) {
+      let nestedPos = pos;
+      for (let index = 0; index < changedOld.length; index += 1) {
+        diffNode(
+          changedOld[index]!,
+          changedNew[index]!,
+          nestedPos,
+          ranges,
+          budget,
+        );
+        nestedPos += changedOld[index]!.nodeSize;
+      }
+    } else {
+      appendRange(
+        ranges,
+        pos,
+        changedOld.reduce((size, node) => size + node.nodeSize, 0),
+        changedNew.reduce((size, node) => size + node.nodeSize, 0),
+      );
+    }
+    pos += changedOld.reduce((size, node) => size + node.nodeSize, 0);
+    changedOld = [];
+    changedNew = [];
+  };
+
+  const components = sequenceDiff(
+    oldChildren,
+    newChildren,
+    (a, b) => a.eq(b),
+    budget,
+  );
+  if (components === null) {
+    diffWithAnchors(
+      oldChildren,
+      newChildren,
+      increasingAnchors(oldChildren, newChildren, (node) =>
+        JSON.stringify(node.toJSON()),
+      ),
+      start,
+      ranges,
+      (node) => node.nodeSize,
+    );
+    return;
+  }
+  for (const component of components) {
+    if (!component.added && !component.removed) {
+      flush();
+      for (let count = 0; count < component.count; count += 1) {
+        pos += oldChildren[oldIndex++]!.nodeSize;
+        newIndex += 1;
+      }
+    } else if (component.added) {
+      changedNew.push(...newChildren.slice(newIndex, newIndex + component.count));
+      newIndex += component.count;
+    } else {
+      changedOld.push(...oldChildren.slice(oldIndex, oldIndex + component.count));
+      oldIndex += component.count;
+    }
+  }
+  flush();
+}
+
+export function documentReplacementMap(
+  before: ProseMirrorNode,
+  after: ProseMirrorNode,
+): StepMap {
+  if (before.eq(after)) return StepMap.empty;
+  const ranges: number[] = [];
+  diffContent(before, after, 0, ranges, {
+    remaining: SEQUENCE_DIFF_WORK_BUDGET,
+  });
+  return new StepMap(ranges);
+}
+
+function rebasePositionAfterDocumentChange(
+  pos: number,
+  before: ProseMirrorNode,
+  after: ProseMirrorNode,
+): number {
+  if (before === after) return Math.max(0, Math.min(pos, after.content.size));
+  const mapped = documentReplacementMap(before, after).map(pos, 1);
+  return Math.max(
+    0,
+    Math.min(mapped, after.content.size),
+  );
 }
 
 // Writes each image to the workspace and inserts an image node for it. Images
@@ -296,6 +819,7 @@ export async function placeImageFiles(
   sources: readonly ImageSource[],
   context: ImagePasteContext,
   startPos: number,
+  anchorDoc: ProseMirrorNode = view.state.doc,
 ): Promise<void> {
   // One read for the whole batch: every image in a single paste/drop/pick lands
   // under the setting as it stands at that moment.
@@ -331,7 +855,14 @@ export async function placeImageFiles(
       console.warn(`[dohc] could not write image "${filename}":`, error);
       continue;
     }
+    context.onBeforeInsert?.();
+    pos = rebasePositionAfterDocumentChange(
+      pos,
+      anchorDoc,
+      view.state.doc,
+    );
     pos = insertImageAtPosition(view, { src: relativeSrc, alt: "" }, pos);
+    anchorDoc = view.state.doc;
   }
 }
 
@@ -434,6 +965,7 @@ export async function pickAndInsertImages(
 ): Promise<void> {
   const pick = context.pickImages;
   if (!pick) return;
+  const anchorDoc = view.state.doc;
   let picked: readonly PickedImage[];
   try {
     picked = await pick();
@@ -442,5 +974,11 @@ export async function pickAndInsertImages(
     return;
   }
   if (picked.length === 0) return; // cancelled
-  await placeImageFiles(view, picked.map(pickedImageSource), context, pos);
+  await placeImageFiles(
+    view,
+    picked.map(pickedImageSource),
+    context,
+    pos,
+    anchorDoc,
+  );
 }

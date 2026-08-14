@@ -24,13 +24,24 @@ export const YDOC_EVENT = {
   remoteUpdate: "ydoc.remoteUpdate",
 } as const;
 
-export type YdocContentKind = "richdoc" | "plaintext";
+export type YdocContentKind = "richdoc" | "plaintext" | "scene";
 export type JsonObject = { [key: string]: JsonValue | undefined };
+
+export interface ArtifactAssetDescriptor extends JsonObject {
+  id: string;
+  mimeType: string;
+  created: number;
+  ref: string;
+  sha256: string;
+  lastRetrieved?: number;
+  version?: number;
+}
 
 export type YdocOpenParams = JsonObject & {
   versionId: string;
   path: string;
   contentKind?: YdocContentKind;
+  seedFromArtifact?: boolean;
 };
 
 export type YdocOpenResult = JsonObject & {
@@ -49,6 +60,9 @@ export type YdocOpenResult = JsonObject & {
   // daemon resurrects is lineage-existing and head-absent. Only both absent
   // means the session is bound to an EMPTY doc over nothing.
   lineage: "existing" | "absent";
+  artifactAssets?: ArtifactAssetDescriptor[];
+  seedContent?: string;
+  lineageClaimId: string | null;
 };
 
 export type YdocRecordUpdateParams = JsonObject & {
@@ -59,6 +73,14 @@ export type YdocRecordUpdateParams = JsonObject & {
 
 export type YdocRecordUpdateResult = JsonObject & {
   seq: number;
+  lineageClaimId: string | null;
+};
+
+export type YdocResyncResult = JsonObject & {
+  initialUpdateBase64: string;
+  lineageClaimId: string | null;
+  recoveredPaths: string[];
+  artifactAssets: ArtifactAssetDescriptor[];
 };
 
 export type YdocSettleParams = JsonObject & {
@@ -78,7 +100,7 @@ export type YdocSettleResult = JsonObject & {
   // null once the settled body is past the engine's in-band response cap. The
   // settle still committed and the engine wrote the file — read it from disk
   // rather than echoing it back over the wire.
-  markdown: string | null;
+  content: string | null;
   sha256: string;
   // false => the settle committed but the FILE did not move (materialization
   // blocked by containment; the write is pending a retry). Nothing may report
@@ -150,7 +172,16 @@ function decodeYdocSchema<S extends Schema.ConstraintDecoder<unknown>>(
   return decoded.success;
 }
 
-const YdocContentKindSchema = Schema.Literals(["richdoc", "plaintext"]);
+const YdocContentKindSchema = Schema.Literals(["richdoc", "plaintext", "scene"]);
+const ArtifactAssetDescriptorSchema = mutableStruct({
+  id: Schema.String,
+  mimeType: Schema.String,
+  created: Schema.Int,
+  ref: Schema.String,
+  sha256: Schema.String,
+  lastRetrieved: Schema.optionalKey(Schema.Int),
+  version: Schema.optionalKey(Schema.Int),
+});
 const OpenResultSchema = mutableStruct({
   sessionId: Schema.String,
   objectId: Schema.String,
@@ -159,8 +190,20 @@ const OpenResultSchema = mutableStruct({
   initialUpdateBase64: Schema.String,
   head: Schema.Literals(["present", "absent"]),
   lineage: Schema.Literals(["existing", "absent"]),
+  artifactAssets: Schema.optionalKey(Schema.Array(ArtifactAssetDescriptorSchema)),
+  seedContent: Schema.optionalKey(Schema.String),
+  lineageClaimId: Schema.NullOr(Schema.String),
 });
-const RecordUpdateResultSchema = mutableStruct({ seq: Schema.Int });
+const RecordUpdateResultSchema = mutableStruct({
+  seq: Schema.Int,
+  lineageClaimId: Schema.NullOr(Schema.String),
+});
+const ResyncResultSchema = mutableStruct({
+  initialUpdateBase64: Schema.String,
+  lineageClaimId: Schema.NullOr(Schema.String),
+  recoveredPaths: Schema.mutable(Schema.Array(Schema.String)),
+  artifactAssets: Schema.mutable(Schema.Array(ArtifactAssetDescriptorSchema)),
+});
 const ProjectionProvenanceSchema = mutableStruct({
   contentKind: YdocContentKindSchema,
   sourceStateVectorSha256: Schema.String,
@@ -169,7 +212,7 @@ const ProjectionProvenanceSchema = mutableStruct({
 const SettleResultSchema = mutableStruct({
   momentId: Schema.String,
   path: Schema.String,
-  markdown: Schema.NullOr(Schema.String),
+  content: Schema.NullOr(Schema.String),
   sha256: Schema.String,
   materialized: Schema.Boolean,
   projection: ProjectionProvenanceSchema,
@@ -189,11 +232,62 @@ const RemoteUpdatePayloadSchema = mutableStruct({
 });
 
 export function decodeYdocOpenResult(value: JsonValue): YdocOpenResult {
-  return decodeYdocSchema(
+  const decoded = decodeYdocSchema(
     OpenResultSchema,
     value,
     "ydoc.open result",
   ) as YdocOpenResult;
+  decoded.artifactAssets?.forEach((asset, index) => {
+    if (
+      asset.id.length === 0 ||
+      asset.mimeType.length === 0 ||
+      !isNonnegativeSafeInteger(asset.created) ||
+      (asset.lastRetrieved !== undefined &&
+        !isNonnegativeSafeInteger(asset.lastRetrieved)) ||
+      (asset.version !== undefined &&
+        !isNonnegativeSafeInteger(asset.version)) ||
+      !isNormalizedWorkspaceRef(asset.ref) ||
+      !/^[0-9a-f]{64}$/.test(asset.sha256)
+    ) {
+      throw new YdocProtocolShapeError(
+        `ydoc.open result.artifactAssets[${index}] is not a valid asset descriptor.`,
+      );
+    }
+  });
+  return decoded;
+}
+
+function isNonnegativeSafeInteger(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function isNormalizedWorkspaceRef(ref: string): boolean {
+  if (
+    !ref ||
+    ref.includes("\\") ||
+    ref.startsWith("/") ||
+    /[:\u0000-\u001f\u007f-\u009f]/.test(ref) ||
+    !hasWellFormedSurrogates(ref)
+  ) {
+    return false;
+  }
+  return ref
+    .split("/")
+    .every((part) => part.length > 0 && part !== "." && part !== "..");
+}
+
+function hasWellFormedSurrogates(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
 }
 
 export function decodeYdocRecordUpdateResult(
@@ -204,6 +298,14 @@ export function decodeYdocRecordUpdateResult(
     value,
     "ydoc.recordUpdate result",
   ) as YdocRecordUpdateResult;
+}
+
+export function decodeYdocResyncResult(value: JsonValue): YdocResyncResult {
+  return decodeYdocSchema(
+    ResyncResultSchema,
+    value,
+    "ydoc.resync result",
+  ) as YdocResyncResult;
 }
 
 export function decodeYdocSettleResult(value: JsonValue): YdocSettleResult {

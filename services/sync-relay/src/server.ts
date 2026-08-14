@@ -15,6 +15,7 @@ import {
   validateChatChannelShareSelector,
   validateShareSelector,
   type AnyShareSelector,
+  type ChatChannelShareSelector,
   type ChatShareChannelKind,
   type ChatShareThreadResolver,
 } from "./shareFilter";
@@ -61,6 +62,7 @@ type SyncRelayRoute =
   | { route: "epoch"; workspaceId: string }
   | { route: "keys"; workspaceId: string }
   | { route: "log"; workspaceId: string }
+  | { route: "log-coordinate"; workspaceId: string; originId: string; originSeq: number }
   | { route: "shares-create"; workspaceId: string }
   | { route: "shares-list" }
   | { route: "share"; shareId: string }
@@ -102,6 +104,27 @@ const MAX_OP_KIND_CHARS = 128;
 const MAX_EMAIL_CHARS = 320;
 const MAX_SHARE_ID_CHARS = 128;
 const MAX_IDENTITY_BYTES = 512;
+
+// The selector KIND from a stored row, without trusting the rest of it. A
+// row can be damaged in every other dimension and still say honestly which
+// manager owns it; `undefined` means even that could not be read.
+function storedSelectorKind(
+  selectorJson: string,
+): { selectorKind: "chat-channel" } | Record<string, never> {
+  try {
+    const parsed: unknown = JSON.parse(selectorJson);
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      (parsed as { kind?: unknown }).kind === "chat-channel"
+    ) {
+      return { selectorKind: "chat-channel" };
+    }
+  } catch {
+    // Unreadable JSON names no kind.
+  }
+  return {};
+}
 
 export function createSyncRelayHandler({
   storage,
@@ -171,6 +194,16 @@ export function createSyncRelayHandler({
     return channelKind === "agent" || channelKind === null;
   };
 
+  // Whether a recipient may append through this selector at all. A read-write
+  // chat-channel grant may. A path/version selector may not, at ANY level
+  // (#646): view, comment, and edit all refuse here with the same
+  // shareNotAppendable() code, because a level-specific refusal would tell a
+  // probing recipient the selector's level. PR2 opens comment and edit.
+  const selectorAcceptsAppends = (
+    selector: AnyShareSelector,
+  ): selector is ChatChannelShareSelector =>
+    isChatChannelSelector(selector) && selector.access === "read-write";
+
   // Loads a share for RECIPIENT access. Every failure mode — no such share,
   // revoked share, caller is not the recipient, granter lost the workspace —
   // is the same generic 404 the relay uses for absent workspaces, so probing
@@ -236,7 +269,20 @@ export function createSyncRelayHandler({
     const selector = parseAnyShareSelectorJson(share.selectorJson);
     const base = {
       shareId: share.shareId,
-      selector: selector ?? { paths: [], versionId: null },
+      // An unreadable row says so. It does NOT get a stand-in selector: a
+      // fabricated `view` would state a level nobody granted, on a row whose
+      // own reads answer 404. The row stays listed because it is the
+      // caller's own share and ending it must remain possible — the reverse
+      // path is the invariant here, and listing it reveals nothing the
+      // caller did not already have.
+      selector,
+      // The KIND survives the damage when it can be read at all. It is what
+      // routes a row to the right manager, and losing it made a damaged
+      // chat-channel grant surface in the path/version lists as an unreadable
+      // path share. A kind that cannot be read is not invented.
+      ...(selector
+        ? {}
+        : { damaged: true as const, ...storedSelectorKind(share.selectorJson) }),
       createdAtMs: share.createdAtMs,
     };
     if (side === "granted") {
@@ -395,6 +441,9 @@ export function createSyncRelayHandler({
       //      access; a read-only member (and any path/version share) is
       //      REFUSED with an explicit 403 — the member legitimately knows the
       //      share exists, so this is a refusal, not a 404.
+      //      #646: a path/version selector is refused at EVERY level, with
+      //      one code. A level-specific refusal would tell a probing
+      //      recipient the selector's level. PR2 opens comment and edit.
       //   3. MU-C0 verified authorship: every authored chat op must claim the
       //      AUTHENTICATED pusher (assertChatAuthorship verifies it) — a
       //      member cannot forge a message or reaction as another member.
@@ -411,8 +460,7 @@ export function createSyncRelayHandler({
       if (route.route === "share-log" && request.method === "POST") {
         await claimPendingShares(actor.userId);
         const share = shareForRecipient(route.shareId, actor.userId);
-        if (!isChatChannelSelector(share.selector)) throw shareNotAppendable();
-        if (share.selector.access !== "read-write") throw shareNotAppendable();
+        if (!selectorAcceptsAppends(share.selector)) throw shareNotAppendable();
         const input = await readJsonObject(request);
         const originId = parseString(input.originId, "originId", MAX_ORIGIN_ID_CHARS);
         if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
@@ -467,8 +515,7 @@ export function createSyncRelayHandler({
           guard: () => {
             const fresh = shareForRecipient(route.shareId, actor.userId);
             if (fresh.workspaceId !== share.workspaceId) throw notFound();
-            if (!isChatChannelSelector(fresh.selector)) throw shareNotAppendable();
-            if (fresh.selector.access !== "read-write") throw shareNotAppendable();
+            if (!selectorAcceptsAppends(fresh.selector)) throw shareNotAppendable();
           },
         });
         return jsonResponse({
@@ -651,6 +698,7 @@ export function createSyncRelayHandler({
           const validation = validateShareSelector({
             paths: input.paths,
             versionId: input.versionId,
+            access: input.access,
           });
           if (!validation.ok) {
             throw relayHttpError(RELAY_ERRORS[validation.code], validation.message);
@@ -869,10 +917,8 @@ export function createSyncRelayHandler({
           route.workspaceId,
           identity,
         );
-        const since = Math.max(
-          parseCursor(url.searchParams.get("since")),
-          epochLogFloor,
-        );
+        const requestedSince = parseCursor(url.searchParams.get("since"));
+        const since = Math.max(requestedSince, epochLogFloor);
         const limit = parseLimit(url.searchParams.get("limit"));
         const page = storage.fetchLogPage({
           workspaceId: route.workspaceId,
@@ -890,8 +936,49 @@ export function createSyncRelayHandler({
             payload: JSON.parse(row.payloadJson) as unknown,
             recordedAtMs: row.recordedAtMs,
           })),
-          nextCursor: page.nextCursor,
+          // A hidden epoch floor is a read filter, not a served log row. An
+          // empty response therefore cannot advance the caller's cursor: the
+          // strict page contract requires nextCursor to equal the final
+          // relaySeq, or the requested cursor when no row was served.
+          nextCursor: page.rows.length === 0 ? requestedSince : page.nextCursor,
           hasMore: page.hasMore,
+        });
+      }
+
+      if (route.route === "log-coordinate" && request.method === "GET") {
+        const url = new URL(request.url);
+        const identity = parseOptionalWorkspaceIdentityQuery(url.searchParams);
+        const epochLogFloor = enforceWorkspaceIdentity(
+          storage,
+          route.workspaceId,
+          identity,
+        );
+        const row = storage.fetchLogCoordinate({
+          workspaceId: route.workspaceId,
+          originId: route.originId,
+          originSeq: route.originSeq,
+        });
+        if (!row) return jsonResponse({ ok: true, status: "absent" });
+        const op = {
+          relaySeq: row.relaySeq,
+          workspaceId: row.workspaceId,
+          originId: row.originId,
+          originSeq: row.originSeq,
+          opKind: row.opKind,
+          payload: JSON.parse(row.payloadJson) as unknown,
+          recordedAtMs: row.recordedAtMs,
+        };
+        if (row.relaySeq <= epochLogFloor) {
+          return jsonResponse({
+            ok: true,
+            status: "presentBelowEpochFloor",
+            op,
+          });
+        }
+        return jsonResponse({
+          ok: true,
+          status: "present",
+          op,
         });
       }
 
@@ -934,6 +1021,12 @@ function parseRoute(request: Request): SyncRelayRoute {
   }
   if (parts.length === 3 && parts[2] === "log") {
     return { route: "log", workspaceId };
+  }
+  if (parts.length === 5 && parts[2] === "log") {
+    const originId = parseString(parts[3], "originId", MAX_ORIGIN_ID_CHARS);
+    const originSeq = Number(parts[4]);
+    if (!Number.isSafeInteger(originSeq) || originSeq < 0) throw notFound();
+    return { route: "log-coordinate", workspaceId, originId, originSeq };
   }
   if (parts.length === 3 && parts[2] === "bootstrap") {
     return { route: "bootstrap", workspaceId };

@@ -10,7 +10,7 @@ use dohc_engine_protocol::{
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{
-    CAPTURE_MOMENT_RECORDED_EVENT, EngineEventNotice, EngineService,
+    CAPTURE_MOMENT_RECORDED_EVENT, CaptureApplyProbe, EngineEventNotice, EngineService,
     shadow_fence::write_shadow_marker_for_harness,
 };
 use serde_json::{Value, json};
@@ -1052,6 +1052,77 @@ async fn watcher_status_reports_a_live_driver_and_flush_settles() {
         .call(
             RequestContext::unbounded(),
             request(5, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_reconcile_forces_a_full_manifest_rebuild() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "seed.md", b"seeded before open");
+
+    let probe = CaptureApplyProbe::default();
+    let transport = InProcessTransport::new(Arc::new(
+        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    ));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    let starts_before = probe.layer_start_count();
+    write_file(
+        scratch.path(),
+        "reconciled.md",
+        b"written before forced reconcile",
+    );
+    let reconcile = transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "capture.reconcile", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("capture.reconcile");
+
+    // The driver can finish the forced rebuild before it receives this RPC's
+    // flush request. In that case, the reconcile response is already settled.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    let mut id = 2;
+    let mut settled = reconcile.result["settled"]
+        .as_bool()
+        .expect("capture.reconcile settled flag");
+    while !settled {
+        id += 1;
+        let flush = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "capture.flush", Some(handle.clone()), json!({})),
+            )
+            .await
+            .expect("capture.flush");
+        settled = flush.result["settled"]
+            .as_bool()
+            .expect("capture.flush settled flag");
+        assert!(
+            settled || tokio::time::Instant::now() < deadline,
+            "forced manifest rebuild never settled"
+        );
+    }
+    assert!(
+        probe.layer_start_count() > starts_before,
+        "capture.reconcile must replace the live files layer"
+    );
+    id += 1;
+    assert_eq!(
+        read_text(&transport, &handle, id, "reconciled.md")
+            .await
+            .as_deref(),
+        Some("written before forced reconcile"),
+        "the replacement layer must capture the current disk manifest"
+    );
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(90_000, "workspace.close", Some(handle), json!({})),
         )
         .await
         .expect("close");

@@ -1,13 +1,15 @@
 use dohc_engine_collab::{ContentKind, Regime, Ydoc, read_marker};
 use dohc_engine_crypto::create_key_file;
 use dohc_engine_domain::{
-    CreateNamedVersion, SecretDelete, SecretDiskIntent, SecretWrite, WriteText,
+    CreateNamedVersion, SecretDelete, SecretDiskIntent, SecretWrite, VersionedTextStore, WriteText,
 };
 use dohc_engine_runtime::{
     ActiveVersionSwitch, CancellationToken, CaptureIngestBinary, NoFaults, RuntimeError,
     SelfWriteRecorder, WorkspaceSupervisor,
 };
-use dohc_engine_storage::{EngineStore, FaultAction, FaultInjector, FaultPoint};
+use dohc_engine_storage::{
+    EngineStore, FaultAction, FaultInjector, FaultPoint, StorageError, TxnOutcome,
+};
 use dohc_engine_testkit::{EngineDbScan, ScratchDir, ScriptedFaults};
 use rusqlite::Connection;
 use std::path::PathBuf;
@@ -89,6 +91,7 @@ async fn binary_head_retires_its_ydoc_lineage_before_the_unsettled_scan() {
             Regime::LocalOnly,
             Ydoc::wire().plaintext_insert(0, "durable text"),
             None,
+            None,
             true,
             None,
             3,
@@ -139,6 +142,89 @@ async fn binary_head_retires_its_ydoc_lineage_before_the_unsettled_scan() {
         None,
         "the binary capture and lineage retirement must commit together"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pathless_settled_scene_is_not_reported_as_unsettled() {
+    const WS: &str = "ws-pathless-settled-scene";
+    const PATH: &str = "drawings/settled.excalidraw";
+    const OBJECT: &str = "pathless-scene-object";
+    let scratch = ScratchDir::new().expect("scratch");
+    let database = scratch.engine_db_path().expect("database");
+    let imported = dohc_engine_collab::import_portable_scene(
+        r#"{"type":"excalidraw","version":2,"source":"https://excalidraw.com","elements":[],"appState":{},"files":{}}"#,
+    )
+    .expect("scene import");
+    let scene = Ydoc::wire();
+    scene.apply(&imported.initial_update).expect("scene seed");
+    let projection = scene
+        .project(ContentKind::Scene)
+        .expect("scene projection")
+        .content;
+
+    {
+        let mut store = EngineStore::open(&database, 1).expect("store");
+        {
+            let mut versions = VersionedTextStore::new(&mut store);
+            versions
+                .ensure_main_version(WS, "main", 1, &NoFaults)
+                .expect("main");
+            versions
+                .write_text(
+                    &WriteText {
+                        workspace_id: WS.to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: OBJECT.to_owned(),
+                        path: PATH.to_owned(),
+                        text: projection,
+                        moment_id: "pathless-scene-head".to_owned(),
+                        metadata_origin: "test".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .expect("scene head");
+        }
+        let key = dohc_engine_collab::DocKey::new(WS, "main", OBJECT).expect("doc key");
+        dohc_engine_collab::claim_base(
+            &mut store,
+            &key,
+            ContentKind::Scene,
+            &scene.encode_full_state(),
+            &NoFaults,
+            3,
+        )
+        .expect("scene base");
+        let removed = store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "DELETE FROM path_aliases WHERE workspace_id=?1 AND version_id='main' \
+                     AND object_id=?2",
+                    rusqlite::params![WS, OBJECT],
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .expect("remove scene path");
+        assert!(matches!(removed, TxnOutcome::Committed(1)));
+    }
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&database, 4).expect("actor").actor;
+    let content_kind = actor
+        .ydoc_version_unsettled_content_kind(
+            WS.to_owned(),
+            "main".to_owned(),
+            Vec::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("compare the pathless scene with its snapshot");
+    assert_eq!(content_kind, None);
+    supervisor.close(&database).expect("close actor");
 }
 
 struct RewriteAtJobStart {

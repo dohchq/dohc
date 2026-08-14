@@ -12,7 +12,7 @@
 //! 2. **Nested `Any::Map` key order is nondeterministic through a yrs re-encode.**
 //!    [`Ydoc::canonical_content`] sorts every map (including nested frontmatter
 //!    objects) via `BTreeMap`, and [`project_frontmatter`] sorts nested keys, so
-//!    neither the semantic convergence surface nor the markdown projection
+//!    neither the semantic convergence surface nor the content projection
 //!    depends on HashMap iteration order.
 //! 3. **Well-formed UTF-16 at the boundary.** Rust `String` cannot hold a lone
 //!    surrogate, so every string this module produces is well-formed by
@@ -21,9 +21,9 @@
 //!    journaling so a wire edit cannot split a multi-unit scalar.
 //! 4. **Shared declared root schema; projection is destructive on the TS side.**
 //!    Roots are read through the declared dohc schema ([`ROOT_FRONTMATTER`],
-//!    [`ROOT_META`], [`ROOT_BODY`], [`ROOT_PLAINTEXT`]) — the Yjs v1 wire carries
-//!    no root kinds. The projection records provenance including a
-//!    `destructive` flag.
+//!    [`ROOT_META`], [`ROOT_BODY`], [`ROOT_PLAINTEXT`], and the three scene
+//!    maps) — the Yjs v1 wire carries no root kinds. The projection records
+//!    provenance including a `destructive` flag.
 //! 5. **yjs `applyUpdate` is not atomic on malformed input; yrs is.** The durable
 //!    layer NEVER journals bytes that failed validation: [`Ydoc::apply`] decodes
 //!    the whole update before applying (a truncated update is rejected on decode,
@@ -56,6 +56,12 @@ pub const LINEAGE_EPOCH_META_KEY: &str = "dohcLineageEpoch";
 pub const ROOT_BODY: &str = "body";
 /// The plaintext-document body: a single `Y.Text`.
 pub const ROOT_PLAINTEXT: &str = "plainText";
+/// Immutable Excalidraw element snapshots, keyed by revision tuple JSON.
+pub const ROOT_SCENE_REVISIONS: &str = "excalidraw:revisions";
+/// Excalidraw app-state properties, keyed by property name.
+pub const ROOT_SCENE_APP_STATE: &str = "excalidraw:app-state";
+/// Durable Excalidraw asset metadata, keyed by file id.
+pub const ROOT_SCENE_ASSETS: &str = "excalidraw:assets";
 
 /// Which offset mode a `Doc` is built with. `Utf16` is the ONLY wire-safe mode;
 /// `Bytes` exists solely so the pinned divergence probe can demonstrate the
@@ -76,6 +82,8 @@ pub enum ContentKind {
     Plaintext,
     /// Root `XmlFragment` under [`ROOT_BODY`] plus a [`ROOT_FRONTMATTER`] map.
     Richdoc,
+    /// Excalidraw scene roots projected through the bundled scene codec.
+    Scene,
 }
 
 impl ContentKind {
@@ -84,15 +92,19 @@ impl ContentKind {
         match self {
             ContentKind::Plaintext => "plaintext",
             ContentKind::Richdoc => "richdoc",
+            ContentKind::Scene => "scene",
         }
     }
 
-    /// Parse the column string (unknown → richdoc, matching the TS driver).
-    pub fn parse(raw: &str) -> Self {
-        if raw == "plaintext" {
-            ContentKind::Plaintext
-        } else {
-            ContentKind::Richdoc
+    /// Parse the durable column string.
+    pub fn parse(raw: &str) -> Result<Self, CollabError> {
+        match raw {
+            "plaintext" => Ok(ContentKind::Plaintext),
+            "richdoc" => Ok(ContentKind::Richdoc),
+            "scene" => Ok(ContentKind::Scene),
+            kind => Err(CollabError::UnsupportedContentKind {
+                kind: kind.to_owned(),
+            }),
         }
     }
 }
@@ -103,6 +115,7 @@ const SUCCESSOR_CLIENT_DOMAIN: &[u8] = b"dohc:ydoc-successor-client:v1";
 /// The deterministic identity of one fresh successor lineage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuccessorIdentity {
+    key: crate::DocKey,
     epoch_tag: String,
     client_id: u64,
     content_kind: ContentKind,
@@ -164,6 +177,7 @@ impl SuccessorIdentity {
         client_bytes.copy_from_slice(&digest[..8]);
         let client_id = (u64::from_be_bytes(client_bytes) & ((1_u64 << 53) - 1)).max(1);
         Self {
+            key: key.clone(),
             epoch_tag,
             client_id,
             content_kind,
@@ -192,25 +206,19 @@ pub struct SuccessorBase {
     pub state_vector: Vec<u8>,
 }
 
-/// Build a fresh Y.Doc from canonical text without merging predecessor items.
+/// Build a fresh Y.Doc from a canonical artifact without merging predecessor items.
 pub fn fresh_successor_base(
     identity: &SuccessorIdentity,
-    markdown: &str,
+    artifact: &str,
 ) -> Result<SuccessorBase, CollabError> {
-    let observed_result = crate::hex_sha256(markdown.as_bytes());
+    let observed_result = crate::hex_sha256(artifact.as_bytes());
     if observed_result != identity.result_sha256 {
         return Err(CollabError::SuccessorResultMismatch {
             expected: identity.result_sha256.clone(),
             observed: observed_result,
         });
     }
-    let doc = Ydoc {
-        doc: Doc::with_options(Options {
-            client_id: yrs::ClientID::new(identity.client_id),
-            offset_kind: yrs::OffsetKind::Utf16,
-            ..Options::default()
-        }),
-    };
+    let doc = Ydoc::with_client_id(identity.client_id);
     let meta = doc.doc.get_or_insert_map(ROOT_META);
     {
         let mut txn = doc.doc.transact_mut();
@@ -224,11 +232,22 @@ pub fn fresh_successor_base(
             identity.epoch_tag.as_str(),
         );
     }
-    doc.rewrite_content_to_markdown(identity.content_kind, markdown);
-    let projected = doc.project(identity.content_kind)?.markdown;
-    if projected != markdown {
+    let projected = if identity.content_kind == ContentKind::Scene {
+        let asset_bytes = crate::scene::seed_portable_scene(&doc, &identity.key, artifact)
+            .map_err(|error| CollabError::InvalidSuccessorBase {
+                constraint: "scene successor portable artifact",
+                expected: "a valid portable Excalidraw scene".to_owned(),
+                observed: error.to_string(),
+            })?;
+        doc.fold_scene()
+            .portable_json_with_asset_bytes(&asset_bytes)?
+    } else {
+        doc.rewrite_content_to_markdown(identity.content_kind, artifact)?;
+        doc.project(identity.content_kind)?.content
+    };
+    if projected != artifact {
         return Err(CollabError::SuccessorProjectionMismatch {
-            expected_sha256: crate::hex_sha256(markdown.as_bytes()),
+            expected_sha256: crate::hex_sha256(artifact.as_bytes()),
             observed_sha256: crate::hex_sha256(projected.as_bytes()),
         });
     }
@@ -245,18 +264,17 @@ pub fn fresh_successor_base(
     })
 }
 
-/// A markdown projection of a durable Y.Doc with its provenance. Constraint 4:
-/// the TS `yDocToMarkdown` is destructive (y-prosemirror drops PM-invalid
-/// elements), so provenance must record what state produced the markdown and
-/// whether the projection mutated the source.
+/// A content projection of a durable Y.Doc with its provenance. Constraint 4:
+/// a projector can mutate its source, so provenance records the state that
+/// produced the content and whether projection changed that state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Projection {
-    /// The projected markdown (UTF-8; well-formed by Rust's `String` invariant).
-    pub markdown: String,
+    /// The projected artifact content (well-formed UTF-8 by `String`).
+    pub content: String,
     /// The content kind that drove the projection.
     pub content_kind: ContentKind,
     /// Lowercase-hex sha-256 of the doc's state vector at projection time — the
-    /// durable provenance link from a settled markdown blob back to the exact
+    /// durable provenance link from a settled content blob back to the exact
     /// CRDT state it came from.
     pub source_state_vector_sha256: String,
     /// Whether producing this projection mutated the live doc. The Rust
@@ -281,12 +299,7 @@ impl Ydoc {
     /// Construct an empty wire-facing doc with `OffsetKind::Utf16` (constraint 1).
     /// This is the constructor durable/replicated code paths use.
     pub fn wire() -> Self {
-        Ydoc {
-            doc: Doc::with_options(Options {
-                offset_kind: yrs::OffsetKind::Utf16,
-                ..Options::default()
-            }),
-        }
+        Ydoc::with_offset_kind(yrs::OffsetKind::Utf16)
     }
 
     /// Construct a doc in the requested offset mode. `Bytes` is wire-unsafe and
@@ -297,12 +310,33 @@ impl Ydoc {
             OffsetMode::Utf16 => yrs::OffsetKind::Utf16,
             OffsetMode::Bytes => yrs::OffsetKind::Bytes,
         };
-        Ydoc {
-            doc: Doc::with_options(Options {
-                offset_kind,
-                ..Options::default()
-            }),
-        }
+        Ydoc::with_offset_kind(offset_kind)
+    }
+
+    fn with_offset_kind(offset_kind: yrs::OffsetKind) -> Self {
+        let doc = Doc::with_options(Options {
+            offset_kind,
+            ..Options::default()
+        });
+        Self::from_doc(doc)
+    }
+
+    fn with_client_id(client_id: u64) -> Self {
+        let doc = Doc::with_options(Options {
+            client_id: yrs::ClientID::new(client_id),
+            offset_kind: yrs::OffsetKind::Utf16,
+            ..Options::default()
+        });
+        Self::from_doc(doc)
+    }
+
+    fn from_doc(doc: Doc) -> Self {
+        // Yjs v1 updates do not carry root kinds. Declare every scene root as a
+        // map before any update is applied, including replay reconstruction.
+        doc.get_or_insert_map(ROOT_SCENE_REVISIONS);
+        doc.get_or_insert_map(ROOT_SCENE_APP_STATE);
+        doc.get_or_insert_map(ROOT_SCENE_ASSETS);
+        Ydoc { doc }
     }
 
     /// Validate an update WITHOUT mutating any doc: decode the whole v1 update.
@@ -452,18 +486,66 @@ impl Ydoc {
         crate::hex_sha256(&canonical)
     }
 
-    /// Project to markdown with provenance (constraint 4). Plaintext projects the
-    /// exact `Y.Text`; richdoc projects sorted frontmatter + paragraph text.
+    /// Project artifact content with provenance (constraint 4).
     pub fn project(&self, content_kind: ContentKind) -> Result<Projection, CollabError> {
-        let markdown = match content_kind {
+        let content = match content_kind {
             ContentKind::Plaintext => self.project_plaintext(),
             ContentKind::Richdoc => self.project_richdoc(),
+            ContentKind::Scene => self.project_scene(),
         }?;
         Ok(Projection {
-            markdown,
+            content,
             content_kind,
             source_state_vector_sha256: crate::hex_sha256(&self.encode_state_vector()),
             destructive: false,
+        })
+    }
+
+    /// Fold the format-owned scene maps without serializing the portable
+    /// artifact. The runtime can use the validated assets from this value when
+    /// it hydrates native `BinaryFileData`.
+    pub fn fold_scene(&self) -> crate::scene::FoldedScene {
+        crate::scene::fold_scene(
+            &self.scene_string_map(ROOT_SCENE_REVISIONS),
+            &self.scene_string_map(ROOT_SCENE_APP_STATE),
+            &self.scene_string_map(ROOT_SCENE_ASSETS),
+        )
+    }
+
+    fn project_scene(&self) -> Result<String, CollabError> {
+        self.fold_scene().portable_json()
+    }
+
+    fn scene_string_map(&self, root: &str) -> BTreeMap<String, String> {
+        let map = self.doc.get_or_insert_map(root);
+        let txn = self.doc.transact();
+        map.iter(&txn)
+            .filter_map(|(key, value)| match value {
+                Out::Any(Any::String(value)) => Some((key.to_string(), value.to_string())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn seed_scene_maps(
+        &self,
+        revisions: &BTreeMap<String, String>,
+        app_state: &BTreeMap<String, String>,
+        assets: &BTreeMap<String, String>,
+    ) -> Vec<u8> {
+        let revision_map = self.doc.get_or_insert_map(ROOT_SCENE_REVISIONS);
+        let app_state_map = self.doc.get_or_insert_map(ROOT_SCENE_APP_STATE);
+        let asset_map = self.doc.get_or_insert_map(ROOT_SCENE_ASSETS);
+        self.with_delta(|txn| {
+            for (key, value) in revisions {
+                revision_map.insert(txn, key.as_str(), value.as_str());
+            }
+            for (key, value) in app_state {
+                app_state_map.insert(txn, key.as_str(), value.as_str());
+            }
+            for (key, value) in assets {
+                asset_map.insert(txn, key.as_str(), value.as_str());
+            }
         })
     }
 
@@ -642,8 +724,8 @@ impl Ydoc {
         &self,
         content_kind: ContentKind,
         markdown: &str,
-    ) -> Vec<u8> {
-        match content_kind {
+    ) -> Result<Vec<u8>, CollabError> {
+        let update = match content_kind {
             ContentKind::Plaintext => {
                 let t = self.doc.get_or_insert_text(ROOT_PLAINTEXT);
                 self.with_delta(|txn| {
@@ -687,7 +769,13 @@ impl Ydoc {
                     }
                 })
             }
-        }
+            ContentKind::Scene => {
+                return Err(CollabError::MarkdownRewriteUnsupported {
+                    kind: content_kind.as_str(),
+                });
+            }
+        };
+        Ok(update)
     }
 
     /// Set a top-level [`ROOT_FRONTMATTER`] scalar and return the encoded delta.
@@ -1121,7 +1209,13 @@ fn content_json(doc: &Doc) -> Value {
     // locally, exactly like the TS engine's typed getters). Empty roots are
     // omitted: whether an empty root exists depends on local API access, not
     // replicated state, so both sides skip them.
-    let map_roots = [ROOT_FRONTMATTER, ROOT_META];
+    let map_roots = [
+        ROOT_FRONTMATTER,
+        ROOT_META,
+        ROOT_SCENE_REVISIONS,
+        ROOT_SCENE_APP_STATE,
+        ROOT_SCENE_ASSETS,
+    ];
     for name in map_roots {
         let m = doc.get_or_insert_map(name);
         let txn = doc.transact();
@@ -1147,7 +1241,15 @@ fn content_json(doc: &Doc) -> Value {
     // Surface any replicated root the schema did NOT declare so a mismatch in
     // root enumeration cannot pass silently.
     let txn = doc.transact();
-    let declared = [ROOT_FRONTMATTER, ROOT_META, ROOT_BODY, ROOT_PLAINTEXT];
+    let declared = [
+        ROOT_FRONTMATTER,
+        ROOT_META,
+        ROOT_BODY,
+        ROOT_PLAINTEXT,
+        ROOT_SCENE_REVISIONS,
+        ROOT_SCENE_APP_STATE,
+        ROOT_SCENE_ASSETS,
+    ];
     for (name, _) in txn.root_refs() {
         if !declared.contains(&name) {
             roots.insert(name.to_string(), json!({ "type": "undeclaredRoot" }));
@@ -3600,6 +3702,97 @@ mod projection_tests {
     use yrs::types::xml::XmlIn;
     use yrs::types::Attrs;
 
+    fn scene_map_set(doc: &Ydoc, root: &str, key: &str, value: &str) -> Vec<u8> {
+        let map = doc.doc.get_or_insert_map(root);
+        doc.with_delta(|txn| {
+            map.insert(txn, key, value);
+        })
+    }
+
+    #[test]
+    fn scene_roots_apply_in_any_order_and_project_identically() {
+        let revisions = Ydoc::wire();
+        let revision_update = scene_map_set(
+            &revisions,
+            ROOT_SCENE_REVISIONS,
+            "[\"box\",1,1]",
+            "{\"id\":\"box\",\"isDeleted\":false,\"type\":\"rectangle\",\"version\":1,\"versionNonce\":1}",
+        );
+        let state = Ydoc::wire();
+        let state_update = scene_map_set(&state, ROOT_SCENE_APP_STATE, "theme", "\"dark\"");
+
+        let forward = Ydoc::wire();
+        forward.apply(&revision_update).expect("revision update");
+        forward.apply(&state_update).expect("state update");
+        let reverse = Ydoc::wire();
+        reverse.apply(&state_update).expect("state update");
+        reverse.apply(&revision_update).expect("revision update");
+
+        assert_eq!(forward.canonical_content(), reverse.canonical_content());
+        assert_eq!(
+            forward
+                .project(ContentKind::Scene)
+                .expect("scene projection")
+                .content,
+            reverse
+                .project(ContentKind::Scene)
+                .expect("scene projection")
+                .content
+        );
+    }
+
+    #[test]
+    fn oversized_scene_projection_is_refused_at_the_existing_byte_cap() {
+        let doc = Ydoc::wire();
+        let oversized_color = serde_json::to_string(&"x".repeat(MAX_PROJECTION_BYTES))
+            .expect("encode oversized app state");
+        scene_map_set(
+            &doc,
+            ROOT_SCENE_APP_STATE,
+            "viewBackgroundColor",
+            &oversized_color,
+        );
+
+        assert!(matches!(
+            doc.project(ContentKind::Scene),
+            Err(CollabError::ProjectionTooLarge {
+                actual,
+                max: MAX_PROJECTION_BYTES
+            }) if actual > MAX_PROJECTION_BYTES
+        ));
+    }
+
+    #[test]
+    fn canonical_fingerprint_includes_scene_root_values() {
+        let first = Ydoc::wire();
+        scene_map_set(&first, ROOT_SCENE_APP_STATE, "theme", "\"dark\"");
+        let second = Ydoc::wire();
+        scene_map_set(&second, ROOT_SCENE_APP_STATE, "theme", "\"light\"");
+
+        assert_ne!(first.canonical_content(), second.canonical_content());
+        assert_ne!(
+            first.canonical_content_sha256(),
+            second.canonical_content_sha256()
+        );
+        assert_eq!(
+            first.canonical_content()[ROOT_SCENE_APP_STATE]["type"],
+            "map"
+        );
+        assert_ne!(
+            first.canonical_content()[ROOT_SCENE_APP_STATE]["type"],
+            "undeclaredRoot"
+        );
+    }
+
+    #[test]
+    fn scene_rejects_markdown_replacement() {
+        let doc = Ydoc::wire();
+        let error = doc
+            .rewrite_content_to_markdown(ContentKind::Scene, "not a scene")
+            .expect_err("scene replacement must use a scene operation");
+        assert_eq!(error.code(), "markdown-rewrite-unsupported");
+    }
+
     fn xml_text(value: impl Into<String>) -> XmlIn {
         XmlTextPrelim::new(value).into()
     }
@@ -3896,7 +4089,7 @@ mod projection_tests {
         assert_eq!(
             doc.project(ContentKind::Richdoc)
                 .expect("small projection")
-                .markdown,
+                .content,
             "\n| Value         | Other  |\n| ------------- | ------ |\n| left \\| right | stable |"
         );
     }
@@ -3929,7 +4122,7 @@ mod projection_tests {
         assert_eq!(
             doc.project(ContentKind::Richdoc)
                 .expect("small projection")
-                .markdown,
+                .content,
             "\n| first  | row |\n| ------ | --- |\n| second | row |"
         );
     }
@@ -3951,7 +4144,7 @@ mod projection_tests {
             projection
                 .expect("checked above")
                 .expect("clamped projection")
-                .markdown,
+                .content,
             "###### bounded",
             "out-of-schema heading levels clamp to level six"
         );
@@ -4037,7 +4230,7 @@ mod projection_tests {
         let markdown = doc
             .project(ContentKind::Richdoc)
             .expect("small projection")
-            .markdown;
+            .content;
         assert_eq!(
             markdown,
             "\n| H               |\n| --------------- |\n| first<br>second |"
@@ -4074,7 +4267,7 @@ mod projection_tests {
         let markdown = doc
             .project(ContentKind::Richdoc)
             .expect("small projection")
-            .markdown;
+            .content;
         assert!(
             markdown.contains("````const fence = ```;````<br>`left \\| right <&>`"),
             "unexpected projection: {markdown}"
@@ -4186,7 +4379,9 @@ mod projection_tests {
         peer.apply(&base_state).expect("peer accepts base");
         peer.richdoc_append_paragraph("peer unseen edit");
 
-        let rewrite = origin.rewrite_content_to_markdown(ContentKind::Richdoc, RESOLVED);
+        let rewrite = origin
+            .rewrite_content_to_markdown(ContentKind::Richdoc, RESOLVED)
+            .expect("rewrite");
         peer.apply(&rewrite).expect("peer accepts rewrite");
         origin
             .apply(&peer.encode_full_state())
@@ -4197,9 +4392,74 @@ mod projection_tests {
         let projection = peer
             .project(ContentKind::Richdoc)
             .expect("peer projection")
-            .markdown;
+            .content;
         assert_ne!(projection, RESOLVED);
         assert!(projection.contains("peer unseen edit"));
+    }
+
+    #[test]
+    fn a_scene_successor_is_byte_stable_and_reproduces_embedded_assets() {
+        let key = crate::DocKey::new("ws", "main", "drawing-object").expect("valid key");
+        let external = serde_json::to_string(&json!({
+            "type": "excalidraw",
+            "version": 2,
+            "source": "https://excalidraw.com",
+            "elements": [{
+                "id": "image",
+                "type": "image",
+                "version": 1,
+                "versionNonce": 7,
+                "isDeleted": false,
+                "index": "a0",
+                "fileId": "image-file"
+            }],
+            "appState": { "viewBackgroundColor": "#ffffff" },
+            "files": {
+                "image-file": {
+                    "id": "image-file",
+                    "mimeType": "image/png",
+                    "created": 10,
+                    "dataURL": "data:image/png;base64,AQID"
+                }
+            }
+        }))
+        .expect("external scene");
+        let canonical_doc = Ydoc::wire();
+        let asset_bytes = crate::scene::seed_portable_scene(&canonical_doc, &key, &external)
+            .expect("seed canonical scene");
+        let canonical = canonical_doc
+            .fold_scene()
+            .portable_json_with_asset_bytes(&asset_bytes)
+            .expect("canonical portable scene");
+        let result_sha = crate::hex_sha256(canonical.as_bytes());
+        let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &"a".repeat(64),
+            predecessor_state_vector_sha256: &"b".repeat(64),
+            artifact_op_kind: "conflict.resolve",
+            artifact_id: "scene-conflict",
+            artifact_preimage_sha256: &"c".repeat(64),
+            content_kind: ContentKind::Scene,
+            result_sha256: &result_sha,
+        });
+
+        let first = fresh_successor_base(&identity, &canonical).expect("scene successor");
+        let replay = fresh_successor_base(&identity, &canonical).expect("scene replay");
+        assert_eq!(first, replay, "one scene identity has one exact base");
+
+        let loaded = Ydoc::wire();
+        loaded.apply(&first.update).expect("load scene successor");
+        assert_eq!(
+            loaded.lineage_epoch_tag().as_deref(),
+            Some(first.epoch_tag.as_str())
+        );
+        assert_eq!(
+            loaded
+                .fold_scene()
+                .portable_json_with_asset_bytes(&asset_bytes)
+                .expect("project scene successor"),
+            canonical,
+        );
     }
 
     #[test]
@@ -4290,7 +4550,7 @@ mod projection_tests {
             loaded
                 .project(ContentKind::Richdoc)
                 .expect("projection")
-                .markdown,
+                .content,
             chosen
         );
         assert_eq!(
@@ -4325,7 +4585,7 @@ mod projection_tests {
             loaded_plain
                 .project(ContentKind::Plaintext)
                 .expect("plain projection")
-                .markdown,
+                .content,
             plain_text
         );
 
@@ -4414,10 +4674,11 @@ fn main() {}
 
 | a | b |
 |---|---|";
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen);
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+            .expect("richdoc rewrite");
         let projected = doc.project(ContentKind::Richdoc).expect("projection");
         assert_eq!(
-            projected.markdown, chosen,
+            projected.content, chosen,
             "the folded document projects the chosen bytes back"
         );
         let body = serde_json::to_string(&doc.canonical_content()["body"]).expect("body json");
@@ -4452,10 +4713,11 @@ fn main() {}
         let doc = Ydoc::wire();
         doc.richdoc_append_paragraph("old");
         let chosen = "---\nmeta:\n  owner: ice\n  team: dohc\ntitle: Chosen\n---\n\nbody text";
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen);
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+            .expect("richdoc rewrite");
         let projected = doc.project(ContentKind::Richdoc).expect("projection");
         assert_eq!(
-            projected.markdown, chosen,
+            projected.content, chosen,
             "the nested frontmatter roundtrips byte-identically"
         );
         let frontmatter =
@@ -4474,7 +4736,9 @@ fn main() {}
         // assertion fails.
         let adversarial = Ydoc::wire();
         let hostile = format!("{}deep", "> ".repeat(1_000));
-        adversarial.rewrite_content_to_markdown(ContentKind::Richdoc, &hostile);
+        adversarial
+            .rewrite_content_to_markdown(ContentKind::Richdoc, &hostile)
+            .expect("richdoc rewrite");
         let body =
             serde_json::to_string(&adversarial.canonical_content()["body"]).expect("body json");
         let blockquotes = body.matches("\"blockquote\"").count();
@@ -4495,16 +4759,18 @@ fn main() {}
         // re-projects to catch before it commits anything.
         let overflowed = Ydoc::wire();
         let hostile = format!("{}deep", "> ".repeat(QUOTE_FOLD_MAX_DEPTH + 5));
-        overflowed.rewrite_content_to_markdown(ContentKind::Richdoc, &hostile);
+        overflowed
+            .rewrite_content_to_markdown(ContentKind::Richdoc, &hostile)
+            .expect("richdoc rewrite");
         let projected = overflowed
             .project(ContentKind::Richdoc)
             .expect("projection");
         assert_ne!(
-            projected.markdown, hostile,
+            projected.content, hostile,
             "past the budget the fold cannot reproduce the chosen bytes"
         );
         assert!(
-            projected.markdown.contains("&gt;"),
+            projected.content.contains("&gt;"),
             "and the loss is the projector's escaping"
         );
     }
@@ -4521,12 +4787,13 @@ fn main() {}
         // 'attempt to add with overflow'.
         let doc = Ydoc::wire();
         let chosen = format!("{}. item\n\nafter", i64::MAX);
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen);
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen)
+            .expect("richdoc rewrite");
         let projected = doc.project(ContentKind::Richdoc).expect("projection");
         assert!(
-            projected.markdown.contains("item") && projected.markdown.contains("after"),
+            projected.content.contains("item") && projected.content.contains("after"),
             "the list ends where no successor exists and the rest still parses: {}",
-            projected.markdown
+            projected.content
         );
     }
 
@@ -4540,10 +4807,11 @@ fn main() {}
         for levels in [1_usize, 40, 100, QUOTE_FOLD_MAX_DEPTH] {
             let doc = Ydoc::wire();
             let chosen = format!("{}deep", "> ".repeat(levels));
-            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen);
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen)
+                .expect("richdoc rewrite");
             let projected = doc.project(ContentKind::Richdoc).expect("projection");
             assert_eq!(
-                projected.markdown, chosen,
+                projected.content, chosen,
                 "a {levels}-level quote must roundtrip byte-identically"
             );
         }

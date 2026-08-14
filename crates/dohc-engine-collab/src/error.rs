@@ -29,7 +29,7 @@ pub enum CollabError {
     #[error("Y.Doc update is {actual} bytes, over the {max}-byte cap")]
     UpdateTooLarge { actual: usize, max: usize },
 
-    /// Markdown projection exceeded its materialization cap. This is checked
+    /// The artifact projection exceeded its materialization cap. This is checked
     /// while rendering so hostile content cannot amplify a small Y.Doc into a
     /// much larger temporary allocation before the boundary rejects it.
     #[error("Y.Doc projection is at least {actual} bytes, over the {max}-byte cap")]
@@ -43,12 +43,24 @@ pub enum CollabError {
     /// An identifier (`workspace_id`/`version_id`/`object_id`/`origin_id`) is
     /// empty or over the length bound.
     #[error("invalid identifier: {reason}")]
-    InvalidIdentifier { reason: &'static str },
+    InvalidIdentifier { reason: String },
 
     /// The caller tried to append through a projection kind different from the
     /// kind that already owns this durable lineage.
     #[error("Y.Doc content kind does not match the existing lineage")]
     ContentKindMismatch,
+
+    /// A durable marker names a content kind this engine cannot interpret.
+    /// The engine must not guess a projection schema for unknown state.
+    #[error(
+        "unsupported durable Y.Doc content kind `{kind}`; supported kinds are `plaintext`, `richdoc`, and `scene`"
+    )]
+    UnsupportedContentKind { kind: String },
+
+    /// The conflict resolver tried to replace a non-Markdown artifact with
+    /// Markdown source. Scene conflict resolution needs its own operation.
+    #[error("Y.Doc content kind `{kind}` does not support Markdown replacement")]
+    MarkdownRewriteUnsupported { kind: &'static str },
 
     /// A replicated lineage already has its single base; a second base is
     /// rejected (base-once). The caller must resume the existing lineage.
@@ -60,6 +72,24 @@ pub enum CollabError {
     /// lineage while the relay cursor advances past it.
     #[error("incoming base state diverges from the claimed base")]
     BaseStateDiverged,
+
+    /// The local base exists, but its relay position is still unknown. The
+    /// caller must retain the incoming base and retry after exact lookup.
+    #[error("the claimed base has no authenticated relay position yet")]
+    BaseRelaySequencePending,
+
+    /// A relay position is globally unique and cannot name two base blobs.
+    #[error("different Y.Doc bases carry relay sequence {relay_seq}")]
+    BaseRelaySequenceCollision { relay_seq: i64 },
+
+    /// An open editor tried to append after its durable lineage was replaced.
+    #[error(
+        "Y.Doc lineage changed while editing: expected {expected:?}, observed {observed:?}; resync before writing"
+    )]
+    LineageWriteStale {
+        expected: Option<String>,
+        observed: Option<String>,
+    },
 
     /// A successor base could not reproduce its canonical text exactly.
     #[error(
@@ -148,9 +178,9 @@ pub enum CollabError {
     SeedOntoExistingLineage,
 
     /// A local-only close would prune CRDT state whose edits no durable settle
-    /// covers (the current head is not reflected in the materialized markdown).
-    /// Settle first — markdown-is-the-artifact requires the artifact to exist
-    /// before the cache is discarded.
+    /// covers (the current head is not reflected in the materialized artifact).
+    /// Settle first. The workspace file must contain the artifact before the
+    /// cache is discarded.
     #[error("local-only close would discard unsettled edits; settle before closing")]
     UnsettledClose,
 
@@ -176,8 +206,13 @@ impl CollabError {
             CollabError::ProjectionTooComplex { .. } => "projection-too-complex",
             CollabError::InvalidIdentifier { .. } => "invalid-identifier",
             CollabError::ContentKindMismatch => "content-kind-mismatch",
+            CollabError::UnsupportedContentKind { .. } => "unsupported-content-kind",
+            CollabError::MarkdownRewriteUnsupported { .. } => "markdown-rewrite-unsupported",
             CollabError::BaseAlreadyClaimed => "base-already-claimed",
             CollabError::BaseStateDiverged => "base-state-diverged",
+            CollabError::BaseRelaySequencePending => "base-relay-sequence-pending",
+            CollabError::BaseRelaySequenceCollision { .. } => "base-relay-sequence-collision",
+            CollabError::LineageWriteStale { .. } => "lineage-write-stale",
             CollabError::SuccessorProjectionMismatch { .. } => "successor-projection-mismatch",
             CollabError::SuccessorResultMismatch { .. } => "successor-result-mismatch",
             CollabError::LineageEpochChanged { .. } => "lineage-epoch-changed",

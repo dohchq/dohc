@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
+import type { ShareViewSelector } from "./shareViewInfo";
 
 // Pure registry persistence: a JSON file of known local workspaces. The
 // electron wiring (userData path, test-home seam) lives in
@@ -216,7 +217,10 @@ export interface ShareViewIdentity {
   // so a record without one is damaged, never merely old. Its refresh refuses
   // rather than asking the relay for a replacement — that ask is the one a
   // relay able to damage a record would answer with a wider scope.
-  grantedSelector: { paths: string[]; versionId: string | null };
+  //
+  // The `access` level rides with it (#646): the level is part of the grant,
+  // pinned once and enforced on every pull, not re-asked per refresh.
+  grantedSelector: ShareViewSelector;
   ended?: boolean;
   // Ops this share's pulls skipped, and why. Durable on purpose: the cursor
   // has moved past them, so the content stays missing until the granter
@@ -267,7 +271,7 @@ export interface ShareMountRecord {
   // Same REQUIRED pinned selector as ShareViewIdentity.grantedSelector, for
   // the same reason: the mount's pulls enforce it against the relay's
   // selection, and a record without one is damaged.
-  grantedSelector: { paths: string[]; versionId: string | null };
+  grantedSelector: ShareViewSelector;
   ended?: boolean;
   // Same durable skip record as ShareViewIdentity.skippedOps, for the same
   // reason: a mount's pulls commit past a refused op too.

@@ -41,6 +41,14 @@ pub enum SyncError {
     CoordinateDiverged,
     #[error("replication state is not ready: {reason}")]
     RetryableState { reason: &'static str },
+    #[error(
+        "Y.Doc projection exceeds {constraint}: limit {limit_bytes} bytes, observed at least {actual_bytes} bytes"
+    )]
+    ProjectionTooLarge {
+        constraint: &'static str,
+        actual_bytes: usize,
+        limit_bytes: usize,
+    },
     #[error("operation kind is not owned by this apply surface")]
     UnsupportedOperation,
     #[error("replicated operation is outside the share boundary")]
@@ -136,7 +144,8 @@ impl SyncError {
             | SyncError::UnsupportedOperation
             | SyncError::ShareBoundaryViolation
             | SyncError::ShareVersionMismatch { .. }
-            | SyncError::ShareVersionUnusable { .. } => ShareDisposition::Skip,
+            | SyncError::ShareVersionUnusable { .. }
+            | SyncError::ProjectionTooLarge { .. } => ShareDisposition::Skip,
             // Failures of the pull itself. Skipping past a missing blob or a
             // storage fault would report the op as refused when nothing about
             // it was wrong, and would commit the cursor past content that is
@@ -158,6 +167,7 @@ impl SyncError {
             SyncError::InputTooLarge { .. } => "invalid-input",
             SyncError::SequenceGap | SyncError::CoordinateDiverged => "state-corrupt",
             SyncError::RetryableState { .. } => "retryable-state",
+            SyncError::ProjectionTooLarge { .. } => "projection-too-large",
             SyncError::UnsupportedOperation => "invalid-input",
             // The boundary class is "the share does not cover this op". The
             // recipient's copy says so and names the granter, who is the one

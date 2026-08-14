@@ -77,6 +77,9 @@ export function mockLiveSessions(
       if (request.method === "capture.flush") {
         return { id: request.id, result: captureFlushResult() };
       }
+      if (request.method === "capture.reconcile") {
+        return { id: request.id, result: captureFlushResult() };
+      }
       if (request.method === "capture.setAuthor") {
         return { id: request.id, result: { updated: true } };
       }

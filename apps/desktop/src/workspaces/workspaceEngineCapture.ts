@@ -26,7 +26,11 @@ import {
   type VersionedTextMomentSummary,
   type VersionedTextStore,
 } from "@dohc/workspace-contracts/engine";
-import type { RelayMaterializedPath } from "@dohc/workspace-contracts/relay";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
+import type {
+  MaterializeRelayPullPage,
+  RelayMaterializedPath,
+} from "@dohc/workspace-contracts/relay";
 import {
   openEngineYdocProviderSession,
   DaemonRefusalError,
@@ -37,11 +41,14 @@ import {
   isYdocRemoteUpdatesPendingRefusal,
   isYdocUnsettledCloseRefusal,
   YdocReleasedWithSettleFailureError,
+  YdocAdapterError,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
   type EngineTransport,
+  type ArtifactAssetDescriptor,
   type YdocContentKind,
 } from "@dohc/workspace-engine-client";
+import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
 import * as Y from "yjs";
 import {
   isTextMediaType,
@@ -54,7 +61,6 @@ import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promise
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
-  MAX_HISTORY_TEXT_SNAPSHOT_BYTES,
   type ActiveAgentRun,
 } from "./workspaceWatcher";
 import {
@@ -100,7 +106,7 @@ export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
 //     secret paths — the SAME floor engine search uses) that .dohc policy
 //     files can NEVER override, plus workspace policy from .dohc/files.toml
 //     which can only narrow (tracked = false), never widen.
-//   - Only UTF-8 text files up to MAX_HISTORY_TEXT_SNAPSHOT_BYTES are
+//   - Only UTF-8 text files up to the engine's MAX_TEXT_BYTES are
 //     captured (the legacy history snapshot pipeline's text heuristics).
 //     Binary, oversized, non-UTF-8, and secret files are skipped entirely —
 //     no metadata-only engine moments; if a previously captured path stops
@@ -169,7 +175,7 @@ export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
 // which a daemon that never fails never enters.
 export const YDOC_OPEN_RETRY_DEADLINE_MS =
   2 * (WORKSPACE_OPEN_DEADLINE_MS + TRANSPORT_REBIND_MAX_BACKOFF_MS);
-export const MAX_ENGINE_CAPTURE_TEXT_BYTES = MAX_HISTORY_TEXT_SNAPSHOT_BYTES;
+export const MAX_ENGINE_CAPTURE_TEXT_BYTES = 10 * 1024 * 1024;
 export const MAX_ENGINE_CAPTURE_BINARY_BYTES = MAX_VERSIONED_BINARY_FILE_BYTES;
 
 export interface ExpectedEngineEvent {
@@ -341,6 +347,10 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // (#665) — see `RestartSafeYDocSession`.
   | "evict"
 > & {
+  readArtifactAsset(descriptor: ArtifactAssetDescriptor): Promise<{
+    descriptor: ArtifactAssetDescriptor;
+    bytes: Uint8Array;
+  }>;
   // `onArmed` fires when THIS update has reached the provider — journaled onto
   // the session's journal chain and counted by the settle it arms. The call is
   // queued, so that moment is later than the caller handing the update over,
@@ -432,6 +442,7 @@ export interface WorkspaceEngineCapture {
   openYDocSession(input: {
     path: string;
     onRemoteUpdate: (update: Uint8Array) => void;
+    onLineageReplaced?: (update: Uint8Array, recoveredPaths: string[]) => void;
     contentKind?: YdocContentKind;
     // The HONEST save state for this document, reported on every settle:
     // "settling" when one starts, "saved" only when the projection AND the
@@ -551,17 +562,12 @@ export interface WorkspaceEngineCapture {
   // version operations. The task owns engine push/pull; returned
   // active-version paths are materialized with expected-event suppression so
   // watcher observations of sync writes never become new local moments.
-  // Data-safety contract: the pull's relay fetch cursor commits ONLY after
-  // materialization succeeds — runRelaySync invokes the result's
-  // commitFetchCursor once every fast-forwarded path is safely on disk, so a
-  // failed materialization leaves the cursor behind and the next pass
-  // retries the same ops instead of permanently skipping them.
-  runRelaySync<
-    T extends {
-      fastForwardedPaths: readonly RelayMaterializedPath[];
-      commitFetchCursor?: () => Promise<void>;
-    },
-  >(task: () => Promise<T>): Promise<T>;
+  // Data-safety contract: the task must give every pull page to the supplied
+  // materializer before it commits that page's relay cursor. A failed page
+  // remains available to the next pass instead of being skipped forever.
+  runRelaySync<T>(
+    task: (materializePage: MaterializeRelayPullPage) => Promise<T>,
+  ): Promise<T>;
   // Resolves when everything enqueued so far has been captured (tests).
   flush(): Promise<void>;
   // Stops accepting work and resolves once in-flight capture is durably
@@ -617,7 +623,11 @@ export interface WorkspaceEngineCaptureOptions {
   // Injectable only to simulate daemon generations in focused restart tests.
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionOptions,
-  ) => Promise<EngineYdocProviderSession>;
+  ) => Promise<
+    Omit<EngineYdocProviderSession, "artifactAssets"> & {
+      artifactAssets?: EngineYdocProviderSession["artifactAssets"];
+    }
+  >;
 }
 
 export interface EngineDiskWriter {
@@ -668,6 +678,15 @@ function isFileLockedCause(error: unknown): boolean {
 // file lock leaves a durably pending write for the detached debt registry.
 function isTransientEngineCause(error: unknown): boolean {
   return hasRefusalInCauseChain(error, isTransientEngineRefusal);
+}
+
+function isLineageChangedCause(error: unknown): boolean {
+  return hasRefusalInCauseChain(
+    error,
+    (candidate) =>
+      candidate instanceof YdocAdapterError &&
+      candidate.code === "lineage-changed",
+  );
 }
 
 /**
@@ -748,6 +767,14 @@ function announceOnce(announce: (() => void) | undefined): () => void {
     announced = true;
     announce?.();
   };
+}
+
+function isExactYDocClaimPromotion(doc: Y.Doc, claimId: string): boolean {
+  // Promotion claims the SHA-256 of this lineage's full-state base.
+  // Shared client clocks prove ancestry only: two peers can clone a base and
+  // then fork. The exact base hash proves that this unclaimed document is the
+  // lineage that received the claim.
+  return sha256Bytes(Y.encodeStateAsUpdate(doc)) === claimId;
 }
 
 function sha256Utf8(text: string): string {
@@ -1108,32 +1135,25 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
       if (bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES) return { kind: "untracked-content" };
       return { kind: "binary", bytes, sha256: sha256Bytes(bytes), byteLength: bytes.byteLength };
     }
-    // Text-media ordering (WS-G1 review fix): the BINARY cap decides
-    // readability here, because a text-suffixed path can be binary in
-    // disguise (invalid UTF-8) and the store accepts that as binary up to
-    // MAX_ENGINE_CAPTURE_BINARY_BYTES. Only content that genuinely IS text
-    // (round-trips through UTF-8) is held to the smaller text cap.
-    if (info.size > MAX_ENGINE_CAPTURE_BINARY_BYTES) return { kind: "untracked-content" };
+    if (info.size > MAX_ENGINE_CAPTURE_TEXT_BYTES) return { kind: "untracked-content" };
     const bytes = await readFile(absolute);
-    if (bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES) {
-      // Bytes in hand: carry the sha so a settle's own materialization past
-      // even the BINARY cap is recognizable as our write, exactly like the
-      // text-cap case below. (The size-only early-out above cannot — it
-      // deliberately refuses to load the file to find out.)
+    if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
+      // Bytes in hand: carry the sha so a settle's own oversized
+      // materialization is recognizable as our write. The size-only early-out
+      // above cannot because it deliberately refuses to load the file.
       return { kind: "untracked-content", sha256: sha256Bytes(bytes) };
     }
     const text = bytes.toString("utf8");
     // The engine only stores text that round-trips through UTF-8; anything
     // else is binary in disguise, not engine-ownable as text.
     if (!Buffer.from(text, "utf8").equals(bytes)) {
+      if (
+        liveDocumentKindForPath(path) === "scene" ||
+        bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES
+      ) {
+        return { kind: "untracked-content", sha256: sha256Bytes(bytes) };
+      }
       return { kind: "binary", bytes, sha256: sha256Bytes(bytes), byteLength: bytes.byteLength };
-    }
-    // Genuine text over the text cap stays untracked (established behavior —
-    // oversized text is neither snapshotted nor demoted to bytes). The sha
-    // rides along so a settle's own oversized materialization is still
-    // recognizable as OUR write rather than a reason to retire the record.
-    if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
-      return { kind: "untracked-content", sha256: sha256Utf8(text) };
     }
     return { kind: "text", text, sha256: sha256Utf8(text) };
   } catch (error) {
@@ -1679,10 +1699,11 @@ export function createWorkspaceEngineCapture(
     onDead: () => void;
     onAlive: () => void;
     onRemoteUpdate: (update: Uint8Array) => void;
+    onLineageReplaced: (update: Uint8Array, recoveredPaths: string[]) => void;
     onSettled: (
       result: {
         sha256: string;
-        markdown: string | null;
+        content: string | null;
         materialized: boolean;
       },
       token: number,
@@ -1706,6 +1727,7 @@ export function createWorkspaceEngineCapture(
       openEngineYdocProviderSession;
     const workspace = { workspaceId, rootPath };
     let canonicalDoc: Y.Doc | null = null;
+    let canonicalLineageClaimId: string | null = null;
     let current: EngineYdocProviderSession | null = null;
     let releaseObligation: EngineYdocProviderSession | null = null;
     let closed = false;
@@ -1816,7 +1838,7 @@ export function createWorkspaceEngineCapture(
               onError(`Y.Doc rebind of ${input.path}`, rebindError);
             });
           };
-          opened = await openProvider({
+          const providerOpened = await openProvider({
             transport: binding.client as EngineTransport,
             workspace: binding.workspace,
             versionId: input.versionId,
@@ -1833,6 +1855,17 @@ export function createWorkspaceEngineCapture(
               Y.applyUpdate(canonicalDoc, update);
               input.onRemoteUpdate(update);
             },
+            onLineageReplaced: (replacement, recoveredPaths) => {
+              if (current !== opened || canonicalDoc === null) return;
+              const retired = canonicalDoc;
+              canonicalDoc = replacement;
+              canonicalLineageClaimId = opened?.lineageClaimId ?? null;
+              input.onLineageReplaced?.(
+                Y.encodeStateAsUpdate(replacement),
+                recoveredPaths,
+              );
+              retired.destroy();
+            },
             onLocalEditError: requestReconnect,
             // requestReconnect returns early for anything that is not a
             // reconnect error, so it is NOT an error sink: every settle
@@ -1848,6 +1881,7 @@ export function createWorkspaceEngineCapture(
               return input.onSettled(result, token, generation);
             },
           });
+          opened = providerOpened;
           openingRemoteUpdates.set(opened, opening);
           return opened;
         },
@@ -1873,6 +1907,25 @@ export function createWorkspaceEngineCapture(
       onReplayArmed?: () => void,
     ): Promise<void> => {
       try {
+        let replacementClaimId = replacement.lineageClaimId ?? null;
+        const claimChanged = replacementClaimId !== canonicalLineageClaimId;
+        const promotedSameLineage =
+          canonicalLineageClaimId === null &&
+          replacementClaimId !== null &&
+          isExactYDocClaimPromotion(doc, replacementClaimId);
+        if (claimChanged && !promotedSameLineage) {
+          openingRemoteUpdates.delete(replacement);
+          canonicalDoc = replacement.doc;
+          canonicalLineageClaimId = replacementClaimId;
+          current = replacement;
+          input.onLineageReplaced?.(
+            Y.encodeStateAsUpdate(replacement.doc),
+            [],
+          );
+          doc.destroy();
+          markAlive();
+          return;
+        }
         const opening = openingRemoteUpdates.get(replacement);
         const updatesIncludedInRemoteDelta = opening?.updates.length ?? 0;
 
@@ -1892,6 +1945,8 @@ export function createWorkspaceEngineCapture(
           const journaled = replacement.applyLocalUpdate(replay);
           onReplayArmed?.();
           await journaled;
+          replacementClaimId =
+            replacement.lineageClaimId ?? replacementClaimId;
         } else {
           // Nothing to replay: the replacement already holds this text, so
           // every settle it runs carries it.
@@ -1908,6 +1963,7 @@ export function createWorkspaceEngineCapture(
             input.onRemoteUpdate(update);
           }
         }
+        canonicalLineageClaimId = replacementClaimId;
       } catch (error) {
         openingRemoteUpdates.delete(replacement);
         try {
@@ -2044,6 +2100,7 @@ export function createWorkspaceEngineCapture(
     // outside that budget, and keep the full ladder.
     current = await openGeneration(true);
     canonicalDoc = current.doc;
+    canonicalLineageClaimId = current.lineageClaimId ?? null;
     const initialOpening = openingRemoteUpdates.get(current);
     if (initialOpening) {
       initialOpening.installed = true;
@@ -2057,16 +2114,36 @@ export function createWorkspaceEngineCapture(
     // applied it to `doc`; encode the installed canonical state so the
     // renderer cannot initialize from the stale pre-update snapshot.
     const initialUpdate = Y.encodeStateAsUpdate(canonicalDoc);
+    const objectId = current.objectId;
+    const sessionVersionId = current.versionId;
     const contentKind = current.contentKind;
     const sessionPath = current.path;
     const openedHead = current.head;
     const openedLineage = current.lineage;
 
     const restartSafeSession: RestartSafeYDocSession = {
-      doc: canonicalDoc,
+      get doc() {
+        if (canonicalDoc === null) throw closedError();
+        return canonicalDoc;
+      },
       initialUpdate,
+      ...(objectId ? { objectId } : {}),
+      ...(sessionVersionId ? { versionId: sessionVersionId } : {}),
+      get lineageClaimId() {
+        return canonicalLineageClaimId;
+      },
       contentKind,
+      get artifactAssets() {
+        return current?.artifactAssets ?? [];
+      },
       path: sessionPath,
+      readArtifactAsset(descriptor) {
+        return Promise.reject(
+          new Error(
+            `Artifact asset ${descriptor.id} must load through its version-bound capture session.`,
+          ),
+        );
+      },
       applyLocalUpdate(update, onArmed) {
         // ONE announcement per update, at the FIRST provider call that arms a
         // settle carrying it. Three calls can be that first one — the live
@@ -2105,6 +2182,14 @@ export function createWorkspaceEngineCapture(
             armed();
             await journaled;
             Y.applyUpdate(doc, update);
+            // A successful record can promote a local-only lineage. Retain
+            // the durable claim now; later deltas change the full-state hash.
+            if (
+              canonicalLineageClaimId === null &&
+              generation.lineageClaimId != null
+            ) {
+              canonicalLineageClaimId = generation.lineageClaimId;
+            }
           } catch (error) {
             // A live refusal still owns its lease and must close first; a
             // transport restart opens first because the old daemon is gone.
@@ -2115,6 +2200,12 @@ export function createWorkspaceEngineCapture(
             // once-guard makes announcing there a no-op when the failure was
             // asynchronous and the count already rose.
             Y.applyUpdate(doc, update);
+            // This is an invariant breach, not a reconnect. Rebinding would
+            // replace this still-visible editor with the winner and silently
+            // discard the refused keystroke. Keep the old document visible
+            // and report the failure; the server's live-session drain rule
+            // makes this branch unreachable in an ordinary arbitration.
+            if (isLineageChangedCause(error)) throw error;
             // A transient refusal is not a broken generation, and rebinding
             // for one is worse than doing nothing. The provider holds what the
             // engine refused and has already re-armed its own ladder to resend
@@ -2766,7 +2857,7 @@ export function createWorkspaceEngineCapture(
     }
     if (disk.kind === "untracked-content") {
       // OUR OWN settle materialization can land here. A Y.Doc is not bounded
-      // by MAX_ENGINE_CAPTURE_TEXT_BYTES (128 KiB), so a document grown past
+      // by the engine's MAX_TEXT_BYTES, so a document grown past
       // it materializes a file this reader classifies as un-ownable — and
       // retiring the record would DELETE the document's engine history while
       // the editor reports "Saved". (The dogfood journey's repro was 131,442
@@ -3344,9 +3435,9 @@ export function createWorkspaceEngineCapture(
           throw new Error("Plugin panel is no longer active.");
         }
         const observedBytes = Buffer.byteLength(text, "utf8");
-        if (observedBytes > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
+        if (observedBytes > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
           throw new Error(
-            `Authored text exceeds the capture limit: limit ${MAX_ENGINE_CAPTURE_TEXT_BYTES} bytes, observed ${observedBytes} bytes.`,
+            `Authored text exceeds the in-band write limit: limit ${MAX_DESKTOP_CAPTURE_TEXT_BYTES} bytes, observed ${observedBytes} bytes.`,
           );
         }
         const { relative: resolvedRelative, resolvedAbsolute } =
@@ -3544,7 +3635,7 @@ export function createWorkspaceEngineCapture(
         const onSettled = async (
           result: {
             sha256: string;
-            markdown: string | null;
+            content: string | null;
             // The daemon reports whether the settled document reached the workspace
             // file. Only an explicit success may continue to the save notification.
             materialized: boolean;
@@ -3755,6 +3846,10 @@ export function createWorkspaceEngineCapture(
           onRemoteUpdate: (update) => {
             noteUpdate();
             input.onRemoteUpdate(update);
+          },
+          onLineageReplaced: (update, recoveredPaths) => {
+            noteUpdate();
+            input.onLineageReplaced?.(update, recoveredPaths);
           },
           onSettled,
           onSettleStart,
@@ -4110,6 +4205,9 @@ export function createWorkspaceEngineCapture(
                   // decided by comparing it to what that settle covers.
                   updateSeq += 1;
                 },
+                onLineageReplaced: () => {
+                  updateSeq += 1;
+                },
                 onSettleStart: () => undefined,
                 onSettleError: () => undefined,
                 onSettled: () => undefined,
@@ -4388,7 +4486,7 @@ export function createWorkspaceEngineCapture(
             // THE ORPHAN'S THIRD EXIT (#665). It may not settle — the rule
             // above — and its prune-close refuses while no artifact holds its
             // CRDT's bytes. On a policy-excluded path, or a file over the
-            // 128 KiB capture limit, no capture will ever mint that artifact,
+            // MAX_TEXT_BYTES capture limit, no capture will ever mint that artifact,
             // so the refused close's reinserted lease answered every later
             // open with `ydoc-session-busy` until the daemon restarted.
             //
@@ -4673,10 +4771,38 @@ export function createWorkspaceEngineCapture(
         // keeps that session and something must still be able to close it.
         liveYDocSessions.set(input.path, liveEntry);
         return {
-          doc: session.doc,
+          get doc() {
+            return session.doc;
+          },
           initialUpdate: session.initialUpdate,
+          ...(session.objectId ? { objectId: session.objectId } : {}),
+          ...(session.versionId ? { versionId: session.versionId } : {}),
+          get lineageClaimId() {
+            return session.lineageClaimId;
+          },
           contentKind: session.contentKind,
+          get artifactAssets() {
+            return session.artifactAssets ?? [];
+          },
           path: session.path,
+          async readArtifactAsset(descriptor) {
+            const bytes = await engine.readBinaryBlob({
+              workspaceId,
+              sha256: descriptor.sha256,
+            });
+            if (!bytes) {
+              throw new Error(
+                `Artifact asset ${descriptor.id} is missing from version ${versionId}. Open the file again after sync finishes.`,
+              );
+            }
+            const actualSha256 = sha256Bytes(bytes);
+            if (actualSha256 !== descriptor.sha256) {
+              throw new Error(
+                `Artifact asset ${descriptor.id} failed its SHA-256 check. Open the file again after sync finishes.`,
+              );
+            }
+            return { descriptor, bytes };
+          },
           // TWO counters ride this call, and they are not the same count.
           // `noteUpdate` is the CLOSE counter (#496): it asks whether every
           // update is covered by a settle, counts here at hand-over, and
@@ -5650,8 +5776,11 @@ export function createWorkspaceEngineCapture(
     writeGeneratedTextFile(input) {
       return enqueueResult("write generated text", async () => {
         const path = assertGeneratedMarkdownPath(input.path);
-        if (Buffer.byteLength(input.text, "utf8") > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
-          throw new Error(`Generated Markdown is too large to track: ${path}`);
+        const observedBytes = Buffer.byteLength(input.text, "utf8");
+        if (observedBytes > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
+          throw new Error(
+            `Generated Markdown exceeds the in-band write limit: limit ${MAX_DESKTOP_CAPTURE_TEXT_BYTES} bytes, observed ${observedBytes} bytes: ${path}.`,
+          );
         }
         if (input.recoverExistingText) {
           // Recovery may only replace an owned projection with another text
@@ -6225,35 +6354,80 @@ export function createWorkspaceEngineCapture(
 
     runRelaySync(task) {
       return enqueueResult("relay sync", async () => {
-        const result = await task();
-        const changed = result.fastForwardedPaths;
-        if (changed.length > 0) {
-          // Policy/engine reads only when there is disk work: a quiescent
-          // relay tick must not pay for policy I/O it never uses.
+        // A joined daemon can pull before any capture task has opened the
+        // versioned store. The incoming moments target `main`, so create that
+        // version before the relay applies them.
+        const engine = await engineStore();
+        const materializePage: MaterializeRelayPullPage = async (changed) => {
+          if (changed.length === 0) return;
+          // Policy and active-version reads only when there is disk work: a
+          // quiescent relay tick does not need either one.
           const policy = await readPolicyForTask();
-          const engine = await engineStore();
           const activeVersionId = await activeVersionIdOf(engine);
           const materializations: MaterializeOperation[] = [];
           for (const change of changed) {
+            // A failed disk materialization leaves the relay cursor behind.
+            // If the user switches versions before the retry, the redelivered
+            // path still belongs to the version that produced it. Never read
+            // from or delete the newly active version's disk projection.
+            if (change.versionId !== activeVersionId) continue;
             if (change.operation === "delete") {
-              materializations.push({ kind: "delete", path: change.path });
+              materializations.push({
+                kind: "delete",
+                path: change.path,
+                ...(change.contentKind === "secret" ? { protected: true } : {}),
+              });
+              continue;
+            }
+            if (change.contentKind === "secret") {
+              const materialized = await secretStoreFor().materializeSecretFile({
+                workspaceId,
+                versionId: change.versionId,
+                path: change.path,
+              });
+              if (!materialized.present) {
+                throw new Error(
+                  `Protected content for ${change.path} is no longer available.`,
+                );
+              }
+              materializations.push({
+                kind: "write",
+                path: change.path,
+                text: materialized.text,
+                protected: true,
+              });
+              continue;
+            }
+            if (change.contentKind === "binary") {
+              const bytes = await engine.readBinaryFile({
+                workspaceId,
+                versionId: activeVersionId,
+                path: change.path,
+              });
+              if (!bytes) {
+                throw new Error(`Binary content for ${change.path} is no longer available.`);
+              }
+              materializations.push({ kind: "write-binary", path: change.path, bytes });
               continue;
             }
             const snapshot = await engine.readTextFile({
               workspaceId,
-              versionId: activeVersionId,
+              versionId: change.versionId,
               path: change.path,
             });
             if (!snapshot) continue;
             materializations.push(await materializeWriteForSnapshot(engine, snapshot));
           }
           await materialize(materializations, policy);
-        }
-        // Only NOW is the pulled state durable on disk — commit the relay
-        // fetch cursor. A throw above leaves the cursor behind so the next
-        // pass re-fetches and retries the materialization.
-        await result.commitFetchCursor?.();
-        return result;
+          // The daemon watcher must manifest the pulled disk state before the
+          // caller can make its next edit. Otherwise a fast local edit can
+          // coalesce with this materialization as the path's first sight, and
+          // capture correctly refuses to claim the foreign sync head.
+          if (options.daemonOwnsCapture) {
+            await engine.reconcileCapture?.();
+          }
+        };
+        return await task(materializePage);
       });
     },
 

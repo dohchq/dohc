@@ -134,6 +134,19 @@ fn lineage_rows(db: &Path, key: &DocKey) -> (i64, i64) {
         .expect("count lineage rows")
 }
 
+fn deferred_rows(store: &EngineStore, key: &DocKey) -> i64 {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_deferred_updates \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("count deferred rows")
+}
+
 fn marker_state(db: &Path, key: &DocKey) -> (Regime, bool) {
     let store = EngineStore::open(db, 9_102).expect("open store");
     let marker = dohc_engine_collab::read_marker(&store, key)
@@ -326,6 +339,7 @@ fn replay_into_clean_peer(
             workspace_id: workspace_id.to_owned(),
             origin_id: op.origin_id.clone(),
             origin_seq: op.origin_seq - first_origin_seq,
+            relay_seq: Some(op.origin_seq - first_origin_seq),
             op_kind: op.op_kind.clone(),
             payload: op.payload.clone(),
             recorded_at_ms: op.recorded_at_ms,
@@ -424,7 +438,7 @@ fn oversized_lineage() -> &'static OversizedLineage {
             projected
                 .project(ContentKind::Plaintext)
                 .expect("the oversized state remains projectable")
-                .markdown
+                .content
                 .len(),
             visible_bytes
         );
@@ -470,13 +484,16 @@ fn remote_edit_envelope(
     path: &str,
     recorded_at_ms: i64,
 ) -> ReplicationEnvelope {
+    let fixture = oversized_lineage();
     let edit_sha = store
-        .put_binary_blob(&oversized_lineage().remote_edit)
+        .put_binary_blob(&fixture.remote_edit)
         .expect("store remote edit");
+    let base_claim = dohc_engine_storage::hex_sha256(&fixture.base);
     ReplicationEnvelope {
         workspace_id: key.workspace_id.clone(),
         origin_id: "peer".to_owned(),
         origin_seq: 0,
+        relay_seq: Some(1),
         op_kind: "ydoc.update".to_owned(),
         payload: serde_json::json!({
             "versionId": key.version_id,
@@ -484,32 +501,20 @@ fn remote_edit_envelope(
             "path": path,
             "contentKind": "plaintext",
             "updateBlobSha256": edit_sha,
+            "lineageClaimId": base_claim,
             "isBaseState": false
         }),
         recorded_at_ms,
     }
 }
 
-fn assert_oversized_decline(declined: &dohc_engine_sync::SharingDeclined, path: &str) {
-    assert_eq!(declined.path, path);
-    assert_eq!(declined.constraint, "MAX_YDOC_UPDATE_BYTES");
-    assert_eq!(
-        declined.limit_bytes,
-        dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES
-    );
-    assert!(
-        declined.observed_bytes > declined.limit_bytes,
-        "the decline must report the oversized base: {declined:?}"
-    );
-}
-
-fn assert_remote_edit_committed(store: &EngineStore, key: &DocKey) {
+fn assert_remote_edit_not_committed(store: &EngineStore, key: &DocKey) {
     let persisted = dohc_engine_collab::load_persisted(store, key)
         .expect("load persisted lineage")
         .expect("lineage exists");
     assert!(
-        persisted.doc.plaintext_string().starts_with("remote "),
-        "the edit remains in the lineage when base origination declines"
+        !persisted.doc.plaintext_string().starts_with("remote "),
+        "an unverified edit must not enter the local lineage"
     );
 }
 
@@ -535,13 +540,14 @@ async fn a_first_edit_on_a_synced_workspace_originates_one_base_then_deltas() {
 
     let doc = Ydoc::wire();
     let first = doc.plaintext_insert(0, "hello ");
-    handle
+    let first_append = handle
         .ydoc_record_update(
             key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
             Regime::LocalOnly,
             first,
+            None,
             None,
             // The real seed path: `ydoc.recordUpdate` sets this for the first
             // update of an absent lineage.
@@ -573,6 +579,7 @@ async fn a_first_edit_on_a_synced_workspace_originates_one_base_then_deltas() {
             Regime::LocalOnly,
             second,
             None,
+            first_append.lineage_claim_id,
             false,
             None,
             300,
@@ -605,11 +612,10 @@ impl LeaseProbe for AlwaysLiveLease {
     }
 }
 
-/// A dependent local update cannot originate until its missing predecessor
-/// arrives. When that predecessor arrives through the deferred-drain path, the
-/// drain must retry origination without waiting for another local edit.
+/// A deferred delta cannot enter an unclaimed local lineage. The relay must
+/// deliver and authenticate the immutable base claim before the drain retries.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn draining_a_late_predecessor_retries_origination() {
+async fn draining_a_delta_without_a_verified_base_keeps_it_parked() {
     const WS: &str = "ws-originate-after-drain";
     const PATH: &str = "notes/deferred.md";
     let scratch = ScratchDir::new().expect("scratch");
@@ -622,6 +628,7 @@ async fn draining_a_late_predecessor_retries_origination() {
     let key = DocKey::new(WS, "main", &object_id).expect("key");
 
     let doc = Ydoc::wire();
+    let base_claim = dohc_engine_storage::hex_sha256(&doc.encode_full_state());
     let predecessor = doc.plaintext_insert(0, "dep base");
     let dependent = doc.plaintext_insert(0, "more ");
     handle
@@ -631,6 +638,7 @@ async fn draining_a_late_predecessor_retries_origination() {
             ContentKind::Plaintext,
             Regime::Replicated,
             dependent,
+            None,
             None,
             false,
             None,
@@ -660,6 +668,7 @@ async fn draining_a_late_predecessor_retries_origination() {
         workspace_id: WS.to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 0,
+        relay_seq: Some(1),
         op_kind: "ydoc.update".to_owned(),
         payload: serde_json::json!({
             "versionId": "main",
@@ -667,6 +676,7 @@ async fn draining_a_late_predecessor_retries_origination() {
             "path": PATH,
             "contentKind": "plaintext",
             "updateBlobSha256": predecessor_sha,
+            "lineageClaimId": base_claim,
             "isBaseState": false
         }),
         recorded_at_ms: 300,
@@ -681,32 +691,30 @@ async fn draining_a_late_predecessor_retries_origination() {
         "the predecessor is deferred"
     );
 
-    let drained =
-        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults).expect("drain predecessor");
-    assert_eq!(drained.drained, 1);
-    assert!(drained.sharing_declined.is_empty());
+    assert!(matches!(
+        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults),
+        Err(SyncError::RetryableState {
+            reason: "parked Y.Doc delta is waiting for a verified base identity"
+        })
+    ));
+    assert_eq!(deferred_rows(&store, &key), 1, "the delta stays parked");
     drop(store);
 
     assert_eq!(
         marker_state(&db, &key),
-        (Regime::Replicated, true),
-        "the drain retries and claims the base"
+        (Regime::Replicated, false),
+        "a delta cannot claim the missing base"
     );
-    let ops = local_ydoc_ops(&db);
-    assert_eq!(ops.len(), 1, "the drain journals one originated base");
-    assert!(ops[0].is_base());
-    assert_eq!(base_ops_in_log(&db), 1);
-    assert_eq!(
-        replay_into_clean_peer(&db, &ops, WS, PATH),
-        "more dep base",
-        "the originated base carries the resolved dependent state"
+    assert!(
+        local_ydoc_ops(&db).is_empty(),
+        "the invalid delta cannot trigger base origination"
     );
 }
 
-/// The deferred-drain boundary returns an actionable decline without rolling
-/// back the remote edit that made an oversized unclaimed lineage complete.
+/// An unverified edit cannot turn a local oversized lineage into a sharing
+/// decline. The missing base remains the first error the relay must repair.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn draining_an_edit_surfaces_an_oversized_base_decline() {
+async fn draining_an_unverified_edit_does_not_report_a_base_size_decline() {
     const WS: &str = "ws-oversized-drain-decline";
     const PATH: &str = "notes/oversized-drain.md";
     let scratch = ScratchDir::new().expect("scratch");
@@ -729,18 +737,20 @@ async fn draining_an_edit_surfaces_an_oversized_base_decline() {
         dohc_engine_sync::ApplyOutcome::Applied(ref result) if result.deferred
     ));
 
-    let drained =
-        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults).expect("drain remote edit");
-    assert_eq!(drained.drained, 1);
-    assert_eq!(drained.sharing_declined.len(), 1);
-    assert_oversized_decline(&drained.sharing_declined[0], PATH);
-    assert_remote_edit_committed(&store, &key);
+    assert!(matches!(
+        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults),
+        Err(SyncError::RetryableState {
+            reason: "parked Y.Doc delta is waiting for a verified base identity"
+        })
+    ));
+    assert_eq!(deferred_rows(&store, &key), 1, "the edit stays parked");
+    assert_remote_edit_not_committed(&store, &key);
 }
 
-/// The ordinary non-leased apply path can also complete a local dependent
-/// update. It must retry origination after it projects the complete lineage.
+/// An ordinary apply cannot merge a peer delta into an unclaimed local
+/// lineage. The relay must first authenticate the delta's base claim.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn applying_a_late_predecessor_without_a_lease_retries_origination() {
+async fn applying_a_delta_without_a_verified_base_stays_retryable() {
     const WS: &str = "ws-originate-after-ordinary-apply";
     const PATH: &str = "notes/ordinary.md";
     let scratch = ScratchDir::new().expect("scratch");
@@ -752,6 +762,7 @@ async fn applying_a_late_predecessor_without_a_lease_retries_origination() {
     let object_id = capture_seed(&handle, WS, PATH, 100).await;
     let key = DocKey::new(WS, "main", &object_id).expect("key");
     let doc = Ydoc::wire();
+    let base_claim = dohc_engine_storage::hex_sha256(&doc.encode_full_state());
     let predecessor = doc.plaintext_insert(0, "dep base");
     let dependent = doc.plaintext_insert(0, "more ");
     handle
@@ -761,6 +772,7 @@ async fn applying_a_late_predecessor_without_a_lease_retries_origination() {
             ContentKind::Plaintext,
             Regime::Replicated,
             dependent,
+            None,
             None,
             false,
             None,
@@ -781,6 +793,7 @@ async fn applying_a_late_predecessor_without_a_lease_retries_origination() {
         workspace_id: WS.to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 0,
+        relay_seq: Some(1),
         op_kind: "ydoc.update".to_owned(),
         payload: serde_json::json!({
             "versionId": "main",
@@ -788,33 +801,34 @@ async fn applying_a_late_predecessor_without_a_lease_retries_origination() {
             "path": PATH,
             "contentKind": "plaintext",
             "updateBlobSha256": predecessor_sha,
+            "lineageClaimId": base_claim,
             "isBaseState": false
         }),
         recorded_at_ms: 300,
     };
-    let applied = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
-        .expect("ordinary predecessor apply");
     assert!(matches!(
-        applied,
-        dohc_engine_sync::ApplyOutcome::Applied(_)
+        apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases),
+        Err(SyncError::RetryableState {
+            reason: "ydoc.update delta is waiting for a verified base identity"
+        })
     ));
     drop(store);
 
     assert_eq!(
         marker_state(&db, &key),
-        (Regime::Replicated, true),
-        "the ordinary apply retries and claims the base"
+        (Regime::Replicated, false),
+        "a delta cannot claim the missing base"
     );
-    let ops = local_ydoc_ops(&db);
-    assert_eq!(ops.len(), 1, "the ordinary apply journals one base");
-    assert!(ops[0].is_base());
-    assert_eq!(replay_into_clean_peer(&db, &ops, WS, PATH), "more dep base");
+    assert!(
+        local_ydoc_ops(&db).is_empty(),
+        "the invalid delta cannot trigger base origination"
+    );
 }
 
-/// The ordinary apply boundary returns the same actionable decline and keeps
-/// the edit when the completed base is too large to originate.
+/// An ordinary unverified edit cannot trigger an oversized-base decline. The
+/// missing base remains retryable, and the edit does not enter the lineage.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn applying_an_edit_surfaces_an_oversized_base_decline() {
+async fn applying_an_unverified_edit_does_not_report_a_base_size_decline() {
     const WS: &str = "ws-oversized-apply-decline";
     const PATH: &str = "notes/oversized-apply.md";
     let scratch = ScratchDir::new().expect("scratch");
@@ -830,24 +844,13 @@ async fn applying_an_edit_surfaces_an_oversized_base_decline() {
 
     let mut store = EngineStore::open(&db, 9_511).expect("open store");
     let envelope = remote_edit_envelope(&mut store, &key, PATH, 300);
-    let applied = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
-        .expect("apply remote edit");
-    let dohc_engine_sync::ApplyOutcome::WithDiagnostics {
-        outcome,
-        refusals,
-        sharing_declined,
-    } = applied
-    else {
-        panic!("the remote edit must apply and surface its sharing decline");
-    };
     assert!(matches!(
-        *outcome,
-        dohc_engine_sync::ApplyOutcome::Applied(_)
+        apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases),
+        Err(SyncError::RetryableState {
+            reason: "ydoc.update delta is waiting for a verified base identity"
+        })
     ));
-    assert!(refusals.is_empty());
-    assert_eq!(sharing_declined.len(), 1);
-    assert_oversized_decline(&sharing_declined[0], PATH);
-    assert_remote_edit_committed(&store, &key);
+    assert_remote_edit_not_committed(&store, &key);
 }
 
 /// Edit a lineage twice on a workspace prepared by `prepare`, then assert it
@@ -872,6 +875,7 @@ async fn two_edits_originate_nothing(ws: &str, path: &str, prepare: fn(&Path, &s
                 ContentKind::Plaintext,
                 Regime::LocalOnly,
                 update,
+                None,
                 None,
                 false,
                 None,
@@ -960,6 +964,7 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
             Regime::LocalOnly,
             alpha,
             None,
+            None,
             false,
             None,
             200,
@@ -1008,6 +1013,7 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
             Regime::LocalOnly,
             beta,
             None,
+            state.lineage_claim_id,
             false,
             None,
             500,
@@ -1034,6 +1040,7 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
             Regime::LocalOnly,
             gamma,
             None,
+            promoted.lineage_claim_id,
             false,
             None,
             600,
@@ -1089,6 +1096,7 @@ async fn deleting_a_crash_left_ydoc_before_enrollment_retires_the_lineage() {
             ContentKind::Plaintext,
             Regime::LocalOnly,
             update,
+            None,
             None,
             false,
             None,
@@ -1209,6 +1217,7 @@ async fn capture_retiring_a_closed_ydoc_head_retires_the_lineage() {
             Regime::LocalOnly,
             update,
             None,
+            None,
             false,
             None,
             200,
@@ -1260,13 +1269,14 @@ async fn live_lease_blocks_capture_retire_until_retry_and_rolls_back_every_row()
     let object_id = capture_seed(&handle, WS, PATH, 100).await;
     let key = DocKey::new(WS, "main", &object_id).expect("key");
     let doc = Ydoc::wire();
-    handle
+    let first_append = handle
         .ydoc_record_update(
             key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
             Regime::LocalOnly,
             doc.plaintext_insert(0, "first live edit\n"),
+            None,
             None,
             false,
             None,
@@ -1305,6 +1315,7 @@ async fn live_lease_blocks_capture_retire_until_retry_and_rolls_back_every_row()
             Regime::Replicated,
             doc.plaintext_insert(16, "second live edit\n"),
             None,
+            first_append.lineage_claim_id,
             false,
             None,
             270,
@@ -1475,6 +1486,7 @@ async fn merge_fast_forward_delete_retires_the_target_ydoc_lineage() {
             Regime::LocalOnly,
             update,
             None,
+            None,
             false,
             None,
             200,
@@ -1574,13 +1586,15 @@ async fn a_peer_base_that_lands_first_leaves_the_local_edit_a_delta() {
             workspace_id: WS.to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,
+            relay_seq: Some(0),
             op_kind: "ydoc.update".to_owned(),
             payload: serde_json::json!({
                 "versionId": "main",
                 "objectId": object_id,
                 "path": PATH,
                 "contentKind": "plaintext",
-                "updateBlobSha256": sha,
+                "updateBlobSha256": sha.clone(),
+                "lineageClaimId": sha,
                 "isBaseState": true
             }),
             recorded_at_ms: 300,
@@ -1601,6 +1615,7 @@ async fn a_peer_base_that_lands_first_leaves_the_local_edit_a_delta() {
             Regime::Replicated,
             local,
             None,
+            Some(dohc_engine_storage::hex_sha256(&peer_base)),
             false,
             None,
             400,
@@ -1649,6 +1664,7 @@ async fn redelivering_an_originated_base_is_idempotent() {
             Regime::LocalOnly,
             update,
             None,
+            None,
             false,
             None,
             200,
@@ -1665,18 +1681,21 @@ async fn redelivering_an_originated_base_is_idempotent() {
 
     // The very same base bytes come back from the relay.
     let base_bytes = blob_bytes(&db, &ops[0].blob_sha());
+    let base_sha = dohc_engine_storage::hex_sha256(&base_bytes);
     let mut store = EngineStore::open(&db, 9_400).expect("open store");
     let envelope = ReplicationEnvelope {
         workspace_id: WS.to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 0,
+        relay_seq: Some(0),
         op_kind: "ydoc.update".to_owned(),
         payload: serde_json::json!({
             "versionId": "main",
             "objectId": object_id,
             "path": PATH,
             "contentKind": "plaintext",
-            "updateBlobSha256": dohc_engine_storage::hex_sha256(&base_bytes),
+            "updateBlobSha256": base_sha.clone(),
+            "lineageClaimId": base_sha,
             "isBaseState": true
         }),
         recorded_at_ms: 500,
@@ -1745,6 +1764,7 @@ async fn closing_a_session_that_originated_mid_flight_keeps_the_base() {
             Regime::LocalOnly,
             update,
             None,
+            state.lineage_claim_id,
             false,
             None,
             200,
@@ -1808,12 +1828,12 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
     let doc = Ydoc::wire();
     doc.apply(&opened.initial_update)
         .expect("load seeded state");
-    let seed = opened.seed_markdown.as_deref().expect("Markdown seed");
+    let seed = opened.seed_content.as_deref().expect("Markdown seed");
     doc.plaintext_insert(0, seed);
     assert_eq!(doc.plaintext_string(), BEFORE);
     doc.plaintext_insert(BEFORE.len() as u32, "after\n");
     let update = doc.encode_full_state();
-    handle
+    let append = handle
         .ydoc_record_update(
             key.clone(),
             PATH.to_owned(),
@@ -1821,6 +1841,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             opened.regime,
             update,
             None,
+            opened.lineage_claim_id.clone(),
             false,
             None,
             200,
@@ -1835,6 +1856,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             key.clone(),
             PATH.to_owned(),
             ContentKind::Plaintext,
+            append.lineage_claim_id,
             opened.head_blob_sha256,
             "rollback-source-session".to_owned(),
             Arc::new(NoRecorder),
@@ -1919,6 +1941,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             reopened.regime,
             next,
             None,
+            reopened.lineage_claim_id.clone(),
             false,
             None,
             400,
@@ -1933,6 +1956,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             key,
             PATH.to_owned(),
             ContentKind::Plaintext,
+            reopened.lineage_claim_id,
             reopened.head_blob_sha256,
             "rollback-follow-up-session".to_owned(),
             Arc::new(NoRecorder),
@@ -2071,6 +2095,7 @@ async fn ordinary_text_write_sends_one_canonical_rewrite_before_its_moment() {
             workspace_id: WS.to_owned(),
             origin_id: op.origin_id.clone(),
             origin_seq: op.origin_seq,
+            relay_seq: Some(op.origin_seq),
             op_kind: op.op_kind.clone(),
             payload: op.payload.clone(),
             recorded_at_ms: op.recorded_at_ms,
@@ -2156,6 +2181,7 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
                 Regime::LocalOnly,
                 update,
                 None,
+                None,
                 false,
                 None,
                 now,
@@ -2177,6 +2203,7 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
             ContentKind::Plaintext,
             Regime::LocalOnly,
             update,
+            None,
             None,
             false,
             None,
@@ -2270,6 +2297,7 @@ async fn a_lineage_past_the_old_inherited_cap_originates() {
                 Regime::LocalOnly,
                 update,
                 None,
+                None,
                 false,
                 None,
                 now,
@@ -2290,6 +2318,7 @@ async fn a_lineage_past_the_old_inherited_cap_originates() {
             ContentKind::Plaintext,
             Regime::LocalOnly,
             update,
+            None,
             None,
             false,
             None,

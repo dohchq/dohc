@@ -55,7 +55,7 @@ describe("share mounts real daemon", () => {
             },
             // A REAL pinned selector: no paths and no version selects
             // nothing at all, which the engine refuses.
-            pinnedSelector: { paths: ["docs"], versionId: null },
+            pinnedSelector: { paths: ["docs"], versionId: null, access: "view" },
             recordRefusals: async () => undefined,
             pull: async () => ({
               fetched: 0,

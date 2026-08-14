@@ -72,7 +72,10 @@ import {
   graphChatOpenTarget,
   pendingHeadingTargetForOpen,
   resolveCanonicalDm,
+  goneMountProjections,
   runCanonicalDmNavigation,
+  shareRefreshSummary,
+  shareUnmountProjection,
   versionCompareOffCopy,
   type Workspace,
 } from "./DesktopWorkspaceShell";
@@ -90,6 +93,8 @@ import {
   resetOrphanedDrafts,
   useAllOrphanedDrafts,
 } from "./orphanedDrafts";
+import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
+import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 import { RecoveryList } from "./RecoveryList";
 
 // The close dialog's list, standing on its own: the guard subscribes and hands
@@ -162,6 +167,10 @@ function storedTabs(state: WorkspaceUiState): string[] {
   return state.editorGroups.flatMap((group) => group.tabs);
 }
 
+function isFileOpenStartMark(name: string): boolean {
+  return name.startsWith("file-open-start:");
+}
+
 // One canonical DM, as the graph node a click starts a navigation from and as
 // the record syncDms answers with.
 const DM_GRAPH_NODE = {
@@ -197,6 +206,31 @@ function dmSyncResult(
 }
 
 Element.prototype.scrollIntoView = vi.fn();
+
+const originalSetPointerCapture = Object.getOwnPropertyDescriptor(
+  Element.prototype,
+  "setPointerCapture",
+);
+const originalHasPointerCapture = Object.getOwnPropertyDescriptor(
+  Element.prototype,
+  "hasPointerCapture",
+);
+const originalElementFromPoint = Object.getOwnPropertyDescriptor(
+  document,
+  "elementFromPoint",
+);
+
+function restoreProperty(
+  target: object,
+  key: PropertyKey,
+  descriptor: PropertyDescriptor | undefined,
+): void {
+  if (descriptor) {
+    Object.defineProperty(target, key, descriptor);
+  } else {
+    Reflect.deleteProperty(target, key);
+  }
+}
 
 // The dirty-draft test types into the real markdown editor, which needs the
 // same two globals jsdom lacks that FileInspector.test.tsx stubs.
@@ -598,7 +632,11 @@ const SHARE_STATUS = {
 };
 const SHARE_VIEW: Workspace = {
   ...WORKSPACE,
-  shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+  shareView: {
+    shareId: "share-1",
+    granterEmail: "granter@dohc.test",
+    access: "view",
+  },
 };
 
 // A bridge that answers the way MAIN answers for a shared view: the capture
@@ -646,8 +684,21 @@ async function settleEngineOnRead(bridge: ReturnType<typeof makeEngineBridge>) {
   await act(async () => {});
 }
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  restoreProperty(
+    Element.prototype,
+    "setPointerCapture",
+    originalSetPointerCapture,
+  );
+  restoreProperty(
+    Element.prototype,
+    "hasPointerCapture",
+    originalHasPointerCapture,
+  );
+  restoreProperty(document, "elementFromPoint", originalElementFromPoint);
+  await disposeEngineDocLeasesForTests();
+  resetSharedLocalDocumentsForTests();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
   // The set-aside drafts (#567) live in a module store on purpose; tests
@@ -952,7 +1003,490 @@ describe("editor groups", () => {
       .find((row) => row.dataset.path === path)!;
   }
 
-  it("creates an editor group right with Ctrl+\\ and collapses it after its last tab closes", async () => {
+  it("keeps the close-selected neighbor when an older duplicate-file open finishes flushing", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          {
+            id: "left",
+            tabs: ["race-a.md"],
+            activeTab: "race-a.md",
+            size: 0.5,
+          },
+          {
+            id: "right",
+            tabs: ["b.md", "c.md"],
+            activeTab: "c.md",
+            size: 0.5,
+          },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["race-a.md", "b.md", "c.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.readWorkspaceText = vi.fn(async () => ({
+      text: "# Doc\n\n",
+      truncated: false as const,
+      contentHash: "a".repeat(64),
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), "Draft");
+    await waitFor(() =>
+      expect(within(left).getByTestId("tab-dirty")).toBeTruthy(),
+    );
+
+    fireEvent.pointerDown(right);
+    await waitFor(() => expect(right.dataset.active).toBe("true"));
+    await user.click(fileTreeRow("race-a.md"));
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1),
+    );
+
+    await user.click(
+      within(within(right).getByTestId("tab-c.md")).getByRole("button", {
+        name: "Close c.md",
+      }),
+    );
+    await waitFor(() =>
+      expect(within(right).queryByTestId("tab-c.md")).toBeNull(),
+    );
+    expect(within(right).getByTestId("tab-b.md").dataset.active).toBe("true");
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    await waitFor(() =>
+      expect(within(right).getByTestId("tab-b.md").dataset.active).toBe("true"),
+    );
+    expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
+  });
+
+  it("keeps a plugin panel selected when an older duplicate-file open finishes flushing", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const panelPath = pluginPanelTabPath("hello-plugin", "main");
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          {
+            id: "left",
+            tabs: ["race-a.md"],
+            activeTab: "race-a.md",
+            size: 0.5,
+          },
+          {
+            id: "right",
+            tabs: ["b.md"],
+            activeTab: "b.md",
+            size: 0.5,
+          },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["race-a.md", "b.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.readWorkspaceText = vi.fn(async ({ relativePath }) => ({
+      text: relativePath === "race-a.md" ? "# Race\n" : "# B\n",
+      truncated: false as const,
+      contentHash: "a".repeat(64),
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const left = await screen.findByTestId("editor-group-left");
+    const right = await screen.findByTestId("editor-group-right");
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), " dirty");
+
+    fireEvent.pointerDown(right);
+    await waitFor(() => expect(right.dataset.active).toBe("true"));
+    await user.click(fileTreeRow("race-a.md"));
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1),
+    );
+
+    act(() => {
+      bridge.emitPluginPanelOpened({
+        workspaceId: WORKSPACE.workspaceId,
+        pluginId: "hello-plugin",
+        panelId: "main",
+      });
+    });
+    await waitFor(() =>
+      expect(within(right).getByTestId(`tab-${panelPath}`).dataset.active).toBe(
+        "true",
+      ),
+    );
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    await waitFor(() =>
+      expect(within(right).getByTestId(`tab-${panelPath}`).dataset.active).toBe(
+        "true",
+      ),
+    );
+    expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
+  });
+
+  it("keeps a newer duplicate-file open when a delayed cross-group move completes", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          {
+            id: "left",
+            tabs: ["race-a.md"],
+            activeTab: "race-a.md",
+            size: 1 / 3,
+          },
+          { id: "middle", tabs: ["b.md"], activeTab: "b.md", size: 1 / 3 },
+          { id: "right", tabs: ["c.md"], activeTab: "c.md", size: 1 / 3 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["race-a.md", "b.md", "c.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    Object.defineProperty(Element.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    Object.defineProperty(Element.prototype, "hasPointerCapture", {
+      configurable: true,
+      value: vi.fn(() => false),
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(3),
+    );
+    const left = screen.getByTestId("editor-group-left");
+    const middle = screen.getByTestId("editor-group-middle");
+    const right = screen.getByTestId("editor-group-right");
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), " dirty");
+    await waitFor(() => expect(within(left).getByTestId("tab-dirty")).toBeTruthy());
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: vi.fn(() => middle),
+    });
+
+    const source = within(left).getByTestId("tab-race-a.md");
+    fireEvent.pointerDown(source, {
+      button: 0,
+      pointerId: 7,
+      clientX: 10,
+      clientY: 10,
+    });
+    fireEvent.pointerMove(source, {
+      buttons: 1,
+      pointerId: 7,
+      clientX: 30,
+      clientY: 40,
+    });
+    fireEvent.pointerUp(source, {
+      pointerId: 7,
+      clientX: 30,
+      clientY: 40,
+    });
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+
+    fireEvent.pointerDown(right);
+    await waitFor(() => expect(right.dataset.active).toBe("true"));
+    await user.click(fileTreeRow("race-a.md"));
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    await waitFor(() => {
+      expect(within(right).getByTestId("tab-race-a.md").dataset.active).toBe(
+        "true",
+      );
+      expect(within(middle).getByTestId("tab-b.md").dataset.active).toBe("true");
+      expect(within(middle).getByTestId("tab-race-a.md").dataset.active).not.toBe(
+        "true",
+      );
+    });
+  });
+
+  it("keeps a newer duplicate-file open when a delayed split completes", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          {
+            id: "left",
+            tabs: ["race-a.md"],
+            activeTab: "race-a.md",
+            size: 1 / 3,
+          },
+          { id: "middle", tabs: ["b.md"], activeTab: "b.md", size: 1 / 3 },
+          { id: "right", tabs: ["c.md"], activeTab: "c.md", size: 1 / 3 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["race-a.md", "b.md", "c.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(3),
+    );
+    const left = screen.getByTestId("editor-group-left");
+    const right = screen.getByTestId("editor-group-right");
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), " dirty");
+    await waitFor(() => expect(within(left).getByTestId("tab-dirty")).toBeTruthy());
+
+    await user.click(within(left).getByTestId("create-editor-group-right"));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+    fireEvent.pointerDown(right);
+    await waitFor(() => expect(right.dataset.active).toBe("true"));
+    await user.click(fileTreeRow("race-a.md"));
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    await waitFor(() => {
+      expect(within(right).getByTestId("tab-race-a.md").dataset.active).toBe(
+        "true",
+      );
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(4);
+    });
+  });
+
+  it("does not offer Split Right for the singleton Chats tab", async () => {
+    renderShell(
+      makeBridge(
+        Promise.resolve(storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH)),
+      ),
+    );
+
+    await screen.findByTestId(`tab-${CHATS_TAB_PATH}`);
+    expect(
+      (screen.getByTestId("create-editor-group-right") as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it("explains why a lifecycle-owned tab cannot create an editor group", async () => {
+    const user = userEvent.setup();
+    renderShell(
+      makeBridge(
+        Promise.resolve(storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH)),
+      ),
+    );
+
+    await screen.findByTestId(`tab-${CHATS_TAB_PATH}`);
+    expect(
+      (screen.getByTestId("create-editor-group-right") as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "New editor group right",
+      ),
+    );
+
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain(
+      "This tab owns its process and cannot be split. Open another tab before you create an editor group.",
+    );
+    expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1);
+  });
+
+  it("explains the 100 open-tab limit when Split Right cannot create a group", async () => {
+    const editorGroups = Array.from({ length: 100 }, (_, index) => ({
+      id: `group-${index}`,
+      tabs: [`file-${index}.md`],
+      activeTab: `file-${index}.md`,
+      size: 0.01,
+    }));
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups,
+        activeEditorGroup: "group-0",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: editorGroups.map((group) => ({
+        path: group.activeTab,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-file-0.md");
+    fireEvent.keyDown(window, { key: "\\", ctrlKey: true });
+
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain(
+      "This workspace has 100 open tabs; the limit is 100. Close a tab to create an editor group.",
+    );
+    expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(100);
+    expect(screen.getByRole("region", { name: "Editor group 1" }).dataset.active).toBe(
+      "true",
+    );
+    fireEvent(window, new Event("beforeunload"));
+    const [persisted] = bridge.setWorkspaceUiState.mock.calls.at(-1)!;
+    expect(persisted.state.editorGroups).toHaveLength(100);
+
+    await userEvent.click(
+      within(screen.getByRole("region", { name: "Editor group 100" })).getByRole(
+        "button",
+        { name: "Close file-99.md" },
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(99),
+    );
+    fireEvent.keyDown(window, { key: "\\", ctrlKey: true });
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(100),
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("explains the 100 open-tab limit when a file cannot open", async () => {
+    const editorGroups = Array.from({ length: 100 }, (_, index) => ({
+      id: `group-${index}`,
+      tabs: [`file-${index}.md`],
+      activeTab: `file-${index}.md`,
+      size: 0.01,
+    }));
+    const unopenedPath = "file-100.md";
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups,
+        activeEditorGroup: "group-0",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: [
+        ...editorGroups.map((group) => ({
+          path: group.activeTab,
+          kind: "file" as const,
+        })),
+        { path: unopenedPath, kind: "file" as const },
+      ],
+      folders: [],
+    }));
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-file-0.md");
+    await userEvent.click(fileTreeRow(unopenedPath));
+
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain(
+      "This workspace has 100 open tabs; the limit is 100. Close a tab to open this file.",
+    );
+    expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(100);
+    expect(screen.queryByTestId(`tab-${unopenedPath}`)).toBeNull();
+    fireEvent(window, new Event("beforeunload"));
+    const [persisted] = bridge.setWorkspaceUiState.mock.calls.at(-1)!;
+    expect(persisted.state.recentFiles ?? []).not.toContain(unopenedPath);
+  });
+
+  it("reports lifecycle ownership before the open-tab limit for Chats", async () => {
+    const fileGroups = Array.from({ length: 99 }, (_, index) => ({
+      id: `group-${index}`,
+      tabs: [`file-${index}.md`],
+      activeTab: `file-${index}.md`,
+      size: 0.01,
+    }));
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          ...fileGroups,
+          {
+            id: "chats",
+            tabs: [CHATS_TAB_PATH],
+            activeTab: CHATS_TAB_PATH,
+            size: 0.01,
+          },
+        ],
+        activeEditorGroup: "chats",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: fileGroups.map((group) => ({
+        path: group.activeTab,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    renderShell(bridge);
+
+    await screen.findByTestId(`tab-${CHATS_TAB_PATH}`);
+    fireEvent.keyDown(window, { key: "\\", ctrlKey: true });
+
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain(
+      "This tab owns its process and cannot be split. Open another tab before you create an editor group.",
+    );
+    expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(100);
+  });
+
+  it("copies the active tab right with Ctrl+\\ and collapses the group after its last tab closes", async () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
@@ -966,9 +1500,15 @@ describe("editor groups", () => {
     expect(screen.getByRole("region", { name: "Editor group 2" }).dataset.active).toBe(
       "true",
     );
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    expect(within(left).getByTestId("tab-a.md")).toBeTruthy();
+    expect(within(right).getByTestId("tab-a.md")).toBeTruthy();
+    expect(within(left).getByTestId("view-markdown")).toBeTruthy();
+    expect(await within(right).findByTestId("view-markdown")).toBeTruthy();
 
     await userEvent.click(fileTreeRow("b.md"));
-    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+    expect(await within(right).findByTestId("tab-b.md")).toBeTruthy();
     await waitFor(
       () => {
         const persisted = bridge.setWorkspaceUiState.mock.calls
@@ -977,12 +1517,16 @@ describe("editor groups", () => {
             (state) =>
               state.editorGroups.length === 2 &&
               state.editorGroups[0]?.tabs.includes("a.md") &&
+              state.editorGroups[1]?.tabs.includes("a.md") &&
               state.editorGroups[1]?.tabs.includes("b.md"),
           );
         expect(persisted?.activeEditorGroup).toBe(persisted?.editorGroups[1]?.id);
       },
       { timeout: 2_000 },
     );
+    fireEvent.keyDown(window, { key: "w", ctrlKey: true });
+    await waitFor(() => expect(within(right).queryByTestId("tab-b.md")).toBeNull());
+    expect(within(right).getByTestId("tab-a.md")).toBeTruthy();
     fireEvent.keyDown(window, { key: "w", ctrlKey: true });
     await waitFor(() =>
       expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1),
@@ -991,13 +1535,286 @@ describe("editor groups", () => {
     expect(screen.getByTestId("tab-a.md")).toBeTruthy();
   });
 
+  it("keeps newer group focus when split creation finishes saving", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    bridge.readWorkspaceText = vi.fn(async () => ({
+      text: "# Doc\n\n",
+      truncated: false as const,
+      contentHash: "a".repeat(64),
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    await user.click(within(right).getByTestId("markdown-edit-toggle"));
+    await user.type(within(right).getByTestId("markdown-editor"), "Draft");
+    await waitFor(() => expect(within(right).getByTestId("tab-dirty")).toBeTruthy());
+
+    await user.click(within(right).getByTestId("create-editor-group-right"));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+    fireEvent.pointerDown(left);
+    await waitFor(() => expect(left.dataset.active).toBe("true"));
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    const split = await screen.findByRole("region", { name: "Editor group 3" });
+    expect(within(split).getByTestId("tab-b.md")).toBeTruthy();
+    expect(left.dataset.active).toBe("true");
+    expect(split.dataset.active).not.toBe("true");
+  });
+
+  it("keeps a newer tab focused when a delayed move creates a group", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
+    );
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    bridge.showWorkbenchMenu.mockResolvedValue("move-tab-to-new-group");
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(screen.getByTestId("markdown-editor"), "Draft");
+    await waitFor(() => expect(screen.getByTestId("tab-dirty")).toBeTruthy());
+
+    fireEvent.contextMenu(screen.getByTestId("tab-a.md"));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+    await user.click(screen.getByTestId("tab-b.md"));
+    expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    const left = await screen.findByRole("region", { name: "Editor group 1" });
+    const right = await screen.findByRole("region", { name: "Editor group 2" });
+    expect(within(right).getByTestId("tab-a.md")).toBeTruthy();
+    expect(within(left).getByTestId("tab-b.md").dataset.active).toBe("true");
+    expect(left.dataset.active).toBe("true");
+  });
+
+  it("keeps a newer destination tab focused when a delayed drag completes", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          {
+            id: "right",
+            tabs: ["b.md", "c.md"],
+            activeTab: "b.md",
+            size: 0.5,
+          },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["a.md", "b.md", "c.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    Object.defineProperty(Element.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    Object.defineProperty(Element.prototype, "hasPointerCapture", {
+      configurable: true,
+      value: vi.fn(() => false),
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), "Draft");
+    await waitFor(() => expect(within(left).getByTestId("tab-dirty")).toBeTruthy());
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: vi.fn(() => right),
+    });
+
+    const source = within(left).getByTestId("tab-a.md");
+    fireEvent.pointerDown(source, {
+      button: 0,
+      pointerId: 7,
+      clientX: 10,
+      clientY: 10,
+    });
+    fireEvent.pointerMove(source, {
+      buttons: 1,
+      pointerId: 7,
+      clientX: 30,
+      clientY: 40,
+    });
+    fireEvent.pointerUp(source, {
+      pointerId: 7,
+      clientX: 30,
+      clientY: 40,
+    });
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
+    await user.click(within(right).getByTestId("tab-c.md"));
+    expect(within(right).getByTestId("tab-c.md").dataset.active).toBe("true");
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    await waitFor(() => expect(within(left).queryByTestId("tab-a.md")).toBeNull());
+    expect(within(right).getByTestId("tab-a.md")).toBeTruthy();
+    expect(within(right).getByTestId("tab-c.md").dataset.active).toBe("true");
+    expect(right.dataset.active).toBe("true");
+  });
+
+  it("keeps a newer duplicate-file open in an empty drag destination", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 1 / 3 },
+          { id: "middle", tabs: ["b.md"], activeTab: "b.md", size: 1 / 3 },
+          { id: "right", tabs: [], activeTab: null, size: 1 / 3 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["a.md", "b.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.readWorkspaceText = vi.fn(async () => ({
+      text: "# Doc\n\n",
+      truncated: false as const,
+      contentHash: "a".repeat(64),
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    Object.defineProperty(Element.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    Object.defineProperty(Element.prototype, "hasPointerCapture", {
+      configurable: true,
+      value: vi.fn(() => false),
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const middle = screen.getByRole("region", { name: "Editor group 2" });
+    const right = screen.getByRole("region", { name: "Editor group 3" });
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), "Left draft");
+    await user.click(within(middle).getByTestId("markdown-edit-toggle"));
+    await user.type(within(middle).getByTestId("markdown-editor"), "Middle draft");
+    await waitFor(() => {
+      expect(within(left).getByTestId("tab-dirty")).toBeTruthy();
+      expect(within(middle).getByTestId("tab-dirty")).toBeTruthy();
+    });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: vi.fn(() => right),
+    });
+
+    const source = within(left).getByTestId("tab-a.md");
+    fireEvent.pointerDown(source, {
+      button: 0,
+      pointerId: 7,
+      clientX: 10,
+      clientY: 10,
+    });
+    fireEvent.pointerMove(source, {
+      buttons: 1,
+      pointerId: 7,
+      clientX: 30,
+      clientY: 40,
+    });
+    fireEvent.pointerUp(source, {
+      pointerId: 7,
+      clientX: 30,
+      clientY: 40,
+    });
+    await waitFor(() =>
+      expect(
+        bridge.writeWorkspaceText.mock.calls.some(
+          ([payload]) => payload.relativePath === "a.md",
+        ),
+      ).toBe(true),
+    );
+
+    fireEvent.pointerDown(right);
+    await waitFor(() => expect(right.dataset.active).toBe("true"));
+    await user.click(fileTreeRow("b.md"));
+    await waitFor(() =>
+      expect(
+        bridge.writeWorkspaceText.mock.calls.some(
+          ([payload]) => payload.relativePath === "b.md",
+        ),
+      ).toBe(true),
+    );
+    expect(within(right).queryByTestId("tab-b.md")).toBeNull();
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    await waitFor(() =>
+      expect(within(right).getByTestId("tab-b.md").dataset.active).toBe("true"),
+    );
+    expect(within(right).getByTestId("tab-a.md")).toBeTruthy();
+    expect(right.dataset.active).toBe("true");
+  });
+
   it("closes an empty editor group from its visible control", async () => {
     renderShell(
-      makeBridge(Promise.resolve(storedStateWithTabs(["a.md"], "a.md"))),
+      makeBridge(
+        Promise.resolve({
+          ...STORED_STATE,
+          editorGroups: [
+            { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+            { id: "right", tabs: [], activeTab: null, size: 0.5 },
+          ],
+          activeEditorGroup: "right",
+        }),
+      ),
     );
     expect(await screen.findByTestId("view-markdown")).toBeTruthy();
-
-    fireEvent.keyDown(window, { key: "\\", ctrlKey: true });
     await waitFor(() =>
       expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(2),
     );
@@ -1012,6 +1829,556 @@ describe("editor groups", () => {
       expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1),
     );
     expect(screen.queryByRole("button", { name: "Close editor group" })).toBeNull();
+  });
+
+  it("opens a file in the focused group even when another group already has it", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    renderShell(bridge);
+    await screen.findByRole("region", { name: "Editor group 2" });
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+
+    await userEvent.click(fileTreeRow("a.md"));
+
+    expect(within(left).getByTestId("tab-a.md")).toBeTruthy();
+    expect(await within(right).findByTestId("tab-a.md")).toBeTruthy();
+    expect(right.dataset.active).toBe("true");
+  });
+
+  it("keeps the newest open when two duplicate-file flushes resolve out of order", async () => {
+    const aSave = deferred<{ status: "written"; contentHash: string }>();
+    const bSave = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          {
+            id: "left",
+            tabs: ["race-a.md"],
+            activeTab: "race-a.md",
+            size: 1 / 3,
+          },
+          {
+            id: "middle",
+            tabs: ["race-b.md"],
+            activeTab: "race-b.md",
+            size: 1 / 3,
+          },
+          {
+            id: "right",
+            tabs: ["race-c.md"],
+            activeTab: "race-c.md",
+            size: 1 / 3,
+          },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["race-a.md", "race-b.md", "race-c.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    // The rich editor's canonical serialization ends a paragraph with a
+    // blank line. Keep this concurrency test's untouched third document in
+    // that form so a delayed editor normalization is not mistaken for a user
+    // edit while the two intended drafts race.
+    bridge.readWorkspaceText = vi.fn(async () => ({
+      text: "# Doc\n\n",
+      truncated: false as const,
+      contentHash: "a".repeat(64),
+    }));
+    bridge.writeWorkspaceText = vi.fn((payload: WriteWorkspaceTextPayload) =>
+      payload.relativePath === "race-a.md" ? aSave.promise : bSave.promise,
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(3),
+    );
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const middle = screen.getByRole("region", { name: "Editor group 2" });
+    const right = screen.getByRole("region", { name: "Editor group 3" });
+    await user.click(within(left).getByTestId("markdown-edit-toggle"));
+    await user.type(within(left).getByTestId("markdown-editor"), "Left draft");
+    await user.click(within(middle).getByTestId("markdown-edit-toggle"));
+    await user.type(within(middle).getByTestId("markdown-editor"), "Middle draft");
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId("tab-dirty")
+          .map((dot) => dot.closest('[role="tab"]')?.getAttribute("data-testid")),
+      ).toEqual(["tab-race-a.md", "tab-race-b.md"]),
+    );
+
+    fireEvent.pointerDown(right);
+    await waitFor(() => expect(right.dataset.active).toBe("true"));
+    await user.click(fileTreeRow("race-a.md"));
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText.mock.calls.at(-1)?.[0].relativePath).toBe(
+        "race-a.md",
+      ),
+    );
+    await user.click(fileTreeRow("race-b.md"));
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+    expect(bridge.writeWorkspaceText.mock.calls[1]?.[0].relativePath).toBe(
+      "race-b.md",
+    );
+
+    await act(async () => {
+      bSave.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await bSave.promise;
+    });
+    await waitFor(() =>
+      expect(within(right).getByTestId("tab-race-b.md").dataset.active).toBe(
+        "true",
+      ),
+    );
+
+    await act(async () => {
+      aSave.resolve({ status: "written", contentHash: "a".repeat(64) });
+      await aSave.promise;
+    });
+    await waitFor(() =>
+      expect(within(right).getByTestId("tab-race-b.md").dataset.active).toBe(
+        "true",
+      ),
+    );
+    expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
+  });
+
+  it.each([
+    { destination: "an existing tab", navigate: "tab" as const },
+    { destination: "another editor group", navigate: "group" as const },
+  ])(
+    "keeps $destination selected when an older duplicate-file open finishes flushing",
+    async ({ navigate }) => {
+      const save = deferred<{ status: "written"; contentHash: string }>();
+      const bridge = makeBridge(
+        Promise.resolve({
+          ...STORED_STATE,
+          editorGroups: [
+            {
+              id: "left",
+              tabs: ["race-a.md"],
+              activeTab: "race-a.md",
+              size: 0.5,
+            },
+            {
+              id: "right",
+              tabs: ["b.md", "c.md"],
+              activeTab: "c.md",
+              size: 0.5,
+            },
+          ],
+          activeEditorGroup: "right",
+        }),
+      );
+      bridge.listWorkspaceFiles = vi.fn(async () => ({
+        files: ["race-a.md", "b.md", "c.md"].map((path) => ({
+          path,
+          kind: "file" as const,
+        })),
+        folders: [],
+      }));
+      bridge.readWorkspaceText = vi.fn(async () => ({
+        text: "# Doc\n\n",
+        truncated: false as const,
+        contentHash: "a".repeat(64),
+      }));
+      bridge.writeWorkspaceText = vi.fn(() => save.promise);
+      const user = userEvent.setup();
+      renderShell(bridge);
+
+      await waitFor(() =>
+        expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+      );
+      const left = screen.getByRole("region", { name: "Editor group 1" });
+      const right = screen.getByRole("region", { name: "Editor group 2" });
+      await user.click(within(left).getByTestId("markdown-edit-toggle"));
+      await user.type(within(left).getByTestId("markdown-editor"), "Draft");
+      await waitFor(() =>
+        expect(within(left).getByTestId("tab-dirty")).toBeTruthy(),
+      );
+
+      fireEvent.pointerDown(right);
+      await waitFor(() => expect(right.dataset.active).toBe("true"));
+      await user.click(fileTreeRow("race-a.md"));
+      await waitFor(() =>
+        expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      );
+
+      if (navigate === "tab") {
+        await user.click(within(right).getByTestId("tab-b.md"));
+        expect(within(right).getByTestId("tab-b.md").dataset.active).toBe(
+          "true",
+        );
+      } else {
+        fireEvent.pointerDown(left);
+        await waitFor(() => expect(left.dataset.active).toBe("true"));
+      }
+
+      await act(async () => {
+        save.resolve({ status: "written", contentHash: "b".repeat(64) });
+        await save.promise;
+      });
+
+      if (navigate === "tab") {
+        await waitFor(() =>
+          expect(within(right).getByTestId("tab-b.md").dataset.active).toBe(
+            "true",
+          ),
+        );
+      } else {
+        await waitFor(() => expect(left.dataset.active).toBe("true"));
+        expect(right.dataset.active).not.toBe("true");
+      }
+      expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
+    },
+  );
+
+  it.each([
+    {
+      destination: "Graph",
+      tabPath: "dohc://graph",
+      navigate: async (user: ReturnType<typeof userEvent.setup>) => {
+        await user.click(screen.getByTestId("activity-graph"));
+        await user.click(await screen.findByTestId("graph-open-tab"));
+      },
+    },
+    {
+      destination: "History",
+      tabPath: "dohc://history",
+      navigate: async (user: ReturnType<typeof userEvent.setup>) => {
+        await user.click(screen.getByTestId("activity-history"));
+        await user.click(await screen.findByTestId("history-open-tab"));
+      },
+    },
+    {
+      destination: "Chats",
+      tabPath: "dohc://chats",
+      navigate: async (user: ReturnType<typeof userEvent.setup>) => {
+        await user.click(await screen.findByTestId("chats-open-tab"));
+      },
+    },
+    {
+      destination: "Compare with Main",
+      tabPath: versionCompareTabPath("v-old"),
+      navigate: async (user: ReturnType<typeof userEvent.setup>) => {
+        await user.click(await screen.findByTestId("version-menu-button"));
+        await user.click(await screen.findByTestId("version-compare"));
+      },
+    },
+  ])(
+    "keeps $destination selected when an older duplicate-file open finishes flushing",
+    async ({ tabPath, navigate }) => {
+      const save = deferred<{ status: "written"; contentHash: string }>();
+      const bridge = makeEngineBridge(
+        Promise.resolve({
+          ...STORED_STATE,
+          editorGroups: [
+            {
+              id: "left",
+              tabs: ["race-a.txt"],
+              activeTab: "race-a.txt",
+              size: 0.5,
+            },
+            {
+              id: "right",
+              tabs: ["b.md"],
+              activeTab: "b.md",
+              size: 0.5,
+            },
+          ],
+          activeEditorGroup: "right",
+        }),
+      );
+      bridge.listWorkspaceFiles = vi.fn(async () => ({
+        files: ["race-a.txt", "b.md"].map((path) => ({
+          path,
+          kind: "file" as const,
+        })),
+        folders: [],
+      }));
+      bridge.readWorkspaceText = vi.fn(async () => ({
+        text: "Draft base",
+        truncated: false as const,
+        contentHash: "a".repeat(64),
+      }));
+      bridge.writeWorkspaceText = vi.fn(() => save.promise);
+      bridge.listWorkspaceVersions = vi.fn(async () => ({
+        versions: [
+          {
+            id: "main",
+            name: "Main",
+            kind: "main" as const,
+            createdAtMs: 0,
+            canMergeIntoMain: false,
+          },
+          {
+            id: "v-old",
+            name: "Earlier draft",
+            kind: "named" as const,
+            createdAtMs: 1,
+            canMergeIntoMain: true,
+          },
+        ],
+        activeVersionId: "v-old",
+      }));
+      const user = userEvent.setup();
+      renderShell(bridge);
+      await settleEngineOnRead(bridge);
+
+      const left = await screen.findByRole("region", {
+        name: "Editor group 1",
+      });
+      const right = screen.getByRole("region", { name: "Editor group 2" });
+      const content = (await within(left).findByTestId("view-text-editor"))
+        .querySelector(".cm-content") as HTMLElement;
+      await user.click(content);
+      await user.keyboard("{End} changed");
+      await waitFor(() =>
+        expect(within(left).getByTestId("view-text-save-state").dataset.state).toBe(
+          "saving",
+        ),
+      );
+      expect(within(left).getByTestId("tab-dirty")).toBeTruthy();
+
+      fireEvent.pointerDown(right);
+      await waitFor(() => expect(right.dataset.active).toBe("true"));
+      await user.click(fileTreeRow("race-a.txt"));
+      await waitFor(() =>
+        expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      );
+
+      await navigate(user);
+      await waitFor(() =>
+        expect(within(right).getByTestId(`tab-${tabPath}`).dataset.active).toBe(
+          "true",
+        ),
+      );
+
+      await act(async () => {
+        save.resolve({ status: "written", contentHash: "b".repeat(64) });
+        await save.promise;
+      });
+
+      await waitFor(() =>
+        expect(within(right).getByTestId(`tab-${tabPath}`).dataset.active).toBe(
+          "true",
+        ),
+      );
+      expect(right.dataset.active).toBe("true");
+      expect(within(right).queryByTestId("tab-race-a.txt")).toBeNull();
+    },
+  );
+
+  it.each([
+    { destination: "a split group", navigate: "split" as const },
+    { destination: "an existing group", navigate: "move" as const },
+    { destination: "a new group", navigate: "move-new" as const },
+  ])(
+    "keeps $destination focused when an older duplicate-file open finishes flushing",
+    async ({ navigate }) => {
+      const save = deferred<{ status: "written"; contentHash: string }>();
+      const bridge = makeBridge(
+        Promise.resolve({
+          ...STORED_STATE,
+          editorGroups: [
+            {
+              id: "left",
+              tabs: ["race-a.md"],
+              activeTab: "race-a.md",
+              size: 0.5,
+            },
+            {
+              id: "right",
+              tabs: ["b.md"],
+              activeTab: "b.md",
+              size: 0.5,
+            },
+          ],
+          activeEditorGroup: "right",
+        }),
+      );
+      bridge.listWorkspaceFiles = vi.fn(async () => ({
+        files: ["race-a.md", "b.md"].map((path) => ({
+          path,
+          kind: "file" as const,
+        })),
+        folders: [],
+      }));
+      bridge.readWorkspaceText = vi.fn(async () => ({
+        text: "# Doc\n\n",
+        truncated: false as const,
+        contentHash: "a".repeat(64),
+      }));
+      bridge.writeWorkspaceText = vi.fn(() => save.promise);
+      bridge.showWorkbenchMenu.mockResolvedValue("move-tab-to-new-group");
+      Object.defineProperty(Element.prototype, "setPointerCapture", {
+        configurable: true,
+        value: vi.fn(),
+      });
+      Object.defineProperty(Element.prototype, "hasPointerCapture", {
+        configurable: true,
+        value: vi.fn(() => false),
+      });
+      const user = userEvent.setup();
+      renderShell(bridge);
+
+      await waitFor(() =>
+        expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+      );
+      const left = screen.getByRole("region", { name: "Editor group 1" });
+      const right = screen.getByRole("region", { name: "Editor group 2" });
+      await user.click(within(left).getByTestId("markdown-edit-toggle"));
+      await user.type(within(left).getByTestId("markdown-editor"), "Draft");
+      await waitFor(() =>
+        expect(within(left).getByTestId("tab-dirty")).toBeTruthy(),
+      );
+
+      fireEvent.pointerDown(right);
+      await waitFor(() => expect(right.dataset.active).toBe("true"));
+      await user.click(fileTreeRow("race-a.md"));
+      await waitFor(() =>
+        expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      );
+
+      if (navigate === "split") {
+        await user.click(within(right).getByTestId("create-editor-group-right"));
+      } else if (navigate === "move-new") {
+        fireEvent.contextMenu(within(right).getByTestId("tab-b.md"));
+      } else {
+        Object.defineProperty(document, "elementFromPoint", {
+          configurable: true,
+          value: vi.fn(() => left),
+        });
+        const source = within(right).getByTestId("tab-b.md");
+        fireEvent.pointerDown(source, {
+          button: 0,
+          pointerId: 9,
+          clientX: 10,
+        });
+        fireEvent.pointerMove(source, {
+          pointerId: 9,
+          buttons: 1,
+          clientX: 30,
+          clientY: 40,
+        });
+        fireEvent.pointerUp(source, {
+          pointerId: 9,
+          clientX: 30,
+          clientY: 40,
+        });
+      }
+
+      const destination =
+        navigate === "move"
+          ? left
+          : await screen.findByRole("region", { name: "Editor group 3" });
+      await waitFor(() => expect(destination.dataset.active).toBe("true"));
+      expect(within(destination).getByTestId("tab-b.md").dataset.active).toBe(
+        "true",
+      );
+
+      await act(async () => {
+        save.resolve({ status: "written", contentHash: "b".repeat(64) });
+        await save.promise;
+      });
+
+      await waitFor(() => expect(destination.dataset.active).toBe("true"));
+      expect(within(destination).getByTestId("tab-b.md").dataset.active).toBe(
+        "true",
+      );
+      expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
+    },
+  );
+
+  it("moves a tab into an empty editor group by pointer drag", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: [], activeTab: null, size: 0.5 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    Object.defineProperty(Element.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    Object.defineProperty(Element.prototype, "hasPointerCapture", {
+      configurable: true,
+      value: vi.fn(() => false),
+    });
+    renderShell(bridge);
+    await screen.findByRole("region", { name: "Editor group 2" });
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: vi.fn(() => right),
+    });
+    const source = within(left).getByTestId("tab-a.md");
+
+    fireEvent.pointerDown(source, { button: 0, pointerId: 7, clientX: 10 });
+    fireEvent.pointerMove(source, {
+      pointerId: 7,
+      buttons: 1,
+      clientX: 30,
+      clientY: 40,
+    });
+    fireEvent.pointerUp(source, { pointerId: 7, clientX: 30, clientY: 40 });
+
+    await waitFor(() => expect(within(left).queryByTestId("tab-a.md")).toBeNull());
+    expect(within(right).getByTestId("tab-a.md")).toBeTruthy();
+    expect(right.dataset.active).toBe("true");
+  });
+
+  it("shares one live document session when the active Markdown file is split", async () => {
+    const bridge = makeEngineBridge(
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
+    );
+    const doc = markdownToYDoc("# Shared\n");
+    const openEngineYDocSession = vi.fn(async () => ({
+      available: true,
+      initialUpdate: Y.encodeStateAsUpdate(doc),
+      lineageGeneration: 1,
+    }));
+    Object.assign(bridge, {
+      openEngineYDocSession,
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+      closeEngineYDocSession: vi.fn(async () => undefined),
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
+    });
+    renderShell(bridge);
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+
+    await userEvent.click(screen.getByTestId("create-editor-group-right"));
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("markdown-source-toggle")).toHaveLength(2),
+    );
+    expect(openEngineYDocSession).toHaveBeenCalledTimes(1);
   });
 
   it("keeps different surfaces visible and routes new opens to the focused group", async () => {
@@ -1633,7 +3000,11 @@ describe("ui-state merge-on-load", () => {
     bridge.refreshSharedView = vi.fn(() => pull.promise);
     renderShell(bridge, {
       ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
     });
 
     // It survives that listing: nothing has said the file is gone yet.
@@ -1694,7 +3065,11 @@ describe("ui-state merge-on-load", () => {
     }));
     renderShell(bridge, {
       ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
     });
 
     const refused = await screen.findByTestId("shared-view-refused");
@@ -1755,7 +3130,11 @@ describe("ui-state merge-on-load", () => {
     // Mounts with NO skip record: the shell's boot snapshot is healthy.
     renderShell(bridge, {
       ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
     });
 
     const refused = await screen.findByTestId("shared-view-refused");
@@ -1813,6 +3192,7 @@ describe("ui-state merge-on-load", () => {
       shareView: {
         shareId: "share-1",
         granterEmail: "granter@dohc.test",
+        access: "view",
         skippedOps: SKIPPED_RECORD,
       },
     });
@@ -1954,7 +3334,7 @@ describe("ui-state merge-on-load", () => {
     renderShell(bridge);
 
     const openStartCalls = () =>
-      mark.mock.calls.filter(([name]) => name === "file-open-start").length;
+      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)).length;
 
     // Wait for the RESTORE to land first, or the assertions below pass
     // vacuously against the empty default state.
@@ -3259,6 +4639,273 @@ describe("workspace shell errors", () => {
 // active row used to mark anyway — no remount/measure follows, so the stale
 // mark corrupts the NEXT open's latency measure.
 describe("file-open-start marking", () => {
+  it("marks the source fallback and target after a delayed move creates a group", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["a.md", "fallback.md"], "a.md")),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["a.md", "fallback.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.readWorkspaceText = vi.fn(async () => ({
+      text: "# Doc\n\n",
+      truncated: false as const,
+      contentHash: "a".repeat(64),
+    }));
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    bridge.showWorkbenchMenu.mockResolvedValue("move-tab-to-new-group");
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("view-markdown");
+    await user.click(screen.getByTestId("markdown-edit-toggle"));
+    await user.type(screen.getByTestId("markdown-editor"), "Draft");
+    await waitFor(() => expect(screen.getByTestId("tab-dirty")).toBeTruthy());
+    const mark = vi.spyOn(rendererMarks, "mark");
+
+    fireEvent.contextMenu(screen.getByTestId("tab-a.md"));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+    expect(mark.mock.calls.some(([name]) => isFileOpenStartMark(name))).toBe(false);
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    const target = await screen.findByRole("region", { name: "Editor group 2" });
+    const targetGroupId = target.dataset.editorGroupId!;
+    expect(mark).toHaveBeenCalledWith("file-open-start:primary");
+    expect(mark).toHaveBeenCalledWith(`file-open-start:${targetGroupId}`);
+    mark.mockRestore();
+  });
+
+  it("marks both Markdown mounts in an active cross-group move", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          {
+            id: "left",
+            tabs: ["a.md", "fallback.md"],
+            activeTab: "a.md",
+            size: 0.5,
+          },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["a.md", "fallback.md", "b.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    Object.defineProperty(Element.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    Object.defineProperty(Element.prototype, "hasPointerCapture", {
+      configurable: true,
+      value: vi.fn(() => false),
+    });
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+    const mark = vi.spyOn(rendererMarks, "mark");
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: vi.fn(() => right),
+    });
+    const source = within(left).getByTestId("tab-a.md");
+
+    fireEvent.pointerDown(source, { button: 0, pointerId: 7, clientX: 10 });
+    fireEvent.pointerMove(source, {
+      pointerId: 7,
+      buttons: 1,
+      clientX: 30,
+      clientY: 40,
+    });
+    fireEvent.pointerUp(source, {
+      pointerId: 7,
+      clientX: 30,
+      clientY: 40,
+    });
+
+    await waitFor(() =>
+      expect(within(right).getByTestId("tab-a.md").dataset.active).toBe("true"),
+    );
+    expect(mark).toHaveBeenCalledWith("file-open-start:right");
+    expect(mark).toHaveBeenCalledWith("file-open-start:left");
+    mark.mockRestore();
+  });
+
+  it("measures overlapping Markdown opens from each editor group's start", async () => {
+    const leftRead = deferred<{
+      text: string;
+      truncated: false;
+      contentHash: string;
+    }>();
+    const rightRead = deferred<{
+      text: string;
+      truncated: false;
+      contentHash: string;
+    }>();
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          {
+            id: "left",
+            tabs: ["left-old.md"],
+            activeTab: "left-old.md",
+            size: 0.5,
+          },
+          {
+            id: "right",
+            tabs: ["right-old.md"],
+            activeTab: "right-old.md",
+            size: 0.5,
+          },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    const paths = ["left-old.md", "right-old.md", "left-new.md", "right-new.md"];
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: paths.map((path) => ({ path, kind: "file" as const })),
+      folders: [],
+    }));
+    bridge.readWorkspaceText = vi.fn((payload: ReadWorkspaceTextPayload) => {
+      if (payload.relativePath === "left-new.md") return leftRead.promise;
+      if (payload.relativePath === "right-new.md") return rightRead.promise;
+      return Promise.resolve({
+        text: "# Ready\n",
+        truncated: false as const,
+        contentHash: "a".repeat(64),
+      });
+    });
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+    const mark = vi.spyOn(rendererMarks, "mark");
+    const measureSince = vi.spyOn(rendererMarks, "measureSince");
+    const user = userEvent.setup();
+    const left = screen.getByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+
+    await user.click(
+      screen
+        .getAllByTestId("tree-row")
+        .find((row) => row.dataset.path === "left-new.md")!,
+    );
+    fireEvent.pointerDown(right);
+    await waitFor(() => expect(right.dataset.active).toBe("true"));
+    await user.click(
+      screen
+        .getAllByTestId("tree-row")
+        .find((row) => row.dataset.path === "right-new.md")!,
+    );
+
+    await act(async () => {
+      rightRead.resolve({
+        text: "# Right\n",
+        truncated: false,
+        contentHash: "b".repeat(64),
+      });
+      await rightRead.promise;
+    });
+    await waitFor(() =>
+      expect(measureSince).toHaveBeenCalledWith(
+        "markdown-open",
+        "file-open-start:right",
+      ),
+    );
+
+    await act(async () => {
+      leftRead.resolve({
+        text: "# Left\n",
+        truncated: false,
+        contentHash: "c".repeat(64),
+      });
+      await leftRead.promise;
+    });
+    await waitFor(() =>
+      expect(measureSince).toHaveBeenCalledWith(
+        "markdown-open",
+        "file-open-start:left",
+      ),
+    );
+    expect(mark).toHaveBeenCalledWith("file-open-start:left");
+    expect(mark).toHaveBeenCalledWith("file-open-start:right");
+    expect(within(left).getByTestId("tab-left-new.md").dataset.active).toBe(
+      "true",
+    );
+    expect(within(right).getByTestId("tab-right-new.md").dataset.active).toBe(
+      "true",
+    );
+    mark.mockRestore();
+    measureSince.mockRestore();
+  });
+
+  it("marks before a Markdown split mounts another inspector", async () => {
+    const mark = vi.spyOn(rendererMarks, "mark");
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
+    );
+    renderShell(bridge);
+
+    await screen.findByTestId("view-markdown");
+    const openStartCalls = () =>
+      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)).length;
+    const before = openStartCalls();
+
+    await userEvent.click(screen.getByTestId("create-editor-group-right"));
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
+    );
+
+    expect(openStartCalls()).toBe(before + 1);
+    mark.mockRestore();
+  });
+
+  it("marks before a SQLite split loads another first page", async () => {
+    const mark = vi.spyOn(rendererMarks, "mark");
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["data.db"], "data.db")),
+    );
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      files: [{ path: "data.db", kind: "file" }],
+      folders: [],
+    });
+    Object.assign(bridge, {
+      readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
+    });
+    renderShell(bridge);
+
+    await screen.findByTestId("view-database");
+    const openStartCalls = () =>
+      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)).length;
+    const before = openStartCalls();
+
+    await userEvent.click(screen.getByTestId("create-editor-group-right"));
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-database")).toHaveLength(2),
+    );
+
+    expect(openStartCalls()).toBe(before + 1);
+    mark.mockRestore();
+  });
+
   it("focuses an already-mounted Open Editors tab without marking a file open", async () => {
     const mark = vi.spyOn(rendererMarks, "mark");
     const bridge = makeBridge(
@@ -3276,7 +4923,7 @@ describe("file-open-start marking", () => {
 
     await screen.findByTestId("tab-a.md");
     const openStartCalls = () =>
-      mark.mock.calls.filter(([name]) => name === "file-open-start").length;
+      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)).length;
     const before = openStartCalls();
     await user.click(
       within(screen.getAllByTestId("open-editor-group")[0]!).getByTitle("a.md"),
@@ -3298,7 +4945,7 @@ describe("file-open-start marking", () => {
     renderShell(bridge);
 
     const openStartCalls = () =>
-      mark.mock.calls.filter(([name]) => name === "file-open-start").length;
+      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)).length;
 
     const row = await screen.findByText("a.md");
     await user.click(row);
@@ -3341,7 +4988,7 @@ describe("file-open-start marking", () => {
     await screen.findByTestId("tab-c.md");
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const before = mark.mock.calls.filter(
-      ([name]) => name === "file-open-start",
+      ([name]) => isFileOpenStartMark(name),
     ).length;
     await userEvent.click(
       within(left).getByRole("button", { name: "Close b.md" }),
@@ -3349,8 +4996,9 @@ describe("file-open-start marking", () => {
 
     await screen.findByTestId("tab-a.md");
     expect(
-      mark.mock.calls.filter(([name]) => name === "file-open-start"),
+      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)),
     ).toHaveLength(before + 1);
+    expect(mark).toHaveBeenCalledWith("file-open-start:left");
     mark.mockRestore();
   });
 
@@ -3371,7 +5019,7 @@ describe("file-open-start marking", () => {
     await screen.findByTestId("tab-b.md");
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const before = mark.mock.calls.filter(
-      ([name]) => name === "file-open-start",
+      ([name]) => isFileOpenStartMark(name),
     ).length;
     await userEvent.click(
       within(left).getByRole("button", { name: "Close a.md" }),
@@ -3382,7 +5030,7 @@ describe("file-open-start marking", () => {
     );
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
     expect(
-      mark.mock.calls.filter(([name]) => name === "file-open-start"),
+      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)),
     ).toHaveLength(before);
     mark.mockRestore();
   });
@@ -3752,8 +5400,196 @@ describe("active file sharing", () => {
     expect(bridge.createRelayShare).toHaveBeenCalledWith({
       workspaceId: "ws-shell-test",
       recipientEmail: "friend@dohc.test",
+      access: "view",
       paths: ["a.md"],
     });
+  });
+});
+
+// In PR1 every level grants exactly these rights, so the banner reads the
+// same at every level (#646). The per-level sentences the design specifies
+// ship with the rights they describe — PR2 for chat, PR3 for edits — because
+// a banner that promised chat now would lie until PR2 opens the append gate.
+// Removing a mount reprojects path-keyed UI state only when the folder
+// actually went. Record-only cleanup leaves the files exactly where they
+// were, so their tabs, pins and drafts must survive it.
+// The closing line a manual refresh leaves behind. Damage has to reach it:
+// reporting damage in a separate notice meant the summary replaced it, and
+// the user was left with "Shares refreshed" — the wrong half.
+describe("share refresh summary", () => {
+  const row = (over: Partial<{ label: string; status: string; changedPaths: number }>) => ({
+    label: "alex",
+    status: "updated" as const,
+    changedPaths: 0,
+    ...over,
+  }) as Parameters<typeof shareRefreshSummary>[0][number];
+
+  it("states damage and how to fix it, alongside the refresh result", () => {
+    const summary = shareRefreshSummary([
+      row({ label: "kim", changedPaths: 2 }),
+      row({ label: "alex", status: "damaged" }),
+    ]);
+    expect(summary).toContain("Shares refreshed — 2 files updated.");
+    expect(
+      summary,
+      "MUTATION: the summary replaces the damage notice and the fix is lost",
+    ).toContain("dohc can't read what alex grants. Remove it and add the share again.");
+    expect(summary).not.toContain("grant.");
+  });
+
+  it("says nothing about damage when every mount is healthy", () => {
+    const summary = shareRefreshSummary([row({ changedPaths: 1 })]);
+    expect(summary).toBe("Shares refreshed — 1 file updated.");
+    expect(summary).not.toContain("can't read");
+  });
+
+  it("keeps the ended report when damage is present too", () => {
+    const summary = shareRefreshSummary([
+      row({ label: "kim", status: "ended" }),
+      row({ label: "alex", status: "damaged" }),
+      row({ label: "sam", status: "damaged" }),
+    ]);
+    expect(summary).toContain("kim ended");
+    // Plural subjects take the plural verb; the singular case keeps "grants".
+    expect(
+      summary,
+      "MUTATION: two shares reading as one — \"what alex, sam grants\"",
+    ).toContain("what alex, sam grant. Remove them and add those shares again.");
+  });
+
+  it("says so when there is nothing to refresh", () => {
+    expect(shareRefreshSummary([])).toBe("No shares are added to this workspace.");
+  });
+});
+
+describe("share unmount projection", () => {
+  it("reprojects like a folder delete when the folder went", () => {
+    expect(
+      shareUnmountProjection({
+        shareId: "share-1",
+        label: "alex",
+        folderLeft: false,
+      }),
+    ).toEqual([
+      {
+        id: "unmount-share-1",
+        kind: "delete-folder",
+        path: "shared-with-me/alex",
+      },
+    ]);
+  });
+
+  // Both removal surfaces funnel here. The Explorer records the share id
+  // itself; Settings reports it through the files-changed callback. Either
+  // way the reload must not delete state for files still on disk.
+  it("skips a vanished mount whose folder stayed, whichever surface removed it", () => {
+    const previous = [
+      { shareId: "s-gone", label: "alex" },
+      { shareId: "s-left", label: "sam" },
+      { shareId: "s-stays", label: "kim" },
+    ];
+    const next = [{ shareId: "s-stays" }];
+    const foldersLeftBehind = new Set(["s-left"]);
+
+    expect(
+      goneMountProjections({ previous, next, foldersLeftBehind }),
+      "MUTATION: projecting a delete for a mount whose folder is still there",
+    ).toEqual([
+      {
+        id: "unmount-s-gone",
+        kind: "delete-folder",
+        path: "shared-with-me/alex",
+      },
+    ]);
+    // Consumed, so an unrelated later reload cannot read a stale exemption.
+    expect(foldersLeftBehind.has("s-left")).toBe(false);
+  });
+
+  it("projects nothing when nothing vanished", () => {
+    expect(
+      goneMountProjections({
+        previous: [{ shareId: "s-1", label: "alex" }],
+        next: [{ shareId: "s-1" }],
+        foldersLeftBehind: new Set(),
+      }),
+    ).toEqual([]);
+  });
+
+  it("projects nothing when the folder stayed", () => {
+    expect(
+      shareUnmountProjection({
+        shareId: "share-1",
+        label: "alex",
+        folderLeft: true,
+      }),
+      "MUTATION: deleting path-keyed state for files that are still on disk",
+    ).toEqual([]);
+  });
+});
+
+describe("shared view banner", () => {
+  for (const access of ["view", "comment", "edit"] as const) {
+    it(`tells a ${access} recipient the view is read-only, because in PR1 it is`, async () => {
+      const bridge = makeShareBridge();
+      renderShell(bridge, {
+        ...SHARE_VIEW,
+        shareView: {
+          shareId: "share-1",
+          granterEmail: "sam@dohc.test",
+          access,
+        },
+      });
+
+      const banner = await screen.findByTestId("shared-view-banner");
+      expect(banner.textContent, access).toContain(
+        "Shared view from sam@dohc.test — read-only. Ask sam@dohc.test for changes.",
+      );
+      // MUTATION: shipping the PR2 sentences early would promise chat rights
+      // the relay's append route still refuses at every level.
+      expect(banner.textContent, access).not.toContain("You can chat about");
+      expect(banner.textContent, access).not.toContain("You can edit these files");
+    });
+  }
+});
+
+// A share view whose stored grant cannot be read keeps its RESTRICTIVE
+// marker (#646). Dropping it would present someone else's files as an
+// ordinary writable workspace — damage failing OPEN, which is the one
+// direction this must never fail in.
+describe("shared view with an unreadable grant", () => {
+  const damaged = {
+    ...SHARE_VIEW,
+    shareView: {
+      shareId: "share-1",
+      granterEmail: "sam@dohc.test",
+      damaged: true as const,
+    },
+  };
+
+  it("keeps the read-only stance and says what happened", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, damaged);
+
+    const banner = await screen.findByTestId("shared-view-banner");
+    expect(banner.textContent).toContain(
+      "dohc can't read what this share grants. Open the share again to restore it.",
+    );
+    // No level is stated, because none could be read.
+    expect(banner.textContent).not.toContain("read-only. Ask");
+  });
+
+  // There is no grant to pull with, so the refresh is skipped rather than
+  // fired and failed. Offering it would promise a recovery it cannot do.
+  it("does not offer or fire a refresh", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, damaged);
+
+    await screen.findByTestId("shared-view-banner");
+    expect(
+      screen.queryByTestId("shared-view-refresh"),
+      "MUTATION: a share with no readable grant must not offer a refresh",
+    ).toBeNull();
+    expect(bridge.refreshSharedView).not.toHaveBeenCalled();
   });
 });
 
@@ -4846,7 +6682,11 @@ describe("history page", () => {
     const user = userEvent.setup();
     renderShell(bridge, {
       ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
     });
 
     await user.click(screen.getByTestId("activity-history"));
@@ -4875,7 +6715,11 @@ describe("history page", () => {
     const user = userEvent.setup();
     renderShell(bridge, {
       ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
     });
 
     await user.click(screen.getByTestId("activity-history"));
@@ -4924,6 +6768,7 @@ describe("history page", () => {
       shareView: {
         shareId: "share-1",
         granterEmail: "granter@dohc.test",
+        access: "view",
         ended: true,
       },
     });
@@ -4965,6 +6810,182 @@ describe("history page", () => {
       activeVersionId,
     };
   }
+
+  it("keeps a moment diff selected when an older duplicate-file open finishes flushing", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+          {
+            id: "right",
+            tabs: ["race-a.txt"],
+            activeTab: "race-a.txt",
+            size: 0.5,
+          },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["race-a.txt", "b.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.listEngineMoments = vi.fn(async () =>
+      historyPage([historyMoment("m-1", "Wrote the plan")]),
+    );
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await settleEngineOnRead(bridge);
+
+    const left = await screen.findByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    const content = (await within(right).findByTestId("view-text-editor"))
+      .querySelector(".cm-content") as HTMLElement;
+    await user.click(content);
+    await user.keyboard("{End} changed");
+    await waitFor(() => expect(within(right).getByTestId("tab-dirty")).toBeTruthy());
+
+    fireEvent.pointerDown(left);
+    await waitFor(() => expect(left.dataset.active).toBe("true"));
+    await user.click(
+      screen
+        .getAllByTestId("tree-row")
+        .find((row) => row.dataset.path === "race-a.txt")!,
+    );
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    const momentPath = momentDiffTabPath("m-1");
+    await waitFor(() =>
+      expect(within(left).getByTestId(`tab-${momentPath}`).dataset.active).toBe(
+        "true",
+      ),
+    );
+    expect(left.dataset.active).toBe("true");
+    expect(within(left).queryByTestId("tab-race-a.txt")).toBeNull();
+  });
+
+  it("keeps a newer file selected when an older moment-diff flush finishes", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeEngineBridge(
+      Promise.resolve(storedStateWithTabs(["race-a.txt", "b.md"], "race-a.txt")),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["race-a.txt", "b.md"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.listEngineMoments = vi.fn(async () =>
+      historyPage([historyMoment("m-1", "Wrote the plan")]),
+    );
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await settleEngineOnRead(bridge);
+
+    const group = await screen.findByRole("region", { name: "Editor group 1" });
+    const content = (await within(group).findByTestId("view-text-editor"))
+      .querySelector(".cm-content") as HTMLElement;
+    await user.click(content);
+    await user.keyboard("{End} changed");
+    await waitFor(() => expect(within(group).getByTestId("tab-dirty")).toBeTruthy());
+
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1));
+
+    await user.click(within(group).getByTestId("tab-b.md"));
+    expect(within(group).getByTestId("tab-b.md").dataset.active).toBe("true");
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    await waitFor(() =>
+      expect(within(group).getByTestId("tab-b.md").dataset.active).toBe("true"),
+    );
+    expect(
+      within(group).queryByTestId(`tab-${momentDiffTabPath("m-1")}`),
+    ).toBeNull();
+  });
+
+  it("does not open a moment after its target group closes during the draft flush", async () => {
+    const save = deferred<{ status: "written"; contentHash: string }>();
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          {
+            id: "right",
+            tabs: ["dirty.txt"],
+            activeTab: "dirty.txt",
+            size: 0.5,
+          },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: ["a.md", "dirty.txt"].map((path) => ({
+        path,
+        kind: "file" as const,
+      })),
+      folders: [],
+    }));
+    bridge.listEngineMoments = vi.fn(async () =>
+      historyPage([historyMoment("m-1", "Wrote the plan")]),
+    );
+    bridge.writeWorkspaceText = vi.fn(() => save.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await settleEngineOnRead(bridge);
+
+    const left = await screen.findByRole("region", { name: "Editor group 1" });
+    const right = screen.getByRole("region", { name: "Editor group 2" });
+    const content = (await within(right).findByTestId("view-text-editor"))
+      .querySelector(".cm-content") as HTMLElement;
+    await user.click(content);
+    await user.keyboard("{End} changed");
+    await waitFor(() => expect(within(right).getByTestId("tab-dirty")).toBeTruthy());
+
+    fireEvent.pointerDown(left);
+    await waitFor(() => expect(left.dataset.active).toBe("true"));
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1));
+
+    await user.click(within(left).getByRole("button", { name: "Close a.md" }));
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1),
+    );
+
+    await act(async () => {
+      save.resolve({ status: "written", contentHash: "b".repeat(64) });
+      await save.promise;
+    });
+
+    expect(
+      screen.queryByTestId(`tab-${momentDiffTabPath("m-1")}`),
+    ).toBeNull();
+    expect(screen.getByRole("region", { name: "Editor group 1" })).toBe(right);
+  });
 
   // The listing loaders' rule, on the timeline: a request that is merely in
   // flight has answered nothing, and one that FAILS never will. Superseding on
@@ -6178,6 +8199,9 @@ describe("history page", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
+    const treeRows = await screen.findAllByTestId("tree-row");
+    await user.click(treeRows.find((row) => row.textContent?.includes("a.md"))!);
+    await screen.findByTestId("tab-a.md");
     await user.click(screen.getByTestId("activity-history"));
     expect(await screen.findByText("Wrote the plan")).toBeTruthy();
 
@@ -6193,6 +8217,15 @@ describe("history page", () => {
     expect(banner.textContent).toContain("dohc could not refresh sync status.");
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
     expect(screen.getByText("Wrote the plan")).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "\\", ctrlKey: true });
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(2),
+    );
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+      "dohc could not refresh sync status.",
+    );
+    expect(screen.getByTestId("workspace-shell-error-retry")).toBeTruthy();
 
     // The workspace moved on while the lane was stale.
     nextStatus = syncingStatus;
@@ -8740,12 +10773,32 @@ describe("open editors", () => {
     expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
       workspaceId: "ws-shell-test",
       relativePath: "Untitled.txt",
+      initialText: "",
     });
     expect(await screen.findByTestId("tab-Untitled.txt")).toBeTruthy();
 
     await user.click(screen.getByLabelText("Close all editors"));
     await waitFor(() => expect(screen.queryByTestId("tab-Untitled.txt")).toBeNull());
     expect(screen.queryAllByTestId("open-editor-row")).toHaveLength(0);
+  });
+
+  it("numbers untitled text files after case-insensitive file and folder matches", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      files: [{ path: "untitled.txt", kind: "file" as const }],
+      folders: ["UNTITLED 2.TXT"],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.click(screen.getByLabelText("New untitled text file"));
+
+    expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
+      workspaceId: "ws-shell-test",
+      relativePath: "Untitled 3.txt",
+      initialText: "",
+    });
   });
 
   it("surfaces file title actions for create, refresh, and collapse folders", async () => {
@@ -8786,6 +10839,7 @@ describe("open editors", () => {
       expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
         workspaceId: "ws-shell-test",
         relativePath: "docs/notes.md",
+        initialText: "",
       }),
     );
 
@@ -9329,6 +11383,88 @@ describe("settings entry points", () => {
   });
 });
 
+describe("drawing entry point", () => {
+  it("creates and opens an empty engine-claimable drawing from the command palette", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "New drawing",
+      ),
+    );
+
+    await waitFor(() =>
+      expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        relativePath: "Untitled.excalidraw",
+        initialText: "",
+      }),
+    );
+    expect(
+      (await screen.findAllByText("Untitled.excalidraw")).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("numbers drawings after case-insensitive file and folder matches", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockResolvedValue({
+      files: [{ path: "UNTITLED 2.EXCALIDRAW", kind: "file" as const }],
+      folders: ["untitled.excalidraw"],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findAllByTestId("tree-row");
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "New drawing",
+      ),
+    );
+
+    await waitFor(() =>
+      expect(bridge.createWorkspaceFile).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        relativePath: "Untitled 3.excalidraw",
+        initialText: "",
+      }),
+    );
+  });
+
+  it("opens a new drawing only in the focused editor group", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "right",
+      }),
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("tab-a.md");
+    await screen.findByTestId("tab-b.md");
+    const left = await screen.findByRole("region", { name: "Editor group 1" });
+    const right = await screen.findByRole("region", { name: "Editor group 2" });
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "New drawing",
+      ),
+    );
+
+    expect(await within(right).findByTestId("tab-Untitled.excalidraw")).toBeTruthy();
+    expect(within(left).queryByTestId("tab-Untitled.excalidraw")).toBeNull();
+    expect(within(left).getByTestId("tab-a.md")).toBeTruthy();
+  });
+});
+
 // #687/#589: the note's precedence and exact copy are pinned at the
 // AgentsMcpSettings/RunnerSettingsCard layer, but every test there hands
 // sessionRecorderOn and sharedView straight to DesktopSettings — bypassing
@@ -9596,11 +11732,16 @@ describe("set-aside draft recovery", () => {
     Object.assign(bridge, {
       openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
         sessionId = payload.sessionId;
-        return { available: true, initialUpdate: Y.encodeStateAsUpdate(doc) };
+        return {
+          available: true,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          lineageGeneration: 1,
+        };
       }),
-      applyEngineYDocUpdate: vi.fn(async () => undefined),
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(
         (listener: (event: EngineYDocSaveStateEvent) => void) => {
           saveStateListeners.add(listener);
@@ -9702,7 +11843,12 @@ describe("set-aside draft recovery", () => {
     // degrades to not-engine-backed instead of ever attempting the open, so
     // this mock needs it even though this test never emits through it.
     const onEngineYDocSaveState = vi.fn(() => () => undefined);
-    Object.assign(bridge, { openEngineYDocSession, onEngineYDocSaveState });
+    const onEngineYDocLineageReplacement = vi.fn(() => () => undefined);
+    Object.assign(bridge, {
+      openEngineYDocSession,
+      onEngineYDocSaveState,
+      onEngineYDocLineageReplacement,
+    });
     renderShell(bridge);
     await screen.findByTestId("view-markdown");
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
@@ -9789,7 +11935,12 @@ describe("set-aside draft recovery", () => {
     // degrades to not-engine-backed instead of ever attempting the open, so
     // this mock needs it even though this test never emits through it.
     const onEngineYDocSaveState = vi.fn(() => () => undefined);
-    Object.assign(bridge, { openEngineYDocSession, onEngineYDocSaveState });
+    const onEngineYDocLineageReplacement = vi.fn(() => () => undefined);
+    Object.assign(bridge, {
+      openEngineYDocSession,
+      onEngineYDocSaveState,
+      onEngineYDocLineageReplacement,
+    });
     renderShell(bridge);
     await screen.findByTestId("view-markdown");
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));

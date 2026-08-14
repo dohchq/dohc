@@ -150,9 +150,11 @@ export function OpenSharedView(props: {
       {gate.kind === "signed-in" ? (
         <>
           <p className="m-0 text-xs leading-relaxed text-muted">
+            {/* No level claim here: the share states its own level, and this
+                screen has not read it yet. The banner says it after open. */}
             {mounting
-              ? "Paste the share code you received. The shared files appear in this workspace under shared-with-me/ — read-only, kept up to date, and readable by your agent."
-              : "Paste the share code you received. You'll get a read-only view of what was shared — it updates when you refresh, and only the person who shared it can change the files."}
+              ? "Paste the share code you received. The shared files appear in this workspace under shared-with-me/."
+              : "Paste the share code you received. You get a separate view of the shared files."}
           </p>
           <label className="block text-[11px] font-medium text-subtle">
             Share code
@@ -200,7 +202,7 @@ export function OpenSharedView(props: {
                 >
                   Open separately
                   <span className="block text-[10px] text-subtle">
-                    A read-only view in its own folder
+                    A separate view in its own folder
                   </span>
                 </button>
               </div>

@@ -24,8 +24,8 @@ const WORKSPACE_ID = "workspace";
 const WORKSPACE_HANDLE = "workspace-handle";
 const SENTINEL = new Error("sentinel");
 
-// Past `MAX_DESKTOP_CAPTURE_TEXT_BYTES` (128 KiB), so the daemon withholds this
-// body from a moment payload and reports its digest instead. The leading BOM
+// Past the 128 KiB versioned-text in-band response cap, so the daemon withholds
+// this body from a moment payload and reports its digest instead. The leading BOM
 // and the two-byte characters make the readback a real UTF-8 check rather than
 // an ASCII one.
 const OVER_CAP_TEXT = `\uFEFF# héllo\n${"é".repeat(70 * 1024)}\n`;
@@ -33,6 +33,11 @@ const OVER_CAP_BYTES = new Uint8Array(Buffer.from(OVER_CAP_TEXT, "utf8"));
 const OVER_CAP_SHA256 = createHash("sha256")
   .update(OVER_CAP_BYTES)
   .digest("hex");
+
+// These real over-cap UTF-8 hydrations take less than one second alone but
+// exceeded 5 seconds under the eight-worker desktop suite on 2026-08-13.
+// Keep the contention budget local to tests that process the large bodies.
+const BLOB_HYDRATION_TEST_TIMEOUT_MS = 15_000;
 
 function sessionsFor(
   client: EngineDaemonClient,
@@ -872,6 +877,7 @@ describe("createCaptureLiveStores", () => {
           .map((request) => (request.params as { sha256: string }).sha256),
       ).toEqual(blobDigests);
     },
+    BLOB_HYDRATION_TEST_TIMEOUT_MS,
   );
 
   it("mutation proof: preserves a rename moment's source path", async () => {
@@ -1353,6 +1359,7 @@ describe("createCaptureLiveStores", () => {
         ),
       ).toHaveLength(surface.blobReads);
     },
+    BLOB_HYDRATION_TEST_TIMEOUT_MS,
   );
 
   it("rejects a withheld text moment that carries no digest to hydrate from", async () => {
