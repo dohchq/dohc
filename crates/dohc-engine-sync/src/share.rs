@@ -332,13 +332,13 @@ fn enforce_share_view_thread_create(
             reason: "share-view chat.thread.create must carry linkedPath, never a linked object id or path hint",
         });
     }
-    let path = op
-        .payload
-        .get("linkedPath")
-        .and_then(Value::as_str)
-        .ok_or(SyncError::InvalidInput {
-            reason: "share-view chat.thread.create must carry a linkedPath string",
-        })?;
+    let path =
+        op.payload
+            .get("linkedPath")
+            .and_then(Value::as_str)
+            .ok_or(SyncError::InvalidInput {
+                reason: "share-view chat.thread.create must carry a linkedPath string",
+            })?;
     if classify_share_path(path) != PathClass::Tracked || !path_within_grant(path, granted) {
         return Err(SyncError::ShareBoundaryViolation);
     }

@@ -5113,15 +5113,17 @@ export function DesktopWorkspaceShell(props: {
               ) : isShareView ? (
                 // A persisted Chats tab on a shared view (#615). The
                 // neighbouring line blamed the Settings flag, and a share
-                // never touched it: the share's open installs no capture, so
-                // main refuses every Chats call. State the capability, and
-                // name the next step the tab really has.
+                // never touched it. #646 PR2 changed what is true here: a
+                // shared view HAS chat now, per file, and this tab is the
+                // workspace-wide listing it still does not get — so the copy
+                // states the capability the reader does have and points at
+                // the surface that answers.
                 <div
                   data-testid="chats-page-share-view"
                   className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
                 >
-                  A shared view has no chats. Close this tab to go back to the
-                  shared files.
+                  A shared view lists no chats. Open a shared file to chat
+                  about it.
                 </div>
               ) : !captureDecided ? (
                 // Main has not decided yet — a load state, not a claim (#542).

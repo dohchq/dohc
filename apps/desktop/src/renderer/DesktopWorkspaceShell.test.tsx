@@ -681,13 +681,15 @@ function makeShareBridge(
   return bridge;
 }
 
-// The non-vacuity probe for a shared view (#615). Every engine surface is
-// hidden there now — the version selector, the Chats panel, the titlebar
-// Chats button — so no rendered control can prove the renderer's capability
-// read resolved engine-ON, and a no-call pin asserted before that read lands
-// would pass for the wrong reason. The read itself carries the proof: wait
-// until the shell asked, confirm the answer is engine-ON, then flush the
-// state update that answer commits.
+// The non-vacuity probe for a shared view (#615). The capture-backed surfaces
+// are hidden there — the version selector, the history timeline, the graph's
+// chat mentions — so no rendered control proves the renderer's capability read
+// resolved engine-ON, and a no-call pin asserted before that read lands would
+// pass for the wrong reason. The read itself carries the proof: wait until the
+// shell asked, confirm the answer is engine-ON, then flush the state update
+// that answer commits. (The Chats panel and its titlebar button render for a
+// shared view since #646 PR2, but they render off `isShareView`, not off this
+// read, so they still prove nothing about it.)
 async function settleEngineOnRead(bridge: ReturnType<typeof makeEngineBridge>) {
   await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalled());
   const read = await bridge.getWorkspaceSettings();
@@ -10273,10 +10275,12 @@ describe("shared view chats surface", () => {
     renderShell(bridge, SHARE_VIEW);
 
     // One line, per the empty-state recipe (copy.md): what is missing, then
-    // the next step this surface really has — the tab closes.
+    // the next step this surface really has. #646 PR2 changed BOTH halves —
+    // a shared view has per-file chat now, so "no chats" became false and
+    // "close this tab" stopped being the real next step.
     const placeholder = await screen.findByTestId("chats-page-share-view");
     expect(placeholder.textContent).toContain(
-      "A shared view has no chats. Close this tab to go back to the shared files.",
+      "A shared view lists no chats. Open a shared file to chat about it.",
     );
     expect(placeholder.className).toContain("text-sm");
     expect(placeholder.className).toContain("text-muted");
@@ -10486,7 +10490,7 @@ describe("shared view chats surface", () => {
 
     const placeholder = await screen.findByTestId("chats-page-share-view");
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
-    expect(placeholder.textContent).toContain("A shared view has no chats.");
+    expect(placeholder.textContent).toContain("A shared view lists no chats.");
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
   });
 });

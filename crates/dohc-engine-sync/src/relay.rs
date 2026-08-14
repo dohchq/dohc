@@ -3139,8 +3139,10 @@ impl SharePushScope<'_> {
     ) -> Result<Option<serde_json::Value>, RelayError> {
         match self {
             Self::Channel(channel_wire_id) => {
-                Ok(shared_channel_op_allowed(store, workspace_id, channel_wire_id, op)?
-                    .then(|| op.payload.clone()))
+                Ok(
+                    shared_channel_op_allowed(store, workspace_id, channel_wire_id, op)?
+                        .then(|| op.payload.clone()),
+                )
             }
             Self::View(granted) => share_view_push_payload(store, workspace_id, granted, op),
         }

@@ -12,8 +12,8 @@ use dohc_engine_sync::{
     KeyEnvelopeDownloadRequest, KeyEnvelopeRequest, LogCoordinateRequest, LogCoordinateResponse,
     NoLiveLeases, ObservedBytes, ProbeRequest, PullRequest, RelayError, RelaySyncClient,
     RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareLogPushRequest,
-    ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest, SyncPassOutcome, blob_ceiling,
-    journal_local_replication_op, read_pushed_seq, read_relay_cursor,
+    ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest, SyncPassOutcome,
+    blob_ceiling, journal_local_replication_op, read_pushed_seq, read_relay_cursor,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use dohc_engine_testkit::ScratchDir;

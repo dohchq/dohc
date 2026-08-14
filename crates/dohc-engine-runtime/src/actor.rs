@@ -91,11 +91,11 @@ use dohc_engine_sync::{
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, ProbeRequest, ProbeResponse,
     PullRequest, PullResponse, PushRequest, PushResponse, RecoverResponse, RelayCursor, RelayError,
     RelaySyncClient, RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareCursor,
-    ShareViewPullOutcome, ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome,
-    ShareLogPushRequest, SharedChannelPushOutcome, SharedChannelRequest, SharedChannelResponse,
-    SyncPassOutcome,
-    adopt_join_identity, apply_conflict_envelope, read_replayed_refusal, read_sync_identity,
-    retain_refusal_for_direct_retry, ydoc_update_payload,
+    ShareLogPushRequest, ShareViewPullOutcome, ShareViewRequest, ShareViewResponse,
+    SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRequest,
+    SharedChannelResponse, SyncPassOutcome, adopt_join_identity, apply_conflict_envelope,
+    read_replayed_refusal, read_sync_identity, retain_refusal_for_direct_retry,
+    ydoc_update_payload,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use rusqlite::{OptionalExtension, params};

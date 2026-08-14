@@ -22189,7 +22189,11 @@ fn share_view_refuses_a_thread_about_a_file_outside_the_grant() {
         Err(SyncError::ShareBoundaryViolation)
     ));
     // And a path this surface never replays at all.
-    let secret = thread_create(0, "thread-secret", json!({ "linkedPath": "shared/docs/.env" }));
+    let secret = thread_create(
+        0,
+        "thread-secret",
+        json!({ "linkedPath": "shared/docs/.env" }),
+    );
     assert!(matches!(
         apply_shared_envelope(&mut engine, &boundary, &secret, &NoFaults),
         Err(SyncError::ShareBoundaryViolation)
@@ -22198,7 +22202,11 @@ fn share_view_refuses_a_thread_about_a_file_outside_the_grant() {
     // is refused at apply, not at the boundary: the grant covers it, and the
     // file simply has not arrived. It lands in the refusal lane rather than as
     // an error, which is what makes the skip visible instead of silent.
-    let absent = thread_create(0, "thread-absent", json!({ "linkedPath": "shared/docs/gone.md" }));
+    let absent = thread_create(
+        0,
+        "thread-absent",
+        json!({ "linkedPath": "shared/docs/gone.md" }),
+    );
     let outcome = apply_shared_envelope(&mut engine, &boundary, &absent, &NoFaults)
         .expect("a missing file is a refusal, not a failed pull");
     let refusal = match outcome {
@@ -22207,7 +22215,10 @@ fn share_view_refuses_a_thread_about_a_file_outside_the_grant() {
     };
     assert_eq!(refusal.op_kind, "chat.thread.create");
     assert!(
-        refusal.reason.message().contains("names no file in this workspace"),
+        refusal
+            .reason
+            .message()
+            .contains("names no file in this workspace"),
         "MUTATION: the refusal must say WHICH constraint the op hit, got {:?}",
         refusal.reason,
     );
@@ -22220,7 +22231,12 @@ fn share_view_refuses_a_thread_scoped_op_whose_thread_is_unknown_or_out_of_grant
     // Unknown locally: the four thread-scoped kinds carry no file of their
     // own, so an unresolved thread is the boundary's answer, not a guess.
     assert!(matches!(
-        apply_shared_envelope(&mut engine, &boundary, &thread_message(0, "thread-nowhere", "m"), &NoFaults),
+        apply_shared_envelope(
+            &mut engine,
+            &boundary,
+            &thread_message(0, "thread-nowhere", "m"),
+            &NoFaults
+        ),
         Err(SyncError::ShareBoundaryViolation)
     ));
 
@@ -22239,14 +22255,35 @@ fn share_view_refuses_a_thread_scoped_op_whose_thread_is_unknown_or_out_of_grant
         })
         .expect("plant thread");
     for (index, kind, payload) in [
-        (0_i64, "chat.message.append", json!({"messageId":"m","threadId":"thread-out","authorKind":"human","authorDisplayName":"G","body":"x","createdAtMs":1})),
-        (0, "chat.reaction.set", json!({"reactionId":"r","messageId":"m","threadId":"thread-out","emoji":"👍","authorId":"u","authorKind":"human","authorDisplayName":"U","state":"added","atMs":1})),
-        (0, "chat.decision.set", json!({"threadId":"thread-out","messageId":"m","state":"open","atMs":1})),
-        (0, "chat.attachment.add", json!({"attachmentId":"a","threadId":"thread-out","messageId":"m","targetKind":"file","createdAtMs":1})),
+        (
+            0_i64,
+            "chat.message.append",
+            json!({"messageId":"m","threadId":"thread-out","authorKind":"human","authorDisplayName":"G","body":"x","createdAtMs":1}),
+        ),
+        (
+            0,
+            "chat.reaction.set",
+            json!({"reactionId":"r","messageId":"m","threadId":"thread-out","emoji":"👍","authorId":"u","authorKind":"human","authorDisplayName":"U","state":"added","atMs":1}),
+        ),
+        (
+            0,
+            "chat.decision.set",
+            json!({"threadId":"thread-out","messageId":"m","state":"open","atMs":1}),
+        ),
+        (
+            0,
+            "chat.attachment.add",
+            json!({"attachmentId":"a","threadId":"thread-out","messageId":"m","targetKind":"file","createdAtMs":1}),
+        ),
     ] {
         assert!(
             matches!(
-                apply_shared_envelope(&mut engine, &boundary, &envelope("granter", index, kind, payload), &NoFaults),
+                apply_shared_envelope(
+                    &mut engine,
+                    &boundary,
+                    &envelope("granter", index, kind, payload),
+                    &NoFaults
+                ),
                 Err(SyncError::ShareBoundaryViolation)
             ),
             "MUTATION: {kind} on an out-of-grant thread must be refused",
@@ -22261,13 +22298,27 @@ fn share_view_never_carries_the_readers_own_state_or_any_other_chat_kind() {
     // file boundary's terminal deny, the same way they do for a channel share.
     let (_scratch, _path, mut engine, boundary) = share_view_chat_fixture();
     for (kind, payload) in [
-        ("chat.follow.set", json!({"ownerUserId":"u","targetKind":"thread","targetId":"thread-in","state":"following","atMs":1})),
-        ("chat.feed.read.set", json!({"ownerUserId":"u","lastSeenCreatedAtMs":1,"lastSeenMessageId":"m","atMs":1})),
-        ("chat.channel.create", json!({"channelId":"c","name":"General","slug":"general","kind":"channel","createdAtMs":1,"wireId":"wire"})),
+        (
+            "chat.follow.set",
+            json!({"ownerUserId":"u","targetKind":"thread","targetId":"thread-in","state":"following","atMs":1}),
+        ),
+        (
+            "chat.feed.read.set",
+            json!({"ownerUserId":"u","lastSeenCreatedAtMs":1,"lastSeenMessageId":"m","atMs":1}),
+        ),
+        (
+            "chat.channel.create",
+            json!({"channelId":"c","name":"General","slug":"general","kind":"channel","createdAtMs":1,"wireId":"wire"}),
+        ),
     ] {
         assert!(
             matches!(
-                apply_shared_envelope(&mut engine, &boundary, &envelope("granter", 0, kind, payload), &NoFaults),
+                apply_shared_envelope(
+                    &mut engine,
+                    &boundary,
+                    &envelope("granter", 0, kind, payload),
+                    &NoFaults
+                ),
                 Err(SyncError::ShareBoundaryViolation)
             ),
             "MUTATION: {kind} must never cross a file share",
@@ -22334,18 +22385,38 @@ fn share_view_push_rewrites_a_thread_link_to_a_path_and_scopes_by_the_grant() {
             "chat.thread.create",
             json!({"threadId":"thread-in","title":"Q","createdAtMs":1,"linkedAtMs":1,"linkedObjectId":"object-in","linkedPathHint":"stale/hint.md"}),
         ),
-        (1_002, "chat.message.append", json!({"threadId":"thread-in","messageId":"m-in"})),
+        (
+            1_002,
+            "chat.message.append",
+            json!({"threadId":"thread-in","messageId":"m-in"}),
+        ),
         (
             1_003,
             "chat.thread.create",
             json!({"threadId":"thread-out","title":"Private","createdAtMs":1,"linkedAtMs":1,"linkedObjectId":"object-out"}),
         ),
-        (1_004, "chat.message.append", json!({"threadId":"thread-out","messageId":"m-out"})),
+        (
+            1_004,
+            "chat.message.append",
+            json!({"threadId":"thread-out","messageId":"m-out"}),
+        ),
         // Never this replica's to push through a FILE share, at any level.
-        (1_005, "chat.follow.set", json!({"threadId":"thread-in","ownerUserId":"u","targetKind":"thread","targetId":"thread-in","state":"following","atMs":1})),
+        (
+            1_005,
+            "chat.follow.set",
+            json!({"threadId":"thread-in","ownerUserId":"u","targetKind":"thread","targetId":"thread-in","state":"following","atMs":1}),
+        ),
     ] {
         journal_local_replication_op(
-            &mut engine, "ws", "local", "epoch-1", "stream-1", kind, &payload, index, &NoFaults,
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            kind,
+            &payload,
+            index,
+            &NoFaults,
         )
         .expect("journal local op");
     }
@@ -22374,7 +22445,10 @@ fn share_view_push_rewrites_a_thread_link_to_a_path_and_scopes_by_the_grant() {
     assert_eq!(ops[1].origin_seq, 1);
 
     let create = &ops[0].payload;
-    assert_eq!(create.get("linkedPath").and_then(|v| v.as_str()), Some("shared/docs/in.md"));
+    assert_eq!(
+        create.get("linkedPath").and_then(|v| v.as_str()),
+        Some("shared/docs/in.md")
+    );
     assert!(
         create.get("linkedObjectId").is_none(),
         "MUTATION: a local object id means nothing to the granter and the relay refuses a create carrying both shapes",
@@ -22391,7 +22465,10 @@ fn share_view_push_rewrites_a_thread_link_to_a_path_and_scopes_by_the_grant() {
         .collect::<Vec<_>>()
         .join(" ");
     for absent in ["thread-out", "m-out", "private/out.md", "object-out"] {
-        assert!(!wire.contains(absent), "{absent} must not cross the boundary");
+        assert!(
+            !wire.contains(absent),
+            "{absent} must not cross the boundary"
+        );
     }
 }
 
@@ -22549,7 +22626,10 @@ fn a_recipient_thread_create_binds_to_the_granters_own_object_on_the_owner_lane(
         .expect("thread row");
     assert_eq!(
         bound,
-        Some(("granter-object".to_owned(), Some("shared/docs/in.md".to_owned()))),
+        Some((
+            "granter-object".to_owned(),
+            Some("shared/docs/in.md".to_owned())
+        )),
         "MUTATION: the granter must resolve the path to ITS OWN object, never store the path as an id",
     );
 }

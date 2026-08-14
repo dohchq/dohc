@@ -76,9 +76,8 @@ pub use relay::{
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, ProbeRequest, ProbeResponse,
     PullRequest, PullResponse, PushRequest, PushResponse, RecoverResponse, RelaySyncClient,
     RelayTransport, ShareBlobRequest, ShareLogPushRequest, ShareReplicationEnvelope,
-    ShareViewChangedPath,
-    ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest, ShareViewResponse,
-    SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
+    ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest,
+    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
     SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
 };
 pub use router::{RoutedApply, apply_replication_envelope};
