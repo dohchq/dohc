@@ -3207,8 +3207,13 @@ export function DesktopWorkspaceShell(props: {
       const label = path.split("/")[1] ?? "";
       const mount = shareMounts.find((m) => m.label === label);
       if (!mount) return;
+      let folderLeft = false;
       try {
-        await bridge().unmountShare({ workspaceId, shareId: mount.shareId });
+        const result = await bridge().unmountShare({
+          workspaceId,
+          shareId: mount.shareId,
+        });
+        folderLeft = result?.folderLeft === true;
       } catch (error) {
         reportShellError("Couldn't remove the share.", error);
         return;
@@ -3223,7 +3228,14 @@ export function DesktopWorkspaceShell(props: {
       ]);
       await refreshFiles().catch(() => undefined);
       void reloadShareMounts();
-      showShellNotice(`Removed ${label} from this workspace.`);
+      // The record went but its folder stayed, because its label is not one
+      // this app would ever address a folder through. The files are still on
+      // disk, so say where they are and leave the choice to the user.
+      showShellNotice(
+        folderLeft
+          ? `Removed ${label} from this workspace. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.`
+          : `Removed ${label} from this workspace.`,
+      );
     },
     [
       workspaceId,

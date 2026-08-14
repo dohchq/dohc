@@ -70,6 +70,71 @@ describe("SharedWithMeList", () => {
   // The PIN is the authority the recipient's own pulls enforce. A relay that
   // restates a wider level must not get to announce it here, so a mounted row
   // shows what it pinned, not what the relay now says.
+  // Removing a mount whose label is unusable cleans up the RECORD only: the
+  // folder is left exactly where it is, because addressing a folder through
+  // that label is the move the validator refuses. The user is the only one
+  // who can decide what happens to those files, so they have to be told.
+  it("says the folder stayed when removal could only clean up the record", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listRelayShares.mockResolvedValue({ received: [] });
+    bridgeMock.getWorkspaceRegistry.mockResolvedValue({
+      workspaces: [
+        {
+          workspaceId: WORKSPACE_ID,
+          shareMounts: [
+            {
+              shareId: "share-1",
+              label: "alex",
+              granterEmail: "alex@dohc.test",
+              damaged: true,
+            },
+          ],
+        },
+      ],
+    });
+    bridgeMock.unmountShare.mockResolvedValue({ folderLeft: true });
+
+    render(<SharedWithMeList workspaceId={WORKSPACE_ID} />);
+    await screen.findByTestId("shared-with-me-row");
+    await user.click(screen.getByTestId("shared-with-me-unmount"));
+
+    const notice = await screen.findByTestId("shared-with-me-folder-left");
+    expect(
+      notice.textContent,
+      "MUTATION: dropping folderLeft leaves the files on disk with nothing said",
+    ).toBe(
+      "Removed the share from this workspace. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.",
+    );
+  });
+
+  it("says nothing extra when the folder went with the record", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listRelayShares.mockResolvedValue({ received: [] });
+    bridgeMock.getWorkspaceRegistry.mockResolvedValue({
+      workspaces: [
+        {
+          workspaceId: WORKSPACE_ID,
+          shareMounts: [
+            {
+              shareId: "share-1",
+              label: "alex",
+              granterEmail: "alex@dohc.test",
+              access: "view",
+            },
+          ],
+        },
+      ],
+    });
+    bridgeMock.unmountShare.mockResolvedValue({});
+
+    render(<SharedWithMeList workspaceId={WORKSPACE_ID} />);
+    await screen.findByTestId("shared-with-me-row");
+    await user.click(screen.getByTestId("shared-with-me-unmount"));
+
+    await waitFor(() => expect(bridgeMock.unmountShare).toHaveBeenCalled());
+    expect(screen.queryByTestId("shared-with-me-folder-left")).toBeNull();
+  });
+
   it("shows the pinned level, not a wider one the relay restates", async () => {
     bridgeMock.listRelayShares.mockResolvedValue({
       received: [

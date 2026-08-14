@@ -42,6 +42,11 @@ type LoadState =
   | { status: "ready"; shares: RelayShareReceivedRow[]; mounts: MountInfo[] }
   | { status: "error"; message: string };
 
+// Removal left the folder behind. States what changed, where the files are,
+// and the one thing left for the user to do.
+const FOLDER_LEFT_NOTICE =
+  "Removed the share from this workspace. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.";
+
 function errorMessage(cause: unknown): string {
   const text = cause instanceof Error ? cause.message : String(cause);
   return text.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
@@ -104,6 +109,7 @@ export function SharedWithMeList(props: {
 }) {
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [busyShareId, setBusyShareId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   // Response token (repo invariant for workspace-scoped async loads): a
   // slower older refresh must never overwrite a newer list, and nothing may
   // set state after unmount or a workspace switch.
@@ -267,8 +273,15 @@ export function SharedWithMeList(props: {
     const live = () => epoch === workspaceEpoch.current;
     setBusyShareId(shareId);
     try {
-      await bridge().unmountShare({ workspaceId: props.workspaceId, shareId });
+      const result = await bridge().unmountShare({
+        workspaceId: props.workspaceId,
+        shareId,
+      });
       if (!live()) return;
+      // The record went but its folder stayed, because its label is not one
+      // this app would ever address a folder through. Saying so is the whole
+      // point: the files are still on disk, and only the user can decide.
+      setNotice(result?.folderLeft ? FOLDER_LEFT_NOTICE : null);
       await refresh();
       if (live()) props.onWorkspaceFilesChanged?.();
     } catch (cause) {
@@ -303,6 +316,15 @@ export function SharedWithMeList(props: {
     );
   }
   return (
+    <>
+    {notice ? (
+      <p
+        data-testid="shared-with-me-folder-left"
+        className="m-0 mb-1.5 text-[11px] leading-relaxed text-warning"
+      >
+        {notice}
+      </p>
+    ) : null}
     <ul
       className="m-0 list-none divide-y divide-line overflow-hidden rounded-lg border border-line p-0"
       data-testid="shared-with-me-list"
@@ -415,5 +437,6 @@ export function SharedWithMeList(props: {
         );
       })}
     </ul>
+    </>
   );
 }

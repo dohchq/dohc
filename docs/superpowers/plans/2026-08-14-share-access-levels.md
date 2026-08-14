@@ -519,8 +519,8 @@ without being a vulnerability.
 | MCP `--read-only` | set | PR2 splits: document-write tools off, chat-write tools on | PR3: both on | server-side (the tool is never registered) | `mcp/src/server.ts:100-102` |
 | Editor `readOnly` prop | true | true | false in PR3 | UX mirror | `DesktopWorkspaceShell.tsx:4536` |
 | Native Explorer menu reduction | reduced | reduced | full in PR3 | UX mirror of a main-owned menu | `main.ts:3776-3800` |
-| Recipient banner copy | states level | states level | states level | UX mirror | `DesktopWorkspaceShell.tsx:4056-4120` |
-| Level badge on share rows | shows level | shows level | shows level | UX mirror | `SharedByMeList.tsx`, `SharedWithMeList.tsx` |
+| Recipient banner copy | read-only in PR1, unchanged after | read-only in PR1, states chat from PR2 | read-only until PR3, then states edit | UX mirror, phased with the rights | `DesktopWorkspaceShell.tsx:4056-4120` |
+| Level badge on share rows | shows level | shows level | shows level | UX mirror — a level name is a fact, not a promise, so it ships in PR1 | `SharedByMeList.tsx`, `SharedWithMeList.tsx` |
 
 The MCP row is the one that needs care. `--read-only` today suppresses eleven
 tools in one list (`packages/mcp/src/server.test.ts:7-20`), and two of them are
@@ -609,16 +609,40 @@ granter's workspace id (`server.ts:256-258`), and the level does not widen that.
 
 ### Recipient banner — `DesktopWorkspaceShell.tsx:4056-4120`
 
-Per level, replacing the single string at line 4068:
+The banner phases with the RIGHTS, not with the level field. Each sentence
+ships in the PR that makes it true.
+
+**PR1 — one string, every level:**
+
+> `Shared view from {granter} — read-only. Ask {granter} for changes.`
+
+This is the existing line, unchanged. It is true at all three levels in PR1,
+because all three grant exactly read there. A per-level banner in PR1 would
+promise chat that the append route still refuses at every level — the UI
+running ahead of the truth table, which the table at the top of this document
+exists to stop. The level is still visible to the recipient in PR1: the BADGE
+on the received row states it, because a level name is a fact about the grant
+while the banner sentence is a promise about rights.
+
+**PR2 — Comment gains its sentence, with its rights:**
 
 | Level | Banner |
 | --- | --- |
-| View | `Shared view from {granter} — read-only. Ask {granter} for changes.` |
+| View | unchanged from PR1 |
 | Comment | `Shared view from {granter}. You can chat about these files, not edit them.` |
-| Edit | `Shared view from {granter}. You can edit these files and chat about them.` |
+| Edit | unchanged from PR1 until PR3 |
 
-The ended-share line is unchanged: `This share was ended by {granter}. Your copy
-stays readable but won't update anymore.`
+**PR3 — Edit gains its sentence, with its rights:**
+
+> `Shared view from {granter}. You can edit these files and chat about them.`
+
+The ended-share line is unchanged in every phase: `This share was ended by
+{granter}. Your copy stays readable but won't update anymore.`
+
+A share whose stored grant cannot be read states that instead, and offers the
+one step that fixes it: `dohc can't read what this share grants. Open the
+share again to restore it.` It shows no level, and skips the refresh it has no
+grant to run.
 
 ### Open flow — `apps/desktop/src/renderer/OpenSharedView.tsx`
 
@@ -694,8 +718,10 @@ words: `This shared file is read-only for you.`
     2438-2443) gains `access: z.enum(["view","comment","edit"])`;
     `CreateRelaySharePayload` (line 2481-2487) gains a required `access`;
     `WorkspaceSummary.shareView` (line 163-178) gains `access`.
-11. UI: the picker, the two badges, the three banner strings, the OpenSharedView
-    rewrite — all as specified above.
+11. UI: the picker, the two badges, the PR1 banner string, and the
+    OpenSharedView rewrite — all as specified above. The banner keeps its
+    single read-only line at every level; the Comment and Edit sentences ship
+    with their rights in PR2 and PR3 (see the banner section).
 
 **Not in PR1**: any change to `mcpConfigFor`, the editor `readOnly` prop, the
 native menu, or any chat handler.
