@@ -944,4 +944,105 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.dispose();
     }
   }, 60_000);
+
+  it("holds for approval instead of auto-approving a disk-only change that lands while a door write's own refresh is queued (#779 round 3 finding 1)", async () => {
+    const fixture = await createPluginWorkspace();
+    const installGate = deferred();
+    let installCalls = 0;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: async (input) => {
+          installCalls += 1;
+          // The 2nd overall install call is approve()'s — it occupies this
+          // plugin's job queue so the door-write refresh queued below has
+          // to wait behind it, giving the disk-only mutation a real window.
+          if (installCalls === 2) await installGate.promise;
+          return installPluginDependencies({ ...input, forkProcess: nodeForkProcess });
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      // approve() runs unconditionally and blocks on the gated 2nd install
+      // call, occupying the queue — standing in for "some other job is
+      // already running when the door write arrives" (installCalls === 2
+      // is deliberately generic: any job ahead in the queue creates the
+      // same delay).
+      const approvePromise = pipeline.approve("example-plugin");
+      await waitFor(() => installCalls === 2, "approve() never reached the gated install.");
+
+      // The door write itself: authored content lands on disk, then the
+      // owning plugin is told about it immediately, exactly like
+      // main.ts's writeAuthoredText -> handleDoorWrittenSourceChange call.
+      await writeFile(fixture.entryPath, [
+        'export const marker = "door-written";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      pipeline.handleDoorWrittenSourceChange("example-plugin");
+      // Let the door-write hash capture actually read the file before the
+      // interloper below overwrites it — the capture itself is a real,
+      // unsynchronized filesystem read, not a snapshot; the property this
+      // fix defends is that it happens well before the queued refresh gets
+      // its turn (job Z is still blocked on the install gate), which a
+      // short pause here reflects without racing the capture itself.
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+      // Before that refresh gets a turn (it is still queued behind
+      // approve()'s blocked install), an unrelated, non-door-authored actor
+      // mutates the same file on disk.
+      await writeFile(fixture.entryPath, [
+        'export const marker = "disk-only-interloper";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+
+      installGate.resolve();
+      const approved = await approvePromise;
+      expect(approved.ok).toBe(true);
+
+      await waitFor(
+        () => pipeline.list()[0]?.status === "disabled-pending-approval",
+        `The disk-only change was not held for approval; status is `
+          + `"${pipeline.list()[0]?.status}".`,
+      );
+      expect(pipeline.list()[0]).toMatchObject({
+        status: "disabled-pending-approval",
+        disabledReason: "approval",
+      });
+      // The interloper's content never ran.
+      expect(await readFile(
+        liveBundlePath(fixture, "example-plugin"),
+        "utf8",
+      )).not.toContain("disk-only-interloper");
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
 });

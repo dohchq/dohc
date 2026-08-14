@@ -23,6 +23,7 @@ import {
 import type { DohcPluginManifest } from "./pluginManifestSchema";
 import type { PluginRuntimeStatus } from "./pluginHostProtocol";
 import {
+  hashPluginSourceFiles,
   pluginIdToSafePath,
   snapshotPluginSource,
   type PluginSourceSnapshotResult,
@@ -460,17 +461,51 @@ export class PluginPipeline {
   }
 
   handleDoorWrittenSourceChange(pluginId: string): void {
+    const candidate = this.validCandidate(pluginId);
+    if (!candidate) return;
+    // Hashed synchronously, before this refresh waits in the per-plugin
+    // job queue: this is the tree's hash at door-write time. The queue
+    // delay is unbounded — another job for this plugin may already be
+    // running — so a disk-only write can land after the door write but
+    // before this refresh gets its turn. The queued job below re-hashes
+    // the live tree once it actually runs and holds for approval instead
+    // of building if the two disagree, so that interloping change can
+    // never ride the door write's auto-approval (#779 round 3 finding 1,
+    // security-grade).
+    const doorWrittenHash = hashPluginSourceFiles(candidate.rootPath)
+      .then((digest) => digest.sourceHash)
+      .catch(() => null);
+
     this.enqueueSourceRefresh(pluginId, async () => {
-      const candidate = this.validCandidate(pluginId);
-      if (!candidate) return;
+      const freshCandidate = this.validCandidate(pluginId);
+      if (!freshCandidate) return;
       const state = await this.localRecord(pluginId);
       if (!state?.approvedHash) {
-        this.setStatus(candidate, { status: "discovered" });
+        this.setStatus(freshCandidate, { status: "discovered" });
         return;
       }
       const disabled = state.disabled === true;
+      const [expectedHash, liveDigest] = await Promise.all([
+        doorWrittenHash,
+        hashPluginSourceFiles(freshCandidate.rootPath).catch(() => null),
+      ]);
+      if (
+        expectedHash === null ||
+        liveDigest === null ||
+        liveDigest.sourceHash !== expectedHash
+      ) {
+        const priorDisabledReason = disabled
+          ? this.statuses.get(pluginId)?.disabledReason ?? "user"
+          : undefined;
+        await this.holdForApproval(
+          freshCandidate,
+          liveDigest?.sourceHash ?? state.approvedHash,
+          priorDisabledReason,
+        );
+        return;
+      }
       await this.runFullBuild({
-        candidate,
+        candidate: freshCandidate,
         startRuntime: !disabled,
         disabledReasonAfterBuild: disabled ? "user" : null,
         resetCrashAccounting: !disabled,
