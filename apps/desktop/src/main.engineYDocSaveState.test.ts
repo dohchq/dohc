@@ -73,7 +73,9 @@ describe("engine Y.Doc save-state reporting in main", () => {
     // engine records the rename moment.
     expect(handler).toContain("liveDocumentKindForPath(input.fromPath)");
     expect(handler).toContain("liveDocumentKindForPath(input.toPath)");
-    const guardAt = handler.indexOf("fromKind !== toKind");
+    // Including a rename OUT of a live kind: a drawing renamed `.txt` keeps
+    // a scene lineage nothing at the new path can update.
+    const guardAt = handler.indexOf("fromKind !== null && fromKind !== toKind");
     const renameAt = handler.indexOf("capture.beginFileRename(");
     expect(guardAt).toBeGreaterThan(-1);
     expect(guardAt).toBeLessThan(renameAt);
