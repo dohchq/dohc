@@ -194,6 +194,13 @@ pub struct SharedChannelResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareLogPushRequest {
+    pub share_id: String,
+    pub origin_id: String,
+    pub ops: Vec<ShareReplicationEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareViewRequest {
     pub share_id: String,
     pub cursor: i64,
@@ -446,10 +453,10 @@ pub trait RelayTransport {
         &self,
         req: SharedChannelRequest,
     ) -> Result<SharedChannelResponse, RelayError>;
-    fn shared_channel_push(
-        &self,
-        req: SharedChannelRequest,
-    ) -> Result<SharedChannelResponse, RelayError>;
+    /// POST to a share's log. ONE surface for both share kinds: the route is
+    /// per-share and the relay scopes the batch by the share's own selector,
+    /// so the pusher names no channel and no path (#646 PR2).
+    fn share_log_push(&self, req: ShareLogPushRequest) -> Result<PushResponse, RelayError>;
     fn share_view_pull(&self, req: ShareViewRequest) -> Result<ShareViewResponse, RelayError>;
     fn share_blob(&self, req: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError>;
 }
@@ -1628,6 +1635,54 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         channel_wire_id: &str,
         faults: &dyn FaultInjector,
     ) -> Result<SharedChannelPushOutcome, RelayError> {
+        self.push_share_ops(
+            store,
+            workspace_id,
+            share_id,
+            &SharePushScope::Channel(channel_wire_id),
+            faults,
+        )
+    }
+
+    /// Push this replica's own chat about a RECEIVED file share back to the
+    /// granter (#646 PR2).
+    ///
+    /// The lane is MU-C4's, op for op: the same local scan, the same dense
+    /// per-share origin sequence, the same batched POST to the share log, the
+    /// same push state. Only the scope differs — a channel share scopes by
+    /// channel wire id, a file share by the pinned grant — and one payload is
+    /// rewritten on the way out, because a thread's link crosses a share
+    /// boundary as a PATH and this replica's object ids mean nothing to the
+    /// granter.
+    ///
+    /// The relay refuses the whole batch when the grant does not admit an op,
+    /// so eligibility here is not the authorization; it is what keeps this
+    /// replica from offering ops the grant was never going to accept.
+    pub fn push_share_view(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        share_id: &str,
+        granted: &crate::ShareGrant,
+        faults: &dyn FaultInjector,
+    ) -> Result<SharedChannelPushOutcome, RelayError> {
+        self.push_share_ops(
+            store,
+            workspace_id,
+            share_id,
+            &SharePushScope::View(granted),
+            faults,
+        )
+    }
+
+    fn push_share_ops(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        share_id: &str,
+        scope: &SharePushScope<'_>,
+        faults: &dyn FaultInjector,
+    ) -> Result<SharedChannelPushOutcome, RelayError> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
@@ -1640,7 +1695,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     store,
                     workspace_id,
                     &identity.origin_id,
-                    channel_wire_id,
+                    scope,
                     scanned,
                 )?;
                 write_shared_push_state(store, workspace_id, share_id, scanned, dense_seq, faults)?;
@@ -1651,14 +1706,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut last_scanned = scanned;
         let mut pushed = 0_usize;
         let push_batch = |batch: &[(i64, ShareReplicationEnvelope)]| {
-            let response = self.transport.shared_channel_push(SharedChannelRequest {
+            let push = self.transport.share_log_push(ShareLogPushRequest {
                 share_id: share_id.to_owned(),
-                channel_wire_id: channel_wire_id.to_owned(),
                 origin_id: identity.origin_id.clone(),
-                cursor: 0,
                 ops: batch.iter().map(|(_, op)| op.clone()).collect(),
             })?;
-            let push = response.push.ok_or(RelayError::InvalidResponse)?;
             if push.accepted != batch.len()
                 || push.inserted.checked_add(push.skipped) != Some(push.accepted)
             {
@@ -1680,9 +1732,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 break;
             };
             for op in page {
-                let eligible =
-                    shared_channel_op_allowed(store, workspace_id, channel_wire_id, &op)?;
-                if eligible {
+                let served = scope.served_payload(store, workspace_id, &op)?;
+                if served.is_some() {
                     dense_seq = dense_seq
                         .checked_add(1)
                         .ok_or(RelayError::InvalidResponse)?;
@@ -1691,14 +1742,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     continue;
                 }
                 last_scanned = op.origin_seq;
-                if eligible {
+                if let Some(payload) = served {
                     pending.push((
                         op.origin_seq,
                         ShareReplicationEnvelope {
                             origin_id: identity.origin_id.clone(),
                             origin_seq: dense_seq,
                             op_kind: op.op_kind,
-                            payload: op.payload,
+                            payload,
                             recorded_at_ms: op.recorded_at_ms,
                         },
                     ));
@@ -1830,10 +1881,29 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 Ok(outcome) => {
                     let (primary, nested_refusals, sharing_declined) =
                         outcome.into_primary_and_diagnostics();
+                    // #646 PR2: a share-view CHAT op does mutate chat
+                    // dependencies — that is what applying it means, and the
+                    // replay it unparks can refuse ops of its own. What must
+                    // still hold is that none of those refusals is a FILE op:
+                    // the chat lane must never reach back into the file
+                    // replay this pull owns. A refusal recorded there would be
+                    // a file op refused by a code path with no business
+                    // touching one.
                     debug_assert!(
-                        nested_refusals.is_empty(),
-                        "share-view boundary application does not mutate chat dependencies"
+                        nested_refusals
+                            .iter()
+                            .all(|refusal| refusal.op_kind.starts_with("chat.")),
+                        "share-view chat apply must not refuse a file op"
                     );
+                    for refusal in nested_refusals {
+                        refusals.push(ShareViewRefusal::new(
+                            refusal.origin_id,
+                            refusal.origin_seq,
+                            &refusal.op_kind,
+                            refusal.reason.code(),
+                            refusal.reason.message().to_owned(),
+                        ));
+                    }
                     debug_assert!(sharing_declined.is_empty());
                     match primary {
                         ApplyOutcome::Applied(_) => {}
@@ -1871,6 +1941,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     }
                     ShareDisposition::Abort => return Err(local(error)),
                 },
+            }
+            // #646 PR2: a chat op is fully applied by the boundary above —
+            // it has no file to materialize, no blob to fetch, and no path to
+            // report as changed. `replay_share_view_op` is the FILE replay,
+            // and running it for a chat op would ensure a version and then
+            // fall through every branch for nothing.
+            if envelope.op_kind.starts_with("chat.") {
+                applied += 1;
+                continue;
             }
             let mut replay = ShareViewReplayContext {
                 transport: &self.transport,
@@ -3037,11 +3116,149 @@ fn write_shared_push_state(
     Ok(())
 }
 
+/// What a push is scoped to. The two share surfaces run the SAME outbound
+/// lane — one local scan, one dense per-share origin sequence, one batched
+/// POST — and differ only in which of this replica's ops belong to the share
+/// and what shape they take on the wire.
+enum SharePushScope<'a> {
+    /// MU-C4: the granted channel's own ops, pushed unchanged.
+    Channel(&'a str),
+    /// #646 PR2: this replica's chat about the files a received file share
+    /// covers, scoped by the pinned grant.
+    View(&'a crate::ShareGrant),
+}
+
+impl SharePushScope<'_> {
+    /// The payload to push for `op`, or `None` when the op is not this
+    /// share's to push.
+    fn served_payload(
+        &self,
+        store: &EngineStore,
+        workspace_id: &str,
+        op: &ReplicationEnvelope,
+    ) -> Result<Option<serde_json::Value>, RelayError> {
+        match self {
+            Self::Channel(channel_wire_id) => {
+                Ok(shared_channel_op_allowed(store, workspace_id, channel_wire_id, op)?
+                    .then(|| op.payload.clone()))
+            }
+            Self::View(granted) => share_view_push_payload(store, workspace_id, granted, op),
+        }
+    }
+}
+
+/// The file-share half of the eligibility rule, and the one rewrite the
+/// outbound lane makes.
+///
+/// An op is this share's to push when it is one of the five file-chat kinds
+/// AND the file its thread is about sits inside the pinned grant right now.
+/// A `chat.thread.create` then leaves here naming that file by PATH: the
+/// granter mints its own object ids, so the local one this replica journaled
+/// would name nothing there, and the relay's own filter refuses a create that
+/// carries both shapes.
+fn share_view_push_payload(
+    store: &EngineStore,
+    workspace_id: &str,
+    granted: &crate::ShareGrant,
+    op: &ReplicationEnvelope,
+) -> Result<Option<serde_json::Value>, RelayError> {
+    if !crate::share::is_share_view_chat_kind(&op.op_kind) {
+        return Ok(None);
+    }
+    let object_id = if op.op_kind == "chat.thread.create" {
+        match op
+            .payload
+            .get("linkedObjectId")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(object_id) => object_id.to_owned(),
+            // A channel thread, or a create already naming a path. Neither is
+            // this file share's to push.
+            None => return Ok(None),
+        }
+    } else {
+        let Some(thread_id) = op
+            .payload
+            .get("threadId")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return Ok(None);
+        };
+        match read_thread_linked_object(store, workspace_id, thread_id)? {
+            Some(object_id) => object_id,
+            None => return Ok(None),
+        }
+    };
+    let Some(path) = read_object_path(store, workspace_id, &object_id)? else {
+        return Ok(None);
+    };
+    if crate::classify_share_path(&path) != crate::PathClass::Tracked
+        || !crate::share::path_within_grant(&path, granted)
+    {
+        return Ok(None);
+    }
+    if op.op_kind != "chat.thread.create" {
+        return Ok(Some(op.payload.clone()));
+    }
+    let mut payload = op.payload.clone();
+    let Some(record) = payload.as_object_mut() else {
+        return Ok(None);
+    };
+    record.remove("linkedObjectId");
+    // Display-only and captured once. The granter re-resolves the path it
+    // receives against its own store, so carrying a second, staler copy of the
+    // same idea across the boundary would only invite someone to read it.
+    record.remove("linkedPathHint");
+    record.insert("linkedPath".to_owned(), serde_json::Value::String(path));
+    Ok(Some(payload))
+}
+
+fn read_thread_linked_object(
+    store: &EngineStore,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<Option<String>, RelayError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT linked_object_id FROM chat_threads \
+                 WHERE workspace_id=?1 AND thread_id=?2",
+                params![workspace_id, thread_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .map_err(SyncError::corrupt)
+        })
+        .map_err(local)
+}
+
+fn read_object_path(
+    store: &EngineStore,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<Option<String>, RelayError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT path FROM path_aliases \
+                 WHERE workspace_id=?1 AND object_id=?2 \
+                   AND version_id=(SELECT main_version_id FROM versioned_workspaces \
+                                   WHERE workspace_id=?1)",
+                params![workspace_id, object_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)
+        })
+        .map_err(local)
+}
+
 fn shared_dense_seq_through(
     store: &EngineStore,
     workspace_id: &str,
     origin_id: &str,
-    channel_wire_id: &str,
+    scope: &SharePushScope<'_>,
     scanned_seq: i64,
 ) -> Result<i64, RelayError> {
     let mut dense_seq = -1_i64;
@@ -3056,7 +3273,7 @@ fn shared_dense_seq_through(
             if op.origin_seq > scanned_seq {
                 return Ok(dense_seq);
             }
-            if shared_channel_op_allowed(store, workspace_id, channel_wire_id, &op)? {
+            if scope.served_payload(store, workspace_id, &op)?.is_some() {
                 dense_seq = dense_seq
                     .checked_add(1)
                     .ok_or(RelayError::InvalidResponse)?;

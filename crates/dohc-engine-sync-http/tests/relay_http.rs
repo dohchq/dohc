@@ -11,8 +11,8 @@ use dohc_engine_sync::{
     BlobDownloadRequest, BlobHaveRequest, BlobKind, BlobUploadRequest, ClaimRequest, EpochRequest,
     KeyEnvelopeDownloadRequest, KeyEnvelopeRequest, LogCoordinateRequest, LogCoordinateResponse,
     NoLiveLeases, ObservedBytes, ProbeRequest, PullRequest, RelayError, RelaySyncClient,
-    RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareReplicationEnvelope,
-    ShareViewRequest, SharedChannelRequest, SyncPassOutcome, blob_ceiling,
+    RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareLogPushRequest,
+    ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest, SyncPassOutcome, blob_ceiling,
     journal_local_replication_op, read_pushed_seq, read_relay_cursor,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
@@ -1263,11 +1263,9 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
         })
         .expect("key download");
     transport
-        .shared_channel_push(SharedChannelRequest {
+        .share_log_push(ShareLogPushRequest {
             share_id: "share-1".to_owned(),
-            channel_wire_id: "wire-1".to_owned(),
             origin_id: "member".to_owned(),
-            cursor: 0,
             ops: vec![ShareReplicationEnvelope {
                 origin_id: "member".to_owned(),
                 origin_seq: 0,

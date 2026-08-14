@@ -12,6 +12,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import {
+  isShareAccessValue,
+  SHARE_ACCESS_VALUES,
+  type ShareAccess,
+} from "@dohc/security-contract/share-selector";
+import {
   createWorkspaceDirectory,
   addSiteSdk,
   listChannels,
@@ -54,11 +59,11 @@ export function parseArgs(argv: string[]): ToolContext {
     process.env.DOHC_SDK_DEPENDENCY_RANGE,
     "DOHC_SDK_DEPENDENCY_RANGE",
   );
-  let readOnly = false;
+  let shareAccess: ShareAccess | undefined;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--workspace" && argv[i + 1]) root = nonEmptyArg(argv[++i], "--workspace");
     else if (argv[i] === "--home" && argv[i + 1]) home = nonEmptyArg(argv[++i], "--home");
-    else if (argv[i] === "--read-only") readOnly = true;
+    else if (argv[i] === "--share-access") shareAccess = shareAccessArg(argv[++i]);
     else if (argv[i] === "--sdk-package-json" && argv[i + 1]) {
       sdkPackageJsonPath = nonEmptyArg(argv[++i], "--sdk-package-json");
     } else if (argv[i] === "--sdk-dependency-range" && argv[i + 1]) {
@@ -70,7 +75,7 @@ export function parseArgs(argv: string[]): ToolContext {
     home,
     ...(sdkPackageJsonPath ? { sdkPackageJsonPath } : {}),
     ...(sdkDependencyRange ? { sdkDependencyRange } : {}),
-    ...(readOnly ? { readOnly: true } : {}),
+    ...(shareAccess ? { shareAccess } : {}),
   };
 }
 
@@ -78,6 +83,16 @@ function nonEmptyArg(value: string, name: string): string {
   const trimmed = value.trim();
   if (!trimmed) throw new Error(`${name} requires a non-empty value`);
   return trimmed;
+}
+
+// An unreadable level is refused, never read as the narrowest one: a guess
+// here decides which write tools an agent is offered.
+function shareAccessArg(value: string | undefined): ShareAccess {
+  if (isShareAccessValue(value)) return value;
+  const received = value === undefined ? "no value" : JSON.stringify(value);
+  throw new Error(
+    `--share-access must be one of ${SHARE_ACCESS_VALUES.join(", ")}. Received: ${received}.`,
+  );
 }
 
 function optionalNonEmptyArg(value: string | undefined, name: string): string | undefined {
@@ -91,15 +106,25 @@ function text(value: unknown) {
 export function createDohcMcpServer(ctx: ToolContext): McpServer {
   const server = new McpServer({ name: "dohc", version: "0.1.0" });
 
-  // PR 18 read-only shared views: a shared view is a read-only local
-  // workspace, so its MCP server must not expose any mutating tool. In the
-  // read-only profile registerWrite is a no-op — dohc_write_file,
-  // create_directory, move_path, delete_path and the other mutating tools are
-  // never registered, so an agent pointed at a shared view can list/read/
-  // search but cannot change anything. Read tools always register below.
-  const registerWrite: McpServer["registerTool"] = ctx.readOnly
-    ? ((() => undefined) as unknown as McpServer["registerTool"])
-    : server.registerTool.bind(server);
+  // A share view's write surface is its access level (#646). The write tools
+  // come in two tiers, and a tier the level does not grant is NEVER registered
+  // — an agent pointed at a share view is offered only what it may use. Read
+  // tools always register below.
+  //
+  //   no level  local workspace: both tiers
+  //   view      neither tier
+  //   comment   chat writes only
+  //   edit      chat writes only (PR3 opens document writes for edit)
+  const register = server.registerTool.bind(server);
+  const skip = (() => undefined) as unknown as McpServer["registerTool"];
+  // dohc_write_file, dohc_create_directory, dohc_move_path, dohc_delete_path,
+  // dohc_create_site, dohc_add_sdk, dohc_import_data, dohc_publish_site,
+  // dohc_share.
+  const registerWrite: McpServer["registerTool"] =
+    ctx.shareAccess === undefined ? register : skip;
+  // dohc_start_channel_chat, dohc_reply_to_chat.
+  const registerChatWrite: McpServer["registerTool"] =
+    ctx.shareAccess === "view" ? skip : register;
 
   server.registerTool(
     "dohc_list_workspaces",
@@ -402,7 +427,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async () => text(await listChannels(ctx)),
   );
 
-  registerWrite(
+  registerChatWrite(
     "dohc_start_channel_chat",
     {
       description:
@@ -416,7 +441,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await startChannelChat(ctx, args)),
   );
 
-  registerWrite(
+  registerChatWrite(
     "dohc_reply_to_chat",
     {
       description:

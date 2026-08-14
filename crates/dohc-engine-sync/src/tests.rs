@@ -5829,10 +5829,7 @@ impl RelayTransport for FakeRelay {
     ) -> Result<SharedChannelResponse, RelayError> {
         Err(RelayError::InvalidResponse)
     }
-    fn shared_channel_push(
-        &self,
-        _req: SharedChannelRequest,
-    ) -> Result<SharedChannelResponse, RelayError> {
+    fn share_log_push(&self, _req: ShareLogPushRequest) -> Result<PushResponse, RelayError> {
         Err(RelayError::InvalidResponse)
     }
     fn share_view_pull(&self, _req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
@@ -5903,10 +5900,7 @@ impl RelayTransport for KeyConflictRelay {
     ) -> Result<SharedChannelResponse, RelayError> {
         Err(RelayError::InvalidResponse)
     }
-    fn shared_channel_push(
-        &self,
-        _req: SharedChannelRequest,
-    ) -> Result<SharedChannelResponse, RelayError> {
+    fn share_log_push(&self, _req: ShareLogPushRequest) -> Result<PushResponse, RelayError> {
         Err(RelayError::InvalidResponse)
     }
     fn share_view_pull(&self, _req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
@@ -6113,10 +6107,7 @@ impl RelayTransport for PagedRelay {
         Err(RelayError::InvalidResponse)
     }
 
-    fn shared_channel_push(
-        &self,
-        _req: SharedChannelRequest,
-    ) -> Result<SharedChannelResponse, RelayError> {
+    fn share_log_push(&self, _req: ShareLogPushRequest) -> Result<PushResponse, RelayError> {
         Err(RelayError::InvalidResponse)
     }
 
@@ -6133,7 +6124,7 @@ struct PagedShareRelay {
     shared_pages: BTreeMap<i64, SharedChannelResponse>,
     view_pages: BTreeMap<i64, ShareViewResponse>,
     shared_pulls: Mutex<Vec<i64>>,
-    shared_pushes: Mutex<Vec<SharedChannelRequest>>,
+    shared_pushes: Mutex<Vec<ShareLogPushRequest>>,
     view_pulls: Mutex<Vec<(i64, usize)>>,
     view_blobs: BTreeMap<String, Vec<u8>>,
     /// What the TRANSPORT answers for a blob instead of serving it. The real
@@ -6243,26 +6234,18 @@ impl RelayTransport for PagedShareRelay {
             .ok_or(RelayError::InvalidResponse)
     }
 
-    fn shared_channel_push(
-        &self,
-        req: SharedChannelRequest,
-    ) -> Result<SharedChannelResponse, RelayError> {
+    fn share_log_push(&self, req: ShareLogPushRequest) -> Result<PushResponse, RelayError> {
         let accepted = req.ops.len();
         let current_max_origin_seq = req.ops.last().map_or(-1, |op| op.origin_seq);
         self.shared_pushes
             .lock()
             .expect("shared push calls")
             .push(req);
-        Ok(SharedChannelResponse {
-            ops: Vec::new(),
-            next_cursor: 0,
-            has_more: false,
-            push: Some(PushResponse {
-                accepted,
-                inserted: accepted,
-                skipped: 0,
-                current_max_origin_seq,
-            }),
+        Ok(PushResponse {
+            accepted,
+            inserted: accepted,
+            skipped: 0,
+            current_max_origin_seq,
         })
     }
 

@@ -340,8 +340,9 @@ import {
   setWorkspaceSharedChannels,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
-import type { JoinedSharedChannel } from "./workspaces/registryStore";
+import type { JoinedSharedChannel, RegistryEntry } from "./workspaces/registryStore";
 import {
+  readableShareLevel,
   shareViewGranterEmail,
   shareViewIsPresent,
 } from "./workspaces/shareViewMarker";
@@ -462,6 +463,7 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import type {
   ChannelThreadSummary,
   ChatChannelSummary,
@@ -1714,9 +1716,28 @@ async function runSharedChannelSyncPass(
 // root (path containment), --home points it at the desktop registry/state dir.
 // DOHC_MCP_COMMAND lets a packaged build override the launcher with its shipped
 // binary; the default `dohc-mcp` is the @dohc/mcp bin on PATH.
+// The MCP profile a workspace hands out (#646): `null` for a workspace this
+// machine owns, and the share's level for a share view.
+//
+// The two questions compose, and in this order. PRESENCE decides whether a
+// share profile applies at all — a marker whose value was lost is still a
+// share view, and reading it as an ordinary workspace would hand out the full
+// write-capable server. READABILITY only decides how much the profile opens,
+// so a present marker with no readable grant falls to `view`, which registers
+// no write tools at all.
+function mcpShareAccessOf(shareView: unknown): ShareAccess | null {
+  if (!shareViewIsPresent(shareView)) return null;
+  const grantedSelector = isRecordValue(shareView) ? shareView.grantedSelector : undefined;
+  return readableShareLevel(grantedSelector) ?? "view";
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function mcpConfigFor(
   rootPath: string,
-  options: { readOnly?: boolean } = {},
+  shareAccess: ShareAccess | null,
 ): {
   command: string;
   args: string[];
@@ -1748,10 +1769,10 @@ function mcpConfigFor(
         : undefined);
   const sdkDependencyRange = process.env.DOHC_SDK_DEPENDENCY_RANGE?.trim();
   const args = ["--workspace", rootPath, "--home", home];
-  // Shared views hand out a READ-ONLY MCP profile: the launched server never
-  // registers the mutating tools (PR 18), so an agent can read the shared
-  // view but cannot write into it.
-  if (options.readOnly) args.push("--read-only");
+  // A share view hands out the MCP profile for its level (#646): the launched
+  // server registers only the write tools that level grants. `null` is a local
+  // workspace, which gets every tool.
+  if (shareAccess) args.push("--share-access", shareAccess);
   if (sdkPackageJsonPath) args.push("--sdk-package-json", sdkPackageJsonPath);
   if (sdkDependencyRange) args.push("--sdk-dependency-range", sdkDependencyRange);
   return {
@@ -1770,11 +1791,9 @@ async function mcpRuntimeConfigFor(rootPath: string): Promise<{
   await warmCredentialCache();
   const workspace = listWorkspaces().find((entry) => entry.rootPath === rootPath);
   // Defense in depth: managed agent runs are already refused on shared views,
-  // but if a runtime MCP is ever spawned for one it must be the read-only
-  // profile — never the write-capable server.
-  const config = mcpConfigFor(rootPath, {
-    readOnly: shareViewIsPresent(workspace?.shareView),
-  });
+  // but if a runtime MCP is ever spawned for one it must carry the share's
+  // level — never the full local profile.
+  const config = mcpConfigFor(rootPath, mcpShareAccessOf(workspace?.shareView));
   const env = mcpCloudEnvironment({
     workspace,
     credentials: cachedCredentials,
@@ -8539,10 +8558,10 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = AgentRunPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    // A shared view hands out the read-only MCP profile so the user's AI tool
-    // can browse the shared files without any write tool existing.
-    const readOnly = !!sharedViewOf(workspace.workspaceId);
-    return McpConfigResult.parse(mcpConfigFor(workspace.rootPath, { readOnly }));
+    // A shared view hands out the MCP profile for its level, so the user's AI
+    // tool is offered only the write tools the grant allows.
+    const shareAccess = mcpShareAccessOf(workspace.shareView);
+    return McpConfigResult.parse(mcpConfigFor(workspace.rootPath, shareAccess));
   });
 
   ipcMain.handle(CHANNELS.probeAgentDrivers, async (event, payload) => {

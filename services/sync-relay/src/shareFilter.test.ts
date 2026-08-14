@@ -16,8 +16,17 @@ import {
   validateShareSelector,
   type ChatChannelShareSelector,
   type ChatShareThreadResolver,
+  type ShareFileChatResolver,
   type ShareSelector,
 } from "./shareFilter";
+
+// A resolver that knows no file-linked thread and no object. Channel-share
+// cases carry it so their fixtures state the file half explicitly instead of
+// inheriting whatever a default would be.
+const NO_FILE_CHAT: ShareFileChatResolver = {
+  threadFileBinding: () => undefined,
+  objectCurrentPath: () => undefined,
+};
 
 function momentPayload(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -686,6 +695,7 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
   const threadResolver: ChatShareThreadResolver = {
     channelKind: (wireId) =>
       wireId === "wire-1" || wireId === "wire-2" ? "channel" : undefined,
+    ...NO_FILE_CHAT,
     threadChannelWireId: (threadId) =>
       threadId === "thread-in" ? "wire-1" : threadId === "thread-out" ? "wire-2" : undefined,
   };
@@ -774,6 +784,7 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
     const boundResolver: ChatShareThreadResolver = {
       channelKind: (wireId) =>
         wireId === "chat:thread:thread-foreign" ? "channel" : undefined,
+      ...NO_FILE_CHAT,
       threadChannelWireId: (tid) =>
         tid === "thread-foreign" ? "chat:thread:thread-foreign" : undefined,
     };
@@ -788,6 +799,7 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
     };
     const agentResolver: ChatShareThreadResolver = {
       channelKind: (wireId) => (wireId === "wire-agent" ? "agent" : undefined),
+      ...NO_FILE_CHAT,
       threadChannelWireId: (threadId) =>
         threadId === "thread-agent" ? "wire-agent" : undefined,
     };
@@ -843,6 +855,7 @@ describe("chat-channel share op filter", () => {
   const resolver: ChatShareThreadResolver = {
     channelKind: (wireId) =>
       wireId === "wire-shared" || wireId === "wire-private" ? "channel" : undefined,
+    ...NO_FILE_CHAT,
     threadChannelWireId: (threadId) =>
       threadId === "thread-in"
         ? "wire-shared"
@@ -1019,6 +1032,7 @@ describe("chat-channel share op filter", () => {
   it("distinguishes an absent thread from an existing unshareable thread", () => {
     const unshareableResolver: ChatShareThreadResolver = {
       channelKind: (wireId) => (wireId === "wire-shared" ? "channel" : undefined),
+      ...NO_FILE_CHAT,
       threadChannelWireId: (threadId) =>
         threadId === "thread-file-linked" ? null : undefined,
     };
@@ -1079,6 +1093,7 @@ describe("chat-channel share op filter", () => {
     };
     const agentResolver: ChatShareThreadResolver = {
       channelKind: (wireId) => (wireId === "wire-agent" ? "agent" : undefined),
+      ...NO_FILE_CHAT,
       threadChannelWireId: (threadId) =>
         threadId === "thread-agent" ? "wire-agent" : undefined,
     };

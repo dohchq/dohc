@@ -321,8 +321,10 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     });
     expect(bypassAttempts.agent).toContain("Agents can't run in a shared view");
     expect(bypassAttempts.sitePreview).toContain("disabled in a shared view");
-    // The copyable MCP config for a shared view is the read-only profile.
-    expect(bypassAttempts.mcpArgs).toContain("--read-only");
+    // The copyable MCP config for a shared view carries the share's level, so
+    // the launched server registers only the write tools that level grants.
+    // This share was created at "view", which grants none.
+    expect(bypassAttempts.mcpArgs.join(" ")).toContain("--share-access view");
     // The engine Y.Doc editor session is refused (never opens a writable session
     // in a shared view), and applying an update to it is an inert no-op.
     expect(bypassAttempts.engineYDocAvailable).toBe(false);

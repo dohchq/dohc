@@ -15,9 +15,9 @@ import {
   validateChatChannelShareSelector,
   validateShareSelector,
   type AnyShareSelector,
-  type ChatChannelShareSelector,
   type ChatShareChannelKind,
   type ChatShareThreadResolver,
+  type ThreadFileBinding,
 } from "./shareFilter";
 import {
   SyncRelayBlobMissingError,
@@ -195,14 +195,15 @@ export function createSyncRelayHandler({
   };
 
   // Whether a recipient may append through this selector at all. A read-write
-  // chat-channel grant may. A path/version selector may not, at ANY level
-  // (#646): view, comment, and edit all refuse here with the same
-  // shareNotAppendable() code, because a level-specific refusal would tell a
-  // probing recipient the selector's level. PR2 opens comment and edit.
-  const selectorAcceptsAppends = (
-    selector: AnyShareSelector,
-  ): selector is ChatChannelShareSelector =>
-    isChatChannelSelector(selector) && selector.access === "read-write";
+  // chat-channel grant may. A path/version selector may at comment and edit
+  // (#646 PR2, chat ops only — the per-op filter decides which); a view share
+  // may not, and its refusal is the SAME shareNotAppendable() code and body
+  // every other refusal uses, because a level-specific one would tell a
+  // probing recipient the selector's level.
+  const selectorAcceptsAppends = (selector: AnyShareSelector): boolean =>
+    isChatChannelSelector(selector)
+      ? selector.access === "read-write"
+      : selector.access === "comment" || selector.access === "edit";
 
   // Loads a share for RECIPIENT access. Every failure mode — no such share,
   // revoked share, caller is not the recipient, granter lost the workspace —
@@ -235,6 +236,8 @@ export function createSyncRelayHandler({
   const chatResolverFor = (workspaceId: string): ChatShareThreadResolver => {
     const threadCache = new Map<string, string | null | undefined>();
     const kindCache = new Map<string, ChatShareChannelKind | null | undefined>();
+    const bindingCache = new Map<string, ThreadFileBinding | null | undefined>();
+    const pathCache = new Map<string, string | null | undefined>();
     return {
       channelKind: (channelWireId) => {
         if (kindCache.has(channelWireId)) return kindCache.get(channelWireId);
@@ -247,6 +250,21 @@ export function createSyncRelayHandler({
         const bound = storage.findThreadCreateChannelWireId(workspaceId, threadId);
         threadCache.set(threadId, bound);
         return bound;
+      },
+      // #646 PR2, memoized for the same reason: the file-chat filter asks
+      // about the SAME threadId and the SAME objectId across every
+      // thread-scoped row of a page.
+      threadFileBinding: (threadId) => {
+        if (bindingCache.has(threadId)) return bindingCache.get(threadId);
+        const bound = storage.findThreadCreateFileBinding(workspaceId, threadId);
+        bindingCache.set(threadId, bound);
+        return bound;
+      },
+      objectCurrentPath: (objectId) => {
+        if (pathCache.has(objectId)) return pathCache.get(objectId);
+        const path = storage.objectCurrentPath(workspaceId, objectId);
+        pathCache.set(objectId, path);
+        return path;
       },
     };
   };
@@ -437,13 +455,13 @@ export function createSyncRelayHandler({
       // owner's bucket. Fail-closed gauntlet, in order:
       //   1. shareForRecipient: membership, revocation, granter standing —
       //      every denial is the same byte-identical generic 404.
-      //   2. The selector must be a chat-channel grant with read-write
-      //      access; a read-only member (and any path/version share) is
-      //      REFUSED with an explicit 403 — the member legitimately knows the
-      //      share exists, so this is a refusal, not a 404.
-      //      #646: a path/version selector is refused at EVERY level, with
-      //      one code. A level-specific refusal would tell a probing
-      //      recipient the selector's level. PR2 opens comment and edit.
+      //   2. The selector must accept appends: a read-write chat-channel
+      //      grant, or (#646 PR2) a file share at comment or edit. A
+      //      read-only member and a VIEW file share are REFUSED with an
+      //      explicit 403 — the member legitimately knows the share exists,
+      //      so this is a refusal, not a 404 — and with ONE code and one
+      //      body, because a level-specific refusal would tell a probing
+      //      recipient the selector's level.
       //   3. MU-C0 verified authorship: every authored chat op must claim the
       //      AUTHENTICATED pusher (assertChatAuthorship verifies it) — a
       //      member cannot forge a message or reaction as another member.
@@ -474,6 +492,11 @@ export function createSyncRelayHandler({
         // binding always wins over the batch — a batch cannot re-bind an
         // existing thread.
         const pendingThreadBindings = new Map<string, string>();
+        // #646 PR2: the path sibling of the same rule, for a file share. A
+        // recipient's `chat.thread.create` names the granted PATH (its own
+        // object ids mean nothing here), and the message it composes with
+        // rides in the same batch.
+        const pendingThreadFiles = new Map<string, ThreadFileBinding>();
         const resolver: ChatShareThreadResolver = {
           channelKind: (channelWireId) =>
             storage.findChannelCreateKind(share.workspaceId, channelWireId),
@@ -481,6 +504,12 @@ export function createSyncRelayHandler({
             const stored = storage.findThreadCreateChannelWireId(share.workspaceId, threadId);
             return stored !== undefined ? stored : pendingThreadBindings.get(threadId);
           },
+          threadFileBinding: (threadId) => {
+            const stored = storage.findThreadCreateFileBinding(share.workspaceId, threadId);
+            return stored !== undefined ? stored : pendingThreadFiles.get(threadId);
+          },
+          objectCurrentPath: (objectId) =>
+            storage.objectCurrentPath(share.workspaceId, objectId),
         };
         const ops = input.ops.map(parseLogOp);
         for (const op of ops) {
@@ -492,9 +521,20 @@ export function createSyncRelayHandler({
           // attachment's objectId/pathHint) must not survive the append.
           op.payloadJson = JSON.stringify(decision.payload);
           if (op.opKind === "chat.thread.create") {
-            const threadId = (JSON.parse(op.payloadJson) as { threadId?: unknown }).threadId;
+            const created = JSON.parse(op.payloadJson) as {
+              threadId?: unknown;
+              linkedPath?: unknown;
+            };
+            const threadId = created.threadId;
             if (typeof threadId === "string" && threadId.length > 0) {
-              pendingThreadBindings.set(threadId, share.selector.channelWireId);
+              if (isChatChannelSelector(share.selector)) {
+                pendingThreadBindings.set(threadId, share.selector.channelWireId);
+              } else if (
+                typeof created.linkedPath === "string" &&
+                created.linkedPath.length > 0
+              ) {
+                pendingThreadFiles.set(threadId, { kind: "path", path: created.linkedPath });
+              }
             }
           }
         }
@@ -510,8 +550,9 @@ export function createSyncRelayHandler({
           // above can never slip a write in — the guard sees it and the whole
           // batch rolls back as the same generic 404. The guard re-runs the
           // full appendability gauntlet: recipient-owned, unrevoked, granter
-          // in standing, still a read-write chat-channel grant on the same
-          // workspace bucket.
+          // in standing, and STILL a selector that accepts appends at its
+          // current level (#646) on the same workspace bucket — a level
+          // narrowed mid-flight loses the race the same way a revoke does.
           guard: () => {
             const fresh = shareForRecipient(route.shareId, actor.userId);
             if (fresh.workspaceId !== share.workspaceId) throw notFound();

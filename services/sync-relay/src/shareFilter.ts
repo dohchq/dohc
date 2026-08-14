@@ -71,11 +71,33 @@ export type AnyShareSelector = ShareSelector | ChatChannelShareSelector;
 
 export type ChatShareChannelKind = "channel" | "dm" | "agent";
 
+// The two wire shapes a FILE-linked thread create carries (#646 PR2). Restated
+// from `services/sync-relay/src/storage.ts`, which reads them out of the log:
+// `object` is the granter's own op, `path` a recipient's op pushed back
+// through the share log. A recipient's object ids are its own and mean nothing
+// on this side, so its create names the granted path directly.
+export type ThreadFileBinding =
+  | { kind: "object"; objectId: string }
+  | { kind: "path"; path: string };
+
+// #646 PR2: how the file-chat branch answers "which file is this thread
+// about, and where is that file now?" from the workspace OWNER's log. Both
+// lookups are tri-state and every non-string answer denies.
+export interface ShareFileChatResolver {
+  // The file bound by the EARLIEST chat.thread.create for this threadId.
+  // undefined = no create in the log; null = an authoritative create exists
+  // and binds the thread to no file (a channel thread, or a malformed one).
+  threadFileBinding(threadId: string): ThreadFileBinding | null | undefined;
+  // The path of the LATEST moment.append for this object. undefined = the
+  // relay has never seen the object; null = its latest moment deleted it.
+  objectCurrentPath(objectId: string): string | null | undefined;
+}
+
 // MU-C4: how the chat branch resolves channel and thread ownership from the
 // workspace owner's append-only log. Both lookups use the EARLIEST matching
 // create op, mirroring the engine's insert-if-absent apply semantics: a later
 // forged create can never change a channel's kind or re-bind a thread.
-export interface ChatShareThreadResolver {
+export interface ChatShareThreadResolver extends ShareFileChatResolver {
   // The kind claimed by the EARLIEST chat.channel.create op for this wire id,
   // undefined when no create exists yet, or null when an authoritative create
   // exists but is malformed/unshareable.
@@ -608,11 +630,170 @@ function filterChatOpForChannelShare(
   return { allowed: false };
 }
 
+// #646 PR2: the EXACTLY five chat kinds a file share carries. The list is an
+// allowlist and nothing falls through it. `chat.follow.set` and
+// `chat.feed.read.set` are the reader's OWN state and are deliberately absent
+// (`crates/dohc-engine-sync/src/share.rs`, the same reason written for the
+// channel branch); `chat.channel.create` is a channel's bootstrap and a file
+// share has no channel.
+const FILE_CHAT_THREAD_SCOPED_KINDS = [
+  "chat.message.append",
+  "chat.reaction.set",
+  "chat.decision.set",
+  "chat.attachment.add",
+] as const;
+
+// The binding a `chat.thread.create` payload claims for ITSELF. Exactly one
+// shape may be present: an op carrying both is malformed, and reading either
+// half of it would let a crafted create bind one thread to two files.
+// A channel thread (no file binding at all) is not a shape a FILE share
+// carries, so it reads as "no binding" and the caller denies it.
+function threadCreateBinding(record: Record<string, unknown>): ThreadFileBinding | null {
+  const objectId = collectString(record.linkedObjectId);
+  const path = collectString(record.linkedPath);
+  if (objectId && path) return null;
+  if (objectId) return { kind: "object", objectId };
+  if (path) return { kind: "path", path };
+  return null;
+}
+
+// A binding resolved to the path the selector is tested against, or null when
+// it cannot be resolved. Fail closed on every tri-state: an unknown object
+// (undefined) and a deleted one (null) both deny. Hiding the discussion about
+// a deleted file is the fail-closed answer and the simple one to state.
+function resolvedThreadPath(
+  chat: ShareFileChatResolver,
+  binding: ThreadFileBinding | null | undefined,
+): string | null {
+  if (!binding) return null;
+  if (binding.kind === "path") return binding.path;
+  const path = chat.objectCurrentPath(binding.objectId);
+  return typeof path === "string" ? path : null;
+}
+
+// The FILE-chat branch of the fail-closed share filter (#646 PR2), for a
+// path/version selector. A thread is visible through a file share when the
+// file it is about is visible through that file share — resolved from the
+// owner's log to the file's CURRENT path and tested by name, never taken from
+// a client's word or from the display-only `linkedPathHint`.
+//
+// Across the boundary a thread's link travels as `linkedPath` and never as
+// `linkedObjectId`: the served moment deliberately drops the granter's object
+// id (see the moment branch below), so the recipient's store mints its own and
+// a granter object id would mean nothing there.
+//
+// Chat ops are blob-free, so every decision here carries `blobSha256s: []` —
+// the share-blob route reads exactly that to decide reachability, and a chat
+// decision exposing a hash would silently widen blob access.
+function filterFileChatOpForPathShare(
+  selector: ShareSelector,
+  opKind: string,
+  payload: unknown,
+  chat: ChatShareThreadResolver | undefined,
+): ShareOpDecision {
+  // No resolver wired = no way to resolve a thread to a file = nothing served.
+  if (!chat) return { allowed: false };
+  const record = asRecord(payload);
+  if (!record) return { allowed: false };
+  const threadId = collectString(record.threadId);
+  if (!threadId) return { allowed: false };
+  const bound = chat.threadFileBinding(threadId);
+  const boundPath = resolvedThreadPath(chat, bound);
+
+  let path: string | null;
+  if (opKind === "chat.thread.create") {
+    path = resolvedThreadPath(chat, threadCreateBinding(record));
+    // undefined = this op IS the first binding (the recipient append path, not
+    // yet in the log). Any authoritative existing state must resolve to the
+    // SAME file, or this create is a re-bind trying to move a thread into (or
+    // out of) the share — the forgery the earliest-wins rule exists to stop.
+    if (bound !== undefined && boundPath !== path) return { allowed: false };
+  } else if ((FILE_CHAT_THREAD_SCOPED_KINDS as readonly string[]).includes(opKind)) {
+    path = boundPath;
+  } else {
+    return { allowed: false };
+  }
+  if (path === null) return { allowed: false };
+  // Gate #2 unchanged: the path must be inside the selector AND classified
+  // engine-tracked right now, so the chat lane inherits the secret-path floor.
+  if (!pathVisibleThroughShare(selector, path)) return { allowed: false };
+
+  if (opKind === "chat.thread.create") {
+    const served = pickServed(record, ["threadId", "title", "createdAtMs", "linkedAtMs"]);
+    // The resolved path, not the payload's own field: the recipient re-tests
+    // this value against its pinned grant, and it must be the value the
+    // selector was tested against.
+    served.linkedPath = path;
+    return { allowed: true, payload: served, blobSha256s: [] };
+  }
+  if (opKind === "chat.message.append") {
+    return {
+      allowed: true,
+      payload: pickServed(record, [
+        "messageId",
+        "threadId",
+        "authorKind",
+        "authorDisplayName",
+        "authorUserId",
+        "parentMessageId",
+        "body",
+        "createdAtMs",
+      ]),
+      blobSha256s: [],
+    };
+  }
+  if (opKind === "chat.reaction.set") {
+    return {
+      allowed: true,
+      payload: pickServed(record, [
+        "reactionId",
+        "messageId",
+        "threadId",
+        "emoji",
+        "authorId",
+        "authorKind",
+        "authorDisplayName",
+        "state",
+        "atMs",
+      ]),
+      blobSha256s: [],
+    };
+  }
+  if (opKind === "chat.decision.set") {
+    return {
+      allowed: true,
+      payload: pickServed(record, [
+        "threadId",
+        "messageId",
+        "state",
+        "resolvedByMessageId",
+        "atMs",
+      ]),
+      blobSha256s: [],
+    };
+  }
+  // chat.attachment.add: the opaque chip the channel branch already serves.
+  // Its objectId/pathHint could name a file outside the share, so they stay
+  // dropped and the recipient renders a chip it cannot follow.
+  return {
+    allowed: true,
+    payload: pickServed(record, [
+      "attachmentId",
+      "threadId",
+      "messageId",
+      "targetKind",
+      "createdAtMs",
+    ]),
+    blobSha256s: [],
+  };
+}
+
 // The single decision point for what a share recipient may read. Strict
 // allowlist per selector kind. Path/version selector: moment.append (all
 // referenced paths visible, version matches), version.create for the shared
-// version (forkSnapshots redacted), and the payload-free workspace.init
-// bootstrap op — chats stay excluded. Chat-channel selector (MU-C4): ONLY the
+// version (forkSnapshots redacted), the payload-free workspace.init bootstrap
+// op, and (#646 PR2) the five file-chat kinds whose thread resolves to a file
+// inside the selector. Chat-channel selector (MU-C4): ONLY the
 // granted channel's chat ops (see filterChatOpForChannelShare) — file, secret,
 // version, and bootstrap ops stay excluded. EVERYTHING unrecognized is
 // excluded either way.
@@ -631,6 +812,13 @@ export function filterOpForShare(
 
   if (isChatChannelSelector(selector)) {
     return filterChatOpForChannelShare(selector, opKind, payload, chat);
+  }
+
+  // #646 PR2: chat follows the file share. Every chat kind routes here, so the
+  // branch's own allowlist is the only way one is served — a kind it does not
+  // name is denied there, not silently carried by a later branch.
+  if (opKind.startsWith("chat.")) {
+    return filterFileChatOpForPathShare(selector, opKind, payload, chat);
   }
 
   if (opKind === "workspace.init") {

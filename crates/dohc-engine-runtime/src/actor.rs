@@ -92,7 +92,8 @@ use dohc_engine_sync::{
     PullRequest, PullResponse, PushRequest, PushResponse, RecoverResponse, RelayCursor, RelayError,
     RelaySyncClient, RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareCursor,
     ShareViewPullOutcome, ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome,
-    SharedChannelPushOutcome, SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
+    ShareLogPushRequest, SharedChannelPushOutcome, SharedChannelRequest, SharedChannelResponse,
+    SyncPassOutcome,
     adopt_join_identity, apply_conflict_envelope, read_replayed_refusal, read_sync_identity,
     retain_refusal_for_direct_retry, ydoc_update_payload,
 };
@@ -357,6 +358,15 @@ pub enum RelayOperation {
         /// recipient on first read. Required: there is no unscoped pull.
         granted: dohc_engine_sync::ShareGrant,
     },
+    /// Push this replica's own chat about a RECEIVED file share back to the
+    /// granter (#646 PR2). The grant is required for the same reason the pull
+    /// requires it: it decides which of this replica's ops belong to the
+    /// share.
+    PushShareView {
+        workspace_id: String,
+        share_id: String,
+        granted: dohc_engine_sync::ShareGrant,
+    },
     CommitShareViewCursor {
         workspace_id: String,
         cursor: ShareCursor,
@@ -379,7 +389,7 @@ enum RelayIoRequest {
     UploadKeyEnvelope(KeyEnvelopeRequest),
     DownloadKeyEnvelope(KeyEnvelopeDownloadRequest),
     SharedChannelPull(SharedChannelRequest),
-    SharedChannelPush(SharedChannelRequest),
+    ShareLogPush(ShareLogPushRequest),
     ShareViewPull(ShareViewRequest),
     ShareBlob(ShareBlobRequest),
 }
@@ -398,7 +408,7 @@ enum RelayIoResponse {
     UploadKeyEnvelope(KeyEnvelopeResponse),
     DownloadKeyEnvelope(KeyEnvelopeDownloadResponse),
     SharedChannelPull(SharedChannelResponse),
-    SharedChannelPush(SharedChannelResponse),
+    ShareLogPush(PushResponse),
     ShareViewPull(ShareViewResponse),
     ShareBlob(BlobDownloadResponse),
 }
@@ -408,7 +418,7 @@ struct DeferredRelayState {
     completed: Vec<(RelayIoRequest, Result<RelayIoResponse, RelayError>)>,
     pending: Option<RelayIoRequest>,
     workspace_pushed: usize,
-    shared_channel_pushed: usize,
+    share_log_pushed: usize,
 }
 
 #[derive(Clone, Default)]
@@ -434,7 +444,7 @@ impl DeferredRelayTransport {
             let release = matches!(
                 state.completed[index].0,
                 RelayIoRequest::Push(_)
-                    | RelayIoRequest::SharedChannelPush(_)
+                    | RelayIoRequest::ShareLogPush(_)
                     | RelayIoRequest::UploadBlob(_)
                     | RelayIoRequest::DownloadBlob(_)
                     | RelayIoRequest::UploadKeyEnvelope(_)
@@ -489,10 +499,8 @@ impl DeferredRelayTransport {
         {
             state.workspace_pushed = state.workspace_pushed.saturating_add(response.inserted);
         }
-        if let Ok(RelayIoResponse::SharedChannelPush(response)) = &result
-            && let Some(push) = &response.push
-        {
-            state.shared_channel_pushed = state.shared_channel_pushed.saturating_add(push.inserted);
+        if let Ok(RelayIoResponse::ShareLogPush(response)) = &result {
+            state.share_log_pushed = state.share_log_pushed.saturating_add(response.inserted);
         }
         state.completed.push((request, result));
     }
@@ -507,7 +515,7 @@ impl DeferredRelayTransport {
                 *pushed = state.workspace_pushed;
             }
             RelayOperationOutcome::SharedChannelPushed(outcome) => {
-                outcome.pushed = state.shared_channel_pushed;
+                outcome.pushed = state.share_log_pushed;
             }
             _ => {}
         }
@@ -590,11 +598,11 @@ impl RelayTransport for DeferredRelayTransport {
         SharedChannelPull
     );
     relay_transport_method!(
-        shared_channel_push,
-        SharedChannelRequest,
-        SharedChannelPush,
-        SharedChannelResponse,
-        SharedChannelPush
+        share_log_push,
+        ShareLogPushRequest,
+        ShareLogPush,
+        PushResponse,
+        ShareLogPush
     );
     relay_transport_method!(
         share_view_pull,
@@ -6573,9 +6581,9 @@ fn execute_http_request(
         RelayIoRequest::SharedChannelPull(request) => transport
             .shared_channel_pull(request)
             .map(RelayIoResponse::SharedChannelPull),
-        RelayIoRequest::SharedChannelPush(request) => transport
-            .shared_channel_push(request)
-            .map(RelayIoResponse::SharedChannelPush),
+        RelayIoRequest::ShareLogPush(request) => transport
+            .share_log_push(request)
+            .map(RelayIoResponse::ShareLogPush),
         RelayIoRequest::ShareViewPull(request) => transport
             .share_view_pull(request)
             .map(RelayIoResponse::ShareViewPull),
@@ -6747,6 +6755,14 @@ fn execute_relay_operation(
         } => client
             .pull_share_view(store, &workspace_id, &share_id, &granted, &NoFaults)
             .map(RelayOperationOutcome::ShareViewPulled)
+            .map_err(RuntimeError::from),
+        RelayOperation::PushShareView {
+            workspace_id,
+            share_id,
+            granted,
+        } => client
+            .push_share_view(store, &workspace_id, &share_id, &granted, &NoFaults)
+            .map(RelayOperationOutcome::SharedChannelPushed)
             .map_err(RuntimeError::from),
         RelayOperation::CommitShareViewCursor {
             workspace_id,
