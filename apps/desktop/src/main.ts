@@ -3073,6 +3073,15 @@ interface EngineYDocSessionEntry {
     string,
     NonNullable<WorkspaceEngineYDocProviderSession["artifactAssets"]>[number]
   >;
+  // Descriptors from lineages this session already replaced. A retired
+  // document's recovery can retry a failed asset read after the
+  // acknowledgement swapped `artifactAssetsById` to the winner, so losing
+  // descriptors stay readable until the normal session close. The current
+  // lineage wins an id collision.
+  retiredArtifactAssetsById: Map<
+    string,
+    NonNullable<WorkspaceEngineYDocProviderSession["artifactAssets"]>[number]
+  >;
   // Set by releaseEngineYDocSession when a close failed. The next open of this
   // document retries the release before it binds anything.
   closeFailed?: boolean;
@@ -8979,6 +8988,9 @@ function registerIpcHandlers(
             lineageGeneration = nextLineageGeneration;
             if (registeredEntry !== null) {
               registeredEntry.lineageGeneration = nextLineageGeneration;
+              for (const [id, asset] of registeredEntry.artifactAssetsById) {
+                registeredEntry.retiredArtifactAssetsById.set(id, asset);
+              }
               registeredEntry.artifactAssetsById = new Map(
                 handoff.artifactAssets.map((asset) => [asset.id, asset]),
               );
@@ -9154,6 +9166,7 @@ function registerIpcHandlers(
         artifactAssetsById: new Map(
           (session.artifactAssets ?? []).map((asset) => [asset.id, asset]),
         ),
+        retiredArtifactAssetsById: new Map(),
       };
       registeredEntry = entry;
       // Every path below that refuses this session releases it through the
@@ -9248,7 +9261,9 @@ function registerIpcHandlers(
           "The live document session is no longer available. Open the file again.",
         );
       }
-      const descriptor = entry.artifactAssetsById.get(input.assetId);
+      const descriptor =
+        entry.artifactAssetsById.get(input.assetId) ??
+        entry.retiredArtifactAssetsById.get(input.assetId);
       if (!descriptor) {
         throw new Error(
           `The live document does not reference artifact asset ${input.assetId}.`,
