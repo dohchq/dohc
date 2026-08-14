@@ -73,7 +73,6 @@ import {
   pendingHeadingTargetForOpen,
   resolveCanonicalDm,
   runCanonicalDmNavigation,
-  shareViewBanner,
   versionCompareOffCopy,
   type Workspace,
 } from "./DesktopWorkspaceShell";
@@ -3776,39 +3775,33 @@ describe("active file sharing", () => {
   });
 });
 
-// The banner is the recipient's one plain statement of what they hold (#646).
-// It mirrors the pinned grant; the relay and the recipient engine's share
-// boundary are what actually decide.
+// In PR1 every level grants exactly these rights, so the banner reads the
+// same at every level (#646). The per-level sentences the design specifies
+// ship with the rights they describe — PR2 for chat, PR3 for edits — because
+// a banner that promised chat now would lie until PR2 opens the append gate.
 describe("shared view banner", () => {
-  it("states the level it was given, and names the granter", () => {
-    expect(shareViewBanner("view", "sam@dohc.test")).toBe(
-      "Shared view from sam@dohc.test — read-only. Ask sam@dohc.test for changes.",
-    );
-    expect(shareViewBanner("comment", "sam@dohc.test")).toBe(
-      "Shared view from sam@dohc.test. You can chat about these files, not edit them.",
-    );
-    expect(shareViewBanner("edit", "sam@dohc.test")).toBe(
-      "Shared view from sam@dohc.test. You can edit these files and chat about them.",
-    );
-  });
+  for (const access of ["view", "comment", "edit"] as const) {
+    it(`tells a ${access} recipient the view is read-only, because in PR1 it is`, async () => {
+      const bridge = makeShareBridge();
+      renderShell(bridge, {
+        ...SHARE_VIEW,
+        shareView: {
+          shareId: "share-1",
+          granterEmail: "sam@dohc.test",
+          access,
+        },
+      });
 
-  it("says something true when the granter has no email to show", () => {
-    expect(shareViewBanner("view", null)).toBe(
-      "Shared view from another dohc user — read-only. Ask them for changes.",
-    );
-    expect(shareViewBanner("comment", null)).toBe(
-      "Shared view from another dohc user. You can chat about these files, not edit them.",
-    );
-  });
-
-  // Three levels, three different sentences: a banner that read the same at
-  // every level would be a mirror of nothing.
-  it("says something different at each level", () => {
-    const lines = (["view", "comment", "edit"] as const).map((access) =>
-      shareViewBanner(access, "sam@dohc.test"),
-    );
-    expect(new Set(lines).size).toBe(3);
-  });
+      const banner = await screen.findByTestId("shared-view-banner");
+      expect(banner.textContent, access).toContain(
+        "Shared view from sam@dohc.test — read-only. Ask sam@dohc.test for changes.",
+      );
+      // MUTATION: shipping the PR2 sentences early would promise chat rights
+      // the relay's append route still refuses at every level.
+      expect(banner.textContent, access).not.toContain("You can chat about");
+      expect(banner.textContent, access).not.toContain("You can edit these files");
+    });
+  }
 });
 
 describe("content search", () => {

@@ -33,7 +33,6 @@ import type {
   DmRecord,
   EngineMomentDetailRecord,
   EngineMomentRecord,
-  ShareAccess,
   SyncStatusResult,
   TryInVersionRunState,
   WorkbenchMenuCommand,
@@ -186,23 +185,6 @@ import {
 // refuses every write to the reserved prefix regardless — but it uses the
 // same alias-normalizing predicate as main so a case-variant path arriving
 // from an agent/open flow ("Shared-With-Me/…") renders read-only too.
-// The live share banner, per level (#646). A mirror of the grant the relay
-// stated, never a decision: what the recipient may actually do is settled
-// server-side, on the relay and at the recipient engine's share boundary.
-export function shareViewBanner(
-  access: ShareAccess,
-  granterEmail: string | null,
-): string {
-  const granter = granterEmail ?? "another dohc user";
-  if (access === "comment") {
-    return `Shared view from ${granter}. You can chat about these files, not edit them.`;
-  }
-  if (access === "edit") {
-    return `Shared view from ${granter}. You can edit these files and chat about them.`;
-  }
-  return `Shared view from ${granter} — read-only. Ask ${granterEmail ?? "them"} for changes.`;
-}
-
 function isMountedSharePath(path: string | null): boolean {
   return !!path && isSharedWithMePath(path);
 }
@@ -4100,7 +4082,12 @@ export function DesktopWorkspaceShell(props: {
           <span className="min-w-0 flex-1 truncate">
             {shareViewEnded
               ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
-              : shareViewBanner(shareView.access, shareView.granterEmail)}
+              : // Every level reads the same here in PR1, because every level
+                // grants exactly these rights in PR1 (#646). The per-level
+                // sentences ship with the rights they describe: PR2 for chat,
+                // PR3 for edits. A banner that promised chat now would lie
+                // until PR2 opens the append gate.
+                `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
           </span>
           {shareSkipped
             ? shareSkipNoticeLines(shareSkipped, shareView.granterEmail).map(

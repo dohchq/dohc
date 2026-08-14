@@ -64,8 +64,9 @@ pub enum ShareSurface {
 }
 
 /// The file-share access level (issue #646, S7). The Rust twin of the
-/// relay's `ShareAccess` (`services/sync-relay/src/shareFilter.ts`), held to
-/// it vector by vector in `crates/dohc-engine-sync/tests/security_contract.rs`.
+/// TypeScript rule in `packages/security-contract/src/shareSelector.ts` —
+/// the one place the relay and the desktop both read it from — held to it
+/// vector by vector in `crates/dohc-engine-sync/tests/security_contract.rs`.
 ///
 /// PR1 carries and pins this on every `ShareGrant`; all three values grant
 /// exactly what a share grants today. PR2 opens Comment and Edit to chat,
