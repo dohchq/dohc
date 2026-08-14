@@ -70,7 +70,7 @@ function registerChatFlowHandlers(
       }
       return context;
     },
-    assertWritableWorkspace() {},
+    assertWritable: null,
   };
 
   ipc.handle(

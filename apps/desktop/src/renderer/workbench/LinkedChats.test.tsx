@@ -405,3 +405,80 @@ describe("LinkedChatsPanel read cursor", () => {
     expect(onError).not.toHaveBeenCalled();
   });
 });
+
+// #646 PR2: chat follows a file share. A `view` recipient reads the chat and
+// adds nothing to it; `comment` and `edit` write. Main refuses a `view` write
+// with these exact words (SharedFileReadOnlyError), so the panel states them
+// instead of offering a control that can only fail.
+describe("LinkedChatsPanel share level", () => {
+  function panel(extra: Partial<Parameters<typeof LinkedChatsPanel>[0]> = {}) {
+    return (
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        onError={() => undefined}
+        {...extra}
+      />
+    );
+  }
+
+  it("replaces the composer with the refusal words when the share refuses writes", async () => {
+    render(panel({ shareReadOnly: true, initialThread: searchThread }));
+
+    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
+    expect(screen.queryByTestId("linked-chat-composer")).toBeNull();
+    expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
+      "This shared file is read-only for you.",
+    );
+  });
+
+  it("offers no new chat when the share refuses writes, and never asks main to create one", async () => {
+    render(panel({ shareReadOnly: true }));
+
+    await waitFor(() => expect(screen.getByTestId("linked-chats-panel")).toBeTruthy());
+    expect(screen.queryByTestId("linked-chat-new")).toBeNull();
+    expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
+      "This shared file is read-only for you.",
+    );
+    expect(bridgeMock.createFileChat).not.toHaveBeenCalled();
+  });
+
+  // The other half of both gates. Without this, hiding the composer from
+  // every share keeps the two pins above green.
+  it("keeps the composer and new chat when the share allows writes", async () => {
+    const view = render(panel({ shareReadOnly: false }));
+
+    await waitFor(() => expect(screen.getByTestId("linked-chat-new")).toBeTruthy());
+    expect(screen.queryByTestId("linked-chat-readonly-note")).toBeNull();
+
+    view.rerender(panel({ shareReadOnly: false, initialThread: searchThread }));
+    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
+    expect(screen.getByTestId("linked-chat-composer")).toBeTruthy();
+    expect(screen.queryByTestId("linked-chat-readonly-note")).toBeNull();
+  });
+
+  // A shared view ALWAYS states the answer, so an absent prop can only mean
+  // a workspace this machine owns. The shell is what guarantees that, and it
+  // is why this prop carries the decision rather than the level: a damaged
+  // grant has no level to read, and reading one would answer "writable".
+  it("refuses writes when the share says so, whatever left it unreadable", async () => {
+    render(panel({ shareReadOnly: true, initialThread: searchThread }));
+
+    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
+    expect(
+      screen.queryByTestId("linked-chat-composer"),
+      "MUTATION: a share whose grant cannot be read must not offer a composer",
+    ).toBeNull();
+    expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
+      "This shared file is read-only for you.",
+    );
+  });
+
+  it("keeps the composer on a workspace this machine owns", async () => {
+    render(panel({ initialThread: searchThread }));
+
+    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
+    expect(screen.getByTestId("linked-chat-composer")).toBeTruthy();
+    expect(screen.queryByTestId("linked-chat-readonly-note")).toBeNull();
+  });
+});

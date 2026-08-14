@@ -576,10 +576,17 @@ function seedObjectPaths(db: SqliteDb): void {
   );
 }
 
-// Latest-wins, guarded by relay_seq: a rename is a later fact about the same
-// object, and the share must follow the file rather than its history. The
-// guard is what stops an out-of-order or replayed insert from moving a path
-// backwards.
+// Latest-wins: a rename is a later fact about the same object, and the share
+// must follow the file rather than its history.
+//
+// The relay_seq guard is defence in depth, and today it is UNREACHABLE: both
+// writers walk the log in relay order (appendLogBatch inserts under the write
+// lock and reads back the row it just took; the seed scans ORDER BY
+// relay_seq), so no upsert here can arrive out of order. Its inverse mutation
+// therefore survives, which is recorded rather than papered over. It stays
+// because this table decides which chat a share serves, and a path moved
+// backwards by a future out-of-order writer would serve a file's discussion at
+// a path the relay can no longer prove.
 const OBJECT_PATH_UPSERT_SQL = `
   INSERT INTO sync_relay_object_paths (workspace_id, object_id, path, relay_seq)
   VALUES (?, ?, ?, ?)

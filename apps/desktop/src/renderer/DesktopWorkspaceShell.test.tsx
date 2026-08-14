@@ -5406,10 +5406,9 @@ describe("active file sharing", () => {
   });
 });
 
-// In PR1 every level grants exactly these rights, so the banner reads the
-// same at every level (#646). The per-level sentences the design specifies
-// ship with the rights they describe — PR2 for chat, PR3 for edits — because
-// a banner that promised chat now would lie until PR2 opens the append gate.
+// The banner states the level's real rights (#646). PR2 opens chat at comment
+// and edit; edit's document writes land in PR3, so edit reads the comment
+// sentence until then — a banner promising editing now would be a lie.
 // Removing a mount reprojects path-keyed UI state only when the folder
 // actually went. Record-only cleanup leaves the files exactly where they
 // were, so their tabs, pins and drafts must survive it.
@@ -5526,10 +5525,27 @@ describe("share unmount projection", () => {
     ).toEqual([]);
   });
 });
-
 describe("shared view banner", () => {
-  for (const access of ["view", "comment", "edit"] as const) {
-    it(`tells a ${access} recipient the view is read-only, because in PR1 it is`, async () => {
+  it("tells a view recipient the view is read-only", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, {
+      ...SHARE_VIEW,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "sam@dohc.test",
+        access: "view",
+      },
+    });
+
+    const banner = await screen.findByTestId("shared-view-banner");
+    expect(banner.textContent).toContain(
+      "Shared view from sam@dohc.test — read-only. Ask sam@dohc.test for changes.",
+    );
+    expect(banner.textContent).not.toContain("You can chat about");
+  });
+
+  for (const access of ["comment", "edit"] as const) {
+    it(`tells a ${access} recipient they can chat about these files, not edit them`, async () => {
       const bridge = makeShareBridge();
       renderShell(bridge, {
         ...SHARE_VIEW,
@@ -5542,11 +5558,11 @@ describe("shared view banner", () => {
 
       const banner = await screen.findByTestId("shared-view-banner");
       expect(banner.textContent, access).toContain(
-        "Shared view from sam@dohc.test — read-only. Ask sam@dohc.test for changes.",
+        "Shared view from sam@dohc.test. You can chat about these files, not edit them.",
       );
-      // MUTATION: shipping the PR2 sentences early would promise chat rights
+      expect(banner.textContent, access).not.toContain("read-only");
+      // MUTATION: shipping PR3's sentence early would promise document writes
       // the relay's append route still refuses at every level.
-      expect(banner.textContent, access).not.toContain("You can chat about");
       expect(banner.textContent, access).not.toContain("You can edit these files");
     });
   }

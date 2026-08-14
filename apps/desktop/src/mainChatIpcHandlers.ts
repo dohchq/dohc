@@ -33,7 +33,13 @@ export function createWritableChatIpcHandler<
   assertTrustedSender: (event: Event) => void;
   parsePayload: (payload: unknown) => Payload;
   requireContext: (workspaceId: string) => Promise<Context>;
-  assertWritableWorkspace: (workspace: Context["workspace"]) => void;
+  // The write gate, over the whole context — not just its workspace, because
+  // a file share's right is a LEVEL the context carries (#646 PR2).
+  //
+  // `null` is a call site stating that this handler has no write to gate:
+  // it must be spelled, never defaulted, so a new handler cannot arrive
+  // ungated by omission.
+  assertWritable: ((context: Context) => void) | null;
   run: (context: Context, payload: Payload) => Promise<Result>;
   afterWrite?: Array<(context: Context, payload: Payload, result: Result) => void>;
 }): MainChatIpcHandler<Event, Result> {
@@ -41,7 +47,7 @@ export function createWritableChatIpcHandler<
     input.assertTrustedSender(event);
     const payload = input.parsePayload(rawPayload);
     const context = await input.requireContext(payload.workspaceId);
-    input.assertWritableWorkspace(context.workspace);
+    input.assertWritable?.(context);
     const result = await input.run(context, payload);
     for (const effect of input.afterWrite ?? []) effect(context, payload, result);
     return result;
@@ -78,7 +84,7 @@ export function createChatChannelIpcHandler<
   assertTrustedSender: (event: Event) => void;
   parsePayload: (payload: unknown) => Payload;
   requireContext: (workspaceId: string) => Promise<Context>;
-  assertWritableWorkspace: (workspace: Context["workspace"]) => void;
+  assertWritable: ((context: Context) => void) | null;
   run: (context: Context, payload: Payload) => Promise<Result>;
   queueCloudSync: (workspaceId: string) => void;
 }): MainChatIpcHandler<Event, Result> {
@@ -97,7 +103,7 @@ export function createSharedChannelWritableChatIpcHandler<
   assertTrustedSender: (event: Event) => void;
   parsePayload: (payload: unknown) => Payload;
   requireContext: (workspaceId: string) => Promise<Context>;
-  assertWritableWorkspace: (workspace: Context["workspace"]) => void;
+  assertWritable: ((context: Context) => void) | null;
   assertSharedChannelWritable: (
     context: Context,
     payload: Payload,
@@ -122,7 +128,7 @@ export function createSetChatReactionIpcHandler<
   assertTrustedSender: (event: Event) => void;
   parsePayload: (payload: unknown) => Payload;
   requireContext: (workspaceId: string) => Promise<Context>;
-  assertWritableWorkspace: (workspace: Context["workspace"]) => void;
+  assertWritable: ((context: Context) => void) | null;
   run: (context: Context, payload: Payload) => Promise<Result>;
   syncJoinedChannels: (workspaceId: string) => void;
   queueCloudSync: (workspaceId: string) => void;

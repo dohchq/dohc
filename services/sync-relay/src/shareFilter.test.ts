@@ -1121,3 +1121,285 @@ describe("chat-channel share op filter", () => {
     expect(filterOpForShare(channelShare, "moment.append", momentPayload(), resolver).allowed).toBe(false);
   });
 });
+
+// #646 PR2 — chat follows the file share. A thread is visible through a file
+// share when the FILE it is about is visible through that file share, so every
+// case below is really a statement about one path: the one the relay resolved
+// from the owner's log, never one a client claimed.
+describe("file-chat share filter (#646 PR2)", () => {
+  // docs/in.md is inside the selector; notes/out.md is not. `object-gone` was
+  // deleted and `object-unknown` was never seen — the two halves of the
+  // tri-state that must both deny.
+  const fileChat: ShareFileChatResolver = {
+    threadFileBinding: (threadId) =>
+      threadId === "thread-in"
+        ? { kind: "object", objectId: "object-in" }
+        : threadId === "thread-out"
+          ? { kind: "object", objectId: "object-out" }
+          : threadId === "thread-gone"
+            ? { kind: "object", objectId: "object-gone" }
+            : threadId === "thread-unknown"
+              ? { kind: "object", objectId: "object-unknown" }
+              : threadId === "thread-unbound"
+                ? null
+                : threadId === "thread-by-path"
+                  ? { kind: "path", path: "docs/in.md" }
+                  : threadId === "thread-by-outside-path"
+                    ? { kind: "path", path: "notes/out.md" }
+                    : undefined,
+    objectCurrentPath: (objectId) =>
+      objectId === "object-in"
+        ? "docs/in.md"
+        : objectId === "object-out"
+          ? "notes/out.md"
+          : objectId === "object-gone"
+            ? null
+            : undefined,
+  };
+  const resolver: ChatShareThreadResolver = {
+    channelKind: () => undefined,
+    threadChannelWireId: () => undefined,
+    ...fileChat,
+  };
+  const share = (access: "view" | "comment" | "edit"): ShareSelector => ({
+    paths: ["docs"],
+    versionId: null,
+    access,
+  });
+  const threadCreate = (overrides: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      threadId: "thread-in",
+      title: "About this file",
+      createdAtMs: 10,
+      linkedAtMs: 11,
+      linkedObjectId: "object-in",
+      linkedPathHint: "docs/stale-hint.md",
+      internalAudit: "SENTINEL-THREAD-INTERNAL",
+      ...overrides,
+    });
+  const message = (threadId: string) =>
+    JSON.stringify({
+      messageId: "m-1",
+      threadId,
+      authorKind: "human",
+      authorDisplayName: "A",
+      authorUserId: "user-a",
+      body: "hi",
+      createdAtMs: 12,
+      deviceId: "SENTINEL-MSG-DEVICE",
+    });
+
+  it("serves a thread about an in-selector file as linkedPath, never as an object id or a hint", () => {
+    const decision = filterOpForShare(
+      share("view"),
+      "chat.thread.create",
+      threadCreate(),
+      resolver,
+    );
+    expect(decision.allowed).toBe(true);
+    if (!decision.allowed) return;
+    expect(decision.payload).toEqual({
+      threadId: "thread-in",
+      title: "About this file",
+      createdAtMs: 10,
+      linkedAtMs: 11,
+      linkedPath: "docs/in.md",
+    });
+    // The three fields that must never cross: the granter's object id (which
+    // names nothing on the recipient's side), the display-only hint, and any
+    // field the stored payload grows later.
+    const served = JSON.stringify(decision.payload);
+    for (const absent of ["linkedObjectId", "linkedPathHint", "SENTINEL-THREAD-INTERNAL"]) {
+      expect(served, absent).not.toContain(absent);
+    }
+    // The share-blob route reads exactly this to decide reachability, so a
+    // chat decision that exposed a hash would silently widen blob access.
+    expect(decision.blobSha256s).toEqual([]);
+  });
+
+  it("serves the resolved path, not the path the payload claims", () => {
+    // The hint says one file and the resolver says another. Only the
+    // resolver's answer may be served, because only it was tested against the
+    // selector.
+    const decision = filterOpForShare(
+      share("comment"),
+      "chat.thread.create",
+      threadCreate({ linkedPathHint: "docs/lie.md" }),
+      resolver,
+    );
+    expect(decision.allowed).toBe(true);
+    if (!decision.allowed) return;
+    expect((decision.payload as { linkedPath: string }).linkedPath).toBe("docs/in.md");
+  });
+
+  it("serves a thread-scoped op only when its thread resolves inside the selector", () => {
+    for (const opKind of [
+      "chat.message.append",
+      "chat.reaction.set",
+      "chat.decision.set",
+      "chat.attachment.add",
+    ]) {
+      expect(
+        filterOpForShare(share("view"), opKind, message("thread-in"), resolver).allowed,
+        opKind,
+      ).toBe(true);
+      expect(
+        filterOpForShare(share("view"), opKind, message("thread-out"), resolver).allowed,
+        opKind,
+      ).toBe(false);
+    }
+  });
+
+  it("denies every tri-state the resolvers can answer with, in both hops", () => {
+    const denied: Array<[string, string]> = [
+      // The thread hop: no create in the log, and an authoritative create
+      // that binds the thread to no file at all.
+      ["thread-never-seen", "no create in the log"],
+      ["thread-unbound", "an authoritative create with no file binding"],
+      // The object hop: a deleted file (null) and one the relay has never
+      // seen (undefined). Hiding the discussion about a deleted file is the
+      // fail-closed answer.
+      ["thread-gone", "the file was deleted"],
+      ["thread-unknown", "the relay has never seen the object"],
+      // Resolved, but outside.
+      ["thread-out", "the file sits outside the selector"],
+      ["thread-by-outside-path", "a path binding outside the selector"],
+    ];
+    for (const [threadId, why] of denied) {
+      expect(
+        filterOpForShare(share("edit"), "chat.message.append", message(threadId), resolver).allowed,
+        why,
+      ).toBe(false);
+    }
+  });
+
+  it("carries a recipient-created thread by path, and the messages that follow it", () => {
+    // A recipient's own object ids mean nothing here, so its create names the
+    // granted path directly and the relay tests that path with no resolver
+    // hop. The messages it posts LATER — in another batch, resolved from the
+    // log — must resolve through the same binding.
+    const created = filterOpForShare(
+      share("comment"),
+      "chat.thread.create",
+      JSON.stringify({
+        threadId: "thread-by-path",
+        title: "From the recipient",
+        createdAtMs: 20,
+        linkedAtMs: 21,
+        linkedPath: "docs/in.md",
+      }),
+      resolver,
+    );
+    expect(created.allowed).toBe(true);
+    if (created.allowed) {
+      expect((created.payload as { linkedPath: string }).linkedPath).toBe("docs/in.md");
+    }
+    expect(
+      filterOpForShare(share("comment"), "chat.message.append", message("thread-by-path"), resolver)
+        .allowed,
+      "MUTATION: a recipient's own thread must not go dead after its first batch",
+    ).toBe(true);
+  });
+
+  it("refuses a re-create that would move an existing thread into the share", () => {
+    // The log's EARLIEST create binds thread-out to a file outside the
+    // selector. A later create claiming an in-selector file is the forgery
+    // earliest-wins exists to stop.
+    expect(
+      filterOpForShare(
+        share("comment"),
+        "chat.thread.create",
+        threadCreate({ threadId: "thread-out", linkedObjectId: "object-in" }),
+        resolver,
+      ).allowed,
+    ).toBe(false);
+    // And the same op in the other direction: a create for a thread already
+    // bound INSIDE, claiming an outside file, is refused too.
+    expect(
+      filterOpForShare(
+        share("comment"),
+        "chat.thread.create",
+        threadCreate({ threadId: "thread-in", linkedObjectId: "object-out" }),
+        resolver,
+      ).allowed,
+    ).toBe(false);
+  });
+
+  it("refuses a create that names its file twice, or not at all", () => {
+    for (const overrides of [
+      // Both shapes: reading either half would let one op bind one thread to
+      // two files.
+      { linkedPath: "docs/in.md" },
+      // Neither shape — a channel thread, which a file share never carries.
+      { linkedObjectId: undefined, channelWireId: "wire-1", channelSlug: "general" },
+    ]) {
+      expect(
+        filterOpForShare(share("edit"), "chat.thread.create", threadCreate(overrides), resolver)
+          .allowed,
+        JSON.stringify(overrides),
+      ).toBe(false);
+    }
+  });
+
+  it("never serves the reader's own state, or any chat kind outside the five", () => {
+    // chat.follow.set and chat.feed.read.set are the READER's state, not the
+    // conversation. The allowlist must not grow to fit them.
+    const follow = JSON.stringify({
+      ownerUserId: "user-a",
+      targetKind: "thread",
+      targetId: "thread-in",
+      threadId: "thread-in",
+      state: "following",
+      atMs: 1,
+    });
+    for (const opKind of [
+      "chat.follow.set",
+      "chat.feed.read.set",
+      "chat.channel.create",
+      "chat.thread.archive",
+    ]) {
+      for (const access of ["view", "comment", "edit"] as const) {
+        expect(
+          filterOpForShare(share(access), opKind, follow, resolver).allowed,
+          `${opKind} @ ${access}`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  it("reads the same at every level — the level gates writing, never reading", () => {
+    for (const access of ["view", "comment", "edit"] as const) {
+      expect(
+        filterOpForShare(share(access), "chat.message.append", message("thread-in"), resolver)
+          .allowed,
+        access,
+      ).toBe(true);
+    }
+  });
+
+  it("serves nothing without a resolver: no way to resolve a thread is no way to serve one", () => {
+    expect(filterOpForShare(share("comment"), "chat.thread.create", threadCreate()).allowed).toBe(
+      false,
+    );
+    expect(
+      filterOpForShare(share("comment"), "chat.message.append", message("thread-in")).allowed,
+    ).toBe(false);
+  });
+
+  it("inherits the secret-path floor through the same visibility check", () => {
+    // A selector that somehow named a secret path (a bug, a hand-edited row)
+    // still serves no chat about it: pathVisibleThroughShare re-classifies
+    // the resolved path, so gate #2 covers the chat lane for free.
+    const poisoned: ShareSelector = { paths: [".env"], versionId: null, access: "comment" };
+    const secretResolver: ChatShareThreadResolver = {
+      channelKind: () => undefined,
+      threadChannelWireId: () => undefined,
+      threadFileBinding: () => ({ kind: "object", objectId: "object-secret" }),
+      objectCurrentPath: () => ".env",
+    };
+    expect(
+      filterOpForShare(poisoned, "chat.message.append", message("thread-secret"), secretResolver)
+        .allowed,
+    ).toBe(false);
+  });
+});

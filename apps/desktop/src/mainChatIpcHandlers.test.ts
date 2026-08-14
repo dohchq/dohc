@@ -62,8 +62,10 @@ function boundaryDeps(contexts: Map<string, TestContext>) {
       if (!context) throw new Error("Workspace not found.");
       return context;
     },
-    assertWritableWorkspace(workspace: TestContext["workspace"]) {
-      if (workspace.readOnly) throw new Error("This is a shared view — it is read-only.");
+    assertWritable(context: TestContext) {
+      if (context.workspace.readOnly) {
+        throw new Error("This is a shared view — it is read-only.");
+      }
     },
   };
 }
@@ -458,7 +460,7 @@ describe("runtime main chat IPC boundaries", () => {
           };
         },
         requireContext: deps.requireContext,
-        assertWritableWorkspace: deps.assertWritableWorkspace,
+        assertWritable: deps.assertWritable,
         assertSharedChannelWritable: assertJoinedChannelWritable,
         run: markThreadRead,
       }),

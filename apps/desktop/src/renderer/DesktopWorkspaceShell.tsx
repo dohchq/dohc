@@ -4343,6 +4343,15 @@ export function DesktopWorkspaceShell(props: {
   // grant to pull with, so the refresh is skipped rather than failed, and the
   // banner says so instead of showing a level nobody can read.
   const shareViewDamaged = !!shareView?.damaged;
+  // Whether this share grants chat WRITES (#646 PR2), as one answer the
+  // banner and the composer both read. Positive recognition only: `view`, an
+  // absent level (which is what `damaged` leaves behind), and anything else
+  // unreadable all mean no. The renderer decides nothing with this — main
+  // refuses the write either way — but a surface that guessed generously
+  // would invite a write it then has to take back.
+  const shareViewChatWritable =
+    !shareViewDamaged &&
+    (shareView?.access === "comment" || shareView?.access === "edit");
   const [shareViewEnded, setShareViewEnded] = useState(!!shareView?.ended);
   const [shareRefreshing, setShareRefreshing] = useState(false);
   // Ops this share's pulls skipped, read from the RECORD, not from the last
@@ -4678,7 +4687,13 @@ export function DesktopWorkspaceShell(props: {
               ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
               : shareViewDamaged
                 ? "dohc can't read what this share grants. Open the share again to restore it."
-                : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
+                : shareViewChatWritable
+                  ? // Edit reads the comment sentence on purpose (#646): its
+                    // document writes land in PR3, so until then its rights
+                    // are comment's, and a banner promising editing would be
+                    // a lie.
+                    `Shared view from ${shareView.granterEmail ?? "another dohc user"}. You can chat about these files, not edit them.`
+                  : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
           </span>
           {shareSkipped
             ? shareSkipNoticeLines(shareSkipped, shareView.granterEmail).map(
@@ -5294,6 +5309,7 @@ export function DesktopWorkspaceShell(props: {
                   <LazyLinkedChatsPanel
                     workspaceId={workspaceId}
                     filePath={activeDocumentPath}
+                    {...(shareView ? { shareReadOnly: !shareViewChatWritable } : {})}
                     initialThread={searchChatTarget?.thread ?? null}
                     initialFocusMessageId={searchChatTarget?.focusMessageId}
                     onInitialThreadConsumed={() => setSearchChatTarget(null)}

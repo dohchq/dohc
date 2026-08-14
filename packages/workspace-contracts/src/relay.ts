@@ -176,6 +176,17 @@ export class SharedChannelReadOnlyError extends Error {
   }
 }
 
+// The file sibling of the class above (#646 PR2). A file share at `view`
+// carries the chat about its files to read, and refuses to add to it — in
+// main before any durable row, and again at the relay, which answers the
+// same `share_read_only` code a read-only channel gets.
+export class SharedFileReadOnlyError extends Error {
+  constructor(message = "This shared file is read-only for you.") {
+    super(message);
+    this.name = "SharedFileReadOnlyError";
+  }
+}
+
 export class SharedChannelAppendRejectedError extends Error {
   constructor(message = "The relay refused an op for this shared channel.") {
     super(message);

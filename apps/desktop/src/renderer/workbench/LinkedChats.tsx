@@ -31,6 +31,20 @@ function basename(path: string): string {
   return index >= 0 ? path.slice(index + 1) : path;
 }
 
+// The composer's replacement wherever a share refuses the write (#646 PR2).
+// Same words main throws (SharedFileReadOnlyError) and the same shape the
+// Chats view's read-only notice uses.
+function ReadOnlyNotice() {
+  return (
+    <p
+      data-testid="linked-chat-readonly-note"
+      className="m-0 shrink-0 border-t border-line px-3 py-2 text-[11px] text-subtle"
+    >
+      This shared file is read-only for you.
+    </p>
+  );
+}
+
 type ThreadsState =
   | { status: "loading" }
   | { status: "unavailable"; message: string }
@@ -43,6 +57,14 @@ type ThreadsState =
 export function LinkedChatsPanel(props: {
   workspaceId: string;
   filePath: string | null;
+  // Whether this shared view refuses chat writes (#646 PR2). A shared view
+  // ALWAYS passes it; absent means a workspace this machine owns, which is
+  // writable by definition.
+  //
+  // The decision, not the level: this panel only ever asked the level one
+  // yes/no question, and a level it might not have — a damaged grant carries
+  // none — would answer that question generously.
+  shareReadOnly?: boolean;
   initialThread?: ChatThreadRecord | null;
   initialFocusMessageId?: string;
   // Fired once when initialThread is consumed so the parent can clear the
@@ -57,6 +79,10 @@ export function LinkedChatsPanel(props: {
   onError: (message: string) => void;
 }) {
   const { workspaceId, filePath } = props;
+  // A file share at `view` reads the chat about its files and adds nothing to
+  // it. Main refuses every chat write with these words, and the relay refuses
+  // the push again, so hiding the composer is honesty, not authorization.
+  const readOnly = props.shareReadOnly === true;
   const [threadsState, setThreadsState] = useState<ThreadsState>({ status: "loading" });
   const [activeThread, setActiveThread] = useState<ChatThreadRecord | null>(null);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
@@ -314,16 +340,20 @@ export function LinkedChatsPanel(props: {
             onToggle: toggleReaction,
           }}
         />
-        <ChatComposer
-          testIdPrefix="linked-chat"
-          composerId="linked-chat-composer"
-          value={composer}
-          sending={sending}
-          placeholder="Write a message…"
-          sendLabel="Send message"
-          onChange={setComposer}
-          onSend={() => void sendMessage()}
-        />
+        {readOnly ? (
+          <ReadOnlyNotice />
+        ) : (
+          <ChatComposer
+            testIdPrefix="linked-chat"
+            composerId="linked-chat-composer"
+            value={composer}
+            sending={sending}
+            placeholder="Write a message…"
+            sendLabel="Send message"
+            onChange={setComposer}
+            onSend={() => void sendMessage()}
+          />
+        )}
       </div>
     );
   }
@@ -377,7 +407,11 @@ export function LinkedChatsPanel(props: {
             <span className="text-xs text-muted">
               No chats about this file yet.
             </span>
-            <span className="text-[11px] text-subtle">Start one.</span>
+            {/* "Start one." is a next step this surface does not offer at
+                `view`, where the New chat control is gone. */}
+            {readOnly ? null : (
+              <span className="text-[11px] text-subtle">Start one.</span>
+            )}
           </div>
         ) : (
           <ul className="m-0 list-none p-0">
@@ -402,55 +436,59 @@ export function LinkedChatsPanel(props: {
           </ul>
         )}
       </div>
-      <div className="shrink-0 border-t border-line p-2">
-        {threadsState.fileObjectId === null ? (
-          <p className="m-0 px-1 text-[11px] leading-4 text-subtle">
-            Chats aren't available for this file yet — only text files dohc
-            tracks can have Chats.
-          </p>
-        ) : creating === null ? (
-          <button
-            type="button"
-            data-testid="linked-chat-new"
-            onClick={() => setCreating(basename(filePath))}
-            className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
-          >
-            <MessageSquare size={12} aria-hidden />
-            New chat
-          </button>
-        ) : (
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              void createChat(creating);
-            }}
-          >
-            <label className="sr-only" htmlFor="linked-chat-new-title">
-              Chat title
-            </label>
-            <input
-              spellCheck={false}
-              id="linked-chat-new-title"
-              data-testid="linked-chat-new-title"
-              autoFocus
-              value={creating}
-              maxLength={200}
-              placeholder="Chat title"
-              onChange={(event) => setCreating(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") {
-                  event.stopPropagation();
-                  setCreating(null);
-                }
-              }}
-              className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
-            />
-            <p className="mb-0 mt-1 px-1 text-[10px] leading-4 text-subtle">
-              Press Enter to start the chat.
+      {readOnly ? (
+        <ReadOnlyNotice />
+      ) : (
+        <div className="shrink-0 border-t border-line p-2">
+          {threadsState.fileObjectId === null ? (
+            <p className="m-0 px-1 text-[11px] leading-4 text-subtle">
+              Chats aren't available for this file yet — only text files dohc
+              tracks can have Chats.
             </p>
-          </form>
-        )}
-      </div>
+          ) : creating === null ? (
+            <button
+              type="button"
+              data-testid="linked-chat-new"
+              onClick={() => setCreating(basename(filePath))}
+              className="flex h-7 w-full cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line text-[11px] text-muted hover:bg-line/50 hover:text-ink"
+            >
+              <MessageSquare size={12} aria-hidden />
+              New chat
+            </button>
+          ) : (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void createChat(creating);
+              }}
+            >
+              <label className="sr-only" htmlFor="linked-chat-new-title">
+                Chat title
+              </label>
+              <input
+                spellCheck={false}
+                id="linked-chat-new-title"
+                data-testid="linked-chat-new-title"
+                autoFocus
+                value={creating}
+                maxLength={200}
+                placeholder="Chat title"
+                onChange={(event) => setCreating(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.stopPropagation();
+                    setCreating(null);
+                  }
+                }}
+                className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+              />
+              <p className="mb-0 mt-1 px-1 text-[10px] leading-4 text-subtle">
+                Press Enter to start the chat.
+              </p>
+            </form>
+          )}
+        </div>
+      )}
     </div>
   );
 }

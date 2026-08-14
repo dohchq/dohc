@@ -6,6 +6,7 @@ import {
   RelayWorkspaceUnavailableError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
+  SharedFileReadOnlyError,
   type CommitRelayCursorResult,
   type MaterializeRelayPullPage,
   type ProbeRelayWorkspaceResult,
@@ -520,6 +521,16 @@ function translateRelayError(method: string, error: unknown): never {
   ) {
     throw new SharedChannelReadOnlyError();
   }
+  // #646 PR2: the same relay refusal, one noun over. The relay answers ONE
+  // code for both — that is the anti-fingerprinting property — so the METHOD,
+  // not the code, decides which noun the reader sees.
+  if (
+    method === "share.view.push" &&
+    error.wireCode === "INVALID_PARAMS" &&
+    error.message === "share-read-only"
+  ) {
+    throw new SharedFileReadOnlyError();
+  }
   throw error;
 }
 
@@ -568,6 +579,18 @@ export interface EngineRelayWorkspaceClient {
     // committed.
     recordRefusals?: (refusals: ShareViewRefusal[]) => Promise<void>;
   }): Promise<PullShareViewResult>;
+  // #646 PR2: this replica's own chat about the shared files, back to the
+  // granter. Takes the SAME pinned selector the pull takes, for the same
+  // reason: the grant decides which of this replica's ops belong to the
+  // share, and a caller that cannot state it must not push through it.
+  pushShareView(input: {
+    shareId: string;
+    grantedSelector: {
+      paths: readonly string[];
+      versionId: string | null;
+      access: ShareAccess;
+    };
+  }): Promise<PushSharedChannelResult>;
 }
 
 export interface EngineRelayClientOptions {
@@ -934,6 +957,23 @@ export class EngineRelayClient {
         );
         return {
           pushed: numberField(result, "pushed", "share.channel.push"),
+        };
+      },
+      pushShareView: async ({ shareId, grantedSelector }) => {
+        const result = resultRecord(
+          await request("share.view.push", {
+            workspaceId: workspace.workspaceId,
+            shareId,
+            grantedSelector: {
+              paths: [...grantedSelector.paths],
+              versionId: grantedSelector.versionId,
+              access: grantedSelector.access,
+            },
+          }),
+          "share.view.push",
+        );
+        return {
+          pushed: numberField(result, "pushed", "share.view.push"),
         };
       },
       pullShareView: async ({ shareId, grantedSelector, recordRefusals }) => {

@@ -77,10 +77,10 @@ describe("RelayShareDialog", () => {
     });
   });
 
-  // The level is stated, not implied. PR1 grants the same reads at every
-  // level, so the dialog offers only View and says so plainly — an enabled
-  // Comment option would promise chat rights the relay still refuses.
-  it("offers View only, states why, and sends the level it showed", async () => {
+  // The level is stated, not implied. PR2 grants chat at Comment, so Comment
+  // is selectable and says what it grants. Edit's document writes land in
+  // PR3, so an enabled Edit would promise a right the relay still refuses.
+  it("offers View and Comment, says only Edit is not ready, and sends the level it showed", async () => {
     const user = userEvent.setup();
     render(
       <RelayShareDialog
@@ -94,30 +94,37 @@ describe("RelayShareDialog", () => {
       "true",
     );
     expect(screen.getByTestId("share-access-view").hasAttribute("disabled")).toBe(false);
-    for (const level of ["comment", "edit"]) {
-      expect(
-        screen.getByTestId(`share-access-${level}`).hasAttribute("disabled"),
-        level,
-      ).toBe(true);
-    }
+    expect(screen.getByTestId("share-access-comment").hasAttribute("disabled")).toBe(
+      false,
+    );
+    expect(screen.getByTestId("share-access-edit").hasAttribute("disabled")).toBe(true);
     expect(screen.getByTestId("share-access-helper").textContent).toBe(
       "They can read what you selected.",
     );
     expect(screen.getByTestId("share-access-pending").textContent).toBe(
-      "Comment and Edit are not ready yet.",
+      "Edit is not ready yet.",
     );
 
-    // Clicking a disabled option changes nothing. The dialog holds no level
-    // state in PR1, so it cannot send a level it never showed.
+    // Comment takes the selection and states the right it grants.
     await user.click(screen.getByTestId("share-access-comment"));
-    expect(screen.getByTestId("share-access-view").getAttribute("aria-checked")).toBe(
+    expect(screen.getByTestId("share-access-comment").getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    expect(screen.getByTestId("share-access-helper").textContent).toBe(
+      "They can read what you selected and chat about it.",
+    );
+
+    // A disabled option cannot become the grant, so the dialog cannot send a
+    // level it never showed.
+    await user.click(screen.getByTestId("share-access-edit"));
+    expect(screen.getByTestId("share-access-comment").getAttribute("aria-checked")).toBe(
       "true",
     );
 
     await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
     await user.click(screen.getByTestId("share-create"));
     expect(bridgeMock.createRelayShare).toHaveBeenCalledWith(
-      expect.objectContaining({ access: "view" }),
+      expect.objectContaining({ access: "comment" }),
     );
   });
 
