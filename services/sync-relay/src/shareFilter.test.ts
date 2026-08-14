@@ -242,6 +242,7 @@ describe("share selector validation", () => {
     const resolver: ChatShareThreadResolver = {
       channelKind: () => undefined,
       threadChannelWireId: () => undefined,
+      ...NO_FILE_CHAT,
     };
     const asItWouldHaveBeen = {
       paths: [],

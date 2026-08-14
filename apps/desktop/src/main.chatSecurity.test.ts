@@ -728,9 +728,21 @@ describe("main-process chat authorization", () => {
     const scopeAt = mainSource.indexOf("async function requireChatScope(");
     const scope = mainSource.slice(scopeAt, mainSource.indexOf("\n  }", scopeAt));
     expect(scope).toContain('requireEngineCapture(workspaceId, "Chats")');
-    expect(scope).toContain("shareView.grantedSelector.access");
-    // The level comes from the PINNED grant, never from a renderer payload or
-    // a relay answer read at call time.
+    // PRESENCE decides whether this is a share at all, and it is the same
+    // question main asks before a write. A marker that lost its value is
+    // still a share view; resolving a capture for it would hand someone
+    // else's workspace the local chat surface.
+    expect(
+      scope,
+      "MUTATION: a truthiness read makes a damaged marker an ordinary workspace",
+    ).toContain("shareViewIsPresent(workspace.shareView)");
+    // The level comes from the PINNED grant, read back through the SAME
+    // function the refresh path uses, so this gate and the pull cannot
+    // disagree about what a share grants. Reading the raw field would accept
+    // a grant that is damaged anywhere except its access value.
+    expect(scope).toContain("readableShareLevel(workspace.shareView?.grantedSelector)");
+    expect(scope).not.toContain("grantedSelector.access");
+    // Never from a renderer payload or a relay answer read at call time.
     expect(scope).not.toContain("input.access");
 
     const gateAt = mainSource.indexOf("function assertChatWritable(");
@@ -744,10 +756,6 @@ describe("main-process chat authorization", () => {
     // author carries a user id, so a share view with no resolvable relay
     // identity must be refused, not written locally and called sent.
     expect(gate).toContain("if (!scope.authorUserId)");
-    expect(scope).toContain("resolveShareViewRelayAuthorId(shareView, cachedCredentials)");
-    expect(
-      scope,
-      "MUTATION: an unvalidated level lets a damaged grant read as one that grants writes",
-    ).toContain("isShareAccessValue(shareView.grantedSelector?.access)");
+    expect(scope).toContain("resolveShareViewRelayAuthorId(");
   });
 });

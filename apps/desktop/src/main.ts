@@ -340,7 +340,6 @@ import {
   setWorkspaceSharedChannels,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
-<<<<<<< HEAD
 import type { JoinedSharedChannel, RegistryEntry } from "./workspaces/registryStore";
 import {
   readableShareLevel,
@@ -352,14 +351,6 @@ import {
   workspaceSummariesFrom,
   workspaceSummaryFor,
 } from "./workspaces/workspaceSummaryProjection";
-=======
-import type {
-  JoinedSharedChannel,
-  RegistryEntry,
-  ShareViewIdentity,
-} from "./workspaces/registryStore";
-import { workspaceSummariesFrom } from "./workspaces/workspaceSummaryProjection";
->>>>>>> f9f1224f (test(share): drive the file-chat filter through the real routes)
 import {
   assertSharedChannelWritable,
   createKeyedSerializer,
@@ -448,6 +439,7 @@ import {
 } from "./workspaces/syncCode";
 import {
   SharePinInvalidError,
+  recordedShareSelector,
   refreshSharedViewOnce,
 } from "./workspaces/sharedView";
 import {
@@ -6477,11 +6469,11 @@ function registerIpcHandlers(
     | {
         kind: "share";
         workspace: RegistryEntry;
-        // The pinned level, or undefined when the stored grant names none
-        // this process can read. The registry file is DATA, not a contract
-        // (see workspaceSummaryProjection.ts), so the level is validated here
-        // rather than trusted from the record's type.
-        access: ShareAccess | undefined;
+        // The pinned level, or null when the stored grant cannot be read.
+        // The registry file is DATA, not a contract (see
+        // workspaceSummaryProjection.ts), so the level is read through
+        // `readableShareLevel` rather than trusted from the record's type.
+        access: ShareAccess | null;
         // The account this recipient writes chat under. Absent when signed
         // out, or signed into a relay that is not this share's — see
         // `assertChatWritable`, which refuses rather than writing a comment
@@ -6490,12 +6482,15 @@ function registerIpcHandlers(
       };
 
   async function requireChatScope(workspaceId: string): Promise<ChatScope> {
-    const shareView = sharedViewOf(workspaceId);
-    if (!shareView) {
-      const { workspace, capture } = await requireEngineCapture(workspaceId, "Chats");
-      return { kind: "workspace", workspace, capture };
-    }
     const workspace = requireWorkspace(workspaceId);
+    // PRESENCE, the same question `sharedViewOf` asks before a write. A
+    // marker that lost its value is still a share view, and resolving a
+    // CAPTURE for it would give someone else's workspace the local chat
+    // surface — the enforcement layer failing open.
+    if (!shareViewIsPresent(workspace.shareView)) {
+      const local = await requireEngineCapture(workspaceId, "Chats");
+      return { kind: "workspace", workspace: local.workspace, capture: local.capture };
+    }
     // Idempotent, and the same guarantee requireEngineCapture makes: the
     // workspace's daemon session is live before any store call reaches it.
     await openWorkspaceActivity(workspace);
@@ -6503,10 +6498,15 @@ function registerIpcHandlers(
     return {
       kind: "share",
       workspace,
-      access: isShareAccessValue(shareView.grantedSelector?.access)
-        ? shareView.grantedSelector.access
-        : undefined,
-      authorUserId: resolveShareViewRelayAuthorId(shareView, cachedCredentials),
+      // The level the PINNED grant names, or null when the grant cannot be
+      // read completely. Read through the same function the refresh path
+      // uses, so this gate and the pull cannot disagree about what a share
+      // grants.
+      access: readableShareLevel(workspace.shareView?.grantedSelector),
+      authorUserId: resolveShareViewRelayAuthorId(
+        workspace.shareView ?? {},
+        cachedCredentials,
+      ),
     };
   }
 
@@ -6536,6 +6536,13 @@ function registerIpcHandlers(
   async function pushShareViewChat(workspace: RegistryEntry): Promise<void> {
     const shareView = workspace.shareView;
     if (!shareView || shareView.ended) return;
+    // The pinned grant, read back through the rule the pull uses. A grant this
+    // process cannot read completely is not one to push through: the engine
+    // scopes the push by it, and the relay judges the batch against the stored
+    // selector either way. Skipped, not failed — a write that reached this far
+    // was already refused if the level was unreadable.
+    const grantedSelector = recordedShareSelector(shareView.grantedSelector);
+    if (!grantedSelector) return;
     await warmCredentialCache();
     const credentials = cachedCredentials;
     if (!credentials?.relayUrl) return;
@@ -6546,10 +6553,7 @@ function registerIpcHandlers(
       workspaceId: workspace.workspaceId,
       rootPath: workspace.rootPath,
       relay: { baseUrl: credentials.relayUrl, token: credentials.token },
-    }).pushShareView({
-      shareId: shareView.shareId,
-      grantedSelector: shareView.grantedSelector,
-    });
+    }).pushShareView({ shareId: shareView.shareId, grantedSelector });
   }
 
   // Every chat write reaches the granter the same way, whichever scope it was
