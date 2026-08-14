@@ -7,7 +7,9 @@ import {
   PINNED_ESBUILD_VERSION,
   PINNED_PNPM_VERSION,
   esbuildPlatformPackageName,
+  parseStagingTarget,
   stagePluginTools,
+  stagePluginToolsFromArgv,
 } from "./stage-plugin-tools.mjs";
 
 const roots = [];
@@ -34,6 +36,7 @@ async function createSources(
     esbuildVersion = PINNED_ESBUILD_VERSION,
     platformVersion = PINNED_ESBUILD_VERSION,
     includePlatform = true,
+    platformKeys = [],
   } = {},
 ) {
   const nodeModulesRoot = join(root, "node_modules");
@@ -52,13 +55,16 @@ async function createSources(
     write(join(nodeModulesRoot, "esbuild", "bin", "esbuild"), "launcher\n"),
     write(join(nodeModulesRoot, "esbuild", "lib", "main.js"), "esbuild main\n"),
   ]);
-  if (includePlatform) {
+  const stagedKeys = includePlatform
+    ? [platformKey, ...platformKeys]
+    : platformKeys;
+  for (const key of stagedKeys) {
     await Promise.all([
       write(
-        join(nodeModulesRoot, "@esbuild", platformKey, "package.json"),
+        join(nodeModulesRoot, "@esbuild", key, "package.json"),
         JSON.stringify({ version: platformVersion }),
       ),
-      write(join(nodeModulesRoot, "@esbuild", platformKey, "bin", "esbuild"), "binary\n"),
+      write(join(nodeModulesRoot, "@esbuild", key, "bin", "esbuild"), `${key} binary\n`),
     ]);
   }
   return { nodeModulesRoot, platformKey };
@@ -150,6 +156,88 @@ test("a successful run stages exactly the required pnpm and esbuild trees", asyn
   ]);
   assert.match(result.pnpm.sha512, /^[0-9a-f]{128}$/);
   assert.match(result.esbuild.sha512, /^[0-9a-f]{128}$/);
+});
+
+test("--platform and --arch stage the target architecture's esbuild binary", async () => {
+  const root = await scratch();
+  const source = await createSources(root, {
+    platformKeys: ["darwin-arm64", "darwin-x64"],
+  });
+  const destinationRoot = join(root, "staged");
+
+  // Cross-arch packaging: an x64 mac runner building the arm64 artifact.
+  const result = await stagePluginToolsFromArgv(
+    ["--platform=darwin", "--arch=arm64"],
+    {
+      desktopRoot: root,
+      nodeModulesRoot: source.nodeModulesRoot,
+      destinationRoot,
+    },
+  );
+
+  assert.equal(result.platformPackage, "@esbuild/darwin-arm64");
+  const staged = await treeFiles(destinationRoot);
+  assert.equal(
+    staged.includes(
+      "esbuild/darwin-arm64/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+    ),
+    true,
+  );
+  assert.equal(
+    staged.some((path) => path.includes("darwin-x64") || path.includes(source.platformKey)),
+    false,
+  );
+  assert.equal(
+    await readFile(
+      join(
+        destinationRoot,
+        "esbuild",
+        "darwin-arm64",
+        "node_modules",
+        "@esbuild",
+        "darwin-arm64",
+        "bin",
+        "esbuild",
+      ),
+      "utf8",
+    ),
+    "darwin-arm64 binary\n",
+  );
+});
+
+test("a target architecture with no installed esbuild package fails loudly", async () => {
+  const root = await scratch();
+  const source = await createSources(root);
+
+  await assert.rejects(
+    stagePluginToolsFromArgv(["--platform=darwin", "--arch=arm64"], {
+      desktopRoot: root,
+      nodeModulesRoot: source.nodeModulesRoot,
+      destinationRoot: join(root, "staged"),
+    }),
+    /@esbuild\/darwin-arm64@0\.28\.1 source package could not be resolved from esbuild/,
+  );
+
+  await assert.rejects(
+    stagePluginToolsFromArgv(["--platform=darwin", "--arch=sparc"], {
+      desktopRoot: root,
+      nodeModulesRoot: source.nodeModulesRoot,
+      destinationRoot: join(root, "staged"),
+    }),
+    /has no staged binary package for platform darwin\/sparc/,
+  );
+});
+
+test("staging target arguments parse into a platform and arch", () => {
+  assert.deepEqual(parseStagingTarget([]), {});
+  assert.deepEqual(parseStagingTarget(["--platform=darwin", "--arch=arm64"]), {
+    platform: "darwin",
+    arch: "arm64",
+  });
+  assert.throws(
+    () => parseStagingTarget(["--arch"]),
+    /Unsupported stage-plugin-tools argument "--arch"/,
+  );
 });
 
 test("re-running overwrites cleanly without retaining stale output", async () => {

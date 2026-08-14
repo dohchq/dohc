@@ -206,8 +206,33 @@ export async function stagePluginTools(options = {}) {
   };
 }
 
+/**
+ * Reads the staging target from `--platform=<platform>` and `--arch=<arch>`.
+ * Packaging for another architecture on the same runner (electron-builder's
+ * `--arm64` on an x64 mac, for example) has to stage that architecture's
+ * esbuild binary; process.arch would stage a binary the packaged app cannot
+ * run, and every plugin build on that artifact would fail.
+ */
+export function parseStagingTarget(argv = []) {
+  const target = {};
+  for (const argument of argv) {
+    const match = /^--(platform|arch)=(.+)$/.exec(argument);
+    if (!match?.[1] || !match[2]) {
+      throw new Error(
+        `Unsupported stage-plugin-tools argument "${argument}". Use --platform=<platform> and --arch=<arch>.`,
+      );
+    }
+    target[match[1]] = match[2];
+  }
+  return target;
+}
+
+export function stagePluginToolsFromArgv(argv = [], options = {}) {
+  return stagePluginTools({ ...options, ...parseStagingTarget(argv) });
+}
+
 async function main() {
-  const result = await stagePluginTools();
+  const result = await stagePluginToolsFromArgv(process.argv.slice(2));
   console.log(`Staged pnpm@${PINNED_PNPM_VERSION} at ${result.pnpm.root}`);
   console.log(
     `pnpm npm tarball: ${result.provenance.pnpm.url} (SHA-512 ${result.provenance.pnpm.sha512})`,

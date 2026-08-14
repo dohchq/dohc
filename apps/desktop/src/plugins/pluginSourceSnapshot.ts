@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, createReadStream } from "node:fs";
 import {
   copyFile,
   lstat,
@@ -754,6 +754,19 @@ export function canonicalPluginSourceHash(
   return canonical.digest("hex");
 }
 
+/**
+ * Streams the file through the hash. A plugin can hold a large binary asset,
+ * and install, reconcile, and uninstall preflight all hash the whole tree —
+ * reading each file into one buffer put that whole asset in main-process
+ * memory every time.
+ */
+async function hashFileSha256(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  const source = createReadStream(path);
+  for await (const chunk of source) hash.update(chunk as Buffer);
+  return hash.digest("hex");
+}
+
 export async function hashPluginSourceFiles(
   sourceRoot: string,
 ): Promise<PluginSourceDigest> {
@@ -761,10 +774,9 @@ export async function hashPluginSourceFiles(
   paths.sort(lexicalCompare);
   const files: PluginSourceFileDigest[] = [];
   for (const relPath of paths) {
-    const bytes = await readFile(join(sourceRoot, ...relPath.split("/")));
     files.push({
       relPath,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
+      sha256: await hashFileSha256(join(sourceRoot, ...relPath.split("/"))),
     });
   }
   return {
