@@ -232,7 +232,36 @@ export interface SyncRelayStorage {
     workspaceId: string,
     channelWireId: string,
   ): "channel" | "dm" | "agent" | null | undefined;
+  // #646 PR2: the file a thread is about, as claimed by the EARLIEST
+  // chat.thread.create for this threadId. Earliest-wins for the same reason
+  // the channel binding uses it: a later forged re-create must not re-bind an
+  // existing thread into a share. undefined means no create exists; null means
+  // the earliest create exists but binds the thread to no file.
+  findThreadCreateFileBinding(
+    workspaceId: string,
+    threadId: string,
+  ): ThreadFileBinding | null | undefined;
+  // Where this object sits RIGHT NOW. undefined means the relay has never
+  // seen the object; null means its latest moment deleted it (or named no
+  // readable path). Both deny.
+  objectCurrentPath(workspaceId: string, objectId: string): string | null | undefined;
+  // The object at this path RIGHT NOW, or undefined when none is. The reverse
+  // of the lookup above; a thread bound by path is re-proved through it.
+  objectIdAtPath(workspaceId: string, path: string): string | undefined;
 }
+
+// The two wire shapes a file-linked thread create carries, kept apart because
+// they come from opposite ends of a share. `object` is the granter's own op —
+// its `linkedObjectId` is a granter-local id the relay resolves to a path.
+// `path` is a RECIPIENT's op, pushed back through the share log: a recipient's
+// object ids are its own and mean nothing here, so its create names the
+// granted path directly, and the relay re-proves that path against the log.
+//
+// Declared here, where it is read out of the log, and re-exported by
+// `shareFilter.ts` for the filter that consumes it.
+export type ThreadFileBinding =
+  | { kind: "object"; objectId: string }
+  | { kind: "path"; path: string };
 
 interface SqliteRunResult {
   changes: number;
@@ -397,6 +426,32 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_recipient_email
         ON sync_relay_shares(recipient_email, created_at_ms);
 
+      -- #646 PR2: where every object the relay has ever seen sits RIGHT NOW,
+      -- maintained at insert time by appendLogBatch. The file-chat share
+      -- filter resolves a thread's object to its current path and tests that
+      -- path against the selector, so this lookup is on the share read path
+      -- and must be a primary-key read. A LIKE scan cannot serve it:
+      -- moment.append rows are most of a busy log, so the partial-index trick
+      -- above would confine nothing.
+      --
+      -- The path column is NULL when the object's latest moment deletes it,
+      -- or when that moment names no readable path. Both read as "deny" — the
+      -- filter fails closed on NULL exactly as it does on an absent row.
+      CREATE TABLE IF NOT EXISTS sync_relay_object_paths (
+        workspace_id TEXT NOT NULL,
+        object_id    TEXT NOT NULL,
+        path         TEXT,
+        relay_seq    INTEGER NOT NULL,
+        PRIMARY KEY (workspace_id, object_id),
+        FOREIGN KEY (workspace_id)
+          REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
+      ) STRICT;
+      -- The reverse lookup: which object sits at this path now. A thread bound
+      -- by PATH is re-proved through this on every serve, so it is on the
+      -- share read path and must not scan.
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_object_paths_path
+        ON sync_relay_object_paths(workspace_id, path);
+
       CREATE TABLE IF NOT EXISTS sync_relay_migrations (
         migration_id TEXT PRIMARY KEY,
         completed_at_ms INTEGER NOT NULL
@@ -463,7 +518,118 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     } catch {}
     throw error;
   }
+  // AFTER the schema transaction commits, in its own. The seed scans every
+  // moment.append the log holds, and holding the schema-init write lock for
+  // the length of that scan stalls every other opener against
+  // SYNC_RELAY_BUSY_TIMEOUT_MS on the first open after a deploy. Its own
+  // transaction still makes it atomic — a crash part-way leaves the migration
+  // unrecorded and the next open redoes it.
+  seedObjectPaths(db);
 }
+
+// Where a `moment.append` payload says its object is AFTER the op: the
+// destination path of a write or a rename (a rename carries the destination in
+// both `path` and `payloadAfterPath`, `crates/dohc-engine-domain/src/store.rs`
+// `rename`), or NULL for a delete.
+//
+// NULL is also the answer for a moment that names an object but no readable
+// path. That op moved the object somewhere this table cannot state, and a
+// stale row would keep serving the object's chat at a path the relay can no
+// longer prove. Unknown denies.
+export function objectPathFromMomentPayload(
+  payloadJson: string,
+): { objectId: string; path: string | null } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadJson);
+  } catch {
+    return null;
+  }
+  const record = asObject(parsed);
+  if (!record) return null;
+  const objectId = record.objectId;
+  if (typeof objectId !== "string" || objectId.length === 0) return null;
+  if (record.operation === "delete") return { objectId, path: null };
+  for (const field of ["path", "payloadAfterPath"] as const) {
+    const value = record[field];
+    if (typeof value === "string" && value.length > 0) return { objectId, path: value };
+  }
+  return { objectId, path: null };
+}
+
+// #646 PR2 one-time seed. `sync_relay_object_paths` is maintained at insert
+// time, so without this every moment.append already in the log would resolve
+// to "the relay has never seen this object" — and the share filter would deny
+// chat on every file shared before this deployment, forever. The scan reads
+// the log in relay order and lets the LAST moment for each object win, which
+// is the same rule the insert-time upsert applies.
+function seedObjectPaths(db: SqliteDb): void {
+  const migrationId = "object-paths-seed-v1";
+  const seeded = db
+    .prepare("SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete")
+    .get(migrationId);
+  if (Number(seeded?.complete ?? 0) !== 0) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    // Re-read under the write lock: two processes can open the same database
+    // at once, both see the marker absent, and only one may do the work.
+    const claimed = db
+      .prepare(
+        "SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete",
+      )
+      .get(migrationId);
+    if (Number(claimed?.complete ?? 0) !== 0) {
+      db.exec("COMMIT");
+      return;
+    }
+    const upsert = db.prepare(OBJECT_PATH_UPSERT_SQL);
+    const rows = db
+      .prepare(
+        `SELECT workspace_id, payload_json, relay_seq FROM sync_relay_log
+         WHERE op_kind = 'moment.append'
+         ORDER BY relay_seq`,
+      )
+      .all();
+    for (const row of rows) {
+      const resolved = objectPathFromMomentPayload(String(row.payload_json));
+      if (!resolved) continue;
+      upsert.run(
+        String(row.workspace_id),
+        resolved.objectId,
+        resolved.path,
+        Number(row.relay_seq),
+      );
+    }
+    db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(
+      migrationId,
+      Date.now(),
+    );
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+}
+
+// Latest-wins: a rename is a later fact about the same object, and the share
+// must follow the file rather than its history.
+//
+// The relay_seq guard is defence in depth, and today it is UNREACHABLE: both
+// writers walk the log in relay order (appendLogBatch inserts under the write
+// lock and reads back the row it just took; the seed scans ORDER BY
+// relay_seq), so no upsert here can arrive out of order. Its inverse mutation
+// therefore survives, which is recorded rather than papered over. It stays
+// because this table decides which chat a share serves, and a path moved
+// backwards by a future out-of-order writer would serve a file's discussion at
+// a path the relay can no longer prove.
+const OBJECT_PATH_UPSERT_SQL = `
+  INSERT INTO sync_relay_object_paths (workspace_id, object_id, path, relay_seq)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(workspace_id, object_id) DO UPDATE
+    SET path = excluded.path, relay_seq = excluded.relay_seq
+    WHERE excluded.relay_seq > sync_relay_object_paths.relay_seq`;
 
 export function openSyncRelayStorage(
   dbPath: string,
@@ -1250,8 +1416,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms
         ) VALUES (?, ?, ?, ?, ?, ?)`,
       );
+      const objectPathStmt = this.db.prepare(OBJECT_PATH_UPSERT_SQL);
       for (const op of newOps) {
-        insertStmt.run(
+        const result = insertStmt.run(
           input.workspaceId,
           input.originId,
           op.originSeq,
@@ -1260,6 +1427,21 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           op.recordedAtMs,
         );
         inserted += 1;
+        // #646 PR2: keep "where is this object now?" answerable by primary
+        // key. The relay_seq this row just took IS the order the guard in the
+        // upsert compares, so a later moment always wins and an out-of-order
+        // one never moves a path backwards.
+        if (op.opKind === "moment.append") {
+          const resolved = objectPathFromMomentPayload(op.payloadJson);
+          if (resolved) {
+            objectPathStmt.run(
+              input.workspaceId,
+              resolved.objectId,
+              resolved.path,
+              Number(result.lastInsertRowid),
+            );
+          }
+        }
       }
 
       this.db.exec("COMMIT");
@@ -1451,23 +1633,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     threadId: string,
   ): string | null | undefined {
     if (!threadId) return undefined;
-    // LIKE pre-filter on the exact JSON fragment the canonical (sorted-key,
-    // JSON.stringify-escaped) payload stores, wildcards escaped so a hostile
-    // threadId cannot widen the match; the JSON.parse comparison below makes
-    // the real decision.
-    const needle = `"threadId":${JSON.stringify(threadId)}`
-      .replaceAll("\\", "\\\\")
-      .replaceAll("%", "\\%")
-      .replaceAll("_", "\\_");
-    const rows = this.db
-      .prepare(
-        `SELECT payload_json FROM sync_relay_log
-         WHERE workspace_id = ? AND op_kind = 'chat.thread.create'
-           AND payload_json LIKE ? ESCAPE '\\'
-         ORDER BY relay_seq`,
-      )
-      .all(workspaceId, `%${needle}%`);
-    for (const row of rows) {
+    for (const row of this.threadCreateRows(workspaceId, threadId)) {
       let payload: unknown;
       try {
         payload = JSON.parse(String(row.payload_json));
@@ -1540,6 +1706,81 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       return record.kind;
     }
     return undefined;
+  }
+
+  findThreadCreateFileBinding(
+    workspaceId: string,
+    threadId: string,
+  ): ThreadFileBinding | null | undefined {
+    if (!threadId) return undefined;
+    for (const row of this.threadCreateRows(workspaceId, threadId)) {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(String(row.payload_json));
+      } catch {
+        continue;
+      }
+      const record = asObject(payload);
+      if (!record || record.threadId !== threadId) continue;
+      // The EARLIEST matching op is authoritative, whatever it says. Exactly
+      // one binding shape may be present: an op claiming both is malformed,
+      // and reading either half of it would let a crafted create bind a
+      // thread twice.
+      const objectId = record.linkedObjectId;
+      const path = record.linkedPath;
+      const hasObject = typeof objectId === "string" && objectId.length > 0;
+      const hasPath = typeof path === "string" && path.length > 0;
+      if (hasObject && hasPath) return null;
+      if (hasObject) return { kind: "object", objectId: objectId as string };
+      if (hasPath) return { kind: "path", path: path as string };
+      return null;
+    }
+    return undefined;
+  }
+
+  objectIdAtPath(workspaceId: string, path: string): string | undefined {
+    if (!path) return undefined;
+    const row = this.db
+      .prepare(
+        "SELECT object_id FROM sync_relay_object_paths \
+         WHERE workspace_id = ? AND path = ? LIMIT 1",
+      )
+      .get(workspaceId, path);
+    return typeof row?.object_id === "string" ? row.object_id : undefined;
+  }
+
+  objectCurrentPath(workspaceId: string, objectId: string): string | null | undefined {
+    if (!objectId) return undefined;
+    const row = this.db
+      .prepare(
+        "SELECT path FROM sync_relay_object_paths WHERE workspace_id = ? AND object_id = ?",
+      )
+      .get(workspaceId, objectId);
+    if (row === undefined) return undefined;
+    return typeof row.path === "string" && row.path.length > 0 ? row.path : null;
+  }
+
+  // The workspace's chat.thread.create rows that MIGHT name this threadId, in
+  // relay order. LIKE pre-filter on the exact JSON fragment the canonical
+  // (sorted-key, JSON.stringify-escaped) payload stores, wildcards escaped so
+  // a hostile threadId cannot widen the match; the caller's JSON.parse
+  // comparison makes the real decision.
+  private threadCreateRows(
+    workspaceId: string,
+    threadId: string,
+  ): Array<Record<string, unknown>> {
+    const needle = `"threadId":${JSON.stringify(threadId)}`
+      .replaceAll("\\", "\\\\")
+      .replaceAll("%", "\\%")
+      .replaceAll("_", "\\_");
+    return this.db
+      .prepare(
+        `SELECT payload_json FROM sync_relay_log
+         WHERE workspace_id = ? AND op_kind = 'chat.thread.create'
+           AND payload_json LIKE ? ESCAPE '\\'
+         ORDER BY relay_seq`,
+      )
+      .all(workspaceId, `%${needle}%`);
   }
 
   fetchLogPage(input: {

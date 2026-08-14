@@ -910,6 +910,9 @@ impl EngineService {
             "share.view.pull" => {
                 Box::pin(self.share_view_pull(&ctx, request.workspace, request.params)).await?
             }
+            "share.view.push" => {
+                Box::pin(self.share_view_push(&ctx, request.workspace, request.params)).await?
+            }
             "versionedText.write" => {
                 self.versioned_text_write(&ctx, &request, request.params.clone())
                     .await?
@@ -2369,6 +2372,42 @@ impl EngineService {
                 self.issue_pending_cursor(bound_handle, &open.workspace_id, cursor)?;
         }
         Ok(result)
+    }
+
+    /// Push this replica's own chat about a RECEIVED file share (#646 PR2).
+    ///
+    /// Takes the SAME pinned selector the pull takes, and refuses an
+    /// unreadable level the same way: the grant decides which of this
+    /// replica's ops belong to the share, so a caller that cannot state it
+    /// must not push through it.
+    async fn share_view_push(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ShareViewParams = parse(params)?;
+        let access = dohc_engine_sync::ShareAccess::parse(&params.granted_selector.access)
+            .ok_or_else(|| wire(ErrorCode::InvalidParams, "unknown share access"))?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::PushShareView {
+                    workspace_id: open.workspace_id.clone(),
+                    share_id: params.share_id,
+                    granted: dohc_engine_sync::ShareGrant {
+                        paths: params.granted_selector.paths,
+                        version_id: params.granted_selector.version_id,
+                        access,
+                    },
+                },
+                "share.view.push",
+            )
+            .await?;
+        relay_outcome_json(outcome)
     }
 
     fn generated_rpc_id(

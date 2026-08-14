@@ -12,6 +12,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import {
+  isShareAccessValue,
+  SHARE_ACCESS_VALUES,
+  type ShareAccess,
+} from "@dohc/security-contract/share-selector";
+import {
   createWorkspaceDirectory,
   addSiteSdk,
   listChannels,
@@ -54,11 +59,11 @@ export function parseArgs(argv: string[]): ToolContext {
     process.env.DOHC_SDK_DEPENDENCY_RANGE,
     "DOHC_SDK_DEPENDENCY_RANGE",
   );
-  let readOnly = false;
+  let shareAccess: ShareAccess | undefined;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--workspace" && argv[i + 1]) root = nonEmptyArg(argv[++i], "--workspace");
     else if (argv[i] === "--home" && argv[i + 1]) home = nonEmptyArg(argv[++i], "--home");
-    else if (argv[i] === "--read-only") readOnly = true;
+    else if (argv[i] === "--share-access") shareAccess = shareAccessArg(argv[++i]);
     else if (argv[i] === "--sdk-package-json" && argv[i + 1]) {
       sdkPackageJsonPath = nonEmptyArg(argv[++i], "--sdk-package-json");
     } else if (argv[i] === "--sdk-dependency-range" && argv[i + 1]) {
@@ -70,7 +75,7 @@ export function parseArgs(argv: string[]): ToolContext {
     home,
     ...(sdkPackageJsonPath ? { sdkPackageJsonPath } : {}),
     ...(sdkDependencyRange ? { sdkDependencyRange } : {}),
-    ...(readOnly ? { readOnly: true } : {}),
+    ...(shareAccess ? { shareAccess } : {}),
   };
 }
 
@@ -78,6 +83,16 @@ function nonEmptyArg(value: string, name: string): string {
   const trimmed = value.trim();
   if (!trimmed) throw new Error(`${name} requires a non-empty value`);
   return trimmed;
+}
+
+// An unreadable level is refused, never read as the narrowest one: a guess
+// here decides which write tools an agent is offered.
+function shareAccessArg(value: string | undefined): ShareAccess {
+  if (isShareAccessValue(value)) return value;
+  const received = value === undefined ? "no value" : JSON.stringify(value);
+  throw new Error(
+    `--share-access must be one of ${SHARE_ACCESS_VALUES.join(", ")}. Received: ${received}.`,
+  );
 }
 
 function optionalNonEmptyArg(value: string | undefined, name: string): string | undefined {
@@ -91,15 +106,27 @@ function text(value: unknown) {
 export function createDohcMcpServer(ctx: ToolContext): McpServer {
   const server = new McpServer({ name: "dohc", version: "0.1.0" });
 
-  // PR 18 read-only shared views: a shared view is a read-only local
-  // workspace, so its MCP server must not expose any mutating tool. In the
-  // read-only profile registerWrite is a no-op — dohc_write_file,
-  // create_directory, move_path, delete_path and the other mutating tools are
-  // never registered, so an agent pointed at a shared view can list/read/
-  // search but cannot change anything. Read tools always register below.
-  const registerWrite: McpServer["registerTool"] = ctx.readOnly
-    ? ((() => undefined) as unknown as McpServer["registerTool"])
-    : server.registerTool.bind(server);
+  // A share view's write surface is its access level (#646). The write tools
+  // come in two tiers, and a tier the level does not grant is NEVER registered
+  // — an agent pointed at a share view is offered only what it may use. Read
+  // tools always register below.
+  //
+  //   no level  a workspace this machine owns: every write tool
+  //   any level a shared view: NO write tool of any kind
+  //
+  // #646 PR2 deliberately registers no chat write tool at any level. The two
+  // that exist — `dohc_start_channel_chat` and `dohc_reply_to_chat` — are
+  // CHANNEL tools, and a shared view refuses every channel write before the
+  // level is consulted (`apps/desktop/src/cli/cliServer.ts`). `comment`
+  // grants per-FILE chat, and no MCP tool writes that yet. Offering an agent
+  // a tool its own workspace always refuses is a promise the surface cannot
+  // keep, so the level is carried here for the tiers PR3 adds and grants
+  // nothing today.
+  const register = server.registerTool.bind(server);
+  const skip = (() => undefined) as unknown as McpServer["registerTool"];
+  // Every write tool, document and chat alike.
+  const registerWrite: McpServer["registerTool"] =
+    ctx.shareAccess === undefined ? register : skip;
 
   server.registerTool(
     "dohc_list_workspaces",

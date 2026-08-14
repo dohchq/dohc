@@ -347,8 +347,9 @@ import {
   setWorkspaceSharedChannels,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
-import type { JoinedSharedChannel } from "./workspaces/registryStore";
+import type { JoinedSharedChannel, RegistryEntry } from "./workspaces/registryStore";
 import {
+  readableShareLevel,
   shareViewGranterEmail,
   shareViewIsPresent,
 } from "./workspaces/shareViewMarker";
@@ -372,6 +373,7 @@ import {
   assertSharedChannelMessageIdentity,
   joinedChannelMatchesCredentials,
   resolveChatRelayIdentity,
+  resolveShareViewRelayAuthorId,
   resolveWorkspaceRelayAuthorId,
   syncEnrollmentRemoteWorkspaceId,
   workspaceRemoteMatchesCredentials,
@@ -444,8 +446,10 @@ import {
 } from "./workspaces/syncCode";
 import {
   SharePinInvalidError,
+  recordedShareSelector,
   refreshSharedViewOnce,
 } from "./workspaces/sharedView";
+import { assertShareChatWritable } from "./workspaces/shareChatGate";
 import {
   assertMountableSelector,
   createMountDirectory,
@@ -464,11 +468,16 @@ import {
   RelayWorkspaceUnavailableError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
+  SharedFileReadOnlyError,
   type RelayWorkspaceBootstrapResult,
   type ShareViewRefusal,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import {
+  isShareAccessValue,
+  type ShareAccess,
+} from "@dohc/security-contract/share-selector";
 import type {
   ChannelThreadSummary,
   ChatChannelSummary,
@@ -1880,9 +1889,28 @@ async function runSharedChannelSyncPass(
 // root (path containment), --home points it at the desktop registry/state dir.
 // DOHC_MCP_COMMAND lets a packaged build override the launcher with its shipped
 // binary; the default `dohc-mcp` is the @dohc/mcp bin on PATH.
+// The MCP profile a workspace hands out (#646): `null` for a workspace this
+// machine owns, and the share's level for a share view.
+//
+// The two questions compose, and in this order. PRESENCE decides whether a
+// share profile applies at all — a marker whose value was lost is still a
+// share view, and reading it as an ordinary workspace would hand out the full
+// write-capable server. READABILITY only decides how much the profile opens,
+// so a present marker with no readable grant falls to `view`, which registers
+// no write tools at all.
+function mcpShareAccessOf(shareView: unknown): ShareAccess | null {
+  if (!shareViewIsPresent(shareView)) return null;
+  const grantedSelector = isRecordValue(shareView) ? shareView.grantedSelector : undefined;
+  return readableShareLevel(grantedSelector) ?? "view";
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function mcpConfigFor(
   rootPath: string,
-  options: { readOnly?: boolean } = {},
+  shareAccess: ShareAccess | null,
 ): {
   command: string;
   args: string[];
@@ -1914,10 +1942,10 @@ function mcpConfigFor(
         : undefined);
   const sdkDependencyRange = process.env.DOHC_SDK_DEPENDENCY_RANGE?.trim();
   const args = ["--workspace", rootPath, "--home", home];
-  // Shared views hand out a READ-ONLY MCP profile: the launched server never
-  // registers the mutating tools (PR 18), so an agent can read the shared
-  // view but cannot write into it.
-  if (options.readOnly) args.push("--read-only");
+  // A share view hands out the MCP profile for its level (#646): the launched
+  // server registers only the write tools that level grants. `null` is a local
+  // workspace, which gets every tool.
+  if (shareAccess) args.push("--share-access", shareAccess);
   if (sdkPackageJsonPath) args.push("--sdk-package-json", sdkPackageJsonPath);
   if (sdkDependencyRange) args.push("--sdk-dependency-range", sdkDependencyRange);
   return {
@@ -1936,11 +1964,9 @@ async function mcpRuntimeConfigFor(rootPath: string): Promise<{
   await warmCredentialCache();
   const workspace = listWorkspaces().find((entry) => entry.rootPath === rootPath);
   // Defense in depth: managed agent runs are already refused on shared views,
-  // but if a runtime MCP is ever spawned for one it must be the read-only
-  // profile — never the write-capable server.
-  const config = mcpConfigFor(rootPath, {
-    readOnly: shareViewIsPresent(workspace?.shareView),
-  });
+  // but if a runtime MCP is ever spawned for one it must carry the share's
+  // level — never the full local profile.
+  const config = mcpConfigFor(rootPath, mcpShareAccessOf(workspace?.shareView));
   const env = mcpCloudEnvironment({
     workspace,
     credentials: cachedCredentials,
@@ -5728,6 +5754,13 @@ function registerIpcHandlers(
       relay,
     });
     let outcome;
+    // #646 PR2: the backstop this share's chat push docstring claims. A push
+    // that failed — offline, a rotated session, a relay blip — is retried
+    // here, before the pull, so a refresh drains the backlog instead of
+    // leaving it until the recipient happens to write again.
+    await pushShareViewChat(workspace).catch((error) => {
+      console.error("[desktop] share view chat push (refresh backstop):", error);
+    });
     try {
       outcome = await refreshSharedViewOnce({
         rootDir: workspace.rootPath,
@@ -6700,6 +6733,134 @@ function registerIpcHandlers(
     return { workspace, capture };
   }
 
+  // #646 PR2: chat follows the share. `requireEngineCapture` is the ONE
+  // barrier between a share view and chat today, and it throws for every
+  // share view because a share view has no capture — by design: a capture
+  // records local file writes, which is exactly what a share view must never
+  // do. So this resolves a SCOPE instead of widening that gate. A local
+  // workspace still goes through `requireEngineCapture` unchanged; a share
+  // view gets a narrower scope carrying the level it was granted.
+  //
+  // A share scope answers PER-FILE chat only. `listChatChannels` and every
+  // other workspace-wide surface keeps `requireEngineCapture` and stays
+  // refused — filtering a workspace-wide listing is the shape that produced
+  // #627, and not routing it is smaller and safer.
+  type ChatScope =
+    | {
+        kind: "workspace";
+        workspace: RegistryEntry;
+        capture: WorkspaceEngineCapture;
+      }
+    | {
+        kind: "share";
+        workspace: RegistryEntry;
+        // The pinned level, or null when the stored grant cannot be read.
+        // The registry file is DATA, not a contract (see
+        // workspaceSummaryProjection.ts), so the level is read through
+        // `readableShareLevel` rather than trusted from the record's type.
+        access: ShareAccess | null;
+        // The account this recipient writes chat under. Absent when signed
+        // out, or signed into a relay that is not this share's — see
+        // `assertChatWritable`, which refuses rather than writing a comment
+        // that can never leave the machine.
+        authorUserId: string | undefined;
+        // The granter ended this share. The local copy stays readable and
+        // stops taking writes, exactly as an ended chat-channel grant does.
+        ended: boolean;
+      };
+
+  async function requireChatScope(workspaceId: string): Promise<ChatScope> {
+    const workspace = requireWorkspace(workspaceId);
+    // PRESENCE, the same question `sharedViewOf` asks before a write. A
+    // marker that lost its value is still a share view, and resolving a
+    // CAPTURE for it would give someone else's workspace the local chat
+    // surface — the enforcement layer failing open.
+    if (!shareViewIsPresent(workspace.shareView)) {
+      const local = await requireEngineCapture(workspaceId, "Chats");
+      return { kind: "workspace", workspace: local.workspace, capture: local.capture };
+    }
+    // Idempotent, and the same guarantee requireEngineCapture makes: the
+    // workspace's daemon session is live before any store call reaches it.
+    await openWorkspaceActivity(workspace);
+    await warmCredentialCache();
+    return {
+      kind: "share",
+      workspace,
+      // The level the PINNED grant names, or null when the grant cannot be
+      // read completely. Read through the same function the refresh path
+      // uses, so this gate and the pull cannot disagree about what a share
+      // grants.
+      access: readableShareLevel(workspace.shareView?.grantedSelector),
+      ended: workspace.shareView?.ended === true,
+      authorUserId: resolveShareViewRelayAuthorId(
+        workspace.shareView ?? {},
+        cachedCredentials,
+      ),
+    };
+  }
+
+  // The chat write gate, run BEFORE any durable row. A view share reads the
+  // discussion about its files and adds nothing to it; comment and edit both
+  // write. The relay refuses the push again with the same words, so the
+  // renderer disabling its composer is honesty, not authorization.
+  // A local workspace is writable by definition; a share view answers to the
+  // shared rule, which the tests drive directly rather than re-implementing.
+  function assertChatWritable(scope: ChatScope): void {
+    if (scope.kind !== "share") return;
+    assertShareChatWritable(scope);
+  }
+
+  // #646 PR2: this recipient's own chat, back to the granter — the file-share
+  // mirror of `syncSharedChannelsForChatTarget`. Fire-and-forget from a write
+  // handler, with the share's refresh cadence as the backstop, and skipped
+  // whenever a refresh would be skipped: an ended share, a signed-out user, or
+  // a session on a relay that is not this share's origin.
+  async function pushShareViewChat(workspace: RegistryEntry): Promise<void> {
+    const shareView = workspace.shareView;
+    if (!shareView || shareView.ended) return;
+    // The pinned grant, read back through the rule the pull uses. A grant this
+    // process cannot read completely is not one to push through: the engine
+    // scopes the push by it, and the relay judges the batch against the stored
+    // selector either way. Skipped, not failed — a write that reached this far
+    // was already refused if the level was unreadable.
+    const grantedSelector = recordedShareSelector(shareView.grantedSelector);
+    if (!grantedSelector) return;
+    await warmCredentialCache();
+    const credentials = cachedCredentials;
+    if (!credentials?.relayUrl) return;
+    if (shareView.relayUrl && !relayUrlsMatch(credentials.relayUrl, shareView.relayUrl)) {
+      return;
+    }
+    await relayClientForWorkspace({
+      workspaceId: workspace.workspaceId,
+      rootPath: workspace.rootPath,
+      relay: { baseUrl: credentials.relayUrl, token: credentials.token },
+    }).pushShareView({ shareId: shareView.shareId, grantedSelector });
+  }
+
+  // Every chat write reaches the granter the same way, whichever scope it was
+  // written in: a local workspace nudges its own cloud sync and any joined
+  // shared channel, a share view pushes its own chat lane.
+  function syncChatWriteFor(scope: ChatScope, target: { threadId: string }): void {
+    if (scope.kind === "share") {
+      void pushShareViewChat(scope.workspace).catch((error) => {
+        console.error("[desktop] share view chat push:", error);
+      });
+      return;
+    }
+    void syncSharedChannelsForChatTarget(scope.workspace.workspaceId, target);
+    activity.queueCloudSync(scope.workspace.workspaceId);
+  }
+
+  // The file a chat is about, resolved for either scope. A share view has no
+  // capture to ask, so it asks the engine's own file index — the same index
+  // the mentions path already reads, over files that arrived by replay.
+  async function chatFileObjectId(scope: ChatScope, path: string): Promise<string | null> {
+    if (scope.kind === "workspace") return await scope.capture.fileObjectIdForPath(path);
+    const index = await activeEngineFileIndex(scope.workspace);
+    return index.objectIdByPath.get(path) ?? null;
+  }
+
   async function requireVersionOperations(workspaceId: string) {
     const { capture } = await requireEngineCapture(
       workspaceId,
@@ -6918,7 +7079,10 @@ function registerIpcHandlers(
 
   async function resolveChatFileReferences(
     workspace: ReturnType<typeof requireWorkspace>,
-    capture: WorkspaceEngineCapture,
+    // The path resolver, not a capture: a share view has no capture and its
+    // files still resolve (#646 PR2). Everything below only ever asked the
+    // capture this one question.
+    fileObjectIdForPath: (path: string) => Promise<string | null>,
     references: readonly ChatFileReferenceInput[] | undefined,
   ) {
     const resolved: Array<{
@@ -6935,7 +7099,7 @@ function registerIpcHandlers(
       seen.add(key);
       const trackedFile = await resolveTrackedChatFilePath(
         reference.path,
-        capture.fileObjectIdForPath,
+        fileObjectIdForPath,
       );
       if (!trackedFile) {
         throw new Error(`Cannot mention ${reference.path} because dohc is not tracking it yet.`);
@@ -7220,11 +7384,13 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.listFileChats, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListFileChatsPayload.parse(payload);
-    const { workspace, capture } = await requireEngineCapture(
-      input.workspaceId,
-      "Chats",
-    );
-    const fileObjectId = await capture.fileObjectIdForPath(input.path);
+    // #646 PR2: reachable from a share view at EVERY level. The file it names
+    // is one the share already served, and an out-of-selector thread was
+    // never served by the relay nor applied by the engine boundary — there is
+    // no superset here to filter.
+    const scope = await requireChatScope(input.workspaceId);
+    const { workspace } = scope;
+    const fileObjectId = await chatFileObjectId(scope, input.path);
     const threads = fileObjectId
       ? await linkedChatStoreFor(workspace).listThreadsForFile({
           workspaceId: workspace.workspaceId,
@@ -7396,14 +7562,15 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.createFileChat, async (event, payload) => {
     assertTrustedSender(event);
     const input = CreateFileChatPayload.parse(payload);
-    const { workspace, capture } = await requireEngineCapture(
-      input.workspaceId,
-      "Chats",
-    );
-    assertWritableWorkspace(workspace);
+    // #646 PR2: reachable from a share view at comment and edit. The level is
+    // the server-side decision main owns; the relay refuses the push again
+    // with the same words if this one is ever skipped.
+    const scope = await requireChatScope(input.workspaceId);
+    assertChatWritable(scope);
+    const { workspace } = scope;
     // The chat links to the file's STABLE engine object id (never the path),
     // so the link survives renames; the path rides along as a display hint.
-    const fileObjectId = await capture.fileObjectIdForPath(input.path);
+    const fileObjectId = await chatFileObjectId(scope, input.path);
     if (!fileObjectId) {
       throw new Error(
         "Chats aren't available for this file yet — only text files dohc tracks can have Chats.",
@@ -7414,16 +7581,16 @@ function registerIpcHandlers(
       title: input.title,
       linkedFile: { objectId: fileObjectId, pathHint: input.path },
     });
+    syncChatWriteFor(scope, { threadId: thread.id });
     return CreateFileChatResult.parse({ thread: chatThreadForIpc(thread) });
   });
 
   ipcMain.handle(CHANNELS.listChatMessages, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatMessagesPayload.parse(payload);
-    const { workspace } = await requireEngineCapture(
-      input.workspaceId,
-      "Chats",
-    );
+    // Reachable from a share view at every level (#646 PR2), for a thread on
+    // a file the share already served.
+    const { workspace } = await requireChatScope(input.workspaceId);
     const messages = await linkedChatStoreFor(workspace).listMessages({
       workspaceId: workspace.workspaceId,
       threadId: input.threadId,
@@ -7436,14 +7603,13 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.sendChatMessage, async (event, payload) => {
     assertTrustedSender(event);
     const input = SendChatMessagePayload.parse(payload);
-    const { workspace, capture } = await requireEngineCapture(
-      input.workspaceId,
-      "Chats",
-    );
-    // Shared-channel access is narrower than workspace access. Enforce the
-    // workspace's server-owned read-only boundary first; renderer UI state is
-    // never authorization.
-    assertWritableWorkspace(workspace);
+    // #646 PR2: a share view resolves a scope instead of a capture, and its
+    // LEVEL is the write gate. A local workspace still resolves a capture and
+    // is writable by definition — `assertWritableWorkspace` refused exactly
+    // the share views this scope now admits at comment and edit.
+    const scope = await requireChatScope(input.workspaceId);
+    assertChatWritable(scope);
+    const { workspace } = scope;
     // MU-C4 (CodeRabbit security): a READ-ONLY shared-channel grant rejects
     // writes at the main boundary, BEFORE any durable local row — the
     // renderer disabling its composer is honesty, not authorization.
@@ -7461,7 +7627,11 @@ function registerIpcHandlers(
       resolveAuthorUserId: () =>
         verifiedChatAuthorUserIdFor(workspace.workspaceId, target),
       resolveAttachments: () =>
-        resolveChatFileReferences(workspace, capture, input.fileReferences),
+        resolveChatFileReferences(
+          workspace,
+          (path) => chatFileObjectId(scope, path),
+          input.fileReferences,
+        ),
       revalidateAuthorUserId: (authorUserId) =>
         revalidateChatWrite(workspace, target, authorUserId),
       // Author is derived HERE: renderer-sent messages are always the local
@@ -7480,19 +7650,22 @@ function registerIpcHandlers(
           ...(attachments.length > 0 ? { attachments } : {}),
         }),
     });
-    void materializePendingChatBookmarks(workspace, capture).catch((error) => {
-      console.error("[desktop] chat bookmark projection:", error);
-    });
+    // Bookmarks and agent dispatch are LOCAL projections of a workspace this
+    // machine owns. A share view owns neither: it has no capture to project
+    // into, and an agent dispatched from someone else's shared file would be
+    // this machine acting on a workspace it only reads.
+    if (scope.kind === "workspace") {
+      void materializePendingChatBookmarks(workspace, scope.capture).catch((error) => {
+        console.error("[desktop] chat bookmark projection:", error);
+      });
+      void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
+        console.error("[desktop] local chat dispatch scan:", error);
+      });
+    }
     // MU-C4: if this thread lives in a joined shared channel, push it out
-    // promptly (fire-and-forget; the sync cadence is the backstop). The share
-    // is named so the bounded pass covers it however the rotation stands.
-    void syncSharedChannelsForChatTarget(workspace.workspaceId, {
-      threadId: input.threadId,
-    });
-    activity.queueCloudSync(workspace.workspaceId);
-    void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
-      console.error("[desktop] local chat dispatch scan:", error);
-    });
+    // promptly (fire-and-forget; the sync cadence is the backstop). A share
+    // view pushes its own chat lane instead (#646 PR2).
+    syncChatWriteFor(scope, { threadId: input.threadId });
     return SendChatMessageResult.parse({ message: chatMessageForIpc(message) });
   });
 
@@ -7523,11 +7696,10 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.resolveChatDecision, async (event, payload) => {
     assertTrustedSender(event);
     const input = ResolveChatDecisionPayload.parse(payload);
-    const { workspace } = await requireEngineCapture(
-      input.workspaceId,
-      "Chats",
-    );
-    assertWritableWorkspace(workspace);
+    // #646 PR2: reachable from a share view at comment and edit.
+    const scope = await requireChatScope(input.workspaceId);
+    assertChatWritable(scope);
+    const { workspace } = scope;
     const store = linkedChatStoreFor(workspace);
     await assertSharedChannelWritable({
       workspaceId: workspace.workspaceId,
@@ -7541,10 +7713,7 @@ function registerIpcHandlers(
       messageId: input.messageId,
       resolvedByMessageId: input.resolvedByMessageId,
     });
-    void syncSharedChannelsForChatTarget(workspace.workspaceId, {
-      threadId: input.threadId,
-    });
-    activity.queueCloudSync(workspace.workspaceId);
+    syncChatWriteFor(scope, { threadId: input.threadId });
     return ResolveChatDecisionResult.parse({
       decision: {
         threadId: decision.threadId,
@@ -7689,12 +7858,7 @@ function registerIpcHandlers(
     let pathByObjectId = new Map<string, string>();
     if (fileThreads.length > 0) {
       try {
-        const index = await engineSearchIndexFor(workspace);
-        if (index) {
-          pathByObjectId = new Map(
-            index.files.map((file) => [file.objectId, file.path]),
-          );
-        }
+        ({ pathByObjectId } = await activeEngineFileIndex(workspace));
       } catch {
         // Path resolution is display-only; the hint fallback keeps the
         // listing honest enough.
@@ -7909,7 +8073,7 @@ function registerIpcHandlers(
       parsePayload: (payload) => CreateChatChannelPayload.parse(payload),
       requireContext: (workspaceId) =>
         requireEngineCapture(workspaceId, "Chats"),
-      assertWritableWorkspace,
+      assertWritable: ({ workspace }) => assertWritableWorkspace(workspace),
       run: async ({ workspace }, input) => {
         const channel = await linkedChatStoreFor(workspace).createChannel({
           workspaceId: workspace.workspaceId,
@@ -7991,7 +8155,7 @@ function registerIpcHandlers(
       resolveAuthorUserId: () =>
         verifiedChatAuthorUserIdFor(workspace.workspaceId, target),
       resolveAttachments: () =>
-        resolveChatFileReferences(workspace, capture, input.fileReferences),
+        resolveChatFileReferences(workspace, capture.fileObjectIdForPath, input.fileReferences),
       revalidateAuthorUserId: (authorUserId) =>
         revalidateChatWrite(workspace, target, authorUserId),
       // No title, ever, on this path: the thread displays its first-message
@@ -8035,9 +8199,13 @@ function registerIpcHandlers(
     createSharedChannelWritableChatIpcHandler({
       assertTrustedSender,
       parsePayload: (payload) => MarkChatThreadReadPayload.parse(payload),
-      requireContext: (workspaceId) =>
-        requireEngineCapture(workspaceId, "Chats"),
-      assertWritableWorkspace,
+      // #646 PR2: reachable from a share view at EVERY level, view included.
+      requireContext: requireChatScope,
+      // Deliberately ungated. Read state is this reader's own, written
+      // locally and never replicated, so there is no write here for a level
+      // to refuse — a view recipient who read the discussion must be able to
+      // stop it showing as unread.
+      assertWritable: null,
       assertSharedChannelWritable: async ({ workspace }, input) => {
         await assertSharedChannelWritable({
           workspaceId: workspace.workspaceId,
@@ -8079,10 +8247,10 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.listChatReactions, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatReactionsPayload.parse(payload);
-    const { workspace } = await requireEngineCapture(
-      input.workspaceId,
-      "Chats",
-    );
+    // #646 PR2: reachable from a share view at EVERY level. The panel loads
+    // messages and reactions together, so a capture gate here refuses the
+    // whole thread open, not just its reactions.
+    const { workspace } = await requireChatScope(input.workspaceId);
     const viewerAuthorId = await chatViewerAuthorId({
       localFallbackAuthorId: localReactorFallbackId(),
       resolveReplicationAuthorId: async () =>
@@ -8110,10 +8278,11 @@ function registerIpcHandlers(
     createSetChatReactionIpcHandler({
       assertTrustedSender,
       parsePayload: (payload) => SetChatReactionPayload.parse(payload),
-      requireContext: (workspaceId) =>
-        requireEngineCapture(workspaceId, "Chats"),
-      assertWritableWorkspace,
-      run: async ({ workspace }, input) => {
+      // #646 PR2: reachable from a share view at comment and edit.
+      requireContext: requireChatScope,
+      assertWritable: assertChatWritable,
+      run: async (scope, input) => {
+        const { workspace } = scope;
         await warmCredentialCache();
         const target = { threadId: input.threadId };
         // MU-C4 (CodeRabbit security): reactions are writes too — a read-only
@@ -8144,6 +8313,10 @@ function registerIpcHandlers(
             linkedChatStoreFor(workspace).setReaction(mutation),
           state: input.state,
         });
+        // #646 PR2: a reaction is a pushable share kind, so a share scope
+        // pushes its own lane here. The joined-channel and cloud-sync nudges
+        // below are inert without an engine capture.
+        syncChatWriteFor(scope, { threadId: input.threadId });
         return SetChatReactionResult.parse({
           reaction: { ...chatReactionForIpc(reaction), state: reaction.state },
           viewerAuthorId: reaction.author.authorId,
@@ -8499,7 +8672,7 @@ function registerIpcHandlers(
     const attachments = await awaitCurrentDmSession(() =>
       resolveChatFileReferences(
         workspace,
-        capture,
+        capture.fileObjectIdForPath,
         input.fileReferences,
       ),
     );
@@ -8816,10 +8989,10 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = AgentRunPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    // A shared view hands out the read-only MCP profile so the user's AI tool
-    // can browse the shared files without any write tool existing.
-    const readOnly = !!sharedViewOf(workspace.workspaceId);
-    return McpConfigResult.parse(mcpConfigFor(workspace.rootPath, { readOnly }));
+    // A shared view hands out the MCP profile for its level, so the user's AI
+    // tool is offered only the write tools the grant allows.
+    const shareAccess = mcpShareAccessOf(workspace.shareView);
+    return McpConfigResult.parse(mcpConfigFor(workspace.rootPath, shareAccess));
   });
 
   ipcMain.handle(CHANNELS.probeAgentDrivers, async (event, payload) => {

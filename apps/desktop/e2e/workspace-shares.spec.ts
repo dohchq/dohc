@@ -321,8 +321,10 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     });
     expect(bypassAttempts.agent).toContain("Agents can't run in a shared view");
     expect(bypassAttempts.sitePreview).toContain("disabled in a shared view");
-    // The copyable MCP config for a shared view is the read-only profile.
-    expect(bypassAttempts.mcpArgs).toContain("--read-only");
+    // The copyable MCP config for a shared view carries the share's level, so
+    // the launched server registers only the write tools that level grants.
+    // This share was created at "view", which grants none.
+    expect(bypassAttempts.mcpArgs.join(" ")).toContain("--share-access view");
     // The engine Y.Doc editor session is refused (never opens a writable session
     // in a shared view), and applying an update to it is an inert no-op.
     expect(bypassAttempts.engineYDocAvailable).toBe(false);
@@ -558,6 +560,169 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
     expect(await readFile(join(temp.rootPath, "notes/mine.md"), "utf8")).toContain(
       "Host workspace file",
     );
+  } finally {
+    await relay?.stop();
+    if (desktop) await cleanupDesktopWorkspace(desktop, temp);
+    else await temp.cleanup();
+  }
+});
+
+test("comment side: a recipient chats about a shared file and the message reaches the granter's log", async () => {
+  // #646 PR2 — the whole loop for a COMMENT share, through the real app: the
+  // relay serves the granter's files, the recipient opens the share, writes a
+  // thread and a message on a shared file through the IPC boundary, and the
+  // message lands in the GRANTER's own log under this share's origin.
+  //
+  // The last step is what makes this an end-to-end test rather than a local
+  // one: the recipient's chat is only chat once it reaches the person who
+  // shared the file. It is read back over HTTP as the granter, because a
+  // second Electron app would collide with this one on the user-data dir.
+  test.setTimeout(240_000);
+  const temp = await createTempWorkspace();
+  const workspaceId = "share-comment-e2e";
+  let relay: SyncRelayHandle | null = null;
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
+    const granter = new RelayFilePeer({
+      baseUrl: relay.baseUrl,
+      token: GRANTER_TOKEN,
+      workspaceId,
+    });
+    await granter.writeTextFiles([
+      { path: "docs/shared.md", text: "# Shared\n\nThe comet-tail draft.\n" },
+      { path: "private/hidden.md", text: "The kraken ledger stays private.\n" },
+    ]);
+
+    const create = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${workspaceId}/shares`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          recipientEmail: RECIPIENT_EMAIL,
+          paths: ["docs"],
+          access: "comment",
+        }),
+      },
+    );
+    expect(create.status).toBe(200);
+    const shareId = (JSON.parse(create.body) as { shareId: string }).shareId;
+
+    await seedCloudCredentials(temp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: RECIPIENT_EMAIL,
+      userId: "e2e-recipient",
+      token: RECIPIENT_TOKEN,
+    });
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+
+    await page.getByTestId("first-run-open-share").click();
+    await expect(page.getByTestId("open-shared-view")).toBeVisible();
+    await page.getByTestId("open-share-code").fill(`dohc-share:${shareId}:${relay.baseUrl}`);
+    await page.getByTestId("open-share-choose-folder").click();
+    await expect(page.getByTestId("open-shared-view")).toContainText(temp.rootPath);
+    await page.getByTestId("open-share-start").click();
+    await expect(page.getByTestId("workspace-shell")).toBeVisible();
+
+    // The banner states the right the share actually grants.
+    const banner = page.getByTestId("shared-view-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText("You can chat about these files, not edit them.");
+
+    // The chat, written through the IPC boundary main owns. The renderer's
+    // affordances are honesty; this is the authorization surface.
+    const chat = await page.evaluate(async () => {
+      const api = (window as unknown as {
+        dohcDesktop: Pick<
+          DohcDesktopBridge,
+          | "getWorkspaceRegistry"
+          | "createFileChat"
+          | "sendChatMessage"
+          | "listFileChats"
+          | "listChatMessages"
+          | "listChatChannels"
+        >;
+      }).dohcDesktop;
+      const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
+      const created = await api.createFileChat({
+        workspaceId,
+        path: "docs/shared.md",
+        title: "About the comet tail",
+      });
+      await api.sendChatMessage({
+        workspaceId,
+        threadId: created.thread.id,
+        body: "Which comet is this?",
+      });
+      const threads = await api.listFileChats({ workspaceId, path: "docs/shared.md" });
+      const messages = await api.listChatMessages({
+        workspaceId,
+        threadId: created.thread.id,
+      });
+      // The workspace-wide listing is NOT routed to a share view: a share
+      // view gets per-file chat only, and #627 is the reason the whole
+      // surface is refused rather than filtered.
+      let channels: string;
+      try {
+        await api.listChatChannels({ workspaceId });
+        channels = "answered";
+      } catch (error) {
+        channels = error instanceof Error ? error.message : String(error);
+      }
+      return {
+        threadId: created.thread.id,
+        threadTitles: threads.threads.map((thread) => thread.title),
+        bodies: messages.messages.map((message) => message.body),
+        channels,
+      };
+    });
+    expect(chat.threadTitles).toContain("About the comet tail");
+    expect(chat.bodies).toContain("Which comet is this?");
+    expect(chat.channels).not.toBe("answered");
+
+    // The proof: the message is in the GRANTER's own log, under this share's
+    // namespaced origin, carrying the recipient's server-derived identity and
+    // the file named by PATH (the recipient's object ids mean nothing here).
+    await expect
+      .poll(
+        async () => {
+          const page = await relayJson(
+            relay!.baseUrl,
+            GRANTER_TOKEN,
+            `/sync/${workspaceId}/log?since=0&limit=500`,
+          );
+          if (page.status !== 200) return `status ${page.status}`;
+          const ops = (
+            JSON.parse(page.body) as {
+              ops: Array<{ originId: string; opKind: string; payload: Record<string, unknown> }>;
+            }
+          ).ops.filter((op) => op.originId.startsWith(`share:${shareId}:`));
+          const create = ops.find((op) => op.opKind === "chat.thread.create");
+          const message = ops.find((op) => op.opKind === "chat.message.append");
+          if (!create || !message) return `kinds: ${ops.map((op) => op.opKind).join(",")}`;
+          return {
+            linkedPath: create.payload.linkedPath,
+            linkedObjectId: create.payload.linkedObjectId ?? null,
+            body: message.payload.body,
+            authorUserId: message.payload.authorUserId,
+          };
+        },
+        { timeout: 60_000, intervals: [1_000] },
+      )
+      .toEqual({
+        linkedPath: "docs/shared.md",
+        // The granter mints its own object ids, so the recipient's never
+        // crosses — and the relay refuses a create that carries both.
+        linkedObjectId: null,
+        body: "Which comet is this?",
+        authorUserId: "e2e-recipient",
+      });
   } finally {
     await relay?.stop();
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);

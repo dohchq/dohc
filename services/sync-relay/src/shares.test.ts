@@ -254,35 +254,81 @@ describe("share grants", () => {
     expect((await json(response)).code).toBe("invalid_access");
   });
 
-  // PR1 keeps the append route refusing EVERY path/version selector with the
-  // SAME code and body, whatever its level (decision 7) — a level-specific
-  // refusal would fingerprint the selector's access to a probing recipient
-  // before PR2 opens comment/edit appends. Byte-identical bodies are the
+  // #646 PR2 opens the append route to comment and edit file shares. What
+  // must NOT change is the refusal a VIEW share gets: one code, and a body
+  // byte-identical to the one a read-only chat-channel grant gets. A refusal
+  // that differed by selector kind or by level would let a probing recipient
+  // read the grant it was refused. Byte-identical bodies are the
   // anti-fingerprinting property itself, not a proxy for it.
-  it("refuses a recipient append on every path-share level with the identical share_read_only body", async () => {
+  it("refuses a view share's append with a body byte-identical to a read-only channel grant's", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
-    const bodies: string[] = [];
-    for (const access of ["view", "comment", "edit"] as const) {
-      const create = await h(
+
+    const viewShare = await json(
+      await h(
         request(
           GRANTER,
           `/sync/${WORKSPACE}/shares`,
-          jsonBody({ recipientUserId: RECIPIENT, paths: [`docs-${access}`], access }),
+          jsonBody({ recipientUserId: RECIPIENT, paths: ["docs-view"], access: "view" }),
         ),
-      );
-      const shareId = (await json(create)).shareId as string;
+      ),
+    );
+    const channelShare = await json(
+      await h(
+        request(
+          GRANTER,
+          `/sync/${WORKSPACE}/shares`,
+          jsonBody({
+            recipientUserId: RECIPIENT,
+            channelWireId: "wire-broadcast",
+            access: "read-only",
+          }),
+        ),
+      ),
+    );
+    const bodies: string[] = [];
+    for (const shareId of [viewShare.shareId as string, channelShare.shareId as string]) {
       const append = await h(
         request(RECIPIENT, `/sync/shares/${shareId}/log`, jsonBody({ originId: "o", ops: [] })),
       );
-      expect(append.status, access).toBe(403);
+      expect(append.status, shareId).toBe(403);
       const body = await append.text();
-      expect(JSON.parse(body).code, access).toBe("share_read_only");
+      expect(JSON.parse(body).code, shareId).toBe("share_read_only");
       bodies.push(body);
     }
-    expect(bodies[0]).toBe(bodies[1]);
-    expect(bodies[1]).toBe(bodies[2]);
+    expect(
+      bodies[0],
+      "MUTATION: a view share's refusal must not be distinguishable from a read-only channel's",
+    ).toBe(bodies[1]);
+  });
+
+  // The other half of the same gate: comment and edit are past it in PR2. An
+  // empty batch is the smallest thing that proves the LEVEL decided, with no
+  // per-op filtering in the way.
+  it("accepts an empty append batch on a comment or edit file share", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    for (const access of ["comment", "edit"] as const) {
+      const created = await json(
+        await h(
+          request(
+            GRANTER,
+            `/sync/${WORKSPACE}/shares`,
+            jsonBody({ recipientUserId: RECIPIENT, paths: [`docs-${access}`], access }),
+          ),
+        ),
+      );
+      const append = await h(
+        request(
+          RECIPIENT,
+          `/sync/shares/${created.shareId as string}/log`,
+          jsonBody({ originId: "o", ops: [] }),
+        ),
+      );
+      expect(append.status, access).toBe(200);
+    }
   });
 
   it("refuses secret paths, traversal, empty selectors, and self-shares at grant time", async () => {

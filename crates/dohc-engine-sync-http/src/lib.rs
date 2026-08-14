@@ -12,8 +12,8 @@ use dohc_engine_sync::{
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_INGEST_BLOB_BYTES,
     MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, ObservedBytes, ProbeRequest, ProbeResponse, PullRequest,
     PullResponse, PushRequest, PushResponse, RelayError, RelayTransport, ReplicationEnvelope,
-    ShareBlobRequest, ShareReplicationEnvelope, ShareViewRequest, ShareViewResponse,
-    SharedChannelRequest, SharedChannelResponse,
+    ShareBlobRequest, ShareLogPushRequest, ShareReplicationEnvelope, ShareViewRequest,
+    ShareViewResponse, SharedChannelRequest, SharedChannelResponse,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::http::{Response, Uri};
@@ -549,10 +549,7 @@ impl RelayTransport for HttpRelayTransport {
         })
     }
 
-    fn shared_channel_push(
-        &self,
-        req: SharedChannelRequest,
-    ) -> Result<SharedChannelResponse, RelayError> {
+    fn share_log_push(&self, req: ShareLogPushRequest) -> Result<PushResponse, RelayError> {
         validate_outbound_payloads(req.ops.iter().map(|op| &op.payload))?;
         let body = WireSharePushRequest {
             origin_id: &req.origin_id,
@@ -566,16 +563,11 @@ impl RelayTransport for HttpRelayTransport {
                 .send_json(body),
             RequestContext::Share,
         )?;
-        Ok(SharedChannelResponse {
-            ops: Vec::new(),
-            next_cursor: req.cursor,
-            has_more: false,
-            push: Some(PushResponse {
-                accepted: wire.accepted,
-                inserted: wire.inserted,
-                skipped: wire.skipped,
-                current_max_origin_seq: wire.current_max_origin_seq,
-            }),
+        Ok(PushResponse {
+            accepted: wire.accepted,
+            inserted: wire.inserted,
+            skipped: wire.skipped,
+            current_max_origin_seq: wire.current_max_origin_seq,
         })
     }
 

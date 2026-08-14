@@ -1198,12 +1198,20 @@ export function EngineMomentDiffPage({
 // (channels, DMs, file threads) or the ACTIVE file's chats. Runtime-only.
 type ChatsPanelTab = "all" | "file";
 
+const CHATS_PANEL_TAB_LABELS: Record<ChatsPanelTab, string> = {
+  all: "Chats",
+  file: "This file",
+};
+// Every workspace this machine owns offers both. A shared view offers the
+// file tab only: it has no workspace-wide chat listing, by design (#646).
+
 // The right-hand Chats panel — dohc's secondary sidebar (VS Code grammar:
 // toggleable, resizable, persistent width, gone entirely while hidden).
 function ChatsPanel(props: {
   width: number;
   onWidthChange: (width: number) => void;
   onCollapse: () => void;
+  tabs: readonly ChatsPanelTab[];
   tab: ChatsPanelTab;
   onTabChange: (tab: ChatsPanelTab) => void;
   actions?: ReactNode;
@@ -1258,12 +1266,7 @@ function ChatsPanel(props: {
           meet the tab strip's on the same pixel row. */}
       <header className="flex h-9 shrink-0 items-center border-b border-line px-3">
         <div className="flex items-center gap-0.5">
-          {(
-            [
-              ["all", "Chats"],
-              ["file", "This file"],
-            ] as const
-          ).map(([tab, label]) => (
+          {props.tabs.map((tab) => (
             <button
               key={tab}
               type="button"
@@ -1276,7 +1279,7 @@ function ChatsPanel(props: {
                   : "text-muted hover:bg-line/40 hover:text-ink"
               }`}
             >
-              {label}
+              {CHATS_PANEL_TAB_LABELS[tab]}
             </button>
           ))}
         </div>
@@ -2362,6 +2365,9 @@ export function DesktopWorkspaceShell(props: {
   // Which surface the right-hand Chats panel shows (all chats vs the active
   // file's). Runtime-only — not persisted.
   const [chatsPanelTab, setChatsPanelTab] = useState<ChatsPanelTab>("all");
+  // A shared view offers the "This file" tab only (#646 PR2), so the panel
+  // opens there whatever the runtime state carried in from another workspace.
+  const chatsPanelActiveTab: ChatsPanelTab = isShareView ? "file" : chatsPanelTab;
   const [searchChatTarget, setSearchChatTarget] = useState<{
     thread: ChatThreadRecord;
     focusMessageId?: string;
@@ -2643,6 +2649,13 @@ export function DesktopWorkspaceShell(props: {
   // deliberately installed no capture. Both halves are synchronous registry
   // facts, so this value never waits on anything.
   const engineSurfacesExist = engineEnabled && !isShareView;
+  // Chats is the one exception (#646 PR2). A share view still installs no
+  // capture, so history and versions stay gone — but main now answers chat
+  // from the SHARE scope instead of a capture, so the Chats panel opens. Only
+  // its "This file" tab: the per-file surface answers for a file the share
+  // already served, and a workspace-wide listing would be a superset to
+  // filter (decision 5, and the shape that produced #627).
+  const chatsSurfaceExists = engineEnabled || isShareView;
   // Whether main's capture will SERVE those surfaces. Main's status is the
   // single answer to "does anything record here", and it overrides the
   // renderer's own engine read: after a failed capture build that read still
@@ -4144,7 +4157,7 @@ export function DesktopWorkspaceShell(props: {
       } else if (secondarySidebarKey) {
         // CommandOrControl+Alt+B mirrors VS Code's secondary-sidebar toggle.
         // It is a no-op when the workspace has no Chats panel.
-        if (engineSurfacesExist) {
+        if (chatsSurfaceExists) {
           event.preventDefault();
           mutateWb(toggleChats);
         }
@@ -4164,8 +4177,8 @@ export function DesktopWorkspaceShell(props: {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
+    chatsSurfaceExists,
     closeActiveTab,
-    engineSurfacesExist,
     openEditorGroupRight,
     mutateWb,
     openSettings,
@@ -4253,11 +4266,11 @@ export function DesktopWorkspaceShell(props: {
             },
           ]
         : []),
-      // The Chats panel exists only for workspace-engine-flagged workspaces
-      // that are not shared views — no surface, no command. A workspace whose
-      // capture cannot serve chats keeps the command: the panel is still
-      // there, stating what dohc cannot do (#628).
-      ...(engineSurfacesExist
+      // The Chats panel exists for workspace-engine-flagged workspaces and
+      // for shared views (#646 PR2) — no surface, no command. A workspace
+      // whose capture cannot serve chats keeps the command: the panel is
+      // still there, stating what dohc cannot do (#628).
+      ...(chatsSurfaceExists
         ? [
             {
               id: "toggle-chats",
@@ -4317,7 +4330,7 @@ export function DesktopWorkspaceShell(props: {
       requestExplorerCreate,
       checkForDesktopUpdates,
       installDesktopUpdate,
-      engineSurfacesExist,
+      chatsSurfaceExists,
       openEditorGroupRight,
       openSettings,
       reportShellError,
@@ -4343,6 +4356,15 @@ export function DesktopWorkspaceShell(props: {
   // grant to pull with, so the refresh is skipped rather than failed, and the
   // banner says so instead of showing a level nobody can read.
   const shareViewDamaged = !!shareView?.damaged;
+  // Whether this share grants chat WRITES (#646 PR2), as one answer the
+  // banner and the composer both read. Positive recognition only: `view`, an
+  // absent level (which is what `damaged` leaves behind), and anything else
+  // unreadable all mean no. The renderer decides nothing with this — main
+  // refuses the write either way — but a surface that guessed generously
+  // would invite a write it then has to take back.
+  const shareViewChatWritable =
+    !shareViewDamaged &&
+    (shareView?.access === "comment" || shareView?.access === "edit");
   const [shareViewEnded, setShareViewEnded] = useState(!!shareView?.ended);
   const [shareRefreshing, setShareRefreshing] = useState(false);
   // Ops this share's pulls skipped, read from the RECORD, not from the last
@@ -4606,7 +4628,7 @@ export function DesktopWorkspaceShell(props: {
           visible: wb.sidebarVisible,
           onToggle: () => mutateWb(toggleSidebar),
         }}
-        {...(engineSurfacesExist
+        {...(chatsSurfaceExists
           ? {
               chatsSidebar: {
                 visible: wb.chatsVisible,
@@ -4678,7 +4700,13 @@ export function DesktopWorkspaceShell(props: {
               ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
               : shareViewDamaged
                 ? "dohc can't read what this share grants. Open the share again to restore it."
-                : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
+                : shareViewChatWritable
+                  ? // Edit reads the comment sentence on purpose (#646): its
+                    // document writes land in PR3, so until then its rights
+                    // are comment's, and a banner promising editing would be
+                    // a lie.
+                    `Shared view from ${shareView.granterEmail ?? "another dohc user"}. You can chat about these files, not edit them.`
+                  : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
           </span>
           {shareSkipped
             ? shareSkipNoticeLines(shareSkipped, shareView.granterEmail).map(
@@ -5083,15 +5111,17 @@ export function DesktopWorkspaceShell(props: {
               ) : isShareView ? (
                 // A persisted Chats tab on a shared view (#615). The
                 // neighbouring line blamed the Settings flag, and a share
-                // never touched it: the share's open installs no capture, so
-                // main refuses every Chats call. State the capability, and
-                // name the next step the tab really has.
+                // never touched it. #646 PR2 changed what is true here: a
+                // shared view HAS chat now, per file, and this tab is the
+                // workspace-wide listing it still does not get — so the copy
+                // states the capability the reader does have and points at
+                // the surface that answers.
                 <div
                   data-testid="chats-page-share-view"
                   className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
                 >
-                  A shared view has no chats. Close this tab to go back to the
-                  shared files.
+                  A shared view lists no chats. Open a shared file to chat
+                  about it.
                 </div>
               ) : !captureDecided ? (
                 // Main has not decided yet — a load state, not a claim (#542).
@@ -5238,20 +5268,23 @@ export function DesktopWorkspaceShell(props: {
         </main>
 
         {/* Chats panel — the right-hand secondary sidebar (flagged
-            workspaces that are not shared views). Hidden entirely while
-            collapsed; the titlebar Chats button, Ctrl+Alt+B, or the
-            toggle-chats command bring it back. History lives in the left
-            History view and the history tab — never here. */}
-        {engineSurfacesExist && wb.chatsVisible ? (
+            workspaces, and shared views with their file tab only). Hidden
+            entirely while collapsed; the titlebar Chats button, Ctrl+Alt+B,
+            or the toggle-chats command bring it back. History lives in the
+            left History view and the history tab — never here. */}
+        {chatsSurfaceExists && wb.chatsVisible ? (
           <ChatsPanel
             width={wb.chatsWidth}
             onWidthChange={(width) => mutateWb((state) => setChatsWidth(state, width))}
             onCollapse={() => mutateWb(toggleChats)}
-            tab={chatsPanelTab}
+            // A share view gets the file tab only: a workspace-wide listing
+            // would be a superset to filter, which is the shape #627 came from.
+            tabs={isShareView ? ["file"] : ["all", "file"]}
+            tab={chatsPanelActiveTab}
             onTabChange={setChatsPanelTab}
             actions={
               captureAvailable &&
-              chatsPanelTab === "all" &&
+              chatsPanelActiveTab === "all" &&
               !isChatsTabPath(focusedTabPath) ? (
                 <button
                   type="button"
@@ -5270,15 +5303,19 @@ export function DesktopWorkspaceShell(props: {
                 switching panel mode or workspace tab clears the failure. */}
             <ErrorBoundary
               scope="rail"
-              resetKeys={[chatsPanelTab, focusedTabPath]}
+              resetKeys={[chatsPanelActiveTab, focusedTabPath]}
             >
-              {!captureAvailable ? (
+              {!captureAvailable && !isShareView ? (
                 // Main's capture cannot serve chats here, so mounting either
                 // view below would issue calls it refuses and show the
                 // refusal as an error (#628). Chats is a persistent sidebar
                 // rather than a tab, so the panel stays where the user left
                 // it — and states the fact, with the one next step that can
                 // change it. Before the decision it states nothing (#542).
+                //
+                // A shared view needs no capture and waits for no decision:
+                // main answers its per-file chat from the share scope, and
+                // its only tab is the file tab (#646 PR2).
                 !captureDecided ? (
                   <PanelLoading label="Chats" />
                 ) : (
@@ -5289,11 +5326,12 @@ export function DesktopWorkspaceShell(props: {
                     {chatsOffCopy(syncStatus)}
                   </div>
                 )
-              ) : chatsPanelTab === "file" ? (
+              ) : chatsPanelActiveTab === "file" ? (
                 <Suspense fallback={<PanelLoading label="Chats" />}>
                   <LazyLinkedChatsPanel
                     workspaceId={workspaceId}
                     filePath={activeDocumentPath}
+                    {...(shareView ? { shareReadOnly: !shareViewChatWritable } : {})}
                     initialThread={searchChatTarget?.thread ?? null}
                     initialFocusMessageId={searchChatTarget?.focusMessageId}
                     onInitialThreadConsumed={() => setSearchChatTarget(null)}

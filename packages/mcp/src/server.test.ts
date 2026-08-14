@@ -4,8 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 import { createDohcMcpServer, parseArgs } from "./server";
 import type { ToolContext } from "./tools";
 
-// The mutating tools that a read-only shared-view server must never expose.
-const WRITE_TOOLS = [
+// The two write tiers a share level decides between (#646). A document write
+// changes the granter's files; a chat write posts to a thread.
+const DOCUMENT_WRITE_TOOLS = [
   "dohc_write_file",
   "dohc_create_directory",
   "dohc_move_path",
@@ -15,8 +16,15 @@ const WRITE_TOOLS = [
   "dohc_import_data",
   "dohc_publish_site",
   "dohc_share",
-  "dohc_start_channel_chat",
-  "dohc_reply_to_chat",
+];
+
+const CHAT_WRITE_TOOLS = ["dohc_start_channel_chat", "dohc_reply_to_chat"];
+
+const READ_TOOLS = [
+  "dohc_list_files",
+  "dohc_read_file",
+  "dohc_search_files",
+  "dohc_workspace_status",
 ];
 
 async function connectedToolNames(ctx: ToolContext): Promise<{ names: string[]; client: Client }> {
@@ -37,44 +45,79 @@ async function connectedTools(ctx: ToolContext): Promise<Array<{ name: string; d
   return listed.tools.map((tool) => ({ name: tool.name, description: tool.description }));
 }
 
-describe("read-only shared-view profile", () => {
+describe("share-level tool profiles", () => {
   const base: ToolContext = { root: "/tmp/shared-view", home: "/tmp/home" };
 
-  it("parses the --read-only flag", () => {
-    expect(parseArgs(["--workspace", "/w", "--home", "/h", "--read-only"])).toMatchObject({
+  it("parses the --share-access flag", () => {
+    expect(parseArgs(["--workspace", "/w", "--home", "/h", "--share-access", "comment"])).toMatchObject({
       root: "/w",
       home: "/h",
-      readOnly: true,
+      shareAccess: "comment",
     });
-    expect(parseArgs(["--workspace", "/w", "--home", "/h"])).not.toHaveProperty("readOnly");
+    expect(parseArgs(["--workspace", "/w", "--home", "/h"])).not.toHaveProperty("shareAccess");
   });
 
-  it("registers NO mutating tools and keeps read tools", async () => {
-    const { names } = await connectedToolNames({ ...base, readOnly: true });
-    for (const tool of WRITE_TOOLS) {
+  it("refuses an unrecognized --share-access value", () => {
+    // The refusal names the flag, the levels, and what it was given — an agent
+    // reads the error, not this file.
+    expect(() => parseArgs(["--share-access", "read-only"])).toThrow(
+      '--share-access must be one of view, comment, edit. Received: "read-only".',
+    );
+    expect(() => parseArgs(["--share-access"])).toThrow(
+      "--share-access must be one of view, comment, edit. Received: no value.",
+    );
+  });
+
+  it("registers NO write tools for a view profile and keeps read tools", async () => {
+    const { names } = await connectedToolNames({ ...base, shareAccess: "view" });
+    for (const tool of [...DOCUMENT_WRITE_TOOLS, ...CHAT_WRITE_TOOLS]) {
       expect(names, tool).not.toContain(tool);
     }
     // The read surface is still available so agents can browse a shared view.
-    for (const tool of ["dohc_list_files", "dohc_read_file", "dohc_search_files", "dohc_workspace_status"]) {
+    for (const tool of READ_TOOLS) {
       expect(names, tool).toContain(tool);
     }
   });
 
-  it("still exposes the mutating tools in the normal (writable) profile", async () => {
+  // #646 PR2 registers NO write tool at any level, chat included. The two
+  // chat tools are CHANNEL tools, and a shared view refuses every channel
+  // write before the level is read; `comment` grants per-FILE chat, which no
+  // MCP tool writes yet. A tool the workspace always refuses is worse than an
+  // absent one — the agent spends a turn discovering the refusal.
+  it("registers no write tool at all for a comment profile, chat tools included", async () => {
+    const { names } = await connectedToolNames({ ...base, shareAccess: "comment" });
+    for (const tool of [...DOCUMENT_WRITE_TOOLS, ...CHAT_WRITE_TOOLS]) {
+      expect(
+        names,
+        `${tool}: MUTATION: offering a write tool a shared view always refuses`,
+      ).not.toContain(tool);
+    }
+    for (const tool of READ_TOOLS) {
+      expect(names, tool).toContain(tool);
+    }
+  });
+
+  it("offers an edit profile exactly the comment profile's tools (PR3 opens document writes)", async () => {
+    const { names: comment } = await connectedToolNames({ ...base, shareAccess: "comment" });
+    const { names: edit } = await connectedToolNames({ ...base, shareAccess: "edit" });
+    expect([...edit].sort()).toEqual([...comment].sort());
+  });
+
+  it("registers both write tiers for a local workspace (no share level)", async () => {
     const { names } = await connectedToolNames(base);
-    for (const tool of WRITE_TOOLS) {
+    for (const tool of [...DOCUMENT_WRITE_TOOLS, ...CHAT_WRITE_TOOLS]) {
       expect(names, tool).toContain(tool);
     }
   });
 
-  it("refuses to invoke a write tool that a read-only server never registered", async () => {
-    const { client } = await connectedToolNames({ ...base, readOnly: true });
+  it("refuses to invoke a document write tool a comment server never registered", async () => {
+    const { client } = await connectedToolNames({ ...base, shareAccess: "comment" });
     const result = (await client.callTool({
       name: "dohc_write_file",
       arguments: { path: "docs/a.md", content: "x" },
     })) as { isError?: boolean; content?: Array<{ text?: string }> };
-    // The tool does not exist in a read-only server, so the call is refused
-    // (never reaching any filesystem write path).
+    // The tool does not exist on this server, so the call is refused (never
+    // reaching any filesystem write path).
     expect(result.isError).toBe(true);
     expect(result.content?.[0]?.text ?? "").toContain("not found");
   });

@@ -149,9 +149,20 @@ pub fn apply_shared_envelope(
     faults: &dyn FaultInjector,
 ) -> Result<ApplyOutcome<i64>, SyncError> {
     crate::model::bounded(&boundary.share_id, "share_id must be non-empty and bounded")?;
-    if boundary.surface == ShareSurface::ShareView {
+    // #646 PR2: a file share carries chat about the files it shares, and chat
+    // needs the store. `chat.message.append` carries no path, only a threadId,
+    // so the file it belongs to is a fact the store holds — the same situation
+    // the SharedChannel path already solves by validating inside the write
+    // transaction. File ops still need no store state and keep their
+    // before-the-transaction check.
+    let share_view_chat =
+        boundary.surface == ShareSurface::ShareView && is_share_view_chat_kind(&envelope.op_kind);
+    if boundary.surface == ShareSurface::ShareView && !share_view_chat {
         enforce_share_view_boundary(boundary, envelope)?;
         return Ok(ApplyOutcome::Applied(envelope.origin_seq));
+    }
+    if share_view_chat {
+        enforce_share_view_thread_create(boundary, envelope)?;
     }
 
     let source_origin_id = envelope.origin_id.clone();
@@ -175,7 +186,11 @@ pub fn apply_shared_envelope(
 
     let mut replay_refusals = Vec::new();
     let outcome = apply_envelope_with(store, &dense, faults, |tx, op| {
-        enforce_shared_channel_boundary(tx, boundary, op)?;
+        if share_view_chat {
+            enforce_share_view_chat_boundary(tx, boundary, op)?;
+        } else {
+            enforce_shared_channel_boundary(tx, boundary, op)?;
+        }
         replay_refusals = crate::apply::apply_chat_tx(tx, op)?;
         advance_shared_peer_tx(
             tx,
@@ -267,6 +282,173 @@ fn enforce_shared_channel_boundary(
     Ok(())
 }
 
+/// The EXACTLY five chat kinds a file share carries (#646 PR2), mirroring the
+/// relay's own allowlist (`services/sync-relay/src/shareFilter.ts`,
+/// `filterFileChatOpForPathShare`).
+///
+/// `chat.follow.set` and `chat.feed.read.set` are absent on purpose: they are
+/// the reader's OWN state, for the same reason written above for the channel
+/// branch's terminal deny. `chat.channel.create` is a channel's bootstrap and
+/// a file share has no channel. Everything not named here reaches
+/// `enforce_share_view_boundary` and is refused as a kind a share does not
+/// carry.
+pub(crate) const SHARE_VIEW_CHAT_KINDS: [&str; 5] = [
+    "chat.thread.create",
+    "chat.message.append",
+    "chat.reaction.set",
+    "chat.decision.set",
+    "chat.attachment.add",
+];
+
+pub(crate) fn is_share_view_chat_kind(op_kind: &str) -> bool {
+    SHARE_VIEW_CHAT_KINDS.contains(&op_kind)
+}
+
+/// Whether a chat op about `path` is inside this grant (#646 PR2).
+///
+/// Chat follows PATHS, and only paths. A grant with no paths is a VERSION
+/// share, and `path_within_grant` reads an empty path list as "every tracked
+/// path" — which for chat would admit the live discussion about every file on
+/// main, including files that were never in the shared version. A version
+/// share is a snapshot; the conversation is not in it. The relay refuses the
+/// same shape (`services/sync-relay/src/shareFilter.ts`), and this is the
+/// recipient's own answer to the same question.
+pub(crate) fn chat_path_within_grant(path: &str, granted: &ShareGrant) -> bool {
+    !granted.paths.is_empty()
+        && classify_share_path(path) == PathClass::Tracked
+        && path_within_grant(path, granted)
+}
+
+/// The BEFORE-the-transaction half of the ShareView chat boundary, for the one
+/// kind that carries its own file: a served `chat.thread.create` names the
+/// granted PATH.
+///
+/// It is a path and never an object id because the served `moment.append`
+/// deliberately drops the granter's `objectId`
+/// (`services/sync-relay/src/shareFilter.ts`), so this store minted its own
+/// and a granter object id would name nothing here. `linkedObjectId` and
+/// `linkedPathHint` are therefore shapes a share NEVER carries, and a relay
+/// offering one is offering something this boundary must not place — which is
+/// a malformed payload, not a scope decision, because no grant admits it and
+/// widening the share changes nothing.
+fn enforce_share_view_thread_create(
+    boundary: &ShareBoundary,
+    op: &ReplicationEnvelope,
+) -> Result<(), SyncError> {
+    if op.op_kind != "chat.thread.create" {
+        return Ok(());
+    }
+    let granted = boundary
+        .granted
+        .as_ref()
+        .ok_or(SyncError::ShareBoundaryViolation)?;
+    if op.payload.get("linkedObjectId").is_some() || op.payload.get("linkedPathHint").is_some() {
+        return Err(SyncError::InvalidInput {
+            reason: "share-view chat.thread.create must carry linkedPath, never a linked object id or path hint",
+        });
+    }
+    let path =
+        op.payload
+            .get("linkedPath")
+            .and_then(Value::as_str)
+            .ok_or(SyncError::InvalidInput {
+                reason: "share-view chat.thread.create must carry a linkedPath string",
+            })?;
+    if !chat_path_within_grant(path, granted) {
+        return Err(SyncError::ShareBoundaryViolation);
+    }
+    Ok(())
+}
+
+/// The INSIDE-the-transaction half. The four thread-scoped kinds carry no file
+/// of their own — only a `threadId` — so the file they belong to is a fact
+/// this store holds: `thread_id -> chat_threads.linked_object_id -> that
+/// object's current local path -> inside the pinned grant`.
+///
+/// Unresolved denies at every hop. A thread this store does not have, a thread
+/// bound to no file, and a file whose object no longer sits at any path are all
+/// the same answer: the share does not cover this op.
+fn enforce_share_view_chat_boundary(
+    tx: &Transaction<'_>,
+    boundary: &ShareBoundary,
+    op: &ReplicationEnvelope,
+) -> Result<(), SyncError> {
+    let granted = boundary
+        .granted
+        .as_ref()
+        .ok_or(SyncError::ShareBoundaryViolation)?;
+    match op.op_kind.as_str() {
+        // Decided before the transaction, against the path it carries itself.
+        // Re-running that rule here would restate it against the same bytes.
+        "chat.thread.create" => Ok(()),
+        "chat.message.append"
+        | "chat.reaction.set"
+        | "chat.decision.set"
+        | "chat.attachment.add" => {
+            let thread_id = op
+                .payload
+                .get("threadId")
+                .and_then(Value::as_str)
+                .ok_or(SyncError::ShareBoundaryViolation)?;
+            let path = thread_linked_path(tx, &op.workspace_id, thread_id)?
+                .ok_or(SyncError::ShareBoundaryViolation)?;
+            if !chat_path_within_grant(&path, granted) {
+                return Err(SyncError::ShareBoundaryViolation);
+            }
+            Ok(())
+        }
+        _ => Err(SyncError::ShareBoundaryViolation),
+    }
+}
+
+/// Where the file a thread is about sits RIGHT NOW, locally. The file sibling
+/// of `thread_bound_to_wire`: `thread_id -> chat_threads.linked_object_id ->
+/// path_aliases` in the workspace's main version. `None` at any hop.
+/// The file a thread is about, as this replica records it.
+pub(crate) fn thread_linked_object(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<Option<String>, SyncError> {
+    conn.query_row(
+        "SELECT linked_object_id FROM chat_threads WHERE workspace_id = ?1 AND thread_id = ?2",
+        params![workspace_id, thread_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(SyncError::corrupt)
+}
+
+/// Where an object sits in this workspace's main version RIGHT NOW.
+pub(crate) fn object_main_path(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<Option<String>, SyncError> {
+    conn.query_row(
+        "SELECT path FROM path_aliases \
+         WHERE workspace_id = ?1 AND object_id = ?2 \
+           AND version_id = (SELECT main_version_id FROM versioned_workspaces \
+                             WHERE workspace_id = ?1)",
+        params![workspace_id, object_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(SyncError::corrupt)
+}
+
+fn thread_linked_path(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<Option<String>, SyncError> {
+    let Some(object_id) = thread_linked_object(tx, workspace_id, thread_id)? else {
+        return Ok(None);
+    };
+    object_main_path(tx, workspace_id, &object_id)
+}
+
 /// Whether `thread_id` resolves to a channel carrying the granted wire id.
 /// `thread_id -> chat_threads.channel_id -> chat_channel_wire_ids.wire_id`.
 fn thread_bound_to_wire(
@@ -327,8 +509,12 @@ fn enforce_share_view_boundary(
         .as_ref()
         .ok_or(SyncError::ShareBoundaryViolation)?;
     if !matches!(op.op_kind.as_str(), "moment.append" | "version.create") {
-        // A KNOWN kind a share does not carry is a scope decision — a chat op
-        // or a secret op is outside what any file share covers. A kind this
+        // A KNOWN kind a share does not carry is a scope decision — a secret
+        // op, or a chat kind outside the five in `SHARE_VIEW_CHAT_KINDS`
+        // (which never reach here), is outside what any file share covers.
+        // That is where `chat.follow.set` and `chat.feed.read.set` land: the
+        // reader's own state, refused by falling through to this deny. A kind
+        // this
         // engine cannot interpret is not: no grant admits it, widening the
         // share changes nothing, and only the sender can fix it.
         return Err(if crate::router::is_owned_op_kind(&op.op_kind) {
@@ -440,7 +626,7 @@ fn enforce_share_view_boundary(
 /// (`validateShareSelector`, `empty_selector`). Reading no paths as "the whole
 /// workspace" regardless of version is exactly the divergence that would let a
 /// grant the relay serves NOTHING through admit everything here.
-fn path_within_grant(path: &str, grant: &ShareGrant) -> bool {
+pub(crate) fn path_within_grant(path: &str, grant: &ShareGrant) -> bool {
     if grant.paths.is_empty() {
         return grant.version_id.is_some();
     }

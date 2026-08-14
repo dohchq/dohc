@@ -31,6 +31,7 @@ import type {
   EngineMomentRecord,
   FileChatThreadRecord,
   ListEngineMomentsResult,
+  ListFileChatsResult,
   ListWorkspaceVersionsResult,
   McpConfigResult,
   PluginPanelOpenedEvent,
@@ -575,7 +576,9 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       async (_payload: SyncDmsPayload): Promise<SyncDmsResult> =>
         dmSyncResult([], false),
     ),
-    listFileChats: vi.fn(async () => ({ fileObjectId: null, threads: [] })),
+    listFileChats: vi.fn(
+      async (): Promise<ListFileChatsResult> => ({ fileObjectId: null, threads: [] }),
+    ),
   });
 }
 
@@ -641,9 +644,14 @@ const SHARE_VIEW: Workspace = {
 
 // A bridge that answers the way MAIN answers for a shared view: the capture
 // gate short-circuits before the settings read, so requireEngineCapture has
-// no capture and every engine call is refused with engineOffRefusal copy. A
-// fake that resolved these would model more than main can do, and every
-// no-call pin below would pass even after the fix was reverted.
+// no capture and every capture-backed call is refused with engineOffRefusal
+// copy. A fake that resolved these would model more than main can do, and
+// every no-call pin below would pass even after the fix was reverted.
+//
+// `listFileChats` is the one that ANSWERS (#646 PR2): main resolves a chat
+// scope from the share instead of a capture, so the per-file chat surface is
+// served at every level. A fake that still refused it would model less than
+// main can do, and every pin written against it would certify fiction.
 function makeShareBridge(
   uiState: Promise<WorkspaceUiState | null> = Promise.resolve(null),
 ) {
@@ -659,7 +667,6 @@ function makeShareBridge(
   for (const call of [
     "listChatChannels",
     "listChannelThreads",
-    "listFileChats",
     "listChatFileMentions",
     "syncDms",
   ] as const) {
@@ -667,16 +674,22 @@ function makeShareBridge(
       new Error("Chats are not enabled for this workspace."),
     );
   }
+  bridge.listFileChats.mockResolvedValue({
+    fileObjectId: "share-object-1",
+    threads: [],
+  });
   return bridge;
 }
 
-// The non-vacuity probe for a shared view (#615). Every engine surface is
-// hidden there now — the version selector, the Chats panel, the titlebar
-// Chats button — so no rendered control can prove the renderer's capability
-// read resolved engine-ON, and a no-call pin asserted before that read lands
-// would pass for the wrong reason. The read itself carries the proof: wait
-// until the shell asked, confirm the answer is engine-ON, then flush the
-// state update that answer commits.
+// The non-vacuity probe for a shared view (#615). The capture-backed surfaces
+// are hidden there — the version selector, the history timeline, the graph's
+// chat mentions — so no rendered control proves the renderer's capability read
+// resolved engine-ON, and a no-call pin asserted before that read lands would
+// pass for the wrong reason. The read itself carries the proof: wait until the
+// shell asked, confirm the answer is engine-ON, then flush the state update
+// that answer commits. (The Chats panel and its titlebar button render for a
+// shared view since #646 PR2, but they render off `isShareView`, not off this
+// read, so they still prove nothing about it.)
 async function settleEngineOnRead(bridge: ReturnType<typeof makeEngineBridge>) {
   await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalled());
   const read = await bridge.getWorkspaceSettings();
@@ -5406,10 +5419,9 @@ describe("active file sharing", () => {
   });
 });
 
-// In PR1 every level grants exactly these rights, so the banner reads the
-// same at every level (#646). The per-level sentences the design specifies
-// ship with the rights they describe — PR2 for chat, PR3 for edits — because
-// a banner that promised chat now would lie until PR2 opens the append gate.
+// The banner states the level's real rights (#646). PR2 opens chat at comment
+// and edit; edit's document writes land in PR3, so edit reads the comment
+// sentence until then — a banner promising editing now would be a lie.
 // Removing a mount reprojects path-keyed UI state only when the folder
 // actually went. Record-only cleanup leaves the files exactly where they
 // were, so their tabs, pins and drafts must survive it.
@@ -5526,10 +5538,27 @@ describe("share unmount projection", () => {
     ).toEqual([]);
   });
 });
-
 describe("shared view banner", () => {
-  for (const access of ["view", "comment", "edit"] as const) {
-    it(`tells a ${access} recipient the view is read-only, because in PR1 it is`, async () => {
+  it("tells a view recipient the view is read-only", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, {
+      ...SHARE_VIEW,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "sam@dohc.test",
+        access: "view",
+      },
+    });
+
+    const banner = await screen.findByTestId("shared-view-banner");
+    expect(banner.textContent).toContain(
+      "Shared view from sam@dohc.test — read-only. Ask sam@dohc.test for changes.",
+    );
+    expect(banner.textContent).not.toContain("You can chat about");
+  });
+
+  for (const access of ["comment", "edit"] as const) {
+    it(`tells a ${access} recipient they can chat about these files, not edit them`, async () => {
       const bridge = makeShareBridge();
       renderShell(bridge, {
         ...SHARE_VIEW,
@@ -5542,11 +5571,11 @@ describe("shared view banner", () => {
 
       const banner = await screen.findByTestId("shared-view-banner");
       expect(banner.textContent, access).toContain(
-        "Shared view from sam@dohc.test — read-only. Ask sam@dohc.test for changes.",
+        "Shared view from sam@dohc.test. You can chat about these files, not edit them.",
       );
-      // MUTATION: shipping the PR2 sentences early would promise chat rights
+      expect(banner.textContent, access).not.toContain("read-only");
+      // MUTATION: shipping PR3's sentence early would promise document writes
       // the relay's append route still refuses at every level.
-      expect(banner.textContent, access).not.toContain("You can chat about");
       expect(banner.textContent, access).not.toContain("You can edit these files");
     });
   }
@@ -5576,6 +5605,23 @@ describe("shared view with an unreadable grant", () => {
     );
     // No level is stated, because none could be read.
     expect(banner.textContent).not.toContain("read-only. Ask");
+  });
+
+  // The chat half of the same stance (#646 PR2). A grant that names no
+  // readable level grants no writes: the panel opens read-only, exactly as a
+  // `view` share does. Asking whether the level is NOT `view` would answer
+  // "writable" for a level nobody can read.
+  it("opens chat read-only, because an unreadable grant grants no writes", async () => {
+    const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge, damaged);
+
+    await settleEngineOnRead(bridge);
+    await screen.findByTestId("chats-panel");
+    expect(
+      (await screen.findByTestId("linked-chat-readonly-note")).textContent,
+      "MUTATION: an unreadable level must not open the composer",
+    ).toBe("This shared file is read-only for you.");
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
   });
 
   // There is no grant to pull with, so the refresh is skipped rather than
@@ -10177,33 +10223,65 @@ describe("chats off copy", () => {
   });
 });
 
-// #615: a shared view gets no capture, so main refuses listChatChannels,
-// listFileChats, syncDms and listChatFileMentions — the panel, the tab and the
-// titlebar button all offered a capability the share never had, and showed the
-// refusal as an error. These pins cover the SHARE fact only; the failed
-// capture build on a normal workspace is the describe below (#628).
+// #615 pinned that a shared view gets no capture, so main refused every chat
+// call and the panel, the tab and the titlebar button all offered a capability
+// the share never had. #646 PR2 moves the line: main now answers the PER-FILE
+// chat from the share scope, so that surface opens. The property #615 really
+// protected survives, restated — a shared view reaches the per-file chat
+// surface and NEVER the workspace-wide listing. These pins cover the SHARE
+// fact only; the failed capture build on a normal workspace is the describe
+// below (#628).
 describe("shared view chats surface", () => {
-  it("offers no Chats on a shared view and never asks main for them", async () => {
-    // The stored state opens with the Chats panel visible, so an ungated
-    // shell mounts it immediately.
+  it("opens the per-file chat panel on a shared view and never asks for the workspace-wide listing", async () => {
+    // The stored state opens with the Chats panel visible and b.md focused.
+    const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge, SHARE_VIEW);
+
+    await settleEngineOnRead(bridge);
+    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
+    expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
+
+    // The file tab is the ONLY tab. A workspace-wide listing would be a
+    // superset to filter, which is the shape #627 came from.
+    expect(screen.getByTestId("chats-panel-tab-file")).toBeTruthy();
+    expect(screen.queryByTestId("chats-panel-tab-all")).toBeNull();
+    expect(screen.queryByTestId("chats-panel-off")).toBeNull();
+
+    await waitFor(() =>
+      expect(bridge.listFileChats).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        path: "b.md",
+      }),
+    );
+    // The level rides all the way to the composer: SHARE_VIEW is a `view`
+    // grant, and main refuses its chat writes with these words.
+    expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe(
+      "This shared file is read-only for you.",
+    );
+
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
+    expect(bridge.syncDms).not.toHaveBeenCalled();
+    expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // The two ways back in that outlive the titlebar button. #615 pinned both
+  // as absent; the surface they reach now exists, so both work — and neither
+  // reaches the workspace-wide listing.
+  it("keeps Ctrl+Alt+B and the toggle command on a shared view", async () => {
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     const user = userEvent.setup();
     renderShell(bridge, SHARE_VIEW);
 
     await settleEngineOnRead(bridge);
-    expect(screen.queryByTestId("chats-panel")).toBeNull();
-    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
-    expect(bridge.listChatChannels).not.toHaveBeenCalled();
-    expect(bridge.listFileChats).not.toHaveBeenCalled();
-    expect(bridge.syncDms).not.toHaveBeenCalled();
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await screen.findByTestId("chats-panel");
 
-    // The two ways back in that outlive the titlebar button.
     await user.keyboard("{Control>}{Alt>}b{/Alt}{/Control}");
-    expect(screen.queryByTestId("chats-panel")).toBeNull();
+    await waitFor(() => expect(screen.queryByTestId("chats-panel")).toBeNull());
+
     await user.keyboard("{Control>}k{/Control}");
     const palette = await screen.findByTestId("command-palette");
-    expect(within(palette).queryByText("Toggle chats panel")).toBeNull();
+    expect(within(palette).getByText("Toggle chats panel")).toBeTruthy();
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
   });
 
@@ -10214,10 +10292,12 @@ describe("shared view chats surface", () => {
     renderShell(bridge, SHARE_VIEW);
 
     // One line, per the empty-state recipe (copy.md): what is missing, then
-    // the next step this surface really has — the tab closes.
+    // the next step this surface really has. #646 PR2 changed BOTH halves —
+    // a shared view has per-file chat now, so "no chats" became false and
+    // "close this tab" stopped being the real next step.
     const placeholder = await screen.findByTestId("chats-page-share-view");
     expect(placeholder.textContent).toContain(
-      "A shared view has no chats. Close this tab to go back to the shared files.",
+      "A shared view lists no chats. Open a shared file to chat about it.",
     );
     expect(placeholder.className).toContain("text-sm");
     expect(placeholder.className).toContain("text-muted");
@@ -10237,6 +10317,10 @@ describe("shared view chats surface", () => {
 
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
     expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
+    // Both tabs. Collapsing every workspace to the share's file-only strip
+    // would keep the share pin above green.
+    expect(screen.getByTestId("chats-panel-tab-all")).toBeTruthy();
+    expect(screen.getByTestId("chats-panel-tab-file")).toBeTruthy();
     await waitFor(() => expect(bridge.listChatChannels).toHaveBeenCalled());
     expect(screen.queryByTestId("chats-panel-off")).toBeNull();
   });
@@ -10267,13 +10351,37 @@ describe("shared view chats surface", () => {
     );
   });
 
-  // Ctrl+Alt+B, on its own. The panel's gate hides it either way, so the only
-  // thing this shortcut still decides on a shared view is whether the shell
-  // CLAIMS the chord from whatever else would handle it.
-  it("does not claim Ctrl+Alt+B on a shared view", async () => {
+  // Ctrl+Alt+B, on its own: whether the shell CLAIMS the chord from whatever
+  // else would handle it. A shared view has a Chats panel to toggle now
+  // (#646 PR2), so it claims the chord — the same rule as any other
+  // workspace, and the pin below is the one that still separates the two.
+  it("claims Ctrl+Alt+B on a shared view", async () => {
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge, SHARE_VIEW);
     await settleEngineOnRead(bridge);
+
+    // A fresh event per attempt: the handler re-registers in a passive
+    // effect, and a stale event carries the previous attempt's verdict.
+    await waitFor(() => {
+      const event = new KeyboardEvent("keydown", {
+        key: "b",
+        ctrlKey: true,
+        altKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      window.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+    });
+  });
+
+  // The gate's other half, and the reason it is not simply deleted: a
+  // workspace with the engine flag OFF still has no Chats panel and must not
+  // claim the chord.
+  it("does not claim Ctrl+Alt+B when the engine flag is off", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
 
     const event = new KeyboardEvent("keydown", {
       key: "b",
@@ -10399,7 +10507,7 @@ describe("shared view chats surface", () => {
 
     const placeholder = await screen.findByTestId("chats-page-share-view");
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
-    expect(placeholder.textContent).toContain("A shared view has no chats.");
+    expect(placeholder.textContent).toContain("A shared view lists no chats.");
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
   });
 });

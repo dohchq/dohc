@@ -22,14 +22,34 @@ function errorMessage(cause: unknown): string {
   return text.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
 }
 
-// The levels this dialog shows, in order. Only View is selectable: Comment's
-// chat rights land with #646 PR2 and Edit's document writes with PR3, and an
-// option that promised a right the relay still refuses would be the dialog
-// lying about the grant. PR2 makes this a real choice.
-const ACCESS_OPTIONS: ReadonlyArray<{ value: ShareAccess; label: string }> = [
-  { value: "view", label: "View" },
-  { value: "comment", label: "Comment" },
-  { value: "edit", label: "Edit" },
+// The levels this dialog offers, in order. Comment's chat rights land here
+// with #646 PR2, so Comment is now selectable. Edit's document writes land
+// with PR3, so Edit stays unselectable: an option that promised a right the
+// relay still refuses would be the dialog lying about the grant.
+const ACCESS_OPTIONS: ReadonlyArray<{
+  value: ShareAccess;
+  label: string;
+  helper: string;
+  ready: boolean;
+}> = [
+  {
+    value: "view",
+    label: "View",
+    helper: "They can read what you selected.",
+    ready: true,
+  },
+  {
+    value: "comment",
+    label: "Comment",
+    helper: "They can read what you selected and chat about it.",
+    ready: true,
+  },
+  {
+    value: "edit",
+    label: "Edit",
+    helper: "They can read, chat, and edit what you selected.",
+    ready: false,
+  },
 ];
 
 export function RelayShareDialog(props: {
@@ -38,6 +58,7 @@ export function RelayShareDialog(props: {
   onClose: () => void;
 }) {
   const [email, setEmail] = useState("");
+  const [access, setAccess] = useState<ShareAccess>("view");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<{
@@ -60,9 +81,7 @@ export function RelayShareDialog(props: {
       const result = await bridge().createRelayShare({
         workspaceId: props.workspaceId,
         recipientEmail: email.trim(),
-        // PR1 grants exactly view rights at every level, and the picker offers
-        // only View, so this is the only level the dialog can send.
-        access: "view",
+        access,
         ...(props.target.paths
           ? { paths: props.target.paths }
           : props.target.path
@@ -121,13 +140,14 @@ export function RelayShareDialog(props: {
                   key={option.value}
                   type="button"
                   role="radio"
-                  aria-checked={option.value === "view"}
-                  disabled={option.value !== "view"}
+                  aria-checked={access === option.value}
+                  disabled={!option.ready}
                   data-testid={`share-access-${option.value}`}
+                  onClick={() => setAccess(option.value)}
                   className={`flex-1 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-                    option.value === "view"
+                    access === option.value
                       ? "border-ink bg-panel-2 text-ink"
-                      : "border-line bg-panel text-muted"
+                      : "border-line bg-panel text-muted enabled:hover:text-ink"
                   }`}
                 >
                   {option.label}
@@ -138,14 +158,16 @@ export function RelayShareDialog(props: {
               data-testid="share-access-helper"
               className="m-0 text-[11px] leading-relaxed text-subtle"
             >
-              They can read what you selected.
+              {ACCESS_OPTIONS.find((option) => option.value === access)?.helper}
             </p>
-            <p
-              data-testid="share-access-pending"
-              className="m-0 text-[11px] leading-relaxed text-subtle"
-            >
-              Comment and Edit are not ready yet.
-            </p>
+            {ACCESS_OPTIONS.some((option) => !option.ready) ? (
+              <p
+                data-testid="share-access-pending"
+                className="m-0 text-[11px] leading-relaxed text-subtle"
+              >
+                Edit is not ready yet.
+              </p>
+            ) : null}
           </div>
 
           <p className="m-0 text-xs leading-relaxed text-muted">
