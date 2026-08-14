@@ -624,10 +624,9 @@ fn repair_imported_element_indices(
             lower,
             upper,
             group.elements.len(),
-            remaining_index_bytes,
+            &mut remaining_index_bytes,
         ) {
-            Ok((repaired, remaining)) => {
-                remaining_index_bytes = remaining;
+            Ok(repaired) => {
                 repairs.extend(group.elements.into_iter().zip(repaired));
             }
             Err(KeyGenerationError::BudgetExceeded) => {
@@ -787,9 +786,8 @@ fn generate_n_keys_between(
     upper: Option<&str>,
     count: usize,
 ) -> Result<Vec<String>, ()> {
-    generate_n_keys_between_bounded(lower, upper, count, usize::MAX)
-        .map(|(keys, _remaining)| keys)
-        .map_err(|_error| ())
+    let mut remaining_bytes = usize::MAX;
+    generate_n_keys_between_bounded(lower, upper, count, &mut remaining_bytes).map_err(|_error| ())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -798,65 +796,61 @@ enum KeyGenerationError {
     BudgetExceeded,
 }
 
-fn charge_generated_key(remaining_bytes: &mut usize, key: &str) -> Result<(), KeyGenerationError> {
+fn next_key(
+    lower: Option<&str>,
+    upper: Option<&str>,
+    remaining_bytes: &mut usize,
+) -> Result<String, KeyGenerationError> {
+    let key = generate_key_between(lower, upper).map_err(|()| KeyGenerationError::Invalid)?;
     *remaining_bytes = remaining_bytes
         .checked_sub(key.len())
         .ok_or(KeyGenerationError::BudgetExceeded)?;
-    Ok(())
+    Ok(key)
 }
 
 fn generate_n_keys_between_bounded(
     lower: Option<&str>,
     upper: Option<&str>,
     count: usize,
-    mut remaining_bytes: usize,
-) -> Result<(Vec<String>, usize), KeyGenerationError> {
+    remaining_bytes: &mut usize,
+) -> Result<Vec<String>, KeyGenerationError> {
     if count == 0 {
-        return Ok((Vec::new(), remaining_bytes));
+        return Ok(Vec::new());
     }
     if count == 1 {
-        let key = generate_key_between(lower, upper).map_err(|()| KeyGenerationError::Invalid)?;
-        charge_generated_key(&mut remaining_bytes, &key)?;
-        return Ok((vec![key], remaining_bytes));
+        return Ok(vec![next_key(lower, upper, remaining_bytes)?]);
     }
     if upper.is_none() {
-        let mut key =
-            generate_key_between(lower, None).map_err(|()| KeyGenerationError::Invalid)?;
-        charge_generated_key(&mut remaining_bytes, &key)?;
+        let mut key = next_key(lower, None, remaining_bytes)?;
         let mut keys = vec![key.clone()];
         for _ in 1..count {
-            key =
-                generate_key_between(Some(&key), None).map_err(|()| KeyGenerationError::Invalid)?;
-            charge_generated_key(&mut remaining_bytes, &key)?;
+            key = next_key(Some(&key), None, remaining_bytes)?;
             keys.push(key.clone());
         }
-        return Ok((keys, remaining_bytes));
+        return Ok(keys);
     }
     if lower.is_none() {
-        let mut key =
-            generate_key_between(None, upper).map_err(|()| KeyGenerationError::Invalid)?;
-        charge_generated_key(&mut remaining_bytes, &key)?;
+        let mut key = next_key(None, upper, remaining_bytes)?;
         let mut keys = vec![key.clone()];
         for _ in 1..count {
-            key =
-                generate_key_between(None, Some(&key)).map_err(|()| KeyGenerationError::Invalid)?;
-            charge_generated_key(&mut remaining_bytes, &key)?;
+            key = next_key(None, Some(&key), remaining_bytes)?;
             keys.push(key.clone());
         }
         keys.reverse();
-        return Ok((keys, remaining_bytes));
+        return Ok(keys);
     }
 
     let middle = count / 2;
-    let key = generate_key_between(lower, upper).map_err(|()| KeyGenerationError::Invalid)?;
-    charge_generated_key(&mut remaining_bytes, &key)?;
-    let (mut keys, remaining_bytes) =
-        generate_n_keys_between_bounded(lower, Some(&key), middle, remaining_bytes)?;
+    let key = next_key(lower, upper, remaining_bytes)?;
+    let mut keys = generate_n_keys_between_bounded(lower, Some(&key), middle, remaining_bytes)?;
     keys.push(key.clone());
-    let (right, remaining_bytes) =
-        generate_n_keys_between_bounded(Some(&key), upper, count - middle - 1, remaining_bytes)?;
-    keys.extend(right);
-    Ok((keys, remaining_bytes))
+    keys.extend(generate_n_keys_between_bounded(
+        Some(&key),
+        upper,
+        count - middle - 1,
+        remaining_bytes,
+    )?);
+    Ok(keys)
 }
 
 fn generate_key_between(lower: Option<&str>, upper: Option<&str>) -> Result<String, ()> {
@@ -2148,8 +2142,9 @@ mod tests {
             .expect("a valid imported order key has a successor");
 
         assert_eq!(midpoint.strip_prefix(&lower), Some("V"));
+        let mut remaining_bytes = lower.len();
         assert_eq!(
-            generate_n_keys_between_bounded(Some(&lower), None, 2, lower.len()),
+            generate_n_keys_between_bounded(Some(&lower), None, 2, &mut remaining_bytes),
             Err(KeyGenerationError::BudgetExceeded)
         );
     }

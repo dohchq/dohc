@@ -1728,7 +1728,6 @@ export function createWorkspaceEngineCapture(
     const workspace = { workspaceId, rootPath };
     let canonicalDoc: Y.Doc | null = null;
     let canonicalLineageClaimId: string | null = null;
-    let artifactAssets: readonly ArtifactAssetDescriptor[] = [];
     let current: EngineYdocProviderSession | null = null;
     let releaseObligation: EngineYdocProviderSession | null = null;
     let closed = false;
@@ -1861,7 +1860,6 @@ export function createWorkspaceEngineCapture(
               const retired = canonicalDoc;
               canonicalDoc = replacement;
               canonicalLineageClaimId = opened?.lineageClaimId ?? null;
-              artifactAssets = opened?.artifactAssets ?? [];
               input.onLineageReplaced?.(
                 Y.encodeStateAsUpdate(replacement),
                 recoveredPaths,
@@ -1920,7 +1918,6 @@ export function createWorkspaceEngineCapture(
           canonicalDoc = replacement.doc;
           canonicalLineageClaimId = replacementClaimId;
           current = replacement;
-          artifactAssets = replacement.artifactAssets ?? [];
           input.onLineageReplaced?.(
             Y.encodeStateAsUpdate(replacement.doc),
             [],
@@ -1956,7 +1953,6 @@ export function createWorkspaceEngineCapture(
           onReplayArmed?.();
         }
         current = replacement;
-        artifactAssets = replacement.artifactAssets ?? [];
         if (opening) {
           opening.installed = true;
           openingRemoteUpdates.delete(replacement);
@@ -2121,7 +2117,6 @@ export function createWorkspaceEngineCapture(
     const objectId = current.objectId;
     const sessionVersionId = current.versionId;
     const contentKind = current.contentKind;
-    artifactAssets = current.artifactAssets ?? [];
     const sessionPath = current.path;
     const openedHead = current.head;
     const openedLineage = current.lineage;
@@ -2139,13 +2134,13 @@ export function createWorkspaceEngineCapture(
       },
       contentKind,
       get artifactAssets() {
-        return artifactAssets;
+        return current?.artifactAssets ?? [];
       },
       path: sessionPath,
-      readArtifactAsset(assetId) {
+      readArtifactAsset(descriptor) {
         return Promise.reject(
           new Error(
-            `Artifact asset ${assetId} must load through its version-bound capture session.`,
+            `Artifact asset ${descriptor.id} must load through its version-bound capture session.`,
           ),
         );
       },

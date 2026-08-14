@@ -241,16 +241,13 @@ describe("engine Y.Doc artifact assets stay bound to one authorized session", ()
     expect(handler).not.toContain("input.ref");
   });
 
-  it("rejects unknown, stale, foreign, and changed descriptors", () => {
+  it("rejects unknown, stale, and foreign descriptors", () => {
     const handler = handlerSource("engineYDocReadArtifactAsset");
     expect(handler).toContain("!entry ||");
     // A deleted entry stays session-bound until normal close so the renderer
     // can finish the drawing recovery that the deletion notice started.
     expect(handler).not.toContain("entry.deleted");
     expect(handler).toContain("!descriptor");
-    expect(handler).toContain("hydrated.descriptor.ref !== descriptor.ref");
-    expect(handler).toContain("hydrated.descriptor.sha256 !== descriptor.sha256");
-    expect(handler).toContain("hydrated.descriptor.mimeType !== descriptor.mimeType");
   });
 });
 

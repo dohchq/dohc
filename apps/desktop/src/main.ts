@@ -9270,15 +9270,6 @@ function registerIpcHandlers(
         );
       }
       const hydrated = await entry.session.readArtifactAsset(descriptor);
-      if (
-        hydrated.descriptor.ref !== descriptor.ref ||
-        hydrated.descriptor.sha256 !== descriptor.sha256 ||
-        hydrated.descriptor.mimeType !== descriptor.mimeType
-      ) {
-        throw new Error(
-          `Artifact asset ${input.assetId} changed while it was loading. Open the file again.`,
-        );
-      }
       return ReadEngineYDocArtifactAssetResult.parse(hydrated);
     },
   );

@@ -1036,8 +1036,8 @@ export function useEngineDoc(input: {
           }
         : null;
       retiredBinding = retiredAuthority;
-      if (documentKind === "scene" && activeBinding && retiredAuthority) {
-        for (const descriptor of retiredAuthority.artifactAssets) {
+      if (documentKind === "scene" && activeBinding) {
+        for (const descriptor of retiredAssets) {
           cacheSceneAssetRead(descriptor, activeBinding);
         }
       }
