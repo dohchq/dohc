@@ -8872,7 +8872,12 @@ function registerIpcHandlers(
     const sender = event.sender;
     const generation = rendererGeneration(sender.id);
     const capture = activity.engineCaptureFor(workspace.workspaceId);
-    const requestedKind = liveDocumentKindForPath(input.path);
+    const validatedPath = validateUserWritePath(input.path);
+    if (!validatedPath.ok) {
+      return OpenEngineYDocSessionResult.parse({ available: false });
+    }
+    const path = validatedPath.normalized;
+    const requestedKind = liveDocumentKindForPath(path);
     // Only engine-flagged workspaces have a capture. The shared classifier is
     // the main-side authority for which paths bind to a Y.Doc.
     if (!capture || requestedKind === null) {
@@ -8918,7 +8923,7 @@ function registerIpcHandlers(
       for (const [failedKey, entry] of [...engineYDocSessions]) {
         if (!entry.closeFailed) continue;
         if (entry.workspaceId !== workspace.workspaceId) continue;
-        if (entry.path !== input.path) continue;
+        if (entry.path !== path) continue;
         if (
           !(await releaseEngineYDocSessionEntry(
             failedKey,
@@ -9015,7 +9020,7 @@ function registerIpcHandlers(
       let session: WorkspaceEngineYDocProviderSession;
       try {
         session = await capture.openYDocSession({
-          path: input.path,
+          path,
           // Explicit, because the daemon defaults an unspecified session to
           // PLAINTEXT (actor.rs requested_content_kind.unwrap_or(Plaintext)).
           // The requested kind must match the editor selected for this path.
@@ -9114,7 +9119,7 @@ function registerIpcHandlers(
         // is really on disk, so it keeps the plain editor: claiming the
         // version does not have it would be false.
         console.error(
-          `[desktop] engine Y.Doc open refused for ${input.path}:`,
+          `[desktop] engine Y.Doc open refused for ${path}:`,
           error,
         );
         return OpenEngineYDocSessionResult.parse({
@@ -9141,7 +9146,7 @@ function registerIpcHandlers(
         sessionId: input.sessionId,
         senderId: sender.id,
         workspaceId: workspace.workspaceId,
-        path: input.path,
+        path,
         sender,
         generation,
         lineageGeneration,
@@ -9185,7 +9190,7 @@ function registerIpcHandlers(
       // fall back to the plain editor only once the session is released.
       if (session.contentKind !== requestedKind) {
         console.error(
-          `[desktop] engine Y.Doc open for ${input.path} came back ${session.contentKind}; ` +
+          `[desktop] engine Y.Doc open for ${path} came back ${session.contentKind}; ` +
             `the editor requested ${requestedKind} (kind-mismatched lineage).`,
         );
         const released = await release("kind-mismatched lineage");

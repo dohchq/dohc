@@ -113,7 +113,7 @@ describe("engine Y.Doc open: a failed close is never a clean fallback", () => {
     // opened it, and closing it here would tear down another window's editor.
     expect(retry).toContain("entry.closeFailed");
     expect(retry).toContain("entry.workspaceId !== workspace.workspaceId");
-    expect(retry).toContain("entry.path !== input.path");
+    expect(retry).toContain("entry.path !== path");
     expect(retry).toContain("engineMayHoldDocument: true");
   });
 
@@ -207,6 +207,20 @@ describe("workspace text writes: a live Y.Doc stays canonical", () => {
     expect(handler).toContain("const writePath = validateUserWritePath(input.relativePath)");
     expect(handler).toContain("entry.path === writePath.normalized");
     expect(handler).toContain("The engine owns this live document.");
+  });
+
+  it("stores the same normalized path that the direct writer compares", () => {
+    const handler = handlerSource("engineYDocOpen");
+    const validationAt = handler.indexOf(
+      "const validatedPath = validateUserWritePath(input.path)",
+    );
+    const registrationAt = handler.indexOf("const entry: EngineYDocSessionEntry");
+
+    expect(validationAt).toBeGreaterThan(-1);
+    expect(validationAt).toBeLessThan(registrationAt);
+    expect(handler).toContain("const path = validatedPath.normalized");
+    expect(handler.slice(registrationAt)).toContain("path,");
+    expect(handler.slice(registrationAt)).not.toContain("path: input.path");
   });
 });
 

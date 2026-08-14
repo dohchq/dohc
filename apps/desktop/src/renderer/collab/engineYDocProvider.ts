@@ -136,6 +136,7 @@ export interface EngineYDocBindOptions {
     retired: Y.Doc,
     recoveredPaths: string[],
   ) => void | Promise<void>;
+  onLineageReplacementFailure?: (error: unknown, retired: Y.Doc) => void;
 }
 
 const LOCAL_UPDATE_BATCH_MS = 32;
@@ -430,12 +431,18 @@ export async function bindEngineYDoc(
         scheduledFlush = null;
       }
       pendingLocalUpdates = [];
-      if (options.onDocumentReplacing) {
-        await options.onDocumentReplacing(retired, input.recoveredPaths);
+      let bufferedUpdates: Uint8Array[];
+      try {
+        if (options.onDocumentReplacing) {
+          await options.onDocumentReplacing(retired, input.recoveredPaths);
+        }
+        bufferedUpdates = await transport.acknowledgeLineageReplacement(
+          input.lineageGeneration,
+        );
+      } catch (error) {
+        options.onLineageReplacementFailure?.(error, retired);
+        throw error;
       }
-      const bufferedUpdates = await transport.acknowledgeLineageReplacement(
-        input.lineageGeneration,
-      );
       if (destroyed) {
         replacement.destroy();
         return;

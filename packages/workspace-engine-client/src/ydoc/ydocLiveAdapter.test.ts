@@ -270,7 +270,7 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
-  it("refuses scene settlement and releases the scene on close", async () => {
+  it("refuses scene settlement and retains its lineage on close", async () => {
     const materialized: Array<{ path: string; content: string }> = [];
     const engine = new YdocLoopbackEngine({
       materialize: (input) => materialized.push(input),
@@ -311,7 +311,12 @@ describe("YdocLiveAdapter", () => {
       path: "drawing.excalidraw",
       contentKind: "scene",
     });
-    expect(reopened.lineage).toBe("absent");
+    expect(reopened.lineage).toBe("existing");
+    expect(
+      reopened.doc
+        .getMap(EXCALIDRAW_SCENE_ROOTS.revisions)
+        .get("revision"),
+    ).toBe("one");
     await reopened.close({ settle: false });
     adapter.dispose();
   });

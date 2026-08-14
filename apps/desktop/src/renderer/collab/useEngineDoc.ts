@@ -849,6 +849,18 @@ export function useEngineDoc(input: {
       enqueueRecoverySnapshot(bytes, true, recoveryTransition, sceneRecovery);
     };
 
+    const captureLineageReplacementFailure = (error: unknown): void => {
+      writesRefused.current = true;
+      if (cancelled || token !== openTokenRef.current) return;
+      setReadOnlyTransition({ token });
+      reportSaveState(
+        "error",
+        error instanceof Error
+          ? `dohc could not finish replacing this document: ${error.message}`
+          : "dohc could not finish replacing this document.",
+      );
+    };
+
     const releaseBinding = (): void => {
       if (!binding || releaseStarted) return;
       releaseStarted = true;
@@ -935,7 +947,7 @@ export function useEngineDoc(input: {
             artifactAssets: [...binding.artifactAssets],
           }
         : null;
-      if (binding && retiredBinding) {
+      if (documentKind === "scene" && binding && retiredBinding) {
         for (const descriptor of retiredBinding.artifactAssets) {
           cacheSceneAssetRead(descriptor, binding);
         }
@@ -1042,6 +1054,7 @@ export function useEngineDoc(input: {
       return bindEngineYDoc(transport, undefined, {
         onPermanentLocalUpdateFailure: capturePermanentFailure,
         onDocumentReplacing: preserveRetiredDocument,
+        onLineageReplacementFailure: captureLineageReplacementFailure,
       });
     })();
     void openAttempt

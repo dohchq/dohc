@@ -885,6 +885,44 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
+  it("reports a failed lineage acknowledgement and keeps the losing doc frozen", async () => {
+    const mock = mockTransport(["Losing root."]);
+    const failure = new Error("acknowledgement refused");
+    const onLineageReplacementFailure = vi.fn();
+    const binding = await bindEngineYDoc(
+      {
+        ...mock.transport,
+        async acknowledgeLineageReplacement() {
+          throw failure;
+        },
+      },
+      undefined,
+      { onLineageReplacementFailure },
+    );
+    const losingDoc = binding.doc!;
+    const winner = new Y.Doc();
+    typeIntoBody(winner, "Winning root.");
+
+    await expect(
+      mock.replaceLineage({
+        update: Y.encodeStateAsUpdate(winner),
+        recoveredPaths: [],
+        artifactAssets: [],
+        lineageGeneration: 2,
+      }),
+    ).rejects.toThrow("acknowledgement refused");
+
+    expect(onLineageReplacementFailure).toHaveBeenCalledExactlyOnceWith(
+      failure,
+      losingDoc,
+    );
+    expect(binding.doc).toBe(losingDoc);
+    const shippedBefore = mock.shipped.length;
+    typeIntoBody(losingDoc, "Late losing edit.");
+    expect(mock.shipped).toHaveLength(shippedBefore);
+    await binding.destroy();
+  });
+
   it("serializes consecutive lineage replacements", async () => {
     const mock = mockTransport(["Losing root."]);
     const binding = await bindEngineYDoc(mock.transport);

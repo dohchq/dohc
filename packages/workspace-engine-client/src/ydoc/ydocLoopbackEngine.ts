@@ -668,14 +668,12 @@ export class YdocLoopbackEngine implements EngineTransport {
     const session = this.requireSession(sessionId);
     const key = this.lineageKeyFor(session);
 
-    // The loopback cannot settle scenes because it has no store-backed asset
-    // projector. A direct settle still refuses, but close must finish the
-    // teardown so the adapter does not retain a session it can never release.
+    // The loopback cannot verify a scene artifact because it has no
+    // store-backed asset projector. Drop only the session, as the daemon does;
+    // the durable lineage must remain available for a later engine-backed
+    // reopen instead of being certified as safely pruned.
     if (session.contentKind === "scene") {
       if (settleFlag === true) project(session);
-      if (this.lineages.get(key)?.regime === "local-only") {
-        this.lineages.delete(key);
-      }
       this.sessions.delete(sessionId);
       return { closed: true };
     }
