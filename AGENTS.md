@@ -423,9 +423,8 @@ These are meant to steer us in the right direction. They are not hard-set, but w
   remote ref is gone. Do not delete the local branch unless asked.
 - After a PR is merged or its task is abandoned, delete the worktree you or
   your campaign created for it, then run `git worktree prune`. Stale worktrees
-  keep multi-gigabyte build artifacts and have filled the disk twice. Never
-  delete the main tree, a worktree you did not create, or a worktree another
-  session still uses.
+  keep multi-gigabyte build artifacts. Never delete the main tree, a worktree
+  you did not create, or a worktree another session still uses.
 - Never stop a process by name, command-line pattern, or worktree path. Stop
   only a PID this task started. Verify a port owner's working directory before
   stopping it.
