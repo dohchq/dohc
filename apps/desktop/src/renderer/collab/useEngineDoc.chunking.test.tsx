@@ -260,8 +260,63 @@ it("persists a lossless rich snapshot when delivery and projection fail", async 
   consoleError.mockRestore();
 });
 
+it("persists a lossless rich snapshot when a deletion's projection fails", async () => {
+  // The deletion boundary is the sibling of the delivery boundary above, and
+  // it loses the same way: the synchronous write is the ONLY copy when the
+  // projection never answers, so it has to carry the document structure, not
+  // the crude walk's flattened text.
+  projectionShouldFail = true;
+  harness = harnessBridge(richTextInitialUpdate());
+  vi.stubGlobal("dohcDesktop", harness.api);
+  const consoleError = vi
+    .spyOn(console, "error")
+    .mockImplementation(() => undefined);
+
+  const view = render(<Harness workspaceId="ws-1" path="notes/rich.md" />);
+  await waitFor(() =>
+    expect(screen.getByTestId("available").textContent).toBe("true"),
+  );
+  act(() => {
+    screen.getByTestId("type-rich").click();
+  });
+  harness.emitNow("deleted", 0);
+  await waitFor(() =>
+    expect(screen.getByTestId("draft-count").textContent).toBe("1"),
+  );
+  view.unmount();
+
+  // The file is gone and the live mirror is destroyed. Read the raw durable
+  // row, as the next renderer process would.
+  let storedText = "";
+  await waitFor(() => {
+    const raw = localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY);
+    expect(raw).not.toBeNull();
+    storedText = (JSON.parse(raw!) as Array<{ text: string }>)[0]?.text ?? "";
+    expect(storedText).toMatch(/<!-- dohc-ydoc-recovery-v1:[A-Za-z0-9+/=]+ -->/u);
+  });
+
+  const encoded = storedText.match(
+    /<!-- dohc-ydoc-recovery-v1:([A-Za-z0-9+/=]+) -->/u,
+  )![1]!;
+  const snapshot = Uint8Array.from(atob(encoded), (character) =>
+    character.charCodeAt(0),
+  );
+  const recovered = new Y.Doc();
+  Y.applyUpdate(recovered, snapshot);
+  const body = recovered.getXmlFragment("body").toString();
+  expect(body).toContain("<bulletlist>");
+  expect(body).toContain('href="https://example.test"');
+  expect(body).toContain('<image alt="Diagram" src="assets/diagram.png"></image>');
+  expect(body).toContain("<table>");
+  expect(consoleError).toHaveBeenCalledWith(
+    expect.stringContaining("could not write a recovery draft"),
+    expect.any(Error),
+  );
+  consoleError.mockRestore();
+});
+
 // MUST run before any test that lets a real projection load complete:
-// `useEngineDoc.ts`'s own `loadProjectionModule` caches the promise at
+// `recoverySnapshot.ts`'s `loadProjectionModule` caches the promise at
 // module scope, for the lifetime of this whole test FILE — once resolved by
 // an earlier test, a later "held" gate has nothing left to hold.
 it("persists a crude-text draft synchronously, before the held projection import resolves", async () => {
@@ -289,7 +344,7 @@ it("persists a crude-text draft synchronously, before the held projection import
   await waitFor(() =>
     expect(screen.getByTestId("draft-count").textContent).toBe("1"),
   );
-  expect(screen.getByTestId("draft").textContent).toBe("My Heading");
+  expect(screen.getByTestId("draft").textContent).toContain("My Heading");
 
   release();
   await waitFor(() =>

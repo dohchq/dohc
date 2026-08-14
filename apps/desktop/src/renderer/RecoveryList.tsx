@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useRecoveredDraftText } from "./collab/recoverySnapshot";
 import {
   dismissOrphanedDraft,
   type OrphanedDraftRow,
@@ -22,8 +23,13 @@ import {
 // FileInspector's CopySourceButton on purpose, WITHOUT importing it: this
 // component mounts above the error boundary (the close guard), and pulling
 // the whole document-view module into that chunk for one button is the
-// wrong trade.
+// wrong trade. `recoverySnapshot` is the exception it makes room for: it
+// carries the snapshot contract alone, and keeps the Tiptap projection behind
+// the same dynamic import the deletion path uses.
 function CopyDraftButton(props: { text: string }) {
+  // A draft the projection never refined carries the document inside an
+  // encoded comment. Copy hands back the document, never the encoding.
+  const text = useRecoveredDraftText(props.text);
   const [label, setLabel] = useState<"Copy" | "Copied" | "Couldn't copy">(
     "Copy",
   );
@@ -39,7 +45,7 @@ function CopyDraftButton(props: { text: string }) {
       type="button"
       data-testid="recovery-list-copy"
       onClick={() => {
-        const write = navigator.clipboard?.writeText(props.text);
+        const write = navigator.clipboard?.writeText(text);
         if (!write) return;
         void write
           .then(() => setLabel("Copied"))

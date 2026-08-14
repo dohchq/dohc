@@ -14,108 +14,13 @@ import {
   type EngineYDocBinding,
   type EngineYDocTransport,
 } from "./engineYDocProvider";
+import {
+  durableMarkdownFromSnapshot,
+  loadProjectionModule,
+  markdownFromSnapshot,
+} from "./recoverySnapshot";
 
 export type { EngineRemovalInProgress };
-
-// `@dohc/ydoc-projection` statically pulls in the full Tiptap stack and
-// builds its schema at module load. `useEngineDoc` backs every FileInspector,
-// so a static import here put that whole editor stack in the renderer's
-// eager chunk. Loaded once, lazily, and cached — every caller in this module
-// shares the same in-flight/resolved promise instead of re-importing.
-type ProjectionModule = typeof import("@dohc/ydoc-projection");
-let projectionModulePromise: Promise<ProjectionModule> | null = null;
-function loadProjectionModule(): Promise<ProjectionModule> {
-  if (projectionModulePromise === null) {
-    // A rejected import must not be cached: a transient chunk-fetch failure
-    // (a bundle replaced mid-session by an update, for example) would
-    // otherwise fail every later deletion's faithful capture for the rest of
-    // the session. Clearing on rejection lets the next deletion retry.
-    const pending = import("@dohc/ydoc-projection");
-    projectionModulePromise = pending;
-    void pending.catch(() => {
-      if (projectionModulePromise === pending) projectionModulePromise = null;
-    });
-  }
-  return projectionModulePromise;
-}
-
-// A deletion's draft text depends on the projection module, but the BYTES
-// that produce it must not: the live doc can be destroyed (unmount) before
-// the module resolves, so the doc is snapshotted synchronously at the event
-// and projected to markdown lazily, off a reconstructed doc.
-function markdownFromSnapshot(snapshot: Uint8Array): Promise<string> {
-  return loadProjectionModule().then(({ yDocToMarkdown }) => {
-    const rebuilt = new Y.Doc();
-    Y.applyUpdate(rebuilt, snapshot);
-    return yDocToMarkdown(rebuilt);
-  });
-}
-
-// The crude fallback the deletion boundary persists BEFORE the projection
-// module is even guaranteed to load — pure yjs, no Tiptap, so it never waits
-// on the chunk this whole lazy-load exists to defer. Faithful markdown
-// (frontmatter ordering, table/list formatting, escaping) replaces this the
-// moment `markdownFromSnapshot` resolves; this only has to outlast a crash.
-function crudeMarkdownFromDoc(doc: Y.Doc): string {
-  const meta = doc.getMap("meta");
-  if (meta.get("contentKind") === "plain-text") {
-    return doc.getText("plainText").toString();
-  }
-  const frontmatter = doc.getMap("frontmatter");
-  const frontmatterLines: string[] = [];
-  for (const [key, value] of frontmatter.entries()) {
-    if (
-      typeof value === "string" ||
-      typeof value === "number" ||
-      typeof value === "boolean"
-    ) {
-      frontmatterLines.push(`${key}: ${String(value)}`);
-    }
-  }
-  const frontmatterText =
-    frontmatterLines.length > 0
-      ? `---\n${frontmatterLines.join("\n")}\n---\n\n`
-      : "";
-  const blockText = (node: Y.XmlText | Y.XmlElement | Y.XmlHook): string => {
-    if (node instanceof Y.XmlText) return node.toString();
-    if (node instanceof Y.XmlElement) {
-      return node.toArray().map(blockText).join("");
-    }
-    return "";
-  };
-  const blocks = doc
-    .getXmlFragment("body")
-    .toArray()
-    .map(blockText)
-    .filter((text) => text.length > 0);
-  return frontmatterText + blocks.join("\n\n");
-}
-
-const YDOC_RECOVERY_MARKER = "dohc-ydoc-recovery-v1";
-
-function snapshotAsBase64(snapshot: Uint8Array): string {
-  let binary = "";
-  const chunkSize = 32_768;
-  for (let offset = 0; offset < snapshot.length; offset += chunkSize) {
-    binary += String.fromCharCode(
-      ...snapshot.subarray(offset, offset + chunkSize),
-    );
-  }
-  return btoa(binary);
-}
-
-function durableMarkdownFromSnapshot(doc: Y.Doc, snapshot: Uint8Array): string {
-  const fallback = crudeMarkdownFromDoc(doc);
-  if (doc.getMap("meta").get("contentKind") === "plain-text") return fallback;
-  const separator = fallback.length > 0 ? "\n\n" : "";
-  // The text store cannot hold a Uint8Array. Keep the canonical Y.Doc update
-  // in an inert Markdown comment until the async projection replaces this
-  // whole fallback. A failed chunk load or renderer exit can lose formatting
-  // from the readable fallback, but it cannot lose the document structure.
-  return `${fallback}${separator}<!-- ${YDOC_RECOVERY_MARKER}:${snapshotAsBase64(
-    snapshot,
-  )} -->`;
-}
 
 function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
@@ -528,7 +433,7 @@ function createEngineDocSession(
       deletionDraftId = captureOrphanedDraft(
         workspaceId,
         path,
-        crudeMarkdownFromDoc(doc),
+        durableMarkdownFromSnapshot(doc, bytes),
       );
     }
     setDeletion(deletionDraftId);

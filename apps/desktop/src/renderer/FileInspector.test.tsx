@@ -962,6 +962,143 @@ describe("markdown editor unmount flush", () => {
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps a peer's new-version text draft when a later duplicate read lifts its refusal", async () => {
+    type ReadResult = {
+      text: string;
+      truncated: false;
+      contentHash: string;
+    };
+    let resolveFirstSwitch!: (value: ReadResult) => void;
+    let resolveSecondSwitch!: (value: ReadResult) => void;
+    const firstSwitch = new Promise<ReadResult>((resolve) => {
+      resolveFirstSwitch = resolve;
+    });
+    const secondSwitch = new Promise<ReadResult>((resolve) => {
+      resolveSecondSwitch = resolve;
+    });
+    const oldHash = "1".repeat(64);
+    const switchedHash = "2".repeat(64);
+    bridgeMock.readWorkspaceText
+      .mockResolvedValueOnce({
+        text: "Old",
+        truncated: false,
+        contentHash: oldHash,
+      })
+      .mockResolvedValueOnce({
+        text: "Old",
+        truncated: false,
+        contentHash: oldHash,
+      })
+      .mockImplementationOnce(() => firstSwitch)
+      .mockImplementationOnce(() => secondSwitch);
+    bridgeMock.writeWorkspaceText.mockResolvedValue({
+      status: "written",
+      contentHash: "4".repeat(64),
+    });
+    const view = render(
+      <>
+        <FileInspector
+          workspaceId="ws-1"
+          path="notes/versioned.txt"
+          engineVersionKey={1}
+        />
+        <FileInspector
+          workspaceId="ws-1"
+          path="notes/versioned.txt"
+          engineVersionKey={1}
+        />
+      </>,
+    );
+    await waitFor(() =>
+      expect(screen.getAllByTestId("view-text-editor")).toHaveLength(2),
+    );
+    view.rerender(
+      <>
+        <FileInspector
+          workspaceId="ws-1"
+          path="notes/versioned.txt"
+          engineVersionKey={2}
+          refreshKey={1}
+        />
+        <FileInspector
+          workspaceId="ws-1"
+          path="notes/versioned.txt"
+          engineVersionKey={2}
+          refreshKey={1}
+        />
+      </>,
+    );
+    await waitFor(() =>
+      expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(4),
+    );
+
+    // Both panes type while their replacement reads are in flight, so both
+    // carry a blocked edit into the lift. The second pane types first: the
+    // first pane's own edit is what its own lift sets aside.
+    const user = userEvent.setup();
+    let editors = screen.getAllByTestId("view-text-editor");
+    await user.click(editors[1]!.querySelector(".cm-content") as HTMLElement);
+    await user.keyboard("{End} blocked-b");
+    await user.click(editors[0]!.querySelector(".cm-content") as HTMLElement);
+    await user.keyboard("{End} blocked-a");
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveFirstSwitch({
+        text: "New",
+        truncated: false,
+        contentHash: switchedHash,
+      });
+      await firstSwitch;
+    });
+    editors = screen.getAllByTestId("view-text-editor");
+    const firstContent = editors[0]!.querySelector(".cm-content") as HTMLElement;
+    await waitFor(() => expect(firstContent.textContent).toBe("New"));
+    await user.click(firstContent);
+    await user.keyboard("{End} peer");
+    const buffer = getSharedLocalDocument(
+      documentVersionKey("ws-1", "notes/versioned.txt", 2),
+    );
+    expect(buffer.getSnapshot()).toMatchObject({
+      body: "New peer",
+      dirty: true,
+    });
+
+    await act(async () => {
+      resolveSecondSwitch({
+        text: "New",
+        truncated: false,
+        contentHash: switchedHash,
+      });
+      await secondSwitch;
+    });
+
+    // MUTATION (peer ownership): drop the guard from the refusal-lift reset.
+    // The later pane resets the shared buffer to the disk snapshot, and the
+    // edit its peer already published for THIS version is gone.
+    await waitFor(() =>
+      expect(buffer.getSnapshot()).toMatchObject({
+        body: "New peer",
+        dirty: true,
+      }),
+    );
+    editors = screen.getAllByTestId("view-text-editor");
+    const secondContent = editors[1]!.querySelector(".cm-content") as HTMLElement;
+    await waitFor(() => expect(secondContent.textContent).toBe("New peer"));
+    // ...and the write that follows carries the peer's edit, not the disk
+    // snapshot the lift would have restored.
+    await waitFor(
+      () =>
+        expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+          workspaceId: "ws-1",
+          relativePath: "notes/versioned.txt",
+          text: "New peer",
+          expectedContentHash: switchedHash,
+        }),
+      { timeout: 2000 },
+    );
+  });
+
   it("marks every duplicate text pane errored when a blocked write leaves a shared draft dirty", async () => {
     const flushes: DraftFlush[] = [];
     const first = (

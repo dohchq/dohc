@@ -32,6 +32,7 @@ import {
   type EngineRemovalInProgress,
   type UseEngineDoc,
 } from "./collab/useEngineDoc";
+import { useRecoveredDraftText } from "./collab/recoverySnapshot";
 import {
   applyFrontmatter,
   orderFrontmatter,
@@ -720,6 +721,16 @@ const DELETED_WITH_SET_ASIDE_EDIT_NOTICE =
 const DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
   "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.";
 
+// Same rule as the recovery list's Copy: a draft the projection never refined
+// carries the document inside an encoded comment, and the user gets the
+// document. A component, because the hook cannot run inside the map below.
+function OrphanedDraftCopyButton(props: { text: string }) {
+  const text = useRecoveredDraftText(props.text);
+  return (
+    <CopySourceButton testId="orphaned-draft-copy" getSource={() => text} />
+  );
+}
+
 function OrphanedDraftNotices(props: { workspaceId: string; path: string }) {
   const drafts = useOrphanedDrafts(props.workspaceId, props.path);
   if (drafts.length === 0) return null;
@@ -736,10 +747,7 @@ function OrphanedDraftNotices(props: { workspaceId: string; path: string }) {
             to keep it.
           </span>
           <div className="flex items-center gap-2">
-            <CopySourceButton
-              testId="orphaned-draft-copy"
-              getSource={() => draft.text}
-            />
+            <OrphanedDraftCopyButton text={draft.text} />
             {/* Deleting the only copy needs the explicit confirm step (#579
                 review, r6) — the same control the recovery list uses. */}
             <DismissDraftControls
@@ -1135,17 +1143,32 @@ function useAutosavedTextDraft(props: {
     if (unsavedDraft.current) {
       unsavedDraft.current = false;
       captureOrphanedDraft(props.workspaceId, props.path, latestDraft.current);
+      let resyncBody = props.body;
+      let resyncSaveState: SaveState = "saved";
       if (refusalLifted) {
-        props.localBuffer.reset(
-          props.body,
-          props.contentHash,
-          localSource.current,
-        );
+        // A duplicate pane whose read landed first can already have published
+        // an edit built on THIS version. That draft owns the shared buffer,
+        // and resetting to the disk snapshot would discard it — the same
+        // ownership rule the markdown resync applies.
+        const sharedBeforeResync = props.localBuffer.getSnapshot();
+        const peerDraftPending =
+          sharedBeforeResync.dirty &&
+          sharedBeforeResync.source !== localSource.current;
+        if (peerDraftPending) {
+          resyncBody = sharedBeforeResync.body;
+          resyncSaveState = sharedBeforeResync.saveState;
+        } else {
+          props.localBuffer.reset(
+            props.body,
+            props.contentHash,
+            localSource.current,
+          );
+        }
       }
       valueRevision.current += 1;
-      setSaveState("saved");
-      setDraft(props.body);
-      latestDraft.current = props.body;
+      setSaveState(resyncSaveState);
+      setDraft(resyncBody);
+      latestDraft.current = resyncBody;
       baseContentRequestId.current = props.contentRequestId;
       acceptedRequestFloor.current = Math.max(
         acceptedRequestFloor.current,
