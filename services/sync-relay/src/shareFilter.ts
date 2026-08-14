@@ -1,6 +1,8 @@
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
   MAX_SHARE_VERSION_ID_CHARS,
+  type ShareAccess,
+  isShareAccessValue,
   isValidShareVersionId,
 } from "@dohc/security-contract/share-selector";
 import { validateUserWritePath } from "@dohc/workspace-core";
@@ -37,6 +39,11 @@ export interface ShareSelector {
   paths: string[];
   // null = live-follow of the main version; otherwise the shared version id.
   versionId: string | null;
+  // The level the recipient holds on this selector (#646). Required: a
+  // selector without one is not a legacy grant, it is unreadable. All three
+  // levels grant the same reads today; PR2 opens comment and edit to chat,
+  // PR3 opens edit to document writes.
+  access: ShareAccess;
 }
 
 // MU-C4 shared channels: a BIDIRECTIONAL chat-channel grant. Unlike the
@@ -156,7 +163,8 @@ export type ShareSelectorValidation =
         | typeof RELAY_ERRORS.too_many_paths.code
         | typeof RELAY_ERRORS.invalid_path.code
         | typeof RELAY_ERRORS.secret_path.code
-        | typeof RELAY_ERRORS.invalid_version.code;
+        | typeof RELAY_ERRORS.invalid_version.code
+        | typeof RELAY_ERRORS.invalid_access.code;
       message: string;
     };
 
@@ -168,6 +176,7 @@ export type ShareSelectorValidation =
 export function validateShareSelector(input: {
   paths?: unknown;
   versionId?: unknown;
+  access?: unknown;
 }): ShareSelectorValidation {
   const rawPaths = input.paths ?? [];
   if (!Array.isArray(rawPaths)) {
@@ -248,19 +257,42 @@ export function validateShareSelector(input: {
       message: "a share must select at least one path or a version",
     };
   }
+  // Default view (decision B): the UI always states the level explicitly, so
+  // this only covers a caller that sends nothing. `undefined` ONLY — an
+  // explicit `null` is not "nothing", it is a value this rule refuses, same
+  // as any other unrecognized one.
+  const access = input.access === undefined ? "view" : input.access;
+  if (!isShareAccessValue(access)) {
+    return {
+      ok: false,
+      code: RELAY_ERRORS.invalid_access.code,
+      message: 'access must be "view", "comment", or "edit"',
+    };
+  }
   const deduped = [...new Set(paths)].sort();
-  return { ok: true, selector: { paths: deduped, versionId } };
+  return { ok: true, selector: { paths: deduped, versionId, access } };
 }
 
+// A persisted row must carry an EXPLICIT, valid access: the create-time
+// default in validateShareSelector must not silently promote a tampered or
+// pre-#646 row into a view grant it never earned. A row missing the field, or
+// carrying a value the relay never issues, fails closed to null (the routes
+// answer that with the generic 404) — this is decision G, stated plainly:
+// no migration shim, no implicit upgrade.
 export function parseShareSelectorJson(selectorJson: string): ShareSelector | null {
   try {
     const parsed = JSON.parse(selectorJson) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    const candidate = parsed as { paths?: unknown; versionId?: unknown };
+    const candidate = parsed as { paths?: unknown; versionId?: unknown; access?: unknown };
     if (!Array.isArray(candidate.paths)) return null;
     if (!candidate.paths.every((path) => typeof path === "string" && path.length > 0)) return null;
     if (candidate.versionId !== null && typeof candidate.versionId !== "string") return null;
-    return { paths: candidate.paths as string[], versionId: candidate.versionId as string | null };
+    if (!isShareAccessValue(candidate.access)) return null;
+    return {
+      paths: candidate.paths as string[],
+      versionId: candidate.versionId as string | null,
+      access: candidate.access,
+    };
   } catch {
     return null;
   }

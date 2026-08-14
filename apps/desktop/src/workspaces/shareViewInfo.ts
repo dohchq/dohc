@@ -1,4 +1,8 @@
-import { isValidShareVersionId } from "@dohc/security-contract/share-selector";
+import {
+  type ShareAccess,
+  isShareAccessValue,
+  isValidShareVersionId,
+} from "@dohc/security-contract/share-selector";
 import {
   RelayUnauthorizedError,
   ShareUnavailableError,
@@ -8,6 +12,9 @@ import {
 export interface ShareViewSelector {
   paths: string[];
   versionId: string | null;
+  // The level the relay states for this share (#646). Required: it is pinned
+  // with the rest of the selector and travels to the engine on every pull.
+  access: ShareAccess;
 }
 
 export interface ShareViewInfo {
@@ -76,6 +83,7 @@ function parseSelector(
     kind?: unknown;
     paths?: unknown;
     versionId?: unknown;
+    access?: unknown;
   };
   if (record.kind === "chat-channel") return null;
   if (!Array.isArray(record.paths)) throw new ShareSelectorInvalidError(shareId);
@@ -102,7 +110,18 @@ function parseSelector(
   if (record.paths.length === 0 && versionId === null) {
     throw new ShareSelectorInvalidError(shareId);
   }
-  return { paths: record.paths as string[], versionId };
+  // The level is held to the relay's OWN rule, from the same one place as the
+  // version dimension. A missing or unrecognized level is refused, never read
+  // as `view`: the narrowest guess is still a guess, and the record it would
+  // pin outlives the response it came from.
+  if (!isShareAccessValue(record.access)) {
+    throw new ShareSelectorInvalidError(shareId);
+  }
+  return {
+    paths: record.paths as string[],
+    versionId,
+    access: record.access,
+  };
 }
 
 export async function fetchShareViewInfo(input: {

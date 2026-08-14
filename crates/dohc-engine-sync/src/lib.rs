@@ -83,8 +83,8 @@ pub use relay::{
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;
 pub use share::{
-    MAX_SHARE_VERSION_ID_CHARS, ShareBoundary, ShareGrant, ShareSurface, apply_shared_envelope,
-    is_valid_share_version_id,
+    MAX_SHARE_VERSION_ID_CHARS, ShareAccess, ShareBoundary, ShareGrant, ShareSurface,
+    apply_shared_envelope, is_valid_share_version_id,
 };
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{

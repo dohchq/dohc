@@ -19,7 +19,7 @@ const ACTIVE_SHARE = {
   workspaceId: "ws-remote",
   recipientUserId: "friend",
   recipientEmail: "friend@dohc.test",
-  selector: { paths: ["docs"], versionId: null },
+  selector: { paths: ["docs"], versionId: null, access: "view" },
   createdAtMs: 1000,
   revokedAtMs: null,
   shareCode: "dohc-share:share-1:http://relay.test",
@@ -55,6 +55,34 @@ describe("SharedByMeList", () => {
     // After the refresh the row reads as ended, with no revoke affordance.
     await screen.findByText("Ended — was shared with friend@dohc.test");
     expect(screen.queryByTestId("shared-by-me-revoke")).toBeNull();
+  });
+
+  // Every row carries its level (#646). A badge shown only on some rows
+  // teaches the reader nothing when it is absent.
+  it("shows the level on every row, at whatever level the share carries", async () => {
+    bridgeMock.listRelayShares.mockResolvedValue({
+      granted: [
+        ACTIVE_SHARE,
+        {
+          ...ACTIVE_SHARE,
+          shareId: "share-2",
+          selector: { paths: ["notes"], versionId: null, access: "comment" },
+        },
+        {
+          ...ACTIVE_SHARE,
+          shareId: "share-3",
+          selector: { paths: ["plans"], versionId: null, access: "edit" },
+        },
+      ],
+    });
+    render(<SharedByMeList />);
+
+    const badges = await screen.findAllByTestId("share-access-badge");
+    expect(badges.map((badge) => badge.textContent)).toEqual([
+      "View",
+      "Comment",
+      "Edit",
+    ]);
   });
 
   it("copies the share code for re-sending", async () => {

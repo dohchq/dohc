@@ -15,6 +15,7 @@ import {
   validateChatChannelShareSelector,
   validateShareSelector,
   type AnyShareSelector,
+  type ChatChannelShareSelector,
   type ChatShareChannelKind,
   type ChatShareThreadResolver,
 } from "./shareFilter";
@@ -172,6 +173,16 @@ export function createSyncRelayHandler({
     return channelKind === "agent" || channelKind === null;
   };
 
+  // Whether a recipient may append through this selector at all. A read-write
+  // chat-channel grant may. A path/version selector may not, at ANY level
+  // (#646): view, comment, and edit all refuse here with the same
+  // shareNotAppendable() code, because a level-specific refusal would tell a
+  // probing recipient the selector's level. PR2 opens comment and edit.
+  const selectorAcceptsAppends = (
+    selector: AnyShareSelector,
+  ): selector is ChatChannelShareSelector =>
+    isChatChannelSelector(selector) && selector.access === "read-write";
+
   // Loads a share for RECIPIENT access. Every failure mode — no such share,
   // revoked share, caller is not the recipient, granter lost the workspace —
   // is the same generic 404 the relay uses for absent workspaces, so probing
@@ -237,7 +248,9 @@ export function createSyncRelayHandler({
     const selector = parseAnyShareSelectorJson(share.selectorJson);
     const base = {
       shareId: share.shareId,
-      selector: selector ?? { paths: [], versionId: null },
+      // An unreadable row still needs a displayable shape: this listing has
+      // no 404 to answer with. Selects nothing, at the narrowest level.
+      selector: selector ?? { paths: [], versionId: null, access: "view" as const },
       createdAtMs: share.createdAtMs,
     };
     if (side === "granted") {
@@ -396,6 +409,9 @@ export function createSyncRelayHandler({
       //      access; a read-only member (and any path/version share) is
       //      REFUSED with an explicit 403 — the member legitimately knows the
       //      share exists, so this is a refusal, not a 404.
+      //      #646: a path/version selector is refused at EVERY level, with
+      //      one code. A level-specific refusal would tell a probing
+      //      recipient the selector's level. PR2 opens comment and edit.
       //   3. MU-C0 verified authorship: every authored chat op must claim the
       //      AUTHENTICATED pusher (assertChatAuthorship verifies it) — a
       //      member cannot forge a message or reaction as another member.
@@ -412,8 +428,7 @@ export function createSyncRelayHandler({
       if (route.route === "share-log" && request.method === "POST") {
         await claimPendingShares(actor.userId);
         const share = shareForRecipient(route.shareId, actor.userId);
-        if (!isChatChannelSelector(share.selector)) throw shareNotAppendable();
-        if (share.selector.access !== "read-write") throw shareNotAppendable();
+        if (!selectorAcceptsAppends(share.selector)) throw shareNotAppendable();
         const input = await readJsonObject(request);
         const originId = parseString(input.originId, "originId", MAX_ORIGIN_ID_CHARS);
         if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
@@ -468,8 +483,7 @@ export function createSyncRelayHandler({
           guard: () => {
             const fresh = shareForRecipient(route.shareId, actor.userId);
             if (fresh.workspaceId !== share.workspaceId) throw notFound();
-            if (!isChatChannelSelector(fresh.selector)) throw shareNotAppendable();
-            if (fresh.selector.access !== "read-write") throw shareNotAppendable();
+            if (!selectorAcceptsAppends(fresh.selector)) throw shareNotAppendable();
           },
         });
         return jsonResponse({
@@ -652,6 +666,7 @@ export function createSyncRelayHandler({
           const validation = validateShareSelector({
             paths: input.paths,
             versionId: input.versionId,
+            access: input.access,
           });
           if (!validation.ok) {
             throw relayHttpError(RELAY_ERRORS[validation.code], validation.message);

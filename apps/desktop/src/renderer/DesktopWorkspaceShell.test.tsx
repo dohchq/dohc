@@ -73,6 +73,7 @@ import {
   pendingHeadingTargetForOpen,
   resolveCanonicalDm,
   runCanonicalDmNavigation,
+  shareViewBanner,
   versionCompareOffCopy,
   type Workspace,
 } from "./DesktopWorkspaceShell";
@@ -598,7 +599,11 @@ const SHARE_STATUS = {
 };
 const SHARE_VIEW: Workspace = {
   ...WORKSPACE,
-  shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+  shareView: {
+    shareId: "share-1",
+    granterEmail: "granter@dohc.test",
+    access: "view",
+  },
 };
 
 // A bridge that answers the way MAIN answers for a shared view: the capture
@@ -1633,7 +1638,11 @@ describe("ui-state merge-on-load", () => {
     bridge.refreshSharedView = vi.fn(() => pull.promise);
     renderShell(bridge, {
       ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
     });
 
     // It survives that listing: nothing has said the file is gone yet.
@@ -1694,7 +1703,11 @@ describe("ui-state merge-on-load", () => {
     }));
     renderShell(bridge, {
       ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
     });
 
     const refused = await screen.findByTestId("shared-view-refused");
@@ -1755,7 +1768,11 @@ describe("ui-state merge-on-load", () => {
     // Mounts with NO skip record: the shell's boot snapshot is healthy.
     renderShell(bridge, {
       ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
     });
 
     const refused = await screen.findByTestId("shared-view-refused");
@@ -1813,6 +1830,7 @@ describe("ui-state merge-on-load", () => {
       shareView: {
         shareId: "share-1",
         granterEmail: "granter@dohc.test",
+        access: "view",
         skippedOps: SKIPPED_RECORD,
       },
     });
@@ -3752,8 +3770,44 @@ describe("active file sharing", () => {
     expect(bridge.createRelayShare).toHaveBeenCalledWith({
       workspaceId: "ws-shell-test",
       recipientEmail: "friend@dohc.test",
+      access: "view",
       paths: ["a.md"],
     });
+  });
+});
+
+// The banner is the recipient's one plain statement of what they hold (#646).
+// It mirrors the pinned grant; the relay and the recipient engine's share
+// boundary are what actually decide.
+describe("shared view banner", () => {
+  it("states the level it was given, and names the granter", () => {
+    expect(shareViewBanner("view", "sam@dohc.test")).toBe(
+      "Shared view from sam@dohc.test — read-only. Ask sam@dohc.test for changes.",
+    );
+    expect(shareViewBanner("comment", "sam@dohc.test")).toBe(
+      "Shared view from sam@dohc.test. You can chat about these files, not edit them.",
+    );
+    expect(shareViewBanner("edit", "sam@dohc.test")).toBe(
+      "Shared view from sam@dohc.test. You can edit these files and chat about them.",
+    );
+  });
+
+  it("says something true when the granter has no email to show", () => {
+    expect(shareViewBanner("view", null)).toBe(
+      "Shared view from another dohc user — read-only. Ask them for changes.",
+    );
+    expect(shareViewBanner("comment", null)).toBe(
+      "Shared view from another dohc user. You can chat about these files, not edit them.",
+    );
+  });
+
+  // Three levels, three different sentences: a banner that read the same at
+  // every level would be a mirror of nothing.
+  it("says something different at each level", () => {
+    const lines = (["view", "comment", "edit"] as const).map((access) =>
+      shareViewBanner(access, "sam@dohc.test"),
+    );
+    expect(new Set(lines).size).toBe(3);
   });
 });
 
@@ -4846,7 +4900,11 @@ describe("history page", () => {
     const user = userEvent.setup();
     renderShell(bridge, {
       ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
     });
 
     await user.click(screen.getByTestId("activity-history"));
@@ -4875,7 +4933,11 @@ describe("history page", () => {
     const user = userEvent.setup();
     renderShell(bridge, {
       ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
     });
 
     await user.click(screen.getByTestId("activity-history"));
@@ -4924,6 +4986,7 @@ describe("history page", () => {
       shareView: {
         shareId: "share-1",
         granterEmail: "granter@dohc.test",
+        access: "view",
         ended: true,
       },
     });

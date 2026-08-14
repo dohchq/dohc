@@ -5131,6 +5131,7 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
         granted: Some(ShareGrant {
             paths: vec!["shared/docs".to_owned()],
             version_id: None,
+            ..Default::default()
         }),
     };
     let secret = envelope(
@@ -5361,6 +5362,7 @@ fn share_view_secondary_path_out_of_boundary_is_rejected() {
         granted: Some(ShareGrant {
             paths: vec!["shared/docs".to_owned()],
             version_id: None,
+            ..Default::default()
         }),
     };
     let crossing = envelope(
@@ -5403,6 +5405,7 @@ fn share_view_version_boundary(version_id: Option<&str>) -> ShareBoundary {
         granted: Some(ShareGrant {
             paths: vec!["shared/docs".to_owned()],
             version_id: version_id.map(str::to_owned),
+            ..Default::default()
         }),
     }
 }
@@ -15472,6 +15475,7 @@ fn share_view_admits_a_granted_version_create_that_carries_no_snapshots() {
         granted: Some(ShareGrant {
             paths: vec!["shared/docs".to_owned()],
             version_id: Some("version-granted".to_owned()),
+            ..Default::default()
         }),
     };
     let empty = envelope(
@@ -16471,6 +16475,7 @@ fn tracked_grant<'a>(paths: impl IntoIterator<Item = &'a str>) -> ShareGrant {
     ShareGrant {
         paths: paths.into_iter().map(str::to_owned).collect(),
         version_id: None,
+        ..Default::default()
     }
 }
 
@@ -16480,6 +16485,7 @@ fn version_grant<'a>(paths: impl IntoIterator<Item = &'a str>, version_id: &str)
     ShareGrant {
         paths: paths.into_iter().map(str::to_owned).collect(),
         version_id: Some(version_id.to_owned()),
+        ..Default::default()
     }
 }
 
@@ -16819,6 +16825,7 @@ fn share_view_pull_skips_a_version_create_from_a_version_the_share_did_not_grant
     let granted = ShareGrant {
         paths: Vec::new(),
         version_id: Some("v1".to_owned()),
+        ..Default::default()
     };
     let outcome = client
         .pull_share_view(&mut engine, "ws", "share", &granted, &NoFaults)

@@ -477,6 +477,7 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
           api.createRelayShare({
             workspaceId,
             recipientEmail: "third-party@dohc.test",
+            access: "view",
             paths: ["shared-with-me/e2e-granter/docs"],
           }),
         ),

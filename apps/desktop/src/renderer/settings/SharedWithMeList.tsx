@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import type { RelayShareReceivedRow } from "../../ipc/bridgeContract";
+import type {
+  RelayShareReceivedRow,
+  ShareAccess,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import {
   hasUnacknowledgedShareSkips,
   shareSkipNoticeLines,
 } from "../shareSkipNotice";
+import { ShareAccessBadge } from "./ShareAccessBadge";
 
 // "Shared with me" (share mounts): the receive-side inventory. Lives in
 // Settings → Cloud beside SharedByMeList. Each row is a path/version share
@@ -16,6 +20,9 @@ type MountInfo = {
   shareId: string;
   label: string;
   granterEmail?: string | null;
+  // The pinned level (#646), so a mount the relay no longer lists still says
+  // what it grants.
+  access: ShareAccess;
   ended?: boolean;
   // Ops this mount's pulls skipped. Durable: the cursor committed past them.
   skippedOps?: {
@@ -305,8 +312,11 @@ export function SharedWithMeList(props: {
           className="flex items-center gap-2 bg-panel px-2.5 py-2"
         >
           <div className="min-w-0 flex-1">
-            <div className="truncate font-mono text-[11px] text-ink">
-              {`shared-with-me/${mount.label}`}
+            <div className="flex items-center gap-1.5">
+              <span className="truncate font-mono text-[11px] text-ink">
+                {`shared-with-me/${mount.label}`}
+              </span>
+              <ShareAccessBadge access={mount.access} />
             </div>
             <div className="truncate text-[11px] text-subtle">
               {`From ${mount.granterEmail ?? "another dohc user"}`}
@@ -337,8 +347,11 @@ export function SharedWithMeList(props: {
             className="flex items-center gap-2 bg-panel px-2.5 py-2"
           >
             <div className="min-w-0 flex-1">
-              <div className="truncate font-mono text-[11px] text-ink">
-                {selectorLabel(share)}
+              <div className="flex items-center gap-1.5">
+                <span className="truncate font-mono text-[11px] text-ink">
+                  {selectorLabel(share)}
+                </span>
+                <ShareAccessBadge access={share.selector.access} />
               </div>
               <div className="truncate text-[11px] text-subtle">
                 {`From ${share.granterEmail ?? "another dohc user"}`}

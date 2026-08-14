@@ -40,7 +40,11 @@ import { refreshSharedViewOnce } from "./sharedView";
 // damaged-record path has its own tests in sharedView.test.ts. This is a REAL
 // selector — no paths and no version selects nothing at all, which the engine
 // refuses.
-const PINNED_SELECTOR = { paths: ["docs"], versionId: null };
+const PINNED_SELECTOR = {
+  paths: ["docs"],
+  versionId: null,
+  access: "view",
+} as const;
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
 
@@ -752,7 +756,7 @@ describe("EngineRelayClient", () => {
     ).toEqual({
       workspaceId: "workspace-a",
       shareId: "share-view",
-      grantedSelector: { paths: ["docs"], versionId: null },
+      grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
     });
     await sessions.closeAll();
   });
@@ -772,7 +776,7 @@ describe("EngineRelayClient", () => {
       relay,
       shareId: "share-view",
       store,
-      pinnedSelector: { paths: ["docs"], versionId: "v1" },
+      pinnedSelector: { paths: ["docs"], versionId: "v1", access: "view" },
       recordRefusals: async () => undefined,
       pull: async (input) =>
         await client.pullShareView({
@@ -785,11 +789,11 @@ describe("EngineRelayClient", () => {
       daemon.requests.find(
         (request) => request.method === "share.view.pull",
       )?.params,
-      "MUTATION: dropping either dimension on the wire widens the accepted grant",
+      "MUTATION: dropping any dimension on the wire widens the accepted grant, or leaves one the engine cannot read",
     ).toEqual({
       workspaceId: "workspace-a",
       shareId: "share-view",
-      grantedSelector: { paths: ["docs"], versionId: "v1" },
+      grantedSelector: { paths: ["docs"], versionId: "v1", access: "view" },
     });
     await sessions.closeAll();
   });
@@ -829,7 +833,7 @@ describe("EngineRelayClient", () => {
 
     const pull = await client.pullShareView({
       shareId: "share-view",
-      grantedSelector: { paths: ["docs"], versionId: null },
+      grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
     });
 
     expect(
@@ -876,7 +880,7 @@ describe("EngineRelayClient", () => {
 
     const pull = await client.pullShareView({
       shareId: "share-view",
-      grantedSelector: { paths: ["docs"], versionId: null },
+      grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
       recordRefusals: async (refusals) => {
         recorded += refusals.length;
       },
@@ -927,7 +931,7 @@ describe("EngineRelayClient", () => {
     await expect(
       client.pullShareView({
         shareId: "share-view",
-        grantedSelector: { paths: ["docs"], versionId: null },
+        grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
         recordRefusals: async (refusals) => {
           recorded.push(...refusals.map((refusal) => refusal.detail));
         },
@@ -1109,7 +1113,7 @@ describe("EngineRelayClient", () => {
     await expect(
       client.pullShareView({
         shareId: "share-revoked",
-        grantedSelector: { paths: ["docs"], versionId: null },
+        grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
       }),
     ).rejects.toBeInstanceOf(ShareUnavailableError);
     await expect(
@@ -1341,7 +1345,7 @@ describe("EngineRelayClient", () => {
 
     const view = await client.pullShareView({
       shareId: "share-view",
-      grantedSelector: { paths: ["docs"], versionId: null },
+      grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
     });
     expect(view).toMatchObject({
       fetched: 2,

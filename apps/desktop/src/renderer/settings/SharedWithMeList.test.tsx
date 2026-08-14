@@ -64,6 +64,46 @@ afterEach(() => {
 });
 
 describe("SharedWithMeList", () => {
+  // The level is the RECIPIENT's own right, so it belongs on the recipient's
+  // surface too — on relay-listed rows and on a mount the relay no longer
+  // lists, which reads its level from the pinned grant.
+  it("shows the level on a received row and on a registry-only mount", async () => {
+    bridgeMock.listRelayShares.mockResolvedValue({
+      received: [
+        {
+          shareId: "share-listed",
+          granterEmail: "sam@dohc.test",
+          selector: { paths: ["docs"], versionId: null, access: "comment" },
+          createdAtMs: 1,
+          shareCode: "dohc-share:share-listed:http://relay.test",
+        },
+      ],
+    });
+    bridgeMock.getWorkspaceRegistry.mockResolvedValue({
+      workspaces: [
+        {
+          workspaceId: WORKSPACE_ID,
+          shareMounts: [
+            {
+              shareId: "share-unlisted",
+              label: "alex",
+              granterEmail: "alex@dohc.test",
+              access: "edit",
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<SharedWithMeList workspaceId={WORKSPACE_ID} />);
+
+    const badges = await screen.findAllByTestId("share-access-badge");
+    expect(badges.map((badge) => badge.textContent).sort()).toEqual([
+      "Comment",
+      "Edit",
+    ]);
+  });
+
   // A mounted share's pull skips a refused op and keeps going, so the mount
   // goes on looking healthy while it stops carrying part of what the granter
   // shares. The mount row is where a recipient sees that — the workspace
@@ -78,6 +118,7 @@ describe("SharedWithMeList", () => {
               shareId: "share-1",
               label: "alex",
               granterEmail: "alex@dohc.test",
+              access: "view",
               skippedOps: SKIPPED,
             },
           ],
@@ -199,6 +240,7 @@ describe("SharedWithMeList", () => {
               shareId: "share-1",
               label: "alex",
               granterEmail: "alex@dohc.test",
+              access: "view",
               skippedOps: SKIPPED,
             },
           ],
@@ -313,7 +355,7 @@ describe("SharedWithMeList", () => {
         {
           shareId: "share-2",
           granterEmail: "sam@dohc.test",
-          selector: { paths: ["docs"], versionId: null },
+          selector: { paths: ["docs"], versionId: null, access: "view" },
           createdAtMs: 1,
           shareCode: "dohc-share:share-2:http://relay.test",
         },
@@ -339,6 +381,7 @@ describe("SharedWithMeList", () => {
               shareId: "share-1",
               label: "alex",
               granterEmail: "alex@dohc.test",
+              access: "view",
               skippedOps: {
                 ...SKIPPED,
                 ops: [
@@ -374,7 +417,12 @@ describe("SharedWithMeList", () => {
         {
           workspaceId: WORKSPACE_ID,
           shareMounts: [
-            { shareId: "share-1", label: "alex", granterEmail: "alex@dohc.test" },
+            {
+              shareId: "share-1",
+              label: "alex",
+              granterEmail: "alex@dohc.test",
+              access: "view",
+            },
           ],
         },
       ],

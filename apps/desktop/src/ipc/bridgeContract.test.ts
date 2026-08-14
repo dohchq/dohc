@@ -1861,7 +1861,8 @@ describe("a persisted share refusal stays readable", () => {
     shareView: {
       shareId: "share-1",
       granterEmail: "granter@dohc.test",
-      grantedSelector: { paths: ["docs"], versionId: null },
+      access: "view" as const,
+      grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
       skippedOps: skipped(opKind),
     },
   });

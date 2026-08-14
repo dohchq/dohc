@@ -1141,7 +1141,30 @@ function notifyCloudSessionChangedWithKey(
 }
 
 function workspaceSummaries(): WorkspaceSummary[] {
-  return listWorkspaces().map((workspace) => WorkspaceSummary.parse(workspace));
+  // The share level reaches the renderer from the PINNED grant, so there is
+  // one stored copy of it (#646). The renderer states the level in its copy;
+  // it never decides anything with it.
+  return listWorkspaces().map((workspace) =>
+    WorkspaceSummary.parse({
+      ...workspace,
+      ...(workspace.shareView
+        ? {
+            shareView: {
+              ...workspace.shareView,
+              access: workspace.shareView.grantedSelector.access,
+            },
+          }
+        : {}),
+      ...(workspace.shareMounts
+        ? {
+            shareMounts: workspace.shareMounts.map((mount) => ({
+              ...mount,
+              access: mount.grantedSelector.access,
+            })),
+          }
+        : {}),
+    }),
+  );
 }
 
 function nativeWorkspaceSummaries(): WorkspaceSummary[] {
@@ -4939,6 +4962,7 @@ function registerIpcHandlers(
         method: "POST",
         body: JSON.stringify({
           recipientEmail: input.recipientEmail,
+          access: input.access,
           ...(input.paths ? { paths: input.paths } : {}),
           ...(input.versionId ? { versionId: input.versionId } : {}),
         }),

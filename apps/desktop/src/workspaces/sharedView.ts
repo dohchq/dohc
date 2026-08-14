@@ -3,7 +3,11 @@ import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promise
 import { dirname, resolve, sep } from "node:path";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
-import { isValidShareVersionId } from "@dohc/security-contract/share-selector";
+import {
+  isShareAccessValue,
+  isValidShareVersionId,
+} from "@dohc/security-contract/share-selector";
+import type { ShareViewSelector } from "./shareViewInfo";
 import {
   ShareUnavailableError,
   type PullShareViewResult,
@@ -37,10 +41,7 @@ export interface RefreshSharedViewOutcome {
  * first use). The user never sees or chooses this scope — pinning only stops
  * the relay from restating a wider one on a later pull.
  */
-export interface PinnedShareSelector {
-  paths: string[];
-  versionId: string | null;
-}
+export type PinnedShareSelector = ShareViewSelector;
 
 /**
  * Raised when a share record carries no readable pinned selector, so the
@@ -75,7 +76,11 @@ export function recordedShareSelector(
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
-  const candidate = value as { paths?: unknown; versionId?: unknown };
+  const candidate = value as {
+    paths?: unknown;
+    versionId?: unknown;
+    access?: unknown;
+  };
   if (!Array.isArray(candidate.paths)) return null;
   if (!candidate.paths.every((path) => typeof path === "string")) return null;
   // The version dimension decides whether a no-paths selector grants the whole
@@ -89,11 +94,16 @@ export function recordedShareSelector(
   // to create a selector with neither a path nor a version, and
   // `pathVisibleThroughShare` serves nothing through one.
   if (candidate.paths.length === 0 && candidate.versionId === null) return null;
+  // The level is part of the pin (#646). A record whose level the relay could
+  // not have issued is damaged the same way a bad version id is, and the
+  // refresh fails closed rather than pulling at a level nobody granted.
+  if (!isShareAccessValue(candidate.access)) return null;
   return {
     paths: [...(candidate.paths as string[])],
     versionId: isValidShareVersionId(candidate.versionId)
       ? candidate.versionId
       : null,
+    access: candidate.access,
   };
 }
 

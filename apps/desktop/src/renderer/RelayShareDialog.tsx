@@ -1,5 +1,6 @@
 import { Check, Copy, Share2, X } from "lucide-react";
 import { useMemo, useState } from "react";
+import type { ShareAccess } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { IconButton, PrimaryButton } from "./ui/controls";
 
@@ -21,12 +22,43 @@ function errorMessage(cause: unknown): string {
   return text.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
 }
 
+// The levels this dialog offers, in order. Only View grants anything extra
+// today, so only View is selectable: Comment's chat rights land with #646 PR2
+// and Edit's document writes with PR3. An option that promised a right the
+// relay still refuses would be the dialog lying about the grant.
+const ACCESS_OPTIONS: ReadonlyArray<{
+  value: ShareAccess;
+  label: string;
+  helper: string;
+  ready: boolean;
+}> = [
+  {
+    value: "view",
+    label: "View",
+    helper: "They can read what you selected.",
+    ready: true,
+  },
+  {
+    value: "comment",
+    label: "Comment",
+    helper: "They can read what you selected and chat about it.",
+    ready: false,
+  },
+  {
+    value: "edit",
+    label: "Edit",
+    helper: "They can read, chat, and edit what you selected.",
+    ready: false,
+  },
+];
+
 export function RelayShareDialog(props: {
   workspaceId: string;
   target: RelayShareTarget;
   onClose: () => void;
 }) {
   const [email, setEmail] = useState("");
+  const [access, setAccess] = useState<ShareAccess>("view");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<{
@@ -49,6 +81,7 @@ export function RelayShareDialog(props: {
       const result = await bridge().createRelayShare({
         workspaceId: props.workspaceId,
         recipientEmail: email.trim(),
+        access,
         ...(props.target.paths
           ? { paths: props.target.paths }
           : props.target.path
@@ -89,19 +122,59 @@ export function RelayShareDialog(props: {
 
       <p className="m-0 text-xs leading-relaxed text-muted">
         {props.target.versionId ? (
-          <>Share {subject} as a read-only live view.</>
+          <>Share {subject}.</>
         ) : (
           <>
-            Share <code className="font-mono text-[11px] text-ink">{subject}</code> as a
-            read-only live view.
+            Share <code className="font-mono text-[11px] text-ink">{subject}</code>.
           </>
-        )}{" "}
-        They see what you selected — nothing else — and your later edits arrive when
-        they refresh.
+        )}
       </p>
 
       {created === null ? (
         <>
+          <div className="flex flex-col gap-1">
+            <span className="text-[11px] font-medium text-subtle">Access</span>
+            <div className="flex gap-1.5" role="radiogroup" aria-label="Access">
+              {ACCESS_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={access === option.value}
+                  disabled={!option.ready}
+                  data-testid={`share-access-${option.value}`}
+                  onClick={() => setAccess(option.value)}
+                  className={`flex-1 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                    access === option.value
+                      ? "border-ink bg-panel-2 text-ink"
+                      : "border-line bg-panel text-muted enabled:hover:text-ink"
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <p
+              data-testid="share-access-helper"
+              className="m-0 text-[11px] leading-relaxed text-subtle"
+            >
+              {ACCESS_OPTIONS.find((option) => option.value === access)?.helper}
+            </p>
+            {ACCESS_OPTIONS.some((option) => !option.ready) ? (
+              <p
+                data-testid="share-access-pending"
+                className="m-0 text-[11px] leading-relaxed text-subtle"
+              >
+                Comment and Edit are not ready yet.
+              </p>
+            ) : null}
+          </div>
+
+          <p className="m-0 text-xs leading-relaxed text-muted">
+            They see what you selected — nothing else — and your later edits arrive
+            when they refresh.
+          </p>
+
           <label className="block text-[11px] font-medium text-subtle">
             Share with (email)
             <input

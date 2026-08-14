@@ -36,15 +36,36 @@ function momentPayload(overrides: Record<string, unknown> = {}): string {
   });
 }
 
-const pathShare: ShareSelector = { paths: ["docs"], versionId: null };
+const pathShare: ShareSelector = { paths: ["docs"], versionId: null, access: "view" };
 
 describe("share selector validation", () => {
   it("accepts explicit tracked paths and normalizes/dedupes them", () => {
     const result = validateShareSelector({ paths: ["docs/notes.md", "docs//notes.md", "src"] });
     expect(result).toEqual({
       ok: true,
-      selector: { paths: ["docs/notes.md", "src"], versionId: null },
+      selector: { paths: ["docs/notes.md", "src"], versionId: null, access: "view" },
     });
+  });
+
+  it("defaults access to view when the caller sends nothing, and accepts every level", () => {
+    for (const access of ["view", "comment", "edit"] as const) {
+      expect(validateShareSelector({ paths: ["docs"], access })).toMatchObject({
+        ok: true,
+        selector: { access },
+      });
+    }
+    expect(validateShareSelector({ paths: ["docs"] })).toMatchObject({
+      ok: true,
+      selector: { access: "view" },
+    });
+  });
+
+  it("refuses every access value that is not exactly view, comment, or edit", () => {
+    for (const access of ["View", "COMMENT", " view", "view ", "viewer", "read-write", 42, null]) {
+      const result = validateShareSelector({ paths: ["docs"], access });
+      expect(result.ok, JSON.stringify(access)).toBe(false);
+      if (!result.ok) expect(result.code).toBe("invalid_access");
+    }
   });
 
   it("refuses secret-classified paths at grant time, including encoded disguises", () => {
@@ -127,21 +148,44 @@ describe("share selector validation", () => {
   });
 
   it("round-trips through selector JSON and rejects malformed persisted selectors", () => {
-    const validated = validateShareSelector({ paths: ["docs"], versionId: "v-1" });
+    const validated = validateShareSelector({ paths: ["docs"], versionId: "v-1", access: "comment" });
     expect(validated.ok).toBe(true);
     if (!validated.ok) return;
     const json = JSON.stringify(validated.selector);
     expect(parseShareSelectorJson(json)).toEqual(validated.selector);
     expect(parseShareSelectorJson("not json")).toBeNull();
-    expect(parseShareSelectorJson('{"paths":"docs","versionId":null}')).toBeNull();
-    expect(parseShareSelectorJson('{"paths":[1],"versionId":null}')).toBeNull();
+    expect(parseShareSelectorJson('{"paths":"docs","versionId":null,"access":"view"}')).toBeNull();
+    expect(parseShareSelectorJson('{"paths":[1],"versionId":null,"access":"view"}')).toBeNull();
+  });
+
+  // A stored row missing `access` (pre-#646) or naming a level the relay
+  // never issues must fail closed to null, never resurrect into "view" — the
+  // create-time default in validateShareSelector is a create-time-only
+  // convenience (decision G), and this is the row-reload rule mirroring the
+  // chat-channel selector's identical posture at line 277-287.
+  it("fails a stored row closed to null when access is missing or unrecognized, even though create-time defaults it", () => {
+    expect(
+      parseShareSelectorJson('{"paths":["docs"],"versionId":null}'),
+      "MUTATION: a stored row with no access must not silently become view",
+    ).toBeNull();
+    for (const access of ["View", "COMMENT", " view", "viewer", "read-write", ""]) {
+      expect(
+        parseShareSelectorJson(JSON.stringify({ paths: ["docs"], versionId: null, access })),
+        access,
+      ).toBeNull();
+    }
+    for (const access of ["view", "comment", "edit"] as const) {
+      expect(
+        parseShareSelectorJson(JSON.stringify({ paths: ["docs"], versionId: null, access })),
+      ).toEqual({ paths: ["docs"], versionId: null, access });
+    }
   });
 });
 
 describe("share op filter", () => {
   it("allows main-version moments inside the selector, exact and prefix", () => {
     const exact = filterOpForShare(
-      { paths: ["docs/a.md"], versionId: null },
+      { paths: ["docs/a.md"], versionId: null, access: "view" },
       "moment.append",
       momentPayload(),
     );
@@ -213,7 +257,7 @@ describe("share op filter", () => {
   });
 
   it("serves a MINIMAL version.create payload with redacted, metadata-free snapshots", () => {
-    const selector: ShareSelector = { paths: ["docs"], versionId: "version-1" };
+    const selector: ShareSelector = { paths: ["docs"], versionId: "version-1", access: "view" };
     const decision = filterOpForShare(
       selector,
       "version.create",
@@ -266,7 +310,7 @@ describe("share op filter", () => {
       ).toBe("main");
     }
     const versioned = filterOpForShare(
-      { paths: ["docs"], versionId: "version-1" },
+      { paths: ["docs"], versionId: "version-1", access: "view" },
       "moment.append",
       momentPayload({ versionId: "version-1" }),
     );
@@ -306,11 +350,11 @@ describe("share op filter", () => {
   });
 
   it("defensively denies secret-classified paths even when a selector somehow contains them", () => {
-    const poisoned: ShareSelector = { paths: [".env"], versionId: null };
+    const poisoned: ShareSelector = { paths: [".env"], versionId: null, access: "view" };
     const op = momentPayload({ path: ".env", payloadAfterPath: ".env" });
     expect(filterOpForShare(poisoned, "moment.append", op).allowed).toBe(false);
     // And a versionful share of "everything" still excludes secret paths.
-    const versionShare: ShareSelector = { paths: [], versionId: "main" };
+    const versionShare: ShareSelector = { paths: [], versionId: "main", access: "view" };
     expect(filterOpForShare(versionShare, "moment.append", op).allowed).toBe(false);
   });
 
@@ -375,7 +419,7 @@ describe("share op filter", () => {
         },
       },
     });
-    const versionShare: ShareSelector = { paths: [], versionId: "main" };
+    const versionShare: ShareSelector = { paths: [], versionId: "main", access: "view" };
 
     for (const selector of [pathShare, versionShare]) {
       const decision = filterOpForShare(selector, "conflict.resolve", payload);
@@ -387,7 +431,7 @@ describe("share op filter", () => {
   });
 
   it("redacts version.create fork snapshots to the selector and drops the rest", () => {
-    const selector: ShareSelector = { paths: ["docs"], versionId: "version-1" };
+    const selector: ShareSelector = { paths: ["docs"], versionId: "version-1", access: "view" };
     const payload = JSON.stringify({
       versionId: "version-1",
       name: "review",
@@ -413,7 +457,7 @@ describe("share op filter", () => {
     const payload = JSON.stringify({ versionId: "version-1", forkSnapshots: [] });
     expect(filterOpForShare(pathShare, "version.create", payload).allowed).toBe(false);
     expect(
-      filterOpForShare({ paths: [], versionId: "version-2" }, "version.create", payload).allowed,
+      filterOpForShare({ paths: [], versionId: "version-2", access: "view" }, "version.create", payload).allowed,
     ).toBe(false);
   });
 
@@ -477,10 +521,18 @@ describe("chat-channel share selector", () => {
     expect(
       parseAnyShareSelectorJson('{"kind":"chat-channel","channelWireId":"w","access":"read-write"}'),
     ).toEqual({ kind: "chat-channel", channelWireId: "w", access: "read-write" });
-    // Legacy path selectors still parse through the union parser.
-    expect(parseAnyShareSelectorJson('{"paths":["docs"],"versionId":null}')).toEqual({
+    // Path selectors still parse through the union parser, and the same
+    // fail-closed-on-missing-access rule applies to them (decision G).
+    expect(
+      parseAnyShareSelectorJson('{"paths":["docs"],"versionId":null}'),
+      "MUTATION: a path row with no access must not silently become view",
+    ).toBeNull();
+    expect(
+      parseAnyShareSelectorJson('{"paths":["docs"],"versionId":null,"access":"view"}'),
+    ).toEqual({
       paths: ["docs"],
       versionId: null,
+      access: "view",
     });
   });
 
@@ -511,7 +563,7 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
     channelWireId: "wire-1",
     access: "read-write",
   };
-  const pathShare: ShareSelector = { paths: ["docs"], versionId: null };
+  const pathShare: ShareSelector = { paths: ["docs"], versionId: null, access: "view" };
   const threadResolver: ChatShareThreadResolver = {
     channelKind: (wireId) =>
       wireId === "wire-1" || wireId === "wire-2" ? "channel" : undefined,
@@ -629,14 +681,14 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
     // kind gate.
     expect(
       presenceTopicAllowedForShare(
-        { paths: ["wire-agent"], versionId: null },
+        { paths: ["wire-agent"], versionId: null, access: "view" },
         "wire-agent",
         agentResolver,
       ),
     ).toBe(false);
     expect(
       presenceTopicAllowedForShare(
-        { paths: ["chat:thread:thread-agent"], versionId: null },
+        { paths: ["chat:thread:thread-agent"], versionId: null, access: "view" },
         "chat:thread:thread-agent",
         agentResolver,
       ),

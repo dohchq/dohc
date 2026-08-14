@@ -9,6 +9,7 @@ import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floo
 import type { SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import type { ShareMountRecord } from "./registryStore";
+import type { ShareViewSelector } from "./shareViewInfo";
 import {
   refreshSharedViewOnce,
   repairSharedViewProjection,
@@ -138,8 +139,8 @@ export async function createMountDirectory(
 // because softening one into "grants everything" is exactly the widening this
 // containment exists to stop.
 export function assertMountableSelector(
-  selector: { paths: readonly string[]; versionId: string | null } | null,
-): asserts selector is { paths: readonly string[]; versionId: string | null } {
+  selector: ShareViewSelector | null,
+): asserts selector is ShareViewSelector {
   if (selector === null) {
     throw new Error(
       "This code is for a shared chat channel — join it from Chats instead of mounting it.",

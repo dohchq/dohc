@@ -1,3 +1,4 @@
+import { SHARE_ACCESS_VALUES } from "@dohc/security-contract/share-selector";
 import {
   WORKSPACE_KINDS,
   WORKSPACE_MODES,
@@ -131,6 +132,13 @@ const MODE_ENUM = z.enum(WORKSPACE_MODES);
 export const PickWorkspaceRootResult = PATH_STRING.nullable();
 export type PickWorkspaceRootResult = z.infer<typeof PickWorkspaceRootResult>;
 
+// The level a recipient holds on a path/version share (#646), from the same
+// one place the relay and the engine read it. All three levels read the same
+// files today; PR2 opens comment and edit to chat, PR3 opens edit to writes.
+// The chat-channel grant's own binary access is a different field.
+export const SHARE_ACCESS = z.enum(SHARE_ACCESS_VALUES);
+export type ShareAccess = z.infer<typeof SHARE_ACCESS>;
+
 // Ops a share pull skipped, and why. Durable state, not a status: the pull
 // commits its cursor past a refused op, so that content never arrives again
 // unless the granter writes the same path a second time.
@@ -173,6 +181,8 @@ export const WorkspaceSummary = z.object({
     .object({
       shareId: z.string().min(1).max(200),
       granterEmail: z.string().min(3).max(320).nullable(),
+      // The pinned level (#646). The banner states it; it never decides it.
+      access: SHARE_ACCESS,
       ended: z.boolean().optional(),
       skippedOps: ShareSkippedOpsSummary.optional(),
     })
@@ -186,6 +196,9 @@ export const WorkspaceSummary = z.object({
         shareId: z.string().min(1).max(200),
         label: z.string().min(1).max(64),
         granterEmail: z.string().min(3).max(320).nullable(),
+        // The pinned level (#646), so a mount the relay no longer lists can
+        // still say what it grants.
+        access: SHARE_ACCESS,
         ended: z.boolean().optional(),
         skippedOps: ShareSkippedOpsSummary.optional(),
       }),
@@ -2518,6 +2531,7 @@ export type CloudJoinWorkspaceResult = z.infer<typeof CloudJoinWorkspaceResult>;
 export const RelayShareSelector = z.object({
   paths: z.array(PATH_STRING).max(100),
   versionId: z.string().min(1).max(128).nullable(),
+  access: SHARE_ACCESS,
 });
 export type RelayShareSelector = z.infer<typeof RelayShareSelector>;
 
@@ -2562,6 +2576,9 @@ export const CreateRelaySharePayload = z.object({
   recipientEmail: EMAIL_STRING,
   paths: z.array(PATH_STRING).min(1).max(100).optional(),
   versionId: z.string().min(1).max(128).optional(),
+  // Required (#646): the dialog always states the level, so it always sends
+  // one. The relay's own default covers other callers, not this one.
+  access: SHARE_ACCESS,
 });
 export type CreateRelaySharePayload = z.infer<typeof CreateRelaySharePayload>;
 

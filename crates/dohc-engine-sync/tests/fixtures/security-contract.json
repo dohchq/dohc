@@ -253,5 +253,74 @@
         "utf16Length": 130
       }
     ]
+  },
+  "shareAccess": {
+    "values": [
+      "view",
+      "comment",
+      "edit"
+    ],
+    "vectors": [
+      {
+        "value": "view",
+        "valid": true
+      },
+      {
+        "value": "comment",
+        "valid": true
+      },
+      {
+        "value": "edit",
+        "valid": true
+      },
+      {
+        "value": "View",
+        "valid": false
+      },
+      {
+        "value": "COMMENT",
+        "valid": false
+      },
+      {
+        "value": "Edit",
+        "valid": false
+      },
+      {
+        "value": " view",
+        "valid": false
+      },
+      {
+        "value": "view ",
+        "valid": false
+      },
+      {
+        "value": "\tview",
+        "valid": false
+      },
+      {
+        "value": "edit\n",
+        "valid": false
+      },
+      {
+        "value": "",
+        "valid": false
+      },
+      {
+        "value": "viewer",
+        "valid": false
+      },
+      {
+        "value": "read-write",
+        "valid": false
+      },
+      {
+        "value": "read-only",
+        "valid": false
+      },
+      {
+        "value": "none",
+        "valid": false
+      }
+    ]
   }
 }

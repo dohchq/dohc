@@ -22,6 +22,7 @@ import {
   type RecoverRelayOriginResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
+import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { probeRelayWorkspace } from "./relayWorkspaceProbe";
 import {
   DaemonRefusalError,
@@ -555,7 +556,11 @@ export interface EngineRelayWorkspaceClient {
     // The selector the relay stated for this share, pinned on first read.
     // Required, because the engine has no unscoped pull: a caller that cannot
     // resolve a selector must skip its refresh, not widen it.
-    grantedSelector: { paths: readonly string[]; versionId: string | null };
+    grantedSelector: {
+      paths: readonly string[];
+      versionId: string | null;
+      access: ShareAccess;
+    };
     // Called with each page's refusals BEFORE that page's cursor is
     // committed. A refusal is a durable fact — the commit moves permanently
     // past the op — so it has to be recorded first, or a later page that
@@ -959,12 +964,14 @@ export class EngineRelayClient {
             await request("share.view.pull", {
               workspaceId: workspace.workspaceId,
               shareId,
-              // Both dimensions, always. Dropping the paths leaves a grant
+              // Every dimension, always. Dropping the paths leaves a grant
               // that selects everything under a version; dropping the version
-              // leaves one the engine refuses outright.
+              // leaves one the engine refuses outright; dropping the level
+              // leaves one the engine cannot read and refuses too.
               grantedSelector: {
                 paths: [...grantedSelector.paths],
                 versionId: grantedSelector.versionId,
+                access: grantedSelector.access,
               },
             }),
             "share.view.pull",

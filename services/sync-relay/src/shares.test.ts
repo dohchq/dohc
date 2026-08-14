@@ -169,7 +169,7 @@ describe("share grants", () => {
       ok: true,
       shareId: "share-0",
       workspaceId: WORKSPACE,
-      selector: { paths: ["docs", "notes.md"], versionId: null },
+      selector: { paths: ["docs", "notes.md"], versionId: null, access: "view" },
       createdAtMs: 5555,
     });
     expect(created).not.toHaveProperty("recipientUserId");
@@ -181,7 +181,7 @@ describe("share grants", () => {
         workspaceId: WORKSPACE,
         recipientUserId: RECIPIENT,
         recipientEmail: `${RECIPIENT}@dohc.test`,
-        selector: { paths: ["docs", "notes.md"], versionId: null },
+        selector: { paths: ["docs", "notes.md"], versionId: null, access: "view" },
         createdAtMs: 5555,
         revokedAtMs: null,
       },
@@ -205,8 +205,80 @@ describe("share grants", () => {
       ok: true,
       shareId: "share-0",
       granterUserId: GRANTER,
-      selector: { paths: ["docs", "notes.md"], versionId: null },
+      selector: { paths: ["docs", "notes.md"], versionId: null, access: "view" },
     });
+  });
+
+  it("creates a share at each level and carries it on the summary rows on both sides", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+
+    for (const access of ["view", "comment", "edit"] as const) {
+      const create = await h(
+        request(
+          GRANTER,
+          `/sync/${WORKSPACE}/shares`,
+          jsonBody({ recipientUserId: RECIPIENT, paths: [`docs-${access}`], access }),
+        ),
+      );
+      expect(create.status, access).toBe(200);
+      expect((await json(create)).selector, access).toMatchObject({ access });
+    }
+
+    const granterList = await json(await h(request(GRANTER, "/sync/shares")));
+    const granted = granterList.granted as Array<{ selector: { access: string } }>;
+    expect(granted.map((row) => row.selector.access)).toEqual(["view", "comment", "edit"]);
+
+    const recipientList = await json(await h(request(RECIPIENT, "/sync/shares")));
+    const received = recipientList.received as Array<{ selector: { access: string } }>;
+    expect(received.map((row) => row.selector.access)).toEqual(["view", "comment", "edit"]);
+  });
+
+  it("refuses an unrecognized access value at grant time", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const response = await h(
+      request(
+        GRANTER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientUserId: RECIPIENT, paths: ["docs"], access: "Edit" }),
+      ),
+    );
+    expect(response.status).toBe(400);
+    expect((await json(response)).code).toBe("invalid_access");
+  });
+
+  // PR1 keeps the append route refusing EVERY path/version selector with the
+  // SAME code and body, whatever its level (decision 7) — a level-specific
+  // refusal would fingerprint the selector's access to a probing recipient
+  // before PR2 opens comment/edit appends. Byte-identical bodies are the
+  // anti-fingerprinting property itself, not a proxy for it.
+  it("refuses a recipient append on every path-share level with the identical share_read_only body", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const bodies: string[] = [];
+    for (const access of ["view", "comment", "edit"] as const) {
+      const create = await h(
+        request(
+          GRANTER,
+          `/sync/${WORKSPACE}/shares`,
+          jsonBody({ recipientUserId: RECIPIENT, paths: [`docs-${access}`], access }),
+        ),
+      );
+      const shareId = (await json(create)).shareId as string;
+      const append = await h(
+        request(RECIPIENT, `/sync/shares/${shareId}/log`, jsonBody({ originId: "o", ops: [] })),
+      );
+      expect(append.status, access).toBe(403);
+      const body = await append.text();
+      expect(JSON.parse(body).code, access).toBe("share_read_only");
+      bodies.push(body);
+    }
+    expect(bodies[0]).toBe(bodies[1]);
+    expect(bodies[1]).toBe(bodies[2]);
   });
 
   it("refuses secret paths, traversal, empty selectors, and self-shares at grant time", async () => {

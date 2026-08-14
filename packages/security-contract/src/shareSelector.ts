@@ -1,4 +1,5 @@
-// The share selector's VERSION dimension, as one rule in one place.
+// The share selector's VERSION and ACCESS dimensions, as one rule in one
+// place.
 //
 // The relay applies it when it creates a selector (`validateShareSelector` in
 // services/sync-relay/src/shareFilter.ts). Every recipient surface that reads
@@ -34,5 +35,33 @@ export function isValidShareVersionId(value: unknown): value is string {
     value.length > 0 &&
     value.trim() === value &&
     value.length <= MAX_SHARE_VERSION_ID_CHARS
+  );
+}
+
+/**
+ * The file-share access levels (issue #646, S7), in the order the UI offers
+ * them. `view` is the narrowest.
+ *
+ * The chat-channel selector's own binary `access` is a different field on a
+ * different selector kind. It is not this rule.
+ */
+export const SHARE_ACCESS_VALUES = ["view", "comment", "edit"] as const;
+
+export type ShareAccess = (typeof SHARE_ACCESS_VALUES)[number];
+
+/**
+ * Whether `value` is a level the relay could have issued: exactly one of the
+ * three lowercase strings above. No case folding and no trimming — a level a
+ * surface cannot read is not a narrower grant, it is an unreadable one.
+ *
+ * The engine twin (`ShareAccess::parse` in
+ * `crates/dohc-engine-sync/src/share.rs`) accepts the same set, held to this
+ * function vector by vector in
+ * `crates/dohc-engine-sync/tests/security_contract.rs`.
+ */
+export function isShareAccessValue(value: unknown): value is ShareAccess {
+  return (
+    typeof value === "string" &&
+    (SHARE_ACCESS_VALUES as readonly string[]).includes(value)
   );
 }

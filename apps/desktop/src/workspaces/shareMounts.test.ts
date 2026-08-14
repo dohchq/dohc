@@ -23,7 +23,11 @@ import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStor
 // These tests drive the pull with the selector a mount record pins. No paths
 // selects the whole tracked workspace only WITH a version — no paths and no
 // version selects nothing at all, which the engine refuses.
-const PINNED_SELECTOR = { paths: [], versionId: "shared-version" };
+const PINNED_SELECTOR = {
+  paths: [],
+  versionId: "shared-version",
+  access: "view",
+} as const;
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
 
@@ -599,10 +603,18 @@ describe("refreshShareMountOnce", () => {
   it("refuses to mount a selector with no file content (chat-channel codes)", () => {
     expect(() => assertMountableSelector(null)).toThrow(/shared chat channel/);
     expect(() =>
-      assertMountableSelector({ paths: ["docs"], versionId: null }),
+      assertMountableSelector({
+        paths: ["docs"],
+        versionId: null,
+        access: "view",
+      }),
     ).not.toThrow();
     expect(() =>
-      assertMountableSelector({ paths: [], versionId: "main" }),
+      assertMountableSelector({
+        paths: [],
+        versionId: "main",
+        access: "comment",
+      }),
     ).not.toThrow();
   });
 

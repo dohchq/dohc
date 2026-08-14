@@ -63,6 +63,36 @@ pub enum ShareSurface {
     ShareView,
 }
 
+/// The file-share access level (issue #646, S7). The Rust twin of the
+/// relay's `ShareAccess` (`services/sync-relay/src/shareFilter.ts`), held to
+/// it vector by vector in `crates/dohc-engine-sync/tests/security_contract.rs`.
+///
+/// PR1 carries and pins this on every `ShareGrant`; all three values grant
+/// exactly what a share grants today. PR2 opens Comment and Edit to chat,
+/// PR3 opens Edit to document writes — neither is wired here yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShareAccess {
+    #[default]
+    View,
+    Comment,
+    Edit,
+}
+
+impl ShareAccess {
+    /// Accepts exactly the three lowercase level strings the relay issues —
+    /// no case folding, no trimming. A grant whose level cannot be read this
+    /// way is not a narrower grant, it is an unreadable one, and the caller
+    /// must refuse it rather than substitute a default.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "view" => Some(Self::View),
+            "comment" => Some(Self::Comment),
+            "edit" => Some(Self::Edit),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareBoundary {
     pub share_id: String,
@@ -92,6 +122,11 @@ pub struct ShareGrant {
     /// main version, which is never entitled to a `version.create`; `Some(id)`
     /// is a version share, entitled to exactly that version's create.
     pub version_id: Option<String>,
+    /// The pinned level (#646 PR1). `Default` makes this `View`, but that is
+    /// a TEST convenience only — never a grant source. A real grant is parsed
+    /// from the relay's own selector at pin time (`ShareAccess::parse`) and
+    /// refused, not defaulted, when unreadable.
+    pub access: ShareAccess,
 }
 
 /// Apply an inbound shared op only if its channel/path selector remains inside
@@ -483,6 +518,7 @@ mod granted_path_tests {
         ShareGrant {
             paths: paths.iter().map(|path| (*path).to_owned()).collect(),
             version_id: version_id.map(str::to_owned),
+            ..Default::default()
         }
     }
 
