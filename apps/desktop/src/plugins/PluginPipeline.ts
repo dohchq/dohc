@@ -1,7 +1,7 @@
 import type { WatcherEvent } from "@dohc/workspace-core";
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, readFile, rm } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { lstat, readFile, readdir, rm } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   PLUGIN_PIPELINE_ERROR_STAGES,
   PLUGIN_PIPELINE_STATUSES,
@@ -699,12 +699,7 @@ export class PluginPipeline {
             maxRetries: 5,
             retryDelay: 200,
           }),
-          this.operations.removePath(this.liveRoot(pluginId), {
-            recursive: true,
-            force: true,
-            maxRetries: 5,
-            retryDelay: 200,
-          }),
+          this.removePluginData(pluginId),
         ]);
         if (rootDeleted.status === "rejected") throw rootDeleted.reason;
         if (liveDeleted.status === "rejected") throw liveDeleted.reason;
@@ -982,12 +977,7 @@ export class PluginPipeline {
         candidate.id,
         () => undefined,
       );
-      await this.operations.removePath(this.liveRoot(candidate.id), {
-        recursive: true,
-        force: true,
-        maxRetries: 5,
-        retryDelay: 200,
-      });
+      await this.removePluginData(candidate.id);
       this.statuses.delete(candidate.id);
       this.uninstallConfirmations.delete(candidate.id);
       this.emit({ kind: "removed", pluginId: candidate.id });
@@ -1323,6 +1313,40 @@ export class PluginPipeline {
 
   private liveRoot(pluginId: string): string {
     return join(this.dohcDir, "plugins", pluginIdToSafePath(pluginId));
+  }
+
+  /**
+   * The live root and anything the build left beside it. A build stages at
+   * `<liveRoot>.staging-<uuid>` and swaps through `<liveRoot>.previous-<uuid>`
+   * (#779 round 7 A1), so a build that died between renames leaves plugin
+   * bytes outside the live root that a recursive delete of the live root
+   * alone would not reach.
+   */
+  private async pluginDataPaths(pluginId: string): Promise<string[]> {
+    const liveRoot = this.liveRoot(pluginId);
+    const parent = dirname(liveRoot);
+    const prefix = `${basename(liveRoot)}.`;
+    const siblings = await readdir(parent).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    });
+    return [
+      liveRoot,
+      ...siblings
+        .filter((name) => name.startsWith(prefix))
+        .map((name) => join(parent, name)),
+    ];
+  }
+
+  private async removePluginData(pluginId: string): Promise<void> {
+    for (const path of await this.pluginDataPaths(pluginId)) {
+      await this.operations.removePath(path, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 200,
+      });
+    }
   }
 
   /**

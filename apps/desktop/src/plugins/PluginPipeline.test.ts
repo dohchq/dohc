@@ -1325,6 +1325,64 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
+  it("uninstall removes a build left staged beside the live root (#779 round 7 A1)", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      // What a build killed between its own renames leaves behind. It holds
+      // built plugin bytes, and it is outside the live root, so uninstall's
+      // recursive delete of the live root alone would walk straight past it.
+      const dataRoot = pluginsDataRoot(fixture);
+      const orphanedStaging = join(dataRoot, "example-plugin.staging-orphan");
+      await mkdir(orphanedStaging, { recursive: true });
+      await writeFile(join(orphanedStaging, "bundle.mjs"), "orphaned bytes\n");
+
+      const preflight = await pipeline.uninstallPreflight("example-plugin");
+      if (!preflight.ok) throw new Error(preflight.error.message);
+      const uninstalled = await pipeline.uninstall(
+        "example-plugin",
+        preflight.confirmationToken,
+      );
+
+      expect(uninstalled.ok).toBe(true);
+      expect(await readdir(dataRoot)).toEqual([]);
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
   it("rebuilds instead of starting stale bytes after a failed publish (#779 round 7 A3)", async () => {
     const fixture = await createPluginWorkspace();
     let failPublish = false;
