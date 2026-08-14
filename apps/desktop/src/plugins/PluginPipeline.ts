@@ -671,14 +671,21 @@ export class PluginPipeline {
           engineCaptureAvailable: this.engineCaptureAvailable(),
         });
         if (preDeletePreflight.liveHash !== confirmation.liveHash) {
-          return this.failure(
-            pluginId,
-            pipelineError(
-              "uninstall",
-              "confirmation-stale",
-              `Plugin "${pluginId}" changed while its process was stopping. Review uninstall again.`,
-            ),
+          const detail = pipelineError(
+            "uninstall",
+            "confirmation-stale",
+            `Plugin "${pluginId}" changed while its process was stopping. Review uninstall again.`,
           );
+          // Nothing was deleted, the record still says disabled, and the host
+          // is stopped — but the status set above still reads "uninstalling",
+          // which disables every action for good (#779 round 7 B6).
+          this.setStatus(candidate, {
+            status: "disabled",
+            disabledReason: "user",
+            runtimeStatus: null,
+            error: detail,
+          });
+          return this.failure(pluginId, detail);
         }
 
         // Both deletes are attempted even if one rejects (round 4 finding 2)
@@ -1219,6 +1226,16 @@ export class PluginPipeline {
       const detail = error instanceof PipelineFailure
         ? error.detail
         : pipelineError("snapshot", "snapshot-failed", errorMessage(error));
+      // snapshotOrThrow set "snapshotting" on its way in. That is a busy
+      // status: it disables every Settings action for this plugin, and
+      // nothing else restores it, so a failed source check left the plugin
+      // unrecoverable short of reopening the workspace (#779 round 7 B5).
+      // Land where runFullBuild's own failure path lands instead.
+      this.setStatus(candidate, {
+        status: "failed",
+        runtimeStatus: this.options.pluginHost.getStatus(candidate.id) ?? null,
+        error: detail,
+      });
       return { ok: false, result: this.failure(candidate.id, detail) };
     }
   }

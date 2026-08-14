@@ -2311,7 +2311,6 @@ const PluginUninstallCounts = z.object({
   addedSinceBaseline: z.number().int().nonnegative(),
   removedSinceBaseline: z.number().int().nonnegative(),
   unknownWithoutBaseline: z.number().int().nonnegative(),
-  capturedRecoverable: z.number().int().nonnegative(),
   notRecoverableFromHistory: z.number().int().nonnegative(),
 }).strict();
 

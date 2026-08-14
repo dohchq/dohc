@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmod,
   copyFile,
@@ -7,12 +8,13 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stop } from "esbuild";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -24,8 +26,13 @@ import {
   type PluginInstallForkOptions,
   type PluginInstallProcessHandle,
 } from "./pluginInstallRunner";
-import { resolvePluginEsbuildBinary } from "./pluginBuildRunner";
-import { mutatePluginRecord, workspaceStateKey } from "./pluginLocalState";
+import { buildPluginBundle, resolvePluginEsbuildBinary } from "./pluginBuildRunner";
+import {
+  mutatePluginRecord,
+  readPluginLocalState,
+  workspaceStateKey,
+} from "./pluginLocalState";
+import { snapshotPluginSource } from "./pluginSourceSnapshot";
 import { pluginUninstallPreflight } from "./pluginUninstallPreflight";
 
 interface Deferred {
@@ -58,6 +65,7 @@ function nodeForkProcess(
     stdio: options.stdio,
   });
   return {
+    pid: child.pid,
     stdout: child.stdout,
     stderr: child.stderr,
     onExit: (listener) => {
@@ -198,18 +206,42 @@ async function createNamedPluginWorkspace(directoryName: string, pluginId: strin
 // Matches PluginPipeline's own dohcDir computation exactly: derived plugin
 // artifacts live under <stateDir>/plugin-data/<workspaceStateKey>, never
 // inside the workspace folder (CERT779).
-function liveBundlePath(
+function pluginsDataRoot(
   fixture: { stateDir: string; workspaceRoot: string },
-  pluginId: string,
 ): string {
   return join(
     fixture.stateDir,
     "plugin-data",
     workspaceStateKey(fixture.workspaceRoot),
     "plugins",
-    pluginId,
-    "bundle.mjs",
   );
+}
+
+function liveBundlePath(
+  fixture: { stateDir: string; workspaceRoot: string },
+  pluginId: string,
+): string {
+  return join(pluginsDataRoot(fixture), pluginId, "bundle.mjs");
+}
+
+/** Every file under `root`, by relative path, with its sha256 — the evidence
+ * that a failed build left the live root byte-identical. */
+async function fileHashes(
+  root: string,
+  base = root,
+): Promise<Record<string, string>> {
+  const hashes: Record<string, string> = {};
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) {
+      Object.assign(hashes, await fileHashes(path, base));
+      continue;
+    }
+    hashes[relative(base, path).replaceAll("\\", "/")] = createHash("sha256")
+      .update(await readFile(path))
+      .digest("hex");
+  }
+  return hashes;
 }
 
 async function waitFor(
@@ -501,7 +533,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
-  it("keeps the approved bundle live when the new build's approval cannot be persisted (#779 round 6 F5)", async () => {
+  it("leaves no staging residue and the live root byte-identical when the new build's approval cannot be persisted (#779 round 6 F5, round 7 A2)", async () => {
     const fixture = await createPluginWorkspace();
     let failRecordWrite = false;
     let pipeline: PluginPipeline;
@@ -540,6 +572,24 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const bundlePath = liveBundlePath(fixture, "example-plugin");
       expect(await readFile(bundlePath, "utf8")).toContain("one");
       const approvedHashBefore = pipeline.list()[0]?.approvedHash;
+      const dataRoot = pluginsDataRoot(fixture);
+      const liveRoot = join(dataRoot, "example-plugin");
+      // The installed snapshot is the working copy the next install and build
+      // run in, and snapshotPluginSource refreshes it before either — so it
+      // is the published build output, not the whole live root, that a failed
+      // attempt has to leave untouched.
+      const publishedOutputs = (hashes: Record<string, string>) =>
+        Object.fromEntries(
+          Object.entries(hashes).filter(([path]) => !path.startsWith("snapshot/")),
+        );
+      const liveBefore = publishedOutputs(await fileHashes(liveRoot));
+      expect(Object.keys(liveBefore).sort()).toEqual([
+        "baseline-manifest.json",
+        "bundle.mjs",
+        "bundle.mjs.map",
+        "dohc-plugin.generated.json",
+        "meta.json",
+      ]);
 
       await writeFile(fixture.entryPath, [
         'export const marker = "two";',
@@ -556,6 +606,15 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(liveBundle).toContain("one");
       expect(liveBundle).not.toContain("two");
       expect(pipeline.list()[0]?.approvedHash).toBe(approvedHashBefore);
+      // The failure path's discard() ran: nothing staged or set aside
+      // survives beside the live root, and the live root itself is exactly
+      // the tree the approved build left (#779 round 7 A2).
+      expect(await readdir(dataRoot)).toEqual(["example-plugin"]);
+      const liveAfter = await fileHashes(liveRoot);
+      expect(publishedOutputs(liveAfter)).toEqual(liveBefore);
+      expect(Object.keys(liveAfter)).toEqual(
+        expect.arrayContaining(["snapshot/src/index.ts"]),
+      );
     } finally {
       await pipeline.dispose();
     }
@@ -889,6 +948,17 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // Refused, not deleted.
       await expect(lstat(fixture.pluginRoot)).resolves.toBeDefined();
       expect(preflightCalls).toBe(3);
+      // And not a stuck "uninstalling" spinner: the status set on the way in
+      // is restored to an actionable one the user can retry from (#779 round
+      // 7 B6).
+      expect(pipeline.list()[0]).toMatchObject({
+        status: "disabled",
+        disabledReason: "user",
+        runtimeStatus: null,
+      });
+      expect(pipeline.list()[0]?.error).toMatchObject({
+        code: "confirmation-stale",
+      });
     } finally {
       await pipeline.dispose();
     }
@@ -1250,6 +1320,236 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // still says "src/index.ts" (whose content has no "v2-entry" marker
       // at all).
       expect(bundle).toContain("v2-entry");
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("rebuilds instead of starting stale bytes after a failed publish (#779 round 7 A3)", async () => {
+    const fixture = await createPluginWorkspace();
+    let failPublish = false;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        build: async (input) => {
+          const result = await buildPluginBundle(input);
+          if (!result.ok || !failPublish) return result;
+          // Stands for any IO failure inside publish's rename swap. The
+          // approval record for these exact bytes is written before publish
+          // runs, so the record ends up naming a bundle the disk never got.
+          return {
+            ...result,
+            publish: () => Promise.reject(new Error("simulated publish failure")),
+          };
+        },
+      },
+    });
+
+    const bundleHashOnDisk = async (): Promise<string> =>
+      createHash("sha256")
+        .update(await readFile(liveBundlePath(fixture, "example-plugin")))
+        .digest("hex");
+    const recordedBundleHash = async (): Promise<string | undefined> => {
+      const state = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      if (!state.ok) throw new Error(state.warning);
+      return state.state.plugins["example-plugin"]?.approvedBundleHash;
+    };
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      await writeFile(fixture.entryPath, [
+        'export const marker = "two";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      failPublish = true;
+      const failed = await pipeline.install("example-plugin");
+
+      expect(failed.ok).toBe(false);
+      if (failed.ok) throw new Error("unreachable");
+      expect(failed.error).toMatchObject({
+        stage: "build",
+        code: "publish-failed",
+      });
+      // The recorded approval names the new build; the disk still holds the
+      // old bundle. That disagreement is the whole point of the pin.
+      const staleBundle = await readFile(
+        liveBundlePath(fixture, "example-plugin"),
+        "utf8",
+      );
+      expect(staleBundle).toContain("one");
+      expect(staleBundle).not.toContain("two");
+      expect(await recordedBundleHash()).not.toBe(await bundleHashOnDisk());
+
+      // Fail closed: the next start must not run those stale bytes. It
+      // rebuilds from the still-approved source instead.
+      failPublish = false;
+      await host.stop("example-plugin");
+      const restarted = await pipeline.ensureStarted("example-plugin");
+
+      expect(restarted.ok).toBe(true);
+      const republished = await readFile(
+        liveBundlePath(fixture, "example-plugin"),
+        "utf8",
+      );
+      expect(republished).toContain("two");
+      expect(await recordedBundleHash()).toBe(await bundleHashOnDisk());
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("persists a failed fresh install as an actionable repair state (#779 round 7 A3)", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: () => Promise.reject(new Error("synthetic install failure")),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+
+      expect(installed.ok).toBe(false);
+      expect(pipeline.list()[0]).toMatchObject({
+        status: "disabled-pending-repair",
+        disabledReason: "repair",
+        runtimeStatus: null,
+      });
+      expect(pipeline.list()[0]?.error).not.toBeNull();
+      // Persisted, not just displayed: a plugin whose first install died
+      // half-way must not come back enabled on the next launch, and it must
+      // not carry an approval it never earned.
+      const state = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      if (!state.ok) throw new Error(state.warning);
+      expect(state.state.plugins["example-plugin"]).toMatchObject({
+        disabled: true,
+      });
+      expect(state.state.plugins["example-plugin"]?.approvedHash).toBeUndefined();
+      expect(host.getStatus("example-plugin")).toBeUndefined();
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("leaves a failed source check actionable instead of stuck at snapshotting (#779 round 7 B5)", async () => {
+    const fixture = await createPluginWorkspace();
+    let failSnapshot = false;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        snapshot: async (input) => {
+          const real = await snapshotPluginSource(input);
+          if (!failSnapshot) return real;
+          return {
+            ok: false,
+            error: {
+              code: "snapshot-io",
+              message: "simulated snapshot failure",
+              path: null,
+            },
+            pnpmPaths: real.pnpmPaths,
+          };
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      expect((await pipeline.disable("example-plugin")).ok).toBe(true);
+
+      failSnapshot = true;
+      const enabled = await pipeline.enable("example-plugin");
+
+      expect(enabled.ok).toBe(false);
+      // "snapshotting" is a busy status: it disables every action for this
+      // plugin, and nothing else restores it (#779 round 7 B5).
+      expect(pipeline.list()[0]?.status).not.toBe("snapshotting");
+      expect(pipeline.list()[0]).toMatchObject({ status: "failed" });
+      expect(pipeline.list()[0]?.error).toMatchObject({
+        stage: "snapshot",
+        code: "snapshot-io",
+      });
+
+      // Actionable means the next attempt really works.
+      failSnapshot = false;
+      expect((await pipeline.enable("example-plugin")).ok).toBe(true);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not recover after the snapshot failure cleared.",
+      );
     } finally {
       await pipeline.dispose();
     }

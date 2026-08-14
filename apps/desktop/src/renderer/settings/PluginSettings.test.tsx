@@ -70,7 +70,6 @@ const cleanPreflight: PluginUninstallPreflightRecord = {
     addedSinceBaseline: 0,
     removedSinceBaseline: 0,
     unknownWithoutBaseline: 0,
-    capturedRecoverable: 0,
     notRecoverableFromHistory: 0,
   },
   warning: null,
@@ -304,21 +303,19 @@ describe("PluginSettings", () => {
           ...cleanPreflight.counts,
           modified: 1,
           addedSinceBaseline: 1,
-          capturedRecoverable: 1,
           notRecoverableFromHistory: 1,
         },
         warning: {
           kind: "local-modifications",
           summary: "Uninstall will delete 2 modified or added plugin source files.",
           details: [
-            "1 changed file can be recovered from history.",
-            "1 changed file cannot be recovered from history.",
+            "1 modified, 1 added, and 0 removed since the installation baseline.",
+            "dohc cannot confirm history holds a copy of the files uninstall will delete.",
           ],
           counts: {
             ...cleanPreflight.counts,
             modified: 1,
             addedSinceBaseline: 1,
-            capturedRecoverable: 1,
             notRecoverableFromHistory: 1,
           },
           notRecoverablePathSample: ["large.txt"],
@@ -334,9 +331,10 @@ describe("PluginSettings", () => {
       "Uninstall will delete 2 modified or added plugin source files.",
     );
     expect(screen.getByTestId("plugin-uninstall-warning").textContent).toContain(
-      "1 changed file can be recovered from history.",
+      "dohc cannot confirm history holds a copy of the files uninstall will delete.",
     );
-    expect(screen.getByText("History cannot recover these files:")).toBeTruthy();
+    expect(screen.getByText("dohc cannot confirm history holds these files:"))
+      .toBeTruthy();
     expect(screen.getByTestId("plugin-uninstall-not-recoverable").textContent).toContain(
       "large.txt",
     );
@@ -348,7 +346,6 @@ describe("PluginSettings", () => {
     const counts = {
       ...cleanPreflight.counts,
       modified: 25,
-      capturedRecoverable: 0,
       notRecoverableFromHistory: 25,
     };
     bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [installed] });
@@ -362,7 +359,9 @@ describe("PluginSettings", () => {
         warning: {
           kind: "local-modifications",
           summary: "Uninstall will delete 25 modified or added plugin source files.",
-          details: ["25 changed files cannot be recovered from history."],
+          details: [
+            "dohc cannot confirm history holds a copy of the files uninstall will delete.",
+          ],
           counts,
           notRecoverablePathSample: sample,
         },

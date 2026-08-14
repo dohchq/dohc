@@ -11,7 +11,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { killProcessTreePosix } from "../process/posixSpawn";
 import {
+  INSTALL_TREE_STOP_GRACE_MS,
   installPluginDependencies,
   PLUGIN_INSTALL_ARGS,
   resolvePluginPnpmEntry,
@@ -44,6 +46,9 @@ class FakeInstallProcess implements PluginInstallProcessHandle {
   readonly stderr = new PassThrough();
   readonly terminate = vi.fn(() => true);
   private readonly exitListeners: Array<(code: number) => void> = [];
+
+  constructor(readonly pid: number | undefined = 4_242) {}
+
   private readonly errorListeners: Array<(message: string) => void> = [];
   private exitedCode: number | undefined;
 
@@ -104,6 +109,11 @@ async function createInstallFixture(
     pluginId: options.pluginId ?? "example-plugin",
     snapshotRoot,
     resourcesBasePath,
+    // Fake-driven tests must never signal a real process table entry for
+    // FakeInstallProcess's made-up pid. The descendant-teardown test below
+    // supplies its own tree walker instead.
+    platform: "linux",
+    killProcessTreePosix: (pid, _signal, alsoSignal) => [pid, ...alsoSignal],
     pnpmPaths: {
       storeDir: join(workspaceRoot, ".dohc", "pnpm", "store"),
       cacheDir: join(workspaceRoot, ".dohc", "pnpm", "cache"),
@@ -112,6 +122,12 @@ async function createInstallFixture(
     },
   };
   return { root, workspaceRoot, snapshotRoot, resourcesBasePath, input };
+}
+
+/** Teardown signals the process tree before terminating the child, so the
+ * terminate call lands a few microtasks after the abort. */
+async function flushMicrotasks(times = 5): Promise<void> {
+  for (let index = 0; index < times; index += 1) await Promise.resolve();
 }
 
 function requireFailure(
@@ -132,6 +148,7 @@ function nodeForkProcess(
     stdio: options.stdio,
   });
   return {
+    pid: child.pid,
     stdout: child.stdout,
     stderr: child.stderr,
     onExit: (listener) => {
@@ -316,7 +333,7 @@ describe("installPluginDependencies", () => {
     });
     await started.promise;
     controller.abort();
-    await Promise.resolve();
+    await flushMicrotasks();
 
     expect(child.terminate).toHaveBeenCalledTimes(1);
     expect(settled).toBe(false);
@@ -325,6 +342,65 @@ describe("installPluginDependencies", () => {
     const failure = requireFailure(await install);
     expect(failure.error).toMatchObject({ code: "aborted", exitCode: 143 });
     expect(failure.error.logs.at(-1)?.text).toBe("Install cancelled by the caller.");
+  });
+
+  it("signals the install child's descendants, not just the child (#779 round 7 B3)", async () => {
+    vi.useFakeTimers();
+    const fixture = await createInstallFixture();
+    const child = new FakeInstallProcess(4_242);
+    const started = deferred<void>();
+    const controller = new AbortController();
+    const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    // pnpm (4242) shelled out to git (4243), which shelled out to its own
+    // helper (4244). 4242 is the only pid this runner was ever told about.
+    const liveTable = [" 4242     1", " 4243  4242", " 4244  4243", " 5000     1", ""]
+      .join("\n");
+    // By the force round the root is gone and its descendants are reparented
+    // to init, so no ppid walk from 4242 can find them any more.
+    const orphanedTable = [" 4243     1", " 4244     1", " 5000     1", ""].join("\n");
+    let tableReads = 0;
+
+    const install = installPluginDependencies({
+      ...fixture.input,
+      forkProcess: () => {
+        started.resolve();
+        return child;
+      },
+      signal: controller.signal,
+      killProcessTreePosix: (pid, signal, alsoSignal) =>
+        killProcessTreePosix(pid, signal, {
+          alsoSignal,
+          readProcessTable: () => {
+            tableReads += 1;
+            return Promise.resolve(tableReads === 1 ? liveTable : orphanedTable);
+          },
+          sendSignal: (targetPid, targetSignal) => {
+            signalled.push({ pid: targetPid, signal: targetSignal });
+          },
+        }),
+    });
+    await started.promise;
+    controller.abort();
+    await flushMicrotasks();
+
+    // Children before parents, so a signalled parent cannot leave a child
+    // behind — and the whole tree is reached before the child is terminated.
+    expect(signalled).toEqual([
+      { pid: 4_244, signal: "SIGTERM" },
+      { pid: 4_243, signal: "SIGTERM" },
+      { pid: 4_242, signal: "SIGTERM" },
+    ]);
+    expect(child.terminate).toHaveBeenCalledTimes(1);
+
+    // The force round reuses the pids the first round captured, so the now
+    // orphaned git and tar processes are still reached.
+    await vi.advanceTimersByTimeAsync(INSTALL_TREE_STOP_GRACE_MS);
+    expect(signalled.filter((entry) => entry.signal === "SIGKILL").map((entry) =>
+      entry.pid
+    ).sort()).toEqual([4_242, 4_243, 4_244]);
+
+    child.exit(143);
+    expect(requireFailure(await install).error.code).toBe("aborted");
   });
 
   it("resolves within a bounded grace period when terminate() reports it never sent the request (CodeRabbit #779 R20)", async () => {
@@ -350,7 +426,7 @@ describe("installPluginDependencies", () => {
     });
     await started.promise;
     controller.abort();
-    await Promise.resolve();
+    await flushMicrotasks();
 
     expect(child.terminate).toHaveBeenCalledTimes(1);
     expect(settled).toBe(false);

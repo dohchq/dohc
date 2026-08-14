@@ -199,6 +199,38 @@ describe("PluginChildProcessBroker", () => {
     expect(fixture.forks).toEqual([]);
   });
 
+  it("cannot reach a build staged beside the plugin's live root (#779 round 7 A1)", async () => {
+    const fixture = await createFixture();
+    const brokerContext = context("plugin-a", "spawn-a");
+    const stagedBuild = "plugin-a.staging-run7";
+    await mkdir(join(fixture.root, "plugins", stagedBuild), { recursive: true });
+    await writeFile(
+      join(fixture.root, "plugins", stagedBuild, "bundle.mjs"),
+      "export {};\n",
+    );
+    const stagedModulePath = `../${stagedBuild}/bundle.mjs`;
+
+    await expect(
+      spawnChild(fixture, brokerContext, { modulePath: stagedModulePath }),
+    ).rejects.toThrow(
+      `childProcesses.spawn modulePath "${stagedModulePath}" escapes plugin directory`,
+    );
+    expect(fixture.forks).toEqual([]);
+
+    // Why the build has to stage out there: containment is rooted at the live
+    // root and has no dot-directory filter, so the same unapproved bundle
+    // staged INSIDE the live root — the round 6 layout — is spawnable.
+    await mkdir(join(fixture.root, "plugins", "plugin-a", ".staging-run6"));
+    await writeFile(
+      join(fixture.root, "plugins", "plugin-a", ".staging-run6", "bundle.mjs"),
+      "export {};\n",
+    );
+    await spawnChild(fixture, brokerContext, {
+      modulePath: ".staging-run6/bundle.mjs",
+    });
+    expect(fixture.forks).toHaveLength(1);
+  });
+
   it("refuses a cwd link that resolves outside the plugin built directory", async () => {
     const fixture = await createFixture();
     const outside = join(fixture.root, "outside");

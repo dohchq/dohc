@@ -627,7 +627,7 @@ export function PluginSettings(props: { workspaceId: string }) {
                   {confirmation.preflight.warning.notRecoverablePathSample.length > 0 ? (
                     <div className="mt-3">
                       <p className="m-0 text-[11px] font-medium text-danger">
-                        History cannot recover these files:
+                        dohc cannot confirm history holds these files:
                       </p>
                       <ul
                         data-testid="plugin-uninstall-not-recoverable"

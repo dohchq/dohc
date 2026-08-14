@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants, createReadStream } from "node:fs";
+import { constants, createReadStream, createWriteStream } from "node:fs";
 import {
   copyFile,
   lstat,
@@ -10,9 +10,9 @@ import {
   realpath,
   rename,
   rm,
-  writeFile,
 } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { load } from "js-yaml";
 import {
   NPM_PACKAGE_NAME,
@@ -637,12 +637,37 @@ async function copyRegularFile(sourcePath: string, destinationPath: string): Pro
     await copyFile(sourcePath, destinationPath);
     return;
   }
+  // Streamed, not read whole: a plugin can hold a large binary asset, and
+  // reading it into one buffer put that whole asset in main-process memory
+  // for every snapshot. The O_NOFOLLOW open is what keeps this from
+  // following a symlink, so the copy reads from that handle and nothing else.
   const sourceHandle = await open(sourcePath, READ_NO_FOLLOW);
   try {
-    await writeFile(destinationPath, await sourceHandle.readFile());
+    await pipeline(
+      sourceHandle.createReadStream({ autoClose: false }),
+      createWriteStream(destinationPath),
+    );
   } finally {
     await sourceHandle.close();
   }
+}
+
+/**
+ * Rejects a source entry whose own name contains a backslash. Snapshot paths
+ * are recorded with backslashes normalized to "/", so on POSIX a file
+ * literally named `a\b` and a nested file `a/b` produce the same recorded
+ * path: the nested one is hashed twice and the backslash one is copied into
+ * the approved snapshot without ever being hashed — executable bytes outside
+ * the approved hash. Windows cannot create such a name.
+ */
+export function assertSafeSnapshotEntryName(name: string, path: string): void {
+  if (!name.includes("\\")) return;
+  throw new SnapshotError(
+    "unsafe-source-entry",
+    `Plugin source entry at ${path} has a backslash in its name. Plugin ` +
+      "source file and directory names must not contain a backslash.",
+    path,
+  );
 }
 
 async function copySourceTree(
@@ -654,6 +679,7 @@ async function copySourceTree(
   entries.sort((left, right) => lexicalCompare(left.name, right.name));
   for (const entry of entries) {
     const sourcePath = join(sourceDirectory, entry.name);
+    assertSafeSnapshotEntryName(entry.name, sourcePath);
     const stats = await lstat(sourcePath);
     if (stats.isSymbolicLink()) {
       throw new SnapshotError(
@@ -710,6 +736,7 @@ async function listSnapshotFiles(
   for (const entry of entries) {
     if (EXCLUDED_SOURCE_NAMES.has(entry.name)) continue;
     const path = join(current, entry.name);
+    assertSafeSnapshotEntryName(entry.name, path);
     if (entry.isDirectory()) {
       files.push(...await listSnapshotFiles(root, path));
       continue;

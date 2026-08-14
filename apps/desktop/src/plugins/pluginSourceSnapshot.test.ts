@@ -20,6 +20,7 @@ import {
 import {
   MAX_PLUGIN_LOCKFILE_BYTES,
   PINNED_PLUGIN_PACKAGE_MANAGER,
+  assertSafeSnapshotEntryName,
   hashPluginSourceFiles,
   pluginIdToSafePath,
   snapshotPluginSource,
@@ -587,4 +588,49 @@ describe("hashPluginSourceFiles entry kinds", () => {
       "nested/payload.txt",
     );
   });
+});
+
+describe("backslash source entry names (#779 round 7 B1)", () => {
+  it("names the constraint it rejects", () => {
+    expect(() => assertSafeSnapshotEntryName("index.ts", "/plugins/p/index.ts"))
+      .not.toThrow();
+    let thrown: unknown;
+    try {
+      assertSafeSnapshotEntryName("a\\b", "/plugins/p/a\\b");
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({
+      code: "unsafe-source-entry",
+      path: "/plugins/p/a\\b",
+    });
+    expect((thrown as Error).message).toContain(
+      "must not contain a backslash",
+    );
+  });
+
+  // Only POSIX can create a file whose own name holds a backslash; on
+  // Windows the same bytes are a path separator, so the collision cannot
+  // exist there.
+  it.skipIf(process.platform === "win32")(
+    "refuses a source tree where a backslash name collides with a nested path",
+    async () => {
+      const fixture = await createPluginFixture();
+      await mkdir(join(fixture.pluginRoot, "a"));
+      await writeFile(join(fixture.pluginRoot, "a", "b"), "nested\n");
+      await writeFile(join(fixture.pluginRoot, "a\\b"), "backslash\n");
+
+      const result = await runSnapshot(fixture);
+
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("unreachable");
+      expect(result.error).toMatchObject({ code: "unsafe-source-entry" });
+      expect(result.error.message).toContain("must not contain a backslash");
+      // The hash pass refuses it too, so an already-installed tree that grows
+      // one cannot report a clean hash either.
+      await expect(hashPluginSourceFiles(fixture.pluginRoot)).rejects.toThrow(
+        /must not contain a backslash/,
+      );
+    },
+  );
 });

@@ -4,16 +4,12 @@ import {
   mkdir,
   readFile,
   rename,
-  stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
-import { isTextMediaType, mediaTypeForPath } from "@dohc/workspace-fs";
 import { z } from "zod";
 import { PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT } from "../ipc/channels";
-import { MAX_HISTORY_TEXT_SNAPSHOT_BYTES } from "../workspaces/workspaceWatcher";
 import {
   canonicalPluginSourceHash,
   hashPluginSourceFiles,
@@ -63,16 +59,24 @@ export type PluginUninstallFileStatus =
   | "removed-since-baseline"
   | "unknown-without-baseline";
 
-export type PluginHistoryRecovery =
-  | "captured-recoverable"
-  | "not-recoverable-from-history";
+/**
+ * The statuses uninstall actually deletes and dohc cannot promise back. dohc
+ * has no per-file capture query — the engine exposes only workspace-wide
+ * moment listing — so it cannot confirm that any specific file reached a
+ * settled capture batch. An edit made seconds ago may never have been
+ * recorded. Rather than promise recovery from a size check and a
+ * capture-is-running flag, every file uninstall deletes and cannot verify
+ * counts as unverified (#779 round 7 B2).
+ */
+const UNVERIFIED_DELETE_STATUSES = new Set<PluginUninstallFileStatus>([
+  "modified",
+  "added-since-baseline",
+  "unknown-without-baseline",
+]);
 
 export interface PluginUninstallFileInventory {
   relPath: string;
   status: PluginUninstallFileStatus;
-  byteLength: number | null;
-  contentKind: "text" | "binary" | null;
-  historyRecovery: PluginHistoryRecovery | null;
 }
 
 export interface PluginUninstallPreflightCounts {
@@ -81,7 +85,6 @@ export interface PluginUninstallPreflightCounts {
   addedSinceBaseline: number;
   removedSinceBaseline: number;
   unknownWithoutBaseline: number;
-  capturedRecoverable: number;
   notRecoverableFromHistory: number;
 }
 
@@ -167,12 +170,10 @@ export interface PluginUninstallPreflightInput {
   pluginRoot: string;
   installedBaselineHash: string | undefined;
   /**
-   * Whether this workspace's engine capture is running right now. A file
-   * under the history capture size cap is only actually "captured-
-   * recoverable" if capture was there to record it — this preflight has no
-   * way to confirm any specific past write actually settled, but it can at
-   * least refuse to promise recovery for anything when capture is known to
-   * be unavailable, rather than a size-only guess (recovery honesty).
+   * Whether this workspace's engine capture is running right now. It does not
+   * change which files count as unverified — nothing here can confirm a
+   * specific file was captured — but it separates "dohc cannot confirm this"
+   * from the stronger, certain "history holds nothing" in the warning.
    */
   engineCaptureAvailable: boolean;
 }
@@ -201,17 +202,18 @@ function emptyCounts(): PluginUninstallPreflightCounts {
     addedSinceBaseline: 0,
     removedSinceBaseline: 0,
     unknownWithoutBaseline: 0,
-    capturedRecoverable: 0,
     notRecoverableFromHistory: 0,
   };
 }
 
-function captureLimitDetail(): string {
-  // These values mirror MAX_CAPTURE_TEXT_BYTES and MAX_CAPTURE_BINARY_BYTES
-  // in crates/dohc-engine-files/src/bounds.rs.
-  const textBytes = MAX_HISTORY_TEXT_SNAPSHOT_BYTES.toLocaleString("en-US");
-  const binaryBytes = MAX_VERSIONED_BINARY_FILE_BYTES.toLocaleString("en-US");
-  return `History does not store text files larger than ${textBytes} bytes, or binary files larger than ${binaryBytes} bytes.`;
+/** What the dialog says about getting these files back. */
+function recoveryDetails(engineCaptureAvailable: boolean): string[] {
+  return [
+    engineCaptureAvailable
+      ? "dohc cannot confirm history holds a copy of the files uninstall will delete."
+      : "History capture is not running, so history holds no copy of these files.",
+    "Copy what you need before you uninstall.",
+  ];
 }
 
 export function pluginBaselineManifestPath(
@@ -302,79 +304,6 @@ async function readBaselineManifest(path: string): Promise<BaselineManifestRead>
   return { kind: "ok", manifest: parsed.data };
 }
 
-function unreadableClassification(): Pick<
-  PluginUninstallFileInventory,
-  "byteLength" | "contentKind" | "historyRecovery"
-> {
-  return { byteLength: null, contentKind: null, historyRecovery: "not-recoverable-from-history" };
-}
-
-async function classifyHistoryRecovery(
-  pluginRoot: string,
-  file: PluginSourceFileDigest,
-  engineCaptureAvailable: boolean,
-): Promise<Pick<
-  PluginUninstallFileInventory,
-  "byteLength" | "contentKind" | "historyRecovery"
->> {
-  const path = join(pluginRoot, ...file.relPath.split("/"));
-  // A file the earlier hash pass saw can still disappear or change before
-  // this runs — this must degrade to "can't confirm, so not recoverable"
-  // rather than crash the whole preflight over one file (CodeRabbit #779
-  // R27).
-  let stats: Awaited<ReturnType<typeof stat>>;
-  try {
-    stats = await stat(path);
-  } catch {
-    return unreadableClassification();
-  }
-  const textMedia = isTextMediaType(mediaTypeForPath(file.relPath), file.relPath);
-  const limit = textMedia
-    ? MAX_HISTORY_TEXT_SNAPSHOT_BYTES
-    : MAX_VERSIONED_BINARY_FILE_BYTES;
-  // A file already over the larger of the two possible caps is not
-  // recoverable regardless of its exact content kind — skip reading it at
-  // all rather than loading a large, possibly multi-hundred-MB binary into
-  // memory just to confirm a foregone conclusion (CodeRabbit #779 R27).
-  if (stats.size > Math.max(MAX_HISTORY_TEXT_SNAPSHOT_BYTES, MAX_VERSIONED_BINARY_FILE_BYTES)) {
-    return {
-      byteLength: stats.size,
-      contentKind: textMedia ? "text" : "binary",
-      historyRecovery: "not-recoverable-from-history",
-    };
-  }
-
-  let bytes: Buffer;
-  try {
-    bytes = await readFile(path);
-  } catch {
-    return unreadableClassification();
-  }
-  const text = bytes.toString("utf8");
-  const contentKind = textMedia && Buffer.from(text, "utf8").equals(bytes)
-    ? "text"
-    : "binary";
-  const contentLimit = contentKind === "text"
-    ? MAX_HISTORY_TEXT_SNAPSHOT_BYTES
-    : MAX_VERSIONED_BINARY_FILE_BYTES;
-  // Under the cap is necessary but not sufficient: capture also has to have
-  // actually been running to record this file. When it wasn't, this can't
-  // honestly promise recovery no matter how small the file is (CodeRabbit
-  // #779 fixround Section B item 7).
-  const underCap = bytes.byteLength <= contentLimit;
-  return {
-    byteLength: bytes.byteLength,
-    contentKind,
-    // The Rust capture floor keeps a file whose length equals the cap
-    // exactly (materialize.rs compares with `>`, not `>=`): only a file
-    // strictly larger than the cap goes untracked. Match that boundary
-    // here so this warning never calls a captured file unrecoverable.
-    historyRecovery: underCap && engineCaptureAvailable
-      ? "captured-recoverable"
-      : "not-recoverable-from-history",
-  };
-}
-
 function countInventory(
   files: readonly PluginUninstallFileInventory[],
 ): PluginUninstallPreflightCounts {
@@ -387,10 +316,7 @@ function countInventory(
     if (file.status === "unknown-without-baseline") {
       counts.unknownWithoutBaseline += 1;
     }
-    if (file.historyRecovery === "captured-recoverable") {
-      counts.capturedRecoverable += 1;
-    }
-    if (file.historyRecovery === "not-recoverable-from-history") {
+    if (UNVERIFIED_DELETE_STATUSES.has(file.status)) {
       counts.notRecoverableFromHistory += 1;
     }
   }
@@ -401,34 +327,20 @@ function notRecoverablePaths(
   files: readonly PluginUninstallFileInventory[],
 ): string[] {
   return files
-    .filter((file) =>
-      file.historyRecovery === "not-recoverable-from-history"
-    )
+    .filter((file) => UNVERIFIED_DELETE_STATUSES.has(file.status))
     .map((file) => file.relPath)
     .sort(lexicalCompare);
 }
 
-async function cannotVerifyResult(
+function cannotVerifyResult(
   input: PluginUninstallPreflightInput,
   manifestPath: string,
   liveDigest: PluginSourceDigest | null,
   reason: string,
-): Promise<PluginUninstallPreflightResult> {
-  const files: PluginUninstallFileInventory[] = [];
-  if (liveDigest) {
-    for (const file of liveDigest.files) {
-      const recovery = await classifyHistoryRecovery(
-        input.pluginRoot,
-        file,
-        input.engineCaptureAvailable,
-      );
-      files.push({
-        relPath: file.relPath,
-        status: "unknown-without-baseline",
-        ...recovery,
-      });
-    }
-  }
+): PluginUninstallPreflightResult {
+  const files: PluginUninstallFileInventory[] = (liveDigest?.files ?? []).map(
+    (file) => ({ relPath: file.relPath, status: "unknown-without-baseline" }),
+  );
   const counts = countInventory(files);
   const unrecoverable = notRecoverablePaths(files);
   const summary =
@@ -436,10 +348,7 @@ async function cannotVerifyResult(
     "Uninstall may delete source that history cannot restore.";
   const details = [
     `${counts.unknownWithoutBaseline} ${plural(counts.unknownWithoutBaseline, "source file")} cannot be compared with the installation baseline.`,
-    captureLimitDetail(),
-    ...(input.engineCaptureAvailable
-      ? []
-      : ["History capture is not currently running, so no file's recovery can be confirmed."]),
+    ...recoveryDetails(input.engineCaptureAvailable),
   ];
   const warning: PluginUninstallWarning = {
     kind: "cannot-verify-baseline",
@@ -461,50 +370,28 @@ async function cannotVerifyResult(
   };
 }
 
-async function verifiedInventory(
-  pluginRoot: string,
+function verifiedInventory(
   liveDigest: PluginSourceDigest,
   baselineFiles: readonly PluginSourceFileDigest[],
-  engineCaptureAvailable: boolean,
-): Promise<PluginUninstallFileInventory[]> {
+): PluginUninstallFileInventory[] {
   const files: PluginUninstallFileInventory[] = [];
   const baselineByPath = new Map(
     baselineFiles.map((file) => [file.relPath, file.sha256]),
   );
   for (const liveFile of liveDigest.files) {
     const baselineHash = baselineByPath.get(liveFile.relPath);
-    if (baselineHash === liveFile.sha256) {
-      files.push({
-        relPath: liveFile.relPath,
-        status: "unchanged",
-        byteLength: null,
-        contentKind: null,
-        historyRecovery: null,
-      });
-    } else {
-      const recovery = await classifyHistoryRecovery(
-        pluginRoot,
-        liveFile,
-        engineCaptureAvailable,
-      );
-      files.push({
-        relPath: liveFile.relPath,
-        status: baselineHash === undefined
+    files.push({
+      relPath: liveFile.relPath,
+      status: baselineHash === liveFile.sha256
+        ? "unchanged"
+        : baselineHash === undefined
           ? "added-since-baseline"
           : "modified",
-        ...recovery,
-      });
-    }
+    });
     baselineByPath.delete(liveFile.relPath);
   }
   for (const relPath of baselineByPath.keys()) {
-    files.push({
-      relPath,
-      status: "removed-since-baseline",
-      byteLength: null,
-      contentKind: null,
-      historyRecovery: null,
-    });
+    files.push({ relPath, status: "removed-since-baseline" });
   }
   files.sort((left, right) => lexicalCompare(left.relPath, right.relPath));
   return files;
@@ -564,12 +451,7 @@ export async function pluginUninstallPreflight(
     );
   }
 
-  const files = await verifiedInventory(
-    resolve(input.pluginRoot),
-    liveDigest,
-    baselineRead.manifest.files,
-    input.engineCaptureAvailable,
-  );
+  const files = verifiedInventory(liveDigest, baselineRead.manifest.files);
   const counts = countInventory(files);
   const unrecoverable = notRecoverablePaths(files);
   const changedCount = counts.modified + counts.addedSinceBaseline;
@@ -596,18 +478,11 @@ export async function pluginUninstallPreflight(
       : `${counts.removedSinceBaseline} installation baseline files are already missing. Uninstall will not delete them.`;
   const details = [
     `${counts.modified} modified, ${counts.addedSinceBaseline} added, and ${counts.removedSinceBaseline} removed since the installation baseline.`,
-    `${counts.capturedRecoverable} changed ${plural(counts.capturedRecoverable, "file")} can be recovered from history.`,
-    `${counts.notRecoverableFromHistory} changed ${plural(counts.notRecoverableFromHistory, "file")} cannot be recovered from history.`,
-    captureLimitDetail(),
+    ...recoveryDetails(input.engineCaptureAvailable),
   ];
   if (counts.removedSinceBaseline > 0) {
     details.push(
       `${counts.removedSinceBaseline} removed baseline ${plural(counts.removedSinceBaseline, "file")} will not be an uninstall delete target.`,
-    );
-  }
-  if (!input.engineCaptureAvailable) {
-    details.push(
-      "History capture is not currently running, so no file's recovery can be confirmed.",
     );
   }
   const warning: PluginUninstallWarning = {

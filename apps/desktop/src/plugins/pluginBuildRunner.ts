@@ -9,14 +9,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import {
-  basename,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type {
   build as esbuildBuild,
   stop as esbuildStop,
@@ -82,7 +75,8 @@ export type PluginBuildResult =
      * `bundleHash` first, so nothing can serve bytes whose approval was
      * never durably recorded (#779 round 6 F5). */
     publish: () => Promise<{ cleanupWarning: string | null }>;
-    /** Drops the built tree and puts the installed snapshot back. */
+    /** Drops the built tree. The live root was never touched, so there is
+     * nothing to restore. */
     discard: () => Promise<void>;
   }
   | {
@@ -113,6 +107,11 @@ export interface BuildPluginBundleInput {
 interface BuildPaths {
   liveRoot: string;
   snapshotRoot: string;
+  /** The manifest entry, already resolved and proven to be a regular file
+   * inside the installed snapshot. esbuild reads it straight out of the live
+   * snapshot: the build never moves the live root's own contents (#779 round
+   * 7 A1). */
+  entryPath: string;
 }
 
 type BuildOutcome =
@@ -376,7 +375,7 @@ async function inspectBuildPaths(
     );
   }
 
-  return { liveRoot, snapshotRoot };
+  return { liveRoot, snapshotRoot, entryPath: containedEntry };
 }
 
 async function inspectEsbuildBinary(binaryPath: string): Promise<void> {
@@ -446,72 +445,71 @@ async function buildWithDeadline(
   return outcome;
 }
 
-async function replaceLiveRoot(
-  liveRoot: string,
-  stagingRoot: string,
-): Promise<string | null> {
-  const stagingName = basename(stagingRoot);
-  const previousRoot = `${liveRoot}.previous-${randomUUID()}`;
-  let liveMoved = false;
-
-  try {
-    await renameWithWindowsRetry(liveRoot, previousRoot);
-    liveMoved = true;
-    const relocatedStagingRoot = join(previousRoot, stagingName);
-    await renameWithWindowsRetry(relocatedStagingRoot, liveRoot);
-  } catch (error) {
-    try {
-      if (liveMoved) {
-        const relocatedStagingRoot = join(previousRoot, stagingName);
-        await renameWithWindowsRetry(
-          join(relocatedStagingRoot, "snapshot"),
-          join(previousRoot, "snapshot"),
-        );
-        await renameWithWindowsRetry(previousRoot, liveRoot);
-      } else {
-        await renameWithWindowsRetry(
-          join(stagingRoot, "snapshot"),
-          join(liveRoot, "snapshot"),
-        );
-      }
-    } catch (rollbackError) {
-      throw new PluginBuildRunnerError(
-        "output-io",
-        `Plugin bundle replacement failed: ${errorMessage(error)} ` +
-          `The previous live directory could not be restored: ` +
-          errorMessage(rollbackError),
-        liveRoot,
-      );
-    }
-    throw error;
-  }
-
-  try {
-    await rm(previousRoot, {
-      recursive: true,
-      force: true,
-      maxRetries: WINDOWS_RENAME_RETRY_DELAYS_MS.length,
-      retryDelay: 200,
-    });
-    return null;
-  } catch (error) {
-    return `The new plugin bundle is live, but the previous directory at ` +
-      `${previousRoot} could not be deleted: ${errorMessage(error)}`;
-  }
-}
-
-/** Puts the installed snapshot back and removes the staged build. */
-async function discardStaging(
-  stagingRoot: string,
-  snapshotRestorePath: string,
-): Promise<void> {
-  await renameWithWindowsRetry(join(stagingRoot, "snapshot"), snapshotRestorePath);
-  await rm(stagingRoot, {
+function removeStaging(stagingRoot: string): Promise<void> {
+  return rm(stagingRoot, {
     recursive: true,
     force: true,
     maxRetries: WINDOWS_RENAME_RETRY_DELAYS_MS.length,
     retryDelay: 200,
   });
+}
+
+/**
+ * Swaps the staged tree in, the same way pluginSourceSnapshot's
+ * replaceSnapshot swaps a snapshot in: move the old directory aside, move the
+ * new one into place, remove the old. The installed snapshot is the one part
+ * of the live root the build did not rebuild, so it rides across here — three
+ * renames, not the whole build, is the entire window in which the live root is
+ * anything other than its complete previous or complete next contents (#779
+ * round 7 A1).
+ */
+async function publishStaging(
+  liveRoot: string,
+  stagingRoot: string,
+): Promise<string | null> {
+  const previousRoot = `${liveRoot}.previous-${randomUUID()}`;
+  const previousSnapshot = join(previousRoot, "snapshot");
+  const stagedSnapshot = join(stagingRoot, "snapshot");
+  try {
+    await renameWithWindowsRetry(liveRoot, previousRoot);
+  } catch (error) {
+    // Nothing moved, so the live root is still whole and the dead staged tree
+    // is safe to drop.
+    await removeStaging(stagingRoot).catch(() => undefined);
+    throw error;
+  }
+  let snapshotMoved = false;
+  try {
+    await renameWithWindowsRetry(previousSnapshot, stagedSnapshot);
+    snapshotMoved = true;
+    await renameWithWindowsRetry(stagingRoot, liveRoot);
+  } catch (error) {
+    try {
+      if (snapshotMoved) {
+        await renameWithWindowsRetry(stagedSnapshot, previousSnapshot);
+      }
+      await renameWithWindowsRetry(previousRoot, liveRoot);
+    } catch (rollbackError) {
+      // The live root is not whole. Everything stays on disk for recovery.
+      throw new PluginBuildRunnerError(
+        "output-io",
+        `Plugin bundle publish failed: ${errorMessage(error)} The previous ` +
+          `live directory at ${previousRoot} could not be restored to ` +
+          `${liveRoot}: ${errorMessage(rollbackError)}`,
+        liveRoot,
+      );
+    }
+    await removeStaging(stagingRoot).catch(() => undefined);
+    throw error;
+  }
+
+  try {
+    await removeStaging(previousRoot);
+    return null;
+  } catch (error) {
+    return `The new plugin bundle is live, but the previous directory at ` +
+      `${previousRoot} could not be deleted: ${errorMessage(error)}`;
+  }
 }
 
 function parseManifest(input: BuildPluginBundleInput): DohcPluginManifest {
@@ -574,7 +572,6 @@ async function runBuildJob(
 ): Promise<PluginBuildResult> {
   const timeoutMs = input.timeoutMs ?? PLUGIN_BUNDLE_TIMEOUT_MS;
   let stagingRoot: string | null = null;
-  let snapshotRestorePath: string | null = null;
 
   try {
     if (input.signal?.aborted) {
@@ -594,24 +591,16 @@ async function runBuildJob(
 
     const esbuildBinary = resolvePluginEsbuildBinary(input.resourcesBasePath);
     await inspectEsbuildBinary(esbuildBinary);
-    stagingRoot = join(paths.liveRoot, `.staging-${randomUUID()}`);
+    // A sibling of the live root, never a directory inside it. Staging inside
+    // the live root made every unpublished byte reachable by the child-process
+    // broker, whose containment is rooted at the live root, and made the live
+    // root incomplete for the whole build — a panel start during a build then
+    // failed outright (#779 round 7 A1).
+    stagingRoot = `${paths.liveRoot}.staging-${randomUUID()}`;
     await mkdir(stagingRoot);
-    const stagedSnapshotRoot = join(stagingRoot, "snapshot");
-    await renameWithWindowsRetry(paths.snapshotRoot, stagedSnapshotRoot);
-    snapshotRestorePath = paths.snapshotRoot;
-    const stagedEntry = await realpath(join(
-      stagedSnapshotRoot,
-      ...manifest.entry.split("/"),
-    ));
-    if (input.signal?.aborted) {
-      throw new PluginBuildRunnerError(
-        "aborted",
-        `Plugin "${input.pluginId}" bundle was cancelled before esbuild started.`,
-      );
-    }
     const outfile = join(stagingRoot, "bundle.mjs");
     const options = {
-      entryPoints: [stagedEntry],
+      entryPoints: [paths.entryPath],
       outfile,
       bundle: true,
       platform: "node",
@@ -668,7 +657,6 @@ async function runBuildJob(
 
     const builtStagingRoot = stagingRoot;
     stagingRoot = null;
-    snapshotRestorePath = null;
     let settled = false;
     const settle = (): void => {
       if (settled) {
@@ -695,41 +683,19 @@ async function runBuildJob(
       publish: async () => {
         settle();
         return {
-          cleanupWarning: await replaceLiveRoot(paths.liveRoot, builtStagingRoot),
+          cleanupWarning: await publishStaging(paths.liveRoot, builtStagingRoot),
         };
       },
       discard: async () => {
         settle();
-        await discardStaging(builtStagingRoot, paths.snapshotRoot);
+        await removeStaging(builtStagingRoot);
       },
     };
   } catch (error) {
     let result = failureResult(error, timeoutMs);
-    if (stagingRoot && snapshotRestorePath) {
-      try {
-        await renameWithWindowsRetry(
-          join(stagingRoot, "snapshot"),
-          snapshotRestorePath,
-        );
-        snapshotRestorePath = null;
-      } catch (restoreError) {
-        return failureResult(new PluginBuildRunnerError(
-          "output-io",
-          `${result.error.message} The installed snapshot could not be ` +
-            `restored to ${snapshotRestorePath}: ${errorMessage(restoreError)}`,
-          snapshotRestorePath,
-          result.error.diagnostics,
-        ), timeoutMs);
-      }
-    }
     if (stagingRoot) {
       try {
-        await rm(stagingRoot, {
-          recursive: true,
-          force: true,
-          maxRetries: WINDOWS_RENAME_RETRY_DELAYS_MS.length,
-          retryDelay: 200,
-        });
+        await removeStaging(stagingRoot);
       } catch (cleanupError) {
         result = {
           ok: false,

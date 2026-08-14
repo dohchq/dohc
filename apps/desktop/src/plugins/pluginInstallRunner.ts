@@ -1,6 +1,8 @@
 import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { killProcessTreePosix } from "../process/posixSpawn";
+import { killProcessTreeWin32 } from "../process/windowsSpawn";
 import {
   PINNED_PLUGIN_PACKAGE_MANAGER,
   PLUGIN_INSTALL_TIMEOUT_MS,
@@ -14,6 +16,9 @@ const PLUGIN_INSTALL_SERVICE_NAME = "dohc.plugin.install";
 // abnormal path, not the normal exit-gated resolution every other job
 // takes.
 export const TERMINATE_FAILURE_GRACE_MS = 5_000;
+// How long a signalled install tree has to exit before the force round, the
+// same grace the plugin child-process broker gives its own children.
+export const INSTALL_TREE_STOP_GRACE_MS = 2_000;
 
 // CodeRabbit #779 R18 (Critical): this install's cwd is a copy of
 // plugin-authored source, whose pnpm-lock.yaml/.npmrc the plugin author
@@ -91,6 +96,11 @@ export interface PluginInstallForkOptions {
 }
 
 export interface PluginInstallProcessHandle {
+  /** The install child's own pid, when it has one. Teardown signals its
+   * descendants too: pnpm shells out to git and tar, and killing only the
+   * pnpm process leaves those writing into the snapshot while the failed
+   * install's artifacts are being removed (#779 round 7 B3). */
+  readonly pid: number | undefined;
   stdout: NodeJS.ReadableStream | null;
   stderr: NodeJS.ReadableStream | null;
   onExit(listener: (code: number) => void): void;
@@ -156,6 +166,15 @@ export interface InstallPluginDependenciesInput {
   signal?: AbortSignal;
   timeoutMs?: number;
   forkProcess?: PluginInstallFork;
+  platform?: NodeJS.Platform;
+  /** Signals the pid, `alsoSignal`, and every descendant of them; returns the
+   * pids it signalled. See posixSpawn.ts's killProcessTreePosix. */
+  killProcessTreePosix?: (
+    pid: number,
+    signal: NodeJS.Signals,
+    alsoSignal: readonly number[],
+  ) => Promise<readonly number[]> | readonly number[];
+  killWindowsTree?: (pid: number) => Promise<boolean>;
 }
 
 const installQueues = new Map<string, Promise<void>>();
@@ -235,6 +254,38 @@ function lockfileMismatch(logs: PluginInstallLogEntry[]): boolean {
   );
 }
 
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolveDelay) => {
+    const timer = setTimeout(resolveDelay, milliseconds);
+    timer.unref?.();
+  });
+}
+
+/**
+ * Stops the install child and everything it started. Enumerating descendants
+ * has to happen while the root is still alive — once it exits, its children
+ * are reparented and no ppid walk can find them — so this runs before the
+ * utility process itself is terminated. The POSIX force round reuses the pids
+ * round one captured, the same captured-set semantics the plugin
+ * child-process broker uses.
+ */
+async function signalInstallTree(
+  pid: number | undefined,
+  platform: NodeJS.Platform,
+  killPosix: NonNullable<InstallPluginDependenciesInput["killProcessTreePosix"]>,
+  killWindows: NonNullable<InstallPluginDependenciesInput["killWindowsTree"]>,
+): Promise<void> {
+  if (pid === undefined) return;
+  if (platform === "win32") {
+    await killWindows(pid);
+    return;
+  }
+  const captured = await killPosix(pid, "SIGTERM", []);
+  void delay(INSTALL_TREE_STOP_GRACE_MS)
+    .then(() => killPosix(pid, "SIGKILL", captured))
+    .catch(() => undefined);
+}
+
 async function forkElectronUtilityProcess(
   modulePath: string,
   args: string[],
@@ -243,6 +294,9 @@ async function forkElectronUtilityProcess(
   const { utilityProcess } = await import("electron");
   const child = utilityProcess.fork(modulePath, args, options);
   return {
+    get pid() {
+      return child.pid;
+    },
     stdout: child.stdout,
     stderr: child.stderr,
     onExit: (listener) => {
@@ -309,6 +363,11 @@ async function runInstallJob(
   if (input.signal?.aborted) return abortedBeforeSpawn(input, timeoutMs);
 
   const logs: PluginInstallLogEntry[] = [];
+  const platform = input.platform ?? process.platform;
+  const killPosix = input.killProcessTreePosix ??
+    ((pid, signal, alsoSignal) => killProcessTreePosix(pid, signal, { alsoSignal }));
+  const killWindows = input.killWindowsTree ??
+    ((pid: number) => killProcessTreeWin32(pid, () => false));
   const pnpmEntry = resolvePluginPnpmEntry(input.resourcesBasePath);
   const env = buildPluginInstallEnv(input.pnpmPaths);
   // A supplied forkProcess (tests) runs pnpm directly — a plain Node
@@ -359,7 +418,7 @@ async function runInstallJob(
       input.signal?.removeEventListener("abort", abortInstall);
     };
 
-    const terminate = (reason: "timeout" | "aborted") => {
+    const terminate = async (reason: "timeout" | "aborted"): Promise<void> => {
       if (settled || termination !== null) return;
       termination = reason;
       if (reason === "timeout") {
@@ -367,6 +426,8 @@ async function runInstallJob(
       } else {
         pushLog(logs, "system", "Install cancelled by the caller.");
       }
+      await signalInstallTree(child.pid, platform, killPosix, killWindows)
+        .catch(() => undefined);
       const sent = child.terminate();
       if (sent) return;
       // terminate() reports it never sent the request (e.g. the child has
@@ -396,7 +457,7 @@ async function runInstallJob(
     };
 
     function abortInstall(): void {
-      terminate("aborted");
+      void terminate("aborted");
     }
 
     child.onError((message) => {
@@ -470,7 +531,7 @@ async function runInstallJob(
       ));
     });
 
-    timer = setTimeout(() => terminate("timeout"), timeoutMs);
+    timer = setTimeout(() => void terminate("timeout"), timeoutMs);
     if (input.signal?.aborted) abortInstall();
     else input.signal?.addEventListener("abort", abortInstall, { once: true });
   });

@@ -13,7 +13,7 @@ import {
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stop, type BuildResult } from "esbuild";
 import {
@@ -169,9 +169,17 @@ async function expectMissing(path: string): Promise<void> {
   await expect(lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
 }
 
+/**
+ * No staged or set-aside build tree survives, inside the live root or beside
+ * it. Round 7 (A1) moved staging out of the live root, so both places have to
+ * be clean: a leftover sibling is exactly the residue the pipeline-level
+ * discard pin looks for.
+ */
 async function expectNoStaging(liveRoot: string): Promise<void> {
-  const entries = await readdir(liveRoot);
-  expect(entries.filter((entry) => entry.startsWith(".staging-"))).toEqual([]);
+  const inside = await readdir(liveRoot).catch(() => []);
+  expect(inside.filter((entry) => entry.includes(".staging-"))).toEqual([]);
+  const siblings = await readdir(dirname(liveRoot));
+  expect(siblings.filter((entry) => entry !== basename(liveRoot))).toEqual([]);
 }
 
 beforeAll(async () => {
@@ -239,7 +247,48 @@ describe("buildPluginBundle", () => {
     await expectNoStaging(fixture.liveRoot);
   });
 
-  it("discard restores the installed snapshot and keeps the old bundle live", async () => {
+  it("keeps the live root complete, snapshot included, for the whole build (#779 round 7 A1)", async () => {
+    const fixture = await createBuildFixture();
+    const oldBundlePath = join(fixture.liveRoot, "bundle.mjs");
+    await writeFile(oldBundlePath, "old bundle bytes\n");
+    let midBuildEntries: string[] | null = null;
+    let midBuildSource: string | null = null;
+    let midBuildBundle: string | null = null;
+    const buildFunction = vi.fn<PluginBundleBuild>(async (options) => {
+      // Everything a panel start or a serving panel reads must still be
+      // there, in the live root, while esbuild runs.
+      midBuildEntries = (await readdir(fixture.liveRoot)).sort();
+      midBuildSource = await readFile(
+        join(fixture.snapshotRoot, "src", "index.ts"),
+        "utf8",
+      );
+      midBuildBundle = await readFile(oldBundlePath, "utf8");
+      await writeFile(options.outfile ?? "", "// staged bundle\n");
+      return {
+        errors: [],
+        warnings: [],
+        metafile: { inputs: {}, outputs: {} },
+      } as unknown as BuildResult;
+    });
+
+    const success = requireSuccess(await buildPluginBundle({
+      ...fixture.input,
+      buildFunction,
+      stopBuild: async () => undefined,
+    }));
+
+    expect(midBuildEntries).toEqual(["bundle.mjs", "snapshot"]);
+    expect(midBuildSource).toContain("increment(41)");
+    expect(midBuildBundle).toBe("old bundle bytes\n");
+    await success.publish();
+    expect(await readFile(oldBundlePath, "utf8")).toBe("// staged bundle\n");
+    await expect(
+      readFile(join(fixture.snapshotRoot, "src", "index.ts"), "utf8"),
+    ).resolves.toContain("increment(41)");
+    await expectNoStaging(fixture.liveRoot);
+  });
+
+  it("discard removes the staged tree and keeps the live root untouched", async () => {
     const fixture = await createBuildFixture();
     const oldBundlePath = join(fixture.liveRoot, "bundle.mjs");
     await writeFile(oldBundlePath, "old bundle bytes\n");
@@ -268,9 +317,10 @@ describe("buildPluginBundle", () => {
     const generatedManifest: unknown = JSON.parse(
       await readFile(success.manifestPath, "utf8"),
     );
-    const sourceMapOnDisk: unknown = JSON.parse(
-      await readFile(join(success.liveRoot, "bundle.mjs.map"), "utf8"),
-    );
+    const sourceMapPath = join(success.liveRoot, "bundle.mjs.map");
+    const sourceMapOnDisk = JSON.parse(
+      await readFile(sourceMapPath, "utf8"),
+    ) as { version: number; sources: string[] };
 
     expect(metafileOnDisk).toEqual(success.metafile);
     expect(Object.keys(success.metafile.inputs).some((path) =>
@@ -281,13 +331,19 @@ describe("buildPluginBundle", () => {
       ...fixture.manifest,
       entry: "bundle.mjs",
     });
-    expect(sourceMapOnDisk).toMatchObject({
-      version: 3,
-      sources: expect.arrayContaining([
-        "snapshot/src/increment.ts",
-        "snapshot/src/index.ts",
-      ]),
-    });
+    // esbuild writes sources as URIs relative to the output file's own
+    // directory, which is the staging sibling at build time. What has to hold
+    // is that they resolve to the real snapshot files from where the map ends
+    // up — assert that, not the literal spelling.
+    expect(sourceMapOnDisk.version).toBe(3);
+    expect(
+      sourceMapOnDisk.sources.map((source) =>
+        resolve(dirname(sourceMapPath), decodeURIComponent(source))
+      ),
+    ).toEqual(expect.arrayContaining([
+      join(success.liveRoot, "snapshot", "src", "increment.ts"),
+      join(success.liveRoot, "snapshot", "src", "index.ts"),
+    ]));
   });
 
   it("refuses an entry whose real path escapes the installed snapshot", async () => {

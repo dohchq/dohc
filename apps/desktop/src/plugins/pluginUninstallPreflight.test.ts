@@ -1,46 +1,16 @@
-import {
-  mkdir,
-  readFile,
-  rm,
-  stat,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { PluginUninstallPreflightRecord } from "../ipc/bridgeContract";
 import { PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT } from "../ipc/channels";
 import { createTestScratch } from "../workspaces/testTemp";
-import { MAX_HISTORY_TEXT_SNAPSHOT_BYTES } from "../workspaces/workspaceWatcher";
 import { hashPluginSourceFiles } from "./pluginSourceSnapshot";
-
-// A pure JS-level interception so one test can make a specific file vanish
-// out from under classifyHistoryRecovery right when it tries to stat it —
-// reproducing the exact TOCTOU window between hashPluginSourceFiles (which
-// already saw the file) and this read (CodeRabbit #779 R27).
-let poisonedPath: string | null = null;
-vi.mock("node:fs/promises", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return {
-    ...actual,
-    stat: (async (path: Parameters<typeof stat>[0], options?: unknown) => {
-      if (poisonedPath !== null && String(path) === poisonedPath) {
-        throw Object.assign(new Error("ENOENT: no such file or directory"), {
-          code: "ENOENT",
-        });
-      }
-      return actual.stat(path as string, options as never);
-    }) as typeof stat,
-  };
-});
-
-const {
+import {
   pluginBaselineManifestPath,
   pluginUninstallPreflight,
   summarizeUninstallPreflight,
   writePluginBaselineManifest,
-} = await import("./pluginUninstallPreflight");
+} from "./pluginUninstallPreflight";
 
 const roots: string[] = [];
 const pluginId = "hello-plugin";
@@ -98,7 +68,6 @@ async function runPreflight(
 }
 
 afterEach(async () => {
-  poisonedPath = null;
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
@@ -157,31 +126,31 @@ describe("plugin uninstall preflight", () => {
     ).toMatchObject({ sourceHash: installedBaselineHash });
   });
 
-  it("classifies modified text under the capture cap as recoverable", async () => {
+  it("never promises recovery it cannot verify, even with capture running (#779 round 7 B2)", async () => {
     const fixture = await createFixture();
     await writeSourceFile(fixture, "index.txt", "baseline text\n");
     const installedBaselineHash = await saveBaseline(fixture);
+    // A tiny edit made a moment ago, with capture running: the old size-plus-
+    // flag classification called this "recoverable" and let the dialog promise
+    // it back, even though nothing here can tell whether a capture batch ever
+    // settled for it.
     await writeSourceFile(fixture, "index.txt", "modified text\n");
 
-    const result = await runPreflight(fixture, installedBaselineHash);
+    const result = await runPreflight(fixture, installedBaselineHash, true);
 
     expect(result.counts).toMatchObject({
       modified: 1,
-      capturedRecoverable: 1,
-      notRecoverableFromHistory: 0,
+      notRecoverableFromHistory: 1,
     });
-    expect(result.files).toEqual([
-      expect.objectContaining({
-        relPath: "index.txt",
-        status: "modified",
-        contentKind: "text",
-        historyRecovery: "captured-recoverable",
-      }),
-    ]);
-    expect(result.warning?.notRecoverablePaths).toEqual([]);
+    expect(result.notRecoverablePaths).toEqual(["index.txt"]);
+    expect(result.warning?.notRecoverablePaths).toEqual(["index.txt"]);
+    const details = result.warning?.details.join(" ") ?? "";
+    expect(details).toContain("dohc cannot confirm history holds a copy");
+    expect(details).toContain("Copy what you need before you uninstall.");
+    expect(details).not.toContain("can be recovered from history");
   });
 
-  it("refuses to promise recovery for any file when engine capture is unavailable (CodeRabbit #779 fixround Section B item 7)", async () => {
+  it("states the stronger fact when engine capture is not running", async () => {
     const fixture = await createFixture();
     await writeSourceFile(fixture, "index.txt", "baseline text\n");
     const installedBaselineHash = await saveBaseline(fixture);
@@ -189,90 +158,13 @@ describe("plugin uninstall preflight", () => {
 
     const result = await runPreflight(fixture, installedBaselineHash, false);
 
-    // Well under the capture size cap — the old, size-only classification
-    // would have called this "captured-recoverable" regardless of whether
-    // anything was actually there to record it.
     expect(result.counts).toMatchObject({
       modified: 1,
-      capturedRecoverable: 0,
       notRecoverableFromHistory: 1,
     });
-    expect(result.files).toEqual([
-      expect.objectContaining({
-        relPath: "index.txt",
-        status: "modified",
-        historyRecovery: "not-recoverable-from-history",
-      }),
-    ]);
-    expect(result.warning?.notRecoverablePaths).toEqual(["index.txt"]);
     expect(result.warning?.details.join(" ")).toContain(
-      "History capture is not currently running",
+      "History capture is not running, so history holds no copy of these files.",
     );
-  });
-
-  it("classifies modified text exactly at the 128 KiB cap as recoverable", async () => {
-    // materialize.rs captures with `metadata.len() > cap` — a file whose
-    // length equals the cap exactly is still captured, so this must not be
-    // named unrecoverable.
-    const fixture = await createFixture();
-    await writeSourceFile(fixture, "large.txt", "baseline text\n");
-    const installedBaselineHash = await saveBaseline(fixture);
-    await writeSourceFile(
-      fixture,
-      "large.txt",
-      "x".repeat(MAX_HISTORY_TEXT_SNAPSHOT_BYTES),
-    );
-
-    const result = await runPreflight(fixture, installedBaselineHash);
-
-    expect(result.counts.notRecoverableFromHistory).toBe(0);
-    expect(result.notRecoverablePaths).toEqual([]);
-    expect(result.files).toContainEqual(expect.objectContaining({
-      relPath: "large.txt",
-      historyRecovery: "captured-recoverable",
-    }));
-  });
-
-  it("names modified text one byte over the 128 KiB cap as not recoverable", async () => {
-    const fixture = await createFixture();
-    await writeSourceFile(fixture, "large.txt", "baseline text\n");
-    const installedBaselineHash = await saveBaseline(fixture);
-    await writeSourceFile(
-      fixture,
-      "large.txt",
-      "x".repeat(MAX_HISTORY_TEXT_SNAPSHOT_BYTES + 1),
-    );
-
-    const result = await runPreflight(fixture, installedBaselineHash);
-
-    expect(result.counts.notRecoverableFromHistory).toBe(1);
-    expect(result.notRecoverablePaths).toEqual(["large.txt"]);
-    expect(result.warning?.notRecoverablePaths).toEqual(["large.txt"]);
-    expect(result.warning?.details.join(" ")).toContain("131,072 bytes");
-  });
-
-  it("names a binary file over 5 MiB as not recoverable", async () => {
-    const fixture = await createFixture();
-    await writeSourceFile(fixture, "asset.bin", Uint8Array.from([0, 1, 2]));
-    const installedBaselineHash = await saveBaseline(fixture);
-    await writeSourceFile(
-      fixture,
-      "asset.bin",
-      new Uint8Array(MAX_VERSIONED_BINARY_FILE_BYTES + 1).fill(0xff),
-    );
-
-    const result = await runPreflight(fixture, installedBaselineHash);
-
-    expect(result.files).toEqual([
-      expect.objectContaining({
-        relPath: "asset.bin",
-        status: "modified",
-        contentKind: "binary",
-        historyRecovery: "not-recoverable-from-history",
-      }),
-    ]);
-    expect(result.notRecoverablePaths).toEqual(["asset.bin"]);
-    expect(result.warning?.details.join(" ")).toContain("5,242,880 bytes");
   });
 
   it("classifies a live-only file as added since the baseline", async () => {
@@ -284,11 +176,12 @@ describe("plugin uninstall preflight", () => {
     const result = await runPreflight(fixture, installedBaselineHash);
 
     expect(result.counts.addedSinceBaseline).toBe(1);
-    expect(result.files).toContainEqual(expect.objectContaining({
+    expect(result.files).toContainEqual({
       relPath: "notes.txt",
       status: "added-since-baseline",
-      historyRecovery: "captured-recoverable",
-    }));
+    });
+    // Uninstall deletes it and dohc cannot confirm history holds it.
+    expect(result.notRecoverablePaths).toEqual(["notes.txt"]);
   });
 
   it("counts a missing live file as removed without making it a delete target", async () => {
@@ -304,15 +197,11 @@ describe("plugin uninstall preflight", () => {
       modified: 0,
       addedSinceBaseline: 0,
       removedSinceBaseline: 1,
-      capturedRecoverable: 0,
       notRecoverableFromHistory: 0,
     });
     expect(result.files).toContainEqual({
       relPath: "removed.txt",
       status: "removed-since-baseline",
-      byteLength: null,
-      contentKind: null,
-      historyRecovery: null,
     });
     expect(result.summary).toBe(
       "1 installation baseline file is already missing. Uninstall will not delete it.",
@@ -341,8 +230,8 @@ describe("plugin uninstall preflight", () => {
     const installedBaselineHash = await saveBaseline(fixture);
     await writeSourceFile(
       fixture,
-      "node_modules/dependency/large.bin",
-      new Uint8Array(MAX_VERSIONED_BINARY_FILE_BYTES + 1).fill(0xff),
+      "node_modules/dependency/installed.bin",
+      Uint8Array.from([0, 1, 2]),
     );
     await writeSourceFile(fixture, ".dohc/generated.txt", "generated\n");
     await writeSourceFile(fixture, "nested/.dohc/generated.txt", "generated\n");
@@ -356,27 +245,6 @@ describe("plugin uninstall preflight", () => {
     expect(renderedResult).not.toContain("generated.txt");
   });
 
-  it("degrades one file to not-recoverable instead of crashing the whole preflight when it vanishes mid-check (CodeRabbit #779 R27)", async () => {
-    const fixture = await createFixture();
-    await writeSourceFile(fixture, "index.txt", "baseline text\n");
-    const installedBaselineHash = await saveBaseline(fixture);
-    await writeSourceFile(fixture, "index.txt", "modified text\n");
-    poisonedPath = join(fixture.pluginRoot, "index.txt");
-
-    const result = await runPreflight(fixture, installedBaselineHash);
-
-    expect(result.files).toEqual([
-      expect.objectContaining({
-        relPath: "index.txt",
-        status: "modified",
-        byteLength: null,
-        contentKind: null,
-        historyRecovery: "not-recoverable-from-history",
-      }),
-    ]);
-    expect(result.notRecoverablePaths).toEqual(["index.txt"]);
-  });
-
   it("sends the renderer a bounded summary, not the whole file inventory", async () => {
     const fixture = await createFixture();
     for (let index = 0; index < 25; index += 1) {
@@ -387,7 +255,6 @@ describe("plugin uninstall preflight", () => {
       await writeSourceFile(fixture, `asset-${index}.bin`, `changed ${index}\n`);
     }
 
-    // Capture is not running, so no changed file can be promised back.
     const result = await runPreflight(fixture, installedBaselineHash, false);
     const summary = summarizeUninstallPreflight(result);
 
