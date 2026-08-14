@@ -20,6 +20,30 @@ import { useEngineDoc } from "./useEngineDoc";
 import { EngineYDocUpdateTooLargeError } from "./engineYDocProvider";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
 
+const projectionGate = vi.hoisted(() => ({
+  pending: null as Promise<void> | null,
+  completed: 0,
+}));
+
+vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("@dohc/ydoc-projection")
+  >();
+  return {
+    ...actual,
+    yDocToMarkdown(doc: Y.Doc) {
+      const markdown = actual.yDocToMarkdown(doc);
+      return (
+        projectionGate.pending?.then(() => {
+          projectionGate.completed += 1;
+          return `${markdown} [projected]`;
+        }) ??
+        markdown
+      );
+    },
+  };
+});
+
 const IMAGE_DESCRIPTOR = {
   id: "recovery-image",
   mimeType: "image/png",
@@ -436,12 +460,16 @@ beforeEach(() => {
   vi.stubGlobal("dohcDesktop", harness.api);
   resetOrphanedDrafts();
   lastBoundDoc = null;
+  projectionGate.pending = null;
+  projectionGate.completed = 0;
 });
 
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   resetOrphanedDrafts();
+  projectionGate.pending = null;
+  projectionGate.completed = 0;
 });
 
 async function mountBound() {
@@ -568,6 +596,29 @@ it("clears a permanent refusal when an independent lineage wins", async () => {
     expect(screen.getByTestId("available").textContent).toBe("false"),
   );
   expect(screen.getByTestId("draft").textContent).toBe("seed!");
+});
+
+it("does not let retired deletion recovery repaint a winning lineage", async () => {
+  let releaseProjection!: () => void;
+  projectionGate.pending = new Promise<void>((resolve) => {
+    releaseProjection = resolve;
+  });
+  await mountBound();
+
+  act(() => screen.getByTestId("type").click());
+  harness.emitNow("deleted", 0);
+  harness.emitLineageReplacement("unused");
+
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  await act(async () => {
+    releaseProjection();
+    await projectionGate.pending;
+  });
+  await waitFor(() =>
+    expect(projectionGate.completed).toBeGreaterThanOrEqual(2),
+  );
+  expect(screen.getByTestId("available").textContent).toBe("true");
+  expect(screen.getByTestId("deleted").textContent).toBe("false");
 });
 
 it("recovers a dirty replaced scene immediately and hydrates its image", async () => {

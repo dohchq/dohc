@@ -724,7 +724,11 @@ export function useEngineDoc(input: {
           // Only the LOCAL render state is guarded by the open token — the
           // draft itself is already durable in the module-level store above,
           // unmount or not.
-          if (transition === "deletion" && token === openTokenRef.current) {
+          if (
+            transition === "deletion" &&
+            slot === recovery &&
+            token === openTokenRef.current
+          ) {
             setDeletion({ token, draftId: slot.draftId });
           }
           if (!sceneRecovery) return;
