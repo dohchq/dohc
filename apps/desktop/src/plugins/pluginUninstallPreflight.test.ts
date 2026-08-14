@@ -268,4 +268,23 @@ describe("plugin uninstall preflight", () => {
     expect(() => PluginUninstallPreflightRecord.parse(summary)).not.toThrow();
     expect(Object.keys(summary)).not.toContain("files");
   });
+
+  it("reports an already-deleted source folder as nothing left to warn about (#779 round 12 A2)", async () => {
+    const fixture = await createFixture();
+    await writeSourceFile(fixture, "index.ts", "export const value = 1;\n");
+    const installedBaselineHash = await saveBaseline(fixture);
+    // What an uninstall that deleted the source and then failed on the
+    // plugin data or the record leaves behind.
+    await rm(fixture.pluginRoot, { recursive: true, force: true });
+
+    const result = await runPreflight(fixture, installedBaselineHash);
+
+    expect(result.verification).toBe("verified");
+    expect(result.liveHash).toBeNull();
+    expect(result.warning).toBeNull();
+    expect(result.files).toEqual([]);
+    expect(result.counts.notRecoverableFromHistory).toBe(0);
+    expect(result.summary).toContain("already deleted");
+    expect(result.summary).not.toContain("cannot verify");
+  });
 });

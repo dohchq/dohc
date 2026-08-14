@@ -149,7 +149,8 @@ interface PluginJobQueue {
 
 interface UninstallConfirmation {
   token: string;
-  pluginRoot: string;
+  /** Null when preflight found no source tree left to delete (#779 round 12 A2). */
+  pluginRoot: string | null;
   liveHash: string | null;
 }
 
@@ -242,6 +243,14 @@ function uninstallVerificationFailure(
     return "source could not be read to confirm what uninstall would delete";
   }
   return currentHash === confirmedHash ? null : changed;
+}
+
+function notDiscoveredError(pluginId: string): PluginPipelineError {
+  return pipelineError(
+    "discovery",
+    "plugin-not-found",
+    `Plugin "${pluginId}" is not a valid discovered plugin.`,
+  );
 }
 
 function invalidPluginError(
@@ -642,18 +651,19 @@ export class PluginPipeline {
     return this.enqueueActionValue(pluginId, async () => {
       try {
         const record = await this.localRecord(pluginId);
-        const candidate = this.requireUninstallableCandidate(pluginId, record);
+        const pluginRoot = this.uninstallRootPath(pluginId, record);
+        const sourcePresent = await this.sourceRootPresent(pluginRoot);
         const preflight = await this.operations.uninstallPreflight({
           dohcDir: this.dohcDir,
           pluginId,
-          pluginRoot: candidate.rootPath,
+          pluginRoot,
           installedBaselineHash: record?.installedBaselineHash,
           engineCaptureAvailable: this.engineCaptureAvailable(),
         });
         const confirmationToken = randomUUID();
         this.uninstallConfirmations.set(pluginId, {
           token: confirmationToken,
-          pluginRoot: resolve(candidate.rootPath),
+          pluginRoot: sourcePresent ? resolve(pluginRoot) : null,
           liveHash: preflight.liveHash,
         });
         return {
@@ -693,6 +703,9 @@ export class PluginPipeline {
       }
 
       const record = await this.localRecord(pluginId);
+      if (confirmation.pluginRoot === null) {
+        return this.finishSourcelessUninstall(pluginId);
+      }
       const candidate = this.requireUninstallableCandidate(pluginId, record);
       if (resolve(candidate.rootPath) !== confirmation.pluginRoot) {
         return this.failure(
@@ -980,6 +993,7 @@ export class PluginPipeline {
     const nextByRoot = new Map(
       nextValid.map((candidate) => [resolve(candidate.rootPath), candidate]),
     );
+    const nextRoots = new Set(next.map((candidate) => resolve(candidate.rootPath)));
     const replaced = new Set<string>();
     const departing: InstalledPluginRecord[] = [];
     const replacements: InstalledPluginRecord[] = [];
@@ -993,6 +1007,19 @@ export class PluginPipeline {
         !sameRoot ||
         sameRoot.id !== oldCandidate.id;
       if (!identityChanged) continue;
+      // A root still on disk whose manifest is momentarily invalid — the
+      // ordinary state while a user's agent edits a plugin — has not
+      // departed. Deleting its record, its approval, and its plugin data
+      // here uninstalled a plugin that only needed its manifest finished
+      // (#779 round 12 A1); the invalid state has its own handling, which
+      // keeps the installation and still offers Uninstall (round 8 D2). It
+      // is a departure only when the root is gone, when a valid manifest
+      // gave this root a different id, or when another valid root took this
+      // id — and that last one must still clean up before its replacement
+      // is reconciled (CERT779 A4).
+      if (!sameId && !sameRoot && nextRoots.has(resolve(oldCandidate.rootPath))) {
+        continue;
+      }
 
       departing.push(oldCandidate);
       const replacement = sameRoot ?? sameId;
@@ -1038,8 +1065,13 @@ export class PluginPipeline {
       if (replaced.has(candidateKey(candidate))) continue;
       const sourceRoot = relativeSourceRoot(this.workspaceRoot, candidate.rootPath);
       if (!events.some((event) => eventTouchesRoot(event, sourceRoot))) continue;
-      const old = previousValid.find((entry) =>
-        entry.id === candidate.id && resolve(entry.rootPath) === resolve(candidate.rootPath)
+      // Joined by root, not by id alone: a root whose manifest was invalid a
+      // moment ago carries discovery's fallback id, and restoring the
+      // manifest has to reconcile the installation whose record survived
+      // that invalid window back to running (#779 round 12 A1).
+      const old = previous.find((entry) =>
+        resolve(entry.rootPath) === resolve(candidate.rootPath) &&
+        (entry.valid && entry.manifest !== null ? entry.id === candidate.id : true)
       );
       if (!old) continue;
       this.enqueueSourceRefresh(candidate.id, () =>
@@ -1052,7 +1084,17 @@ export class PluginPipeline {
   ): Promise<void> {
     const state = await this.localState();
     for (const candidate of candidates) {
-      if (this.statusForCandidate(candidate)) continue;
+      const status = this.statusForCandidate(candidate);
+      // A candidate whose manifest just broke still carries the status of the
+      // valid plugin it was a moment ago, and a candidate whose manifest was
+      // just restored still carries the invalid one. Reseeding either gives
+      // it the status a fresh launch would (#779 round 12 A1).
+      if (
+        status &&
+        status.valid === (candidate.valid && candidate.manifest !== null)
+      ) {
+        continue;
+      }
       this.seedCandidateStatus(state, candidate);
     }
   }
@@ -1265,6 +1307,13 @@ export class PluginPipeline {
         throw failureFromUnknown("state", "state-write-failed", error);
       }
 
+      // The old process stops before either publish. It is full-trust code
+      // that knows its own live root, so leaving it running while the live
+      // root is replaced let it overwrite the published bundle in the window
+      // before the new process starts — unapproved bytes running under the
+      // approvedBundleHash just recorded for them (#779 round 12 A3).
+      if (oldRuntime) await this.options.pluginHost.stop(candidate.id);
+
       // Both publishes happen only now, with the record that approves these
       // exact bytes already durable. The source goes first because the
       // bundle's own publish carries the live snapshot into the tree it swaps
@@ -1306,9 +1355,21 @@ export class PluginPipeline {
 
       if (input.startRuntime) {
         this.setStatus(candidate, { status: "starting", warnings });
-        if (oldRuntime) await this.options.pluginHost.stop(candidate.id);
         if (input.resetCrashAccounting) {
           this.options.pluginHost.resetCrashAccounting(candidate.id);
+        }
+        // The published bundle is re-read here, not trusted from the build:
+        // approval binds the bytes that execute, and anything that reached
+        // the live root between publication and this start is not what the
+        // record approves (#779 round 12 A3).
+        if (!await this.verifiedLiveBundle(built.liveRoot, built.bundleHash)) {
+          throw new PipelineFailure(pipelineError(
+            "build",
+            "bundle-changed",
+            `Plugin "${candidate.id}" bundle at ${built.liveRoot} changed after ` +
+              "it was published, so it no longer matches the approval recorded " +
+              "for it. Install the plugin again.",
+          ));
         }
         await this.options.pluginHost.start(
           built.liveRoot,
@@ -1550,10 +1611,10 @@ export class PluginPipeline {
    * record — so a broken manifest must not remove the way back (#779 round 8
    * D2).
    */
-  private requireUninstallableCandidate(
+  private uninstallableCandidate(
     pluginId: string,
     record: PluginRecordShape | undefined,
-  ): InstalledPluginRecord {
+  ): InstalledPluginRecord | null {
     const valid = this.validCandidate(pluginId);
     if (valid) return valid;
     // Joined by root path, not by id: this plugin's discovery entry carries
@@ -1565,14 +1626,108 @@ export class PluginPipeline {
         resolve(entry.rootPath) === resolve(status.rootPath)
       )
       : undefined;
-    if (installed) return installed;
-    throw new PipelineFailure(
-      pipelineError(
-        "discovery",
-        "plugin-not-found",
-        `Plugin "${pluginId}" is not a valid discovered plugin.`,
-      ),
-    );
+    return installed ?? null;
+  }
+
+  private requireUninstallableCandidate(
+    pluginId: string,
+    record: PluginRecordShape | undefined,
+  ): InstalledPluginRecord {
+    const candidate = this.uninstallableCandidate(pluginId, record);
+    if (candidate) return candidate;
+    throw new PipelineFailure(notDiscoveredError(pluginId));
+  }
+
+  /**
+   * The plugin root an uninstall acts on. Normally the discovered
+   * candidate's. When an earlier uninstall deleted the root and then failed
+   * on the plugin data or the record, discovery has no candidate left and
+   * the installation's own status names the root that is gone — preflight
+   * still has to report what is left, or the interrupted uninstall can never
+   * be finished (#779 round 12 A2).
+   */
+  private uninstallRootPath(
+    pluginId: string,
+    record: PluginRecordShape | undefined,
+  ): string {
+    const candidate = this.uninstallableCandidate(pluginId, record);
+    if (candidate) return candidate.rootPath;
+    const status = this.statuses.get(pluginId);
+    if (status) return status.rootPath;
+    throw new PipelineFailure(notDiscoveredError(pluginId));
+  }
+
+  private async sourceRootPresent(pluginRoot: string): Promise<boolean> {
+    try {
+      await this.operations.inspectPath(pluginRoot);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Finishes an uninstall that has no source tree left to delete. An earlier
+   * attempt deleted the root and then failed on the plugin data or the
+   * record, stranding both: discovery offers no candidate, and every live
+   * hash the normal path re-checks describes a tree that is gone. What the
+   * user confirmed was that irreversible source delete, and it already
+   * happened; what remains is what dohc itself built and recorded (#779
+   * round 12 A2).
+   */
+  private async finishSourcelessUninstall(
+    pluginId: string,
+  ): Promise<PluginPipelineActionResult> {
+    const status = this.statuses.get(pluginId);
+    if (!status) return this.failure(pluginId, notDiscoveredError(pluginId));
+    const candidate: InstalledPluginRecord = {
+      id: pluginId,
+      directoryName: status.directoryName,
+      rootPath: status.rootPath,
+      manifest: null,
+      diagnostics: status.diagnostics,
+      valid: status.valid,
+    };
+    this.setStatus(candidate, {
+      status: "uninstalling",
+      disabledReason: "user",
+      valid: status.valid,
+      error: null,
+    });
+    try {
+      await this.options.pluginHost.stop(pluginId);
+      await this.removePluginData(pluginId);
+      await this.operations.mutateRecord(
+        this.options.stateDir,
+        this.workspaceRoot,
+        pluginId,
+        () => undefined,
+      );
+      this.statuses.delete(pluginId);
+      this.emit({ kind: "removed", pluginId });
+      return {
+        ok: true,
+        plugin: {
+          ...cloneStatus(status),
+          status: "disabled",
+          disabledReason: "user",
+        },
+      };
+    } catch (error) {
+      const detail = pipelineError(
+        "uninstall",
+        "delete-failed",
+        errorMessage(error),
+      );
+      this.setStatus(candidate, {
+        status: "disabled-pending-repair",
+        disabledReason: "repair",
+        runtimeStatus: null,
+        valid: status.valid,
+        error: detail,
+      });
+      return this.failure(pluginId, detail);
+    }
   }
 
   private engineCaptureAvailable(): boolean {

@@ -2489,4 +2489,310 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.dispose();
     }
   }, 60_000);
+
+  it("keeps an installation whose manifest breaks while it is watched, and recovers it when the manifest returns (#779 round 12 A1)", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      const manifestPath = join(fixture.pluginRoot, "dohc-plugin.json");
+      const manifestText = await readFile(manifestPath, "utf8");
+      const liveRoot = join(pluginsDataRoot(fixture), "example-plugin");
+      const liveBefore = await fileHashes(liveRoot);
+
+      // A half-written manifest is an ordinary state while a user's agent
+      // edits the plugin. The root never left; only its manifest did.
+      await writeFile(manifestPath, "{ half written\n");
+      pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin/dohc-plugin.json",
+        operation: "update",
+      }]);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "invalid",
+        "The broken manifest never landed as an invalid row.",
+      );
+
+      // Still installed: the record, the approval, the built bundle, and the
+      // published snapshot all survive, and Settings still offers Uninstall.
+      expect(pipeline.list()[0]).toMatchObject({
+        id: "example-plugin",
+        valid: false,
+        status: "invalid",
+      });
+      expect(pipeline.list()[0]?.approvedHash).not.toBeNull();
+      const broken = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      if (!broken.ok) throw new Error(broken.warning);
+      expect(broken.state.plugins["example-plugin"]?.approvedHash).toEqual(
+        expect.any(String),
+      );
+      expect(await fileHashes(liveRoot)).toEqual(liveBefore);
+
+      // Restoring the same bytes restores the installation on its own
+      // approval — no new approval prompt, no reinstall.
+      await writeFile(manifestPath, manifestText);
+      pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin/dohc-plugin.json",
+        operation: "update",
+      }]);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "The restored manifest did not return the plugin to ready.",
+      );
+      expect(pipeline.list()[0]).toMatchObject({
+        id: "example-plugin",
+        valid: true,
+        approvedHash: broken.state.plugins["example-plugin"]?.approvedHash,
+      });
+      // The built bundle is the same one: recovery verified the approved
+      // source and started it, it did not rebuild. (The published source
+      // snapshot beside it is re-copied by any reconcile whose install
+      // rewrote the lockfile, which is not what this test is about.)
+      expect((await fileHashes(liveRoot))["bundle.mjs"])
+        .toBe(liveBefore["bundle.mjs"]);
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("finishes an uninstall whose source delete succeeded and whose data delete failed (#779 round 12 A2)", async () => {
+    const fixture = await createPluginWorkspace();
+    let failDataRemoval = false;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        removePath: async (path, options) => {
+          if (
+            failDataRemoval &&
+            String(path).startsWith(pluginsDataRoot(fixture))
+          ) {
+            throw new Error("plugin data delete failed");
+          }
+          await rm(path, options);
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      failDataRemoval = true;
+      const firstPreflight = await pipeline.uninstallPreflight("example-plugin");
+      if (!firstPreflight.ok) throw new Error(firstPreflight.error.message);
+      const failed = await pipeline.uninstall(
+        "example-plugin",
+        firstPreflight.confirmationToken,
+      );
+      expect(failed.ok).toBe(false);
+      if (failed.ok) throw new Error("unreachable");
+      expect(failed.error).toMatchObject({
+        stage: "uninstall",
+        code: "delete-failed",
+      });
+      // The source is gone; the plugin data and the record are not.
+      await expect(lstat(fixture.pluginRoot)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(await readdir(pluginsDataRoot(fixture))).toEqual([
+        "example-plugin",
+      ]);
+      expect(pipeline.list()[0]).toMatchObject({
+        id: "example-plugin",
+        status: "disabled-pending-repair",
+        approvedHash: expect.any(String),
+      });
+
+      // The watcher then observes the deleted root and sweeps the identity,
+      // which drops the record and fails on the same plugin data. Discovery
+      // now has no candidate at all, and the row is the only thing left that
+      // names the installation.
+      pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin",
+        operation: "delete",
+      }]);
+      await waitFor(
+        () => pipeline.list()[0]?.error?.code === "identity-cleanup-failed",
+        "The watcher sweep never reported its failed cleanup.",
+      );
+      const swept = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      if (!swept.ok) throw new Error(swept.warning);
+      expect(swept.state.plugins["example-plugin"]).toBeUndefined();
+      expect(await readdir(pluginsDataRoot(fixture))).toEqual([
+        "example-plugin",
+      ]);
+      expect(pipeline.list()[0]).toMatchObject({
+        id: "example-plugin",
+        approvedHash: expect.any(String),
+      });
+
+      // The retry is the same action from the same row, and it finishes.
+      failDataRemoval = false;
+      const retryPreflight = await pipeline.uninstallPreflight("example-plugin");
+      if (!retryPreflight.ok) throw new Error(retryPreflight.error.message);
+      expect(retryPreflight.preflight.liveHash).toBeNull();
+      const finished = await pipeline.uninstall(
+        "example-plugin",
+        retryPreflight.confirmationToken,
+      );
+      expect(finished.ok).toBe(true);
+
+      expect(await readdir(pluginsDataRoot(fixture))).toEqual([]);
+      const state = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      if (!state.ok) throw new Error(state.warning);
+      expect(state.state.plugins["example-plugin"]).toBeUndefined();
+      expect(pipeline.list()).toEqual([]);
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("stops the old runtime before it publishes, and refuses a bundle swapped after publication (#779 round 12 A3)", async () => {
+    const fixture = await createPluginWorkspace();
+    let tamperOnPublish = false;
+    const order: string[] = [];
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    const realStop = host.stop.bind(host);
+    vi.spyOn(host, "stop").mockImplementation(async (pluginId: string) => {
+      order.push("stop");
+      await realStop(pluginId);
+    });
+    const startSpy = vi.spyOn(host, "start");
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        build: async (input) => {
+          const built = await buildPluginBundle(input);
+          if (!built.ok) return built;
+          return {
+            ...built,
+            publish: async () => {
+              const published = await built.publish();
+              order.push("publish");
+              // The still-running full-trust host knows its own live root, so
+              // this is the window it could overwrite the published bundle in.
+              if (tamperOnPublish) {
+                await writeFile(
+                  join(built.liveRoot, "bundle.mjs"),
+                  "globalThis.unapproved = true;\n",
+                );
+              }
+              return published;
+            },
+          };
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      const startsAfterInstall = startSpy.mock.calls.length;
+
+      order.length = 0;
+      tamperOnPublish = true;
+      const rebuilt = await pipeline.install("example-plugin");
+
+      // Nothing may run out of the live root while it is being replaced.
+      expect(order).toEqual(["stop", "publish"]);
+      // The published bytes are not the bytes the record just approved, so
+      // the start is refused and they never execute.
+      expect(rebuilt.ok).toBe(false);
+      if (rebuilt.ok) throw new Error("unreachable");
+      expect(rebuilt.error).toMatchObject({
+        stage: "build",
+        code: "bundle-changed",
+      });
+      expect(startSpy.mock.calls.length).toBe(startsAfterInstall);
+      expect(await readFile(liveBundlePath(fixture, "example-plugin"), "utf8"))
+        .toBe("globalThis.unapproved = true;\n");
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 120_000);
 });

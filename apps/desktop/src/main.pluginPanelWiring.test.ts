@@ -202,4 +202,36 @@ describe("plugin panel main-process wiring", () => {
       "panelStartedHosts.delete(pluginLifecycleKey(input.workspaceId, input.pluginId));",
     );
   });
+
+  it("revokes a plugin's panel authorities before disable and uninstall take its process (#779 round 12 A4)", () => {
+    const disableAt = mainSource.indexOf(
+      "pluginAction(CHANNELS.disablePlugin,",
+    );
+    const disableRevokeAt = mainSource.indexOf(
+      "revokePluginPanels(workspaceId, pluginId);",
+      disableAt,
+    );
+    const disableCallAt = mainSource.indexOf(
+      "return pipeline.disable(pluginId);",
+      disableAt,
+    );
+    const uninstall = handler("uninstallPlugin");
+    const uninstallRevokeAt = uninstall.indexOf(
+      "revokePluginPanels(input.workspaceId, input.pluginId);",
+    );
+    const uninstallCallAt = uninstall.indexOf(
+      "await pipeline.uninstall(input.pluginId, input.confirmationToken),",
+    );
+
+    // MUTATION (ordering): revoking after the pipeline call leaves an
+    // already-queued panel write holding a live authority for the whole time
+    // the pipeline spends stopping the process and deleting the source, which
+    // is exactly the window the write completes in. What revocation does to
+    // an in-flight write is pinned by behavior in PluginHost.test.ts.
+    expect(disableAt).toBeGreaterThan(-1);
+    expect(disableRevokeAt).toBeGreaterThan(-1);
+    expect(disableCallAt).toBeGreaterThan(disableRevokeAt);
+    expect(uninstallRevokeAt).toBeGreaterThan(-1);
+    expect(uninstallCallAt).toBeGreaterThan(uninstallRevokeAt);
+  });
 });

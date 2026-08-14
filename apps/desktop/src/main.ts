@@ -563,6 +563,7 @@ import { stopPluginPanelPreview } from "./plugins/pluginPanelLifecycle";
 import {
   assertPluginPanelRequestCurrent,
   loadPluginPanelRegistrationForCurrentRenderer,
+  revokePluginPanelAuthorities,
   revokePluginPanelAuthoritiesForStatus,
   startPluginPanelWithLock,
   stopPluginPanelWithLock,
@@ -6392,16 +6393,35 @@ function registerIpcHandlers(
     }
   });
 
+  // Ends every panel's authority over a plugin before an action that takes
+  // its process away. A panel SDK call already in flight carries its own
+  // abort signal, so stopping the process is not what cancels it (#779 round
+  // 12 A4).
+  const revokePluginPanels = (workspaceId: string, pluginId: string): void => {
+    revokePluginPanelAuthorities({
+      workspaceId,
+      pluginId,
+      panels: runningPluginPanels.values(),
+      revokePanel: pluginPanelSdkAuthorities.revokePanel,
+    });
+  };
+
   const pluginAction = (
     channel: string,
-    run: (pipeline: PluginPipeline, pluginId: string) => Promise<unknown>,
+    run: (
+      pipeline: PluginPipeline,
+      pluginId: string,
+      workspaceId: string,
+    ) => Promise<unknown>,
   ): void => {
     ipcMain.handle(channel, async (event, payload) => {
       assertTrustedSender(event);
       const input = PluginActionPayload.parse(payload);
       try {
         const pipeline = await activePluginPipelineFor(event, input.workspaceId);
-        const result = PluginActionResult.parse(await run(pipeline, input.pluginId));
+        const result = PluginActionResult.parse(
+          await run(pipeline, input.pluginId, input.workspaceId),
+        );
         if (result.ok) {
           // install/enable/approve/disable/uninstall each decide this
           // plugin's running state on the workspace's own authority — an
@@ -6422,8 +6442,10 @@ function registerIpcHandlers(
 
   pluginAction(CHANNELS.installPlugin, (pipeline, pluginId) =>
     pipeline.install(pluginId));
-  pluginAction(CHANNELS.disablePlugin, (pipeline, pluginId) =>
-    pipeline.disable(pluginId));
+  pluginAction(CHANNELS.disablePlugin, (pipeline, pluginId, workspaceId) => {
+    revokePluginPanels(workspaceId, pluginId);
+    return pipeline.disable(pluginId);
+  });
   pluginAction(CHANNELS.enablePlugin, (pipeline, pluginId) =>
     pipeline.enable(pluginId));
   pluginAction(CHANNELS.approvePlugin, (pipeline, pluginId) =>
@@ -6450,6 +6472,10 @@ function registerIpcHandlers(
     const input = UninstallPluginPayload.parse(payload);
     try {
       const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      // Uninstall stops the plugin's process on its way to deleting the
+      // source, so no panel authority over it survives the attempt whether
+      // or not the delete succeeds (#779 round 12 A4).
+      revokePluginPanels(input.workspaceId, input.pluginId);
       const result = PluginActionResult.parse(
         await pipeline.uninstall(input.pluginId, input.confirmationToken),
       );

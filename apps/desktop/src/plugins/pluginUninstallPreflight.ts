@@ -370,6 +370,30 @@ function cannotVerifyResult(
   };
 }
 
+/**
+ * The plugin's source folder is already deleted, so uninstall has nothing
+ * irreversible left to warn about. This is what an uninstall that deleted the
+ * source and then failed on the plugin data or the record leaves behind
+ * (#779 round 12 A2).
+ */
+function sourceAlreadyDeletedResult(
+  input: PluginUninstallPreflightInput,
+  manifestPath: string,
+): PluginUninstallPreflightResult {
+  return {
+    verification: "verified",
+    installedBaselineHash: input.installedBaselineHash ?? null,
+    liveHash: null,
+    baselineManifestPath: manifestPath,
+    summary:
+      "This plugin's source folder is already deleted. Uninstall removes what is left: the files dohc built and dohc's record of the installation.",
+    counts: emptyCounts(),
+    files: [],
+    notRecoverablePaths: [],
+    warning: null,
+  };
+}
+
 function verifiedInventory(
   liveDigest: PluginSourceDigest,
   baselineFiles: readonly PluginSourceFileDigest[],
@@ -408,6 +432,9 @@ export async function pluginUninstallPreflight(
   try {
     liveDigest = await hashPluginSourceFiles(resolve(input.pluginRoot));
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return sourceAlreadyDeletedResult(input, manifestPath);
+    }
     return cannotVerifyResult(
       input,
       manifestPath,

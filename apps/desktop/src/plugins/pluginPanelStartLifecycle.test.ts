@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   loadPluginPanelRegistrationForCurrentRenderer,
+  revokePluginPanelAuthorities,
   revokePluginPanelAuthoritiesForStatus,
   startPluginPanelWithLock,
   stopPluginPanelWithLock,
@@ -164,6 +165,26 @@ describe("plugin panel start lifecycle", () => {
         { workspaceId: "workspace", pluginId: "plugin", panelId: "a" },
         { workspaceId: "workspace", pluginId: "plugin", panelId: "b" },
         { workspaceId: "workspace", pluginId: "other", panelId: "c" },
+      ],
+      revokePanel: (workspaceId, pluginId, panelId) => {
+        revoked.push(`${workspaceId}/${pluginId}/${panelId}`);
+      },
+    });
+
+    expect(revoked).toEqual(["workspace/plugin/a", "workspace/plugin/b"]);
+  });
+
+  it("revokes every panel grant of one plugin when it is disabled or uninstalled (#779 round 12 A4)", () => {
+    const revoked: string[] = [];
+
+    revokePluginPanelAuthorities({
+      workspaceId: "workspace",
+      pluginId: "plugin",
+      panels: [
+        { workspaceId: "workspace", pluginId: "plugin", panelId: "a" },
+        { workspaceId: "workspace", pluginId: "plugin", panelId: "b" },
+        { workspaceId: "workspace", pluginId: "other", panelId: "c" },
+        { workspaceId: "other-workspace", pluginId: "plugin", panelId: "d" },
       ],
       revokePanel: (workspaceId, pluginId, panelId) => {
         revoked.push(`${workspaceId}/${pluginId}/${panelId}`);

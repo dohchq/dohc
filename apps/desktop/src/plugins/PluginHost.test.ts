@@ -23,6 +23,7 @@ import { readPluginManifestFile } from "./pluginManifest";
 import { invokePluginSdkHost } from "./pluginSdkHost";
 import { createPluginPanelSdkAuthorityRegistry } from "./pluginPanelSdkAuthority";
 import {
+  revokePluginPanelAuthorities,
   revokePluginPanelAuthoritiesForStatus,
   startPluginPanelWithLock,
   stopPluginPanelWithLock,
@@ -1365,6 +1366,114 @@ describe("PluginHost", () => {
     await expect(pending).rejects.toThrow("Plugin panel is no longer active.");
     expect(grant.signal.aborted).toBe(true);
     expect(existsSync(join(root, "cancelled.txt"))).toBe(false);
+    await engine.stop();
+  });
+
+  it("aborts a queued panel write when its plugin is disabled (#779 round 12 A4)", async () => {
+    const root = await workspaceRoot();
+    const entered = deferredVoid();
+    const release = deferredVoid();
+    const writeQueued = deferredVoid();
+    const loopbackTarget = new VersionedLoopbackEngine();
+    let blocked = false;
+    const loopback = new Proxy(loopbackTarget, {
+      get(target, property, receiver) {
+        if (property !== "sendRequest") {
+          return Reflect.get(target, property, receiver);
+        }
+        return async (request: Request) => {
+          if (!blocked && request.method === VERSIONED_METHOD.textWrite) {
+            blocked = true;
+            entered.resolve();
+            await release.promise;
+          }
+          return target.sendRequest(request);
+        };
+      },
+    });
+    const engine = createWorkspaceEngineCapture({
+      workspaceId: "workspace-a",
+      rootPath: root,
+      rustEngineSessions: mockLiveSessions(loopback),
+    });
+    await writeFile(join(root, "queue-blocker.txt"), "block\n", "utf8");
+    engine.captureBatch([{ path: "queue-blocker.txt", operation: "update" }]);
+    await entered.promise;
+
+    const registry = createPluginPanelSdkAuthorityRegistry();
+    const grant = registry.register({
+      senderId: 1,
+      generation: 1,
+      workspaceId: "workspace-a",
+      pluginId: "hello-plugin",
+      panelId: "main",
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: () => ({
+        request: async <T,>(method: string) =>
+          (method === PLUGIN_HOST_METHODS.activate
+            ? { commands: [] }
+            : {}) as T,
+        notify: () => undefined,
+        dispose: async () => undefined,
+      }),
+      routeSdkRequest: defaultRouter,
+    });
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+    const spawnId = host.getSpawnId("hello-plugin");
+    if (!spawnId) throw new Error("Plugin did not expose its spawn id.");
+
+    const pending = invokePluginSdkHost(
+      {
+        pluginId: "hello-plugin",
+        workspaceRoot: root,
+        spawnId,
+        isWritable: () => true,
+        writeAvailable: async () => true,
+        signal: grant.signal,
+        writeAuthoredText: (path, text, options) => {
+          writeQueued.resolve();
+          return engine
+            .writeAuthoredTextFile(
+              join(root, path),
+              text,
+              options.author,
+              { signal: grant.signal },
+            )
+            .then(() => ({ path }));
+        },
+      },
+      "files.write",
+      { path: "disabled.txt", text: "must not land\n" },
+    );
+    await writeQueued.promise;
+
+    // What the disable action site does before it stops the plugin. Stopping
+    // the process alone leaves this queued write holding a live authority.
+    revokePluginPanelAuthorities({
+      workspaceId: "workspace-a",
+      pluginId: "hello-plugin",
+      panels: [
+        {
+          workspaceId: "workspace-a",
+          pluginId: "hello-plugin",
+          panelId: "main",
+        },
+      ],
+      revokePanel: registry.revokePanel,
+    });
+    await host.stop("hello-plugin");
+    release.resolve();
+
+    await expect(pending).rejects.toThrow("Plugin panel is no longer active.");
+    expect(grant.signal.aborted).toBe(true);
+    expect(existsSync(join(root, "disabled.txt"))).toBe(false);
     await engine.stop();
   });
 
