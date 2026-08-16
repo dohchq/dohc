@@ -584,7 +584,9 @@ function filterChatOpForChannelShare(
 
   // The four thread-scoped kinds, all scoped the same way and all serving the
   // same allowlists the file branch serves.
-  if (opKind in SERVED_CHAT_FIELDS) {
+  // `hasOwn`, never `in`: `in` walks the prototype chain, so an op kind of
+  // "toString" would index a function and throw where a refusal belongs.
+  if (Object.hasOwn(SERVED_CHAT_FIELDS, opKind)) {
     const threadId = collectString(record.threadId);
     if (!threadId) return { allowed: false };
     if (chat.threadChannelWireId(threadId) !== selector.channelWireId) {
