@@ -900,3 +900,33 @@ export function filterOpForShare(
 
   return { allowed: false };
 }
+
+// The single decision point for what a share recipient may WRITE.
+// `filterOpForShare` above answers the read question — "may this recipient SEE
+// this op?" — and the two are not the same question. A recipient may read every
+// file moment in the selector; it may write none of them, because a written
+// moment lands in the GRANTER's log and the granter's engine replays it
+// (#646 PR3-0).
+//
+// Only chat crosses in this direction today. A chat-channel grant at
+// `read-write` appends what the channel branch admits. A file share appends
+// only the five file-chat kinds PR2 serves: the file-chat branch's own terminal
+// deny is the allowlist, so `moment.append`, `workspace.init`, `version.create`,
+// and every unknown kind are refused there. This function never falls through
+// to the read filter.
+export function filterOpForShareAppend(
+  selector: AnyShareSelector,
+  opKind: string,
+  payloadJson: string,
+  chat?: ChatShareThreadResolver,
+): ShareOpDecision {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(payloadJson);
+  } catch {
+    return { allowed: false };
+  }
+  return isChatChannelSelector(selector)
+    ? filterChatOpForChannelShare(selector, opKind, payload, chat)
+    : filterFileChatOpForPathShare(selector, opKind, payload, chat);
+}

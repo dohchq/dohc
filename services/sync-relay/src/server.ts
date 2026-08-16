@@ -9,6 +9,7 @@ import {
 } from "./presence";
 import {
   filterOpForShare,
+  filterOpForShareAppend,
   isChatChannelSelector,
   parseAnyShareSelectorJson,
   presenceTopicAllowedForShare,
@@ -196,7 +197,7 @@ export function createSyncRelayHandler({
 
   // Whether a recipient may append through this selector at all. A read-write
   // chat-channel grant may. A path/version selector may at comment and edit
-  // (#646 PR2, chat ops only — the per-op filter decides which); a view share
+  // (#646 PR2, chat ops only — `filterOpForShareAppend` decides which); a view share
   // may not, and its refusal is the SAME shareNotAppendable() code and body
   // every other refusal uses, because a level-specific one would tell a
   // probing recipient the selector's level.
@@ -525,7 +526,14 @@ export function createSyncRelayHandler({
         };
         const ops = input.ops.map(parseLogOp);
         for (const op of ops) {
-          const decision = filterOpForShare(share.selector, op.opKind, op.payloadJson, resolver);
+          // The WRITE filter, never the read one: what a recipient may see is
+          // not what it may push into the granter's log (#646 PR3-0).
+          const decision = filterOpForShareAppend(
+            share.selector,
+            op.opKind,
+            op.payloadJson,
+            resolver,
+          );
           if (!decision.allowed) throw shareOpRejected();
           // Persist the filter's (possibly redacted) copy, never the pusher's
           // original bytes: the owner bucket is read back over the UNfiltered
