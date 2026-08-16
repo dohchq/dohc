@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import {
-  readWorkspaceText,
   withOrderedWorkspaceTextPath,
   writeWorkspaceText,
+  type WorkspaceTextReadResult,
   type WorkspaceTextWriteResult,
 } from "./workspaceAssets";
 import { materializeSharedViewPaths } from "./sharedView";
@@ -83,11 +83,11 @@ async function writeShareViewText(input: {
   // Under the SAME per-file ordering the disk writer takes. Two saves racing
   // on one path would otherwise both read the pre-save bytes, both pass the
   // compare below, and both journal a moment.
-  return withOrderedWorkspaceTextPath(input.rootPath, input.relativePath, async () => {
+  return withOrderedWorkspaceTextPath(input.rootPath, input.relativePath, async (readCurrent) => {
     // The optimistic guard every editor save carries, answered from the bytes
     // the editor read. Checked BEFORE the moment: a stale save must be
     // refused, not journaled and then refused.
-    const current = await currentContentHash(input.rootPath, input.relativePath);
+    const current = await currentContentHash(readCurrent);
     if (current !== input.expectedContentHash) {
       return { status: "conflict", currentContentHash: current };
     }
@@ -117,17 +117,19 @@ async function writeShareViewText(input: {
   });
 }
 
-// The hash the disk writer would have compared against. A MISSING file reads as
-// null, the same answer the disk writer gives for a target that is not there,
-// and null never equals a hash the editor holds. Every other failure — a path
-// that escapes the workspace, an unreadable file — is raised, never softened
-// into a conflict.
+// The hash the disk writer would have compared against, read from the target
+// this save already holds — never through `readWorkspaceText`, which queues on
+// that same target and would wait on a lock this caller is holding.
+//
+// A MISSING file reads as null, the same answer the disk writer gives for a
+// target that is not there, and null never equals a hash the editor holds.
+// Every other failure — a path that escapes the workspace, an unreadable
+// file — is raised, never softened into a conflict.
 async function currentContentHash(
-  rootPath: string,
-  relativePath: string,
+  readCurrent: () => Promise<WorkspaceTextReadResult>,
 ): Promise<string | null> {
   try {
-    return (await readWorkspaceText(rootPath, relativePath)).contentHash;
+    return (await readCurrent()).contentHash;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") return null;

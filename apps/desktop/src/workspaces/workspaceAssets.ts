@@ -388,9 +388,20 @@ export function createOrderedWorkspaceTextAccess(deps: {
     // so it cannot call `write` — but two saves racing on one path must be
     // ordered just the same, or the second reads the first's stale bytes and
     // both pass their compare. Same queue, same key, same containment check.
-    ordered: <T>(rootPath: string, relativePath: string, run: () => Promise<T>) =>
+    //
+    // The operation is handed a reader for the ALREADY-RESOLVED target. It
+    // must not reach back through `read`: that queues on this very target,
+    // which this operation is holding, and the two wait on each other for
+    // ever.
+    ordered: <T>(
+      rootPath: string,
+      relativePath: string,
+      run: (readCurrent: () => Promise<WorkspaceTextReadResult>) => Promise<T>,
+    ) =>
       scheduler.shared(rootPath, () =>
-        admit(rootPath, relativePath, "write", () => run()),
+        admit(rootPath, relativePath, "write", (target) =>
+          run(() => deps.readTarget(target)),
+        ),
       ),
   };
 }
@@ -471,19 +482,30 @@ const orderedWorkspaceTextAccess = createOrderedWorkspaceTextAccess({
 
 /**
  * Run an operation under the SAME per-file ordering the editor's own save
- * takes. For a writer whose bytes do not reach disk through `writeWorkspaceText`
- * — today, a share view's save, which writes an engine moment and then projects
- * it.
+ * takes. For a writer whose bytes do not reach disk through
+ * `writeWorkspaceText` — today, a share view's save, which writes an engine
+ * moment and then projects it.
  *
- * A missing target is raised as `WorkspaceTextTargetMissingError`, the same way
- * a disk save meets it, so the caller can answer with the same conflict.
+ * The operation reads the file through the `readCurrent` it is handed, never
+ * through `readWorkspaceText`: that would queue on the target this operation
+ * is holding and deadlock.
+ *
+ * A target that is not there resolves to `null` rather than throwing, which is
+ * the same answer the disk writer turns into a conflict.
  */
 export function withOrderedWorkspaceTextPath<T>(
   rootPath: string,
   relativePath: string,
-  run: () => Promise<T>,
-): Promise<T> {
-  return orderedWorkspaceTextAccess.ordered(rootPath, relativePath, run);
+  run: (readCurrent: () => Promise<WorkspaceTextReadResult>) => Promise<T>,
+): Promise<T | { status: "conflict"; currentContentHash: null }> {
+  return orderedWorkspaceTextAccess
+    .ordered(rootPath, relativePath, run)
+    .catch((error: unknown) => {
+      if (error instanceof WorkspaceTextTargetMissingError) {
+        return { status: "conflict" as const, currentContentHash: null };
+      }
+      throw error;
+    });
 }
 
 export function withExclusiveWorkspaceOperation<T>(
