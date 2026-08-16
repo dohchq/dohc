@@ -1104,6 +1104,23 @@ mod tests {
                 .and_then(serde_json::Value::as_i64),
             Some(7),
         );
+        // The EXACT field set. `ShareProposalChange` derives `Serialize`, so a
+        // field added to the struct reaches the granter's relay without anyone
+        // deciding it should. This is what makes that a test failure instead.
+        assert_eq!(
+            record.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "basedOnPath",
+                "basedOnBlobSha256",
+                "operation",
+                "afterPath",
+                "afterBlobSha256",
+                "afterContentKind",
+                "afterByteLength",
+                "recordedAtMs",
+            ]),
+            "MUTATION: a new field on ShareProposalChange must not silently join the wire",
+        );
     }
 
     #[test]

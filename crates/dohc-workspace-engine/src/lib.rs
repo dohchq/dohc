@@ -11439,9 +11439,10 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             // below edit level, or a scan that found no change. The caller
             // reads `submitted` for the count and this for the review row.
             "proposalId": outcome.proposal_id,
-            // Files the scan dropped because an edit to them landed outside
-            // the shared paths. Silence here is what leaves a recipient
-            // believing it sent work it never sent.
+            // Files the scan dropped because they are not part of this share:
+            // one of their local ops named a path outside the shared paths.
+            // Silence here is what leaves a recipient believing it sent work
+            // it never sent.
             "skippedOutsideShare": outcome.skipped_outside_share,
             // One submit carries a bounded batch. This says another press has
             // more to offer; the engine did not count what is left.

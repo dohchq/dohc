@@ -35,7 +35,7 @@ import {
   type SyncRelayShareRow,
   type SyncRelayStorage,
 } from "./storage";
-import { proposalMomentPayload } from "./shareProposals";
+import { destinationPath, proposalMomentPayload } from "./shareProposals";
 import { RELAY_ERRORS, type RelayErrorCode, type RelayErrorDefinition } from "./errorCodes";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
@@ -831,7 +831,11 @@ export function createSyncRelayHandler({
           let basedOnObjectId: string | null = null;
           if (change.basedOnPath !== null) {
             basedOnObjectId =
-              storage.objectIdAtPath(share.workspaceId, change.basedOnPath) ?? null;
+              storage.objectIdAtPathInVersion({
+                workspaceId: share.workspaceId,
+                versionId: targetVersionId(share.selector),
+                path: change.basedOnPath,
+              }) ?? null;
             if (basedOnObjectId === null) {
               // Atomic, like every other refusal on this route: one
               // unresolvable base refuses the whole submit rather than
@@ -1003,7 +1007,15 @@ export function createSyncRelayHandler({
                 opIndex: op.opIndex,
                 basedOnPath: op.basedOnPath,
                 operation: op.operation,
-                afterPath: op.afterPath,
+                // WHERE accepting will put it, resolved by the SAME rule the
+                // accept door uses. The review must name the path the write
+                // will use: a content-only change lands at the granter's
+                // current path, so showing the recipient's path would tell
+                // the granter one thing and do another.
+                afterPath: destinationPath(op, {
+                  currentPath: resolved.head?.path ?? null,
+                  base: resolved.base,
+                }),
                 afterBlobSha256: op.afterBlobSha256,
                 afterContentKind: op.afterContentKind,
                 currentPath: resolved.head?.path ?? null,

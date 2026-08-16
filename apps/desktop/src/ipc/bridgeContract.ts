@@ -2917,10 +2917,11 @@ export type SubmitShareChangesPayload = z.infer<typeof SubmitShareChangesPayload
 // answers to one question.
 export const SubmitShareChangesResult = z.object({
   submitted: z.number().int().nonnegative(),
-  // Files this submit did NOT offer because an edit moved them outside what
-  // the share covers. Silently dropping them is the failure this states: the
-  // recipient presses send, some of their work is not sent, and nothing says
-  // so.
+  // Files this submit did NOT offer because they are not part of this share.
+  // The count does not distinguish a file that LEFT the shared paths from one
+  // that was never in them — both are the same fact to the person who pressed
+  // send. Silently dropping them is the failure this states: some of their
+  // work is not sent, and nothing says so.
   skippedOutsideShare: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_FILES),
   // More changes are waiting than one submit carries. A flag rather than a
   // count: the scan stops AT the bound, so it never measures the remainder.

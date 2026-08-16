@@ -23731,11 +23731,18 @@ fn share_proposal_submit_counts_a_file_edited_out_of_the_share() {
     }
 }
 
-/// The count travels even when the submit offers nothing. A recipient whose
-/// every edit landed outside the share is exactly the one that needs telling.
+/// The count is a PATH verdict, not a story about how a file got there: a
+/// file that was never in the shared paths counts exactly like one an edit
+/// moved out, because both state the same fact to the recipient — the file is
+/// not part of this share, and it was not sent.
+///
+/// And the count travels even when the submit offers nothing. A recipient
+/// whose every edit named a path outside the share is exactly the one that
+/// needs telling.
 #[test]
-fn share_proposal_submit_counts_dropped_files_when_it_offers_nothing() {
+fn share_proposal_submit_counts_files_outside_the_shared_paths_when_it_offers_nothing() {
     let (_scratch, _path, mut engine) = proposal_fixture(&["one", "two"]);
+    // NEITHER file was ever inside the shared paths. Both are counted anyway.
     for (index, (moment_id, object_id, path, text)) in [
         ("m-1", "object-a", "other/a.md", "one"),
         ("m-2", "object-b", "elsewhere/b.md", "two"),
@@ -23764,11 +23771,215 @@ fn share_proposal_submit_counts_dropped_files_when_it_offers_nothing() {
     assert_eq!(
         (outcome.submitted, outcome.skipped_outside_share),
         (0, 2),
-        "MUTATION: a submit that offered nothing must still say what it dropped",
+        "MUTATION: a submit that offered nothing must still count the files that \
+         sit outside the shared paths, whether or not they ever sat inside them",
     );
     assert!(
         outcome.proposal_id.is_none(),
         "a submit with nothing to offer names no proposal",
+    );
+}
+
+/// One local write to a file the grant does not cover.
+fn journal_numbered_outside_write(engine: &mut EngineStore, index: usize, at_ms: i64) {
+    let text = format!("out{index}");
+    seed_blob(engine, &text);
+    journal_local_moment(
+        engine,
+        &local_moment_payload(
+            &format!("m-out-{index}"),
+            &format!("object-out-{index}"),
+            "write",
+            None,
+            &format!("other/{index}.md"),
+            &text,
+        ),
+        at_ms,
+    );
+}
+
+/// The count crosses a contract that caps it at the batch bound, and the cap
+/// is parsed AFTER the submit succeeded and the scan position moved on. An
+/// honest larger number would therefore report a working submit as a failure
+/// whose retry offers nothing, because the window is already consumed.
+#[test]
+fn share_proposal_submit_saturates_the_skipped_count_at_the_bound() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&["kept"]);
+    let outside = crate::MAX_PUSH_OPS_PER_BATCH + 1;
+    for index in 0..outside {
+        journal_numbered_outside_write(&mut engine, index, 1_001 + index as i64);
+    }
+    // One file inside the grant, so the submit really reaches the relay.
+    journal_local_moment(
+        &mut engine,
+        &local_moment_payload(
+            "m-in",
+            "object-in",
+            "write",
+            None,
+            "shared/docs/in.md",
+            "kept",
+        ),
+        9_001,
+    );
+
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    let outcome = client
+        .submit_share_proposal(
+            &mut engine,
+            "ws",
+            "share-saturate",
+            &proposal_grant(crate::ShareAccess::Edit),
+            "submit-1",
+            &NoFaults,
+        )
+        .expect("MUTATION: dropping more files than the bound must not fail the submit");
+    assert_eq!(
+        outcome.skipped_outside_share,
+        crate::MAX_PUSH_OPS_PER_BATCH,
+        "MUTATION: the reported count must saturate at the bound the contract accepts",
+    );
+    assert_eq!(
+        outcome.submitted, 1,
+        "MUTATION: the in-grant file must still travel",
+    );
+}
+
+/// The bound stops the scan at the op that would admit one file too many, so a
+/// scan holding EXACTLY the bound stopped at nothing and has nothing left to
+/// offer. Saying otherwise sends the recipient back for a submit that carries
+/// no change.
+#[test]
+fn share_proposal_submit_at_exactly_the_bound_asks_for_no_second_press() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&[]);
+    for index in 0..crate::MAX_PUSH_OPS_PER_BATCH {
+        journal_numbered_write(&mut engine, index, 1_001 + index as i64);
+    }
+
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    let outcome = client
+        .submit_share_proposal(
+            &mut engine,
+            "ws",
+            "share-at-bound",
+            &proposal_grant(crate::ShareAccess::Edit),
+            "submit-1",
+            &NoFaults,
+        )
+        .expect("submit");
+    assert_eq!(
+        outcome.submitted,
+        crate::MAX_PUSH_OPS_PER_BATCH,
+        "MUTATION: a scan that fits exactly must carry every file it holds",
+    );
+    assert!(
+        !outcome.more_pending,
+        "MUTATION: a scan that ended AT the bound left nothing behind and must not \
+         ask for another press",
+    );
+}
+
+/// A pulled granter change must never be offered back to the granter.
+///
+/// The scan reads this replica's journal under the workspace's single
+/// `sync_identity` origin and filters per op by `op_kind` alone, so if the
+/// share-view pull journaled what it applied, the recipient's next submit
+/// would offer the granter its own edit back with a stale base.
+///
+/// It does not: `replay_share_write` writes through
+/// `VersionedTextStore::write_text` in `dohc-engine-domain`, and that door
+/// touches `replication_journal` only. The `replication_log` row the scan
+/// reads is appended by `journal_moment_outbound_in_tx`
+/// (`dohc-engine-runtime/src/actor.rs`), which sits on the LOCAL write path
+/// alone. This test is the standing proof of that gap.
+#[test]
+fn share_proposal_submit_never_offers_a_pulled_granter_change_back() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&["mine"]);
+    let granter_bytes = b"the granter wrote this".to_vec();
+    let granter_sha = dohc_engine_storage::hex_sha256(&granter_bytes);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![ShareReplicationEnvelope {
+                        origin_id: "granter".to_owned(),
+                        origin_seq: 0,
+                        op_kind: "moment.append".to_owned(),
+                        payload: json!({
+                            "versionId": "main",
+                            "operation": "write",
+                            "path": "shared/docs/granter.md",
+                            "payloadAfterPath": "shared/docs/granter.md",
+                            "payloadAfterBlobSha256": granter_sha,
+                            "payloadAfterContentKind": "text",
+                        }),
+                        recorded_at_ms: 1_500,
+                    }],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(granter_sha.clone(), granter_bytes)]),
+    );
+    let granted = proposal_grant(crate::ShareAccess::Edit);
+    let pulled = client
+        .pull_share_view(&mut engine, "ws", "share-echo", &granted, &NoFaults)
+        .expect("pull");
+    assert_eq!(
+        (pulled.fetched, pulled.applied),
+        (1, 1),
+        "the granter's change must LAND locally, or this test proves nothing",
+    );
+    // A local edit to a different file, so an empty offer cannot pass this
+    // test by the scan being broken.
+    journal_local_moment(
+        &mut engine,
+        &local_moment_payload(
+            "m-mine",
+            "object-mine",
+            "write",
+            None,
+            "shared/docs/mine.md",
+            "mine",
+        ),
+        9_001,
+    );
+
+    let outcome = client
+        .submit_share_proposal(
+            &mut engine,
+            "ws",
+            "share-echo",
+            &granted,
+            "submit-1",
+            &NoFaults,
+        )
+        .expect("submit");
+    assert_eq!(
+        outcome.submitted, 1,
+        "MUTATION: a pulled granter change must not join this replica's own offer",
+    );
+    let submits = client.transport().proposal_submits.lock().expect("submits");
+    assert_eq!(
+        submits
+            .iter()
+            .flat_map(|submit| submit.ops.iter())
+            .filter_map(|op| op.after_path.as_deref())
+            .collect::<Vec<_>>(),
+        vec!["shared/docs/mine.md"],
+        "MUTATION: the granter's own path must never be named back to the granter",
+    );
+    assert!(
+        !client
+            .transport()
+            .proposal_calls
+            .lock()
+            .expect("calls")
+            .contains(&format!("blob:{granter_sha}")),
+        "MUTATION: the granter's own content must not be uploaded back to the granter",
     );
 }
 

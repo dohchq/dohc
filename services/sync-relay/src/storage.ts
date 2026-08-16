@@ -295,6 +295,17 @@ export interface SyncRelayStorage {
   // The object at this path RIGHT NOW, or undefined when none is. The reverse
   // of the lookup above; a thread bound by path is re-proved through it.
   objectIdAtPath(workspaceId: string, path: string): string | undefined;
+  // #646 PR3a. WHICH object sits at this path, in the ONE version a share
+  // exposes. `objectIdAtPath` above answers across every version at once, so
+  // a path last touched in a side version resolves to an object that share
+  // never saw — and every lookup below would then be scoped to a version that
+  // object has nothing in. undefined means "nothing is there", which the
+  // submit door refuses rather than minting a create.
+  objectIdAtPathInVersion(input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+  }): string | undefined;
   // #646 PR3a. The granter's own moment for this object WITHIN one version:
   // the latest one, or the latest that produced `blobSha256` when one is
   // named. The first answers "did this file drift since they sent it?"; the
@@ -590,6 +601,13 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       -- the most recent moment that produced it.
       CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_blob
         ON sync_relay_object_moments(workspace_id, object_id, blob_sha256, relay_seq);
+      -- WHICH object sits at a path IN ONE VERSION. sync_relay_object_paths
+      -- answers the same question across every version at once, latest-wins,
+      -- so a path last touched in a side version resolves to the wrong object
+      -- for a share that exposes another one. The proposal lane asks this
+      -- instead, and it must not scan.
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_path
+        ON sync_relay_object_moments(workspace_id, version_id, path, relay_seq);
 
       -- #646 PR3a: a recipient's submitted changes, held until the granter
       -- accepts or declines them. Nothing here is in the granter's log: accept
@@ -2080,6 +2098,35 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       .get(workspaceId, objectId);
     if (row === undefined) return undefined;
     return typeof row.path === "string" && row.path.length > 0 ? row.path : null;
+  }
+
+  objectIdAtPathInVersion(input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+  }): string | undefined {
+    if (!input.path || !input.versionId) return undefined;
+    // The object whose LATEST moment in this version sits at this path. A
+    // moment that moved the object away leaves a newer row naming another
+    // path, so that object no longer answers here — which is what makes this
+    // "who is at this path now, in this version" rather than "who was ever".
+    const row = this.db
+      .prepare(
+        `SELECT m.object_id
+         FROM sync_relay_object_moments m
+         WHERE m.workspace_id = ? AND m.version_id = ? AND m.path = ?
+           AND m.relay_seq = (
+             SELECT MAX(latest.relay_seq)
+             FROM sync_relay_object_moments latest
+             WHERE latest.workspace_id = m.workspace_id
+               AND latest.object_id = m.object_id
+               AND latest.version_id = m.version_id
+           )
+         ORDER BY m.relay_seq DESC
+         LIMIT 1`,
+      )
+      .get(input.workspaceId, input.versionId, input.path);
+    return typeof row?.object_id === "string" ? row.object_id : undefined;
   }
 
   objectMoment(input: {

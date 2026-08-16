@@ -83,7 +83,6 @@ import {
   DismissShareSkipsPayload,
   ListShareProposalsPayload,
   ListShareProposalsResult,
-  ENGINE_TEXT_MAX_CHARS,
   ReadShareProposalChangesPayload,
   ReadShareProposalChangesResult,
   SettleShareProposalPayload,
@@ -367,6 +366,7 @@ import {
   shareViewGranterEmail,
   shareViewIsPresent,
 } from "./workspaces/shareViewMarker";
+import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaces/workspaceTextLimits";
 import { workspaceWriteRefusal } from "./workspaces/shareWriteGate";
 import {
   assertShareProposalGranter,
@@ -5716,10 +5716,14 @@ function registerIpcHandlers(
       );
       if (!response.ok) return null;
       const bytes = await response.arrayBuffer();
-      // The bound the bridge itself states for a stored body. Over it there
-      // is nothing this surface can render, and the contract would refuse the
-      // response — which would take the whole review down with it.
-      if (bytes.byteLength > ENGINE_TEXT_MAX_CHARS) return null;
+      // The bound the CONTRACT enforces on this very field, not a larger one
+      // from somewhere else. `incomingText` is validated by
+      // `WORKSPACE_EDITOR_TEXT`, so text over that bound would make the whole
+      // response fail to parse — and one unreadable file would take every
+      // other file in the review down with it. This is also the bound the
+      // current side already answers with (`readWorkspaceText` truncates at
+      // it and reads as no preview), so the two sides agree.
+      if (bytes.byteLength > WORKSPACE_TEXT_EDITOR_MAX_BYTES) return null;
       return new TextDecoder().decode(bytes);
     } catch {
       return null;

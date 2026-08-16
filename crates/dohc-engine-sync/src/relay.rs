@@ -291,7 +291,12 @@ pub struct ShareProposalSubmitOutcome {
     /// Files this scan dropped because one of their local ops named a path
     /// the pinned grant does not cover. Counted once per file, not per op:
     /// the file is not offerable at all, so a partly collected one is dropped
-    /// whole.
+    /// whole. A file that was never in the shared paths and one an edit moved
+    /// out of them count the same, because they state the same fact — the file
+    /// is not part of this share, and it was not sent.
+    ///
+    /// Saturates at `MAX_PUSH_OPS_PER_BATCH`, the bound the contract carrying
+    /// this count accepts.
     pub skipped_outside_share: usize,
     /// Whether the per-submit change bound stopped this scan before the
     /// journal mark it read, so a further submit has more to offer.
@@ -3585,7 +3590,11 @@ fn collect_share_proposal_changes(
         changes,
         scanned_through,
         more_pending,
-        skipped_outside_share: outside_share.len(),
+        // SATURATED at the batch bound, because that is what the contract this
+        // count crosses accepts. A larger number is parsed after the submit
+        // already succeeded and the scan position already moved on, so it would
+        // report a working submit as a failure whose retry offers nothing.
+        skipped_outside_share: outside_share.len().min(crate::MAX_PUSH_OPS_PER_BATCH),
     })
 }
 

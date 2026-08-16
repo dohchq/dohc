@@ -76,9 +76,9 @@ function recipientMoved(op: ShareProposalOpRow): boolean {
 // drift and the granter accepts knowing it.
 //
 // A delete lands where the granter has the file now, for the same reason.
-function destinationPath(
+export function destinationPath(
   op: ShareProposalOpRow,
-  context: ProposalMomentContext,
+  context: { currentPath: string | null; base?: { path: string | null } | null },
 ): string | null {
   if (op.operation === "delete") return context.currentPath ?? context.base?.path ?? null;
   if (recipientMoved(op)) return op.afterPath;

@@ -4973,11 +4973,21 @@ export function DesktopWorkspaceShell(props: {
                   data-more-pending={shareChangesSkipped.morePending || undefined}
                   className="min-w-0 truncate text-[11px] text-warning"
                 >
-                  {shareChangesSkipped.outsideShare > 0
-                    ? shareChangesSkipped.outsideShare === 1
-                      ? "1 file wasn't sent — it's outside what this share covers."
-                      : `${shareChangesSkipped.outsideShare} files weren't sent — they're outside what this share covers.`
-                    : "More changes are waiting. Send again to send the rest."}
+                  {/* BOTH facts, when both are true. An either/or line drops
+                      "more pending" exactly when a submit was largest — the
+                      case the count exists to report. */}
+                  {[
+                    shareChangesSkipped.outsideShare === 0
+                      ? null
+                      : shareChangesSkipped.outsideShare === 1
+                        ? "1 file wasn't sent — it's not part of this share."
+                        : `${shareChangesSkipped.outsideShare} files weren't sent — they're not part of this share.`,
+                    shareChangesSkipped.morePending
+                      ? "More changes are waiting. Send again to send the rest."
+                      : null,
+                  ]
+                    .filter((line) => line !== null)
+                    .join(" ")}
                 </span>
               ) : null}
               <button

@@ -211,10 +211,16 @@ export function ProposalReviewDialog(props: {
           >
             Finish later
           </button>
+          {/* Decline is the SAFE EXIT, so nothing about reading the changes
+              can take it away. It moves nothing into this workspace, and a
+              granter who cannot see a proposal must still be able to refuse
+              it — otherwise the only way out is ending the share, which
+              discards work without asking. Accept is the opposite: it writes,
+              so it stays disabled until the review actually loaded. */}
           <button
             type="button"
             data-testid="proposal-review-decline"
-            disabled={load.status !== "ready" || settling}
+            disabled={settling}
             onClick={() => void settle("decline")}
             className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-line/50 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
           >

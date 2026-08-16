@@ -2330,6 +2330,35 @@ describe("share changes IPC contract (#646 PR3a)", () => {
     ).toThrow();
   });
 
+  // The bound that decides whether a review can be read at all. `incomingText`
+  // is validated by the EDITOR's text bound, so main must guard the blob it
+  // fetches with the SAME number — a larger guard admits a body this schema
+  // then refuses, and one unreadable file takes every other file in the
+  // review down with it.
+  it("refuses an incoming side over the editor's text bound, and admits one at it", () => {
+    const row = (incomingText: string) => ({
+      proposedByEmail: null,
+      files: [
+        {
+          opIndex: 0,
+          path: "docs/a.md",
+          operation: "write" as const,
+          drifted: false,
+          currentText: null,
+          incomingText,
+        },
+      ],
+    });
+    expect(
+      () => ReadShareProposalChangesResult.parse(row("x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES + 1))),
+      "MUTATION: guarding at a LARGER bound sends a body this schema refuses",
+    ).toThrow();
+    expect(
+      ReadShareProposalChangesResult.parse(row("x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES)))
+        .files[0]?.incomingText?.length,
+    ).toBe(WORKSPACE_TEXT_EDITOR_MAX_BYTES);
+  });
+
   // What a submit LEFT BEHIND is not optional. Softened to a default, a
   // recipient is told everything went when some of it did not.
   it("refuses a submit result that does not say what it left behind", () => {

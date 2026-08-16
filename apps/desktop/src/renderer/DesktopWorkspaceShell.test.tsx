@@ -5841,7 +5841,31 @@ describe("shared view send changes", () => {
     expect(
       line.textContent,
       "MUTATION: a silent drop is work the recipient believes they sent",
-    ).toBe("2 files weren't sent — they're outside what this share covers.");
+    ).toBe("2 files weren't sent — they're not part of this share.");
+  });
+
+  // Both facts, when both are true. An either/or line drops "more pending"
+  // exactly when a submit was largest — which is the case the count exists to
+  // report.
+  it("states both what was skipped and what is still waiting", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.submitShareChanges.mockResolvedValue({
+      submitted: 500,
+      skippedOutsideShare: 3,
+      morePending: true,
+    });
+    renderShell(bridge, EDIT_SHARE);
+
+    await user.click(await screen.findByTestId("share-changes-send"));
+    const line = await screen.findByTestId("share-changes-skipped");
+    expect(
+      line.textContent,
+      "MUTATION: an either/or line hides the ~97 changes still queued",
+    ).toBe(
+      "3 files weren't sent — they're not part of this share. " +
+        "More changes are waiting. Send again to send the rest.",
+    );
   });
 
   it("says more changes are waiting when the bound held some back", async () => {

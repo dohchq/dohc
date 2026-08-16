@@ -842,6 +842,17 @@ describe("what the granter does under an open proposal", () => {
       beforePath: "docs/in.md",
     });
 
+    // The REVIEW names the destination the accept will use — the granter's
+    // current path, not the one the recipient read. A pure rename leaves
+    // `drifted: false`, so there is no drift line to warn them either.
+    const reviewed = (await reviewRows(h))[0]!;
+    const reviewedOp = (reviewed.ops as Array<Record<string, unknown>>)[0]!;
+    expect(
+      reviewedOp.afterPath,
+      "MUTATION: the review names a path the accept will not write to",
+    ).toBe("docs/moved.md");
+    expect(reviewedOp.drifted).toBe(false);
+
     expect((await settle(h, proposalId, "accept")).status).toBe(200);
     const moment = (await granter.sharedMoments(shareId))[0]!;
     expect(
@@ -886,6 +897,13 @@ describe("what the granter does under an open proposal", () => {
       payloadBeforePath: "docs/in.md",
       beforePath: "docs/in.md",
     });
+
+    // The REVIEW names the same destination the accept will use.
+    const reviewed = (await reviewRows(h))[0]!;
+    expect(
+      (reviewed.ops as Array<Record<string, unknown>>)[0]!.afterPath,
+      "MUTATION: the review must name the path the write will use",
+    ).toBe("docs/by-recipient.md");
 
     expect((await settle(h, proposalId, "accept")).status).toBe(200);
     const moments = await granter.sharedMoments(shareId);
@@ -1087,6 +1105,43 @@ describe("the version a share exposes", () => {
       "MUTATION: an unscoped base lookup takes the LATEST match, which is the side version's moment",
     ).toBe(main.momentId);
     expect(moment.versionId).toBe("main");
+  });
+
+  it("resolves the base to the object THIS version has at that path", async () => {
+    // Two different objects hold the same path in two versions. Resolving the
+    // path across all versions at once picks whichever moved last, so a main
+    // share would build its change on a side version's file — and every
+    // version-scoped lookup after it would then find nothing, because that
+    // object has no moments in main.
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const granter = new Granter(h);
+    // The side version's object is recorded FIRST, so it is the row an
+    // unscoped "who is at this path" lookup reaches before the main one.
+    await granter.write("object-side", "docs/in.md", "side content", {
+      versionId: "version-2",
+    });
+    const main = await granter.write("object-main", "docs/in.md", "granter one");
+    const shareId = await createShare(h, "edit");
+    await uploadShareBlob(h, shareId, "recipient two");
+
+    const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: main.blobSha256 })]);
+    expect(submitted.status, await submitted.clone().text()).toBe(200);
+    expect((await settle(h, (await json(submitted)).proposalId as string, "accept")).status).toBe(
+      200,
+    );
+
+    const moment = (await granter.sharedMoments(shareId))[0]!;
+    expect(
+      moment.objectId,
+      "MUTATION: an unscoped path lookup takes the side version's object, and the change lands on an unrelated file",
+    ).toBe("object-main");
+    expect(
+      moment.beforeLatestMomentId,
+      "MUTATION: and its base then resolves to nothing, so a current change states no base at all",
+    ).toBe(main.momentId);
+    expect(moment.payloadAfterPath).toBe("docs/in.md");
   });
 });
 

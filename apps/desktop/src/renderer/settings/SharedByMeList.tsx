@@ -52,6 +52,9 @@ export function SharedByMeList(props: { workspaceId: string }) {
   const [busyShareId, setBusyShareId] = useState<string | null>(null);
   const [copiedShareId, setCopiedShareId] = useState<string | null>(null);
   const [reviewProposalId, setReviewProposalId] = useState<string | null>(null);
+  // Which row is asking before it discards. Ending a share settles what the
+  // recipient still has waiting, so the count is shown before the click.
+  const [confirmShareId, setConfirmShareId] = useState<string | null>(null);
   // Latest-wins token: the open-changes read is workspace-scoped, so an
   // answer for one workspace must never repaint another.
   const loadToken = useRef(0);
@@ -97,6 +100,7 @@ export function SharedByMeList(props: { workspaceId: string }) {
     setBusyShareId(shareId);
     try {
       await bridge().revokeRelayShare({ shareId });
+      setConfirmShareId(null);
       await refresh();
     } catch (cause) {
       setLoad({ status: "error", message: errorMessage(cause) });
@@ -199,15 +203,51 @@ export function SharedByMeList(props: { workspaceId: string }) {
                 {copiedShareId === share.shareId ? "Copied" : "Copy code"}
               </button>
               ) : null}
-              <button
-                type="button"
-                data-testid="shared-by-me-revoke"
-                disabled={busyShareId === share.shareId}
-                onClick={() => void revoke(share.shareId)}
-                className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:text-danger disabled:opacity-50"
-              >
-                {busyShareId === share.shareId ? "Ending…" : "End share"}
-              </button>
+              {/* Ending a share DECLINES whatever the recipient still has
+                  waiting, and they cannot send it again — the share is gone.
+                  So the count is stated before the click that discards it,
+                  never after. */}
+              {confirmShareId === share.shareId ? (
+                <>
+                  <span
+                    data-testid="shared-by-me-revoke-confirm"
+                    className="min-w-0 flex-1 truncate text-[11px] text-warning"
+                  >
+                    {waiting
+                      ? waiting.count === 1
+                        ? `End this share and decline 1 change ${share.recipientEmail ?? share.recipientUserId} sent? They cannot send it again.`
+                        : `End this share and decline ${waiting.count} changes ${share.recipientEmail ?? share.recipientUserId} sent? They cannot send them again.`
+                      : `End this share? ${share.recipientEmail ?? share.recipientUserId} keeps a read-only copy and stops receiving updates.`}
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="shared-by-me-revoke-cancel"
+                    onClick={() => setConfirmShareId(null)}
+                    className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:text-ink"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="shared-by-me-revoke"
+                    disabled={busyShareId === share.shareId}
+                    onClick={() => void revoke(share.shareId)}
+                    className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-danger transition-colors hover:bg-panel-2 disabled:opacity-50"
+                  >
+                    {busyShareId === share.shareId ? "Ending…" : "End share"}
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  data-testid="shared-by-me-revoke-start"
+                  disabled={busyShareId === share.shareId}
+                  onClick={() => setConfirmShareId(share.shareId)}
+                  className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:text-danger disabled:opacity-50"
+                >
+                  End share
+                </button>
+              )}
             </>
           ) : null}
         </li>

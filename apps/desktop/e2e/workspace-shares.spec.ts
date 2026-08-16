@@ -131,6 +131,9 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     await expect(row).toBeVisible();
     await expect(row).toContainText("docs/plan.md");
     await expect(row).toContainText(RECIPIENT_EMAIL);
+    // Ending asks before it ends: the first click opens the confirm.
+    await row.getByTestId("shared-by-me-revoke-start").click();
+    await expect(row.getByTestId("shared-by-me-revoke-confirm")).toBeVisible();
     await row.getByTestId("shared-by-me-revoke").click();
     await expect(row).toContainText("Ended — was shared with");
 

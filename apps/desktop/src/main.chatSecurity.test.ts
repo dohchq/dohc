@@ -917,6 +917,26 @@ describe("main-process chat authorization", () => {
     );
   });
 
+  // #646 PR3a. The review's incoming side is fetched by main and validated by
+  // the bridge, and the two must state ONE bound. A larger guard here admits a
+  // body the contract then refuses, which fails the whole response — every
+  // file in the review, not just the large one. The contract half is driven
+  // behaviourally in `ipc/bridgeContract.test.ts`.
+  it("guards the review's incoming text at the bound the contract enforces", () => {
+    const readerAt = mainSource.indexOf("async function shareProposalIncomingText(");
+    const reader = mainSource.slice(readerAt, readerAt + 1600);
+    expect(readerAt).toBeGreaterThan(-1);
+    // The WHOLE guard, not a prefix of it: `> BOUND * 5` contains the same
+    // constant name and would pass a looser match.
+    expect(reader).toContain(
+      "if (bytes.byteLength > WORKSPACE_TEXT_EDITOR_MAX_BYTES) return null;",
+    );
+    expect(
+      reader,
+      "MUTATION: the engine's 10 MiB bound admits a body the 2 MiB field refuses",
+    ).not.toContain("ENGINE_TEXT_MAX_CHARS");
+  });
+
   // #646 PR3. Which handlers sit behind the ordinary workspace write gate.
   //
   // This pin proves POSITION only. What the gate DECIDES is driven

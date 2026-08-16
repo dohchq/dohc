@@ -179,6 +179,40 @@ describe("ProposalReviewDialog", () => {
     );
   });
 
+  // Decline is the safe exit: it moves nothing into this workspace. A granter
+  // who cannot READ a proposal must still be able to refuse it — otherwise
+  // the only way out is ending the share, which discards the recipient's work
+  // without asking.
+  it("still offers Decline when the review cannot be read at all", async () => {
+    const user = userEvent.setup();
+    bridgeMock.readShareProposalChanges.mockRejectedValue(
+      new Error(
+        "Error invoking remote method 'desktop:read-share-proposal-changes': " +
+          "Error: dohc could not read those changes.",
+      ),
+    );
+    renderDialog();
+
+    await screen.findByRole("alert");
+    expect(
+      screen.getByTestId("proposal-review-decline").hasAttribute("disabled"),
+      "MUTATION: a read failure that disables Decline leaves the granter holding a proposal they can neither see nor answer",
+    ).toBe(false);
+    // Accept is the opposite: it writes, so it stays disabled.
+    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
+      true,
+    );
+
+    await user.click(screen.getByTestId("proposal-review-decline"));
+    await waitFor(() =>
+      expect(bridgeMock.settleShareProposal).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        proposalId: "proposal-1",
+        decision: "decline",
+      }),
+    );
+  });
+
   it("accepts the whole submission", async () => {
     const user = userEvent.setup();
     const onSettled = vi.fn();

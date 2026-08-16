@@ -52,13 +52,16 @@ describe("SharedByMeList", () => {
     bridgeMock.listRelayShares.mockResolvedValue({
       granted: [{ ...ACTIVE_SHARE, revokedAtMs: 2000 }],
     });
+    // Ending asks first, and only the second click ends it.
+    await user.click(screen.getByTestId("shared-by-me-revoke-start"));
+    expect(bridgeMock.revokeRelayShare).not.toHaveBeenCalled();
     await user.click(screen.getByTestId("shared-by-me-revoke"));
     await waitFor(() =>
       expect(bridgeMock.revokeRelayShare).toHaveBeenCalledWith({ shareId: "share-1" }),
     );
     // After the refresh the row reads as ended, with no revoke affordance.
     await screen.findByText("Ended — was shared with friend@dohc.test");
-    expect(screen.queryByTestId("shared-by-me-revoke")).toBeNull();
+    expect(screen.queryByTestId("shared-by-me-revoke-start")).toBeNull();
   });
 
   // Every row carries its level (#646). A badge shown only on some rows
@@ -103,7 +106,7 @@ describe("SharedByMeList", () => {
       screen.queryByTestId("shared-by-me-copy"),
       "MUTATION: handing out a code for a share the relay cannot read",
     ).toBeNull();
-    expect(screen.queryByTestId("shared-by-me-revoke")).not.toBeNull();
+    expect(screen.queryByTestId("shared-by-me-revoke-start")).not.toBeNull();
     expect(screen.queryByTestId("share-access-badge")).toBeNull();
   });
 
@@ -172,6 +175,58 @@ describe("SharedByMeList", () => {
     });
   });
 
+  // Ending a share declines whatever the recipient still has waiting, and
+  // they cannot send it again. AGENTS.md: tell the user before it runs.
+  it("names the changes an End share will discard, before it discards them", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listShareProposals.mockResolvedValue({
+      proposals: [
+        {
+          proposalId: "proposal-1",
+          shareId: "share-1",
+          proposedByEmail: "friend@dohc.test",
+          createdAtMs: 1000,
+          files: [
+            { opIndex: 0, path: "docs/plan.md", operation: "write", drifted: false },
+          ],
+        },
+        {
+          proposalId: "proposal-2",
+          shareId: "share-1",
+          proposedByEmail: "friend@dohc.test",
+          createdAtMs: 2000,
+          files: [
+            { opIndex: 0, path: "docs/notes.md", operation: "write", drifted: false },
+          ],
+        },
+      ],
+    });
+    render(<SharedByMeList workspaceId="ws-1" />);
+
+    await user.click(await screen.findByTestId("shared-by-me-revoke-start"));
+    expect(
+      (await screen.findByTestId("shared-by-me-revoke-confirm")).textContent,
+      "MUTATION: ending a share silently discards work the recipient cannot resend",
+    ).toBe(
+      "End this share and decline 2 changes friend@dohc.test sent? They cannot send them again.",
+    );
+    expect(bridgeMock.revokeRelayShare).not.toHaveBeenCalled();
+
+    // And backing out changes nothing.
+    await user.click(screen.getByTestId("shared-by-me-revoke-cancel"));
+    expect(screen.queryByTestId("shared-by-me-revoke-confirm")).toBeNull();
+    expect(bridgeMock.revokeRelayShare).not.toHaveBeenCalled();
+  });
+
+  it("asks a plainer question when nothing is waiting", async () => {
+    const user = userEvent.setup();
+    render(<SharedByMeList workspaceId="ws-1" />);
+    await user.click(await screen.findByTestId("shared-by-me-revoke-start"));
+    expect((await screen.findByTestId("shared-by-me-revoke-confirm")).textContent).toBe(
+      "End this share? friend@dohc.test keeps a read-only copy and stops receiving updates.",
+    );
+  });
+
   // A share with nothing waiting must not grow a control that reviews
   // nothing: the row would ask for a decision nobody submitted.
   it("shows no review control when nothing is waiting", async () => {
@@ -192,7 +247,7 @@ describe("SharedByMeList", () => {
     render(<SharedByMeList workspaceId="ws-1" />);
     await screen.findByTestId("shared-by-me-row");
     expect(screen.queryByTestId("shared-by-me-error")).toBeNull();
-    expect(screen.queryByTestId("shared-by-me-revoke")).not.toBeNull();
+    expect(screen.queryByTestId("shared-by-me-revoke-start")).not.toBeNull();
   });
 
   it("shows calm empty and error states", async () => {
