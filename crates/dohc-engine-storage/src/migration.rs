@@ -3401,6 +3401,47 @@ fn apply_non_transactional(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The REAL ledger is well-formed. `validate_migration_order` runs before
+    /// every migration, so a malformed list already fails closed at runtime —
+    /// but nothing asserted it against `BASELINE_MIGRATIONS` itself, so a
+    /// duplicate ordinal would first be seen by whoever opened a store.
+    ///
+    /// Two branches taking the same ordinal is not hypothetical: #646 PR3-1
+    /// and PR3a both wrote ordinal 36, and the collision was caught by hand at
+    /// rebase. This is the check that would have caught it either way.
+    #[test]
+    fn the_real_migration_ledger_has_unique_increasing_ordinals_and_ids() {
+        validate_migration_order(BASELINE_MIGRATIONS)
+            .expect("MUTATION: the shipped migration list must be well-formed");
+
+        let mut ordinals: Vec<u32> = BASELINE_MIGRATIONS.iter().map(|m| m.ordinal).collect();
+        let count = ordinals.len();
+        ordinals.sort_unstable();
+        ordinals.dedup();
+        assert_eq!(
+            ordinals.len(),
+            count,
+            "MUTATION: two migrations share an ordinal — one of them will never apply",
+        );
+
+        let mut ids: Vec<&str> = BASELINE_MIGRATIONS.iter().map(|m| m.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            count,
+            "MUTATION: two migrations share an id — the ledger cannot tell them apart",
+        );
+
+        // Slice order IS ordinal order, which is what the runner trusts.
+        assert!(
+            BASELINE_MIGRATIONS
+                .windows(2)
+                .all(|w| w[0].ordinal < w[1].ordinal),
+            "MUTATION: the list is not in ordinal order, so DDL would apply out of order",
+        );
+    }
     #[cfg(feature = "fault-injection")]
     use crate::faults::FaultAction;
     use crate::faults::NoFaults;
