@@ -22,33 +22,29 @@ function errorMessage(cause: unknown): string {
   return text.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
 }
 
-// The levels this dialog offers, in order. Comment's chat rights land here
-// with #646 PR2, so Comment is now selectable. Edit's document writes land
-// with PR3, so Edit stays unselectable: an option that promised a right the
-// relay still refuses would be the dialog lying about the grant.
+// The levels this dialog offers, in order. All three are real from #646 PR3a:
+// Comment's chat rights landed with PR2, and Edit now lets the recipient send
+// changes back for the granter to accept. Edit's helper states that, because
+// Edit does not write the granter's files — it never has and never will.
 const ACCESS_OPTIONS: ReadonlyArray<{
   value: ShareAccess;
   label: string;
   helper: string;
-  ready: boolean;
 }> = [
   {
     value: "view",
     label: "View",
     helper: "They can read what you selected.",
-    ready: true,
   },
   {
     value: "comment",
     label: "Comment",
     helper: "They can read what you selected and chat about it.",
-    ready: true,
   },
   {
     value: "edit",
     label: "Edit",
-    helper: "They can read, chat, and edit what you selected.",
-    ready: false,
+    helper: "They can read, chat, and send you changes to accept.",
   },
 ];
 
@@ -141,13 +137,12 @@ export function RelayShareDialog(props: {
                   type="button"
                   role="radio"
                   aria-checked={access === option.value}
-                  disabled={!option.ready}
                   data-testid={`share-access-${option.value}`}
                   onClick={() => setAccess(option.value)}
-                  className={`flex-1 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                  className={`flex-1 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors ${
                     access === option.value
                       ? "border-ink bg-panel-2 text-ink"
-                      : "border-line bg-panel text-muted enabled:hover:text-ink"
+                      : "border-line bg-panel text-muted hover:text-ink"
                   }`}
                 >
                   {option.label}
@@ -160,14 +155,6 @@ export function RelayShareDialog(props: {
             >
               {ACCESS_OPTIONS.find((option) => option.value === access)?.helper}
             </p>
-            {ACCESS_OPTIONS.some((option) => !option.ready) ? (
-              <p
-                data-testid="share-access-pending"
-                className="m-0 text-[11px] leading-relaxed text-subtle"
-              >
-                Edit is not ready yet.
-              </p>
-            ) : null}
           </div>
 
           <p className="m-0 text-xs leading-relaxed text-muted">

@@ -2791,6 +2791,177 @@ export const RevokeRelaySharePayload = z.object({
 });
 export type RevokeRelaySharePayload = z.infer<typeof RevokeRelaySharePayload>;
 
+// ---- Share changes (#646 PR3a) ----
+// An edit-level recipient edits its own share view and SENDS the result. The
+// granter reads the changes and accepts or declines them; nothing lands in
+// the granter's files without that act. The user-facing noun is `changes`
+// throughout; `proposal` is code and storage only.
+
+export const SHARE_PROPOSAL_ID = z.string().min(1).max(128);
+
+// One submit is one relay batch, so a proposal carries at most as many files
+// as the relay carries ops in one request (MAX_OPS_PER_REQUEST, 500). A body
+// over the cap is relay damage, not a listing this surface should try to
+// render.
+export const MAX_SHARE_PROPOSAL_FILES = 500;
+// Rows a share-changes listing may carry, bounding a body dohc did not write
+// and must parse in one go. Same class of thing and the same number as the
+// chat-share lanes' own cap (MAX_CHAT_CHANNEL_SHARE_ROWS, declared below):
+// relay-supplied rows this surface renders. Nothing here measured a smaller
+// healthy range, so nothing here may state one.
+const MAX_SHARE_PROPOSAL_ROWS = 4096;
+
+export const ShareProposalState = z.enum([
+  "open",
+  "accepted",
+  "declined",
+  "withdrawn",
+]);
+export type ShareProposalState = z.infer<typeof ShareProposalState>;
+
+// What one op does to one file, net. A rename is a write at the after path.
+export const ShareProposalOperation = z.enum(["write", "delete"]);
+export type ShareProposalOperation = z.infer<typeof ShareProposalOperation>;
+
+export const ListShareProposalsPayload = z.object({
+  // The GRANTER's own workspace. A share view is refused this channel.
+  workspaceId: WORKSPACE_ID,
+});
+export type ListShareProposalsPayload = z.infer<typeof ListShareProposalsPayload>;
+
+export const ShareProposalFileRow = z.object({
+  // Position in the submit, dense from 0, so the last valid index is one
+  // below the number of files a submit may carry.
+  opIndex: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_FILES - 1),
+  path: PATH_STRING,
+  operation: ShareProposalOperation,
+  // The granter's copy changed since the recipient sent this. Accepting still
+  // works; it opens a conflict with a correct three-way base.
+  drifted: z.boolean(),
+});
+export type ShareProposalFileRow = z.infer<typeof ShareProposalFileRow>;
+
+export const ShareProposalRow = z.object({
+  proposalId: SHARE_PROPOSAL_ID,
+  shareId: SHARE_ID,
+  // null when the relay could not state who sent the changes. The row stays
+  // listed: reviewing them is still possible, and a missing email is damage
+  // to state rather than a name to invent.
+  proposedByEmail: EMAIL_STRING.nullable(),
+  createdAtMs: z.number().int().nonnegative(),
+  files: z.array(ShareProposalFileRow).max(MAX_SHARE_PROPOSAL_FILES),
+});
+export type ShareProposalRow = z.infer<typeof ShareProposalRow>;
+
+export const ListShareProposalsResult = z.object({
+  proposals: z.array(ShareProposalRow).max(MAX_SHARE_PROPOSAL_ROWS),
+});
+export type ListShareProposalsResult = z.infer<typeof ListShareProposalsResult>;
+
+// ONE read for the whole review. The dialog used to ask for the listing and
+// then ask again per file, and each of those asks re-read the entire proposal
+// list from the relay: a five-file review cost six listings. The relay states
+// every file of a proposal in one answer, so the review reads it once.
+export const ReadShareProposalChangesPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  proposalId: SHARE_PROPOSAL_ID,
+});
+export type ReadShareProposalChangesPayload = z.infer<
+  typeof ReadShareProposalChangesPayload
+>;
+
+export const ShareProposalChangeRow = ShareProposalFileRow.extend({
+  // The GRANTER's content now. null when the granter does not have the file,
+  // or when it is not text this surface can show.
+  currentText: WORKSPACE_EDITOR_TEXT.nullable(),
+  // The proposal's after content. null for a delete, for binary content, for
+  // content over the editor's text bound, and for content the relay would not
+  // serve — every one of which the review states as "no preview" rather than
+  // failing, because the granter can still decline what it cannot read.
+  incomingText: WORKSPACE_EDITOR_TEXT.nullable(),
+});
+export type ShareProposalChangeRow = z.infer<typeof ShareProposalChangeRow>;
+
+export const ReadShareProposalChangesResult = z.object({
+  proposedByEmail: EMAIL_STRING.nullable(),
+  files: z.array(ShareProposalChangeRow).max(MAX_SHARE_PROPOSAL_FILES),
+});
+export type ReadShareProposalChangesResult = z.infer<
+  typeof ReadShareProposalChangesResult
+>;
+
+export const SettleShareProposalPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  proposalId: SHARE_PROPOSAL_ID,
+  decision: z.enum(["accept", "decline"]),
+});
+export type SettleShareProposalPayload = z.infer<
+  typeof SettleShareProposalPayload
+>;
+
+export const SettleShareProposalResult = z.object({
+  state: z.enum(["accepted", "declined"]),
+});
+export type SettleShareProposalResult = z.infer<typeof SettleShareProposalResult>;
+
+export const SubmitShareChangesPayload = z.object({
+  // The SHARE VIEW. Main resolves the share and its pinned grant from the
+  // registry; a client-supplied share id is never trusted.
+  workspaceId: WORKSPACE_ID,
+});
+export type SubmitShareChangesPayload = z.infer<typeof SubmitShareChangesPayload>;
+
+// What a submit did, in the three facts the recipient's surface states. The
+// new proposal's id is NOT among them: the surface re-reads its own sent
+// changes right after, and an id that arrived by two routes would be two
+// answers to one question.
+export const SubmitShareChangesResult = z.object({
+  submitted: z.number().int().nonnegative(),
+  // Files this submit did NOT offer because they are not part of this share.
+  // The count does not distinguish a file that LEFT the shared paths from one
+  // that was never in them — both are the same fact to the person who pressed
+  // send. Silently dropping them is the failure this states: some of their
+  // work is not sent, and nothing says so.
+  skippedOutsideShare: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_FILES),
+  // More changes are waiting than one submit carries. A flag rather than a
+  // count: the scan stops AT the bound, so it never measures the remainder.
+  morePending: z.boolean(),
+});
+export type SubmitShareChangesResult = z.infer<typeof SubmitShareChangesResult>;
+
+export const ListMyShareChangesPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type ListMyShareChangesPayload = z.infer<typeof ListMyShareChangesPayload>;
+
+export const MyShareChangeRow = z.object({
+  proposalId: SHARE_PROPOSAL_ID,
+  state: ShareProposalState,
+  createdAtMs: z.number().int().nonnegative(),
+  files: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_FILES),
+});
+export type MyShareChangeRow = z.infer<typeof MyShareChangeRow>;
+
+export const ListMyShareChangesResult = z.object({
+  proposals: z.array(MyShareChangeRow).max(MAX_SHARE_PROPOSAL_ROWS),
+});
+export type ListMyShareChangesResult = z.infer<typeof ListMyShareChangesResult>;
+
+export const WithdrawShareChangesPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  proposalId: SHARE_PROPOSAL_ID,
+});
+export type WithdrawShareChangesPayload = z.infer<
+  typeof WithdrawShareChangesPayload
+>;
+
+export const WithdrawShareChangesResult = z.object({
+  state: z.literal("withdrawn"),
+});
+export type WithdrawShareChangesResult = z.infer<
+  typeof WithdrawShareChangesResult
+>;
+
 // ---- Shared channels (MU-C4) ----
 // A chat-channel grant: a whole channel (threads + messages + reactions)
 // shared to another relay account, read-write by default, read-only as the
@@ -3908,6 +4079,26 @@ export interface DohcDesktopBridge {
   openSharedView(payload: OpenSharedViewPayload): Promise<OpenSharedViewResult>;
   refreshSharedView(payload: RefreshSharedViewPayload): Promise<RefreshSharedViewResult>;
   dismissShareSkips(payload: DismissShareSkipsPayload): Promise<void>;
+  // Share changes (#646 PR3a): the granter reviews and settles.
+  listShareProposals(
+    payload: ListShareProposalsPayload,
+  ): Promise<ListShareProposalsResult>;
+  readShareProposalChanges(
+    payload: ReadShareProposalChangesPayload,
+  ): Promise<ReadShareProposalChangesResult>;
+  settleShareProposal(
+    payload: SettleShareProposalPayload,
+  ): Promise<SettleShareProposalResult>;
+  // Share changes (#646 PR3a): the recipient sends, tracks, and takes back.
+  submitShareChanges(
+    payload: SubmitShareChangesPayload,
+  ): Promise<SubmitShareChangesResult>;
+  listMyShareChanges(
+    payload: ListMyShareChangesPayload,
+  ): Promise<ListMyShareChangesResult>;
+  withdrawShareChanges(
+    payload: WithdrawShareChangesPayload,
+  ): Promise<WithdrawShareChangesResult>;
   // Share mounts: a received share materialized into a host workspace's
   // shared-with-me/<label>/ as ordinary read-only files.
   mountShare(payload: MountSharePayload): Promise<MountShareResult>;

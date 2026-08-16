@@ -84,6 +84,17 @@ import {
   parseInvokeSiteSdkPayloadForIpc,
   parseInvokePluginPanelSdkPayloadForIpc,
   CloudJoinWorkspacePayload,
+  MAX_SHARE_PROPOSAL_FILES,
+  ListShareProposalsPayload,
+  ListShareProposalsResult,
+  ListMyShareChangesPayload,
+  ListMyShareChangesResult,
+  ReadShareProposalChangesResult,
+  SettleShareProposalPayload,
+  SubmitShareChangesPayload,
+  SubmitShareChangesResult,
+  WithdrawShareChangesPayload,
+  WithdrawShareChangesResult,
 } from "./bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import {
@@ -2158,6 +2169,249 @@ describe("joined workspace passphrase boundary", () => {
         rootPath: "/workspace",
         passphrase: "x".repeat(4097),
       }),
+    ).toThrow();
+  });
+});
+
+// #646 PR3a. The share-changes channels cross a boundary between two
+// accounts: one side's relay body becomes the other side's review screen, and
+// accepting writes into the reviewer's own workspace. Every field is checked
+// rather than coerced, and a malformed one is refused whole.
+describe("share changes IPC contract (#646 PR3a)", () => {
+  const proposal = () => ({
+    proposalId: "proposal-1",
+    shareId: "share-1",
+    proposedByEmail: "recipient@example.com",
+    createdAtMs: 1,
+    files: [
+      { opIndex: 0, path: "docs/a.md", operation: "write", drifted: false },
+      { opIndex: 1, path: "docs/b.md", operation: "delete", drifted: true },
+    ],
+  });
+
+  it("carries a granter's review listing whole", () => {
+    const parsed = ListShareProposalsResult.parse({ proposals: [proposal()] });
+    expect(parsed.proposals[0]?.files).toHaveLength(2);
+    expect(parsed.proposals[0]?.files[1]?.operation).toBe("delete");
+    expect(parsed.proposals[0]?.files[1]?.drifted).toBe(true);
+  });
+
+  it("states a sender it could not name, rather than inventing one", () => {
+    expect(
+      ListShareProposalsResult.parse({
+        proposals: [{ ...proposal(), proposedByEmail: null }],
+      }).proposals[0]?.proposedByEmail,
+    ).toBeNull();
+  });
+
+  it("refuses an operation, a state, or a decision outside its closed set", () => {
+    expect(
+      () =>
+        ListShareProposalsResult.parse({
+          proposals: [
+            { ...proposal(), files: [{ opIndex: 0, path: "a.md", operation: "rename", drifted: false }] },
+          ],
+        }),
+      "MUTATION: an unknown operation renders as a change nobody described",
+    ).toThrow();
+    expect(() =>
+      ListMyShareChangesResult.parse({
+        proposals: [{ proposalId: "p", state: "sent", createdAtMs: 1, files: 1 }],
+      }),
+    ).toThrow();
+    expect(() =>
+      SettleShareProposalPayload.parse({
+        workspaceId: "ws-1",
+        proposalId: "p",
+        decision: "maybe",
+      }),
+    ).toThrow();
+  });
+
+  // `drifted` decides whether the review warns that the granter's copy moved.
+  // A missing flag read as false would hide the warning on every drifted file.
+  it("refuses a file row with no drift answer", () => {
+    expect(
+      () =>
+        ListShareProposalsResult.parse({
+          proposals: [
+            { ...proposal(), files: [{ opIndex: 0, path: "a.md", operation: "write" }] },
+          ],
+        }),
+      "MUTATION: an absent drift flag reads as `not drifted` and hides the warning",
+    ).toThrow();
+  });
+
+  it("refuses an op index outside one submit's own bound", () => {
+    const files = (opIndex: number) => ({
+      opIndex,
+      path: "docs/a.md",
+      operation: "write" as const,
+      drifted: false,
+      currentText: null,
+      incomingText: "after\n",
+    });
+    for (const [label, opIndex] of [
+      // Dense from 0, so the last valid index is one below the file bound.
+      ["the bound itself", MAX_SHARE_PROPOSAL_FILES],
+      ["negative", -1],
+      ["fractional", 1.5],
+    ] as const) {
+      expect(
+        () =>
+          ReadShareProposalChangesResult.parse({
+            proposedByEmail: null,
+            files: [files(opIndex)],
+          }),
+        label,
+      ).toThrow();
+    }
+    expect(
+      ReadShareProposalChangesResult.parse({
+        proposedByEmail: null,
+        files: [files(MAX_SHARE_PROPOSAL_FILES - 1)],
+      }).files,
+    ).toHaveLength(1);
+  });
+
+  // Either side of the review may genuinely be absent: a file the granter
+  // does not have, a delete that carries no incoming content, and content
+  // this surface cannot preview — which must still be reviewable, because a
+  // granter has to be able to decline what they cannot read.
+  it("carries either side of a change as null", () => {
+    const parsed = ReadShareProposalChangesResult.parse({
+      proposedByEmail: "recipient@example.com",
+      files: [
+        {
+          opIndex: 0,
+          path: "docs/a.md",
+          operation: "delete",
+          drifted: true,
+          currentText: "before\n",
+          incomingText: null,
+        },
+        {
+          opIndex: 1,
+          path: "docs/new.md",
+          operation: "write",
+          drifted: false,
+          currentText: null,
+          incomingText: "after\n",
+        },
+      ],
+    });
+    expect(parsed.files[0]?.incomingText).toBeNull();
+    expect(parsed.files[1]?.currentText).toBeNull();
+  });
+
+  // The recipient names a workspace and nothing else. A share id on the wire
+  // would be a client claiming which grant it is writing through.
+  it("takes no share id from the renderer on either recipient channel", () => {
+    expect(
+      Object.keys(SubmitShareChangesPayload.parse({ workspaceId: "ws-1", shareId: "share-9" })),
+    ).toEqual(["workspaceId"]);
+    expect(
+      Object.keys(
+        WithdrawShareChangesPayload.parse({
+          workspaceId: "ws-1",
+          proposalId: "p",
+          shareId: "share-9",
+        }),
+      ).sort(),
+    ).toEqual(["proposalId", "workspaceId"]);
+  });
+
+  // Zero is the honest answer for "nothing was pending", not an error.
+  it("carries an empty submit", () => {
+    const empty = { submitted: 0, skippedOutsideShare: 0, morePending: false };
+    expect(SubmitShareChangesResult.parse(empty).submitted).toBe(0);
+    expect(() =>
+      SubmitShareChangesResult.parse({ ...empty, submitted: -1 }),
+    ).toThrow();
+  });
+
+  // The bound that decides whether a review can be read at all. `incomingText`
+  // is validated by the EDITOR's text bound, so main must guard the blob it
+  // fetches with the SAME number — a larger guard admits a body this schema
+  // then refuses, and one unreadable file takes every other file in the
+  // review down with it.
+  it("refuses an incoming side over the editor's text bound, and admits one at it", () => {
+    const row = (incomingText: string) => ({
+      proposedByEmail: null,
+      files: [
+        {
+          opIndex: 0,
+          path: "docs/a.md",
+          operation: "write" as const,
+          drifted: false,
+          currentText: null,
+          incomingText,
+        },
+      ],
+    });
+    expect(
+      () => ReadShareProposalChangesResult.parse(row("x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES + 1))),
+      "MUTATION: guarding at a LARGER bound sends a body this schema refuses",
+    ).toThrow();
+    expect(
+      ReadShareProposalChangesResult.parse(row("x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES)))
+        .files[0]?.incomingText?.length,
+    ).toBe(WORKSPACE_TEXT_EDITOR_MAX_BYTES);
+    // BYTES, not characters. One "é" is two bytes in UTF-8, so a string of
+    // exactly the bound in CHARACTERS is twice the bound in bytes — and a
+    // guard that counted characters would admit a body the relay then refuses.
+    expect(
+      () => ReadShareProposalChangesResult.parse(row("é".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES))),
+      "MUTATION: counting characters instead of bytes doubles the real bound",
+    ).toThrow();
+  });
+
+  // What a submit LEFT BEHIND is not optional. Softened to a default, a
+  // recipient is told everything went when some of it did not.
+  it("refuses a submit result that does not say what it left behind", () => {
+    expect(() =>
+      SubmitShareChangesResult.parse({
+        submitted: 1,
+        morePending: false,
+      }),
+    ).toThrow();
+    expect(() =>
+      SubmitShareChangesResult.parse({
+        submitted: 1,
+        skippedOutsideShare: 0,
+      }),
+    ).toThrow();
+  });
+
+  // Withdraw has exactly one successful outcome. A result that could carry
+  // `accepted` would let the reverse path report the forward one.
+  it("refuses any withdraw result but withdrawn", () => {
+    expect(WithdrawShareChangesResult.parse({ state: "withdrawn" }).state).toBe(
+      "withdrawn",
+    );
+    expect(
+      () => WithdrawShareChangesResult.parse({ state: "accepted" }),
+      "MUTATION: a widened withdraw result tells the sender their changes are back when the granter has them",
+    ).toThrow();
+  });
+
+  it("refuses a malformed payload rather than coercing it", () => {
+    for (const payload of [
+      { workspaceId: "" },
+      { workspaceId: "Not A Workspace" },
+      { workspaceId: 1 },
+      {},
+      null,
+    ]) {
+      expect(() => ListShareProposalsPayload.parse(payload), JSON.stringify(payload)).toThrow();
+      expect(() => ListMyShareChangesPayload.parse(payload), JSON.stringify(payload)).toThrow();
+      expect(() => SubmitShareChangesPayload.parse(payload), JSON.stringify(payload)).toThrow();
+    }
+    expect(() =>
+      WithdrawShareChangesPayload.parse({ workspaceId: "ws-1", proposalId: "" }),
+    ).toThrow();
+    expect(() =>
+      WithdrawShareChangesPayload.parse({ workspaceId: "ws-1", proposalId: "p".repeat(129) }),
     ).toThrow();
   });
 });

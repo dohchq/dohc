@@ -97,6 +97,10 @@ describe("captureForFlaggedWorkspace decision", () => {
   // cause, and the settings file — which a shared view does not even
   // materialize — is never read (a read would produce a warning or a
   // capture; the assertions refuse both).
+  //
+  // Every level answers the same way (#646 PR3): an edit recipient's writes
+  // reach the engine because the app writes them there itself, so no share
+  // view needs a watcher.
   it("gives a shared view a null capture with the share cause, before any read", async () => {
     const decision = await captureForFlaggedWorkspace(
       {

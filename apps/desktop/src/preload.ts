@@ -222,6 +222,18 @@ const bridge: DohcDesktopBridge = {
   openSharedView: (payload) => ipcRenderer.invoke(CHANNELS.openSharedView, payload),
   refreshSharedView: (payload) => ipcRenderer.invoke(CHANNELS.refreshSharedView, payload),
   dismissShareSkips: (payload) => ipcRenderer.invoke(CHANNELS.dismissShareSkips, payload),
+  listShareProposals: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listShareProposals, payload),
+  readShareProposalChanges: (payload) =>
+    ipcRenderer.invoke(CHANNELS.readShareProposalChanges, payload),
+  settleShareProposal: (payload) =>
+    ipcRenderer.invoke(CHANNELS.settleShareProposal, payload),
+  submitShareChanges: (payload) =>
+    ipcRenderer.invoke(CHANNELS.submitShareChanges, payload),
+  listMyShareChanges: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listMyShareChanges, payload),
+  withdrawShareChanges: (payload) =>
+    ipcRenderer.invoke(CHANNELS.withdrawShareChanges, payload),
   mountShare: (payload) => ipcRenderer.invoke(CHANNELS.mountShare, payload),
   refreshShareMounts: (payload) => ipcRenderer.invoke(CHANNELS.refreshShareMounts, payload),
   unmountShare: (payload) => ipcRenderer.invoke(CHANNELS.unmountShare, payload),

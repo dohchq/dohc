@@ -917,6 +917,10 @@ impl EngineService {
                 Box::pin(self.share_view_record_identity(&ctx, request.workspace, request.params))
                     .await?
             }
+            "share.proposal.submit" => {
+                Box::pin(self.share_proposal_submit(&ctx, request.workspace, request.params))
+                    .await?
+            }
             "versionedText.write" => {
                 self.versioned_text_write(&ctx, &request, request.params.clone())
                     .await?
@@ -2332,19 +2336,7 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: ShareViewParams = parse(params)?;
-        // Parsed BEFORE the relay round trip: a grant whose level this
-        // process cannot read must never pin (#646) — refusing early is the
-        // same posture as every other unreadable-field refusal here.
-        let access = dohc_engine_sync::ShareAccess::parse(&params.granted_selector.access)
-            .ok_or_else(|| {
-                // Names the constraint and the accepted set, like the relay's
-                // own refusal: the caller is an agent reading this error, and
-                // "unknown share access" told it nothing it could act on.
-                wire(
-                    ErrorCode::InvalidParams,
-                    r#"access must be "view", "comment", or "edit""#,
-                )
-            })?;
+        let granted = share_grant(params.granted_selector)?;
         let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let outcome = self
@@ -2355,11 +2347,7 @@ impl EngineService {
                 RelayOperation::PullShareView {
                     workspace_id: open.workspace_id.clone(),
                     share_id: params.share_id,
-                    granted: dohc_engine_sync::ShareGrant {
-                        paths: params.granted_selector.paths,
-                        version_id: params.granted_selector.version_id,
-                        access,
-                    },
+                    granted,
                 },
                 "share.view.pull",
             )
@@ -2391,8 +2379,7 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: ShareViewParams = parse(params)?;
-        let access = dohc_engine_sync::ShareAccess::parse(&params.granted_selector.access)
-            .ok_or_else(|| wire(ErrorCode::InvalidParams, "unknown share access"))?;
+        let granted = share_grant(params.granted_selector)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let outcome = self
             .relay_execute(
@@ -2402,11 +2389,7 @@ impl EngineService {
                 RelayOperation::PushShareView {
                     workspace_id: open.workspace_id.clone(),
                     share_id: params.share_id,
-                    granted: dohc_engine_sync::ShareGrant {
-                        paths: params.granted_selector.paths,
-                        version_id: params.granted_selector.version_id,
-                        access,
-                    },
+                    granted,
                 },
                 "share.view.push",
             )
@@ -2414,14 +2397,14 @@ impl EngineService {
         relay_outcome_json(outcome)
     }
 
-    /// Give this share view the sync identity its share lane needs (#646
-    /// PR3-1). Run at open and again at every refresh; the engine writes the
-    /// row once and later calls answer `already-enrolled`.
+    /// Record this share view's own replica identity (#646 PR3-1). Run at
+    /// open and again at every refresh; the engine writes the row once and
+    /// later calls answer `already-recorded`.
     ///
     /// Takes no `shareId`: `sync_identity` is per WORKSPACE, and a share view
     /// mirrors exactly one share. It takes the pinned selector because the
-    /// LEVEL decides — a `view` share may push nothing, so it is never
-    /// enrolled — and refuses an unreadable level the same way the pull and
+    /// LEVEL decides — a `view` share may push nothing, so it records
+    /// nothing — and refuses an unreadable level the same way the pull and
     /// the push do.
     ///
     /// The three identity components are minted HERE, not by the caller, for
@@ -2437,13 +2420,7 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: ShareViewEnrollParams = parse(params)?;
-        let access = dohc_engine_sync::ShareAccess::parse(&params.granted_selector.access)
-            .ok_or_else(|| {
-                wire(
-                    ErrorCode::InvalidParams,
-                    r#"access must be "view", "comment", or "edit""#,
-                )
-            })?;
+        let granted = share_grant(params.granted_selector)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let outcome = self
             .relay_execute(
@@ -2457,13 +2434,46 @@ impl EngineService {
                 // matter to it.
                 RelayOperation::RecordShareViewIdentity {
                     workspace_id: open.workspace_id.clone(),
-                    access,
+                    access: granted.access,
                     origin_id: sync_identifier("origin")?,
                     replication_epoch: sync_identifier("epoch")?,
                     stream_identity: sync_identifier("stream")?,
                     created_at_ms: now_ms()?,
                 },
                 "share.view.recordIdentity",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    /// Offer this replica's own edits of a RECEIVED file share to the granter
+    /// (#646 PR3).
+    ///
+    /// Takes the SAME pinned selector the pull and the chat push take, and
+    /// refuses an unreadable level the same way. The client refuses again
+    /// below `edit` — the caller states the level it pinned, and a level this
+    /// process cannot read is not a narrower grant.
+    async fn share_proposal_submit(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ShareProposalSubmitParams = parse(params)?;
+        let granted = share_grant(params.granted_selector)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::SubmitShareProposal {
+                    workspace_id: open.workspace_id.clone(),
+                    share_id: params.share_id,
+                    granted,
+                    submit_id: params.submit_id,
+                },
+                "share.proposal.submit",
             )
             .await?;
         relay_outcome_json(outcome)
@@ -8924,9 +8934,24 @@ struct ShareViewParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ShareViewEnrollParams {
     workspace_id: String,
-    /// REQUIRED, for the level it carries. Enrolment is a level decision, and
-    /// a caller that cannot state the level must not enroll.
+    /// REQUIRED, for the level it carries. Recording is a level decision, and
+    /// a caller that cannot state the level must not record one.
     granted_selector: GrantedSelectorParams,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShareProposalSubmitParams {
+    workspace_id: String,
+    share_id: String,
+    /// Required, and required as an object, for the same reason the pull
+    /// requires it: a submit with no scope offers everything this replica
+    /// wrote, and the level inside it is what the client refuses below `edit`
+    /// on.
+    granted_selector: GrantedSelectorParams,
+    /// The idempotency key for ONE submit. No default: a generated-per-attempt
+    /// id would open a second proposal on every retry of the same intent.
+    submit_id: String,
 }
 
 #[derive(Deserialize)]
@@ -11408,6 +11433,21 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
                 dohc_engine_runtime::ShareViewIdentityRecord::NotRequired => "not-required",
             },
         }),
+        RelayOperationOutcome::ShareProposalSubmitted(outcome) => json!({
+            "submitted": outcome.submitted,
+            // `null` is not "failed": it is "nothing was offered" — a share
+            // below edit level, or a scan that found no change. The caller
+            // reads `submitted` for the count and this for the review row.
+            "proposalId": outcome.proposal_id,
+            // Files the scan dropped because they are not part of this share:
+            // one of their local ops named a path outside the shared paths.
+            // Silence here is what leaves a recipient believing it sent work
+            // it never sent.
+            "skippedOutsideShare": outcome.skipped_outside_share,
+            // One submit carries a bounded batch. This says another press has
+            // more to offer; the engine did not count what is left.
+            "morePending": outcome.more_pending,
+        }),
         RelayOperationOutcome::ShareViewPulled(outcome) => json!({
             "fetched": outcome.fetched,
             "hasMore": outcome.has_more,
@@ -11435,6 +11475,27 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
                 "cursor": outcome.pending_cursor.cursor,
             },
         }),
+    })
+}
+
+/// The selector the relay stated for this share, pinned by the caller on first
+/// read, read into the grant every share RPC enforces.
+///
+/// Read BEFORE the relay round trip: a grant whose level this process cannot
+/// read must never pin (#646). The refusal names the accepted set, like the
+/// relay's own — the caller is an agent reading this error, and "unknown share
+/// access" told it nothing it could act on.
+fn share_grant(selector: GrantedSelectorParams) -> Result<dohc_engine_sync::ShareGrant, WireError> {
+    let access = dohc_engine_sync::ShareAccess::parse(&selector.access).ok_or_else(|| {
+        wire(
+            ErrorCode::InvalidParams,
+            r#"access must be "view", "comment", or "edit""#,
+        )
+    })?;
+    Ok(dohc_engine_sync::ShareGrant {
+        paths: selector.paths,
+        version_id: selector.version_id,
+        access,
     })
 }
 
@@ -12979,6 +13040,95 @@ mod tests {
         );
         assert_eq!(value["refusals"][0]["originSeq"], 4);
         assert_eq!(value["refusals"][0]["code"], "share-boundary-violation");
+    }
+
+    #[test]
+    fn share_proposal_outcome_json_states_an_empty_submit_as_a_null_proposal() {
+        let offered = relay_outcome_json(RelayOperationOutcome::ShareProposalSubmitted(
+            dohc_engine_sync::ShareProposalSubmitOutcome {
+                submitted: 2,
+                proposal_id: Some("proposal-1".to_owned()),
+                skipped_outside_share: 0,
+                more_pending: false,
+            },
+        ))
+        .expect("serialize share proposal outcome");
+        assert_eq!(offered["submitted"], 2);
+        assert_eq!(offered["proposalId"], "proposal-1");
+
+        let nothing = relay_outcome_json(RelayOperationOutcome::ShareProposalSubmitted(
+            dohc_engine_sync::ShareProposalSubmitOutcome::default(),
+        ))
+        .expect("serialize empty share proposal outcome");
+        assert_eq!(nothing["submitted"], 0);
+        assert!(
+            nothing["proposalId"].is_null(),
+            "MUTATION: an omitted proposalId reads as a missing field, and the client \
+             cannot tell 'nothing was offered' from 'the engine did not answer'"
+        );
+    }
+
+    /// A submit that dropped work, or left work behind, has to SAY so. Both
+    /// facts are silent otherwise, and a recipient reading only `submitted`
+    /// believes the whole edit reached the granter.
+    #[test]
+    fn share_proposal_outcome_json_reports_dropped_and_pending_changes() {
+        let value = relay_outcome_json(RelayOperationOutcome::ShareProposalSubmitted(
+            dohc_engine_sync::ShareProposalSubmitOutcome {
+                submitted: 500,
+                proposal_id: Some("proposal-1".to_owned()),
+                skipped_outside_share: 3,
+                more_pending: true,
+            },
+        ))
+        .expect("serialize share proposal outcome");
+        assert_eq!(
+            value["skippedOutsideShare"], 3,
+            "MUTATION: a change dropped for landing outside the share must be counted to the caller"
+        );
+        assert_eq!(
+            value["morePending"], true,
+            "MUTATION: without this the recipient cannot know a further submit has more to offer"
+        );
+
+        let complete = relay_outcome_json(RelayOperationOutcome::ShareProposalSubmitted(
+            dohc_engine_sync::ShareProposalSubmitOutcome::default(),
+        ))
+        .expect("serialize share proposal outcome");
+        assert_eq!(complete["skippedOutsideShare"], 0);
+        assert_eq!(complete["morePending"], false);
+    }
+
+    #[test]
+    fn share_proposal_params_require_a_submit_id_and_a_readable_level() {
+        let complete: Result<ShareProposalSubmitParams, _> = serde_json::from_value(json!({
+            "workspaceId": "workspace",
+            "shareId": "share",
+            "grantedSelector": { "paths": ["docs"], "versionId": null, "access": "edit" },
+            "submitId": "submit-1",
+        }));
+        assert!(complete.is_ok());
+
+        let no_submit_id: Result<ShareProposalSubmitParams, _> = serde_json::from_value(json!({
+            "workspaceId": "workspace",
+            "shareId": "share",
+            "grantedSelector": { "paths": ["docs"], "versionId": null, "access": "edit" },
+        }));
+        assert!(
+            no_submit_id.is_err(),
+            "MUTATION: defaulting the submit id opens a second proposal per retry"
+        );
+
+        let no_access: Result<ShareProposalSubmitParams, _> = serde_json::from_value(json!({
+            "workspaceId": "workspace",
+            "shareId": "share",
+            "grantedSelector": { "paths": ["docs"], "versionId": null },
+            "submitId": "submit-1",
+        }));
+        assert!(
+            no_access.is_err(),
+            "MUTATION: defaulting the level submits through a grant nobody read"
+        );
     }
 
     #[test]

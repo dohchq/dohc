@@ -90,8 +90,9 @@ use dohc_engine_sync::{
     EpochResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, ProbeRequest, ProbeResponse,
     PullRequest, PullResponse, PushRequest, PushResponse, RecoverResponse, RelayCursor, RelayError,
-    RelaySyncClient, RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareCursor,
-    ShareLogPushRequest, ShareViewPullOutcome, ShareViewRequest, ShareViewResponse,
+    RelaySyncClient, RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareBlobUploadRequest,
+    ShareCursor, ShareLogPushRequest, ShareProposalSubmitOutcome, ShareProposalSubmitRequest,
+    ShareProposalSubmitResponse, ShareViewPullOutcome, ShareViewRequest, ShareViewResponse,
     SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRequest,
     SharedChannelResponse, SyncPassOutcome, adopt_join_identity, apply_conflict_envelope,
     read_replayed_refusal, read_sync_identity, retain_refusal_for_direct_retry,
@@ -382,6 +383,19 @@ pub enum RelayOperation {
         share_id: String,
         granted: dohc_engine_sync::ShareGrant,
     },
+    /// Offer this replica's own edits of a RECEIVED file share back to the
+    /// granter, for the granter to accept or decline (#646 PR3). The grant is
+    /// required for the same reason the pull and the chat push require it, and
+    /// carries the level the client refuses below `edit` on.
+    SubmitShareProposal {
+        workspace_id: String,
+        share_id: String,
+        granted: dohc_engine_sync::ShareGrant,
+        /// The idempotency key for ONE submit. A repeat with the same id
+        /// answers with the proposal the relay already holds and never opens a
+        /// second one.
+        submit_id: String,
+    },
     CommitShareViewCursor {
         workspace_id: String,
         cursor: ShareCursor,
@@ -407,6 +421,8 @@ enum RelayIoRequest {
     ShareLogPush(ShareLogPushRequest),
     ShareViewPull(ShareViewRequest),
     ShareBlob(ShareBlobRequest),
+    ShareBlobUpload(ShareBlobUploadRequest),
+    ShareProposalSubmit(ShareProposalSubmitRequest),
 }
 
 #[derive(Debug, Clone)]
@@ -426,6 +442,8 @@ enum RelayIoResponse {
     ShareLogPush(PushResponse),
     ShareViewPull(ShareViewResponse),
     ShareBlob(BlobDownloadResponse),
+    ShareBlobUpload,
+    ShareProposalSubmit(ShareProposalSubmitResponse),
 }
 
 #[derive(Default)]
@@ -465,6 +483,8 @@ impl DeferredRelayTransport {
                     | RelayIoRequest::UploadKeyEnvelope(_)
                     | RelayIoRequest::DownloadKeyEnvelope(_)
                     | RelayIoRequest::ShareBlob(_)
+                    | RelayIoRequest::ShareBlobUpload(_)
+                    | RelayIoRequest::ShareProposalSubmit(_)
             ) || matches!(
                 &state.completed[index].1,
                 Ok(RelayIoResponse::BlobsHave(response)) if response.missing.is_empty()
@@ -632,6 +652,20 @@ impl RelayTransport for DeferredRelayTransport {
         ShareBlob,
         BlobDownloadResponse,
         ShareBlob
+    );
+
+    fn share_blob_upload(&self, request: ShareBlobUploadRequest) -> Result<(), RelayError> {
+        self.resolve(RelayIoRequest::ShareBlobUpload(request), |response| {
+            matches!(response, RelayIoResponse::ShareBlobUpload).then_some(())
+        })
+    }
+
+    relay_transport_method!(
+        share_proposal_submit,
+        ShareProposalSubmitRequest,
+        ShareProposalSubmit,
+        ShareProposalSubmitResponse,
+        ShareProposalSubmit
     );
 }
 
@@ -851,6 +885,7 @@ pub enum RelayOperationOutcome {
     SharedChannelPushed(SharedChannelPushOutcome),
     ShareViewPulled(ShareViewPullOutcome),
     ShareViewIdentity(ShareViewIdentityRecord),
+    ShareProposalSubmitted(ShareProposalSubmitOutcome),
 }
 
 /// What a share view's identity call settled on, including the answer the
@@ -6620,6 +6655,12 @@ fn execute_http_request(
         RelayIoRequest::ShareBlob(request) => transport
             .share_blob(request)
             .map(RelayIoResponse::ShareBlob),
+        RelayIoRequest::ShareBlobUpload(request) => transport
+            .share_blob_upload(request)
+            .map(|()| RelayIoResponse::ShareBlobUpload),
+        RelayIoRequest::ShareProposalSubmit(request) => transport
+            .share_proposal_submit(request)
+            .map(RelayIoResponse::ShareProposalSubmit),
     }
 }
 
@@ -6840,6 +6881,22 @@ fn execute_relay_operation(
         } => client
             .push_share_view(store, &workspace_id, &share_id, &granted, &NoFaults)
             .map(RelayOperationOutcome::SharedChannelPushed)
+            .map_err(RuntimeError::from),
+        RelayOperation::SubmitShareProposal {
+            workspace_id,
+            share_id,
+            granted,
+            submit_id,
+        } => client
+            .submit_share_proposal(
+                store,
+                &workspace_id,
+                &share_id,
+                &granted,
+                &submit_id,
+                &NoFaults,
+            )
+            .map(RelayOperationOutcome::ShareProposalSubmitted)
             .map_err(RuntimeError::from),
         RelayOperation::CommitShareViewCursor {
             workspace_id,

@@ -783,4 +783,273 @@ describe("main-process chat authorization", () => {
     expect(shareGate).toContain("if (!scope.authorUserId)");
     expect(scope).toContain("resolveShareViewRelayAuthorId(");
   });
+
+  // #646 PR3a. The same property the #627 pin above asserts for chat, now for
+  // FILES: `assertWritableWorkspace` stopped being "is this workspace a share
+  // view?" and became "what does this share grant?", so a handler that reaches
+  // a store before it writes at view level.
+  //
+  // The gate has to precede every await, not just every named seam: an await
+  // is where a store call can hide, and a check after one is a check the write
+  // already passed.
+  it("gates every file-write handler on the workspace write boundary, before any await", () => {
+    const fileWrites = [
+      "createWorkspaceFile",
+      "createWorkspaceFolder",
+      "moveWorkspacePath",
+      "deleteWorkspacePath",
+      "importWorkspaceFiles",
+      "writeWorkspaceText",
+      "writeWorkspaceAsset",
+      "applyDatabaseEdit",
+      "importToDatabase",
+    ];
+    const seams = [
+      "createFile(",
+      "createFolder(",
+      "routeWorkspaceTextWrite(",
+      "writeWorkspaceAsset(",
+      "importDroppedPaths(",
+      "applyDatabaseEdit(",
+      "importToDatabase(",
+      "withExclusiveWorkspaceOperation(",
+      "withStaleSensitiveWorkspaceOperation(",
+      "engineCaptureFor(",
+    ];
+
+    for (const channel of fileWrites) {
+      const handler = handlerSource(channel);
+      const gateAt = handler.indexOf("assertWritableWorkspace(workspace);");
+      expect(
+        gateAt,
+        `${channel}: MUTATION: an ungated file write lands in someone else's workspace at view level`,
+      ).toBeGreaterThan(-1);
+
+      const awaitAt = handler.indexOf("await ");
+      if (awaitAt >= 0) {
+        expect(awaitAt, `${channel}: the gate must precede every await`).toBeGreaterThan(
+          gateAt,
+        );
+      }
+      const seamAts = seams
+        .map((seam) => handler.indexOf(seam))
+        .filter((at) => at >= 0);
+      expect(seamAts.length, channel).toBeGreaterThan(0);
+      expect(
+        Math.min(...seamAts),
+        `${channel}: the gate must precede the store`,
+      ).toBeGreaterThan(gateAt);
+    }
+  });
+
+  // The write gate's own shape, pinned where it is defined. Same split as
+  // `assertChatWritable` above: main DELEGATES the level rule, and the rule's
+  // behaviour is driven against the REAL function in shareWriteGate.test.ts.
+  // A source pin proves position, never behaviour.
+  it("keeps the workspace write boundary on PRESENCE, and the level only where the write is routed", () => {
+    const gateAt = mainSource.indexOf("function assertWritableWorkspace(");
+    const gate = mainSource.slice(
+      gateAt,
+      mainSource.indexOf("function assertAgentRunnableWorkspace(", gateAt),
+    );
+    expect(gateAt).toBeGreaterThan(-1);
+    // The ordinary write gate asks ONE rule, and that rule cannot see a
+    // level. What it decides is driven behaviourally in
+    // `workspaces/shareWriteGate.test.ts`.
+    expect(gate).toContain("workspaceWriteRefusal(findWorkspace(workspace.workspaceId)?.shareView)");
+    expect(
+      gate,
+      "MUTATION: a level test here opens 27 handlers on an edit share view at once",
+    ).not.toContain("shareViewTakesLocalWrites(");
+    expect(gate).not.toContain('access !== "view"');
+    expect(gate).not.toContain('=== "edit"');
+
+    // And `sharedViewOf` still answers PRESENCE for every caller that asks
+    // only whether this is a share view — agent runs, site previews, the
+    // dispatch scan. Widening it to a level test would make an edit share view
+    // an ordinary workspace on all of them at once.
+    const resolverAt = mainSource.indexOf("function sharedViewOf(");
+    const resolver = mainSource.slice(
+      resolverAt,
+      mainSource.indexOf("function assertWritableWorkspace(", resolverAt),
+    );
+    expect(
+      resolver,
+      "MUTATION: a truthiness read makes a damaged marker an ordinary workspace",
+    ).toContain("if (!shareViewIsPresent(entry.shareView)) return null;");
+    expect(resolver).toContain("readableShareLevel(marker.grantedSelector)");
+    expect(resolver).toContain("ended: marker.ended === true");
+
+    // The WRITE PATH asks the same rule, from the same registry answer, and it
+    // is the only thing that decides where an editor save lands. A share view
+    // has no watcher, so a save routed to disk alone would leave the recipient
+    // nothing to send.
+    const writeRouter = readFileSync(
+      new URL("./workspaces/workspaceTextWrite.ts", import.meta.url),
+      "utf8",
+    );
+    expect(
+      writeRouter,
+      "MUTATION: a second copy of the level rule is a copy that drifts",
+    ).toContain("shareViewTakesLocalWrites(input.shareView)");
+    expect(handlerSource("writeWorkspaceText")).toContain(
+      "const shareView = sharedViewOf(workspace.workspaceId);",
+    );
+  });
+
+  // The menu is a UX MIRROR of the gate below, and it has to mirror the same
+  // rule: the four items it drops — create, rename, delete, import — are
+  // exactly the handlers `assertWritableWorkspace` refuses in a share view at
+  // every level. A menu that offered them at edit would be lying about what
+  // the handlers accept. Position only; what the handlers decide is driven in
+  // `workspaces/shareWriteGate.test.ts`.
+  it("keeps a shared view's explorer menu read-only at every level", () => {
+    const handler = handlerSource("showExplorerMenu");
+    expect(handler).toContain(
+      "const isSharedView = shareViewIsPresent(registryEntry?.shareView);",
+    );
+    expect(
+      handler,
+      "MUTATION: a level-aware menu offers writes the handlers behind it refuse",
+    ).not.toContain("shareViewTakesLocalWrites(");
+    expect(handler).toContain(
+      "const template: Electron.MenuItemConstructorOptions[] = isSharedView",
+    );
+  });
+
+  // #646 PR3a. The review's incoming side is fetched by main and validated by
+  // the bridge, and the two must state ONE bound. A larger guard here admits a
+  // body the contract then refuses, which fails the whole response — every
+  // file in the review, not just the large one. The contract half is driven
+  // behaviourally in `ipc/bridgeContract.test.ts`.
+  it("guards the review's incoming text at the bound the contract enforces", () => {
+    const readerAt = mainSource.indexOf("async function shareProposalIncomingText(");
+    const reader = mainSource.slice(readerAt, readerAt + 1600);
+    expect(readerAt).toBeGreaterThan(-1);
+    // The WHOLE guard, not a prefix of it: `> BOUND * 5` contains the same
+    // constant name and would pass a looser match.
+    expect(reader).toContain(
+      "if (bytes.byteLength > WORKSPACE_TEXT_EDITOR_MAX_BYTES) return null;",
+    );
+    expect(
+      reader,
+      "MUTATION: the engine's 10 MiB bound admits a body the 2 MiB field refuses",
+    ).not.toContain("ENGINE_TEXT_MAX_CHARS");
+  });
+
+  // #646 PR3. Which handlers sit behind the ordinary workspace write gate.
+  //
+  // This pin proves POSITION only. What the gate DECIDES is driven
+  // behaviourally in `workspaces/shareWriteGate.test.ts`, which executes
+  // `workspaceWriteRefusal` against a real edit-level registry marker and
+  // asserts it refuses — the property that keeps every writer below closed on
+  // a share view at every level. Position and decision together are the
+  // claim; neither alone is.
+  it("keeps every raw-disk writer and the plugin pipeline behind the workspace write gate", () => {
+    // Each of these writes the workspace FOLDER. A share view's folder is a
+    // projection of its engine store, so a write here would leave the
+    // projection stating content no moment does — unsendable, and overwritten
+    // by the next pull.
+    const rawDiskWriters = [
+      "createWorkspaceFile",
+      "createWorkspaceFolder",
+      "moveWorkspacePath",
+      "deleteWorkspacePath",
+      "importWorkspaceFiles",
+      "writeWorkspaceAsset",
+      "pickImageFiles",
+      "applyDatabaseEdit",
+      "importToDatabase",
+    ];
+    for (const channel of rawDiskWriters) {
+      expect(handlerSource(channel), channel).toContain(
+        "assertWritableWorkspace(workspace);",
+      );
+    }
+
+    // The plugin pipeline installs and runs plugin code against the workspace
+    // root, so it takes the same gate before it is built.
+    const pipelineAt = mainSource.indexOf("async function ensurePluginPipeline(");
+    const pipeline = mainSource.slice(pipelineAt, pipelineAt + 900);
+    expect(
+      pipeline,
+      "MUTATION: an ungated pipeline writes plugin state into someone else's workspace",
+    ).toContain("assertWritableWorkspace(workspace);");
+
+    // And the ONE handler that does NOT take the blanket refusal, stated
+    // here so widening it is a visible edit rather than a silent one: a share
+    // view's text save is decided at the routed seam instead.
+    const textWrite = handlerSource("writeWorkspaceText");
+    expect(textWrite).toContain(
+      "if (shareView === null) assertWritableWorkspace(workspace);",
+    );
+    expect(
+      textWrite,
+      "MUTATION: a second copy of the level rule in main is a copy that drifts",
+    ).not.toContain("shareViewTakesLocalWrites(");
+  });
+
+  // #646 PR3a. Two lanes, and a workspace is only ever in one of them. The
+  // rules live in shareProposals.ts and are driven behaviourally there; this
+  // pin covers main's wiring — that both lanes go through them, and that
+  // neither takes a share id from the renderer.
+  it("splits the share-changes lanes in main, and resolves every share id from the registry", () => {
+    const granterLane = [
+      "listShareProposals",
+      "readShareProposalChanges",
+      "settleShareProposal",
+    ];
+    for (const channel of granterLane) {
+      const handler = handlerSource(channel);
+      // Directly, or through the one reader both review surfaces share —
+      // which is itself pinned to the granter gate below.
+      expect(
+        handler.includes("await requireShareProposalGranter(") ||
+          handler.includes("await openShareProposals("),
+        channel,
+      ).toBe(true);
+      expect(handler, `${channel}: a share view is never the granter`).not.toContain(
+        "requireShareProposalRecipient(",
+      );
+    }
+    const openAt = mainSource.indexOf("async function openShareProposals(");
+    expect(
+      mainSource.slice(openAt, openAt + 700),
+      "MUTATION: the shared reader is where two granter surfaces would lose their gate together",
+    ).toContain("await requireShareProposalGranter(workspaceId)");
+
+    const recipientLane = ["submitShareChanges", "listMyShareChanges", "withdrawShareChanges"];
+    for (const channel of recipientLane) {
+      const handler = handlerSource(channel);
+      expect(handler, channel).toContain("await requireShareProposalRecipient(");
+      expect(handler, `${channel}: shareId: input.` ).not.toContain("shareId: input.");
+    }
+
+    const granterAt = mainSource.indexOf("async function requireShareProposalGranter(");
+    const granter = mainSource.slice(
+      granterAt,
+      mainSource.indexOf("async function requireShareProposalRecipient(", granterAt),
+    );
+    expect(
+      granter,
+      "MUTATION: a share view accepting its own changes writes into someone else's workspace",
+    ).toContain("assertShareProposalGranter(requireWorkspace(workspaceId).shareView)");
+
+    // Which rule each recipient channel asks for. Sending needs the edit
+    // level; seeing and taking back what was already sent need membership
+    // only, because a reverse path a downgrade removes is not one. Both rules
+    // are driven behaviourally in `workspaces/shareProposals.test.ts`.
+    expect(
+      handlerSource("submitShareChanges"),
+      "MUTATION: an ungated submit sends a view recipient's edits to the granter",
+    ).toContain("requireShareViewProposalScope,");
+    for (const channel of ["listMyShareChanges", "withdrawShareChanges"]) {
+      expect(handlerSource(channel), channel).toContain("requireShareViewMembership,");
+    }
+    // The grant that leaves this machine is the PINNED one the scope resolved,
+    // never a selector the renderer stated.
+    expect(handlerSource("submitShareChanges")).toContain(
+      "grantedSelector: scope.grant,",
+    );
+  });
 });

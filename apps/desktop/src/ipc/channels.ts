@@ -691,6 +691,14 @@ export const CHANNELS = {
   openSharedView: "desktop:open-shared-view",
   refreshSharedView: "desktop:refresh-shared-view",
   dismissShareSkips: "desktop:dismiss-share-skips",
+  // Share changes (#646 PR3a). The first three act on a workspace this
+  // machine owns; the last three act from inside an edit-level share view.
+  listShareProposals: "desktop:list-share-proposals",
+  readShareProposalChanges: "desktop:read-share-proposal-changes",
+  settleShareProposal: "desktop:settle-share-proposal",
+  submitShareChanges: "desktop:submit-share-changes",
+  listMyShareChanges: "desktop:list-my-share-changes",
+  withdrawShareChanges: "desktop:withdraw-share-changes",
   mountShare: "desktop:mount-share",
   refreshShareMounts: "desktop:refresh-share-mounts",
   unmountShare: "desktop:unmount-share",

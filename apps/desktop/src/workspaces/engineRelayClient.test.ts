@@ -12,6 +12,7 @@ import {
   RelayOriginDivergedError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
+  SharedFileReadOnlyError,
 } from "@dohc/workspace-contracts/relay";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -44,6 +45,14 @@ const PINNED_SELECTOR = {
   paths: ["docs"],
   versionId: null,
   access: "view",
+} as const;
+// The same pinned selector at the one level that can offer changes (#646
+// PR3). Submitting through a view or comment grant is refused by the engine,
+// so a submit test that pinned `view` would prove nothing about the wire.
+const EDIT_SELECTOR = {
+  paths: ["docs"],
+  versionId: null,
+  access: "edit",
 } as const;
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
@@ -145,6 +154,13 @@ class MockDaemon implements EngineDaemonClient {
             nextCursor: 13,
             changedPaths: [],
             pendingCursor: { kind: "shareView", token: "share-cursor-13" },
+          };
+        case "share.proposal.submit":
+          return {
+            submitted: 2,
+            proposalId: "proposal-1",
+            skippedOutsideShare: 0,
+            morePending: false,
           };
         case "versions.ensureMain":
           return {
@@ -606,6 +622,172 @@ describe("EngineRelayClient", () => {
         },
       },
     ]);
+    await sessions.closeAll();
+  });
+
+  it("offers a share proposal through daemon RPC with its pinned selector and submit id", async () => {
+    const { daemon, sessions, client } = await harness();
+
+    await expect(
+      client.submitShareProposal({
+        shareId: "share-file",
+        grantedSelector: EDIT_SELECTOR,
+        submitId: "submit-1",
+      }),
+    ).resolves.toEqual({
+      submitted: 2,
+      proposalId: "proposal-1",
+      skippedOutsideShare: 0,
+      morePending: false,
+    });
+    expect(
+      daemon.requests
+        .filter((request) => request.method === "share.proposal.submit")
+        .map((request) => request.params),
+    ).toEqual([
+      {
+        workspaceId: "workspace-a",
+        shareId: "share-file",
+        // Every dimension, always, and the submit id with them: a submit
+        // that drops the level offers through a grant the engine cannot
+        // read, and one that drops the id opens a second proposal per retry.
+        grantedSelector: { paths: ["docs"], versionId: null, access: "edit" },
+        submitId: "submit-1",
+      },
+    ]);
+    expectStatefulRequestsScoped(daemon.requests);
+    await sessions.closeAll();
+  });
+
+  it("reports an empty share proposal submit as offering nothing, not as a failure", async () => {
+    const daemon = new MockDaemon((request) =>
+      request.method === "share.proposal.submit"
+        ? { submitted: 0, proposalId: null, skippedOutsideShare: 3, morePending: false }
+        : undefined,
+    );
+    const { client, sessions } = await harness(daemon);
+
+    await expect(
+      client.submitShareProposal({
+        shareId: "share-file",
+        grantedSelector: EDIT_SELECTOR,
+        submitId: "submit-empty",
+      }),
+    ).resolves.toEqual({
+      submitted: 0,
+      proposalId: null,
+      // A submit that offered nothing still says what it dropped: every
+      // change it found was outside what this share covers.
+      skippedOutsideShare: 3,
+      morePending: false,
+    });
+    await sessions.closeAll();
+  });
+
+  // What a submit LEFT BEHIND is not optional. A missing field read as zero
+  // would tell the recipient everything went when some of it did not.
+  it("refuses a share proposal submit that does not say what it left behind", async () => {
+    for (const [label, reply] of [
+      ["no skipped count", { submitted: 1, proposalId: "p", morePending: false }],
+      ["no pending flag", { submitted: 1, proposalId: "p", skippedOutsideShare: 0 }],
+    ] as const) {
+      const daemon = new MockDaemon((request) =>
+        request.method === "share.proposal.submit" ? (reply as JsonValue) : undefined,
+      );
+      const { client, sessions } = await harness(daemon);
+      await expect(
+        client.submitShareProposal({
+          shareId: "share-file",
+          grantedSelector: EDIT_SELECTOR,
+          submitId: `submit-${label}`,
+        }),
+        `MUTATION: ${label} softened to a default hides work that was not sent`,
+      ).rejects.toThrow(/share\.proposal\.submit\./u);
+      await sessions.closeAll();
+    }
+  });
+
+  it("refuses a share proposal submit that disagrees with itself about opening a proposal", async () => {
+    let reply: JsonValue = {
+      submitted: 2,
+      proposalId: null,
+      skippedOutsideShare: 0,
+      morePending: false,
+    };
+    const daemon = new MockDaemon((request) =>
+      request.method === "share.proposal.submit" ? reply : undefined,
+    );
+    const { client, sessions } = await harness(daemon);
+    const submit = async (submitId: string): Promise<unknown> =>
+      await client.submitShareProposal({
+        shareId: "share-file",
+        grantedSelector: EDIT_SELECTOR,
+        submitId,
+      });
+
+    // Changes offered, but no proposal to show the sender or to withdraw.
+    await expect(submit("submit-a")).rejects.toThrow(
+      /disagreed with itself/u,
+    );
+    // A proposal opened over nothing.
+    reply = {
+      submitted: 0,
+      proposalId: "proposal-empty",
+      skippedOutsideShare: 0,
+      morePending: false,
+    };
+    await expect(submit("submit-b")).rejects.toThrow(
+      /disagreed with itself/u,
+    );
+    // Neither field may be coerced: a number is not an id, and "" is not a
+    // proposal that exists.
+    reply = { submitted: 1, proposalId: 7 };
+    await expect(submit("submit-c")).rejects.toThrow(
+      /proposalId must be a string or null/u,
+    );
+    reply = { submitted: 1, proposalId: "" };
+    await expect(submit("submit-d")).rejects.toThrow(
+      /proposalId must be a string or null/u,
+    );
+    reply = { proposalId: "proposal-1" };
+    await expect(submit("submit-e")).rejects.toThrow(
+      /submitted must be a non-negative integer/u,
+    );
+    await sessions.closeAll();
+  });
+
+  it("reports a level-refused share proposal as a read-only file, not a read-only chat", async () => {
+    let readOnlyMarker = false;
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "share.proposal.submit") return undefined;
+      throw new DaemonRefusalError(
+        {
+          code: "INVALID_PARAMS",
+          message: readOnlyMarker ? "share-read-only" : "payload-too-large",
+          retry: "no",
+        },
+        new Error("refused"),
+      );
+    });
+    const { client, sessions } = await harness(daemon);
+    const submit = async (submitId: string): Promise<unknown> =>
+      await client.submitShareProposal({
+        shareId: "share-file",
+        grantedSelector: EDIT_SELECTOR,
+        submitId,
+      });
+
+    await expect(submit("submit-other")).rejects.toBeInstanceOf(
+      DaemonRefusalError,
+    );
+    readOnlyMarker = true;
+    const refusal = await submit("submit-read-only").catch(
+      (error: unknown) => error,
+    );
+    expect(refusal).toBeInstanceOf(SharedFileReadOnlyError);
+    // The noun, not just the class: the relay answers ONE code for chat and
+    // for changes, so this name is the only thing that carries which one.
+    expect((refusal as Error).name).toBe("SharedFileReadOnlyError");
     await sessions.closeAll();
   });
 

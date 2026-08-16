@@ -2844,6 +2844,22 @@ SELECT d.workspace_id, d.version_id, d.object_id,
 
 pub(crate) const YDOC_RELAY_ARBITRATION_MIGRATION_ID: &str = "v1-ydoc-relay-arbitration";
 
+/// Ordinal 37. A recipient of an edit-level file share submits its own changes
+/// to the granter as a proposal (#646 PR3a), and a submit must know where the
+/// last one stopped reading the local journal. That position is its own fact:
+/// `shared_channel_push_state` records what a share has PUSHED, and a proposal
+/// pushes nothing until the recipient decides to submit.
+const V1_SHARE_PROPOSAL_PUSH_STATE_DDL: &str = "\
+CREATE TABLE share_proposal_push_state (
+    workspace_id TEXT    NOT NULL,
+    share_id     TEXT    NOT NULL,
+    scanned_seq  INTEGER NOT NULL CHECK (scanned_seq >= -1),
+    PRIMARY KEY (workspace_id, share_id)
+) STRICT;
+";
+
+pub(crate) const SHARE_PROPOSAL_PUSH_STATE_MIGRATION_ID: &str = "v1-share-proposal-push-state";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -3108,6 +3124,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: SHARE_VIEW_FILE_LANE_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_SHARE_VIEW_FILE_LANE_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 37,
+        id: SHARE_PROPOSAL_PUSH_STATE_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SHARE_PROPOSAL_PUSH_STATE_DDL,
         sets_user_version: None,
     },
 ];
@@ -3378,6 +3401,22 @@ fn apply_non_transactional(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The REAL ledger is well-formed. `validate_migration_order` runs before
+    /// every migration, so a malformed list already fails closed at runtime —
+    /// but nothing asserted it against `BASELINE_MIGRATIONS` itself, so a
+    /// duplicate ordinal would first be seen by whoever opened a store.
+    ///
+    /// Two branches taking the same ordinal is not hypothetical: #646 PR3-1
+    /// and PR3a both wrote ordinal 36, and the collision was caught by hand at
+    /// rebase. This is the check that would have caught it either way.
+    #[test]
+    fn the_real_migration_ledger_has_unique_increasing_ordinals_and_ids() {
+        validate_migration_order(BASELINE_MIGRATIONS).expect(
+            "MUTATION: the shipped migration list must have strictly increasing ordinals \
+             and unique ids, or a migration never applies and DDL runs out of order",
+        );
+    }
     #[cfg(feature = "fault-injection")]
     use crate::faults::FaultAction;
     use crate::faults::NoFaults;
