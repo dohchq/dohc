@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 import { lstat, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
-import type {
-  PluginSettingDeclaration,
-  PluginSettingValue,
+import {
+  MAX_SETTING_VALUE_CHARS,
+  type PluginSettingDeclaration,
+  type PluginSettingValue,
 } from "./pluginManifestSchema";
 
 // A plugin's settings are the user's answers, so they live in the workspace as
@@ -68,10 +69,11 @@ function readStoredSettings(body: unknown): StoredPluginSettings {
  * What a plugin's settings actually are: its declared defaults, with a stored
  * value replacing a default only when that value fits the declaration. Every
  * declared key is present and no undeclared key is, so a plugin never has to
- * check whether a setting exists. A stored value of the wrong type, or a
- * select answer that is no longer an option, falls back to the default rather
- * than reaching the plugin — the manifest is what a value has to satisfy, and
- * a manifest can change under a file that was written for an older one.
+ * check whether a setting exists. A stored value of the wrong type, a string
+ * past the value cap, or a select answer that is no longer an option, falls
+ * back to the default rather than reaching the plugin — the manifest is what
+ * a value has to satisfy, and a manifest can change under a file that was
+ * written for an older one.
  */
 export function resolvePluginSettings(
   declared: readonly PluginSettingDeclaration[],
@@ -92,8 +94,14 @@ function fitsDeclaration(
   value: unknown,
 ): value is PluginSettingValue {
   switch (setting.type) {
+    // The IPC contract caps a string at MAX_SETTING_VALUE_CHARS, and the
+    // manifest caps every declared default the same way. A longer stored
+    // value is not a settings value: kept, it would fail the contract on its
+    // way to the renderer and the reader would get a validation error where
+    // their settings should be, with nothing in the app to undo it.
     case "string":
-      return typeof value === "string";
+      return typeof value === "string"
+        && value.length <= MAX_SETTING_VALUE_CHARS;
     case "boolean":
       return typeof value === "boolean";
     case "number":
@@ -202,9 +210,16 @@ export function savePluginSettings(
 }
 
 function settingTypeName(setting: PluginSettingDeclaration): string {
-  return setting.type === "select"
-    ? `one of ${setting.options.map((option) => `"${option}"`).join(", ")}`
-    : setting.type;
+  switch (setting.type) {
+    case "select":
+      return `one of ${setting.options.map((option) => `"${option}"`).join(", ")}`;
+    // Names the cap, because a refused string is as likely to be too long as
+    // to be the wrong type.
+    case "string":
+      return `string of ${MAX_SETTING_VALUE_CHARS} characters or fewer`;
+    default:
+      return setting.type;
+  }
 }
 
 async function writePluginSettingsFile(

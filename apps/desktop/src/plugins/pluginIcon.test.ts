@@ -101,6 +101,23 @@ describe("verifyPluginIcon", () => {
     expect(result.diagnostic).toContain("is not a readable file");
   });
 
+  it("refuses an icon reached through a directory link out of the root", async () => {
+    // Nothing on the icon's own path is a link: `assets` is, and lstat
+    // follows it. Only comparing real path to real path catches this one.
+    // A junction rather than a symlink, so Windows runs the check too
+    // instead of skipping it for want of developer mode.
+    const outside = join(root, "outside");
+    await mkdir(outside);
+    await writeFile(join(outside, "icon.png"), "png bytes");
+    await symlink(outside, join(pluginRoot, "assets"), "junction");
+
+    const result = await verifyPluginIcon(pluginRoot, "assets/icon.png");
+
+    expect(result.icon).toBeNull();
+    expect(result.diagnostic).toContain(join(outside, "icon.png"));
+    expect(result.diagnostic).toContain("outside the plugin root");
+  });
+
   it("refuses a path that escapes the root before it touches the disk", async () => {
     const result = await verifyPluginIcon(pluginRoot, "../../escape.png");
 

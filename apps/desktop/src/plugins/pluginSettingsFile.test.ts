@@ -1,9 +1,14 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { PluginSettingDeclaration } from "./pluginManifestSchema";
+import { PluginSettingsResult } from "../ipc/bridgeContract";
 import {
+  MAX_SETTING_VALUE_CHARS,
+  type PluginSettingDeclaration,
+} from "./pluginManifestSchema";
+import {
+  MAX_PLUGIN_SETTINGS_FILE_BYTES,
   PLUGIN_SETTINGS_FILE,
   readPluginSettingsFile,
   resolvePluginSettings,
@@ -79,6 +84,30 @@ describe("resolvePluginSettings", () => {
     },
   );
 
+  it("falls back to the default for a string past the value cap", () => {
+    // A hand-edited or synced file can hold any string. The IPC contract
+    // cannot: it caps a value at MAX_SETTING_VALUE_CHARS, and a resolved
+    // payload that carries an over-long value fails on its way to the
+    // renderer — the reader gets a validation error where their settings
+    // should be, and no control in the app can put it right.
+    const values = resolvePluginSettings(DECLARED, {
+      greeting: "x".repeat(5_000),
+    });
+
+    expect(values.greeting).toBe("Hello");
+    expect(PluginSettingsResult.parse({ ok: true, values })).toEqual({
+      ok: true,
+      values,
+    });
+  });
+
+  it("keeps a stored string exactly at the value cap", () => {
+    const atCap = "x".repeat(MAX_SETTING_VALUE_CHARS);
+
+    expect(resolvePluginSettings(DECLARED, { greeting: atCap }).greeting)
+      .toBe(atCap);
+  });
+
   it("drops a key the manifest does not declare", () => {
     const values = resolvePluginSettings(DECLARED, {
       greeting: "Hei",
@@ -111,6 +140,23 @@ describe("readPluginSettingsFile", () => {
   ])("reads %s as empty rather than failing", async (_case, body) => {
     await writeSettingsFile(workspaceRoot, body);
 
+    expect(await readPluginSettingsFile(workspaceRoot)).toEqual({});
+  });
+
+  it("reads a file past the size cap as empty, without parsing it", async () => {
+    const path = await writeSettingsFile(
+      workspaceRoot,
+      JSON.stringify({
+        "t3-code": {
+          greeting: "Hei",
+          filler: "x".repeat(MAX_PLUGIN_SETTINGS_FILE_BYTES),
+        },
+      }),
+    );
+
+    expect((await stat(path)).size).toBeGreaterThan(
+      MAX_PLUGIN_SETTINGS_FILE_BYTES,
+    );
     expect(await readPluginSettingsFile(workspaceRoot)).toEqual({});
   });
 
@@ -180,7 +226,7 @@ describe("savePluginSettings", () => {
   it.each([
     ["shout", "yes", "boolean"],
     ["repeat", "three", "number"],
-    ["greeting", 7, "string"],
+    ["greeting", 7, `string of ${MAX_SETTING_VALUE_CHARS} characters or fewer`],
   ])(
     "refuses %s with the wrong type and names the type it wanted",
     async (key, value, typeName) => {
@@ -191,6 +237,32 @@ describe("savePluginSettings", () => {
       ).rejects.toThrow(new RegExp(`must be a ${typeName}\\.$`));
     },
   );
+
+  it("refuses a string past the value cap, and names the cap", async () => {
+    await expect(
+      savePluginSettings(workspaceRoot, "hello-plugin", DECLARED, {
+        greeting: "x".repeat(MAX_SETTING_VALUE_CHARS + 1),
+      }),
+    ).rejects.toThrow(
+      `must be a string of ${MAX_SETTING_VALUE_CHARS} characters or fewer.`,
+    );
+    expect(await readPluginSettingsFile(workspaceRoot)).toEqual({});
+  });
+
+  it("stores a string exactly at the value cap", async () => {
+    const atCap = "x".repeat(MAX_SETTING_VALUE_CHARS);
+
+    const values = await savePluginSettings(
+      workspaceRoot,
+      "hello-plugin",
+      DECLARED,
+      { greeting: atCap },
+    );
+
+    expect(values.greeting).toBe(atCap);
+    expect((await readPluginSettingsFile(workspaceRoot))["hello-plugin"]
+      ?.greeting).toBe(atCap);
+  });
 
   it("refuses a select answer that is not an option, and lists the options", async () => {
     await expect(

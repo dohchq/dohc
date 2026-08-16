@@ -4258,6 +4258,63 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   });
 
+  it("saves a setting and tells the plugin's host what its settings became", async () => {
+    const fixture = await createPluginWorkspace();
+    await writeFile(
+      join(fixture.pluginRoot, "dohc-plugin.json"),
+      `${JSON.stringify({
+        version: 1,
+        name: "example-plugin",
+        entry: "src/index.ts",
+        settings: [
+          {
+            key: "greeting",
+            type: "string",
+            label: "Greeting",
+            default: "Hello",
+          },
+          { key: "shout", type: "boolean", label: "Shout", default: false },
+        ],
+      }, null, 2)}\n`,
+    );
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    const told = vi.spyOn(host, "notifySettingsChanged");
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+
+      const values = await pipeline.setPluginSettings("example-plugin", {
+        greeting: "Hei",
+      });
+
+      // Every declared setting under the one answer the user changed: a
+      // plugin hears what its settings ARE, never the patch.
+      expect(values).toEqual({ greeting: "Hei", shout: false });
+      expect(told).toHaveBeenCalledWith("example-plugin", values);
+      // Saved, not only announced.
+      expect(await pipeline.getPluginSettings("example-plugin")).toEqual(values);
+    } finally {
+      await pipeline.dispose();
+    }
+  });
+
   it("advertises no icon, and says why, when the declared file is missing", async () => {
     const fixture = await createPluginWorkspace();
     await writeFile(

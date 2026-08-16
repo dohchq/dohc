@@ -1414,41 +1414,162 @@ describe("PluginDetailsPage", () => {
       expect(alert.textContent).toContain("must be a boolean");
     });
 
-    it("never paints one workspace's values onto another", async () => {
-      const slow = deferred<{ ok: true; values: Record<string, unknown> }>();
+    function greetingField(): HTMLInputElement {
+      return screen.getByTestId(
+        "plugin-setting-input-greeting",
+      ) as HTMLInputElement;
+    }
+
+    // Both pins switch plugin on a page that is already showing the section,
+    // so nothing unmounts and the request token is the only thing that can
+    // refuse the answer the reader walked away from. Switching before the
+    // section mounts proves nothing: there is no losing request to lose.
+    function withTwoPlugins() {
       bridgeMock.listPlugins.mockResolvedValue({
         ok: true,
-        plugins: [plugin("hello-plugin", { settings: declared })],
+        plugins: [
+          plugin("hello-plugin", { settings: declared }),
+          plugin("other-plugin", { settings: declared }),
+        ],
       });
+    }
+
+    it("asks the workspace it is showing, and paints that workspace's values", async () => {
+      withTwoPlugins();
       bridgeMock.getPluginSettings.mockImplementation(
         ({ workspaceId }: { workspaceId: string }) =>
-          workspaceId === "ws-old"
-            ? slow.promise
-            : Promise.resolve({ ok: true, values: { ...defaults, greeting: "New" } }),
+          Promise.resolve({
+            ok: true,
+            values: workspaceId === "ws-old"
+              ? defaults
+              : { ...defaults, greeting: "New" },
+          }),
       );
 
       const view = render(
         <PluginDetailsPage workspaceId="ws-old" pluginId="hello-plugin" />,
       );
+      await waitFor(() => expect(greetingField().value).toBe("Hello"));
+
       view.rerender(
         <PluginDetailsPage workspaceId="ws-new" pluginId="hello-plugin" />,
       );
-      await waitFor(() =>
-        expect(
-          (screen.getByTestId("plugin-setting-input-greeting") as HTMLInputElement)
-            .value,
-        ).toBe("New")
+
+      await waitFor(() => expect(greetingField().value).toBe("New"));
+      expect(bridgeMock.getPluginSettings).toHaveBeenCalledWith({
+        workspaceId: "ws-new",
+        pluginId: "hello-plugin",
+      });
+    });
+
+    it("never paints the plugin the reader left onto the one they opened", async () => {
+      const slowLoad = deferred<{ ok: true; values: Record<string, unknown> }>();
+      withTwoPlugins();
+      bridgeMock.getPluginSettings.mockImplementation(
+        ({ pluginId }: { pluginId: string }) =>
+          pluginId === "hello-plugin"
+            ? slowLoad.promise
+            : Promise.resolve({
+              ok: true,
+              values: { ...defaults, greeting: "Other" },
+            }),
       );
 
+      const view = renderPage("hello-plugin");
+      // Mounted, and its load issued: only now is there an answer to lose.
+      const section = await screen.findByTestId("plugin-settings");
+      await waitFor(() =>
+        expect(bridgeMock.getPluginSettings).toHaveBeenCalledWith({
+          workspaceId: "ws-1",
+          pluginId: "hello-plugin",
+        })
+      );
+
+      view.rerender(
+        <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" />,
+      );
+      await waitFor(() => expect(greetingField().value).toBe("Other"));
+      expect(screen.getByTestId("plugin-settings")).toBe(section);
+
       await act(async () => {
-        slow.resolve({ ok: true, values: { ...defaults, greeting: "Old" } });
-        await slow.promise;
+        slowLoad.resolve({ ok: true, values: { ...defaults, greeting: "Hei" } });
+        await slowLoad.promise;
       });
 
+      expect(greetingField().value).toBe("Other");
+    });
+
+    it("never paints a save the reader left onto the plugin they opened", async () => {
+      const slowSave = deferred<{ ok: true; values: Record<string, unknown> }>();
+      withTwoPlugins();
+      bridgeMock.getPluginSettings.mockImplementation(
+        ({ pluginId }: { pluginId: string }) =>
+          Promise.resolve({
+            ok: true,
+            values: pluginId === "hello-plugin"
+              ? defaults
+              : { ...defaults, greeting: "Other" },
+          }),
+      );
+      bridgeMock.setPluginSettings.mockReturnValue(slowSave.promise);
+
+      const view = renderPage("hello-plugin");
+      await screen.findByTestId("plugin-setting-input-greeting");
+      await userEvent.click(screen.getByRole("switch", { name: "Shout" }));
+      expect(bridgeMock.setPluginSettings).toHaveBeenCalled();
+      const section = screen.getByTestId("plugin-settings");
+
+      view.rerender(
+        <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" />,
+      );
+      await waitFor(() => expect(greetingField().value).toBe("Other"));
+      expect(screen.getByTestId("plugin-settings")).toBe(section);
+
+      await act(async () => {
+        slowSave.resolve({
+          ok: true,
+          values: { ...defaults, greeting: "Hei", shout: true },
+        });
+        await slowSave.promise;
+      });
+
+      expect(greetingField().value).toBe("Other");
       expect(
-        (screen.getByTestId("plugin-setting-input-greeting") as HTMLInputElement)
-          .value,
-      ).toBe("New");
+        screen.getByRole("switch", { name: "Shout" }).getAttribute("aria-checked"),
+      ).toBe("false");
+    });
+
+    it("says nothing about a save that failed for the plugin the reader left", async () => {
+      const slowSave = deferred<{ ok: true; values: Record<string, unknown> }>();
+      withTwoPlugins();
+      bridgeMock.getPluginSettings.mockImplementation(
+        ({ pluginId }: { pluginId: string }) =>
+          Promise.resolve({
+            ok: true,
+            values: pluginId === "hello-plugin"
+              ? defaults
+              : { ...defaults, greeting: "Other" },
+          }),
+      );
+      bridgeMock.setPluginSettings.mockReturnValue(slowSave.promise);
+
+      const view = renderPage("hello-plugin");
+      await screen.findByTestId("plugin-setting-input-greeting");
+      await userEvent.click(screen.getByRole("switch", { name: "Shout" }));
+
+      view.rerender(
+        <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" />,
+      );
+      await waitFor(() => expect(greetingField().value).toBe("Other"));
+
+      await act(async () => {
+        slowSave.reject(new Error("the workspace closed"));
+        await slowSave.promise.catch(() => undefined);
+      });
+
+      // The failure belongs to the plugin the reader left. Shown here, it
+      // blames the plugin now on screen for something it never did.
+      expect(screen.queryByTestId("plugin-settings-error")).toBeNull();
     });
   });
 });
