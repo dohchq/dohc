@@ -189,12 +189,13 @@ async function createShare(
   h: SyncRelayHandler,
   access: "view" | "comment" | "edit",
   paths: string[] = ["docs"],
+  versionId?: string,
 ): Promise<string> {
   const response = await h(
     request(
       GRANTER,
       `/sync/${WORKSPACE}/shares`,
-      jsonBody({ recipientUserId: RECIPIENT, paths, access }),
+      jsonBody({ recipientUserId: RECIPIENT, paths, access, versionId }),
     ),
   );
   expect(response.status, await response.clone().text()).toBe(200);
@@ -1069,5 +1070,229 @@ describe("sync_relay_object_paths seeding (#646 PR2, addendum A)", () => {
     // applies the same latest-wins rule the insert-time upsert does.
     await log.append(log.delete("object-in", "docs/renamed.md"));
     expect(storage.objectCurrentPath(WORKSPACE, "object-in")).toBeNull();
+  });
+});
+
+// #646 PR3-0 — the append route accepts chat only.
+//
+// A file share at `comment` or `edit` accepts appends (PR2), and the route used
+// to filter them with `filterOpForShare` — the READ filter. That filter admits
+// every in-selector `moment.append`, plus `workspace.init` and a matching
+// `version.create`. So a modified client could push a delete, a rename, or a
+// revert into the GRANTER's log, and the owner lane replayed it.
+//
+// Every case here drives the real POST route and then reads the GRANTER's own
+// log back through the owner route. The status alone proves nothing: a refusal
+// that still inserted is the defect, so the log is the assertion.
+describe("the append gate accepts chat only (#646 PR3-0)", () => {
+  const LEVELS = ["comment", "edit"] as const;
+
+  async function ownerLog(h: SyncRelayHandler): Promise<unknown[]> {
+    const response = await h(request(GRANTER, `/sync/${WORKSPACE}/log?since=0&limit=500`));
+    expect(response.status, await response.clone().text()).toBe(200);
+    return (await json(response)).ops as unknown[];
+  }
+
+  function pushOp(
+    h: SyncRelayHandler,
+    shareId: string,
+    opKind: string,
+    payload: Record<string, unknown>,
+  ): Promise<Response> {
+    return h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${shareId}/log`,
+        jsonBody({
+          originId: "recipient-origin",
+          ops: [{ originSeq: 0, opKind, recordedAtMs: 5000, payload }],
+        }),
+      ),
+    );
+  }
+
+  // A moment shaped exactly like one the granter's own engine writes, so the
+  // read filter admits it: every path it names is inside the selector and its
+  // version matches. Only the append filter can refuse this.
+  function forgedMoment(overrides: Record<string, unknown>): Record<string, unknown> {
+    return {
+      momentId: "moment-forged",
+      versionId: "main",
+      objectId: "object-in",
+      path: "docs/in.md",
+      recordedAtMs: 5000,
+      operation: "write",
+      payloadBeforeBlobSha256: null,
+      payloadBeforePath: null,
+      payloadAfterBlobSha256: null,
+      payloadAfterPath: "docs/in.md",
+      metadata: { origin: "user" },
+      beforePresent: "null",
+      ...overrides,
+    };
+  }
+
+  const DELETE_MOMENT = forgedMoment({
+    operation: "delete",
+    payloadBeforePath: "docs/in.md",
+    payloadAfterPath: null,
+  });
+
+  const RENAME_MOMENT = forgedMoment({
+    operation: "rename",
+    path: "docs/renamed.md",
+    payloadBeforePath: "docs/in.md",
+    beforePath: "docs/in.md",
+    payloadAfterPath: "docs/renamed.md",
+  });
+
+  for (const access of LEVELS) {
+    it(`refuses a ${access} recipient's delete moment and lands nothing`, async () => {
+      const { storage } = await testStorage();
+      const h = handler(storage);
+      await seedWorkspace(h);
+      const shareId = await createShare(h, access);
+      const before = await ownerLog(h);
+
+      const push = await pushOp(h, shareId, "moment.append", DELETE_MOMENT);
+
+      expect(push.status, await push.clone().text()).toBe(403);
+      expect((await json(push)).code).toBe("share_op_rejected");
+      expect(
+        await ownerLog(h),
+        "MUTATION: a recipient's delete must never reach the granter's log",
+      ).toEqual(before);
+      // And the file is still where it was: the delete did not apply.
+      expect(storage.objectCurrentPath(WORKSPACE, "object-in")).toBe("docs/in.md");
+    });
+
+    it(`refuses a ${access} recipient's rename moment and lands nothing`, async () => {
+      const { storage } = await testStorage();
+      const h = handler(storage);
+      await seedWorkspace(h);
+      const shareId = await createShare(h, access);
+      const before = await ownerLog(h);
+
+      const push = await pushOp(h, shareId, "moment.append", RENAME_MOMENT);
+
+      expect(push.status, await push.clone().text()).toBe(403);
+      expect((await json(push)).code).toBe("share_op_rejected");
+      expect(
+        await ownerLog(h),
+        "MUTATION: a recipient's rename must never reach the granter's log",
+      ).toEqual(before);
+      expect(storage.objectCurrentPath(WORKSPACE, "object-in")).toBe("docs/in.md");
+    });
+
+    it(`refuses a ${access} recipient's workspace.init and lands nothing`, async () => {
+      const { storage } = await testStorage();
+      const h = handler(storage);
+      await seedWorkspace(h);
+      const shareId = await createShare(h, access);
+      const before = await ownerLog(h);
+
+      const push = await pushOp(h, shareId, "workspace.init", {});
+
+      expect(push.status, await push.clone().text()).toBe(403);
+      expect((await json(push)).code).toBe("share_op_rejected");
+      expect(
+        await ownerLog(h),
+        "MUTATION: the payload-free bootstrap op is a READ op and must not append",
+      ).toEqual(before);
+    });
+
+    it(`refuses a ${access} recipient's version.create and lands nothing`, async () => {
+      const { storage } = await testStorage();
+      const h = handler(storage);
+      await seedWorkspace(h);
+      // A share pinned to a version still selects paths, so it still accepts
+      // chat appends — and the read filter admits a version.create matching the
+      // pinned id. That pair is what made this op appendable.
+      const shareId = await createShare(h, access, ["docs"], "v-shared");
+      const before = await ownerLog(h);
+
+      const push = await pushOp(h, shareId, "version.create", {
+        versionId: "v-shared",
+        forkSnapshots: [],
+      });
+
+      expect(push.status, await push.clone().text()).toBe(403);
+      expect((await json(push)).code).toBe("share_op_rejected");
+      expect(
+        await ownerLog(h),
+        "MUTATION: a recipient must not create a version in the granter's workspace",
+      ).toEqual(before);
+    });
+
+    it(`still accepts a ${access} recipient's chat, unchanged`, async () => {
+      const { storage } = await testStorage();
+      const h = handler(storage);
+      await seedWorkspace(h);
+      const shareId = await createShare(h, access);
+
+      const push = await h(
+        request(
+          RECIPIENT,
+          `/sync/shares/${shareId}/log`,
+          jsonBody({
+            originId: "recipient-origin",
+            ops: [
+              {
+                originSeq: 0,
+                opKind: "chat.thread.create",
+                recordedAtMs: 5000,
+                payload: {
+                  threadId: `thread-${access}`,
+                  title: "Still fine",
+                  createdAtMs: 5000,
+                  linkedAtMs: 5000,
+                  linkedPath: "docs/in.md",
+                },
+              },
+              {
+                originSeq: 1,
+                opKind: "chat.message.append",
+                recordedAtMs: 5001,
+                payload: {
+                  messageId: `m-${access}`,
+                  threadId: `thread-${access}`,
+                  authorKind: "human",
+                  authorDisplayName: "Recipient",
+                  authorUserId: RECIPIENT,
+                  body: "the gate must not close on chat",
+                  createdAtMs: 5001,
+                },
+              },
+            ],
+          }),
+        ),
+      );
+
+      expect(push.status, await push.clone().text()).toBe(200);
+      expect(await json(push)).toMatchObject({ ok: true, accepted: 2, inserted: 2 });
+      const served = chatOps(await readShareLog(h, shareId));
+      expect(served.map((op) => op.payload.messageId).filter(Boolean)).toContain(`m-${access}`);
+    });
+  }
+
+  it("refuses the same bytes at comment and at edit", async () => {
+    // A level-specific refusal would tell a probing recipient which level it
+    // holds. Both levels answer with the identical status and body.
+    const refusals: string[] = [];
+    for (const access of LEVELS) {
+      const { storage } = await testStorage();
+      const h = handler(storage);
+      await seedWorkspace(h);
+      const shareId = await createShare(h, access);
+      const push = await pushOp(h, shareId, "moment.append", DELETE_MOMENT);
+      refusals.push(`${push.status} ${await push.text()}`);
+    }
+    // Equal is not enough: two identical SUCCESSES are also equal. Both must be
+    // the refusal, and then be the same refusal.
+    for (const refusal of refusals) {
+      expect(refusal, "MUTATION: identical is only meaningful if both refuse").toContain("403");
+      expect(refusal).toContain("share_op_rejected");
+    }
+    expect(refusals[0]).toBe(refusals[1]);
   });
 });
