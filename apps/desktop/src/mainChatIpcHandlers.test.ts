@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import {
+  assertShareChatWritable,
+  type ShareChatWriteScope,
+} from "./workspaces/shareChatGate";
 import { CHANNELS } from "./ipc/channels";
 import {
   ListChatChannelSharesResult,
@@ -62,8 +66,10 @@ function boundaryDeps(contexts: Map<string, TestContext>) {
       if (!context) throw new Error("Workspace not found.");
       return context;
     },
-    assertWritableWorkspace(workspace: TestContext["workspace"]) {
-      if (workspace.readOnly) throw new Error("This is a shared view — it is read-only.");
+    assertWritable(context: TestContext) {
+      if (context.workspace.readOnly) {
+        throw new Error("This is a shared view — it is read-only.");
+      }
     },
   };
 }
@@ -458,7 +464,7 @@ describe("runtime main chat IPC boundaries", () => {
           };
         },
         requireContext: deps.requireContext,
-        assertWritableWorkspace: deps.assertWritableWorkspace,
+        assertWritable: deps.assertWritable,
         assertSharedChannelWritable: assertJoinedChannelWritable,
         run: markThreadRead,
       }),
@@ -1325,5 +1331,182 @@ describe("createListJoinedSharedChannelsIpcHandler", () => {
     await expect(
       handler({ trusted: false }, { workspaceId: "ws-1", channelWireIds: [] }),
     ).rejects.toThrow("untrusted");
+  });
+});
+
+// #646 PR2 — the LEVEL as a write gate, driven through the real factories.
+//
+// The source pins in main.chatSecurity.test.ts prove the gate's POSITION.
+// Position is not behaviour: a gate can sit first and decide nothing. These
+// drive the factory and watch what runs.
+describe("chat scope write gate (#646 PR2)", () => {
+  type ShareAccess = "view" | "comment" | "edit";
+  type ChatScope =
+    | { kind: "workspace"; workspace: { workspaceId: string } }
+    | ({ kind: "share"; workspace: { workspaceId: string } } & ShareChatWriteScope);
+
+  const workspaceId = "workspace-share";
+
+  // A share scope with every field main fills in. Defaults are the healthy
+  // case; each test overrides the one thing it is about.
+  function shareScope(over: Partial<ShareChatWriteScope>): ChatScope {
+    return {
+      kind: "share",
+      workspace: { workspaceId },
+      access: "comment",
+      ended: false,
+      authorUserId: "recipient",
+      ...over,
+    };
+  }
+
+  // THE REAL GATE, not a copy of it. A re-implementation here proves only
+  // that the copy behaves, and the copy this replaced had already drifted
+  // from main — it made `ended` optional where main makes it required.
+  function assertChatWritable(scope: ChatScope): void {
+    if (scope.kind !== "share") return;
+    assertShareChatWritable(scope);
+  }
+
+  function harnessFor(scope: ChatScope) {
+    const ipc = runtimeHarness();
+    const run = vi.fn(async () => ({ ok: true }));
+    return {
+      ipc,
+      run,
+      deps: {
+        assertTrustedSender(event: TestEvent) {
+          if (!event.trusted) throw new Error("Untrusted renderer.");
+        },
+        parsePayload(payload: unknown) {
+          const parsed = payload as { workspaceId?: unknown };
+          if (typeof parsed?.workspaceId !== "string") throw new Error("Invalid payload.");
+          return { workspaceId: parsed.workspaceId };
+        },
+        async requireContext() {
+          return scope;
+        },
+        run,
+      },
+    };
+  }
+
+  it("refuses a mutation on an ENDED share, whatever level it granted", async () => {
+    // The granter ended the share. The local copy stays readable and takes no
+    // writes — the same rule an ended chat-channel grant follows. Without
+    // this the row lands durably, the panel shows it, and the push bails on
+    // `ended` first thing: a write that looks sent and never is.
+    const { ipc, run, deps } = harnessFor(shareScope({ ended: true }));
+    ipc.handle(
+      CHANNELS.setChatReaction,
+      createSetChatReactionIpcHandler({
+        ...deps,
+        assertWritable: assertChatWritable,
+        syncJoinedChannels: () => undefined,
+        queueCloudSync: () => undefined,
+      }),
+    );
+    await expect(ipc.invoke(CHANNELS.setChatReaction, { workspaceId })).rejects.toThrow(
+      "This shared file is read-only for you.",
+    );
+    expect(
+      run,
+      "MUTATION: an ended share still writes a durable row nothing will ever send",
+    ).not.toHaveBeenCalled();
+  });
+  it("refuses a mutation at view level with the refusal words, before the store", async () => {
+    const { ipc, run, deps } = harnessFor(shareScope({ access: "view" }));
+    ipc.handle(
+      CHANNELS.setChatReaction,
+      createSetChatReactionIpcHandler({
+        ...deps,
+        assertWritable: assertChatWritable,
+        syncJoinedChannels: () => undefined,
+        queueCloudSync: () => undefined,
+      }),
+    );
+    await expect(ipc.invoke(CHANNELS.setChatReaction, { workspaceId })).rejects.toThrow(
+      "This shared file is read-only for you.",
+    );
+    expect(
+      run,
+      "MUTATION: an ungated view share writes a durable row before anything refuses it",
+    ).not.toHaveBeenCalled();
+  });
+
+  it("runs the same mutation at comment and at edit", async () => {
+    for (const access of ["comment", "edit"] as const) {
+      const { ipc, run, deps } = harnessFor(shareScope({ access }));
+      ipc.handle(
+        CHANNELS.setChatReaction,
+        createSetChatReactionIpcHandler({
+          ...deps,
+          assertWritable: assertChatWritable,
+          syncJoinedChannels: () => undefined,
+          queueCloudSync: () => undefined,
+        }),
+      );
+      await expect(ipc.invoke(CHANNELS.setChatReaction, { workspaceId })).resolves.toEqual({
+        ok: true,
+      });
+      expect(run, access).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("leaves a local workspace's chat writes untouched", async () => {
+    const { ipc, run, deps } = harnessFor({ kind: "workspace", workspace: { workspaceId } });
+    ipc.handle(
+      CHANNELS.setChatReaction,
+      createSetChatReactionIpcHandler({
+        ...deps,
+        assertWritable: assertChatWritable,
+        syncJoinedChannels: () => undefined,
+        queueCloudSync: () => undefined,
+      }),
+    );
+    await expect(ipc.invoke(CHANNELS.setChatReaction, { workspaceId })).resolves.toEqual({
+      ok: true,
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks a thread read at EVERY level, view included", async () => {
+    // Read state is the reader's own, written locally and never replicated.
+    // `assertWritable: null` is the call site saying so out loud.
+    for (const access of ["view", "comment", "edit"] as const) {
+      const { ipc, run, deps } = harnessFor(shareScope({ access }));
+      ipc.handle(
+        CHANNELS.markChatThreadRead,
+        createSharedChannelWritableChatIpcHandler({
+          ...deps,
+          assertWritable: null,
+          assertSharedChannelWritable: async () => undefined,
+        }),
+      );
+      await expect(ipc.invoke(CHANNELS.markChatThreadRead, { workspaceId })).resolves.toEqual({
+        ok: true,
+      });
+      expect(run, access).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("still refuses an untrusted sender before it ever resolves a scope", async () => {
+    const requireContext = vi.fn(async () => shareScope({}));
+    const { ipc, run, deps } = harnessFor(shareScope({}));
+    ipc.handle(
+      CHANNELS.setChatReaction,
+      createSetChatReactionIpcHandler({
+        ...deps,
+        requireContext,
+        assertWritable: assertChatWritable,
+        syncJoinedChannels: () => undefined,
+        queueCloudSync: () => undefined,
+      }),
+    );
+    await expect(
+      ipc.invoke(CHANNELS.setChatReaction, { workspaceId }, { trusted: false }),
+    ).rejects.toThrow("Untrusted renderer.");
+    expect(requireContext).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
   });
 });

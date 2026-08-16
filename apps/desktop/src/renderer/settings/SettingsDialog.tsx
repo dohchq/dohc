@@ -638,7 +638,7 @@ export function SettingsDialog(props: {
               <span aria-hidden />
             </SettingRow>
             <div className="px-1 pb-2">
-              <SharedByMeList />
+              <SharedByMeList workspaceId={props.workspaceId} />
             </div>
             <SettingRow
               title="Shared with me"

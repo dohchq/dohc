@@ -39,6 +39,10 @@ export async function captureForFlaggedWorkspace(
   // settings file, so reading defaults here would start a capture. The
   // caller states the share identity (it owns the registry); the gate owns
   // what that identity means for the decision.
+  //
+  // At EDIT level too (#646 PR3): the recipient's edits reach the engine
+  // because the app writes them there itself, so a watcher here would only
+  // observe writes this process already journaled.
   if (workspace.shareView) {
     return { capture: null, shareView: true };
   }

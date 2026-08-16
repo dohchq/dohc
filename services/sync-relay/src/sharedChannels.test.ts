@@ -522,6 +522,16 @@ describe("shared channels (MU-C4)", () => {
       },
       // A message into an unknown thread (no in-log binding).
       messageAppend("msg-leak-2", "thread-nowhere", "SNEAK-unknown", MEMBER_A),
+      // A prototype-chain probe. `toString` lives on Object.prototype, so an
+      // `opKind in SERVED_CHAT_FIELDS` test reads a FUNCTION as this kind's
+      // field list and throws — a 500 where the refusal belongs. Every kind the
+      // allowlist does not own must answer the same 403.
+      {
+        originSeq: 0,
+        opKind: "toString",
+        payload: { threadId: "thread-shared-1" },
+        recordedAtMs: 1,
+      },
       // A forged re-bind: thread.create claiming the GRANTED channel for the
       // owner's existing private thread (earliest-binding must win).
       chatOp("chat.thread.create", {

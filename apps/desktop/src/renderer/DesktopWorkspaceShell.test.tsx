@@ -31,7 +31,15 @@ import type {
   EngineMomentRecord,
   FileChatThreadRecord,
   ListEngineMomentsResult,
+  ListFileChatsResult,
+  ListMyShareChangesResult,
+  ListShareProposalsResult,
   ListWorkspaceVersionsResult,
+  ReadShareProposalChangesResult,
+  SettleShareProposalPayload,
+  SettleShareProposalResult,
+  SubmitShareChangesResult,
+  WithdrawShareChangesResult,
   McpConfigResult,
   PluginPanelOpenedEvent,
   PluginStatusRecord,
@@ -454,6 +462,44 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     })),
     listRelayShares: vi.fn(async () => ({ granted: [] })),
     revokeRelayShare: vi.fn(async () => undefined),
+    // Share changes (#646 PR3a). Typed to the contract, not to these empty
+    // defaults: the review and submit tests drive real rows through them.
+    listShareProposals: vi.fn(
+      async (): Promise<ListShareProposalsResult> => ({ proposals: [] }),
+    ),
+    readShareProposalChanges: vi.fn(
+      async (): Promise<ReadShareProposalChangesResult> => ({
+        proposedByEmail: "friend@dohc.test",
+        files: [
+          {
+            opIndex: 0,
+            path: "docs/plan.md",
+            operation: "write",
+            drifted: false,
+            currentText: "one\n",
+            incomingText: "two\n",
+          },
+        ],
+      }),
+    ),
+    settleShareProposal: vi.fn(
+      async (
+        _payload: SettleShareProposalPayload,
+      ): Promise<SettleShareProposalResult> => ({ state: "accepted" }),
+    ),
+    listMyShareChanges: vi.fn(
+      async (): Promise<ListMyShareChangesResult> => ({ proposals: [] }),
+    ),
+    submitShareChanges: vi.fn(
+      async (): Promise<SubmitShareChangesResult> => ({
+        submitted: 2,
+        skippedOutsideShare: 0,
+        morePending: false,
+      }),
+    ),
+    withdrawShareChanges: vi.fn(
+      async (): Promise<WithdrawShareChangesResult> => ({ state: "withdrawn" }),
+    ),
     openSharedView: vi.fn(async () => {
       throw new Error("not used in shell tests");
     }),
@@ -608,7 +654,9 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       async (_payload: SyncDmsPayload): Promise<SyncDmsResult> =>
         dmSyncResult([], false),
     ),
-    listFileChats: vi.fn(async () => ({ fileObjectId: null, threads: [] })),
+    listFileChats: vi.fn(
+      async (): Promise<ListFileChatsResult> => ({ fileObjectId: null, threads: [] }),
+    ),
   });
 }
 
@@ -674,9 +722,14 @@ const SHARE_VIEW: Workspace = {
 
 // A bridge that answers the way MAIN answers for a shared view: the capture
 // gate short-circuits before the settings read, so requireEngineCapture has
-// no capture and every engine call is refused with engineOffRefusal copy. A
-// fake that resolved these would model more than main can do, and every
-// no-call pin below would pass even after the fix was reverted.
+// no capture and every capture-backed call is refused with engineOffRefusal
+// copy. A fake that resolved these would model more than main can do, and
+// every no-call pin below would pass even after the fix was reverted.
+//
+// `listFileChats` is the one that ANSWERS (#646 PR2): main resolves a chat
+// scope from the share instead of a capture, so the per-file chat surface is
+// served at every level. A fake that still refused it would model less than
+// main can do, and every pin written against it would certify fiction.
 function makeShareBridge(
   uiState: Promise<WorkspaceUiState | null> = Promise.resolve(null),
 ) {
@@ -689,10 +742,15 @@ function makeShareBridge(
   bridge.readEngineMoment = vi.fn(async (): Promise<never> => {
     throw new Error("Engine history is not enabled for this workspace.");
   });
+  // The granter's review channel is workspace-scoped and owner-only: main
+  // refuses it for a share view. A fake that answered it would model more
+  // than main can do, and the no-call pin below would pass after a revert.
+  bridge.listShareProposals.mockRejectedValue(
+    new Error("A shared view cannot review changes."),
+  );
   for (const call of [
     "listChatChannels",
     "listChannelThreads",
-    "listFileChats",
     "listChatFileMentions",
     "syncDms",
   ] as const) {
@@ -700,16 +758,22 @@ function makeShareBridge(
       new Error("Chats are not enabled for this workspace."),
     );
   }
+  bridge.listFileChats.mockResolvedValue({
+    fileObjectId: "share-object-1",
+    threads: [],
+  });
   return bridge;
 }
 
-// The non-vacuity probe for a shared view (#615). Every engine surface is
-// hidden there now — the version selector, the Chats panel, the titlebar
-// Chats button — so no rendered control can prove the renderer's capability
-// read resolved engine-ON, and a no-call pin asserted before that read lands
-// would pass for the wrong reason. The read itself carries the proof: wait
-// until the shell asked, confirm the answer is engine-ON, then flush the
-// state update that answer commits.
+// The non-vacuity probe for a shared view (#615). The capture-backed surfaces
+// are hidden there — the version selector, the history timeline, the graph's
+// chat mentions — so no rendered control proves the renderer's capability read
+// resolved engine-ON, and a no-call pin asserted before that read lands would
+// pass for the wrong reason. The read itself carries the proof: wait until the
+// shell asked, confirm the answer is engine-ON, then flush the state update
+// that answer commits. (The Chats panel and its titlebar button render for a
+// shared view since #646 PR2, but they render off `isShareView`, not off this
+// read, so they still prove nothing about it.)
 async function settleEngineOnRead(bridge: ReturnType<typeof makeEngineBridge>) {
   await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalled());
   const read = await bridge.getWorkspaceSettings();
@@ -5700,10 +5764,9 @@ describe("active file sharing", () => {
   });
 });
 
-// In PR1 every level grants exactly these rights, so the banner reads the
-// same at every level (#646). The per-level sentences the design specifies
-// ship with the rights they describe — PR2 for chat, PR3 for edits — because
-// a banner that promised chat now would lie until PR2 opens the append gate.
+// The banner states the level's real rights (#646). PR2 opens chat at comment
+// and edit; edit's document writes land in PR3, so edit reads the comment
+// sentence until then — a banner promising editing now would be a lie.
 // Removing a mount reprojects path-keyed UI state only when the folder
 // actually went. Record-only cleanup leaves the files exactly where they
 // were, so their tabs, pins and drafts must survive it.
@@ -5820,30 +5883,536 @@ describe("share unmount projection", () => {
     ).toEqual([]);
   });
 });
-
 describe("shared view banner", () => {
-  for (const access of ["view", "comment", "edit"] as const) {
-    it(`tells a ${access} recipient the view is read-only, because in PR1 it is`, async () => {
-      const bridge = makeShareBridge();
-      renderShell(bridge, {
-        ...SHARE_VIEW,
-        shareView: {
-          shareId: "share-1",
-          granterEmail: "sam@dohc.test",
-          access,
-        },
-      });
+  it("tells a view recipient the view is read-only", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, {
+      ...SHARE_VIEW,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "sam@dohc.test",
+        access: "view",
+      },
+    });
 
-      const banner = await screen.findByTestId("shared-view-banner");
-      expect(banner.textContent, access).toContain(
-        "Shared view from sam@dohc.test — read-only. Ask sam@dohc.test for changes.",
-      );
-      // MUTATION: shipping the PR2 sentences early would promise chat rights
-      // the relay's append route still refuses at every level.
-      expect(banner.textContent, access).not.toContain("You can chat about");
-      expect(banner.textContent, access).not.toContain("You can edit these files");
+    const banner = await screen.findByTestId("shared-view-banner");
+    expect(banner.textContent).toContain(
+      "Shared view from sam@dohc.test — read-only. Ask sam@dohc.test for changes.",
+    );
+    expect(banner.textContent).not.toContain("You can chat about");
+  });
+
+  it("tells a comment recipient they can chat about these files, not edit them", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, {
+      ...SHARE_VIEW,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "sam@dohc.test",
+        access: "comment",
+      },
+    });
+
+    const banner = await screen.findByTestId("shared-view-banner");
+    expect(banner.textContent).toContain(
+      "Shared view from sam@dohc.test. You can chat about these files, not edit them.",
+    );
+    expect(banner.textContent).not.toContain("read-only");
+    // MUTATION: giving comment the edit sentence would promise a write-back
+    // lane a comment grant does not carry.
+    expect(banner.textContent).not.toContain("send your changes");
+  });
+
+  // Edit gets its own sentence (#646 PR3a). It states BOTH halves: the
+  // recipient edits, and the granter decides.
+  it("tells an edit recipient to edit and send changes for the granter to accept", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, {
+      ...SHARE_VIEW,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "sam@dohc.test",
+        access: "edit",
+      },
+    });
+
+    const banner = await screen.findByTestId("shared-view-banner");
+    expect(banner.textContent).toContain(
+      "Shared view from sam@dohc.test. Edit these files and send your changes for sam@dohc.test to accept.",
+    );
+    // MUTATION: falling through to the PR2 sentence tells an edit recipient
+    // they cannot edit, which is the exact lie PR3a removes.
+    expect(banner.textContent).not.toContain("not edit them");
+  });
+
+  it("names an unknown granter the way every other share string does", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, {
+      ...SHARE_VIEW,
+      shareView: { shareId: "share-1", granterEmail: null, access: "edit" },
+    });
+
+    const banner = await screen.findByTestId("shared-view-banner");
+    expect(banner.textContent).toContain(
+      "Shared view from another dohc user. Edit these files and send your changes for another dohc user to accept.",
+    );
+  });
+
+  it("keeps the ended sentence, and drops the send control with it", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, {
+      ...SHARE_VIEW,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "sam@dohc.test",
+        access: "edit",
+        ended: true,
+      },
+    });
+
+    const banner = await screen.findByTestId("shared-view-banner");
+    expect(banner.textContent).toContain(
+      "This share was ended by sam@dohc.test. Your copy stays readable but won't update anymore.",
+    );
+    expect(
+      screen.queryByTestId("share-changes-send"),
+      "MUTATION: an ended share cannot carry changes anywhere",
+    ).toBeNull();
+  });
+});
+
+// The editor's read-only stance is the level, not the marker (#646 PR3a).
+// The toggle is disabled exactly when the editor is read-only, so it is the
+// prop's own behaviour rather than a second reading of the level.
+describe("shared view editing", () => {
+  async function editToggleDisabled(
+    shareView: NonNullable<Workspace["shareView"]>,
+  ): Promise<boolean> {
+    const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(["a.md"])));
+    renderShell(bridge, { ...SHARE_VIEW, shareView });
+    const toggle = await screen.findByTestId("markdown-edit-toggle");
+    return toggle.hasAttribute("disabled");
+  }
+
+  for (const shareView of [
+    { shareId: "share-1", granterEmail: "sam@dohc.test", access: "view" as const },
+    { shareId: "share-1", granterEmail: "sam@dohc.test", access: "comment" as const },
+    { shareId: "share-1", granterEmail: "sam@dohc.test", damaged: true as const },
+    {
+      shareId: "share-1",
+      granterEmail: "sam@dohc.test",
+      access: "edit" as const,
+      ended: true,
+    },
+  ]) {
+    const name = shareView.damaged
+      ? "an unreadable grant"
+      : shareView.ended
+        ? "an ended edit share"
+        : `a ${shareView.access} share`;
+    it(`keeps the editor read-only for ${name}`, async () => {
+      expect(
+        await editToggleDisabled(shareView),
+        "MUTATION: reading the level generously opens an editor the grant does not open",
+      ).toBe(true);
     });
   }
+
+  // `damaged` and `access` are independent fields on the marker, so a record
+  // can carry both. The damage wins: a grant dohc could not read is not a
+  // grant it may act on.
+  it("keeps the editor read-only for a damaged marker that still names edit", async () => {
+    expect(
+      await editToggleDisabled({
+        shareId: "share-1",
+        granterEmail: "sam@dohc.test",
+        access: "edit",
+        damaged: true,
+      }),
+      "MUTATION: dropping the damaged test acts on a level dohc could not read",
+    ).toBe(true);
+  });
+
+  it("opens the editor for an edit share", async () => {
+    expect(
+      await editToggleDisabled({
+        shareId: "share-1",
+        granterEmail: "sam@dohc.test",
+        access: "edit",
+      }),
+      "MUTATION: an unconditional shareView read-only keeps edit locked out",
+    ).toBe(false);
+  });
+});
+
+// Sending changes back (#646 PR3a): the recipient's half of the lane.
+describe("shared view send changes", () => {
+  const EDIT_SHARE: Workspace = {
+    ...SHARE_VIEW,
+    shareView: {
+      shareId: "share-1",
+      granterEmail: "sam@dohc.test",
+      access: "edit",
+    },
+  };
+
+  for (const shareView of [
+    { shareId: "share-1", granterEmail: "sam@dohc.test", access: "view" as const },
+    { shareId: "share-1", granterEmail: "sam@dohc.test", access: "comment" as const },
+    { shareId: "share-1", granterEmail: "sam@dohc.test", damaged: true as const },
+    {
+      shareId: "share-1",
+      granterEmail: "sam@dohc.test",
+      access: "edit" as const,
+      damaged: true as const,
+    },
+  ]) {
+    const name = shareView.damaged
+      ? `an unreadable grant${shareView.access ? " that still names edit" : ""}`
+      : shareView.access;
+    it(`offers no send control for ${name}`, async () => {
+      const bridge = makeShareBridge();
+      renderShell(bridge, { ...SHARE_VIEW, shareView });
+      await screen.findByTestId("shared-view-banner");
+      expect(
+        screen.queryByTestId("share-changes-send"),
+        "MUTATION: offering a send control the grant does not carry",
+      ).toBeNull();
+    });
+  }
+
+  // The reverse path outlives the right that created it. A granter can narrow
+  // a share while changes wait, and a withdraw the downgrade took away would
+  // strand them in front of someone who may never answer.
+  it("still shows and withdraws changes already sent after a downgrade", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.listMyShareChanges.mockResolvedValue({
+      proposals: [
+        { proposalId: "proposal-1", state: "open", createdAtMs: 10, files: 2 },
+      ],
+    });
+    renderShell(bridge, {
+      ...SHARE_VIEW,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "sam@dohc.test",
+        // Narrowed after the changes were sent.
+        access: "comment",
+      },
+    });
+
+    const state = await screen.findByTestId("share-changes-state");
+    expect(
+      state.dataset.state,
+      "MUTATION: gating the sent state on the level hides changes the recipient can still take back",
+    ).toBe("open");
+    expect(screen.queryByTestId("share-changes-send")).toBeNull();
+
+    await user.click(screen.getByTestId("share-changes-withdraw"));
+    await waitFor(() =>
+      expect(bridge.withdrawShareChanges).toHaveBeenCalledWith({
+        workspaceId: SHARE_VIEW.workspaceId,
+        proposalId: "proposal-1",
+      }),
+    );
+  });
+
+  // What a submit did NOT take. Both are things the recipient would otherwise
+  // discover by their work simply not arriving.
+  it("states the files a submit left outside the share", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.submitShareChanges.mockResolvedValue({
+      submitted: 1,
+      skippedOutsideShare: 2,
+      morePending: false,
+    });
+    renderShell(bridge, EDIT_SHARE);
+
+    await user.click(await screen.findByTestId("share-changes-send"));
+    const line = await screen.findByTestId("share-changes-skipped");
+    expect(
+      line.textContent,
+      "MUTATION: a silent drop is work the recipient believes they sent",
+    ).toBe("2 files weren't sent — they're not part of this share.");
+  });
+
+  // The control has to come back. Sending re-reads the sent changes, and that
+  // read takes a new latest-wins token — so a cleanup still comparing the
+  // token the click started with never matches, and the button stays disabled
+  // reading "Sending…" until the workspace is reopened.
+  it("re-enables Send after a submit that reloads its own state", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    renderShell(bridge, EDIT_SHARE);
+
+    const send = await screen.findByTestId("share-changes-send");
+    await user.click(send);
+    await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("share-changes-send").hasAttribute("disabled"),
+        "MUTATION: comparing the pre-reload token leaves Send stuck on Sending…",
+      ).toBe(false),
+    );
+    expect(screen.getByTestId("share-changes-send").textContent).toContain("Send changes");
+  });
+
+  // Taking the changes back retires what the last submit said about them.
+  it("clears the last submit's lines when the changes are taken back", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.submitShareChanges.mockResolvedValue({
+      submitted: 1,
+      skippedOutsideShare: 2,
+      morePending: false,
+    });
+    bridge.listMyShareChanges.mockResolvedValue({
+      proposals: [
+        { proposalId: "proposal-1", state: "open", createdAtMs: 10, files: 1 },
+      ],
+    });
+    renderShell(bridge, EDIT_SHARE);
+
+    await user.click(await screen.findByTestId("share-changes-send"));
+    await screen.findByTestId("share-changes-skipped");
+
+    await user.click(await screen.findByTestId("share-changes-withdraw"));
+    await waitFor(() => expect(bridge.withdrawShareChanges).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("share-changes-skipped"),
+        "MUTATION: a withdrawn submission keeps describing what it skipped",
+      ).toBeNull(),
+    );
+  });
+
+  // Both facts, when both are true. An either/or line drops "more pending"
+  // exactly when a submit was largest — which is the case the count exists to
+  // report.
+  it("states both what was skipped and what is still waiting", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.submitShareChanges.mockResolvedValue({
+      submitted: 500,
+      skippedOutsideShare: 3,
+      morePending: true,
+    });
+    renderShell(bridge, EDIT_SHARE);
+
+    await user.click(await screen.findByTestId("share-changes-send"));
+    const line = await screen.findByTestId("share-changes-skipped");
+    expect(
+      line.textContent,
+      "MUTATION: an either/or line hides the ~97 changes still queued",
+    ).toBe(
+      "3 files weren't sent — they're not part of this share. " +
+        "More changes are waiting. Send again to send the rest.",
+    );
+  });
+
+  it("says more changes are waiting when the bound held some back", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.submitShareChanges.mockResolvedValue({
+      submitted: 500,
+      skippedOutsideShare: 0,
+      morePending: true,
+    });
+    renderShell(bridge, EDIT_SHARE);
+
+    await user.click(await screen.findByTestId("share-changes-send"));
+    expect((await screen.findByTestId("share-changes-skipped")).textContent).toBe(
+      "More changes are waiting. Send again to send the rest.",
+    );
+  });
+
+  it("states nothing extra when a submit took everything", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    renderShell(bridge, EDIT_SHARE);
+
+    await user.click(await screen.findByTestId("share-changes-send"));
+    await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalled());
+    expect(
+      screen.queryByTestId("share-changes-skipped"),
+      "MUTATION: a warning on every ordinary submit is a warning nobody reads",
+    ).toBeNull();
+  });
+
+  it("sends the pending changes and states where they went", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.listMyShareChanges
+      .mockResolvedValueOnce({ proposals: [] })
+      .mockResolvedValue({
+        proposals: [
+          { proposalId: "proposal-1", state: "open", createdAtMs: 10, files: 2 },
+        ],
+      });
+    renderShell(bridge, EDIT_SHARE);
+
+    await user.click(await screen.findByTestId("share-changes-send"));
+    await waitFor(() =>
+      expect(bridge.submitShareChanges).toHaveBeenCalledWith({
+        workspaceId: EDIT_SHARE.workspaceId,
+      }),
+    );
+    const state = await screen.findByTestId("share-changes-state");
+    expect(state.dataset.state).toBe("open");
+    expect(state.textContent).toContain("Sent to sam@dohc.test for review.");
+    expect(screen.getByTestId("share-changes-count").textContent).toBe("2 files");
+  });
+
+  it("says so when there was nothing to send", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.submitShareChanges.mockResolvedValue({
+      submitted: 0,
+      skippedOutsideShare: 0,
+      morePending: false,
+    });
+    renderShell(bridge, EDIT_SHARE);
+
+    await user.click(await screen.findByTestId("share-changes-send"));
+    expect((await screen.findByTestId("share-changes-empty")).textContent).toBe(
+      "You have no changes to send yet.",
+    );
+    expect(screen.queryByTestId("share-changes-state")).toBeNull();
+  });
+
+  // Submitting is reversible, and the product invariant requires the reverse
+  // path to be visible while it exists.
+  it("takes an open submission back", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.listMyShareChanges
+      .mockResolvedValueOnce({
+        proposals: [
+          { proposalId: "proposal-1", state: "open", createdAtMs: 10, files: 1 },
+        ],
+      })
+      .mockResolvedValue({
+        proposals: [
+          { proposalId: "proposal-1", state: "withdrawn", createdAtMs: 10, files: 1 },
+        ],
+      });
+    renderShell(bridge, EDIT_SHARE);
+
+    expect((await screen.findByTestId("share-changes-count")).textContent).toBe(
+      "1 file",
+    );
+    await user.click(screen.getByTestId("share-changes-withdraw"));
+    await waitFor(() =>
+      expect(bridge.withdrawShareChanges).toHaveBeenCalledWith({
+        workspaceId: EDIT_SHARE.workspaceId,
+        proposalId: "proposal-1",
+      }),
+    );
+    // A withdrawn submission states nothing: it is as if it was never sent.
+    await waitFor(() =>
+      expect(screen.queryByTestId("share-changes-state")).toBeNull(),
+    );
+  });
+
+  it("states the granter's decision, and only offers a reverse path while one exists", async () => {
+    for (const [state, copy] of [
+      ["accepted", "sam@dohc.test accepted your changes."],
+      [
+        "declined",
+        "sam@dohc.test declined your changes. Your copy still has them. Edit again and send new changes.",
+      ],
+    ] as const) {
+      const bridge = makeShareBridge();
+      bridge.listMyShareChanges.mockResolvedValue({
+        proposals: [{ proposalId: "proposal-1", state, createdAtMs: 10, files: 1 }],
+      });
+      renderShell(bridge, EDIT_SHARE);
+
+      const row = await screen.findByTestId("share-changes-state");
+      expect(row.dataset.state, state).toBe(state);
+      expect(row.textContent, state).toContain(copy);
+      expect(
+        screen.queryByTestId("share-changes-withdraw"),
+        "MUTATION: offering Withdraw for a submission the granter already settled",
+      ).toBeNull();
+      // The declined Next works on this surface: the send control is still here.
+      expect(screen.queryByTestId("share-changes-send")).not.toBeNull();
+      cleanup();
+    }
+  });
+
+  // The newest submission is the one the surface speaks for.
+  it("speaks for the newest submission, not the first row it was handed", async () => {
+    const bridge = makeShareBridge();
+    bridge.listMyShareChanges.mockResolvedValue({
+      proposals: [
+        { proposalId: "proposal-new", state: "open", createdAtMs: 20, files: 3 },
+        { proposalId: "proposal-old", state: "declined", createdAtMs: 10, files: 1 },
+      ],
+    });
+    renderShell(bridge, EDIT_SHARE);
+
+    const row = await screen.findByTestId("share-changes-state");
+    expect(row.dataset.state).toBe("open");
+    expect(screen.getByTestId("share-changes-count").textContent).toBe("3 files");
+  });
+});
+
+// The granter's half: the notice that announces waiting changes, and the
+// review it opens.
+describe("share changes review", () => {
+  const PROPOSAL = {
+    proposalId: "proposal-1",
+    shareId: "share-1",
+    proposedByEmail: "friend@dohc.test",
+    createdAtMs: 1000,
+    files: [
+      { opIndex: 0, path: "docs/plan.md", operation: "write" as const, drifted: false },
+    ],
+  };
+
+  it("announces waiting changes and opens the review", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listShareProposals.mockResolvedValue({ proposals: [PROPOSAL] });
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId("notice-share-changes-proposal-1");
+    expect(notice.textContent).toContain("friend@dohc.test sent you changes");
+    expect(notice.textContent).toContain("Review them to choose what to keep.");
+
+    // The notice OPENS the review. What the review then decides is driven in
+    // ProposalReviewDialog.test.tsx, against the same dialog.
+    await user.click(within(notice).getByRole("button", { name: "Review" }));
+    await screen.findByTestId("proposal-review-dialog");
+  });
+
+  it("raises no notice when nothing is waiting", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-center");
+    expect(
+      screen.queryByTestId("notice-share-changes-proposal-1"),
+      "MUTATION: announcing a review nobody submitted",
+    ).toBeNull();
+  });
+
+  // A share view holds someone else's files and is refused this channel.
+  it("never asks a shared view to review changes", async () => {
+    const bridge = makeShareBridge();
+    renderShell(bridge, SHARE_VIEW);
+    await screen.findByTestId("shared-view-banner");
+    expect(
+      bridge.listShareProposals,
+      "MUTATION: asking main a question it refuses, and surfacing the refusal",
+    ).not.toHaveBeenCalled();
+  });
 });
 
 // A share view whose stored grant cannot be read keeps its RESTRICTIVE
@@ -5870,6 +6439,23 @@ describe("shared view with an unreadable grant", () => {
     );
     // No level is stated, because none could be read.
     expect(banner.textContent).not.toContain("read-only. Ask");
+  });
+
+  // The chat half of the same stance (#646 PR2). A grant that names no
+  // readable level grants no writes: the panel opens read-only, exactly as a
+  // `view` share does. Asking whether the level is NOT `view` would answer
+  // "writable" for a level nobody can read.
+  it("opens chat read-only, because an unreadable grant grants no writes", async () => {
+    const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge, damaged);
+
+    await settleEngineOnRead(bridge);
+    await screen.findByTestId("chats-panel");
+    expect(
+      (await screen.findByTestId("linked-chat-readonly-note")).textContent,
+      "MUTATION: an unreadable level must not open the composer",
+    ).toBe("This shared file is read-only for you.");
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
   });
 
   // There is no grant to pull with, so the refresh is skipped rather than
@@ -10489,33 +11075,65 @@ describe("chats off copy", () => {
   });
 });
 
-// #615: a shared view gets no capture, so main refuses listChatChannels,
-// listFileChats, syncDms and listChatFileMentions — the panel, the tab and the
-// titlebar button all offered a capability the share never had, and showed the
-// refusal as an error. These pins cover the SHARE fact only; the failed
-// capture build on a normal workspace is the describe below (#628).
+// #615 pinned that a shared view gets no capture, so main refused every chat
+// call and the panel, the tab and the titlebar button all offered a capability
+// the share never had. #646 PR2 moves the line: main now answers the PER-FILE
+// chat from the share scope, so that surface opens. The property #615 really
+// protected survives, restated — a shared view reaches the per-file chat
+// surface and NEVER the workspace-wide listing. These pins cover the SHARE
+// fact only; the failed capture build on a normal workspace is the describe
+// below (#628).
 describe("shared view chats surface", () => {
-  it("offers no Chats on a shared view and never asks main for them", async () => {
-    // The stored state opens with the Chats panel visible, so an ungated
-    // shell mounts it immediately.
+  it("opens the per-file chat panel on a shared view and never asks for the workspace-wide listing", async () => {
+    // The stored state opens with the Chats panel visible and b.md focused.
+    const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge, SHARE_VIEW);
+
+    await settleEngineOnRead(bridge);
+    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
+    expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
+
+    // The file tab is the ONLY tab. A workspace-wide listing would be a
+    // superset to filter, which is the shape #627 came from.
+    expect(screen.getByTestId("chats-panel-tab-file")).toBeTruthy();
+    expect(screen.queryByTestId("chats-panel-tab-all")).toBeNull();
+    expect(screen.queryByTestId("chats-panel-off")).toBeNull();
+
+    await waitFor(() =>
+      expect(bridge.listFileChats).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        path: "b.md",
+      }),
+    );
+    // The level rides all the way to the composer: SHARE_VIEW is a `view`
+    // grant, and main refuses its chat writes with these words.
+    expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe(
+      "This shared file is read-only for you.",
+    );
+
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
+    expect(bridge.syncDms).not.toHaveBeenCalled();
+    expect(bridge.listChatFileMentions).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // The two ways back in that outlive the titlebar button. #615 pinned both
+  // as absent; the surface they reach now exists, so both work — and neither
+  // reaches the workspace-wide listing.
+  it("keeps Ctrl+Alt+B and the toggle command on a shared view", async () => {
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     const user = userEvent.setup();
     renderShell(bridge, SHARE_VIEW);
 
     await settleEngineOnRead(bridge);
-    expect(screen.queryByTestId("chats-panel")).toBeNull();
-    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
-    expect(bridge.listChatChannels).not.toHaveBeenCalled();
-    expect(bridge.listFileChats).not.toHaveBeenCalled();
-    expect(bridge.syncDms).not.toHaveBeenCalled();
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await screen.findByTestId("chats-panel");
 
-    // The two ways back in that outlive the titlebar button.
     await user.keyboard("{Control>}{Alt>}b{/Alt}{/Control}");
-    expect(screen.queryByTestId("chats-panel")).toBeNull();
+    await waitFor(() => expect(screen.queryByTestId("chats-panel")).toBeNull());
+
     await user.keyboard("{Control>}k{/Control}");
     const palette = await screen.findByTestId("command-palette");
-    expect(within(palette).queryByText("Toggle chats panel")).toBeNull();
+    expect(within(palette).getByText("Toggle chats panel")).toBeTruthy();
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
   });
 
@@ -10526,10 +11144,12 @@ describe("shared view chats surface", () => {
     renderShell(bridge, SHARE_VIEW);
 
     // One line, per the empty-state recipe (copy.md): what is missing, then
-    // the next step this surface really has — the tab closes.
+    // the next step this surface really has. #646 PR2 changed BOTH halves —
+    // a shared view has per-file chat now, so "no chats" became false and
+    // "close this tab" stopped being the real next step.
     const placeholder = await screen.findByTestId("chats-page-share-view");
     expect(placeholder.textContent).toContain(
-      "A shared view has no chats. Close this tab to go back to the shared files.",
+      "A shared view lists no chats. Open a shared file to chat about it.",
     );
     expect(placeholder.className).toContain("text-sm");
     expect(placeholder.className).toContain("text-muted");
@@ -10549,6 +11169,10 @@ describe("shared view chats surface", () => {
 
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
     expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
+    // Both tabs. Collapsing every workspace to the share's file-only strip
+    // would keep the share pin above green.
+    expect(screen.getByTestId("chats-panel-tab-all")).toBeTruthy();
+    expect(screen.getByTestId("chats-panel-tab-file")).toBeTruthy();
     await waitFor(() => expect(bridge.listChatChannels).toHaveBeenCalled());
     expect(screen.queryByTestId("chats-panel-off")).toBeNull();
   });
@@ -10579,13 +11203,37 @@ describe("shared view chats surface", () => {
     );
   });
 
-  // Ctrl+Alt+B, on its own. The panel's gate hides it either way, so the only
-  // thing this shortcut still decides on a shared view is whether the shell
-  // CLAIMS the chord from whatever else would handle it.
-  it("does not claim Ctrl+Alt+B on a shared view", async () => {
+  // Ctrl+Alt+B, on its own: whether the shell CLAIMS the chord from whatever
+  // else would handle it. A shared view has a Chats panel to toggle now
+  // (#646 PR2), so it claims the chord — the same rule as any other
+  // workspace, and the pin below is the one that still separates the two.
+  it("claims Ctrl+Alt+B on a shared view", async () => {
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge, SHARE_VIEW);
     await settleEngineOnRead(bridge);
+
+    // A fresh event per attempt: the handler re-registers in a passive
+    // effect, and a stale event carries the previous attempt's verdict.
+    await waitFor(() => {
+      const event = new KeyboardEvent("keydown", {
+        key: "b",
+        ctrlKey: true,
+        altKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      window.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+    });
+  });
+
+  // The gate's other half, and the reason it is not simply deleted: a
+  // workspace with the engine flag OFF still has no Chats panel and must not
+  // claim the chord.
+  it("does not claim Ctrl+Alt+B when the engine flag is off", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
 
     const event = new KeyboardEvent("keydown", {
       key: "b",
@@ -10711,7 +11359,7 @@ describe("shared view chats surface", () => {
 
     const placeholder = await screen.findByTestId("chats-page-share-view");
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
-    expect(placeholder.textContent).toContain("A shared view has no chats.");
+    expect(placeholder.textContent).toContain("A shared view lists no chats.");
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
   });
 });

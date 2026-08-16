@@ -2714,6 +2714,25 @@ ALTER TABLE ydoc_recovery_decisions_v35 RENAME TO ydoc_recovery_decisions;
 
 pub(crate) const YDOC_SCENE_RECOVERY_KIND_MIGRATION_ID: &str = "v1-ydoc-scene-recovery-kind";
 
+/// Ordinal 36. Which share views may drain a FILE MOMENT through their share
+/// (#646 PR3-1). A row here is written only by `record_share_view_identity`,
+/// and only for an `edit` grant, in the same transaction as the identity it
+/// records — so the row's existence means both "this is a share view that may
+/// send file changes" and "it has the identity such a journal append needs".
+///
+/// It is a fact, not a proxy. The obvious shortcut — reading
+/// `EXISTS(sync_identity)` — is wrong, and `journal.rs` says why: ordinary
+/// chat activity mints an identity unconditionally, so that row cannot tell a
+/// share view that may send file changes from one that may not.
+const V1_SHARE_VIEW_FILE_LANE_DDL: &str = "\
+CREATE TABLE share_view_file_lane (
+    workspace_id  TEXT    NOT NULL PRIMARY KEY,
+    recorded_at_ms INTEGER NOT NULL
+) STRICT;
+";
+
+pub(crate) const SHARE_VIEW_FILE_LANE_MIGRATION_ID: &str = "v1-share-view-file-lane";
+
 /// Ordinal 32. Persist the relay arbitration coordinate for Y.Doc bases.
 /// Candidate coordinates are only hints recovered from the local append-only
 /// log; sync must authenticate each exact
@@ -2824,6 +2843,22 @@ SELECT d.workspace_id, d.version_id, d.object_id,
 ";
 
 pub(crate) const YDOC_RELAY_ARBITRATION_MIGRATION_ID: &str = "v1-ydoc-relay-arbitration";
+
+/// Ordinal 37. A recipient of an edit-level file share submits its own changes
+/// to the granter as a proposal (#646 PR3a), and a submit must know where the
+/// last one stopped reading the local journal. That position is its own fact:
+/// `shared_channel_push_state` records what a share has PUSHED, and a proposal
+/// pushes nothing until the recipient decides to submit.
+const V1_SHARE_PROPOSAL_PUSH_STATE_DDL: &str = "\
+CREATE TABLE share_proposal_push_state (
+    workspace_id TEXT    NOT NULL,
+    share_id     TEXT    NOT NULL,
+    scanned_seq  INTEGER NOT NULL CHECK (scanned_seq >= -1),
+    PRIMARY KEY (workspace_id, share_id)
+) STRICT;
+";
+
+pub(crate) const SHARE_PROPOSAL_PUSH_STATE_MIGRATION_ID: &str = "v1-share-proposal-push-state";
 
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
@@ -3082,6 +3117,20 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: YDOC_SCENE_RECOVERY_KIND_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_YDOC_SCENE_RECOVERY_KIND_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 36,
+        id: SHARE_VIEW_FILE_LANE_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SHARE_VIEW_FILE_LANE_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 37,
+        id: SHARE_PROPOSAL_PUSH_STATE_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SHARE_PROPOSAL_PUSH_STATE_DDL,
         sets_user_version: None,
     },
 ];
@@ -3352,6 +3401,22 @@ fn apply_non_transactional(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The REAL ledger is well-formed. `validate_migration_order` runs before
+    /// every migration, so a malformed list already fails closed at runtime —
+    /// but nothing asserted it against `BASELINE_MIGRATIONS` itself, so a
+    /// duplicate ordinal would first be seen by whoever opened a store.
+    ///
+    /// Two branches taking the same ordinal is not hypothetical: #646 PR3-1
+    /// and PR3a both wrote ordinal 36, and the collision was caught by hand at
+    /// rebase. This is the check that would have caught it either way.
+    #[test]
+    fn the_real_migration_ledger_has_unique_increasing_ordinals_and_ids() {
+        validate_migration_order(BASELINE_MIGRATIONS).expect(
+            "MUTATION: the shipped migration list must have strictly increasing ordinals \
+             and unique ids, or a migration never applies and DDL runs out of order",
+        );
+    }
     #[cfg(feature = "fault-injection")]
     use crate::faults::FaultAction;
     use crate::faults::NoFaults;
@@ -4841,7 +4906,15 @@ mod tests {
 
         let disposition = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("apply the later replication-log disposition migration");
-        assert_eq!(disposition, MigrationOutcome::Applied { newly_applied: 5 });
+        assert_eq!(
+            disposition,
+            MigrationOutcome::Applied {
+                // Every migration registered after this one. A literal here is
+                // a count that goes stale the next time the ledger grows.
+                newly_applied: u32::try_from(BASELINE_MIGRATIONS.len() - (migration_index + 1))
+                    .expect("the ledger length fits a migration count")
+            }
+        );
         let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("rerun current migrations");
         assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 0 });
@@ -4899,7 +4972,15 @@ mod tests {
         .expect_err("unknown apply dispositions must fail closed");
         let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("rerun current migrations");
-        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 4 });
+        assert_eq!(
+            rerun,
+            MigrationOutcome::Applied {
+                // Every migration registered after this one. A literal here is
+                // a count that goes stale the next time the ledger grows.
+                newly_applied: u32::try_from(BASELINE_MIGRATIONS.len() - (migration_index + 1))
+                    .expect("the ledger length fits a migration count")
+            }
+        );
     }
 
     #[test]
@@ -5051,7 +5132,15 @@ mod tests {
         );
         let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("rerun current migrations");
-        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 3 });
+        assert_eq!(
+            rerun,
+            MigrationOutcome::Applied {
+                // Every migration registered after this one. A literal here is
+                // a count that goes stale the next time the ledger grows.
+                newly_applied: u32::try_from(BASELINE_MIGRATIONS.len() - (migration_index + 1))
+                    .expect("the ledger length fits a migration count")
+            }
+        );
     }
 
     fn seed_hex_binary_blobs(conn: &Connection) {

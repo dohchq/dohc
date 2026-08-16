@@ -54,6 +54,7 @@ import {
   type CliVerb,
 } from "@dohc/cli/protocol";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { workspaceEngineSetting } from "@dohc/workspace-contracts/workspace-settings";
 import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
 // The resolved-path rule lives in ONE place for every surface that decides
@@ -93,11 +94,11 @@ export interface ToolContext {
   // from the MCP build output path because packaged layouts can differ.
   sdkPackageJsonPath?: string;
   sdkDependencyRange?: string;
-  // READ-ONLY profile (PR 18 shared views): when true the server registers
-  // only read/list/search/status tools — the mutating tools are never
-  // registered, so a shared-view MCP server cannot write, create, move,
-  // delete, import, publish, share, or post chat. Set by the --read-only flag.
-  readOnly?: boolean;
+  // The share level this server was launched for (#646), from the
+  // --share-access flag. Absent means a local workspace: every tool registers.
+  // A level narrows the write surface — see createDohcMcpServer, which decides
+  // which write tools exist for it.
+  shareAccess?: ShareAccess;
   // Injectable CLI transport for tests. Production uses sendCliRequest with
   // the explicit desktop state dir supplied by --home.
   request?: (request: CliRequestWithoutToken) => Promise<unknown>;

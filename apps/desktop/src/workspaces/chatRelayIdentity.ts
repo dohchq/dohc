@@ -51,6 +51,30 @@ export function joinedChannelMatchesCredentials(
   );
 }
 
+/**
+ * The relay identity a SHARE VIEW writes chat under (#646 PR2).
+ *
+ * A share view is not an enrolled workspace — it has no `remote`, and no
+ * owner id to write as. Its relay identity is the account that holds the
+ * grant: the signed-in user, and only while that session belongs to the
+ * share's own relay.
+ *
+ * This matters more than it looks. A chat op replicates only when its author
+ * carries a user id, so an unresolved identity here does not degrade to a
+ * local-only comment — it produces a comment that LOOKS sent and never
+ * leaves the machine. Callers must refuse the write instead.
+ */
+export function resolveShareViewRelayAuthorId(
+  shareView: { relayUrl?: string },
+  credentials: CloudCredentials | null,
+): string | undefined {
+  if (!credentials?.relayUrl) return;
+  if (shareView.relayUrl && !relayUrlsMatch(credentials.relayUrl, shareView.relayUrl)) {
+    return;
+  }
+  return credentials.userId;
+}
+
 export function resolveWorkspaceRelayAuthorId(
   workspace: Pick<RegistryEntry, "remote">,
   credentials: CloudCredentials | null,
@@ -80,7 +104,7 @@ export function syncEnrollmentRemoteWorkspaceId(
 }
 
 export async function resolveChatRelayIdentity(input: {
-  workspace: Pick<RegistryEntry, "workspaceId" | "remote" | "sharedChannels">;
+  workspace: Pick<RegistryEntry, "workspaceId" | "remote" | "sharedChannels" | "shareView">;
   credentials: CloudCredentials | null;
   store: ChatRelayIdentityStore;
   target: ChatRelayIdentityTarget;
@@ -96,7 +120,9 @@ export async function resolveChatRelayIdentity(input: {
     ? joinedChannelMatchesCredentials(joinedChannel, input.credentials)
       ? joinedChannel.recipientUserId
       : undefined
-    : resolveWorkspaceRelayAuthorId(input.workspace, input.credentials);
+    : input.workspace.shareView
+      ? resolveShareViewRelayAuthorId(input.workspace.shareView, input.credentials)
+      : resolveWorkspaceRelayAuthorId(input.workspace, input.credentials);
   return {
     joinedChannel,
     ...(authorUserId ? { authorUserId } : {}),

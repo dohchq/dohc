@@ -642,6 +642,12 @@ struct ThreadCreate {
     title: String,
     created_at_ms: i64,
     linked_object_id: Option<String>,
+    /// The file this thread is about, named by PATH (#646 PR2). This is the
+    /// shape a thread's link takes across a SHARE boundary in both
+    /// directions: object ids are minted per replica, so neither end can read
+    /// the other's. Whoever applies it resolves the path to its own local
+    /// object — see `linked_object_for_apply`.
+    linked_path: Option<String>,
     linked_path_hint: Option<String>,
     linked_at_ms: Option<i64>,
     channel_slug: Option<String>,
@@ -1009,6 +1015,62 @@ fn channel_allocation_base(name: &str) -> String {
     bounded
 }
 
+/// The LOCAL object a thread create binds to, plus the path hint to display
+/// beside it.
+///
+/// An op naming its file by object id is a replica's own op and its id is
+/// already local. An op naming it by PATH crossed a share boundary (#646 PR2)
+/// — in either direction, a recipient replaying the granter's thread or a
+/// granter applying the recipient's — and the path is resolved HERE, against
+/// this store's main version, because that is the only place the two replicas
+/// agree.
+///
+/// A path this workspace does not track is refused, not stored. A thread bound
+/// to no file would then read as a channel thread with no channel, and the
+/// refusal is recorded through the caller's existing lane rather than left as
+/// a silent skip.
+fn linked_object_for_apply(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+    payload: &ThreadCreate,
+) -> Result<(Option<String>, Option<String>), SyncError> {
+    let Some(path) = payload.linked_path.as_deref() else {
+        return Ok((
+            payload.linked_object_id.clone(),
+            payload.linked_path_hint.clone(),
+        ));
+    };
+    // The SECRET floor, applied where this op is applied. A `linkedPath` op
+    // reaches a granter over the ordinary owner lane, with no share and no
+    // grant in scope, so the relay's filter is the authority on what a share
+    // COVERS and remains so. This is the one rule this surface can state on
+    // its own: a secret path is never a file a thread may bind to, whoever
+    // asked. `validate_addressable_plaintext_path` refuses `Ignored` and
+    // accepts `Secret`, so it does not cover this.
+    if crate::classify_share_path(path) != crate::PathClass::Tracked {
+        return Err(SyncError::InvalidInput {
+            reason: "chat thread linked path is not a tracked file",
+        });
+    }
+    let object_id: Option<String> = tx
+        .query_row(
+            "SELECT object_id FROM path_aliases \
+             WHERE workspace_id = ?1 AND path = ?2 \
+               AND version_id = (SELECT main_version_id FROM versioned_workspaces \
+                                 WHERE workspace_id = ?1)",
+            params![op.workspace_id, path],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let object_id = object_id.ok_or(SyncError::InvalidInput {
+        reason: "chat thread linked path names no file in this workspace",
+    })?;
+    // The hint is display-only and never authorization, so writing the path
+    // just resolved is the honest value: it is the one this apply proved.
+    Ok((Some(object_id), Some(path.to_owned())))
+}
+
 fn apply_thread(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
@@ -1039,16 +1101,31 @@ fn apply_thread(
         });
     }
     let channel_shape = payload.channel_slug.is_some() || payload.channel_wire_id.is_some();
-    if channel_shape == payload.linked_object_id.is_some() {
+    // A file-linked thread names its file ONE way: by object id (a replica's
+    // own op) or by path (an op that crossed a share boundary, #646 PR2).
+    // Carrying both is malformed — reading either half would let one op bind
+    // one thread to two files.
+    if payload.linked_object_id.is_some() && payload.linked_path.is_some() {
+        return Err(SyncError::InvalidInput {
+            reason: "chat thread names its linked file twice",
+        });
+    }
+    let file_shape = payload.linked_object_id.is_some() || payload.linked_path.is_some();
+    if channel_shape == file_shape {
         return Err(SyncError::InvalidInput {
             reason: "chat thread owner shape is invalid",
         });
     }
-    if payload.linked_object_id.is_none()
-        && (payload.linked_path_hint.is_some() || payload.linked_at_ms.is_some())
-    {
+    if !file_shape && (payload.linked_path_hint.is_some() || payload.linked_at_ms.is_some()) {
         return Err(SyncError::InvalidInput {
             reason: "chat thread linked owner shape is invalid",
+        });
+    }
+    if let Some(path) = payload.linked_path.as_deref()
+        && !matches!(validate_addressable_plaintext_path(path), Ok(normalized) if normalized == path)
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "chat thread linked path is invalid",
         });
     }
     // A file-linked thread MUST carry its linkedAtMs. The oracle accepts this
@@ -1058,7 +1135,7 @@ fn apply_thread(
     // (fail-closed), which is deliberately stricter than the oracle; honest
     // mint always pairs the fields, so only a corrupt/hostile op is refused.
     // See the CROSS-ENGINE DELTA note in RPC_GAP.md.
-    if payload.linked_object_id.is_some() && payload.linked_at_ms.is_none() {
+    if file_shape && payload.linked_at_ms.is_none() {
         return Err(SyncError::InvalidInput {
             reason: "chat thread linked owner requires a linked timestamp",
         });
@@ -1085,11 +1162,12 @@ fn apply_thread(
     } else {
         None
     };
+    let (linked_object_id, linked_path_hint) = linked_object_for_apply(tx, op, &payload)?;
     tx.execute(
         "INSERT OR IGNORE INTO chat_threads \
          (workspace_id, thread_id, title, created_at_ms, updated_at_ms, linked_object_id, linked_path_hint, linked_at_ms, channel_id) \
           VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8)",
-        params![op.workspace_id, payload.thread_id, payload.title, payload.created_at_ms, payload.linked_object_id, payload.linked_path_hint, payload.linked_at_ms, channel_id],
+        params![op.workspace_id, payload.thread_id, payload.title, payload.created_at_ms, linked_object_id, linked_path_hint, payload.linked_at_ms, channel_id],
     )
     .map_err(SyncError::persist)?;
     upsert_chat_search_index_row(

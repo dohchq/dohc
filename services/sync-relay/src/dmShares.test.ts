@@ -11,9 +11,18 @@ import {
   validateChatChannelShareSelector,
   type ChatChannelShareSelector,
   type ChatShareThreadResolver,
+  type ShareFileChatResolver,
   type ShareSelector,
 } from "./shareFilter";
 import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
+
+// A resolver that knows no file-linked thread and no object: a DM grant is a
+// chat-channel selector, and the file half must never decide anything for it.
+const NO_FILE_CHAT: ShareFileChatResolver = {
+  threadFileBinding: () => undefined,
+  objectCurrentPath: () => undefined,
+  objectIdAtPath: () => undefined,
+};
 
 // WS-MU-C3 — DM / chat-channel grants over the relay, riding MU-C4's
 // bidirectional shared-channel lane. A DM is a `kind:"dm"` channel + one
@@ -271,6 +280,7 @@ describe("chat-channel share selector (DM grants)", () => {
     const chat: ChatShareThreadResolver = {
       channelKind: (wireId) =>
         wireId === DM_WIRE ? "dm" : wireId === OTHER_WIRE ? "channel" : undefined,
+      ...NO_FILE_CHAT,
       threadChannelWireId: (threadId) =>
         threadId === "t" ? DM_WIRE : threadId === "t2" ? OTHER_WIRE : undefined,
     };

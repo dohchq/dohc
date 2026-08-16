@@ -11,6 +11,7 @@ import {
   PanelRight,
   RefreshCw,
   Search,
+  Send,
   Undo2,
   User,
   X,
@@ -33,6 +34,8 @@ import type {
   DmRecord,
   EngineMomentDetailRecord,
   EngineMomentRecord,
+  MyShareChangeRow,
+  ShareProposalRow,
   SyncStatusResult,
   TryInVersionRunState,
   WorkbenchMenuCommand,
@@ -121,6 +124,10 @@ import {
   VersionComparePage,
   VersionMenu,
 } from "./workbench/WorkspaceVersions";
+import {
+  ProposalReviewDialog,
+  proposerName,
+} from "./workbench/ProposalReviewDialog";
 import {
   TryInVersionBanner,
   TryInVersionReviewCard,
@@ -632,6 +639,11 @@ const LazyRelayShareDialog = lazy(() =>
   import("./RelayShareDialog").then((mod) => ({ default: mod.RelayShareDialog })),
 );
 const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
+
+// How often an open workspace re-reads the share state only the relay knows:
+// a recipient's mounts, and a granter's waiting changes. Slow on purpose —
+// neither is urgent, and both cost a relay round trip per workspace.
+const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
 
 function scheduleMarkdownEditorPreload(): () => void {
   let idleHandle: number | null = null;
@@ -1217,12 +1229,20 @@ export function EngineMomentDiffPage({
 // (channels, DMs, file threads) or the ACTIVE file's chats. Runtime-only.
 type ChatsPanelTab = "all" | "file";
 
+const CHATS_PANEL_TAB_LABELS: Record<ChatsPanelTab, string> = {
+  all: "Chats",
+  file: "This file",
+};
+// Every workspace this machine owns offers both. A shared view offers the
+// file tab only: it has no workspace-wide chat listing, by design (#646).
+
 // The right-hand Chats panel — dohc's secondary sidebar (VS Code grammar:
 // toggleable, resizable, persistent width, gone entirely while hidden).
 function ChatsPanel(props: {
   width: number;
   onWidthChange: (width: number) => void;
   onCollapse: () => void;
+  tabs: readonly ChatsPanelTab[];
   tab: ChatsPanelTab;
   onTabChange: (tab: ChatsPanelTab) => void;
   actions?: ReactNode;
@@ -1277,12 +1297,7 @@ function ChatsPanel(props: {
           meet the tab strip's on the same pixel row. */}
       <header className="flex h-9 shrink-0 items-center border-b border-line px-3">
         <div className="flex items-center gap-0.5">
-          {(
-            [
-              ["all", "Chats"],
-              ["file", "This file"],
-            ] as const
-          ).map(([tab, label]) => (
+          {props.tabs.map((tab) => (
             <button
               key={tab}
               type="button"
@@ -1295,7 +1310,7 @@ function ChatsPanel(props: {
                   : "text-muted hover:bg-line/40 hover:text-ink"
               }`}
             >
-              {label}
+              {CHATS_PANEL_TAB_LABELS[tab]}
             </button>
           ))}
         </div>
@@ -2411,6 +2426,9 @@ export function DesktopWorkspaceShell(props: {
   // Which surface the right-hand Chats panel shows (all chats vs the active
   // file's). Runtime-only — not persisted.
   const [chatsPanelTab, setChatsPanelTab] = useState<ChatsPanelTab>("all");
+  // A shared view offers the "This file" tab only (#646 PR2), so the panel
+  // opens there whatever the runtime state carried in from another workspace.
+  const chatsPanelActiveTab: ChatsPanelTab = isShareView ? "file" : chatsPanelTab;
   const [searchChatTarget, setSearchChatTarget] = useState<{
     thread: ChatThreadRecord;
     focusMessageId?: string;
@@ -2692,6 +2710,13 @@ export function DesktopWorkspaceShell(props: {
   // deliberately installed no capture. Both halves are synchronous registry
   // facts, so this value never waits on anything.
   const engineSurfacesExist = engineEnabled && !isShareView;
+  // Chats is the one exception (#646 PR2). A share view still installs no
+  // capture, so history and versions stay gone — but main now answers chat
+  // from the SHARE scope instead of a capture, so the Chats panel opens. Only
+  // its "This file" tab: the per-file surface answers for a file the share
+  // already served, and a workspace-wide listing would be a superset to
+  // filter (decision 5, and the shape that produced #627).
+  const chatsSurfaceExists = engineEnabled || isShareView;
   // Whether main's capture will SERVE those surfaces. Main's status is the
   // single answer to "does anything record here", and it overrides the
   // renderer's own engine read: after a failed capture build that read still
@@ -3727,16 +3752,7 @@ export function DesktopWorkspaceShell(props: {
     void reloadShareMounts();
   }, [reloadShareMounts]);
 
-  // Mounts follow their shares while the workspace is open: one pull on
-  // open, then a slow poll. Manual refresh stays available in the explorer
-  // context menu.
   const mountCount = shareMounts.length;
-  useEffect(() => {
-    if (mountCount === 0) return;
-    void refreshShareMounts();
-    const timer = setInterval(() => void refreshShareMounts(), 5 * 60 * 1000);
-    return () => clearInterval(timer);
-  }, [mountCount, refreshShareMounts]);
 
   const unmountShare = useCallback(
     async (path: string) => {
@@ -4218,7 +4234,7 @@ export function DesktopWorkspaceShell(props: {
       } else if (secondarySidebarKey) {
         // CommandOrControl+Alt+B mirrors VS Code's secondary-sidebar toggle.
         // It is a no-op when the workspace has no Chats panel.
-        if (engineSurfacesExist) {
+        if (chatsSurfaceExists) {
           event.preventDefault();
           mutateWb(toggleChats);
         }
@@ -4238,8 +4254,8 @@ export function DesktopWorkspaceShell(props: {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
+    chatsSurfaceExists,
     closeActiveTab,
-    engineSurfacesExist,
     openEditorGroupRight,
     mutateWb,
     openSettings,
@@ -4327,11 +4343,11 @@ export function DesktopWorkspaceShell(props: {
             },
           ]
         : []),
-      // The Chats panel exists only for workspace-engine-flagged workspaces
-      // that are not shared views — no surface, no command. A workspace whose
-      // capture cannot serve chats keeps the command: the panel is still
-      // there, stating what dohc cannot do (#628).
-      ...(engineSurfacesExist
+      // The Chats panel exists for workspace-engine-flagged workspaces and
+      // for shared views (#646 PR2) — no surface, no command. A workspace
+      // whose capture cannot serve chats keeps the command: the panel is
+      // still there, stating what dohc cannot do (#628).
+      ...(chatsSurfaceExists
         ? [
             {
               id: "toggle-chats",
@@ -4391,7 +4407,7 @@ export function DesktopWorkspaceShell(props: {
       requestExplorerCreate,
       checkForDesktopUpdates,
       installDesktopUpdate,
-      engineSurfacesExist,
+      chatsSurfaceExists,
       openEditorGroupRight,
       openSettings,
       reportShellError,
@@ -4417,7 +4433,27 @@ export function DesktopWorkspaceShell(props: {
   // grant to pull with, so the refresh is skipped rather than failed, and the
   // banner says so instead of showing a level nobody can read.
   const shareViewDamaged = !!shareView?.damaged;
+  // Whether this share grants chat WRITES (#646 PR2), as one answer the
+  // banner and the composer both read. Positive recognition only: `view`, an
+  // absent level (which is what `damaged` leaves behind), and anything else
+  // unreadable all mean no. The renderer decides nothing with this — main
+  // refuses the write either way — but a surface that guessed generously
+  // would invite a write it then has to take back.
+  const shareViewChatWritable =
+    !shareViewDamaged &&
+    (shareView?.access === "comment" || shareView?.access === "edit");
   const [shareViewEnded, setShareViewEnded] = useState(!!shareView?.ended);
+  // Whether this share grants DOCUMENT writes (#646 PR3a), read the same way
+  // and for the same reason: positive recognition only, so `view`, an absent
+  // level, and a damaged grant all stay read-only. An ended share grants
+  // nothing either — its recipient can no longer send anything back, so an
+  // editable copy would be a dead end the banner has already closed.
+  //
+  // Edit does not write the granter's files. It writes the recipient's own
+  // copy, which the recipient then sends for the granter to accept.
+  const shareViewDocumentsWritable =
+    !shareViewDamaged && !shareViewEnded && shareView?.access === "edit";
+  const shareGranterName = shareView?.granterEmail ?? "another dohc user";
   const [shareRefreshing, setShareRefreshing] = useState(false);
   // Ops this share's pulls skipped, read from the RECORD, not from the last
   // refresh. The skip is durable — the cursor committed past those ops — so a
@@ -4479,6 +4515,157 @@ export function DesktopWorkspaceShell(props: {
     if (shareView && !shareViewEnded && !shareViewDamaged) void refreshShareView();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
+
+  // ---- The recipient's own submitted changes (#646 PR3a) ----
+  // A submission exists only from Send changes: there is no draft at the
+  // relay, so this reads what was SENT, never what is unsent.
+  const [myShareChange, setMyShareChange] = useState<MyShareChangeRow | null>(null);
+  const [shareChangesSubmitting, setShareChangesSubmitting] = useState(false);
+  // Set by a submit that found nothing to send. Cleared by the next submit,
+  // so the line never outlives the click it answers.
+  const [shareChangesEmpty, setShareChangesEmpty] = useState(false);
+  // What the last submit left behind: files an edit put outside the shared
+  // paths, and whether the bound held changes back for the next submit. Null
+  // when the last submit took everything, which is the ordinary case.
+  const [shareChangesSkipped, setShareChangesSkipped] = useState<{
+    outsideShare: number;
+    morePending: boolean;
+  } | null>(null);
+  // Latest-wins token, the same guard reloadShareSkipped uses: an answer for
+  // one workspace must never repaint another.
+  const myShareChangeToken = useRef(0);
+  // Returns the token IT took. A caller that reloads mid-flight has to know
+  // that number: this read advances the shared counter, so a caller still
+  // comparing the token it started with would find it stale and skip its own
+  // cleanup for ever.
+  const reloadMyShareChanges = useCallback(async (): Promise<number> => {
+    const token = ++myShareChangeToken.current;
+    const result = await bridge().listMyShareChanges({ workspaceId });
+    if (token !== myShareChangeToken.current) return token;
+    // The newest submission is the one the surface speaks for; older ones are
+    // settled history the granter's side already accounts for.
+    setMyShareChange(
+      result.proposals.reduce<MyShareChangeRow | null>(
+        (newest, candidate) =>
+          newest !== null && newest.createdAtMs >= candidate.createdAtMs
+            ? newest
+            : candidate,
+        null,
+      ),
+    );
+    return token;
+  }, [workspaceId]);
+  useEffect(() => {
+    setMyShareChange(null);
+    setShareChangesEmpty(false);
+    setShareChangesSkipped(null);
+    // Read for ANY share view, not only one that can still send: changes
+    // already sent stay withdrawable after a downgrade, and a surface that
+    // stopped reading them would hide the only way back.
+    if (!isShareView) return;
+    void reloadMyShareChanges().catch(() => undefined);
+  }, [isShareView, reloadMyShareChanges]);
+  const sendShareChanges = useCallback(async () => {
+    const token = myShareChangeToken.current;
+    // The newest token this call owns. The reload below takes a fresh one, and
+    // the cleanup has to compare against THAT — comparing against the token
+    // this call started with finds it stale every time and leaves the control
+    // reading "Sending…" for ever.
+    let owned = token;
+    setShareChangesSubmitting(true);
+    try {
+      const result = await bridge().submitShareChanges({ workspaceId });
+      if (token !== myShareChangeToken.current) return;
+      setShareChangesEmpty(result.submitted === 0);
+      setShareChangesSkipped(
+        result.skippedOutsideShare > 0 || result.morePending
+          ? {
+              outsideShare: result.skippedOutsideShare,
+              morePending: result.morePending,
+            }
+          : null,
+      );
+      owned = await reloadMyShareChanges();
+    } catch (error) {
+      reportShellError("Couldn't send your changes.", error);
+    } finally {
+      if (owned === myShareChangeToken.current) setShareChangesSubmitting(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId, reloadMyShareChanges]);
+  const withdrawShareChanges = useCallback(
+    async (proposalId: string) => {
+      const token = myShareChangeToken.current;
+      let owned = token;
+      setShareChangesSubmitting(true);
+      try {
+        await bridge().withdrawShareChanges({ workspaceId, proposalId });
+        if (token !== myShareChangeToken.current) return;
+        // Taking the changes back retires what the last submit reported about
+        // them. Leaving those lines up would describe a submission that is no
+        // longer out there.
+        setShareChangesEmpty(false);
+        setShareChangesSkipped(null);
+        owned = await reloadMyShareChanges();
+      } catch (error) {
+        reportShellError("Couldn't take your changes back.", error);
+      } finally {
+        if (owned === myShareChangeToken.current) setShareChangesSubmitting(false);
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    },
+    [workspaceId, reloadMyShareChanges],
+  );
+
+  // ---- The granter's side of the same lane (#646 PR3a) ----
+  // Changes recipients sent to THIS workspace. One notice per submission, and
+  // the review dialog each notice opens.
+  const [shareProposals, setShareProposals] = useState<readonly ShareProposalRow[]>([]);
+  const [reviewProposalId, setReviewProposalId] = useState<string | null>(null);
+  const shareProposalsToken = useRef(0);
+  const reloadShareProposals = useCallback(async () => {
+    const token = ++shareProposalsToken.current;
+    const result = await bridge().listShareProposals({ workspaceId });
+    if (token !== shareProposalsToken.current) return;
+    setShareProposals(result.proposals);
+  }, [workspaceId]);
+  useEffect(() => {
+    setShareProposals([]);
+    setReviewProposalId(null);
+  }, [workspaceId]);
+
+  // Relay-side share state follows its shares while the workspace is open:
+  // one pull on open, then a slow poll. Manual refresh stays available in the
+  // explorer context menu.
+  //
+  // Both sides of a share ride this ONE cadence. A recipient's mounts change
+  // when the granter changes them, and a granter's waiting changes arrive at
+  // the relay — and neither reaches this machine as workspace activity,
+  // because a proposal is deliberately not in anyone's log (#646 PR3a). A
+  // timer of its own would poll the same relay twice on two schedules.
+  //
+  // A share view holds someone else's files, so it is never the granter who
+  // decides about them.
+  const pollsShareMounts = mountCount > 0;
+  const pollsShareProposals = !isShareView;
+  useEffect(() => {
+    if (!pollsShareMounts && !pollsShareProposals) return;
+    const pull = () => {
+      if (pollsShareMounts) void refreshShareMounts();
+      if (pollsShareProposals) void reloadShareProposals().catch(() => undefined);
+    };
+    pull();
+    const timer = setInterval(pull, SHARE_RELAY_POLL_MS);
+    return () => clearInterval(timer);
+  }, [pollsShareMounts, pollsShareProposals, refreshShareMounts, reloadShareProposals]);
+  const shareChangeNotices = useMemo(
+    () =>
+      shareProposals.map((proposal) => ({
+        proposalId: proposal.proposalId,
+        sender: proposerName(proposal),
+      })),
+    [shareProposals],
+  );
 
   // ONE history timeline element, rendered by the side panel's History view
   // and the history tab — the engine page state is root-owned (never a
@@ -4680,7 +4867,7 @@ export function DesktopWorkspaceShell(props: {
           visible: wb.sidebarVisible,
           onToggle: () => mutateWb(toggleSidebar),
         }}
-        {...(engineSurfacesExist
+        {...(chatsSurfaceExists
           ? {
               chatsSidebar: {
                 visible: wb.chatsVisible,
@@ -4752,7 +4939,15 @@ export function DesktopWorkspaceShell(props: {
               ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
               : shareViewDamaged
                 ? "dohc can't read what this share grants. Open the share again to restore it."
-                : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
+                : shareViewDocumentsWritable
+                  ? // Edit gets its own sentence from #646 PR3a. It states
+                    // the whole right, including the half that is NOT a
+                    // right: the granter's files change only when the
+                    // granter accepts.
+                    `Shared view from ${shareGranterName}. Edit these files and send your changes for ${shareGranterName} to accept.`
+                  : shareViewChatWritable
+                    ? `Shared view from ${shareGranterName}. You can chat about these files, not edit them.`
+                    : `Shared view from ${shareGranterName} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
           </span>
           {shareSkipped
             ? shareSkipNoticeLines(shareSkipped, shareView.granterEmail).map(
@@ -4796,6 +4991,107 @@ export function DesktopWorkspaceShell(props: {
                 ),
               )
             : null}
+          {/* Changes already SENT, and the way to take them back (#646
+              PR3a). Deliberately not behind the level: a granter can narrow
+              the share while changes wait, and a reverse path a downgrade
+              removes is not a reverse path — it would strand work in front of
+              someone who may never answer it. The relay agrees; withdraw asks
+              for membership, not for edit. */}
+          <>
+              {myShareChange && myShareChange.state !== "withdrawn" ? (
+                <span
+                  data-testid="share-changes-state"
+                  data-state={myShareChange.state}
+                  className="flex min-w-0 items-center gap-1.5 text-[11px]"
+                >
+                  <span className="min-w-0 truncate">
+                    {myShareChange.state === "open"
+                      ? `Sent to ${shareGranterName} for review.`
+                      : myShareChange.state === "accepted"
+                        ? `${shareGranterName} accepted your changes.`
+                        : // Declined owes a Next, and this one works right
+                          // here: the editor and the send control both stay.
+                          `${shareGranterName} declined your changes. Your copy still has them. Edit again and send new changes.`}
+                  </span>
+                  {myShareChange.state === "open" ? (
+                    <>
+                      <span
+                        data-testid="share-changes-count"
+                        className="shrink-0 rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px] text-muted"
+                      >
+                        {myShareChange.files === 1
+                          ? "1 file"
+                          : `${myShareChange.files} files`}
+                      </span>
+                      {/* Submitting is reversible, so the reverse path is
+                          visible for as long as it exists. */}
+                      <button
+                        type="button"
+                        data-testid="share-changes-withdraw"
+                        disabled={shareChangesSubmitting}
+                        onClick={() =>
+                          void withdrawShareChanges(myShareChange.proposalId)
+                        }
+                        className="shrink-0 rounded border border-line bg-panel px-2 py-0.5 text-[11px] text-muted hover:text-ink disabled:opacity-50"
+                      >
+                        Withdraw
+                      </button>
+                    </>
+                  ) : null}
+                </span>
+              ) : null}
+          </>
+          {/* Sending. Edit level only, and only while the share is live: an
+              ended or damaged grant carries no way to send, so offering one
+              would be an affordance the grant does not have. */}
+          {shareViewDocumentsWritable ? (
+            <>
+              {shareChangesEmpty ? (
+                <span
+                  data-testid="share-changes-empty"
+                  className="min-w-0 truncate text-[11px]"
+                >
+                  You have no changes to send yet.
+                </span>
+              ) : null}
+              {/* What the submit did NOT take. Both are things the recipient
+                  would otherwise discover by their work simply not arriving. */}
+              {shareChangesSkipped !== null ? (
+                <span
+                  data-testid="share-changes-skipped"
+                  data-skipped={shareChangesSkipped.outsideShare || undefined}
+                  data-more-pending={shareChangesSkipped.morePending || undefined}
+                  className="min-w-0 truncate text-[11px] text-warning"
+                >
+                  {/* BOTH facts, when both are true. An either/or line drops
+                      "more pending" exactly when a submit was largest — the
+                      case the count exists to report. */}
+                  {[
+                    shareChangesSkipped.outsideShare === 0
+                      ? null
+                      : shareChangesSkipped.outsideShare === 1
+                        ? "1 file wasn't sent — it's not part of this share."
+                        : `${shareChangesSkipped.outsideShare} files weren't sent — they're not part of this share.`,
+                    shareChangesSkipped.morePending
+                      ? "More changes are waiting. Send again to send the rest."
+                      : null,
+                  ]
+                    .filter((line) => line !== null)
+                    .join(" ")}
+                </span>
+              ) : null}
+              <button
+                type="button"
+                data-testid="share-changes-send"
+                disabled={shareChangesSubmitting}
+                onClick={() => void sendShareChanges()}
+                className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel px-2 py-0.5 text-[11px] text-muted hover:text-ink disabled:opacity-50"
+              >
+                <Send size={11} aria-hidden />
+                {shareChangesSubmitting ? "Sending…" : "Send changes"}
+              </button>
+            </>
+          ) : null}
           {!shareViewEnded && !shareViewDamaged ? (
             <button
               type="button"
@@ -5166,15 +5462,17 @@ export function DesktopWorkspaceShell(props: {
               ) : isShareView ? (
                 // A persisted Chats tab on a shared view (#615). The
                 // neighbouring line blamed the Settings flag, and a share
-                // never touched it: the share's open installs no capture, so
-                // main refuses every Chats call. State the capability, and
-                // name the next step the tab really has.
+                // never touched it. #646 PR2 changed what is true here: a
+                // shared view HAS chat now, per file, and this tab is the
+                // workspace-wide listing it still does not get — so the copy
+                // states the capability the reader does have and points at
+                // the surface that answers.
                 <div
                   data-testid="chats-page-share-view"
                   className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
                 >
-                  A shared view has no chats. Close this tab to go back to the
-                  shared files.
+                  A shared view lists no chats. Open a shared file to chat
+                  about it.
                 </div>
               ) : !captureDecided ? (
                 // Main has not decided yet — a load state, not a claim (#542).
@@ -5319,7 +5617,10 @@ export function DesktopWorkspaceShell(props: {
                 registerSourceToggle={editorCallbacks.registerSourceToggle}
                 autoFocus={wb.activeEditorGroup === editorGroup.id}
                 knownMarkdownFiles={markdownWikilinkFiles}
-                readOnly={!!shareView || isMountedSharePath(tabPath)}
+                readOnly={
+                  (!!shareView && !shareViewDocumentsWritable) ||
+                  isMountedSharePath(tabPath)
+                }
                 {...(shareView || isMountedSharePath(tabPath)
                   ? {}
                   : { onSharePath: (path: string) => setShareTarget({ path }) })}
@@ -5372,20 +5673,23 @@ export function DesktopWorkspaceShell(props: {
         </main>
 
         {/* Chats panel — the right-hand secondary sidebar (flagged
-            workspaces that are not shared views). Hidden entirely while
-            collapsed; the titlebar Chats button, Ctrl+Alt+B, or the
-            toggle-chats command bring it back. History lives in the left
-            History view and the history tab — never here. */}
-        {engineSurfacesExist && wb.chatsVisible ? (
+            workspaces, and shared views with their file tab only). Hidden
+            entirely while collapsed; the titlebar Chats button, Ctrl+Alt+B,
+            or the toggle-chats command bring it back. History lives in the
+            left History view and the history tab — never here. */}
+        {chatsSurfaceExists && wb.chatsVisible ? (
           <ChatsPanel
             width={wb.chatsWidth}
             onWidthChange={(width) => mutateWb((state) => setChatsWidth(state, width))}
             onCollapse={() => mutateWb(toggleChats)}
-            tab={chatsPanelTab}
+            // A share view gets the file tab only: a workspace-wide listing
+            // would be a superset to filter, which is the shape #627 came from.
+            tabs={isShareView ? ["file"] : ["all", "file"]}
+            tab={chatsPanelActiveTab}
             onTabChange={setChatsPanelTab}
             actions={
               captureAvailable &&
-              chatsPanelTab === "all" &&
+              chatsPanelActiveTab === "all" &&
               !isChatsTabPath(focusedTabPath) ? (
                 <button
                   type="button"
@@ -5404,15 +5708,19 @@ export function DesktopWorkspaceShell(props: {
                 switching panel mode or workspace tab clears the failure. */}
             <ErrorBoundary
               scope="rail"
-              resetKeys={[chatsPanelTab, focusedTabPath]}
+              resetKeys={[chatsPanelActiveTab, focusedTabPath]}
             >
-              {!captureAvailable ? (
+              {!captureAvailable && !isShareView ? (
                 // Main's capture cannot serve chats here, so mounting either
                 // view below would issue calls it refuses and show the
                 // refusal as an error (#628). Chats is a persistent sidebar
                 // rather than a tab, so the panel stays where the user left
                 // it — and states the fact, with the one next step that can
                 // change it. Before the decision it states nothing (#542).
+                //
+                // A shared view needs no capture and waits for no decision:
+                // main answers its per-file chat from the share scope, and
+                // its only tab is the file tab (#646 PR2).
                 !captureDecided ? (
                   <PanelLoading label="Chats" />
                 ) : (
@@ -5423,11 +5731,12 @@ export function DesktopWorkspaceShell(props: {
                     {chatsOffCopy(syncStatus)}
                   </div>
                 )
-              ) : chatsPanelTab === "file" ? (
+              ) : chatsPanelActiveTab === "file" ? (
                 <Suspense fallback={<PanelLoading label="Chats" />}>
                   <LazyLinkedChatsPanel
                     workspaceId={workspaceId}
                     filePath={activeDocumentPath}
+                    {...(shareView ? { shareReadOnly: !shareViewChatWritable } : {})}
                     initialThread={searchChatTarget?.thread ?? null}
                     initialFocusMessageId={searchChatTarget?.focusMessageId}
                     onInitialThreadConsumed={() => setSearchChatTarget(null)}
@@ -5455,6 +5764,8 @@ export function DesktopWorkspaceShell(props: {
         onConnectCloud={() => setCloudOpen(true)}
         onOpenHistory={openHistoryView}
         onOpenConflicts={() => setConflictReviewOpen(true)}
+        shareChangeNotices={shareChangeNotices}
+        onReviewShareChanges={setReviewProposalId}
         onOpenSettings={() => openSettings()}
         onToggleTheme={toggleTheme}
         onContextMenu={() => void showWorkbenchMenu("status")}
@@ -5539,6 +5850,14 @@ export function DesktopWorkspaceShell(props: {
           workspaceId={workspaceId}
           onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
           onClose={() => setConflictReviewOpen(false)}
+        />
+      ) : null}
+      {reviewProposalId ? (
+        <ProposalReviewDialog
+          workspaceId={workspaceId}
+          proposalId={reviewProposalId}
+          onSettled={() => void reloadShareProposals().catch(() => undefined)}
+          onClose={() => setReviewProposalId(null)}
         />
       ) : null}
       {settingsSection ? (

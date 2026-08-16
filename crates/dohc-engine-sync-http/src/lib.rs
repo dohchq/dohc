@@ -12,8 +12,9 @@ use dohc_engine_sync::{
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_INGEST_BLOB_BYTES,
     MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, ObservedBytes, ProbeRequest, ProbeResponse, PullRequest,
     PullResponse, PushRequest, PushResponse, RelayError, RelayTransport, ReplicationEnvelope,
-    ShareBlobRequest, ShareReplicationEnvelope, ShareViewRequest, ShareViewResponse,
-    SharedChannelRequest, SharedChannelResponse,
+    ShareBlobRequest, ShareBlobUploadRequest, ShareLogPushRequest, ShareProposalChange,
+    ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareReplicationEnvelope,
+    ShareViewRequest, ShareViewResponse, SharedChannelRequest, SharedChannelResponse,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::http::{Response, Uri};
@@ -549,10 +550,7 @@ impl RelayTransport for HttpRelayTransport {
         })
     }
 
-    fn shared_channel_push(
-        &self,
-        req: SharedChannelRequest,
-    ) -> Result<SharedChannelResponse, RelayError> {
+    fn share_log_push(&self, req: ShareLogPushRequest) -> Result<PushResponse, RelayError> {
         validate_outbound_payloads(req.ops.iter().map(|op| &op.payload))?;
         let body = WireSharePushRequest {
             origin_id: &req.origin_id,
@@ -566,16 +564,11 @@ impl RelayTransport for HttpRelayTransport {
                 .send_json(body),
             RequestContext::Share,
         )?;
-        Ok(SharedChannelResponse {
-            ops: Vec::new(),
-            next_cursor: req.cursor,
-            has_more: false,
-            push: Some(PushResponse {
-                accepted: wire.accepted,
-                inserted: wire.inserted,
-                skipped: wire.skipped,
-                current_max_origin_seq: wire.current_max_origin_seq,
-            }),
+        Ok(PushResponse {
+            accepted: wire.accepted,
+            inserted: wire.inserted,
+            skipped: wire.skipped,
+            current_max_origin_seq: wire.current_max_origin_seq,
         })
     }
 
@@ -605,6 +598,44 @@ impl RelayTransport for HttpRelayTransport {
             blob_body_overflow(),
         )?;
         Ok(BlobDownloadResponse { bytes })
+    }
+
+    fn share_blob_upload(&self, req: ShareBlobUploadRequest) -> Result<(), RelayError> {
+        let url = self.share_url(
+            &req.share_id,
+            &format!("/blobs/{}", encode_segment(&req.sha256)),
+            &[],
+        );
+        let _: WireOk = self.json(
+            self.agent
+                .put(&url)
+                .header("authorization", &self.authorization())
+                .send(req.bytes.as_slice()),
+            RequestContext::Share,
+        )?;
+        Ok(())
+    }
+
+    fn share_proposal_submit(
+        &self,
+        req: ShareProposalSubmitRequest,
+    ) -> Result<ShareProposalSubmitResponse, RelayError> {
+        let body = WireShareProposalSubmitRequest {
+            submit_id: &req.submit_id,
+            ops: &req.ops,
+        };
+        let url = self.share_url(&req.share_id, "/proposals", &[]);
+        let wire: WireShareProposalSubmitResponse = self.json(
+            self.agent
+                .post(&url)
+                .header("authorization", &self.authorization())
+                .send_json(body),
+            RequestContext::Share,
+        )?;
+        Ok(ShareProposalSubmitResponse {
+            proposal_id: wire.proposal_id,
+            ops: wire.ops,
+        })
     }
 }
 
@@ -914,6 +945,22 @@ impl<'a> From<&'a ShareReplicationEnvelope> for WireShareLogInput<'a> {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WireShareProposalSubmitRequest<'a> {
+    submit_id: &'a str,
+    /// Serialized straight from the contract type: the relay's field names ARE
+    /// its camelCase names, so a mirror here would only be a copy that drifts.
+    ops: &'a [ShareProposalChange],
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireShareProposalSubmitResponse {
+    proposal_id: String,
+    ops: usize,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WirePushResponse {
@@ -1013,6 +1060,67 @@ mod tests {
     struct RelayErrorFixture {
         code: String,
         status: u16,
+    }
+
+    /// The relay reads a proposed change's base pair as a STATED fact — both
+    /// halves or neither (`filterProposedChangeForShare`). An absent field and
+    /// a null field must therefore not look the same on the wire, so every
+    /// optional field is serialized rather than skipped.
+    #[test]
+    fn a_proposed_change_sends_every_absent_field_as_an_explicit_null() {
+        let change = ShareProposalChange {
+            based_on_path: None,
+            based_on_blob_sha256: None,
+            operation: "delete".to_owned(),
+            after_path: None,
+            after_blob_sha256: None,
+            after_content_kind: None,
+            after_byte_length: None,
+            recorded_at_ms: 7,
+        };
+        let wire = serde_json::to_value(&change).expect("serialize");
+        let record = wire.as_object().expect("a change is a JSON object");
+        for field in [
+            "basedOnPath",
+            "basedOnBlobSha256",
+            "afterPath",
+            "afterBlobSha256",
+            "afterContentKind",
+            "afterByteLength",
+        ] {
+            assert_eq!(
+                record.get(field),
+                Some(&serde_json::Value::Null),
+                "MUTATION: {field} must be sent as an explicit null, never skipped",
+            );
+        }
+        assert_eq!(
+            record.get("operation").and_then(serde_json::Value::as_str),
+            Some("delete"),
+        );
+        assert_eq!(
+            record
+                .get("recordedAtMs")
+                .and_then(serde_json::Value::as_i64),
+            Some(7),
+        );
+        // The EXACT field set. `ShareProposalChange` derives `Serialize`, so a
+        // field added to the struct reaches the granter's relay without anyone
+        // deciding it should. This is what makes that a test failure instead.
+        assert_eq!(
+            record.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "basedOnPath",
+                "basedOnBlobSha256",
+                "operation",
+                "afterPath",
+                "afterBlobSha256",
+                "afterContentKind",
+                "afterByteLength",
+                "recordedAtMs",
+            ]),
+            "MUTATION: a new field on ShareProposalChange must not silently join the wire",
+        );
     }
 
     #[test]

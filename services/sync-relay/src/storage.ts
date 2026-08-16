@@ -73,6 +73,53 @@ export interface SyncRelayShareRow {
   revokedAtMs: number | null;
 }
 
+// #646 PR3a. A recipient's submitted changes, held at the relay until the
+// granter accepts or declines them. `open` is the only state that can change.
+export type ShareProposalState = "open" | "accepted" | "declined" | "withdrawn";
+
+export interface ShareProposalRow {
+  proposalId: string;
+  shareId: string;
+  workspaceId: string;
+  // SERVER-derived from the authenticated submitter. Never client-supplied.
+  proposedByUserId: string;
+  // The ONE version the share exposed when this was submitted.
+  versionId: string;
+  state: ShareProposalState;
+  createdAtMs: number;
+  settledAtMs: number | null;
+}
+
+// One net change to one file. Not a moment: the relay mints the moment from
+// the granter's own facts at accept (see `shareProposals.ts`).
+export interface ShareProposalOpRow {
+  opIndex: number;
+  basedOnPath: string | null;
+  // WHICH file the change is built on, resolved from `basedOnPath` at submit
+  // and followed at accept. null for a file the granter does not have.
+  basedOnObjectId: string | null;
+  basedOnBlobSha256: string | null;
+  operation: "write" | "delete";
+  afterPath: string | null;
+  afterBlobSha256: string | null;
+  afterContentKind: "text" | "binary" | null;
+  afterByteLength: number | null;
+  recordedAtMs: number;
+}
+
+// One moment the granter's log holds for one object, as the base rewrite needs
+// to describe it. `path` and `blobSha256` are null when the moment deletes the
+// object.
+export interface ObjectMomentRow {
+  momentId: string;
+  versionId: string;
+  path: string | null;
+  blobSha256: string | null;
+  contentKind: string | null;
+  byteLength: number | null;
+  recordedAtMs: number;
+}
+
 export interface WorkspaceSyncIdentity {
   replicationEpoch: string;
   streamIdentity: string;
@@ -232,7 +279,107 @@ export interface SyncRelayStorage {
     workspaceId: string,
     channelWireId: string,
   ): "channel" | "dm" | "agent" | null | undefined;
+  // #646 PR2: the file a thread is about, as claimed by the EARLIEST
+  // chat.thread.create for this threadId. Earliest-wins for the same reason
+  // the channel binding uses it: a later forged re-create must not re-bind an
+  // existing thread into a share. undefined means no create exists; null means
+  // the earliest create exists but binds the thread to no file.
+  findThreadCreateFileBinding(
+    workspaceId: string,
+    threadId: string,
+  ): ThreadFileBinding | null | undefined;
+  // Where this object sits RIGHT NOW. undefined means the relay has never
+  // seen the object; null means its latest moment deleted it (or named no
+  // readable path). Both deny.
+  objectCurrentPath(workspaceId: string, objectId: string): string | null | undefined;
+  // The object at this path RIGHT NOW, or undefined when none is. The reverse
+  // of the lookup above; a thread bound by path is re-proved through it.
+  objectIdAtPath(workspaceId: string, path: string): string | undefined;
+  // #646 PR3a. WHICH object sits at this path, in the ONE version a share
+  // exposes. `objectIdAtPath` above answers across every version at once, so
+  // a path last touched in a side version resolves to an object that share
+  // never saw — and every lookup below would then be scoped to a version that
+  // object has nothing in. undefined means "nothing is there", which the
+  // submit door refuses rather than minting a create.
+  objectIdAtPathInVersion(input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+  }): string | undefined;
+  // #646 PR3a. The granter's own moment for this object WITHIN one version:
+  // the latest one, or the latest that produced `blobSha256` when one is
+  // named. The first answers "did this file drift since they sent it?"; the
+  // second is the correct three-way base for a change built on that content.
+  //
+  // The LATEST match wins, because content can return to an earlier state and
+  // the recipient started from the most recent moment that produced it. null
+  // when no moment did, which reads as an unknown base and opens a conflict.
+  //
+  // A share exposes exactly ONE version, and the same content can sit under
+  // the same object id in another one. An unscoped lookup would hand a main
+  // share a base from a side version — a moment the granter's main line never
+  // held — so the version is a parameter, never a default.
+  objectMoment(input: {
+    workspaceId: string;
+    objectId: string;
+    versionId: string;
+    blobSha256?: string;
+  }): ObjectMomentRow | null;
+  // Store one submit. `submitId` is idempotent per share: a retried POST
+  // returns `created: false` and the proposal it already made, so a lost
+  // response can never become two proposals for one intent.
+  insertShareProposal(input: {
+    proposalId: string;
+    shareId: string;
+    workspaceId: string;
+    proposedByUserId: string;
+    versionId: string;
+    submitId: string;
+    createdAtMs: number;
+    ops: ShareProposalOpRow[];
+    guard?: () => void;
+  }): { proposalId: string; created: boolean };
+  getShareProposal(
+    proposalId: string,
+  ): (ShareProposalRow & { ops: ShareProposalOpRow[] }) | null;
+  listShareProposalsForShare(shareId: string): Array<ShareProposalRow & { opCount: number }>;
+  listShareProposalsForWorkspace(
+    workspaceId: string,
+  ): Array<ShareProposalRow & { ops: ShareProposalOpRow[] }>;
+  // Move a proposal out of `open`. Returns false when it already moved, which
+  // is how a double accept, a decline racing an accept, and a withdraw racing
+  // either one all lose without a second check.
+  settleShareProposal(
+    proposalId: string,
+    to: Exclude<ShareProposalState, "open">,
+    settledAtMs: number,
+  ): boolean;
+  // The same move, WITHOUT a transaction of its own, for a caller that already
+  // holds the write lock. Accept uses it inside appendLogBatch's guard so the
+  // release and the settle commit together or not at all.
+  settleShareProposalInTransaction(
+    proposalId: string,
+    to: Exclude<ShareProposalState, "open">,
+    settledAtMs: number,
+  ): boolean;
+  // The highest origin_seq this origin holds, or -1 when it holds none. The
+  // proposal accept needs it because a proposal's changes carry no
+  // coordinates: they were never a log, so the relay numbers them.
+  maxOriginSeq(workspaceId: string, originId: string): number;
 }
+
+// The two wire shapes a file-linked thread create carries, kept apart because
+// they come from opposite ends of a share. `object` is the granter's own op —
+// its `linkedObjectId` is a granter-local id the relay resolves to a path.
+// `path` is a RECIPIENT's op, pushed back through the share log: a recipient's
+// object ids are its own and mean nothing here, so its create names the
+// granted path directly, and the relay re-proves that path against the log.
+//
+// Declared here, where it is read out of the log, and re-exported by
+// `shareFilter.ts` for the filter that consumes it.
+export type ThreadFileBinding =
+  | { kind: "object"; objectId: string }
+  | { kind: "path"; path: string };
 
 interface SqliteRunResult {
   changes: number;
@@ -397,6 +544,133 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_recipient_email
         ON sync_relay_shares(recipient_email, created_at_ms);
 
+      -- #646 PR2: where every object the relay has ever seen sits RIGHT NOW,
+      -- maintained at insert time by appendLogBatch. The file-chat share
+      -- filter resolves a thread's object to its current path and tests that
+      -- path against the selector, so this lookup is on the share read path
+      -- and must be a primary-key read. A LIKE scan cannot serve it:
+      -- moment.append rows are most of a busy log, so the partial-index trick
+      -- above would confine nothing.
+      --
+      -- The path column is NULL when the object's latest moment deletes it,
+      -- or when that moment names no readable path. Both read as "deny" — the
+      -- filter fails closed on NULL exactly as it does on an absent row.
+      CREATE TABLE IF NOT EXISTS sync_relay_object_paths (
+        workspace_id TEXT NOT NULL,
+        object_id    TEXT NOT NULL,
+        path         TEXT,
+        relay_seq    INTEGER NOT NULL,
+        PRIMARY KEY (workspace_id, object_id),
+        FOREIGN KEY (workspace_id)
+          REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
+      ) STRICT;
+      -- The reverse lookup: which object sits at this path now. A thread bound
+      -- by PATH is re-proved through this on every serve, so it is on the
+      -- share read path and must not scan.
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_object_paths_path
+        ON sync_relay_object_paths(workspace_id, path);
+
+      -- #646 PR3a: one row per moment the relay has seen for an object, which
+      -- is what the base rewrite resolves against. sync_relay_object_paths
+      -- above answers "where is this object NOW?"; accept needs the harder
+      -- question, "which of your own moments produced the content the
+      -- recipient started from?", because that moment is the correct
+      -- three-way base. A blob hash is the only identifier both sides of a
+      -- share genuinely share, so the hash is what the lookup keys on.
+      --
+      -- path and blob_sha256 are NULL when the moment deletes the object.
+      -- A NULL hash is never a lookup target: an absent base reads as
+      -- "unknown", and unknown opens a conflict rather than claiming a base.
+      CREATE TABLE IF NOT EXISTS sync_relay_object_moments (
+        workspace_id   TEXT NOT NULL,
+        object_id      TEXT NOT NULL,
+        relay_seq      INTEGER NOT NULL,
+        moment_id      TEXT NOT NULL,
+        version_id     TEXT NOT NULL,
+        path           TEXT,
+        blob_sha256    TEXT,
+        content_kind   TEXT,
+        byte_length    INTEGER,
+        recorded_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (workspace_id, object_id, relay_seq),
+        FOREIGN KEY (workspace_id)
+          REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
+      ) STRICT;
+      -- Base resolution by content hash. Latest matching moment wins, because
+      -- content can return to an earlier state and the recipient started from
+      -- the most recent moment that produced it.
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_blob
+        ON sync_relay_object_moments(workspace_id, object_id, blob_sha256, relay_seq);
+      -- WHICH object sits at a path IN ONE VERSION. sync_relay_object_paths
+      -- answers the same question across every version at once, latest-wins,
+      -- so a path last touched in a side version resolves to the wrong object
+      -- for a share that exposes another one. The proposal lane asks this
+      -- instead, and it must not scan.
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_path
+        ON sync_relay_object_moments(workspace_id, version_id, path, relay_seq);
+
+      -- #646 PR3a: a recipient's submitted changes, held until the granter
+      -- accepts or declines them. Nothing here is in the granter's log: accept
+      -- is what releases it, through the same appendLogBatch the chat path
+      -- already uses.
+      --
+      -- workspace_id is denormalized so the granter's owner-scoped read
+      -- never joins through a share the granter may have revoked.
+      -- submit_id makes one submit idempotent: a retried POST returns the
+      -- proposal it already made instead of a second one.
+      -- version_id is PINNED at submit from the selector the recipient read.
+      -- Accept and the review listing both resolve the granter's moments
+      -- within it, so a selector edited mid-flight cannot move a proposal to a
+      -- version its author never saw.
+      CREATE TABLE IF NOT EXISTS sync_relay_share_proposals (
+        proposal_id         TEXT PRIMARY KEY,
+        share_id            TEXT NOT NULL,
+        workspace_id        TEXT NOT NULL,
+        proposed_by_user_id TEXT NOT NULL,
+        version_id          TEXT NOT NULL,
+        submit_id           TEXT NOT NULL,
+        state               TEXT NOT NULL,
+        created_at_ms       INTEGER NOT NULL,
+        settled_at_ms       INTEGER,
+        UNIQUE (share_id, submit_id),
+        FOREIGN KEY (share_id)
+          REFERENCES sync_relay_shares(share_id) ON DELETE CASCADE,
+        FOREIGN KEY (workspace_id)
+          REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_share_proposals_workspace
+        ON sync_relay_share_proposals(workspace_id, state, created_at_ms);
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_share_proposals_share
+        ON sync_relay_share_proposals(share_id, created_at_ms);
+
+      -- One NET change to one file. Not a moment, and deliberately not shaped
+      -- like one: a recipient never learns a granter moment id, so it states
+      -- what it read and what it wants, and the relay mints the moment.
+      --
+      -- based_on_object_id is resolved AT SUBMIT, from the path the recipient
+      -- named. The path is where the granter had the file when the recipient
+      -- read it; the object id is which file it is. Resolving at accept
+      -- instead would follow the path, so a rename between submit and accept
+      -- would find a different file and a delete would find none — and a
+      -- change whose base resolved to nothing is minted as a create, which
+      -- resurrects a file the granter deleted. The object id does not move.
+      CREATE TABLE IF NOT EXISTS sync_relay_share_proposal_ops (
+        proposal_id          TEXT NOT NULL,
+        op_index             INTEGER NOT NULL,
+        based_on_path        TEXT,
+        based_on_object_id   TEXT,
+        based_on_blob_sha256 TEXT,
+        operation            TEXT NOT NULL,
+        after_path           TEXT,
+        after_blob_sha256    TEXT,
+        after_content_kind   TEXT,
+        after_byte_length    INTEGER,
+        recorded_at_ms       INTEGER NOT NULL,
+        PRIMARY KEY (proposal_id, op_index),
+        FOREIGN KEY (proposal_id)
+          REFERENCES sync_relay_share_proposals(proposal_id) ON DELETE CASCADE
+      ) STRICT;
+
       CREATE TABLE IF NOT EXISTS sync_relay_migrations (
         migration_id TEXT PRIMARY KEY,
         completed_at_ms INTEGER NOT NULL
@@ -463,7 +737,186 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     } catch {}
     throw error;
   }
+  // AFTER the schema transaction commits, in its own. The seed scans every
+  // moment.append the log holds, and holding the schema-init write lock for
+  // the length of that scan stalls every other opener against
+  // SYNC_RELAY_BUSY_TIMEOUT_MS on the first open after a deploy. Its own
+  // transaction still makes it atomic — a crash part-way leaves the migration
+  // unrecorded and the next open redoes it.
+  seedObjectPaths(db);
 }
+
+// Where a `moment.append` payload says its object is AFTER the op: the
+// destination path of a write or a rename (a rename carries the destination in
+// both `path` and `payloadAfterPath`, `crates/dohc-engine-domain/src/store.rs`
+// `rename`), or NULL for a delete.
+//
+// NULL is also the answer for a moment that names an object but no readable
+// path. That op moved the object somewhere this table cannot state, and a
+// stale row would keep serving the object's chat at a path the relay can no
+// longer prove. Unknown denies.
+export function objectPathFromMomentPayload(
+  payloadJson: string,
+): { objectId: string; path: string | null } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadJson);
+  } catch {
+    return null;
+  }
+  const record = asObject(parsed);
+  if (!record) return null;
+  const objectId = record.objectId;
+  if (typeof objectId !== "string" || objectId.length === 0) return null;
+  if (record.operation === "delete") return { objectId, path: null };
+  for (const field of ["path", "payloadAfterPath"] as const) {
+    const value = record[field];
+    if (typeof value === "string" && value.length > 0) return { objectId, path: value };
+  }
+  return { objectId, path: null };
+}
+
+// #646 PR3a. What one `moment.append` says about its object, in the shape the
+// base rewrite reads back. The three fields the read filter already trusts —
+// `objectId`, the after path, the after hash — plus the moment's own id, which
+// is what `head_fast_forward` compares against on the granter's engine
+// (`crates/dohc-engine-sync/src/moment_apply.rs`).
+//
+// A delete states a null path and a null hash. A moment the relay cannot read
+// this far states nothing, and an unindexed moment simply cannot be chosen as
+// a base — which fails closed, because an unresolvable base opens a conflict.
+export function objectMomentFromMomentPayload(
+  payloadJson: string,
+): {
+  objectId: string;
+  momentId: string;
+  versionId: string;
+  path: string | null;
+  blobSha256: string | null;
+  contentKind: string | null;
+  byteLength: number | null;
+  recordedAtMs: number;
+} | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadJson);
+  } catch {
+    return null;
+  }
+  const record = asObject(parsed);
+  if (!record) return null;
+  const objectId = record.objectId;
+  const momentId = record.momentId;
+  const versionId = record.versionId;
+  const recordedAtMs = record.recordedAtMs;
+  if (
+    typeof objectId !== "string" ||
+    objectId.length === 0 ||
+    typeof momentId !== "string" ||
+    momentId.length === 0 ||
+    typeof versionId !== "string" ||
+    versionId.length === 0 ||
+    typeof recordedAtMs !== "number" ||
+    !Number.isSafeInteger(recordedAtMs)
+  ) {
+    return null;
+  }
+  const deleted = record.operation === "delete";
+  const path = deleted ? null : readableString(record.path) ?? readableString(record.payloadAfterPath);
+  const blobSha256 = deleted ? null : readableString(record.payloadAfterBlobSha256);
+  const contentKind = deleted ? null : readableString(record.payloadAfterContentKind);
+  const byteLength =
+    !deleted && typeof record.payloadAfterByteLength === "number" &&
+    Number.isSafeInteger(record.payloadAfterByteLength)
+      ? record.payloadAfterByteLength
+      : null;
+  return { objectId, momentId, versionId, path, blobSha256, contentKind, byteLength, recordedAtMs };
+}
+
+function readableString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+const OBJECT_MOMENT_INSERT_SQL = `
+  INSERT INTO sync_relay_object_moments (
+    workspace_id, object_id, relay_seq, moment_id, version_id,
+    path, blob_sha256, content_kind, byte_length, recorded_at_ms
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(workspace_id, object_id, relay_seq) DO NOTHING`;
+
+// #646 PR2 one-time seed. `sync_relay_object_paths` is maintained at insert
+// time, so without this every moment.append already in the log would resolve
+// to "the relay has never seen this object" — and the share filter would deny
+// chat on every file shared before this deployment, forever. The scan reads
+// the log in relay order and lets the LAST moment for each object win, which
+// is the same rule the insert-time upsert applies.
+function seedObjectPaths(db: SqliteDb): void {
+  const migrationId = "object-paths-seed-v1";
+  const seeded = db
+    .prepare("SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete")
+    .get(migrationId);
+  if (Number(seeded?.complete ?? 0) !== 0) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    // Re-read under the write lock: two processes can open the same database
+    // at once, both see the marker absent, and only one may do the work.
+    const claimed = db
+      .prepare(
+        "SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete",
+      )
+      .get(migrationId);
+    if (Number(claimed?.complete ?? 0) !== 0) {
+      db.exec("COMMIT");
+      return;
+    }
+    const upsert = db.prepare(OBJECT_PATH_UPSERT_SQL);
+    const rows = db
+      .prepare(
+        `SELECT workspace_id, payload_json, relay_seq FROM sync_relay_log
+         WHERE op_kind = 'moment.append'
+         ORDER BY relay_seq`,
+      )
+      .all();
+    for (const row of rows) {
+      const resolved = objectPathFromMomentPayload(String(row.payload_json));
+      if (!resolved) continue;
+      upsert.run(
+        String(row.workspace_id),
+        resolved.objectId,
+        resolved.path,
+        Number(row.relay_seq),
+      );
+    }
+    db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(
+      migrationId,
+      Date.now(),
+    );
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+}
+
+// Latest-wins: a rename is a later fact about the same object, and the share
+// must follow the file rather than its history.
+//
+// The relay_seq guard is defence in depth, and today it is UNREACHABLE: both
+// writers walk the log in relay order (appendLogBatch inserts under the write
+// lock and reads back the row it just took; the seed scans ORDER BY
+// relay_seq), so no upsert here can arrive out of order. Its inverse mutation
+// therefore survives, which is recorded rather than papered over. It stays
+// because this table decides which chat a share serves, and a path moved
+// backwards by a future out-of-order writer would serve a file's discussion at
+// a path the relay can no longer prove.
+const OBJECT_PATH_UPSERT_SQL = `
+  INSERT INTO sync_relay_object_paths (workspace_id, object_id, path, relay_seq)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(workspace_id, object_id) DO UPDATE
+    SET path = excluded.path, relay_seq = excluded.relay_seq
+    WHERE excluded.relay_seq > sync_relay_object_paths.relay_seq`;
 
 export function openSyncRelayStorage(
   dbPath: string,
@@ -929,6 +1382,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     // a blob uploaded just before its referencing log op is appended survives
     // the gap between the two phases. cutoff is the newest created_at_ms still
     // eligible for collection.
+    //
+    // #646 PR3a: an OPEN proposal's content is referenced too, and the log
+    // cannot say so — a proposed change is not in the log, which is the whole
+    // point of holding it. Without this second clause a proposal left open
+    // past the grace window would lose its content to the sweep and could
+    // never be accepted, so the granter's only honest answer would be
+    // "decline". A settled proposal stops protecting its blobs: an accepted
+    // one has them in the log, and a declined one never will.
     const cutoff = options.nowMs - this.blobGraceMs;
     // Phase 1 (read only, no write lock): candidate shas that are unreferenced
     // AND aged past the grace window.
@@ -943,6 +1404,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
              FROM sync_relay_log l
              WHERE l.workspace_id = b.workspace_id
                AND l.payload_json LIKE '%' || b.sha256 || '%'
+           )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM sync_relay_share_proposal_ops o
+             JOIN sync_relay_share_proposals p ON p.proposal_id = o.proposal_id
+             WHERE p.workspace_id = b.workspace_id
+               AND p.state = 'open'
+               AND o.after_blob_sha256 = b.sha256
            )
          ORDER BY b.sha256`,
       )
@@ -962,6 +1431,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
            FROM sync_relay_log l
            WHERE l.workspace_id = ?
              AND l.payload_json LIKE '%' || ? || '%'
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM sync_relay_share_proposal_ops o
+           JOIN sync_relay_share_proposals p ON p.proposal_id = o.proposal_id
+           WHERE p.workspace_id = ? AND p.state = 'open' AND o.after_blob_sha256 = ?
          )`,
     );
     const CHUNK = 200;
@@ -970,7 +1445,15 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       this.db.exec("BEGIN IMMEDIATE");
       try {
         for (const sha256 of chunk) {
-          const result = deleteStmt.run(workspaceId, sha256, cutoff, workspaceId, sha256);
+          const result = deleteStmt.run(
+            workspaceId,
+            sha256,
+            cutoff,
+            workspaceId,
+            sha256,
+            workspaceId,
+            sha256,
+          );
           if (result.changes > 0) removedSha256s.push(sha256);
         }
         this.db.exec("COMMIT");
@@ -1250,8 +1733,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms
         ) VALUES (?, ?, ?, ?, ?, ?)`,
       );
+      const objectPathStmt = this.db.prepare(OBJECT_PATH_UPSERT_SQL);
+      const objectMomentStmt = this.db.prepare(OBJECT_MOMENT_INSERT_SQL);
       for (const op of newOps) {
-        insertStmt.run(
+        const result = insertStmt.run(
           input.workspaceId,
           input.originId,
           op.originSeq,
@@ -1260,6 +1745,40 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           op.recordedAtMs,
         );
         inserted += 1;
+        // #646 PR2: keep "where is this object now?" answerable by primary
+        // key. The relay_seq this row just took IS the order the guard in the
+        // upsert compares, so a later moment always wins and an out-of-order
+        // one never moves a path backwards.
+        if (op.opKind === "moment.append") {
+          const resolved = objectPathFromMomentPayload(op.payloadJson);
+          if (resolved) {
+            objectPathStmt.run(
+              input.workspaceId,
+              resolved.objectId,
+              resolved.path,
+              Number(result.lastInsertRowid),
+            );
+          }
+          // #646 PR3a: the same insert, one question deeper. The row above
+          // keeps "where is this object now?" answerable; this one keeps
+          // "which moment produced this content?" answerable, which is what a
+          // proposal's base resolves to at accept.
+          const moment = objectMomentFromMomentPayload(op.payloadJson);
+          if (moment) {
+            objectMomentStmt.run(
+              input.workspaceId,
+              moment.objectId,
+              Number(result.lastInsertRowid),
+              moment.momentId,
+              moment.versionId,
+              moment.path,
+              moment.blobSha256,
+              moment.contentKind,
+              moment.byteLength,
+              moment.recordedAtMs,
+            );
+          }
+        }
       }
 
       this.db.exec("COMMIT");
@@ -1410,28 +1929,31 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   revokeShare(shareId: string, revokedAtMs: number): boolean {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return this.tx(() => {
       const existing = this.db
         .prepare("SELECT revoked_at_ms FROM sync_relay_shares WHERE share_id = ?")
         .get(shareId);
-      if (existing === undefined) {
-        this.db.exec("COMMIT");
-        return false;
-      }
+      if (existing === undefined) return false;
       if (existing.revoked_at_ms === null || existing.revoked_at_ms === undefined) {
         this.db
           .prepare("UPDATE sync_relay_shares SET revoked_at_ms = ? WHERE share_id = ?")
           .run(Math.trunc(revokedAtMs), shareId);
+        // #646 PR3a: ending a share settles what it was still carrying. An
+        // open proposal outlives the grant it came through — the recipient
+        // can no longer withdraw it, and its content stays pinned out of the
+        // blob sweep for as long as it stays open. Declining is the honest
+        // state: the granter ended the share instead of answering, and the
+        // recipient's own copy still has the changes.
+        this.db
+          .prepare(
+            `UPDATE sync_relay_share_proposals
+             SET state = 'declined', settled_at_ms = ?
+             WHERE share_id = ? AND state = 'open'`,
+          )
+          .run(Math.trunc(revokedAtMs), shareId);
       }
-      this.db.exec("COMMIT");
       return true;
-    } catch (error) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    });
   }
 
   listLogRowsReferencing(workspaceId: string, sha256: string): SyncRelayLogRow[] {
@@ -1451,23 +1973,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     threadId: string,
   ): string | null | undefined {
     if (!threadId) return undefined;
-    // LIKE pre-filter on the exact JSON fragment the canonical (sorted-key,
-    // JSON.stringify-escaped) payload stores, wildcards escaped so a hostile
-    // threadId cannot widen the match; the JSON.parse comparison below makes
-    // the real decision.
-    const needle = `"threadId":${JSON.stringify(threadId)}`
-      .replaceAll("\\", "\\\\")
-      .replaceAll("%", "\\%")
-      .replaceAll("_", "\\_");
-    const rows = this.db
-      .prepare(
-        `SELECT payload_json FROM sync_relay_log
-         WHERE workspace_id = ? AND op_kind = 'chat.thread.create'
-           AND payload_json LIKE ? ESCAPE '\\'
-         ORDER BY relay_seq`,
-      )
-      .all(workspaceId, `%${needle}%`);
-    for (const row of rows) {
+    for (const row of this.threadCreateRows(workspaceId, threadId)) {
       let payload: unknown;
       try {
         payload = JSON.parse(String(row.payload_json));
@@ -1540,6 +2046,312 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       return record.kind;
     }
     return undefined;
+  }
+
+  findThreadCreateFileBinding(
+    workspaceId: string,
+    threadId: string,
+  ): ThreadFileBinding | null | undefined {
+    if (!threadId) return undefined;
+    for (const row of this.threadCreateRows(workspaceId, threadId)) {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(String(row.payload_json));
+      } catch {
+        continue;
+      }
+      const record = asObject(payload);
+      if (!record || record.threadId !== threadId) continue;
+      // The EARLIEST matching op is authoritative, whatever it says. Exactly
+      // one binding shape may be present: an op claiming both is malformed,
+      // and reading either half of it would let a crafted create bind a
+      // thread twice.
+      const objectId = record.linkedObjectId;
+      const path = record.linkedPath;
+      const hasObject = typeof objectId === "string" && objectId.length > 0;
+      const hasPath = typeof path === "string" && path.length > 0;
+      if (hasObject && hasPath) return null;
+      if (hasObject) return { kind: "object", objectId: objectId as string };
+      if (hasPath) return { kind: "path", path: path as string };
+      return null;
+    }
+    return undefined;
+  }
+
+  objectIdAtPath(workspaceId: string, path: string): string | undefined {
+    if (!path) return undefined;
+    const row = this.db
+      .prepare(
+        "SELECT object_id FROM sync_relay_object_paths \
+         WHERE workspace_id = ? AND path = ? LIMIT 1",
+      )
+      .get(workspaceId, path);
+    return typeof row?.object_id === "string" ? row.object_id : undefined;
+  }
+
+  objectCurrentPath(workspaceId: string, objectId: string): string | null | undefined {
+    if (!objectId) return undefined;
+    const row = this.db
+      .prepare(
+        "SELECT path FROM sync_relay_object_paths WHERE workspace_id = ? AND object_id = ?",
+      )
+      .get(workspaceId, objectId);
+    if (row === undefined) return undefined;
+    return typeof row.path === "string" && row.path.length > 0 ? row.path : null;
+  }
+
+  objectIdAtPathInVersion(input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+  }): string | undefined {
+    if (!input.path || !input.versionId) return undefined;
+    // The object whose LATEST moment in this version sits at this path. A
+    // moment that moved the object away leaves a newer row naming another
+    // path, so that object no longer answers here — which is what makes this
+    // "who is at this path now, in this version" rather than "who was ever".
+    const row = this.db
+      .prepare(
+        `SELECT m.object_id
+         FROM sync_relay_object_moments m
+         WHERE m.workspace_id = ? AND m.version_id = ? AND m.path = ?
+           AND m.relay_seq = (
+             SELECT MAX(latest.relay_seq)
+             FROM sync_relay_object_moments latest
+             WHERE latest.workspace_id = m.workspace_id
+               AND latest.object_id = m.object_id
+               AND latest.version_id = m.version_id
+           )
+         ORDER BY m.relay_seq DESC
+         LIMIT 1`,
+      )
+      .get(input.workspaceId, input.versionId, input.path);
+    return typeof row?.object_id === "string" ? row.object_id : undefined;
+  }
+
+  objectMoment(input: {
+    workspaceId: string;
+    objectId: string;
+    versionId: string;
+    blobSha256?: string;
+  }): ObjectMomentRow | null {
+    if (!input.objectId || !input.versionId) return null;
+    if (input.blobSha256 !== undefined && !input.blobSha256) return null;
+    const params: unknown[] = [input.workspaceId, input.objectId, input.versionId];
+    if (input.blobSha256 !== undefined) params.push(input.blobSha256);
+    const row = this.db
+      .prepare(
+        `SELECT moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms
+         FROM sync_relay_object_moments
+         WHERE workspace_id = ? AND object_id = ? AND version_id = ?
+           ${input.blobSha256 === undefined ? "" : "AND blob_sha256 = ?"}
+         ORDER BY relay_seq DESC LIMIT 1`,
+      )
+      .get(...params);
+    return row ? rowToObjectMomentRow(row) : null;
+  }
+
+  insertShareProposal(input: {
+    proposalId: string;
+    shareId: string;
+    workspaceId: string;
+    proposedByUserId: string;
+    versionId: string;
+    submitId: string;
+    createdAtMs: number;
+    ops: ShareProposalOpRow[];
+    guard?: () => void;
+  }): { proposalId: string; created: boolean } {
+    return this.tx(() => {
+      // The same posture appendLogBatch takes: the caller's authorization is
+      // re-run under the write lock, so a revoke or a level narrowed
+      // mid-flight loses the race rather than slipping a submit through.
+      input.guard?.();
+      const existing = this.db
+        .prepare(
+          "SELECT proposal_id FROM sync_relay_share_proposals WHERE share_id = ? AND submit_id = ?",
+        )
+        .get(input.shareId, input.submitId);
+      if (existing) {
+        return { proposalId: String(existing.proposal_id), created: false };
+      }
+      this.db
+        .prepare(
+          `INSERT INTO sync_relay_share_proposals (
+            proposal_id, share_id, workspace_id, proposed_by_user_id, version_id,
+            submit_id, state, created_at_ms, settled_at_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, NULL)`,
+        )
+        .run(
+          input.proposalId,
+          input.shareId,
+          input.workspaceId,
+          input.proposedByUserId,
+          input.versionId,
+          input.submitId,
+          Math.trunc(input.createdAtMs),
+        );
+      const insertOp = this.db.prepare(
+        `INSERT INTO sync_relay_share_proposal_ops (
+          proposal_id, op_index, based_on_path, based_on_object_id, based_on_blob_sha256,
+          operation, after_path, after_blob_sha256, after_content_kind, after_byte_length,
+          recorded_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const op of input.ops) {
+        insertOp.run(
+          input.proposalId,
+          op.opIndex,
+          op.basedOnPath,
+          op.basedOnObjectId,
+          op.basedOnBlobSha256,
+          op.operation,
+          op.afterPath,
+          op.afterBlobSha256,
+          op.afterContentKind,
+          op.afterByteLength,
+          Math.trunc(op.recordedAtMs),
+        );
+      }
+      return { proposalId: input.proposalId, created: true };
+    });
+  }
+
+  getShareProposal(
+    proposalId: string,
+  ): (ShareProposalRow & { ops: ShareProposalOpRow[] }) | null {
+    const row = this.db
+      .prepare(
+        `SELECT proposal_id, share_id, workspace_id, proposed_by_user_id, version_id,
+                state, created_at_ms, settled_at_ms
+         FROM sync_relay_share_proposals WHERE proposal_id = ?`,
+      )
+      .get(proposalId);
+    if (!row) return null;
+    return { ...rowToProposalRow(row), ops: this.proposalOps(proposalId) };
+  }
+
+  listShareProposalsForShare(shareId: string): Array<ShareProposalRow & { opCount: number }> {
+    return this.db
+      .prepare(
+        `SELECT p.proposal_id, p.share_id, p.workspace_id, p.proposed_by_user_id, p.version_id,
+                p.state, p.created_at_ms, p.settled_at_ms,
+                (SELECT COUNT(*) FROM sync_relay_share_proposal_ops o
+                  WHERE o.proposal_id = p.proposal_id) AS op_count
+         FROM sync_relay_share_proposals p
+         WHERE p.share_id = ?
+         ORDER BY p.created_at_ms DESC, p.proposal_id`,
+      )
+      .all(shareId)
+      .map((row) => ({ ...rowToProposalRow(row), opCount: Number(row.op_count ?? 0) }));
+  }
+
+  listShareProposalsForWorkspace(
+    workspaceId: string,
+  ): Array<ShareProposalRow & { ops: ShareProposalOpRow[] }> {
+    return this.db
+      .prepare(
+        `SELECT proposal_id, share_id, workspace_id, proposed_by_user_id, version_id,
+                state, created_at_ms, settled_at_ms
+         FROM sync_relay_share_proposals
+         WHERE workspace_id = ? AND state = 'open'
+         ORDER BY created_at_ms, proposal_id`,
+      )
+      .all(workspaceId)
+      .map((row) => {
+        const proposal = rowToProposalRow(row);
+        return { ...proposal, ops: this.proposalOps(proposal.proposalId) };
+      });
+  }
+
+  settleShareProposal(
+    proposalId: string,
+    to: Exclude<ShareProposalState, "open">,
+    settledAtMs: number,
+  ): boolean {
+    return this.tx(() =>
+      this.settleShareProposalInTransaction(proposalId, to, settledAtMs),
+    );
+  }
+
+  // One write transaction, so a caller states what it writes rather than the
+  // BEGIN/COMMIT/ROLLBACK frame around it.
+  private tx<T>(run: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = run();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
+  settleShareProposalInTransaction(
+    proposalId: string,
+    to: Exclude<ShareProposalState, "open">,
+    settledAtMs: number,
+  ): boolean {
+    // `state = 'open'` in the WHERE is the whole concurrency answer: the row
+    // moves exactly once, and every later mover sees zero changed rows.
+    const result = this.db
+      .prepare(
+        `UPDATE sync_relay_share_proposals
+         SET state = ?, settled_at_ms = ?
+         WHERE proposal_id = ? AND state = 'open'`,
+      )
+      .run(to, Math.trunc(settledAtMs), proposalId);
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  maxOriginSeq(workspaceId: string, originId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(MAX(origin_seq), -1) AS max_seq
+         FROM sync_relay_log WHERE workspace_id = ? AND origin_id = ?`,
+      )
+      .get(workspaceId, originId);
+    return Number(row?.max_seq ?? -1);
+  }
+
+  private proposalOps(proposalId: string): ShareProposalOpRow[] {
+    return this.db
+      .prepare(
+        `SELECT op_index, based_on_path, based_on_object_id, based_on_blob_sha256, operation,
+                after_path, after_blob_sha256, after_content_kind, after_byte_length,
+                recorded_at_ms
+         FROM sync_relay_share_proposal_ops
+         WHERE proposal_id = ?
+         ORDER BY op_index`,
+      )
+      .all(proposalId)
+      .map(rowToProposalOpRow);
+  }
+
+  // The workspace's chat.thread.create rows that MIGHT name this threadId, in
+  // relay order. LIKE pre-filter on the exact JSON fragment the canonical
+  // (sorted-key, JSON.stringify-escaped) payload stores, wildcards escaped so
+  // a hostile threadId cannot widen the match; the caller's JSON.parse
+  // comparison makes the real decision.
+  private threadCreateRows(
+    workspaceId: string,
+    threadId: string,
+  ): Array<Record<string, unknown>> {
+    const needle = `"threadId":${JSON.stringify(threadId)}`
+      .replaceAll("\\", "\\\\")
+      .replaceAll("%", "\\%")
+      .replaceAll("_", "\\_");
+    return this.db
+      .prepare(
+        `SELECT payload_json FROM sync_relay_log
+         WHERE workspace_id = ? AND op_kind = 'chat.thread.create'
+           AND payload_json LIKE ? ESCAPE '\\'
+         ORDER BY relay_seq`,
+      )
+      .all(workspaceId, `%${needle}%`);
   }
 
   fetchLogPage(input: {
@@ -1679,6 +2491,59 @@ export function referencedBlobShas(
     }
   }
   return shas;
+}
+
+function nullableText(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value);
+}
+
+function nullableInt(value: unknown): number | null {
+  return value === null || value === undefined ? null : Number(value);
+}
+
+function rowToObjectMomentRow(row: Record<string, unknown>): ObjectMomentRow {
+  return {
+    momentId: String(row.moment_id),
+    versionId: String(row.version_id),
+    path: nullableText(row.path),
+    blobSha256: nullableText(row.blob_sha256),
+    contentKind: nullableText(row.content_kind),
+    byteLength: nullableInt(row.byte_length),
+    recordedAtMs: Number(row.recorded_at_ms),
+  };
+}
+
+function rowToProposalRow(row: Record<string, unknown>): ShareProposalRow {
+  return {
+    proposalId: String(row.proposal_id),
+    shareId: String(row.share_id),
+    workspaceId: String(row.workspace_id),
+    proposedByUserId: String(row.proposed_by_user_id),
+    versionId: String(row.version_id),
+    state: String(row.state) as ShareProposalState,
+    createdAtMs: Number(row.created_at_ms),
+    settledAtMs: nullableInt(row.settled_at_ms),
+  };
+}
+
+function rowToProposalOpRow(row: Record<string, unknown>): ShareProposalOpRow {
+  return {
+    opIndex: Number(row.op_index),
+    basedOnPath: nullableText(row.based_on_path),
+    basedOnObjectId: nullableText(row.based_on_object_id),
+    basedOnBlobSha256: nullableText(row.based_on_blob_sha256),
+    operation: String(row.operation) === "delete" ? "delete" : "write",
+    afterPath: nullableText(row.after_path),
+    afterBlobSha256: nullableText(row.after_blob_sha256),
+    afterContentKind:
+      row.after_content_kind === "binary"
+        ? "binary"
+        : row.after_content_kind === "text"
+          ? "text"
+          : null,
+    afterByteLength: nullableInt(row.after_byte_length),
+    recordedAtMs: Number(row.recorded_at_ms),
+  };
 }
 
 function rowToShareRow(row: Record<string, unknown>): SyncRelayShareRow {

@@ -222,18 +222,32 @@ describe("the shared-channel sync pass is bounded in production", () => {
     expect(syncCallSource).toContain("priorityChannelWireId,");
     // Each write trigger separately: one handler still naming its share is not
     // proof the others do.
-    for (const channel of [
-      "sendChatMessage",
-      "startChannelThread",
-      "resolveChatDecision",
-    ]) {
+    expect(handlerSource("startChannelThread")).toContain(
+      "void syncSharedChannelsForChatTarget(",
+    );
+    // #646 PR2: the two handlers a file share now reaches route their sync
+    // through one helper, because a share view syncs a different lane. The
+    // property is unchanged and still per-handler — the helper NAMES the
+    // thread it wrote into, so the bounded pass covers that share however the
+    // rotation stands.
+    for (const channel of ["sendChatMessage", "resolveChatDecision"]) {
       expect(handlerSource(channel), channel).toContain(
-        "void syncSharedChannelsForChatTarget(",
+        "syncChatWriteFor(scope, { threadId: input.threadId });",
       );
       expect(handlerSource(channel), channel).not.toContain(
         "void syncWorkspaceSharedChannels(",
       );
     }
+    const helperAt = mainSource.indexOf("function syncChatWriteFor(");
+    expect(helperAt).toBeGreaterThan(-1);
+    const helper = mainSource.slice(helperAt, mainSource.indexOf("\n  }", helperAt));
+    expect(helper).toContain(
+      "void syncSharedChannelsForChatTarget(scope.workspace.workspaceId, target);",
+    );
+    expect(
+      helper,
+      "MUTATION: a broad rotation here is the unbounded pass this file exists to stop",
+    ).not.toContain("void syncWorkspaceSharedChannels(");
     // The agent dispatch path posts through the chat service, which now carries
     // the thread it wrote into.
     expect(mainSource).toContain("onMessagePosted: (workspaceId, threadId) => {");

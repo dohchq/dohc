@@ -176,6 +176,17 @@ export class SharedChannelReadOnlyError extends Error {
   }
 }
 
+// The file sibling of the class above (#646 PR2). A file share at `view`
+// carries the chat about its files to read, and refuses to add to it — in
+// main before any durable row, and again at the relay, which answers the
+// same `share_read_only` code a read-only channel gets.
+export class SharedFileReadOnlyError extends Error {
+  constructor(message = "This shared file is read-only for you.") {
+    super(message);
+    this.name = "SharedFileReadOnlyError";
+  }
+}
+
 export class SharedChannelAppendRejectedError extends Error {
   constructor(message = "The relay refused an op for this shared channel.") {
     super(message);
@@ -201,6 +212,24 @@ export class ShareUnavailableError extends Error {
     super(message);
     this.name = "ShareUnavailableError";
   }
+}
+
+// What a share view's identity call did (#646 PR3-1).
+//
+// A share view replicates through its SHARE, not the owner relay lane, so it
+// needs a sync identity of its own before it can journal a local write or
+// push one back. The engine writes that row once; every later refresh answers
+// "already-recorded".
+//
+// "not-required" is a `view` share, which may push nothing and so is given no
+// identity — the absence is what keeps its local writes local.
+export type ShareViewEnrolment =
+  | "recorded"
+  | "already-recorded"
+  | "not-required";
+
+export interface RecordShareViewIdentityResult {
+  identity: ShareViewEnrolment;
 }
 
 export interface ShareViewChangedPath {
@@ -244,4 +273,83 @@ export interface PullShareViewResult {
   // the commit re-fetches (and re-replays) the delta; replay is
   // content-compared so an already-applied op is a no-op.
   commitCursor: () => Promise<void>;
+}
+
+// #646 PR3. A proposal is the set of changes a recipient offered in ONE
+// submit. It exists only from submit — there is no draft state at the relay —
+// and it leaves `open` exactly once.
+export type ShareProposalState =
+  | "open"
+  | "accepted"
+  | "declined"
+  | "withdrawn";
+
+export type ShareProposalDecision = "accept" | "decline";
+
+// What ONE submit offered. `proposalId` is null exactly when nothing was
+// offered: a share below edit level, or a scan that found no change. It is
+// NOT a failure — a failed submit throws.
+export interface SubmitShareProposalResult {
+  submitted: number;
+  proposalId: string | null;
+  // Files the scan dropped because an edit put them outside the shared paths.
+  // The recipient is told; silence would mean pressing send and having some of
+  // the work simply not go.
+  skippedOutsideShare: number;
+  // More changes are waiting than one submit carries, so the next submit
+  // sends the rest. A flag, not a count: the scan stops at the bound and never
+  // measures what is behind it.
+  morePending: boolean;
+}
+
+// One net change to one file, as the GRANTER sees it. The `current*` fields
+// are the granter's own state now, so the reviewer can see the change against
+// what it will actually land on rather than against what the recipient had.
+export interface ShareProposalOp {
+  opIndex: number;
+  // The granter's path for this file when the recipient started, or null for
+  // a file the recipient created.
+  basedOnPath: string | null;
+  operation: "write" | "delete";
+  // Where the change puts the file. Null for a delete.
+  afterPath: string | null;
+  afterBlobSha256: string | null;
+  afterContentKind: "text" | "binary" | null;
+  // Where the granter holds this file NOW. Null when the granter no longer
+  // has it.
+  currentPath: string | null;
+  // The granter moved on since the recipient's base — decided by the RELAY,
+  // against the granter's own head in the version this share exposes.
+  // Accepting still works, but it opens a conflict instead of
+  // fast-forwarding.
+  drifted: boolean;
+}
+
+// A proposal waiting on the granter, with every op expanded for review. This
+// surface serves only what is still OPEN, so there is no state to carry.
+export interface ShareProposal {
+  proposalId: string;
+  shareId: string;
+  // Who sent it, resolved by the relay from the server-derived user id on the
+  // proposal row. Null when the relay cannot name them.
+  proposedByEmail: string | null;
+  createdAtMs: number;
+  ops: ShareProposalOp[];
+}
+
+// A proposal as its own SENDER sees it: the states behind "sent", "accepted"
+// and "declined". The recipient gets a count, not the granter's review view.
+export interface SentShareProposal {
+  proposalId: string;
+  state: ShareProposalState;
+  createdAtMs: number;
+  settledAtMs: number | null;
+  ops: number;
+}
+
+// What a settle or a withdraw left behind. The state is read back rather than
+// assumed: a decision that raced another one answers with the state that won.
+export interface ShareProposalSettlement {
+  proposalId: string;
+  state: ShareProposalState;
 }

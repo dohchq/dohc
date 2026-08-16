@@ -8,26 +8,34 @@ import {
   type PresenceSnapshot,
 } from "./presence";
 import {
+  MAIN_VERSION_ID,
   filterOpForShare,
+  filterOpForShareAppend,
+  filterProposedChangeForShare,
   isChatChannelSelector,
   parseAnyShareSelectorJson,
   presenceTopicAllowedForShare,
+  targetVersionId,
   validateChatChannelShareSelector,
   validateShareSelector,
   type AnyShareSelector,
-  type ChatChannelShareSelector,
+  type ShareSelector,
   type ChatShareChannelKind,
   type ChatShareThreadResolver,
+  type ThreadFileBinding,
 } from "./shareFilter";
 import {
   SyncRelayBlobMissingError,
   SyncRelayConflictError,
   SyncRelayQuotaExceededError,
   type EnforceWorkspaceIdentityResult,
+  type ObjectMomentRow,
+  type ShareProposalOpRow,
   type SyncRelayLogInput,
   type SyncRelayShareRow,
   type SyncRelayStorage,
 } from "./storage";
+import { destinationPath, proposalMomentPayload } from "./shareProposals";
 import { RELAY_ERRORS, type RelayErrorCode, type RelayErrorDefinition } from "./errorCodes";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
@@ -46,6 +54,11 @@ export interface CreateSyncRelayHandlerOptions {
   // Display-only reverse lookup for share listings; never used for authz.
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
   newShareId?: () => string;
+  // #646 PR3a: ids the relay MINTS — proposal ids, and the moment and object
+  // ids a proposal's accept stamps on the granter's own log. Minted, never
+  // taken from the recipient: a recipient-supplied moment id could name a
+  // moment the granter already holds. Injectable so tests can pin them.
+  newId?: () => string;
   // The EPHEMERAL awareness transport (presence/typing). Injectable so a
   // self-hoster's single relay process shares one hub across requests, and so
   // tests can assert it holds only in-memory state (never a storage row).
@@ -69,6 +82,20 @@ type SyncRelayRoute =
   | { route: "share-revoke"; shareId: string }
   | { route: "share-log"; shareId: string }
   | { route: "share-blob"; shareId: string; sha256: string }
+  // #646 PR3a. The recipient's half of the proposal lane is share-scoped; the
+  // granter's half is WORKSPACE-scoped, so its authorization is the one
+  // ownership line every owner route already sits behind rather than a new
+  // per-route check. A recipient cannot even address it: a received share
+  // summary deliberately omits the workspace id.
+  | { route: "share-proposals"; shareId: string }
+  | { route: "share-proposal-withdraw"; shareId: string; proposalId: string }
+  | { route: "workspace-proposals"; workspaceId: string }
+  | {
+      route: "workspace-proposal-settle";
+      workspaceId: string;
+      proposalId: string;
+      decision: "accept" | "decline";
+    }
   | { route: "presence"; workspaceId: string }
   | { route: "share-presence"; shareId: string };
 
@@ -103,7 +130,16 @@ const MAX_ORIGIN_ID_CHARS = 256;
 const MAX_OP_KIND_CHARS = 128;
 const MAX_EMAIL_CHARS = 320;
 const MAX_SHARE_ID_CHARS = 128;
+// #646 PR3a. A submit's idempotency key is the client's own string, not a
+// share id; it takes the same length because both are one opaque identifier,
+// and its own name so the bound says what it bounds.
+const MAX_SUBMIT_ID_CHARS = 128;
 const MAX_IDENTITY_BYTES = 512;
+
+// #646 PR3a. Inside a share's origin namespace (`share:<shareId>:…`), this
+// prefix belongs to the relay: it names the stream one accepted proposal
+// writes. A recipient's own push may not claim it.
+const PROPOSAL_ORIGIN_PREFIX = "proposal:";
 
 // The selector KIND from a stored row, without trusting the rest of it. A
 // row can be damaged in every other dimension and still say honestly which
@@ -133,6 +169,7 @@ export function createSyncRelayHandler({
   resolveUserIdByEmail,
   lookupUserEmail,
   newShareId = () => randomUUID(),
+  newId = () => randomUUID(),
   presence = new PresenceHub(),
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler {
   // Handle a publish (POST) or long-poll (GET) against an already-authorized
@@ -195,14 +232,61 @@ export function createSyncRelayHandler({
   };
 
   // Whether a recipient may append through this selector at all. A read-write
-  // chat-channel grant may. A path/version selector may not, at ANY level
-  // (#646): view, comment, and edit all refuse here with the same
-  // shareNotAppendable() code, because a level-specific refusal would tell a
-  // probing recipient the selector's level. PR2 opens comment and edit.
-  const selectorAcceptsAppends = (
-    selector: AnyShareSelector,
-  ): selector is ChatChannelShareSelector =>
-    isChatChannelSelector(selector) && selector.access === "read-write";
+  // chat-channel grant may. A path/version selector may at comment and edit
+  // (#646 PR2, chat ops only — `filterOpForShareAppend` decides which); a view share
+  // may not, and its refusal is the SAME shareNotAppendable() code and body
+  // every other refusal uses, because a level-specific one would tell a
+  // probing recipient the selector's level.
+  const selectorAcceptsAppends = (selector: AnyShareSelector): boolean =>
+    isChatChannelSelector(selector)
+      ? selector.access === "read-write"
+      : // Chat is the only thing a file share accepts in PR2, and chat follows
+        // PATHS only (#646). A version share — no paths — carries no chat, so
+        // it accepts no append either, at any level.
+        selector.paths.length > 0 &&
+        (selector.access === "comment" || selector.access === "edit");
+
+  // #646 PR3a: whether a recipient may PROPOSE changes to the files this
+  // selector shares. Edit and nothing else — and the refusal is the same
+  // `shareNotAppendable()` code and body a comment or a view share gets on the
+  // append route, because a level-specific refusal would tell a probing
+  // recipient the selector's level. Changes follow PATHS, so a version share
+  // (no paths) proposes nothing at any level.
+  // #646 PR3a. The granter's own facts for one proposed change, in the ONE
+  // version the proposal was submitted against: which file it is, where that
+  // file is now, and the moment that produced the content the recipient
+  // started from.
+  //
+  // One place, because the review listing and the accept door must agree.
+  // The listing tells the granter "this file changed since they sent it";
+  // accept is what turns that into a conflict with a real three-way base. Two
+  // copies of this resolution could disagree, and the granter would be told
+  // one thing and given another.
+  const proposalBase = (
+    workspaceId: string,
+    versionId: string,
+    op: ShareProposalOpRow,
+  ): { head: ObjectMomentRow | null; base: ObjectMomentRow | null } => {
+    const objectId = op.basedOnObjectId;
+    if (objectId === null) return { head: null, base: null };
+    return {
+      head: storage.objectMoment({ workspaceId, objectId, versionId }),
+      base:
+        op.basedOnBlobSha256 === null
+          ? null
+          : storage.objectMoment({
+              workspaceId,
+              objectId,
+              versionId,
+              blobSha256: op.basedOnBlobSha256,
+            }),
+    };
+  };
+
+  const selectorAcceptsProposals = (selector: AnyShareSelector): selector is ShareSelector =>
+    !isChatChannelSelector(selector) &&
+    selector.paths.length > 0 &&
+    selector.access === "edit";
 
   // Loads a share for RECIPIENT access. Every failure mode — no such share,
   // revoked share, caller is not the recipient, granter lost the workspace —
@@ -235,6 +319,9 @@ export function createSyncRelayHandler({
   const chatResolverFor = (workspaceId: string): ChatShareThreadResolver => {
     const threadCache = new Map<string, string | null | undefined>();
     const kindCache = new Map<string, ChatShareChannelKind | null | undefined>();
+    const bindingCache = new Map<string, ThreadFileBinding | null | undefined>();
+    const pathCache = new Map<string, string | null | undefined>();
+    const objectAtPathCache = new Map<string, string | undefined>();
     return {
       channelKind: (channelWireId) => {
         if (kindCache.has(channelWireId)) return kindCache.get(channelWireId);
@@ -247,6 +334,27 @@ export function createSyncRelayHandler({
         const bound = storage.findThreadCreateChannelWireId(workspaceId, threadId);
         threadCache.set(threadId, bound);
         return bound;
+      },
+      // #646 PR2, memoized for the same reason: the file-chat filter asks
+      // about the SAME threadId and the SAME objectId across every
+      // thread-scoped row of a page.
+      threadFileBinding: (threadId) => {
+        if (bindingCache.has(threadId)) return bindingCache.get(threadId);
+        const bound = storage.findThreadCreateFileBinding(workspaceId, threadId);
+        bindingCache.set(threadId, bound);
+        return bound;
+      },
+      objectCurrentPath: (objectId) => {
+        if (pathCache.has(objectId)) return pathCache.get(objectId);
+        const path = storage.objectCurrentPath(workspaceId, objectId);
+        pathCache.set(objectId, path);
+        return path;
+      },
+      objectIdAtPath: (path) => {
+        if (objectAtPathCache.has(path)) return objectAtPathCache.get(path);
+        const objectId = storage.objectIdAtPath(workspaceId, path);
+        objectAtPathCache.set(path, objectId);
+        return objectId;
       },
     };
   };
@@ -437,13 +545,13 @@ export function createSyncRelayHandler({
       // owner's bucket. Fail-closed gauntlet, in order:
       //   1. shareForRecipient: membership, revocation, granter standing —
       //      every denial is the same byte-identical generic 404.
-      //   2. The selector must be a chat-channel grant with read-write
-      //      access; a read-only member (and any path/version share) is
-      //      REFUSED with an explicit 403 — the member legitimately knows the
-      //      share exists, so this is a refusal, not a 404.
-      //      #646: a path/version selector is refused at EVERY level, with
-      //      one code. A level-specific refusal would tell a probing
-      //      recipient the selector's level. PR2 opens comment and edit.
+      //   2. The selector must accept appends: a read-write chat-channel
+      //      grant, or (#646 PR2) a file share at comment or edit. A
+      //      read-only member and a VIEW file share are REFUSED with an
+      //      explicit 403 — the member legitimately knows the share exists,
+      //      so this is a refusal, not a 404 — and with ONE code and one
+      //      body, because a level-specific refusal would tell a probing
+      //      recipient the selector's level.
       //   3. MU-C0 verified authorship: every authored chat op must claim the
       //      AUTHENTICATED pusher (assertChatAuthorship verifies it) — a
       //      member cannot forge a message or reaction as another member.
@@ -463,6 +571,13 @@ export function createSyncRelayHandler({
         if (!selectorAcceptsAppends(share.selector)) throw shareNotAppendable();
         const input = await readJsonObject(request);
         const originId = parseString(input.originId, "originId", MAX_ORIGIN_ID_CHARS);
+        // #646 PR3a: a share's origin space is shared between the recipient's
+        // own pushes and the streams accept mints for its proposals. The
+        // recipient names its half; this prefix is the relay's, and a client
+        // that claimed it could take sequence numbers out of an accept stream.
+        if (originId.startsWith(PROPOSAL_ORIGIN_PREFIX)) {
+          throw badRequest(`originId must not start with "${PROPOSAL_ORIGIN_PREFIX}"`);
+        }
         if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
         if (input.ops.length > MAX_OPS_PER_REQUEST) throw badRequest("too many ops");
         // Authorship runs before the filter and parseLogOp so neither admits nor
@@ -474,6 +589,11 @@ export function createSyncRelayHandler({
         // binding always wins over the batch — a batch cannot re-bind an
         // existing thread.
         const pendingThreadBindings = new Map<string, string>();
+        // #646 PR2: the path sibling of the same rule, for a file share. A
+        // recipient's `chat.thread.create` names the granted PATH (its own
+        // object ids mean nothing here), and the message it composes with
+        // rides in the same batch.
+        const pendingThreadFiles = new Map<string, ThreadFileBinding>();
         const resolver: ChatShareThreadResolver = {
           channelKind: (channelWireId) =>
             storage.findChannelCreateKind(share.workspaceId, channelWireId),
@@ -481,10 +601,24 @@ export function createSyncRelayHandler({
             const stored = storage.findThreadCreateChannelWireId(share.workspaceId, threadId);
             return stored !== undefined ? stored : pendingThreadBindings.get(threadId);
           },
+          threadFileBinding: (threadId) => {
+            const stored = storage.findThreadCreateFileBinding(share.workspaceId, threadId);
+            return stored !== undefined ? stored : pendingThreadFiles.get(threadId);
+          },
+          objectCurrentPath: (objectId) =>
+            storage.objectCurrentPath(share.workspaceId, objectId),
+          objectIdAtPath: (path) => storage.objectIdAtPath(share.workspaceId, path),
         };
         const ops = input.ops.map(parseLogOp);
         for (const op of ops) {
-          const decision = filterOpForShare(share.selector, op.opKind, op.payloadJson, resolver);
+          // The WRITE filter, never the read one: what a recipient may see is
+          // not what it may push into the granter's log (#646 PR3-0).
+          const decision = filterOpForShareAppend(
+            share.selector,
+            op.opKind,
+            op.payloadJson,
+            resolver,
+          );
           if (!decision.allowed) throw shareOpRejected();
           // Persist the filter's (possibly redacted) copy, never the pusher's
           // original bytes: the owner bucket is read back over the UNfiltered
@@ -492,9 +626,50 @@ export function createSyncRelayHandler({
           // attachment's objectId/pathHint) must not survive the append.
           op.payloadJson = JSON.stringify(decision.payload);
           if (op.opKind === "chat.thread.create") {
-            const threadId = (JSON.parse(op.payloadJson) as { threadId?: unknown }).threadId;
+            // Read back from the SERVED copy assigned above, which carries the
+            // path this relay proved — never the pusher's own string.
+            const created = JSON.parse(op.payloadJson) as {
+              threadId?: unknown;
+              linkedPath?: unknown;
+            };
+            const threadId = created.threadId;
             if (typeof threadId === "string" && threadId.length > 0) {
-              pendingThreadBindings.set(threadId, share.selector.channelWireId);
+              if (isChatChannelSelector(share.selector)) {
+                pendingThreadBindings.set(threadId, share.selector.channelWireId);
+              } else if (
+                typeof created.linkedPath === "string" &&
+                created.linkedPath.length > 0
+              ) {
+                // THE ACCEPT DOOR converts the binding (#646 PR2, review).
+                //
+                // A recipient names its file by path because its own object
+                // ids mean nothing here. This is the one moment the relay can
+                // turn that into the granter's OWN object id: the filter just
+                // proved an object sits at this exact path. Persisting the
+                // object id instead of the path is what makes a recipient's
+                // thread behave like the granter's — it follows the file
+                // through a rename INSIDE the share, and stops at one that
+                // leaves it, because both answers come from the same
+                // object→path lookup.
+                //
+                // Rewriting a payload before persisting is what this route
+                // already does: the served copy above is a redaction, and the
+                // path in it was normalized by the filter.
+                const objectId = storage.objectIdAtPath(
+                  share.workspaceId,
+                  created.linkedPath,
+                );
+                // The filter admitted this op by proving an object is there,
+                // so this is unreachable through the filter's own path. A
+                // batch that reaches it is refused whole rather than stored as
+                // a thread bound to nothing.
+                if (!objectId) throw shareOpRejected();
+                const bound: Record<string, unknown> = { ...created };
+                delete bound.linkedPath;
+                bound.linkedObjectId = objectId;
+                op.payloadJson = JSON.stringify(bound);
+                pendingThreadFiles.set(threadId, { kind: "object", objectId });
+              }
             }
           }
         }
@@ -510,8 +685,9 @@ export function createSyncRelayHandler({
           // above can never slip a write in — the guard sees it and the whole
           // batch rolls back as the same generic 404. The guard re-runs the
           // full appendability gauntlet: recipient-owned, unrevoked, granter
-          // in standing, still a read-write chat-channel grant on the same
-          // workspace bucket.
+          // in standing, and STILL a selector that accepts appends at its
+          // current level (#646) on the same workspace bucket — a level
+          // narrowed mid-flight loses the race the same way a revoke does.
           guard: () => {
             const fresh = shareForRecipient(route.shareId, actor.userId);
             if (fresh.workspaceId !== share.workspaceId) throw notFound();
@@ -557,7 +733,212 @@ export function createSyncRelayHandler({
           headers: { "content-type": "application/octet-stream" },
         });
       }
+      // #646 PR3a. A recipient's blob, charged to the GRANTER's workspace.
+      // Same level gate as the proposal route, same refusal, so a probe cannot
+      // tell the level from the code.
+      //
+      // It needs no bound of its own. Three already apply and all three are
+      // the granter's: MAX_BLOB_BYTES per blob, the granter's workspace quota
+      // per workspace (`putBlob` charges it), and the unreferenced-blob sweep,
+      // which reclaims anything no OPEN proposal claims. A blob count would
+      // bound bytes less tightly than the byte quota that already refuses
+      // them.
+      if (route.route === "share-blob" && request.method === "PUT") {
+        await claimPendingShares(actor.userId);
+        const share = shareForRecipient(route.shareId, actor.userId);
+        if (!selectorAcceptsProposals(share.selector)) throw shareNotAppendable();
+        assertSha256(route.sha256);
+        const bytes = await readBytes(request, MAX_BLOB_BYTES);
+        const actual = sha256Hex(bytes);
+        if (actual !== route.sha256) {
+          throw badRequest("blob content does not match sha256 path");
+        }
+        const put = storage.putBlob({
+          workspaceId: share.workspaceId,
+          sha256: route.sha256,
+          content: bytes,
+          createdAtMs: nowMs(),
+        });
+        // Re-check the grant immediately before answering, mirroring the read
+        // routes: a revoke that raced this upload aborts rather than
+        // confirming a write into the granter's workspace.
+        shareForRecipient(route.shareId, actor.userId);
+        return jsonResponse({
+          ok: true,
+          shareId: route.shareId,
+          sha256: route.sha256,
+          byteLength: put.byteLength,
+        });
+      }
       if (route.route === "share-blob") throw methodNotAllowed();
+
+      // #646 PR3a — the proposal lane's front door. The gauntlet mirrors the
+      // share-log POST above stage for stage, and the two routes stay
+      // separate on purpose: one route with two destinations is the
+      // conflation that let a recipient's file moments reach the granter's log
+      // in the first place (fixed by PR3-0). Nothing here can append, and
+      // nothing on the append route can propose.
+      if (route.route === "share-proposals" && request.method === "POST") {
+        await claimPendingShares(actor.userId);
+        const share = shareForRecipient(route.shareId, actor.userId);
+        if (!selectorAcceptsProposals(share.selector)) throw shareNotAppendable();
+        const input = await readJsonObject(request);
+        const submitId = parseString(input.submitId, "submitId", MAX_SUBMIT_ID_CHARS);
+        if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
+        if (input.ops.length === 0) throw badRequest("ops must not be empty");
+        if (input.ops.length > MAX_OPS_PER_REQUEST) {
+          throw badRequest(
+            `this submit carries ${input.ops.length} changes; the limit is ` +
+              `${MAX_OPS_PER_REQUEST} changes per submit. Send the rest in the next submit`,
+          );
+        }
+        const ops: ShareProposalOpRow[] = [];
+        // ONE net change per file, proven here rather than trusted. The
+        // recipient consolidates before it submits — it knows its own object
+        // ids — but a proposal carrying two changes for one file would give
+        // both the SAME base and make them conflict with each other at accept.
+        // So the relay refuses the shape instead of relying on the client to
+        // avoid it.
+        //
+        // ONE set of every path ANY change touches, not one set per side: a
+        // delete of `docs/a.md` beside a create of `docs/a.md` is two changes
+        // for one file, and a set per side would hold one path each and admit
+        // the pair. Compared across changes, never within one — a change that
+        // edits a file in place names the same path on both sides.
+        const touchedPaths = new Set<string>();
+        const referencedShas = new Set<string>();
+        for (const [index, raw] of (input.ops as unknown[]).entries()) {
+          const decision = filterProposedChangeForShare(share.selector, raw);
+          if (!decision.allowed) throw shareOpRejected();
+          const change = decision.change;
+          const paths = new Set(
+            [change.basedOnPath, change.afterPath].filter(
+              (path): path is string => path !== null,
+            ),
+          );
+          for (const path of paths) {
+            if (touchedPaths.has(path)) throw shareOpRejected();
+          }
+          for (const path of paths) touchedPaths.add(path);
+          // WHICH file the change is built on, resolved HERE rather than at
+          // accept. The path is where the granter had the file when the
+          // recipient read it, and a path is not an identity: a rename between
+          // submit and accept moves it to another file, and a delete leaves it
+          // naming none — which accept would then mint as a create, putting
+          // back a file the granter removed. The object id does not move, so
+          // the relay resolves it while the file is provably there and accept
+          // follows what it stored.
+          let basedOnObjectId: string | null = null;
+          if (change.basedOnPath !== null) {
+            basedOnObjectId =
+              storage.objectIdAtPathInVersion({
+                workspaceId: share.workspaceId,
+                versionId: targetVersionId(share.selector),
+                path: change.basedOnPath,
+              }) ?? null;
+            if (basedOnObjectId === null) {
+              // Atomic, like every other refusal on this route: one
+              // unresolvable base refuses the whole submit rather than
+              // dropping one change out of an intent the recipient stated as
+              // a unit. It names the file because the recipient chose it.
+              throw badRequest(
+                `no file is shared at ${change.basedOnPath} any more, so this change ` +
+                  `has nothing to build on; refresh the share and send again`,
+              );
+            }
+          }
+          if (change.afterBlobSha256 !== null) referencedShas.add(change.afterBlobSha256);
+          ops.push({ opIndex: index, basedOnObjectId, ...change });
+        }
+        // The same data-integrity gate appendLogBatch applies, run at SUBMIT
+        // so a recipient learns its blob is missing while it can still
+        // re-upload — rather than at accept, where the granter would meet a
+        // failure it did not cause.
+        if (referencedShas.size > 0) {
+          const missing = storage.missingBlobs(share.workspaceId, [...referencedShas]);
+          if (missing.length > 0) {
+            throw new SyncRelayBlobMissingError(
+              `this submit references ${missing.length} blob(s) not stored on the relay ` +
+                `(first: ${missing[0]}); (re-)upload the blob(s) and retry`,
+            );
+          }
+        }
+        const result = storage.insertShareProposal({
+          proposalId: newId(),
+          shareId: share.shareId,
+          workspaceId: share.workspaceId,
+          // SERVER-derived. The body never states who proposed anything.
+          proposedByUserId: actor.userId,
+          // PINNED from the selector the recipient just proved against,
+          // through the SAME rule the read filter serves ops by, so a
+          // selector edited between submit and accept cannot move these
+          // changes onto a version their author never read.
+          versionId: targetVersionId(share.selector),
+          submitId,
+          createdAtMs: nowMs(),
+          ops,
+          // The revoke race, closed exactly as the append route closes it: the
+          // full gauntlet re-runs inside the write's own BEGIN IMMEDIATE, so a
+          // revoke or a level narrowed mid-flight loses.
+          guard: () => {
+            const fresh = shareForRecipient(route.shareId, actor.userId);
+            if (fresh.workspaceId !== share.workspaceId) throw notFound();
+            if (!selectorAcceptsProposals(fresh.selector)) throw shareNotAppendable();
+          },
+        });
+        return jsonResponse({
+          ok: true,
+          proposalId: result.proposalId,
+          state: "open",
+          ops: ops.length,
+          created: result.created,
+        });
+      }
+
+      // Not level-gated, for the reason withdraw is not: a recipient must be
+      // able to SEE the changes it can still take back after a downgrade. A
+      // level that never submitted anything reads an empty list, which is the
+      // same answer every level with nothing open gives.
+      if (route.route === "share-proposals" && request.method === "GET") {
+        await claimPendingShares(actor.userId);
+        const share = shareForRecipient(route.shareId, actor.userId);
+        return jsonResponse({
+          ok: true,
+          proposals: storage.listShareProposalsForShare(share.shareId).map((proposal) => ({
+            proposalId: proposal.proposalId,
+            state: proposal.state,
+            createdAtMs: proposal.createdAtMs,
+            settledAtMs: proposal.settledAtMs,
+            ops: proposal.opCount,
+          })),
+        });
+      }
+      if (route.route === "share-proposals") throw methodNotAllowed();
+
+      // The reverse path submitting owes (`AGENTS.md`): a recipient can take
+      // its changes back while they are still open.
+      //
+      // Deliberately NOT gated on the level. A downgrade from edit to comment
+      // stops new submits, and a reverse path that a downgrade removes is not
+      // a reverse path — it would strand the recipient's already-sent changes
+      // in front of a granter who may never answer them. Membership is still
+      // proven (`shareForRecipient`), and the proposal must be this share's
+      // and this person's.
+      if (route.route === "share-proposal-withdraw" && request.method === "POST") {
+        await claimPendingShares(actor.userId);
+        const share = shareForRecipient(route.shareId, actor.userId);
+        const proposal = storage.getShareProposal(route.proposalId);
+        // A proposal of another share is the same generic 404 as one that
+        // never existed — and that is also what makes it this person's:
+        // `shareForRecipient` proved the caller is THIS share's recipient, and
+        // a path share has exactly one.
+        if (!proposal || proposal.shareId !== share.shareId) throw notFound();
+        if (!storage.settleShareProposal(route.proposalId, "withdrawn", nowMs())) {
+          throw proposalNotOpen();
+        }
+        return jsonResponse({ ok: true, proposalId: route.proposalId, state: "withdrawn" });
+      }
+      if (route.route === "share-proposal-withdraw") throw methodNotAllowed();
 
       if (route.route === "share-presence") {
         // Cross-user presence: a recipient joins the ephemeral scope for a
@@ -597,6 +978,148 @@ export function createSyncRelayHandler({
       }
 
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
+
+      // #646 PR3a — the granter's half. Everything below this line is
+      // owner-scoped by the ONE check above, which is why accept and decline
+      // live in the workspace namespace rather than the share's: ownership is
+      // derived from the workspace, never from the share, so a recipient can
+      // never accept its own changes.
+      // What the granter still has to answer, and nothing else: this route
+      // serves OPEN proposals only, so it states no `state` and no
+      // `settledAtMs` — both would be constants. A settled proposal is
+      // history, and this surface asks one question.
+      if (route.route === "workspace-proposals" && request.method === "GET") {
+        // WHO sent them, resolved here from the server-derived user id on the
+        // proposal row. The granter's client used to rebuild this by fetching
+        // its whole share list and matching share ids — a second request per
+        // review, and wrong the moment a share has more than one recipient.
+        const rows = await Promise.all(
+          storage.listShareProposalsForWorkspace(route.workspaceId).map(async (proposal) => ({
+            proposalId: proposal.proposalId,
+            shareId: proposal.shareId,
+            proposedByEmail: lookupUserEmail
+              ? await lookupUserEmail(proposal.proposedByUserId)
+              : null,
+            createdAtMs: proposal.createdAtMs,
+            ops: proposal.ops.map((op) => {
+              const resolved = proposalBase(route.workspaceId, proposal.versionId, op);
+              return {
+                opIndex: op.opIndex,
+                basedOnPath: op.basedOnPath,
+                operation: op.operation,
+                // WHERE accepting will put it, resolved by the SAME rule the
+                // accept door uses. The review must name the path the write
+                // will use: a content-only change lands at the granter's
+                // current path, so showing the recipient's path would tell
+                // the granter one thing and do another.
+                afterPath: destinationPath(op, {
+                  currentPath: resolved.head?.path ?? null,
+                  base: resolved.base,
+                }),
+                afterBlobSha256: op.afterBlobSha256,
+                afterContentKind: op.afterContentKind,
+                currentPath: resolved.head?.path ?? null,
+                // What the review surface says out loud: this file changed
+                // since they sent it. Read from the granter's own head IN THE
+                // VERSION this share exposes, never from anything the
+                // recipient claimed.
+                drifted:
+                  op.basedOnBlobSha256 !== null &&
+                  (resolved.head?.blobSha256 ?? null) !== op.basedOnBlobSha256,
+              };
+            }),
+          })),
+        );
+        return jsonResponse({ ok: true, proposals: rows });
+      }
+      if (route.route === "workspace-proposals") throw methodNotAllowed();
+
+      if (route.route === "workspace-proposal-settle" && request.method === "POST") {
+        const proposal = storage.getShareProposal(route.proposalId);
+        // A proposal of another workspace is the same generic 404 the relay
+        // gives for one that never existed.
+        if (!proposal || proposal.workspaceId !== route.workspaceId) throw notFound();
+        if (proposal.state !== "open") throw proposalNotOpen();
+        if (route.decision === "decline") {
+          // Decline never moves the changes. They stay marked declined and are
+          // swept with the share; the recipient's own copy still has them.
+          if (!storage.settleShareProposal(route.proposalId, "declined", nowMs())) {
+            throw proposalNotOpen();
+          }
+          return jsonResponse({ ok: true, proposalId: route.proposalId, state: "declined" });
+        }
+        const proposerEmail = lookupUserEmail
+          ? await lookupUserEmail(proposal.proposedByUserId)
+          : null;
+        // Provenance that survives into the granter's History. A moment cannot
+        // name a human author, so this line is what History shows and the
+        // proposal record is the real provenance.
+        const summary = proposerEmail ? `Accepted changes from ${proposerEmail}` : null;
+        const versionId = proposal.versionId;
+        // THIS proposal's own origin stream, never the recipient's push
+        // origin. The recipient numbers its own stream densely from its own
+        // journal, so ops the relay inserted there would take sequence
+        // numbers the recipient's next push claims — and `appendLogBatch`
+        // refuses a re-used sequence with different content, permanently. One
+        // accept would wedge the recipient's chat for the life of the share.
+        // A fresh origin per proposal cannot collide with anything: nothing
+        // else ever writes it.
+        const originId = `share:${proposal.shareId}:${PROPOSAL_ORIGIN_PREFIX}${route.proposalId}`;
+        // The relay assigns the coordinates, because a proposal's ops carry
+        // none: they were never a log. A concurrent accept that took the same
+        // numbers loses on appendLogBatch's own dense-sequence check.
+        let originSeq = storage.maxOriginSeq(route.workspaceId, originId);
+        const logOps: SyncRelayLogInput[] = [];
+        for (const op of proposal.ops) {
+          const resolved = proposalBase(route.workspaceId, versionId, op);
+          const built = proposalMomentPayload(op, {
+            versionId,
+            // A file the granter does not have gets a NEW object id, minted
+            // here. The recipient's own id names nothing in this workspace.
+            objectId: op.basedOnObjectId ?? newId(),
+            objectCreatedAtMs: op.recordedAtMs,
+            base: resolved.base,
+            currentPath: resolved.head?.path ?? null,
+            momentId: newId(),
+            summary,
+          });
+          if (!built.ok) throw badRequest(built.reason);
+          originSeq += 1;
+          logOps.push({
+            originSeq,
+            opKind: "moment.append",
+            payloadJson: stableJsonStringify(built.payload),
+            recordedAtMs: op.recordedAtMs,
+          });
+        }
+        const result = storage.appendLogBatch({
+          workspaceId: route.workspaceId,
+          // The SAME share-namespaced origin the chat path already writes, so
+          // accepted changes reach the granter over the owner lane the relay
+          // already runs. Nothing new applies them.
+          originId,
+          ops: logOps,
+          // The settle rides INSIDE the release's own transaction: the changes
+          // enter the log and the proposal leaves `open` together, or neither
+          // happens. A second accept finds the row already moved and its whole
+          // batch rolls back.
+          guard: () => {
+            if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
+            if (
+              !storage.settleShareProposalInTransaction(route.proposalId, "accepted", nowMs())
+            ) {
+              throw proposalNotOpen();
+            }
+          },
+        });
+        return jsonResponse({
+          ok: true,
+          proposalId: route.proposalId,
+          state: "accepted",
+          inserted: result.inserted,
+        });
+      }
+      if (route.route === "workspace-proposal-settle") throw methodNotAllowed();
 
       if (route.route === "presence") {
         // The owner's own workspace presence (multi-device co-presence in
@@ -1007,6 +1530,16 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 5 && parts[3] === "blobs" && parts[4]) {
       return { route: "share-blob", shareId, sha256: parts[4] };
     }
+    if (parts.length === 4 && parts[3] === "proposals") {
+      return { route: "share-proposals", shareId };
+    }
+    if (parts.length === 6 && parts[3] === "proposals" && parts[5] === "withdraw") {
+      return {
+        route: "share-proposal-withdraw",
+        shareId,
+        proposalId: parseShareId(parts[4]),
+      };
+    }
     throw notFound();
   }
   const workspaceId = parseWorkspaceId(parts[1]);
@@ -1042,6 +1575,21 @@ function parseRoute(request: Request): SyncRelayRoute {
   }
   if (parts.length === 3 && parts[2] === "shares") {
     return { route: "shares-create", workspaceId };
+  }
+  if (parts.length === 3 && parts[2] === "proposals") {
+    return { route: "workspace-proposals", workspaceId };
+  }
+  if (
+    parts.length === 5 &&
+    parts[2] === "proposals" &&
+    (parts[4] === "accept" || parts[4] === "decline")
+  ) {
+    return {
+      route: "workspace-proposal-settle",
+      workspaceId,
+      proposalId: parseShareId(parts[3]),
+      decision: parts[4],
+    };
   }
   throw notFound();
 }
@@ -1532,12 +2080,25 @@ function shareNotAppendable(): HttpError {
   return relayHttpError(RELAY_ERRORS.share_read_only, "this share does not accept appends");
 }
 
-// MU-C4 fail-closed append scoping: an op in the batch is not a chat op for
-// the granted channel (wrong channel, foreign thread, a file/secret/unknown
-// op, or a forged thread re-bind). The whole batch is rejected atomically.
-// Deliberately does not name which op failed or why.
+// MU-C4 fail-closed append scoping: an op in the batch is not something this
+// share admits — a chat op for another channel, a foreign thread, a forged
+// thread re-bind, a file/secret/unknown op, or (#646 PR3a) a proposed change
+// outside the shared paths or naming a file twice. The whole batch is rejected
+// atomically. Deliberately does not name which op failed or why: the same code
+// and body for every cause is what keeps a probing recipient from reading the
+// share's shape out of its refusals.
 function shareOpRejected(): HttpError {
-  return relayHttpError(RELAY_ERRORS.share_op_rejected, "an op is outside the shared channel");
+  return relayHttpError(RELAY_ERRORS.share_op_rejected, "an op is outside this share");
+}
+
+// #646 PR3a: the proposal already moved out of `open`. Every mover — accept,
+// decline, withdraw — races through the same single-row UPDATE, so exactly one
+// wins and the losers all land here rather than acting on stale state.
+function proposalNotOpen(): HttpError {
+  return relayHttpError(
+    RELAY_ERRORS.conflict,
+    "these changes were already accepted, declined, or withdrawn",
+  );
 }
 
 function notFound(): HttpError {

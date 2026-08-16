@@ -4,6 +4,7 @@ import {
   assertSharedChannelMessageIdentity,
   joinedChannelMatchesCredentials,
   resolveChatRelayIdentity,
+  resolveShareViewRelayAuthorId,
   resolveWorkspaceRelayAuthorId,
   syncEnrollmentRemoteWorkspaceId,
   workspaceRemoteMatchesCredentials,
@@ -256,5 +257,74 @@ describe("syncEnrollmentRemoteWorkspaceId", () => {
         userId: "user-2",
       }),
     ).toThrowError("Sign in to the account that synced this workspace.");
+  });
+});
+
+// #646 PR2 — a share view's chat identity. A share view is not an enrolled
+// workspace: it has no `remote` and no owner id to write as, so the account
+// that holds the grant is the one it writes under.
+describe("share view chat identity (#646 PR2)", () => {
+  const credentials = {
+    serverUrl: "https://cloud.dohc.test",
+    relayUrl: "https://relay.dohc.test",
+    email: "recipient@dohc.test",
+    userId: "recipient",
+    token: "token",
+  };
+
+  it("writes as the signed-in account that holds the grant", () => {
+    expect(
+      resolveShareViewRelayAuthorId({ relayUrl: "https://relay.dohc.test" }, credentials),
+    ).toBe("recipient");
+    // A record with no recorded relay predates the field; the session's own
+    // relay is the only one it could have come from.
+    expect(resolveShareViewRelayAuthorId({}, credentials)).toBe("recipient");
+  });
+
+  it("resolves nothing when signed out or signed into another relay", () => {
+    // Both answers must be undefined, and the CALLER must refuse rather than
+    // write: a chat op with no author never replicates, so a comment written
+    // here would look sent and never leave the machine.
+    expect(
+      resolveShareViewRelayAuthorId({ relayUrl: "https://relay.dohc.test" }, null),
+    ).toBeUndefined();
+    expect(
+      resolveShareViewRelayAuthorId(
+        { relayUrl: "https://relay.dohc.test" },
+        { ...credentials, relayUrl: undefined },
+      ),
+    ).toBeUndefined();
+    expect(
+      resolveShareViewRelayAuthorId(
+        { relayUrl: "https://relay.dohc.test" },
+        { ...credentials, relayUrl: "https://other-relay.dohc.test" },
+      ),
+      "MUTATION: writing under a session from another relay claims an identity that relay never issued",
+    ).toBeUndefined();
+  });
+
+  it("prefers the share view's account over the enrolled-workspace rule", async () => {
+    // The two rules would answer differently, and only one of them is this
+    // workspace's: a share view's `remote` is absent, and reading the owner
+    // id of a workspace it is not would be someone else's identity.
+    const identity = await resolveChatRelayIdentity({
+      workspace: {
+        workspaceId: "share-view-workspace",
+        shareView: {
+          shareId: "share-1",
+          granterEmail: "granter@dohc.test",
+          grantedSelector: { paths: ["docs"], versionId: null, access: "comment" },
+          relayUrl: "https://relay.dohc.test",
+        },
+      },
+      credentials,
+      store: {
+        findThreadChannelId: async () => null,
+        getChannelWireId: async () => null,
+      },
+      target: { threadId: "thread-1" },
+    });
+    expect(identity.joinedChannel).toBeNull();
+    expect(identity.authorUserId).toBe("recipient");
   });
 });

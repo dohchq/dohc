@@ -6,6 +6,9 @@ import { SharedByMeList } from "./SharedByMeList";
 
 const bridgeMock = {
   listRelayShares: vi.fn(),
+  listShareProposals: vi.fn(),
+  readShareProposalChanges: vi.fn(),
+  settleShareProposal: vi.fn(),
   revokeRelayShare: vi.fn(),
   writeClipboardText: vi.fn(),
 };
@@ -28,6 +31,7 @@ const ACTIVE_SHARE = {
 beforeEach(() => {
   vi.resetAllMocks();
   bridgeMock.listRelayShares.mockResolvedValue({ granted: [ACTIVE_SHARE] });
+  bridgeMock.listShareProposals.mockResolvedValue({ proposals: [] });
   bridgeMock.revokeRelayShare.mockResolvedValue(undefined);
   bridgeMock.writeClipboardText.mockResolvedValue(undefined);
 });
@@ -39,7 +43,7 @@ afterEach(() => {
 describe("SharedByMeList", () => {
   it("lists active shares and ends one on request", async () => {
     const user = userEvent.setup();
-    render(<SharedByMeList />);
+    render(<SharedByMeList workspaceId="ws-1" />);
 
     const row = await screen.findByTestId("shared-by-me-row");
     expect(row.textContent).toContain("docs");
@@ -48,13 +52,16 @@ describe("SharedByMeList", () => {
     bridgeMock.listRelayShares.mockResolvedValue({
       granted: [{ ...ACTIVE_SHARE, revokedAtMs: 2000 }],
     });
+    // Ending asks first, and only the second click ends it.
+    await user.click(screen.getByTestId("shared-by-me-revoke-start"));
+    expect(bridgeMock.revokeRelayShare).not.toHaveBeenCalled();
     await user.click(screen.getByTestId("shared-by-me-revoke"));
     await waitFor(() =>
       expect(bridgeMock.revokeRelayShare).toHaveBeenCalledWith({ shareId: "share-1" }),
     );
     // After the refresh the row reads as ended, with no revoke affordance.
     await screen.findByText("Ended — was shared with friend@dohc.test");
-    expect(screen.queryByTestId("shared-by-me-revoke")).toBeNull();
+    expect(screen.queryByTestId("shared-by-me-revoke-start")).toBeNull();
   });
 
   // Every row carries its level (#646). A badge shown only on some rows
@@ -75,7 +82,7 @@ describe("SharedByMeList", () => {
         },
       ],
     });
-    render(<SharedByMeList />);
+    render(<SharedByMeList workspaceId="ws-1" />);
 
     const badges = await screen.findAllByTestId("share-access-badge");
     expect(badges.map((badge) => badge.textContent)).toEqual([
@@ -92,20 +99,20 @@ describe("SharedByMeList", () => {
     bridgeMock.listRelayShares.mockResolvedValue({
       granted: [{ ...ACTIVE_SHARE, selector: null, damaged: true }],
     });
-    render(<SharedByMeList />);
+    render(<SharedByMeList workspaceId="ws-1" />);
 
     await screen.findByTestId("shared-by-me-row");
     expect(
       screen.queryByTestId("shared-by-me-copy"),
       "MUTATION: handing out a code for a share the relay cannot read",
     ).toBeNull();
-    expect(screen.queryByTestId("shared-by-me-revoke")).not.toBeNull();
+    expect(screen.queryByTestId("shared-by-me-revoke-start")).not.toBeNull();
     expect(screen.queryByTestId("share-access-badge")).toBeNull();
   });
 
   it("copies the share code for re-sending", async () => {
     const user = userEvent.setup();
-    render(<SharedByMeList />);
+    render(<SharedByMeList workspaceId="ws-1" />);
     await screen.findByTestId("shared-by-me-row");
     await user.click(screen.getByTestId("shared-by-me-copy"));
     expect(bridgeMock.writeClipboardText).toHaveBeenCalledWith({
@@ -113,9 +120,139 @@ describe("SharedByMeList", () => {
     });
   });
 
+  // The row states what is waiting and opens the review that decides it
+  // (#646 PR3a). A grant inventory with a count is still an inventory.
+  it("counts the changes waiting on a row and opens the review", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listShareProposals.mockResolvedValue({
+      proposals: [
+        {
+          proposalId: "proposal-old",
+          shareId: "share-1",
+          proposedByEmail: "friend@dohc.test",
+          createdAtMs: 1000,
+          files: [
+            { opIndex: 0, path: "docs/plan.md", operation: "write", drifted: false },
+          ],
+        },
+        {
+          proposalId: "proposal-new",
+          shareId: "share-1",
+          proposedByEmail: "friend@dohc.test",
+          createdAtMs: 2000,
+          files: [
+            { opIndex: 0, path: "docs/notes.md", operation: "write", drifted: false },
+          ],
+        },
+      ],
+    });
+    bridgeMock.readShareProposalChanges.mockResolvedValue({
+      proposedByEmail: "friend@dohc.test",
+      files: [
+        {
+          opIndex: 0,
+          path: "docs/plan.md",
+          operation: "write",
+          drifted: false,
+          currentText: "before",
+          incomingText: "after",
+        },
+      ],
+    });
+    render(<SharedByMeList workspaceId="ws-1" />);
+
+    const review = await screen.findByTestId("shared-by-me-review");
+    expect(review.textContent).toBe("Review changes (2)");
+    expect(review.dataset.openChanges).toBe("2");
+
+    // The oldest waiting submission opens first — the sender who waited
+    // longest is decided first.
+    await user.click(review);
+    await screen.findByTestId("proposal-review-dialog");
+    expect(bridgeMock.readShareProposalChanges).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      proposalId: "proposal-old",
+    });
+  });
+
+  // Ending a share declines whatever the recipient still has waiting, and
+  // they cannot send it again. AGENTS.md: tell the user before it runs.
+  it("names the changes an End share will discard, before it discards them", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listShareProposals.mockResolvedValue({
+      proposals: [
+        {
+          proposalId: "proposal-1",
+          shareId: "share-1",
+          proposedByEmail: "friend@dohc.test",
+          createdAtMs: 1000,
+          files: [
+            { opIndex: 0, path: "docs/plan.md", operation: "write", drifted: false },
+          ],
+        },
+        {
+          proposalId: "proposal-2",
+          shareId: "share-1",
+          proposedByEmail: "friend@dohc.test",
+          createdAtMs: 2000,
+          files: [
+            { opIndex: 0, path: "docs/notes.md", operation: "write", drifted: false },
+          ],
+        },
+      ],
+    });
+    render(<SharedByMeList workspaceId="ws-1" />);
+
+    await user.click(await screen.findByTestId("shared-by-me-revoke-start"));
+    expect(
+      (await screen.findByTestId("shared-by-me-revoke-confirm")).textContent,
+      "MUTATION: ending a share silently discards work the recipient cannot resend",
+    ).toBe(
+      "End this share and decline 2 changes friend@dohc.test sent? They cannot send them again.",
+    );
+    expect(bridgeMock.revokeRelayShare).not.toHaveBeenCalled();
+
+    // And backing out changes nothing.
+    await user.click(screen.getByTestId("shared-by-me-revoke-cancel"));
+    expect(screen.queryByTestId("shared-by-me-revoke-confirm")).toBeNull();
+    expect(bridgeMock.revokeRelayShare).not.toHaveBeenCalled();
+  });
+
+  it("asks a plainer question when nothing is waiting", async () => {
+    const user = userEvent.setup();
+    render(<SharedByMeList workspaceId="ws-1" />);
+    await user.click(await screen.findByTestId("shared-by-me-revoke-start"));
+    expect((await screen.findByTestId("shared-by-me-revoke-confirm")).textContent).toBe(
+      "End this share? friend@dohc.test keeps a read-only copy and stops receiving updates.",
+    );
+  });
+
+  // A share with nothing waiting must not grow a control that reviews
+  // nothing: the row would ask for a decision nobody submitted.
+  it("shows no review control when nothing is waiting", async () => {
+    render(<SharedByMeList workspaceId="ws-1" />);
+    await screen.findByTestId("shared-by-me-row");
+    expect(
+      screen.queryByTestId("shared-by-me-review"),
+      "MUTATION: offering a review for a share with no waiting changes",
+    ).toBeNull();
+  });
+
+  // The listing is workspace-scoped and a share view is refused it. A refusal
+  // must cost the inventory nothing — ending a share stays possible.
+  it("still lists shares when the changes listing is refused", async () => {
+    bridgeMock.listShareProposals.mockRejectedValue(
+      new Error("Share views cannot review changes."),
+    );
+    render(<SharedByMeList workspaceId="ws-1" />);
+    await screen.findByTestId("shared-by-me-row");
+    expect(screen.queryByTestId("shared-by-me-error")).toBeNull();
+    expect(screen.queryByTestId("shared-by-me-revoke-start")).not.toBeNull();
+  });
+
   it("shows calm empty and error states", async () => {
     bridgeMock.listRelayShares.mockResolvedValue({ granted: [] });
-    render(<SharedByMeList />);
+    render(<SharedByMeList workspaceId="ws-1" />);
     await screen.findByTestId("shared-by-me-empty");
     cleanup();
 
@@ -124,7 +261,7 @@ describe("SharedByMeList", () => {
         "Error invoking remote method 'desktop:list-relay-shares': Error: Sign in to dohc Cloud first.",
       ),
     );
-    render(<SharedByMeList />);
+    render(<SharedByMeList workspaceId="ws-1" />);
     const error = await screen.findByTestId("shared-by-me-error");
     expect(error.textContent).toBe("Sign in to dohc Cloud first.");
   });

@@ -26,6 +26,13 @@ export const preloadBundledRuntimeDeps = [
   "@dohc/security-contract",
   "@dohc/workspace-contracts",
   "@dohc/workspace-core",
+  // The bridge contract reads the share access levels from the ONE place both
+  // sides define them, and a value import from a sandboxed preload has to be
+  // bundled like any other. Left external, the built preload carried a bare
+  // `require("@dohc/security-contract/share-selector")`, Electron refused the
+  // whole script, and every window came up with no bridge at all — which is
+  // every desktop e2e, silently, for as long as the import has existed.
+  "@dohc/security-contract",
   "effect",
   "zod",
 ];

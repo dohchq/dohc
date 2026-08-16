@@ -79,6 +79,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "ydoc_inactive_lineages",
     "ydoc_base_relay_candidates",
     "ydoc_recovery_decisions",
+    "share_view_file_lane",
     "replication_pending_conflict_bundles",
     "replication_pending_conflict_ops",
     "replication_pending_conflict_moments",
@@ -131,6 +132,8 @@ const REQUIRED_TABLES: &[&str] = &[
     "shared_channel_peers",
     "shared_channel_push_state",
     "share_view_cursors",
+    // #646 PR3a proposal scan position.
+    "share_proposal_push_state",
 ];
 
 /// How an existing file was classified by the fingerprint fence.

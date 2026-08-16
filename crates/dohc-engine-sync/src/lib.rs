@@ -52,9 +52,11 @@ pub use hydration::{
     BlobContent, BlobHydration, BlobKind, MAX_INGEST_BLOB_BYTES, blob_ceiling, hydrate_blob_content,
 };
 pub use journal::{
-    AdoptJoinIdentityOutcome, SyncIdentity, ack_replication_peer, adopt_join_identity,
-    journal_local_op_in_tx, journal_local_replication_op, list_replication_ops,
-    read_replication_acked_seq, read_sync_identity, workspace_replicates_with_relay_in_tx,
+    AdoptJoinIdentityOutcome, ShareViewIdentity, ShareViewIdentityOutcome, SyncIdentity,
+    ack_replication_peer, adopt_join_identity, journal_local_op_in_tx,
+    journal_local_replication_op, list_replication_ops, read_replication_acked_seq,
+    read_sync_identity, record_share_view_identity, workspace_journals_file_moments_in_tx,
+    workspace_replicates_with_relay_in_tx,
 };
 pub use model::{
     MAX_BLOB_HAVE_BATCH, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, MAX_PUSH_OPS_PER_BATCH,
@@ -75,7 +77,9 @@ pub use relay::{
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, ProbeRequest, ProbeResponse,
     PullRequest, PullResponse, PushRequest, PushResponse, RecoverResponse, RelaySyncClient,
-    RelayTransport, ShareBlobRequest, ShareReplicationEnvelope, ShareViewChangedPath,
+    RelayTransport, ShareBlobRequest, ShareBlobUploadRequest, ShareLogPushRequest,
+    ShareProposalChange, ShareProposalSubmitOutcome, ShareProposalSubmitRequest,
+    ShareProposalSubmitResponse, ShareReplicationEnvelope, ShareViewChangedPath,
     ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest, ShareViewResponse,
     SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
     SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,

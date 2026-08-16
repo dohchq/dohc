@@ -6,6 +6,7 @@ import {
   RelayWorkspaceUnavailableError,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
+  SharedFileReadOnlyError,
   type CommitRelayCursorResult,
   type MaterializeRelayPullPage,
   type ProbeRelayWorkspaceResult,
@@ -13,6 +14,7 @@ import {
   type RelayWorkspaceIdentity,
   type PullSharedChannelResult,
   MAX_REPORTED_REFUSALS,
+  type RecordShareViewIdentityResult,
   type PullShareViewResult,
   type ShareViewRefusal,
   type SharingDeclined,
@@ -20,6 +22,7 @@ import {
   type PushSharedChannelResult,
   type PushWorkspaceToRelayResult,
   type RecoverRelayOriginResult,
+  type SubmitShareProposalResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
@@ -349,6 +352,23 @@ function numberField(
   return field;
 }
 
+// A field the engine states as a string OR as an explicit null, where null is
+// a real answer and not an absence. Strict on both sides: an empty string, a
+// missing key and any other type are all refused, because reading one of them
+// as null invents an answer the engine did not give.
+function nullableStringField(
+  value: Record<string, JsonValue | undefined>,
+  key: string,
+  label: string,
+): string | null {
+  const field = value[key];
+  if (field === null) return null;
+  if (typeof field !== "string" || field.length === 0) {
+    throw new Error(`Rust engine ${label}.${key} must be a string or null.`);
+  }
+  return field;
+}
+
 function booleanField(
   value: Record<string, JsonValue | undefined>,
   key: string,
@@ -520,6 +540,17 @@ function translateRelayError(method: string, error: unknown): never {
   ) {
     throw new SharedChannelReadOnlyError();
   }
+  // #646: the same relay refusal, one noun over. The relay answers ONE code
+  // for both — that is the anti-fingerprinting property — so the METHOD, not
+  // the code, decides which noun the reader sees. Chat (PR2) and changes
+  // (PR3) are both the file share, so both read as the file.
+  if (
+    (method === "share.view.push" || method === "share.proposal.submit") &&
+    error.wireCode === "INVALID_PARAMS" &&
+    error.message === "share-read-only"
+  ) {
+    throw new SharedFileReadOnlyError();
+  }
   throw error;
 }
 
@@ -568,6 +599,56 @@ export interface EngineRelayWorkspaceClient {
     // committed.
     recordRefusals?: (refusals: ShareViewRefusal[]) => Promise<void>;
   }): Promise<PullShareViewResult>;
+  // #646 PR2: this replica's own chat about the shared files, back to the
+  // granter. Takes the SAME pinned selector the pull takes, for the same
+  // reason: the grant decides which of this replica's ops belong to the
+  // share, and a caller that cannot state it must not push through it.
+  pushShareView(input: {
+    shareId: string;
+    grantedSelector: {
+      paths: readonly string[];
+      versionId: string | null;
+      access: ShareAccess;
+    };
+  }): Promise<PushSharedChannelResult>;
+  // #646 PR3-1: give this share view the sync identity its share lane needs,
+  // before the first pull or push. Run at open and at every refresh — the
+  // engine writes the row once and later calls answer "already-recorded".
+  //
+  // Takes the pinned selector and no share id. `sync_identity` is per
+  // WORKSPACE and a share view mirrors exactly one share, so the id it would
+  // carry decides nothing; the LEVEL does, because a `view` share may push
+  // nothing and so never records one.
+  //
+  // The identity components are minted by the ENGINE, the same way sync.claim
+  // mints its own. The origin is a REPLICA id — the relay namespaces this
+  // recipient's ops as `share:<shareId>:<originId>` — so it must never be the
+  // recipient's user id, which two of their devices would share. Minting it
+  // engine-side is also what makes a refresh safe: the durable row is the
+  // record, so nothing here has to remember an id between calls.
+  recordShareViewIdentity(input: {
+    grantedSelector: {
+      paths: readonly string[];
+      versionId: string | null;
+      access: ShareAccess;
+    };
+  }): Promise<RecordShareViewIdentityResult>;
+
+  // #646 PR3: this replica's own EDITS of the shared files, offered to the
+  // granter to accept or decline. Takes the same pinned selector, for the
+  // same reason, and the engine offers nothing below `edit`.
+  submitShareProposal(input: {
+    shareId: string;
+    grantedSelector: {
+      paths: readonly string[];
+      versionId: string | null;
+      access: ShareAccess;
+    };
+    // The idempotency key for ONE submit. The caller owns it so a retry of
+    // the same intent answers with the proposal the relay already holds
+    // instead of opening a second one.
+    submitId: string;
+  }): Promise<SubmitShareProposalResult>;
 }
 
 export interface EngineRelayClientOptions {
@@ -934,6 +1015,95 @@ export class EngineRelayClient {
         );
         return {
           pushed: numberField(result, "pushed", "share.channel.push"),
+        };
+      },
+      pushShareView: async ({ shareId, grantedSelector }) => {
+        const result = resultRecord(
+          await request("share.view.push", {
+            workspaceId: workspace.workspaceId,
+            shareId,
+            grantedSelector: {
+              paths: [...grantedSelector.paths],
+              versionId: grantedSelector.versionId,
+              access: grantedSelector.access,
+            },
+          }),
+          "share.view.push",
+        );
+        return {
+          pushed: numberField(result, "pushed", "share.view.push"),
+        };
+      },
+      recordShareViewIdentity: async ({ grantedSelector }) => {
+        const result = resultRecord(
+          await request("share.view.recordIdentity", {
+            workspaceId: workspace.workspaceId,
+            grantedSelector: {
+              paths: [...grantedSelector.paths],
+              versionId: grantedSelector.versionId,
+              access: grantedSelector.access,
+            },
+          }),
+          "share.view.recordIdentity",
+        );
+        const identity = stringField(result, "identity", "share.view.recordIdentity");
+        // Fail closed on an answer this build cannot read: an unknown state
+        // is not a narrower one, and reporting it as recorded would claim a
+        // row nobody checked.
+        if (
+          identity !== "recorded" &&
+          identity !== "already-recorded" &&
+          identity !== "not-required"
+        ) {
+          throw new Error(
+            `Rust engine share.view.recordIdentity returned an unknown identity state: ${identity}`,
+          );
+        }
+        return { identity };
+      },
+      submitShareProposal: async ({ shareId, grantedSelector, submitId }) => {
+        const result = resultRecord(
+          await request("share.proposal.submit", {
+            workspaceId: workspace.workspaceId,
+            shareId,
+            grantedSelector: {
+              paths: [...grantedSelector.paths],
+              versionId: grantedSelector.versionId,
+              access: grantedSelector.access,
+            },
+            submitId,
+          }),
+          "share.proposal.submit",
+        );
+        const submitted = numberField(
+          result,
+          "submitted",
+          "share.proposal.submit",
+        );
+        const proposalId = nullableStringField(
+          result,
+          "proposalId",
+          "share.proposal.submit",
+        );
+        // The two fields state ONE fact between them: a proposal exists, and
+        // it holds these changes. Either half alone is a result no caller can
+        // act on — an id with nothing in it, or changes with nothing to show
+        // the sender or to withdraw.
+        if ((proposalId === null) !== (submitted === 0)) {
+          throw new Error(
+            "Rust engine share.proposal.submit disagreed with itself about " +
+              "whether it opened a proposal.",
+          );
+        }
+        return {
+          submitted,
+          proposalId,
+          skippedOutsideShare: numberField(
+            result,
+            "skippedOutsideShare",
+            "share.proposal.submit",
+          ),
+          morePending: booleanField(result, "morePending", "share.proposal.submit"),
         };
       },
       pullShareView: async ({ shareId, grantedSelector, recordRefusals }) => {

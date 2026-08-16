@@ -71,11 +71,33 @@ export type AnyShareSelector = ShareSelector | ChatChannelShareSelector;
 
 export type ChatShareChannelKind = "channel" | "dm" | "agent";
 
+// Declared where it is read out of the log, and re-exported here for the
+// filter that consumes it.
+import type { ThreadFileBinding } from "./storage";
+export type { ThreadFileBinding };
+
+// #646 PR2: how the file-chat branch answers "which file is this thread
+// about, and where is that file now?" from the workspace OWNER's log. Both
+// lookups are tri-state and every non-string answer denies.
+export interface ShareFileChatResolver {
+  // The file bound by the EARLIEST chat.thread.create for this threadId.
+  // undefined = no create in the log; null = an authoritative create exists
+  // and binds the thread to no file (a channel thread, or a malformed one).
+  threadFileBinding(threadId: string): ThreadFileBinding | null | undefined;
+  // The path of the LATEST moment.append for this object. undefined = the
+  // relay has never seen the object; null = its latest moment deleted it.
+  objectCurrentPath(objectId: string): string | null | undefined;
+  // The object sitting at this path RIGHT NOW, or undefined when none does.
+  // The reverse of the lookup above, and the liveness proof a path binding
+  // needs: a thread bound by path must not outlive the file it names.
+  objectIdAtPath(path: string): string | undefined;
+}
+
 // MU-C4: how the chat branch resolves channel and thread ownership from the
 // workspace owner's append-only log. Both lookups use the EARLIEST matching
 // create op, mirroring the engine's insert-if-absent apply semantics: a later
 // forged create can never change a channel's kind or re-bind a thread.
-export interface ChatShareThreadResolver {
+export interface ChatShareThreadResolver extends ShareFileChatResolver {
   // The kind claimed by the EARLIEST chat.channel.create op for this wire id,
   // undefined when no create exists yet, or null when an authoritative create
   // exists but is malformed/unshareable.
@@ -343,14 +365,26 @@ export function parseAnyShareSelectorJson(selectorJson: string): AnyShareSelecto
 // engine-tracked right now. Even a selector that somehow contained a secret
 // path (bug, hand-edited row) cannot leak secret ops through this check.
 function pathVisibleThroughShare(selector: ShareSelector, path: string): boolean {
+  return visibleSharePath(selector, path) !== null;
+}
+
+// The same gate, answering with the NORMALIZED path it proved. A caller that
+// serves or stores a path must serve this one: the check normalizes before
+// deciding, so serving the caller's own spelling would persist a string this
+// relay never validated — and one the granter may be unable to resolve.
+function visibleSharePath(selector: ShareSelector, path: string): string | null {
   const validated = validateUserWritePath(path);
-  if (!validated.ok) return false;
-  if (classifyEngineFilePath(validated.normalized).kind !== "tracked") return false;
-  if (selector.paths.length === 0) return selector.versionId !== null;
-  return selector.paths.some(
-    (selected) =>
-      validated.normalized === selected || validated.normalized.startsWith(`${selected}/`),
-  );
+  if (!validated.ok) return null;
+  if (classifyEngineFilePath(validated.normalized).kind !== "tracked") return null;
+  const selected =
+    selector.paths.length === 0
+      ? selector.versionId !== null
+      : selector.paths.some(
+          (granted) =>
+            validated.normalized === granted ||
+            validated.normalized.startsWith(`${granted}/`),
+        );
+  return selected ? validated.normalized : null;
 }
 
 // The ONE version a path/version share exposes, and the rule both sides
@@ -359,7 +393,7 @@ function pathVisibleThroughShare(selector: ShareSelector, path: string): boolean
 // or any other lineage is not admitted, on either side. The recipient runs the
 // same equality against the selector it recorded when it accepted the share
 // (`crates/dohc-engine-sync/src/share.rs`, `enforce_share_view_boundary`).
-function targetVersionId(selector: ShareSelector): string {
+export function targetVersionId(selector: ShareSelector): string {
   return selector.versionId ?? MAIN_VERSION_ID;
 }
 
@@ -548,7 +582,11 @@ function filterChatOpForChannelShare(
     };
   }
 
-  if (opKind === "chat.message.append" || opKind === "chat.reaction.set") {
+  // The four thread-scoped kinds, all scoped the same way and all serving the
+  // same allowlists the file branch serves.
+  // `hasOwn`, never `in`: `in` walks the prototype chain, so an op kind of
+  // "toString" would index a function and throw where a refusal belongs.
+  if (Object.hasOwn(SERVED_CHAT_FIELDS, opKind)) {
     const threadId = collectString(record.threadId);
     if (!threadId) return { allowed: false };
     if (chat.threadChannelWireId(threadId) !== selector.channelWireId) {
@@ -556,51 +594,7 @@ function filterChatOpForChannelShare(
     }
     return {
       allowed: true,
-      payload:
-        opKind === "chat.message.append"
-          ? pickServed(record, [
-              "messageId",
-              "threadId",
-              "authorKind",
-              "authorDisplayName",
-              "authorUserId",
-              "parentMessageId",
-              "body",
-              "createdAtMs",
-            ])
-          : pickServed(record, [
-              "reactionId",
-              "messageId",
-              "threadId",
-              "emoji",
-              "authorId",
-              "authorKind",
-              "authorDisplayName",
-              "state",
-              "atMs",
-            ]),
-      blobSha256s: [],
-    };
-  }
-
-  if (opKind === "chat.decision.set" || opKind === "chat.attachment.add") {
-    const threadId = collectString(record.threadId);
-    if (!threadId) return { allowed: false };
-    if (chat.threadChannelWireId(threadId) !== selector.channelWireId) {
-      return { allowed: false };
-    }
-    return {
-      allowed: true,
-      payload:
-        opKind === "chat.decision.set"
-          ? pickServed(record, ["threadId", "messageId", "state", "resolvedByMessageId", "atMs"])
-          : pickServed(record, [
-              "attachmentId",
-              "threadId",
-              "messageId",
-              "targetKind",
-              "createdAtMs",
-            ]),
+      payload: pickServed(record, SERVED_CHAT_FIELDS[opKind as keyof typeof SERVED_CHAT_FIELDS]),
       blobSha256s: [],
     };
   }
@@ -608,11 +602,179 @@ function filterChatOpForChannelShare(
   return { allowed: false };
 }
 
+// #646 PR2: the EXACTLY five chat kinds a file share carries. The list is an
+// allowlist and nothing falls through it. `chat.follow.set` and
+// `chat.feed.read.set` are the reader's OWN state and are deliberately absent
+// (`crates/dohc-engine-sync/src/share.rs`, the same reason written for the
+// channel branch); `chat.channel.create` is a channel's bootstrap and a file
+// share has no channel.
+// The fields each chat op serves, by kind. Both the channel branch and the
+// file branch read these: a redaction list that exists twice is a list that
+// gets a field added to one copy.
+const SERVED_CHAT_FIELDS = {
+  "chat.message.append": [
+    "messageId",
+    "threadId",
+    "authorKind",
+    "authorDisplayName",
+    "authorUserId",
+    "parentMessageId",
+    "body",
+    "createdAtMs",
+  ],
+  "chat.reaction.set": [
+    "reactionId",
+    "messageId",
+    "threadId",
+    "emoji",
+    "authorId",
+    "authorKind",
+    "authorDisplayName",
+    "state",
+    "atMs",
+  ],
+  "chat.decision.set": ["threadId", "messageId", "state", "resolvedByMessageId", "atMs"],
+  "chat.attachment.add": [
+    "attachmentId",
+    "threadId",
+    "messageId",
+    "targetKind",
+    "createdAtMs",
+  ],
+} as const satisfies Record<string, readonly string[]>;
+
+const FILE_CHAT_THREAD_SCOPED_KINDS = [
+  "chat.message.append",
+  "chat.reaction.set",
+  "chat.decision.set",
+  "chat.attachment.add",
+] as const;
+
+// The binding a `chat.thread.create` payload claims for ITSELF. Exactly one
+// shape may be present: an op carrying both is malformed, and reading either
+// half of it would let a crafted create bind one thread to two files.
+// A channel thread (no file binding at all) is not a shape a FILE share
+// carries, so it reads as "no binding" and the caller denies it.
+function threadCreateBinding(record: Record<string, unknown>): ThreadFileBinding | null {
+  const objectId = collectString(record.linkedObjectId);
+  const path = collectString(record.linkedPath);
+  if (objectId && path) return null;
+  if (objectId) return { kind: "object", objectId };
+  if (path) return { kind: "path", path };
+  return null;
+}
+
+// A binding resolved to the file's path RIGHT NOW, or null when it cannot be
+// resolved. Fail closed on every tri-state: an unknown object (undefined) and
+// a deleted one (null) both deny. Hiding the discussion about a deleted file
+// is the fail-closed answer and the simple one to state.
+//
+// Both shapes are answered from the log, and neither is taken on trust.
+//
+// An OBJECT binding reads the object's current path, so the thread follows its
+// file through renames inside the share and stops at one that leaves it.
+// Every binding written from now on is this shape: the append route converts a
+// recipient's path to the granter's own object id at the accept door, where an
+// object is provably at that path (`server.ts`).
+//
+// A PATH binding is therefore only a row written before that conversion
+// existed. It is re-proved by asking which object sits at that path NOW, so
+// such a row still cannot outlive its file — it just cannot follow one either,
+// which is why new accepts do not produce them.
+function resolvedThreadPath(
+  chat: ShareFileChatResolver,
+  binding: ThreadFileBinding | null | undefined,
+): string | null {
+  if (!binding) return null;
+  if (binding.kind === "path") {
+    return chat.objectIdAtPath(binding.path) ? binding.path : null;
+  }
+  const path = chat.objectCurrentPath(binding.objectId);
+  return typeof path === "string" ? path : null;
+}
+
+// The FILE-chat branch of the fail-closed share filter (#646 PR2), for a
+// path/version selector. A thread is visible through a file share when the
+// file it is about is visible through that file share — resolved from the
+// owner's log to the file's CURRENT path and tested by name, never taken from
+// a client's word or from the display-only `linkedPathHint`.
+//
+// Across the boundary a thread's link travels as `linkedPath` and never as
+// `linkedObjectId`: the served moment deliberately drops the granter's object
+// id (see the moment branch below), so the recipient's store mints its own and
+// a granter object id would mean nothing there.
+//
+// Chat ops are blob-free, so every decision here carries `blobSha256s: []` —
+// the share-blob route reads exactly that to decide reachability, and a chat
+// decision exposing a hash would silently widen blob access.
+function filterFileChatOpForPathShare(
+  selector: ShareSelector,
+  opKind: string,
+  payload: unknown,
+  chat: ChatShareThreadResolver | undefined,
+): ShareOpDecision {
+  // No resolver wired = no way to resolve a thread to a file = nothing served.
+  if (!chat) return { allowed: false };
+  // Chat follows PATHS, and only paths (#646 PR2). A selector with no paths is
+  // a VERSION share: it grants one frozen version's files, and
+  // `pathVisibleThroughShare` reads its empty path list as "every tracked
+  // path" — which for chat would serve the live discussion about every file on
+  // main, including files created long after the version and never in it. A
+  // version share is a snapshot; the conversation is not in it.
+  if (selector.paths.length === 0) return { allowed: false };
+  const record = asRecord(payload);
+  if (!record) return { allowed: false };
+  const threadId = collectString(record.threadId);
+  if (!threadId) return { allowed: false };
+  const bound = chat.threadFileBinding(threadId);
+  const boundPath = resolvedThreadPath(chat, bound);
+
+  let path: string | null;
+  if (opKind === "chat.thread.create") {
+    path = resolvedThreadPath(chat, threadCreateBinding(record));
+    // undefined = this op IS the first binding (the recipient append path, not
+    // yet in the log). Any authoritative existing state must resolve to the
+    // SAME file, or this create is a re-bind trying to move a thread into (or
+    // out of) the share — the forgery the earliest-wins rule exists to stop.
+    if (bound !== undefined && boundPath !== path) return { allowed: false };
+  } else if ((FILE_CHAT_THREAD_SCOPED_KINDS as readonly string[]).includes(opKind)) {
+    path = boundPath;
+  } else {
+    return { allowed: false };
+  }
+  if (path === null) return { allowed: false };
+  // Gate #2 unchanged: the path must be inside the selector AND classified
+  // engine-tracked right now, so the chat lane inherits the secret-path floor.
+  // The NORMALIZED spelling it proved is what gets served and stored.
+  const servedPath = visibleSharePath(selector, path);
+  if (servedPath === null) return { allowed: false };
+
+  if (opKind === "chat.thread.create") {
+    const served = pickServed(record, ["threadId", "title", "createdAtMs", "linkedAtMs"]);
+    // The resolved, normalized path — not the payload's own field. The
+    // recipient re-tests this value against its pinned grant, and the granter
+    // resolves it against its own store, so both must read the spelling this
+    // relay proved.
+    served.linkedPath = servedPath;
+    return { allowed: true, payload: served, blobSha256s: [] };
+  }
+  // The four thread-scoped kinds serve their allowlist and nothing else. The
+  // attachment row stays the opaque chip the channel branch serves: its
+  // objectId/pathHint could name a file outside the share, so they are absent
+  // from the list and the recipient renders a chip it cannot follow.
+  return {
+    allowed: true,
+    payload: pickServed(record, SERVED_CHAT_FIELDS[opKind as keyof typeof SERVED_CHAT_FIELDS]),
+    blobSha256s: [],
+  };
+}
+
 // The single decision point for what a share recipient may read. Strict
 // allowlist per selector kind. Path/version selector: moment.append (all
 // referenced paths visible, version matches), version.create for the shared
-// version (forkSnapshots redacted), and the payload-free workspace.init
-// bootstrap op — chats stay excluded. Chat-channel selector (MU-C4): ONLY the
+// version (forkSnapshots redacted), the payload-free workspace.init bootstrap
+// op, and (#646 PR2) the five file-chat kinds whose thread resolves to a file
+// inside the selector. Chat-channel selector (MU-C4): ONLY the
 // granted channel's chat ops (see filterChatOpForChannelShare) — file, secret,
 // version, and bootstrap ops stay excluded. EVERYTHING unrecognized is
 // excluded either way.
@@ -631,6 +793,13 @@ export function filterOpForShare(
 
   if (isChatChannelSelector(selector)) {
     return filterChatOpForChannelShare(selector, opKind, payload, chat);
+  }
+
+  // #646 PR2: chat follows the file share. Every chat kind routes here, so the
+  // branch's own allowlist is the only way one is served — a kind it does not
+  // name is denied there, not silently carried by a later branch.
+  if (opKind.startsWith("chat.")) {
+    return filterFileChatOpForPathShare(selector, opKind, payload, chat);
   }
 
   if (opKind === "workspace.init") {
@@ -732,4 +901,174 @@ export function filterOpForShare(
   }
 
   return { allowed: false };
+}
+
+// The single decision point for what a share recipient may WRITE.
+// `filterOpForShare` above answers the read question — "may this recipient SEE
+// this op?" — and the two are not the same question. A recipient may read every
+// file moment in the selector; it may write none of them, because a written
+// moment lands in the GRANTER's log and the granter's engine replays it
+// (#646 PR3-0).
+//
+// Only chat crosses in this direction today. A chat-channel grant at
+// `read-write` appends what the channel branch admits. A file share appends
+// only the five file-chat kinds PR2 serves: the file-chat branch's own terminal
+// deny is the allowlist, so `moment.append`, `workspace.init`, `version.create`,
+// and every unknown kind are refused there. This function never falls through
+// to the read filter.
+export function filterOpForShareAppend(
+  selector: AnyShareSelector,
+  opKind: string,
+  payloadJson: string,
+  chat?: ChatShareThreadResolver,
+): ShareOpDecision {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(payloadJson);
+  } catch {
+    return { allowed: false };
+  }
+  return isChatChannelSelector(selector)
+    ? filterChatOpForChannelShare(selector, opKind, payload, chat)
+    : filterFileChatOpForPathShare(selector, opKind, payload, chat);
+}
+
+// #646 PR3a. One change a recipient proposes to one file.
+//
+// This is NOT a moment. A recipient never supplies a moment payload: the
+// served moment drops `momentId`, `objectId` and every `before*` field
+// (see the read filter above), so a recipient could not state a lineage the
+// granter recognizes even if it tried. It states the NET CHANGE — "the file
+// you have at `basedOnPath` with content `basedOnBlobSha256` should now be at
+// `afterPath` with content `afterBlobSha256`" — and the relay mints the moment
+// from the granter's own facts when the granter accepts it.
+export interface ProposedChange {
+  // Where the GRANTER has this file. `null` for a file the recipient created,
+  // which the granter therefore has nowhere.
+  basedOnPath: string | null;
+  // The after-hash of the last granter moment the recipient applied for this
+  // file, and the one identifier both sides genuinely share. `null` for a new
+  // file.
+  basedOnBlobSha256: string | null;
+  operation: "write" | "delete";
+  // Absent for a delete: the change removes the file, so it lands nowhere and
+  // carries no content.
+  afterPath: string | null;
+  afterBlobSha256: string | null;
+  afterContentKind: "text" | "binary" | null;
+  afterByteLength: number | null;
+  recordedAtMs: number;
+}
+
+export type ProposedChangeDecision =
+  | { allowed: false }
+  | { allowed: true; change: ProposedChange };
+
+const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/u;
+
+// The single decision point for what a recipient may PROPOSE. It is a third
+// question, next to "may this recipient see this op?" (`filterOpForShare`) and
+// "may this recipient append this op?" (`filterOpForShareAppend`), and it has
+// its own function for the same reason those two do: a route must never widen
+// by inheriting a neighbour's allowlist. Nothing calls this but the proposal
+// route, and the append route cannot reach it.
+//
+// Fails closed on every field. The proven, NORMALIZED paths travel back in the
+// decision, so the caller stores the strings this relay validated rather than
+// the recipient's own spelling.
+export function filterProposedChangeForShare(
+  selector: AnyShareSelector,
+  raw: unknown,
+): ProposedChangeDecision {
+  // A chat-channel grant shares no files, so it can propose no change to one.
+  if (isChatChannelSelector(selector)) return { allowed: false };
+  // Changes follow PATHS. A version share names none, so it proposes nothing.
+  if (selector.paths.length === 0) return { allowed: false };
+  const record = asRecord(raw);
+  if (!record) return { allowed: false };
+
+  const operation = record.operation;
+  if (operation !== "write" && operation !== "delete") return { allowed: false };
+
+  const recordedAtMs = record.recordedAtMs;
+  if (typeof recordedAtMs !== "number" || !Number.isSafeInteger(recordedAtMs)) {
+    return { allowed: false };
+  }
+
+  // The base side. A new file states neither half; an existing one states
+  // both. A half-stated base names a file without saying what the recipient
+  // read, which is exactly the case the base rewrite cannot resolve.
+  const claimedBasePath = record.basedOnPath;
+  const claimedBaseSha = record.basedOnBlobSha256;
+  let basedOnPath: string | null = null;
+  let basedOnBlobSha256: string | null = null;
+  if (claimedBasePath !== null || claimedBaseSha !== null) {
+    if (typeof claimedBasePath !== "string" || typeof claimedBaseSha !== "string") {
+      return { allowed: false };
+    }
+    if (!SHA256_HEX_PATTERN.test(claimedBaseSha)) return { allowed: false };
+    basedOnPath = visibleSharePath(selector, claimedBasePath);
+    if (basedOnPath === null) return { allowed: false };
+    basedOnBlobSha256 = claimedBaseSha;
+  }
+
+  if (operation === "delete") {
+    // A delete removes a file the granter has. It cannot delete a file the
+    // granter never had, and it lands nowhere, so it states no after side.
+    if (basedOnPath === null) return { allowed: false };
+    if (record.afterPath != null || record.afterBlobSha256 != null) {
+      return { allowed: false };
+    }
+    return {
+      allowed: true,
+      change: {
+        basedOnPath,
+        basedOnBlobSha256,
+        operation,
+        afterPath: null,
+        afterBlobSha256: null,
+        afterContentKind: null,
+        afterByteLength: null,
+        recordedAtMs,
+      },
+    };
+  }
+
+  const claimedAfterPath = record.afterPath;
+  const claimedAfterSha = record.afterBlobSha256;
+  if (typeof claimedAfterPath !== "string" || typeof claimedAfterSha !== "string") {
+    return { allowed: false };
+  }
+  if (!SHA256_HEX_PATTERN.test(claimedAfterSha)) return { allowed: false };
+  // The destination is tested exactly as the source is: a change that lands
+  // outside the selector is refused rather than admitted and clipped later.
+  const afterPath = visibleSharePath(selector, claimedAfterPath);
+  if (afterPath === null) return { allowed: false };
+
+  const afterContentKind = record.afterContentKind;
+  if (afterContentKind !== "text" && afterContentKind !== "binary") {
+    return { allowed: false };
+  }
+  const afterByteLength = record.afterByteLength;
+  if (
+    typeof afterByteLength !== "number" ||
+    !Number.isSafeInteger(afterByteLength) ||
+    afterByteLength < 0
+  ) {
+    return { allowed: false };
+  }
+
+  return {
+    allowed: true,
+    change: {
+      basedOnPath,
+      basedOnBlobSha256,
+      operation,
+      afterPath,
+      afterBlobSha256: claimedAfterSha,
+      afterContentKind,
+      afterByteLength,
+      recordedAtMs,
+    },
+  };
 }

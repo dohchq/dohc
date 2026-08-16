@@ -77,10 +77,9 @@ describe("RelayShareDialog", () => {
     });
   });
 
-  // The level is stated, not implied. PR1 grants the same reads at every
-  // level, so the dialog offers only View and says so plainly — an enabled
-  // Comment option would promise chat rights the relay still refuses.
-  it("offers View only, states why, and sends the level it showed", async () => {
+  // The level is stated, not implied. All three are real from #646 PR3a, so
+  // every option is selectable and each says exactly what it grants.
+  it("offers all three levels, states each one, and sends the level it showed", async () => {
     const user = userEvent.setup();
     render(
       <RelayShareDialog
@@ -93,32 +92,54 @@ describe("RelayShareDialog", () => {
     expect(screen.getByTestId("share-access-view").getAttribute("aria-checked")).toBe(
       "true",
     );
-    expect(screen.getByTestId("share-access-view").hasAttribute("disabled")).toBe(false);
-    for (const level of ["comment", "edit"]) {
+    for (const level of ["view", "comment", "edit"] as const) {
       expect(
         screen.getByTestId(`share-access-${level}`).hasAttribute("disabled"),
-        level,
-      ).toBe(true);
+        `MUTATION: ${level} disabled would refuse a level the relay now grants`,
+      ).toBe(false);
     }
     expect(screen.getByTestId("share-access-helper").textContent).toBe(
       "They can read what you selected.",
     );
-    expect(screen.getByTestId("share-access-pending").textContent).toBe(
-      "Comment and Edit are not ready yet.",
-    );
+    // Nothing is pending any more, so the line that said so is gone.
+    expect(screen.queryByTestId("share-access-pending")).toBeNull();
 
-    // Clicking a disabled option changes nothing. The dialog holds no level
-    // state in PR1, so it cannot send a level it never showed.
+    // Comment takes the selection and states the right it grants.
     await user.click(screen.getByTestId("share-access-comment"));
-    expect(screen.getByTestId("share-access-view").getAttribute("aria-checked")).toBe(
+    expect(screen.getByTestId("share-access-comment").getAttribute("aria-checked")).toBe(
       "true",
     );
+    expect(screen.getByTestId("share-access-helper").textContent).toBe(
+      "They can read what you selected and chat about it.",
+    );
+
+    // Edit states the write-back model, not a right over the granter's files.
+    await user.click(screen.getByTestId("share-access-edit"));
+    expect(screen.getByTestId("share-access-edit").getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    expect(
+      screen.getByTestId("share-access-helper").textContent,
+      "MUTATION: promising 'edit what you selected' would name a right Edit does not grant",
+    ).toBe("They can read, chat, and send you changes to accept.");
 
     await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
     await user.click(screen.getByTestId("share-create"));
     expect(bridgeMock.createRelayShare).toHaveBeenCalledWith(
-      expect.objectContaining({ access: "view" }),
+      expect.objectContaining({ access: "edit" }),
     );
+  });
+
+  // The label is Ice's open question (Suggest vs Edit); the wire value is not.
+  it("keeps the Edit label on the level the relay calls edit", () => {
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ path: "docs/plan.md" }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("share-access-edit").textContent).toBe("Edit");
   });
 
   // The dialog no longer promises a level in prose: at Edit that sentence

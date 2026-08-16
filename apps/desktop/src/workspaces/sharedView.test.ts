@@ -10,6 +10,7 @@ import {
   SharePinInvalidError,
   materializeSharedViewPaths,
   refreshSharedViewOnce as refreshSharedViewOnceWithPull,
+  shareViewIdentitySelector,
 } from "./sharedView";
 import type { ShareViewRefusal } from "@dohc/workspace-contracts/relay";
 import { createTestScratch } from "./testTemp";
@@ -570,5 +571,111 @@ describe("shared view refresh", () => {
         }),
       ),
     ).rejects.toThrow(/escapes the workspace/);
+  });
+});
+
+// #646 PR3-1 — which share views ask for a sync identity.
+//
+// The main process runs this before every pull and push. It must fail closed
+// on every tri-state: skip, never throw, and never enrol a share that may not
+// push.
+describe("shareViewIdentitySelector", () => {
+  const COMMENT = { paths: ["docs"], versionId: null, access: "comment" };
+  const match = (left: string, right: string): boolean => left === right;
+
+  function decide(
+    shareView: Parameters<
+      typeof shareViewIdentitySelector
+    >[0]["shareView"],
+    relayUrl: string | null = "https://relay.example",
+  ) {
+    return shareViewIdentitySelector({
+      shareView,
+      relayUrl,
+      relayUrlsMatch: match,
+    });
+  }
+
+  it("enrols a comment or edit share view against its pinned grant", () => {
+    for (const access of ["comment", "edit"] as const) {
+      expect(
+        decide({
+          grantedSelector: { ...COMMENT, access },
+          relayUrl: "https://relay.example",
+        }),
+      ).toEqual({ paths: ["docs"], versionId: null, access });
+    }
+  });
+
+  it("never enrols a view share, which may push nothing", () => {
+    expect(
+      decide({
+        grantedSelector: { ...COMMENT, access: "view" },
+        relayUrl: "https://relay.example",
+      }),
+    ).toBeNull();
+  });
+
+  it("skips a share view whose pinned grant is damaged", () => {
+    // One damaged field per case, each already refused by
+    // `recordedShareSelector`. A record this build cannot read completely is
+    // not a narrower grant, so it must not enrol at a level nobody granted.
+    for (const grantedSelector of [
+      undefined,
+      null,
+      { ...COMMENT, access: "owner" },
+      { ...COMMENT, access: undefined },
+      { ...COMMENT, paths: "docs" },
+      { ...COMMENT, paths: ["../escape"] },
+      { ...COMMENT, paths: ["docs/"] },
+      { paths: [], versionId: null, access: "comment" },
+      { ...COMMENT, versionId: " v1" },
+    ]) {
+      expect(
+        decide({ grantedSelector, relayUrl: "https://relay.example" }),
+      ).toBeNull();
+    }
+  });
+
+  it("skips a share that has ended", () => {
+    expect(
+      decide({
+        grantedSelector: COMMENT,
+        ended: true,
+        relayUrl: "https://relay.example",
+      }),
+    ).toBeNull();
+  });
+
+  it("skips a workspace that is not a share view at all", () => {
+    expect(decide(null)).toBeNull();
+    expect(decide(undefined)).toBeNull();
+  });
+
+  it("skips when there are no dohc Cloud credentials", () => {
+    for (const relayUrl of [null, ""]) {
+      expect(
+        decide(
+          { grantedSelector: COMMENT, relayUrl: "https://relay.example" },
+          relayUrl,
+        ),
+      ).toBeNull();
+    }
+  });
+
+  it("skips a session signed into a relay that is not this share's origin", () => {
+    expect(
+      decide(
+        { grantedSelector: COMMENT, relayUrl: "https://origin.example" },
+        "https://other.example",
+      ),
+    ).toBeNull();
+    // A record with no origin relay predates that field; the session's relay
+    // is all there is, and it enrols.
+    expect(decide({ grantedSelector: COMMENT })).toEqual({
+      paths: ["docs"],
+      versionId: null,
+      access: "comment",
+    });
   });
 });

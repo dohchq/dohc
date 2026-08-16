@@ -131,6 +131,9 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     await expect(row).toBeVisible();
     await expect(row).toContainText("docs/plan.md");
     await expect(row).toContainText(RECIPIENT_EMAIL);
+    // Ending asks before it ends: the first click opens the confirm.
+    await row.getByTestId("shared-by-me-revoke-start").click();
+    await expect(row.getByTestId("shared-by-me-revoke-confirm")).toBeVisible();
     await row.getByTestId("shared-by-me-revoke").click();
     await expect(row).toContainText("Ended — was shared with");
 
@@ -233,7 +236,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
 
     // Writes are refused with the honest copy — at the IPC boundary, not
     // just in the UI.
-    const writeAttempt = await page.evaluate(async () => {
+    const writeAttempt = await page.evaluate(async (unusedContentHash) => {
       const api = (window as unknown as {
         dohcDesktop: Pick<
           DohcDesktopBridge,
@@ -246,14 +249,19 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
           workspaceId: registry.workspaces[0]!.workspaceId,
           relativePath: "docs/shared.md",
           text: "defaced",
-          expectedContentHash: UNUSED_CONTENT_HASH,
+          expectedContentHash: unusedContentHash,
         });
         return "wrote";
       } catch (error) {
         return error instanceof Error ? error.message : String(error);
       }
-    });
-    expect(writeAttempt).toContain("This is a shared view — ask e2e-granter@dohc.test for changes.");
+    }, UNUSED_CONTENT_HASH);
+    // A share view's text save is the one write decided at its own routed
+    // seam rather than by the workspace-wide gate (#646 PR3), so a VIEW share
+    // is refused there by the shared-file rule. Every other write handler
+    // below still meets the workspace gate and its wording.
+    expect(writeAttempt).toContain("SharedFileReadOnlyError");
+    expect(writeAttempt).toContain("This shared file is read-only for you.");
 
     // The other three mutation side-doors are refused at the IPC boundary too:
     // a managed agent run, a code-executing site preview, and a write-capable
@@ -279,10 +287,10 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
             sessionId: string;
             path: string;
           }): Promise<{ available: boolean }>;
-          applyEngineYDocUpdate(payload: {
-            sessionId: string;
-            update: Uint8Array;
-          }): Promise<void>;
+          // Taken from the CONTRACT, not re-typed here. The hand-written
+          // shape drifted once already, so the call was rejected at the
+          // schema and never reached the refusal this asserts.
+          applyEngineYDocUpdate: DohcDesktopBridge["applyEngineYDocUpdate"];
         };
       }).dohcDesktop;
       const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
@@ -309,7 +317,15 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
         path: "docs/shared.md",
       });
       const engineYDocApply = await capture(() =>
-        api.applyEngineYDocUpdate({ sessionId: "shared-view-bypass", update: new Uint8Array([1, 2, 3]) }),
+        api.applyEngineYDocUpdate({
+          sessionId: "shared-view-bypass",
+          update: new Uint8Array([1, 2, 3]),
+          lineageGeneration: 1,
+          // Typing this from the contract surfaced a SECOND drift the
+          // hand-written shape hid: `seq` is required too, so the call would
+          // have been rejected at the schema again.
+          seq: 1,
+        }),
       );
       return {
         agent,
@@ -321,8 +337,10 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     });
     expect(bypassAttempts.agent).toContain("Agents can't run in a shared view");
     expect(bypassAttempts.sitePreview).toContain("disabled in a shared view");
-    // The copyable MCP config for a shared view is the read-only profile.
-    expect(bypassAttempts.mcpArgs).toContain("--read-only");
+    // The copyable MCP config for a shared view carries the share's level, so
+    // the launched server registers only the write tools that level grants.
+    // This share was created at "view", which grants none.
+    expect(bypassAttempts.mcpArgs.join(" ")).toContain("--share-access view");
     // The engine Y.Doc editor session is refused (never opens a writable session
     // in a shared view), and applying an update to it is an inert no-op.
     expect(bypassAttempts.engineYDocAvailable).toBe(false);
@@ -448,7 +466,7 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
 
     // Writes are refused at the IPC boundary (reserved projection), and
     // re-sharing mounted content is refused with the honest copy.
-    const boundaryChecks = await page.evaluate(async () => {
+    const boundaryChecks = await page.evaluate(async (unusedContentHash) => {
       const api = (window as unknown as {
         dohcDesktop: Pick<
           DohcDesktopBridge,
@@ -470,7 +488,7 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
             workspaceId,
             relativePath: "shared-with-me/e2e-granter/docs/brief.md",
             text: "defaced",
-            expectedContentHash: UNUSED_CONTENT_HASH,
+            expectedContentHash: unusedContentHash,
           }),
         ),
         reshare: await capture(() =>
@@ -482,7 +500,7 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
           }),
         ),
       };
-    });
+    }, UNUSED_CONTENT_HASH);
     expect(boundaryChecks.write).toContain("reserved");
     expect(boundaryChecks.reshare).toContain(
       "copy it into your own files to share it onward",
@@ -558,6 +576,392 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
     expect(await readFile(join(temp.rootPath, "notes/mine.md"), "utf8")).toContain(
       "Host workspace file",
     );
+  } finally {
+    await relay?.stop();
+    if (desktop) await cleanupDesktopWorkspace(desktop, temp);
+    else await temp.cleanup();
+  }
+});
+
+test("comment side: a recipient chats about a shared file and the message reaches the granter's log", async () => {
+  // #646 PR2 — the whole loop for a COMMENT share, through the real app: the
+  // relay serves the granter's files, the recipient opens the share, writes a
+  // thread and a message on a shared file through the IPC boundary, and the
+  // message lands in the GRANTER's own log under this share's origin.
+  //
+  // The last step is what makes this an end-to-end test rather than a local
+  // one: the recipient's chat is only chat once it reaches the person who
+  // shared the file. It is read back over HTTP as the granter, because a
+  // second Electron app would collide with this one on the user-data dir.
+  test.setTimeout(240_000);
+  const temp = await createTempWorkspace();
+  const workspaceId = "share-comment-e2e";
+  let relay: SyncRelayHandle | null = null;
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
+    const granter = new RelayFilePeer({
+      baseUrl: relay.baseUrl,
+      token: GRANTER_TOKEN,
+      workspaceId,
+    });
+    await granter.writeTextFiles([
+      { path: "docs/shared.md", text: "# Shared\n\nThe comet-tail draft.\n" },
+      { path: "private/hidden.md", text: "The kraken ledger stays private.\n" },
+    ]);
+
+    const create = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${workspaceId}/shares`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          recipientEmail: RECIPIENT_EMAIL,
+          paths: ["docs"],
+          access: "comment",
+        }),
+      },
+    );
+    expect(create.status).toBe(200);
+    const shareId = (JSON.parse(create.body) as { shareId: string }).shareId;
+
+    await seedCloudCredentials(temp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: RECIPIENT_EMAIL,
+      userId: "e2e-recipient",
+      token: RECIPIENT_TOKEN,
+    });
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+
+    await page.getByTestId("first-run-open-share").click();
+    await expect(page.getByTestId("open-shared-view")).toBeVisible();
+    await page.getByTestId("open-share-code").fill(`dohc-share:${shareId}:${relay.baseUrl}`);
+    await page.getByTestId("open-share-choose-folder").click();
+    await expect(page.getByTestId("open-shared-view")).toContainText(temp.rootPath);
+    await page.getByTestId("open-share-start").click();
+    await expect(page.getByTestId("workspace-shell")).toBeVisible();
+
+    // The banner states the right the share actually grants.
+    const banner = page.getByTestId("shared-view-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText("You can chat about these files, not edit them.");
+
+    // The chat, written through the IPC boundary main owns. The renderer's
+    // affordances are honesty; this is the authorization surface.
+    const chat = await page.evaluate(async () => {
+      const api = (window as unknown as {
+        dohcDesktop: Pick<
+          DohcDesktopBridge,
+          | "getWorkspaceRegistry"
+          | "createFileChat"
+          | "sendChatMessage"
+          | "listFileChats"
+          | "listChatMessages"
+          | "listChatChannels"
+        >;
+      }).dohcDesktop;
+      const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
+      const created = await api.createFileChat({
+        workspaceId,
+        path: "docs/shared.md",
+        title: "About the comet tail",
+      });
+      await api.sendChatMessage({
+        workspaceId,
+        threadId: created.thread.id,
+        body: "Which comet is this?",
+      });
+      const threads = await api.listFileChats({ workspaceId, path: "docs/shared.md" });
+      const messages = await api.listChatMessages({
+        workspaceId,
+        threadId: created.thread.id,
+      });
+      // The workspace-wide listing is NOT routed to a share view: a share
+      // view gets per-file chat only, and #627 is the reason the whole
+      // surface is refused rather than filtered.
+      let channels: string;
+      try {
+        await api.listChatChannels({ workspaceId });
+        channels = "answered";
+      } catch (error) {
+        channels = error instanceof Error ? error.message : String(error);
+      }
+      return {
+        threadId: created.thread.id,
+        threadTitles: threads.threads.map((thread) => thread.title),
+        bodies: messages.messages.map((message) => message.body),
+        channels,
+      };
+    });
+    expect(chat.threadTitles).toContain("About the comet tail");
+    expect(chat.bodies).toContain("Which comet is this?");
+    expect(chat.channels).not.toBe("answered");
+
+    // The proof: the message is in the GRANTER's own log, under this share's
+    // namespaced origin, carrying the recipient's server-derived identity and
+    // the file named by PATH (the recipient's object ids mean nothing here).
+    await expect
+      .poll(
+        async () => {
+          const page = await relayJson(
+            relay!.baseUrl,
+            GRANTER_TOKEN,
+            `/sync/${workspaceId}/log?since=0&limit=500`,
+          );
+          if (page.status !== 200) return `status ${page.status}`;
+          const all = (
+            JSON.parse(page.body) as {
+              ops: Array<{ originId: string; opKind: string; payload: Record<string, unknown> }>;
+            }
+          ).ops;
+          // The GRANTER's own object id for the shared file, read from the
+          // granter's own log. This is what the recipient's binding has to
+          // resolve to, and it is knowable here rather than assumed.
+          const granterObjectId = all
+            .filter(
+              (op) =>
+                op.opKind === "moment.append" &&
+                !op.originId.startsWith(`share:${shareId}:`) &&
+                (op.payload.payloadAfterPath === "docs/shared.md" ||
+                  op.payload.path === "docs/shared.md"),
+            )
+            .map((op) => op.payload.objectId)
+            .at(-1);
+          const ops = all.filter((op) => op.originId.startsWith(`share:${shareId}:`));
+          const create = ops.find((op) => op.opKind === "chat.thread.create");
+          const message = ops.find((op) => op.opKind === "chat.message.append");
+          if (!create || !message) return `kinds: ${ops.map((op) => op.opKind).join(",")}`;
+          if (typeof granterObjectId !== "string") return "no granter object for docs/shared.md";
+          return {
+            // The relay's accept door CONVERTS the binding before it stores
+            // it, so the stored op names the granter's own object and no
+            // path — the SAME object the granter's own moments name.
+            carriesPath: create.payload.linkedPath !== undefined,
+            boundToGranterObject: create.payload.linkedObjectId === granterObjectId,
+            body: message.payload.body,
+            authorUserId: message.payload.authorUserId,
+          };
+        },
+        { timeout: 60_000, intervals: [1_000] },
+      )
+      .toEqual({
+        // A recipient names its file by PATH on the wire, because its own
+        // object ids mean nothing in the granter's workspace. The relay then
+        // resolves that path to the granter's object and persists THAT —
+        // which is what makes the thread follow the file through a rename
+        // inside the share. `services/sync-relay/src/fileChatShares.test.ts`
+        // pins the conversion; this is the same fact end to end, against the
+        // granter's real object id rather than against the shape of one.
+        carriesPath: false,
+        boundToGranterObject: true,
+        body: "Which comet is this?",
+        authorUserId: "e2e-recipient",
+      });
+  } finally {
+    await relay?.stop();
+    if (desktop) await cleanupDesktopWorkspace(desktop, temp);
+    else await temp.cleanup();
+  }
+});
+
+test("edit side: a recipient edits a shared file, sends the changes, and the granter accepts them", async () => {
+  // #646 PR3a — the whole proposal loop, through the real app and a real
+  // relay. This is the only place in the repo where a real engine and a real
+  // relay meet, so it is the only place that can prove the loop rather than
+  // one half of it: the recipient's engine journals the edit, the relay holds
+  // it as a change, the granter accepts, and the change lands in the
+  // GRANTER's log carrying a base the granter's own log can name.
+  test.setTimeout(300_000);
+  const temp = await createTempWorkspace();
+  const workspaceId = "share-edit-e2e";
+  let relay: SyncRelayHandle | null = null;
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const EDITED = "# Shared\n\nThe comet-tail draft, corrected.\n";
+
+  try {
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
+    const granter = new RelayFilePeer({
+      baseUrl: relay.baseUrl,
+      token: GRANTER_TOKEN,
+      workspaceId,
+    });
+    const [shared] = await granter.writeTextFiles([
+      { path: "docs/shared.md", text: "# Shared\n\nThe comet-tail draft.\n" },
+      { path: "private/hidden.md", text: "The kraken ledger stays private.\n" },
+    ]);
+
+    const create = await relayJson(relay.baseUrl, GRANTER_TOKEN, `/sync/${workspaceId}/shares`, {
+      method: "POST",
+      body: JSON.stringify({
+        recipientEmail: RECIPIENT_EMAIL,
+        paths: ["docs"],
+        access: "edit",
+      }),
+    });
+    expect(create.status).toBe(200);
+    const shareId = (JSON.parse(create.body) as { shareId: string }).shareId;
+
+    await seedCloudCredentials(temp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: RECIPIENT_EMAIL,
+      userId: "e2e-recipient",
+      token: RECIPIENT_TOKEN,
+    });
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+
+    await page.getByTestId("first-run-open-share").click();
+    await expect(page.getByTestId("open-shared-view")).toBeVisible();
+    await page.getByTestId("open-share-code").fill(`dohc-share:${shareId}:${relay.baseUrl}`);
+    await page.getByTestId("open-share-choose-folder").click();
+    await expect(page.getByTestId("open-shared-view")).toContainText(temp.rootPath);
+    await page.getByTestId("open-share-start").click();
+    await expect(page.getByTestId("workspace-shell")).toBeVisible();
+
+    // The banner states the right the share actually grants.
+    const banner = page.getByTestId("shared-view-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText("send your changes");
+
+    // The edit, written through the IPC boundary main owns. At view and
+    // comment this same call is refused; the receive-side spec pins that.
+    const wrote = await page.evaluate(async (text) => {
+      const api = (
+        window as unknown as {
+          dohcDesktop: Pick<
+            DohcDesktopBridge,
+            "getWorkspaceRegistry" | "readWorkspaceText" | "writeWorkspaceText"
+          >;
+        }
+      ).dohcDesktop;
+      const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
+      try {
+        // The write is optimistic: it names the hash of the bytes it read, so
+        // the recipient's edit is the same shape any editor save takes.
+        const read = await api.readWorkspaceText({
+          workspaceId,
+          relativePath: "docs/shared.md",
+        });
+        if (read.truncated) return "the shared file read back truncated";
+        await api.writeWorkspaceText({
+          workspaceId,
+          relativePath: "docs/shared.md",
+          text,
+          expectedContentHash: read.contentHash,
+        });
+        return "written";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }, EDITED);
+    expect(wrote, "an edit-level recipient may write to its own share view").toBe("written");
+
+    // Sending waits for the capture to settle the write into a moment. A
+    // submit that finds nothing pending makes no proposal, so polling it is
+    // safe and never mints an empty one.
+    await expect
+      .poll(
+        async () =>
+          await page.evaluate(async () => {
+            const api = (
+              window as unknown as {
+                dohcDesktop: Pick<
+                  DohcDesktopBridge,
+                  "getWorkspaceRegistry" | "submitShareChanges"
+                >;
+              }
+            ).dohcDesktop;
+            const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
+            try {
+              return (await api.submitShareChanges({ workspaceId })).submitted;
+            } catch (error) {
+              return error instanceof Error ? error.message : String(error);
+            }
+          }),
+        { timeout: 120_000, intervals: [2_000] },
+      )
+      .toBe(1);
+
+    // The granter's side, read over HTTP as the granter: one change, on the
+    // shared file, not drifted.
+    const listed = await relayJson(relay.baseUrl, GRANTER_TOKEN, `/sync/${workspaceId}/proposals`);
+    expect(listed.status).toBe(200);
+    const proposals = (
+      JSON.parse(listed.body) as {
+        proposals: Array<{
+          proposalId: string;
+          proposedByEmail: string;
+          ops: Array<{ basedOnPath: string; afterPath: string; drifted: boolean }>;
+        }>;
+      }
+    ).proposals;
+    expect(proposals.length).toBe(1);
+    // WHO sent them, resolved by the relay from the server-derived user id on
+    // the proposal row — never rebuilt by the client from its share list.
+    expect(proposals[0]!.proposedByEmail).toBe("e2e-recipient@dohc.test");
+    expect(proposals[0]!.ops.length).toBe(1);
+    expect(proposals[0]!.ops[0]!.afterPath).toBe("docs/shared.md");
+    expect(proposals[0]!.ops[0]!.drifted).toBe(false);
+
+    // Nothing is in the granter's log until the granter says so.
+    const beforeAccept = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${workspaceId}/log?since=0&limit=500`,
+    );
+    const sharedOpsBefore = (
+      JSON.parse(beforeAccept.body) as { ops: Array<{ originId: string }> }
+    ).ops.filter((op) => op.originId.startsWith(`share:${shareId}:`));
+    expect(sharedOpsBefore.length, "an open change must not be in the granter's log").toBe(0);
+
+    const accepted = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${workspaceId}/proposals/${proposals[0]!.proposalId}/accept`,
+      { method: "POST" },
+    );
+    expect(accepted.status, accepted.body).toBe(200);
+
+    // The proof. The change is in the GRANTER's log, under this share's
+    // namespaced origin, naming the GRANTER's own object and the GRANTER's
+    // own moment as its base — which is what lets the granter's engine
+    // fast-forward instead of opening a conflict for a lineage it never saw.
+    const afterAccept = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${workspaceId}/log?since=0&limit=500`,
+    );
+    const landed = (
+      JSON.parse(afterAccept.body) as {
+        ops: Array<{ originId: string; opKind: string; payload: Record<string, unknown> }>;
+      }
+    ).ops.filter(
+      (op) => op.originId.startsWith(`share:${shareId}:`) && op.opKind === "moment.append",
+    );
+    expect(landed.length).toBe(1);
+    expect(landed[0]!.payload.objectId).toBe(shared!.objectId);
+    expect(landed[0]!.payload.beforeLatestMomentId).toBe(shared!.latestMomentId);
+    expect(landed[0]!.payload.beforeBlobSha256).toBe(shared!.blobSha256);
+    expect(landed[0]!.payload.payloadAfterPath).toBe("docs/shared.md");
+    expect(landed[0]!.payload.operation).toBe("write");
+
+    // And the content really crossed: the granter can read the recipient's
+    // bytes out of its own workspace.
+    const digest = String(landed[0]!.payload.payloadAfterBlobSha256);
+    const blob = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${workspaceId}/blobs/${digest}`,
+    );
+    expect(blob.status).toBe(200);
+    expect(blob.body).toBe(EDITED);
   } finally {
     await relay?.stop();
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);
