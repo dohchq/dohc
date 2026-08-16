@@ -98,10 +98,13 @@ export interface WorkspaceActivityOptions {
 export interface WorkspaceCaptureDecision {
   capture: WorkspaceEngineCapture | null;
   warning?: string;
-  // True for a shared view (#540): it is fed by the share's pull and never
-  // gets a recorder of its own. A capability, not an opt-out and not a
-  // failure — without this cause the null capture wears the opt-out's copy,
-  // blaming a Settings toggle nobody touched.
+  // True for a shared view (#540). It states WHAT THE WORKSPACE IS, not what
+  // the capture came out as: at view and comment the view is fed by the
+  // share's pull and gets no recorder of its own, and without this cause the
+  // null capture wears the opt-out's copy, blaming a Settings toggle nobody
+  // touched. At edit (#646 PR3) the same share view does get a recorder, and
+  // this stays true — the notice cascade it feeds is keyed on
+  // `historyRecordingOff`, which an edit share view does not set.
   //
   // REQUIRED, like the contract field it feeds: an omitted boolean would
   // read as "not a shared view", and the sole producer of `true` could be

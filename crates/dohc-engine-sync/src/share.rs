@@ -304,19 +304,40 @@ pub(crate) fn is_share_view_chat_kind(op_kind: &str) -> bool {
     SHARE_VIEW_CHAT_KINDS.contains(&op_kind)
 }
 
-/// Whether a chat op about `path` is inside this grant (#646 PR2).
+/// The four fields a `moment.append` payload can name a path in. Every surface
+/// that decides whether a moment is inside a grant reads all four, so a rename
+/// crossing the boundary cannot leak the outside path through the one field a
+/// reader forgot.
+pub(crate) const MOMENT_PATH_FIELDS: [&str; 4] = [
+    "path",
+    "payloadBeforePath",
+    "payloadAfterPath",
+    "beforePath",
+];
+
+/// Whether `path` is one a share may place at all AND inside the pinned grant.
 ///
-/// Chat follows PATHS, and only paths. A grant with no paths is a VERSION
-/// share, and `path_within_grant` reads an empty path list as "every tracked
-/// path" — which for chat would admit the live discussion about every file on
-/// main, including files that were never in the shared version. A version
-/// share is a snapshot; the conversation is not in it. The relay refuses the
-/// same shape (`services/sync-relay/src/shareFilter.ts`), and this is the
-/// recipient's own answer to the same question.
-pub(crate) fn chat_path_within_grant(path: &str, granted: &ShareGrant) -> bool {
-    !granted.paths.is_empty()
-        && classify_share_path(path) == PathClass::Tracked
-        && path_within_grant(path, granted)
+/// The containment rule, in one place, so the inbound boundary and the
+/// outbound scan cannot drift apart. `PathClass::Tracked` is the floor: a
+/// secret, unsafe, or ignored path is never a share's to carry, whichever
+/// direction it travels.
+pub(crate) fn tracked_path_within_grant(path: &str, granted: &ShareGrant) -> bool {
+    classify_share_path(path) == PathClass::Tracked && path_within_grant(path, granted)
+}
+
+/// Whether `path` is inside a grant that SELECTS PATHS (#646 PR2, PR3a).
+///
+/// Chat and proposed changes both follow PATHS, and only paths. A grant with
+/// no paths is a VERSION share, and `path_within_grant` reads an empty path
+/// list as "every tracked path" — which for chat would admit the live
+/// discussion about every file on main, and for a change would offer an edit
+/// to a file the share never named. A version share is a snapshot; neither the
+/// conversation nor a new edit is in it. The relay refuses both shapes
+/// (`services/sync-relay/src/shareFilter.ts`: `filterFileChatOpForPathShare`
+/// and `filterProposedChangeForShare` each return early on an empty path
+/// list), and this is the recipient's own answer to the same question.
+pub(crate) fn selected_path_within_grant(path: &str, granted: &ShareGrant) -> bool {
+    !granted.paths.is_empty() && tracked_path_within_grant(path, granted)
 }
 
 /// The BEFORE-the-transaction half of the ShareView chat boundary, for the one
@@ -354,7 +375,7 @@ fn enforce_share_view_thread_create(
             .ok_or(SyncError::InvalidInput {
                 reason: "share-view chat.thread.create must carry a linkedPath string",
             })?;
-    if !chat_path_within_grant(path, granted) {
+    if !selected_path_within_grant(path, granted) {
         return Err(SyncError::ShareBoundaryViolation);
     }
     Ok(())
@@ -392,7 +413,7 @@ fn enforce_share_view_chat_boundary(
                 .ok_or(SyncError::ShareBoundaryViolation)?;
             let path = thread_linked_path(tx, &op.workspace_id, thread_id)?
                 .ok_or(SyncError::ShareBoundaryViolation)?;
-            if !chat_path_within_grant(&path, granted) {
+            if !selected_path_within_grant(&path, granted) {
                 return Err(SyncError::ShareBoundaryViolation);
             }
             Ok(())
@@ -564,12 +585,7 @@ fn enforce_share_view_boundary(
         enforce_granted_version(granted, op)?;
     }
     let mut paths = Vec::new();
-    for field in [
-        "path",
-        "payloadBeforePath",
-        "payloadAfterPath",
-        "beforePath",
-    ] {
+    for field in MOMENT_PATH_FIELDS {
         if let Some(path) = op.payload.get(field).and_then(Value::as_str) {
             paths.push(path);
         }
@@ -611,7 +627,7 @@ fn enforce_share_view_boundary(
         });
     }
     for path in paths {
-        if classify_share_path(path) != PathClass::Tracked || !path_within_grant(path, granted) {
+        if !tracked_path_within_grant(path, granted) {
             return Err(SyncError::ShareBoundaryViolation);
         }
     }

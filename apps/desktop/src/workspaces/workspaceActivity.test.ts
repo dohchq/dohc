@@ -158,7 +158,7 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: (w, hooks) =>
         captureForFlaggedWorkspace(
-          { workspaceId: w.workspaceId, rootPath: w.rootPath, shareView: true },
+          { workspaceId: w.workspaceId, rootPath: w.rootPath, shareView: { access: "view", ended: false } },
           hooks,
           engineUnreachableSessions,
         ),

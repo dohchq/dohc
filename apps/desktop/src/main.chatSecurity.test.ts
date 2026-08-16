@@ -783,4 +783,165 @@ describe("main-process chat authorization", () => {
     expect(shareGate).toContain("if (!scope.authorUserId)");
     expect(scope).toContain("resolveShareViewRelayAuthorId(");
   });
+
+  // #646 PR3a. The same property the #627 pin above asserts for chat, now for
+  // FILES: `assertWritableWorkspace` stopped being "is this workspace a share
+  // view?" and became "what does this share grant?", so a handler that reaches
+  // a store before it writes at view level.
+  //
+  // The gate has to precede every await, not just every named seam: an await
+  // is where a store call can hide, and a check after one is a check the write
+  // already passed.
+  it("gates every file-write handler on the workspace write boundary, before any await", () => {
+    const fileWrites = [
+      "createWorkspaceFile",
+      "createWorkspaceFolder",
+      "moveWorkspacePath",
+      "deleteWorkspacePath",
+      "importWorkspaceFiles",
+      "writeWorkspaceText",
+      "writeWorkspaceAsset",
+      "applyDatabaseEdit",
+      "importToDatabase",
+    ];
+    const seams = [
+      "createFile(",
+      "createFolder(",
+      "writeWorkspaceText(",
+      "writeWorkspaceAsset(",
+      "importDroppedPaths(",
+      "applyDatabaseEdit(",
+      "importToDatabase(",
+      "withExclusiveWorkspaceOperation(",
+      "withStaleSensitiveWorkspaceOperation(",
+      "engineCaptureFor(",
+    ];
+
+    for (const channel of fileWrites) {
+      const handler = handlerSource(channel);
+      const gateAt = handler.indexOf("assertWritableWorkspace(workspace);");
+      expect(
+        gateAt,
+        `${channel}: MUTATION: an ungated file write lands in someone else's workspace at view level`,
+      ).toBeGreaterThan(-1);
+
+      const awaitAt = handler.indexOf("await ");
+      if (awaitAt >= 0) {
+        expect(awaitAt, `${channel}: the gate must precede every await`).toBeGreaterThan(
+          gateAt,
+        );
+      }
+      const seamAts = seams
+        .map((seam) => handler.indexOf(seam))
+        .filter((at) => at >= 0);
+      expect(seamAts.length, channel).toBeGreaterThan(0);
+      expect(
+        Math.min(...seamAts),
+        `${channel}: the gate must precede the store`,
+      ).toBeGreaterThan(gateAt);
+    }
+  });
+
+  // The write gate's own shape, pinned where it is defined. Same split as
+  // `assertChatWritable` above: main DELEGATES the level rule, and the rule's
+  // behaviour is driven against the REAL function in shareWriteGate.test.ts.
+  // A source pin proves position, never behaviour.
+  it("derives the workspace write boundary from the share's level, through the shared rule", () => {
+    const gateAt = mainSource.indexOf("function assertWritableWorkspace(");
+    const gate = mainSource.slice(
+      gateAt,
+      mainSource.indexOf("function assertAgentRunnableWorkspace(", gateAt),
+    );
+    expect(gateAt).toBeGreaterThan(-1);
+    // PRESENCE still decides whether a share rule applies at all.
+    expect(gate).toContain("sharedViewOf(workspace.workspaceId)");
+    expect(
+      gate,
+      "MUTATION: a second copy of the level rule is a copy that drifts",
+    ).toContain("shareViewTakesLocalWrites(shareView)");
+    expect(gate).not.toContain('access !== "view"');
+    expect(gate).not.toContain('=== "edit"');
+
+    // And `sharedViewOf` still answers PRESENCE for every caller that asks
+    // only whether this is a share view — agent runs, site previews, the
+    // dispatch scan. Widening it to a level test would make an edit share view
+    // an ordinary workspace on all of them at once.
+    const resolverAt = mainSource.indexOf("function sharedViewOf(");
+    const resolver = mainSource.slice(
+      resolverAt,
+      mainSource.indexOf("function assertWritableWorkspace(", resolverAt),
+    );
+    expect(
+      resolver,
+      "MUTATION: a truthiness read makes a damaged marker an ordinary workspace",
+    ).toContain("if (!shareViewIsPresent(entry.shareView)) return null;");
+    expect(resolver).toContain("readableShareLevel(marker.grantedSelector)");
+    expect(resolver).toContain("ended: marker.ended === true");
+
+    // The capture gate asks the SAME rule, from the same registry answer. A
+    // capture without the write gate records nothing; a write gate without the
+    // capture writes changes the recipient can never send.
+    expect(mainSource).toContain("shareView: sharedViewOf(workspace.workspaceId),");
+    const captureGate = readFileSync(
+      new URL("./workspaces/engineCaptureGate.ts", import.meta.url),
+      "utf8",
+    );
+    expect(
+      captureGate,
+      "MUTATION: an unconditional capture records a view recipient's edits",
+    ).toContain("shareViewTakesLocalWrites(workspace.shareView)");
+    // Decided BEFORE the settings read. A share view materializes no settings
+    // file, so falling through would refuse every edit share view.
+    expect(
+      captureGate.indexOf("if (workspace.shareView) {"),
+      "MUTATION: reading settings first makes the edit lane green and dead",
+    ).toBeLessThan(captureGate.indexOf("await readWorkspaceSettingsFile("));
+  });
+
+  // #646 PR3a. Two lanes, and a workspace is only ever in one of them. The
+  // rules live in shareProposals.ts and are driven behaviourally there; this
+  // pin covers main's wiring — that both lanes go through them, and that
+  // neither takes a share id from the renderer.
+  it("splits the share-changes lanes in main, and resolves every share id from the registry", () => {
+    const granterLane = ["listShareProposals", "readShareProposalDiff", "settleShareProposal"];
+    for (const channel of granterLane) {
+      const handler = handlerSource(channel);
+      expect(handler, channel).toContain("await requireShareProposalGranter(");
+      expect(handler, `${channel}: a share view is never the granter`).not.toContain(
+        "requireShareProposalRecipient(",
+      );
+    }
+
+    const recipientLane = ["submitShareChanges", "listMyShareChanges", "withdrawShareChanges"];
+    for (const channel of recipientLane) {
+      const handler = handlerSource(channel);
+      expect(handler, channel).toContain("await requireShareProposalRecipient(");
+      expect(handler, `${channel}: shareId: input.` ).not.toContain("shareId: input.");
+    }
+
+    const granterAt = mainSource.indexOf("async function requireShareProposalGranter(");
+    const granter = mainSource.slice(
+      granterAt,
+      mainSource.indexOf("async function requireShareProposalRecipient(", granterAt),
+    );
+    expect(
+      granter,
+      "MUTATION: a share view accepting its own changes writes into someone else's workspace",
+    ).toContain("assertShareProposalGranter(requireWorkspace(workspaceId).shareView)");
+
+    const recipientAt = mainSource.indexOf("async function requireShareProposalRecipient(");
+    const recipient = mainSource.slice(
+      recipientAt,
+      mainSource.indexOf("async function shareRecipientEmails(", recipientAt),
+    );
+    expect(
+      recipient,
+      "MUTATION: an ungated submit sends a view recipient's edits to the granter",
+    ).toContain("requireShareViewProposalScope(workspace.shareView)");
+    // The grant that leaves this machine is the PINNED one the scope resolved,
+    // never a selector the renderer stated.
+    expect(handlerSource("submitShareChanges")).toContain(
+      "grantedSelector: scope.grant,",
+    );
+  });
 });

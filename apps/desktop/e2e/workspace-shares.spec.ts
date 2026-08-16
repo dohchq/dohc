@@ -796,12 +796,27 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
     const wrote = await page.evaluate(async (text) => {
       const api = (
         window as unknown as {
-          dohcDesktop: Pick<DohcDesktopBridge, "getWorkspaceRegistry" | "writeWorkspaceText">;
+          dohcDesktop: Pick<
+            DohcDesktopBridge,
+            "getWorkspaceRegistry" | "readWorkspaceText" | "writeWorkspaceText"
+          >;
         }
       ).dohcDesktop;
       const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
       try {
-        await api.writeWorkspaceText({ workspaceId, path: "docs/shared.md", text });
+        // The write is optimistic: it names the hash of the bytes it read, so
+        // the recipient's edit is the same shape any editor save takes.
+        const read = await api.readWorkspaceText({
+          workspaceId,
+          relativePath: "docs/shared.md",
+        });
+        if (read.truncated) return "the shared file read back truncated";
+        await api.writeWorkspaceText({
+          workspaceId,
+          relativePath: "docs/shared.md",
+          text,
+          expectedContentHash: read.contentHash,
+        });
         return "written";
       } catch (error) {
         return error instanceof Error ? error.message : String(error);

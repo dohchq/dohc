@@ -1,16 +1,32 @@
 import { Copy, Check } from "lucide-react";
-import { useEffect, useState } from "react";
-import type { RelayShareGrantedRow } from "../../ipc/bridgeContract";
+import { useEffect, useRef, useState } from "react";
+import type {
+  RelayShareGrantedRow,
+  ShareProposalRow,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { ProposalReviewDialog } from "../workbench/ProposalReviewDialog";
 import { ShareAccessBadge } from "./ShareAccessBadge";
 
 // "Shared by me" (PR 18): the management list for relay share grants. Lives
 // in Settings → Cloud. Calm inventory: what's shared, with whom, and one
 // honest way to end it.
+//
+// #646 PR3a adds one fact and one link: how many submissions from an edit
+// recipient are waiting, and the review that decides them. This list is an
+// inventory with no detail view, so the row opens the review dialog rather
+// than growing a page of its own.
 
 type LoadState =
   | { status: "loading" }
-  | { status: "ready"; shares: RelayShareGrantedRow[] }
+  | {
+      status: "ready";
+      shares: RelayShareGrantedRow[];
+      // Open submissions for THIS workspace, oldest first per share. Shares
+      // granted from another workspace list with no count: the read is
+      // workspace-scoped, and a missing count states less than a wrong one.
+      openChanges: Map<string, ShareProposalRow[]>;
+    }
   | { status: "error"; message: string };
 
 function errorMessage(cause: unknown): string {
@@ -30,25 +46,48 @@ function selectorLabel(share: RelayShareGrantedRow): string {
   return share.selector.paths.join(", ") || "Everything";
 }
 
-export function SharedByMeList() {
+export function SharedByMeList(props: { workspaceId: string }) {
+  const workspaceId = props.workspaceId;
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [busyShareId, setBusyShareId] = useState<string | null>(null);
   const [copiedShareId, setCopiedShareId] = useState<string | null>(null);
+  const [reviewProposalId, setReviewProposalId] = useState<string | null>(null);
+  // Latest-wins token: the open-changes read is workspace-scoped, so an
+  // answer for one workspace must never repaint another.
+  const loadToken = useRef(0);
 
   async function refresh() {
+    const token = ++loadToken.current;
     try {
-      const result = await bridge().listRelayShares();
-      setLoad({ status: "ready", shares: result.granted });
+      const [shares, proposals] = await Promise.all([
+        bridge().listRelayShares(),
+        // A workspace with no proposal lane yet still lists its shares.
+        bridge()
+          .listShareProposals({ workspaceId })
+          .catch(() => ({ proposals: [] as ShareProposalRow[] })),
+      ]);
+      if (token !== loadToken.current) return;
+      const openChanges = new Map<string, ShareProposalRow[]>();
+      for (const proposal of [...proposals.proposals].sort(
+        (a, b) => a.createdAtMs - b.createdAtMs,
+      )) {
+        openChanges.set(proposal.shareId, [
+          ...(openChanges.get(proposal.shareId) ?? []),
+          proposal,
+        ]);
+      }
+      setLoad({ status: "ready", shares: shares.granted, openChanges });
     } catch (cause) {
+      if (token !== loadToken.current) return;
       setLoad({ status: "error", message: errorMessage(cause) });
     }
   }
 
   useEffect(() => {
     void refresh();
-    // Load once per mount; revokes refresh explicitly.
+    // Reloads when the workspace changes; revokes refresh explicitly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [workspaceId]);
 
   async function revoke(shareId: string) {
     setBusyShareId(shareId);
@@ -90,11 +129,14 @@ export function SharedByMeList() {
     );
   }
   return (
+    <>
     <ul
       className="m-0 list-none divide-y divide-line overflow-hidden rounded-lg border border-line p-0"
       data-testid="shared-by-me-list"
     >
-      {load.shares.map((share) => (
+      {load.shares.map((share) => {
+        const waiting = load.openChanges.get(share.shareId) ?? [];
+        return (
         <li
           key={share.shareId}
           data-testid="shared-by-me-row"
@@ -118,6 +160,22 @@ export function SharedByMeList() {
               {share.selector ? "" : " — dohc can't read what this share grants"}
             </div>
           </div>
+          {/* Waiting submissions stay reviewable after the share ends: the
+              granter deciding about their OWN files is not a recipient
+              write, and the changes are already here. */}
+          {waiting.length > 0 ? (
+            <button
+              type="button"
+              data-testid="shared-by-me-review"
+              data-open-changes={waiting.length}
+              onClick={() => setReviewProposalId(waiting[0]!.proposalId)}
+              className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+            >
+              {waiting.length > 1
+                ? `Review changes (${waiting.length})`
+                : "Review changes"}
+            </button>
+          ) : null}
           {share.revokedAtMs === null ? (
             <>
               {/* No code to hand out for a row the relay cannot read: the
@@ -150,7 +208,17 @@ export function SharedByMeList() {
             </>
           ) : null}
         </li>
-      ))}
+        );
+      })}
     </ul>
+    {reviewProposalId ? (
+      <ProposalReviewDialog
+        workspaceId={workspaceId}
+        proposalId={reviewProposalId}
+        onSettled={() => void refresh()}
+        onClose={() => setReviewProposalId(null)}
+      />
+    ) : null}
+    </>
   );
 }

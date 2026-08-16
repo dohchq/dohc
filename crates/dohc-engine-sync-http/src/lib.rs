@@ -12,8 +12,9 @@ use dohc_engine_sync::{
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_INGEST_BLOB_BYTES,
     MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, ObservedBytes, ProbeRequest, ProbeResponse, PullRequest,
     PullResponse, PushRequest, PushResponse, RelayError, RelayTransport, ReplicationEnvelope,
-    ShareBlobRequest, ShareLogPushRequest, ShareReplicationEnvelope, ShareViewRequest,
-    ShareViewResponse, SharedChannelRequest, SharedChannelResponse,
+    ShareBlobRequest, ShareBlobUploadRequest, ShareLogPushRequest, ShareProposalChange,
+    ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareReplicationEnvelope,
+    ShareViewRequest, ShareViewResponse, SharedChannelRequest, SharedChannelResponse,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::http::{Response, Uri};
@@ -598,6 +599,46 @@ impl RelayTransport for HttpRelayTransport {
         )?;
         Ok(BlobDownloadResponse { bytes })
     }
+
+    fn share_blob_upload(&self, req: ShareBlobUploadRequest) -> Result<(), RelayError> {
+        let url = self.share_url(
+            &req.share_id,
+            &format!("/blobs/{}", encode_segment(&req.sha256)),
+            &[],
+        );
+        let _: WireOk = self.json(
+            self.agent
+                .put(&url)
+                .header("authorization", &self.authorization())
+                .send(req.bytes.as_slice()),
+            RequestContext::Share,
+        )?;
+        Ok(())
+    }
+
+    fn share_proposal_submit(
+        &self,
+        req: ShareProposalSubmitRequest,
+    ) -> Result<ShareProposalSubmitResponse, RelayError> {
+        let body = WireShareProposalSubmitRequest {
+            submit_id: &req.submit_id,
+            origin_id: &req.origin_id,
+            ops: req.ops.iter().map(WireShareProposalChange::from).collect(),
+        };
+        let url = self.share_url(&req.share_id, "/proposals", &[]);
+        let wire: WireShareProposalSubmitResponse = self.json(
+            self.agent
+                .post(&url)
+                .header("authorization", &self.authorization())
+                .send_json(body),
+            RequestContext::Share,
+        )?;
+        Ok(ShareProposalSubmitResponse {
+            proposal_id: wire.proposal_id,
+            ops: wire.ops,
+            created: wire.created,
+        })
+    }
 }
 
 impl HttpRelayTransport {
@@ -904,6 +945,54 @@ impl<'a> From<&'a ShareReplicationEnvelope> for WireShareLogInput<'a> {
             recorded_at_ms: value.recorded_at_ms,
         }
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WireShareProposalSubmitRequest<'a> {
+    submit_id: &'a str,
+    origin_id: &'a str,
+    ops: Vec<WireShareProposalChange<'a>>,
+}
+
+/// Every optional field serializes as an explicit `null` rather than being
+/// skipped. The relay reads the base pair as a stated fact — both halves or
+/// neither — so an absent field and a null field must not look the same on the
+/// wire.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WireShareProposalChange<'a> {
+    based_on_path: Option<&'a str>,
+    based_on_blob_sha256: Option<&'a str>,
+    operation: &'a str,
+    after_path: Option<&'a str>,
+    after_blob_sha256: Option<&'a str>,
+    after_content_kind: Option<&'a str>,
+    after_byte_length: Option<i64>,
+    recorded_at_ms: i64,
+}
+
+impl<'a> From<&'a ShareProposalChange> for WireShareProposalChange<'a> {
+    fn from(value: &'a ShareProposalChange) -> Self {
+        Self {
+            based_on_path: value.based_on_path.as_deref(),
+            based_on_blob_sha256: value.based_on_blob_sha256.as_deref(),
+            operation: &value.operation,
+            after_path: value.after_path.as_deref(),
+            after_blob_sha256: value.after_blob_sha256.as_deref(),
+            after_content_kind: value.after_content_kind.as_deref(),
+            after_byte_length: value.after_byte_length,
+            recorded_at_ms: value.recorded_at_ms,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireShareProposalSubmitResponse {
+    proposal_id: String,
+    ops: usize,
+    created: bool,
 }
 
 #[derive(Deserialize)]

@@ -5,6 +5,7 @@ import {
   validateUserWritePath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
+import { randomUUID } from "node:crypto";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
   CHATS_METHOD,
@@ -80,6 +81,18 @@ import {
   RefreshShareMountsResult,
   RefreshSharedViewPayload,
   DismissShareSkipsPayload,
+  ListShareProposalsPayload,
+  ListShareProposalsResult,
+  ReadShareProposalDiffPayload,
+  ReadShareProposalDiffResult,
+  SettleShareProposalPayload,
+  SettleShareProposalResult,
+  SubmitShareChangesPayload,
+  SubmitShareChangesResult,
+  ListMyShareChangesPayload,
+  ListMyShareChangesResult,
+  WithdrawShareChangesPayload,
+  WithdrawShareChangesResult,
   RefreshSharedViewResult,
   UnmountSharePayload,
   UnmountShareResult,
@@ -353,6 +366,12 @@ import {
   shareViewGranterEmail,
   shareViewIsPresent,
 } from "./workspaces/shareViewMarker";
+import { shareViewTakesLocalWrites } from "./workspaces/shareWriteGate";
+import {
+  assertShareProposalGranter,
+  requireShareViewProposalScope,
+  shareProposalOpPath,
+} from "./workspaces/shareProposals";
 import { pathShareLanes } from "./workspaces/relayShareLanes";
 import {
   workspaceSummariesFrom,
@@ -471,6 +490,7 @@ import {
   SharedChannelReadOnlyError,
   SharedFileReadOnlyError,
   type RelayWorkspaceBootstrapResult,
+  type ShareProposalOp,
   type ShareViewRefusal,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
@@ -492,6 +512,7 @@ import {
   ShareSelectorInvalidError,
   fetchShareViewInfo,
 } from "./workspaces/shareViewInfo";
+import type { ShareViewSelector } from "./workspaces/shareViewInfo";
 import { fetchSharedChannelInfo } from "./workspaces/sharedChannelInfo";
 import { installWorkspaceDataKey } from "./workspaces/workspaceDataKey";
 import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
@@ -531,6 +552,14 @@ import {
   RelayTransportRouteGuard,
   type EngineRelayWorkspaceClient,
 } from "./workspaces/engineRelayClient";
+// #646 PR3a. The proposal routes that do not go through the engine: reviewing,
+// settling, listing and withdrawing read and write ONLY relay state.
+import {
+  listMyShareProposals,
+  listShareProposals,
+  settleShareProposal,
+  withdrawShareProposal,
+} from "./workspaces/shareProposalRelay";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
   createDesktopLinkedChatStore,
@@ -744,7 +773,15 @@ function requireWorkspace(workspaceId: string) {
 // routes through it so a shared view can never be changed, only read. The
 // renderer also hides its edit affordances; this main-process layer is the
 // enforcement that cannot be skipped.
-function sharedViewOf(workspaceId: string): { granterEmail: string | null } | null {
+function sharedViewOf(workspaceId: string): {
+  granterEmail: string | null;
+  // The level the PINNED grant names, or null when the grant cannot be read.
+  // Every caller that asks only "is this a share view?" reads the object's
+  // presence and never these two, so PRESENCE stays the answer to that
+  // question wherever it is asked.
+  access: ShareAccess | null;
+  ended: boolean;
+} | null {
   const entry = findWorkspace(workspaceId);
   if (!entry) return null;
   // PRESENCE, not truthiness. A stored `shareView: null` is a share view
@@ -753,15 +790,27 @@ function sharedViewOf(workspaceId: string): { granterEmail: string | null } | nu
   // files writable here (#646). Only an ABSENT field is an ordinary
   // workspace; anything else stays refused, readable marker or not.
   if (!shareViewIsPresent(entry.shareView)) return null;
-  return { granterEmail: shareViewGranterEmail(entry.shareView) };
+  const marker: Record<string, unknown> = isRecordValue(entry.shareView)
+    ? entry.shareView
+    : {};
+  return {
+    granterEmail: shareViewGranterEmail(entry.shareView),
+    access: readableShareLevel(marker.grantedSelector),
+    ended: marker.ended === true,
+  };
 }
 
 function assertWritableWorkspace(workspace: { workspaceId: string }): void {
   const shareView = sharedViewOf(workspace.workspaceId);
-  if (shareView) {
-    const granter = shareView.granterEmail ?? "the person who shared it";
-    throw new Error(`This is a shared view — ask ${granter} for changes.`);
-  }
+  if (!shareView) return;
+  // Level-aware (#646 PR3). An EDIT share view is the recipient's own store,
+  // and the recipient's edits are what the share exists to collect — they go
+  // nowhere near the granter's files until the granter accepts them. View,
+  // comment, an ended share, and a grant this process cannot read all stay
+  // refused, through the same rule the capture gate asks.
+  if (shareViewTakesLocalWrites(shareView)) return;
+  const granter = shareView.granterEmail ?? "the person who shared it";
+  throw new Error(`This is a shared view — ask ${granter} for changes.`);
 }
 
 // Agents may READ a shared view (the copyable MCP config serves a read-only
@@ -2075,17 +2124,16 @@ const activity = createWorkspaceActivity(notifyRenderer, {
   engineFor: engineForWorkspace,
   // The flag-gated engine capture (see engineCaptureGate.ts — shared with the
   // arc-gate QA harness so the harness asserts against the REAL gate). The
-  // gate also owns the shared-view rule (#540): main only states the share
-  // identity from the registry, and the decision carries the cause so the
-  // null capture never wears the Settings opt-out's copy.
+  // gate also owns the shared-view rule (#540, level-aware since #646 PR3):
+  // main only states the share identity from the registry, and the decision
+  // carries the cause so the null capture never wears the Settings opt-out's
+  // copy.
   captureFor: async (workspace, hooks) =>
     captureForFlaggedWorkspace(
       {
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
-        shareView: shareViewIsPresent(
-          findWorkspace(workspace.workspaceId)?.shareView,
-        ),
+        shareView: sharedViewOf(workspace.workspaceId),
       },
       hooks,
       requireEngineSessions(),
@@ -2446,7 +2494,7 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
         // Guarded above: a shared view already returned false.
-        shareView: false,
+        shareView: null,
       },
       {
         activeAgentRun: () => null,
@@ -4320,10 +4368,19 @@ function registerIpcHandlers(
       const separator = { type: "separator" as const };
       // Shared views (PR 18) get a READ-ONLY menu: no create/rename/delete/
       // import — main owns the menu, so the reduction cannot be bypassed by
-      // the renderer. Sharing itself is offered only on synced, non-shared
-      // workspaces (a share needs a relay-side workspace to grant from).
+      // the renderer. Since #646 PR3 the reduction follows the LEVEL, and
+      // through the same rule `assertWritableWorkspace` asks: an edit share
+      // view takes the recipient's own writes, so offering no way to make one
+      // would be the menu lying about what the handlers accept.
+      //
+      // Sharing onward stays off for EVERY share view, at every level.
+      // Someone else's files are not this account's to grant, and a share
+      // needs a relay-side workspace to grant from.
       const registryEntry = findWorkspace(input.workspaceId);
-      const isSharedView = shareViewIsPresent(registryEntry?.shareView);
+      const shareView = sharedViewOf(input.workspaceId);
+      const isSharedView = shareView !== null;
+      const isReadOnlySharedView =
+        shareView !== null && !shareViewTakesLocalWrites(shareView);
       // Share-mount paths (shared-with-me/…) are a read-only projection of
       // someone else's files: no create/rename/delete/import/share — main
       // owns the menu, so the reduction cannot be bypassed by the renderer.
@@ -4338,7 +4395,7 @@ function registerIpcHandlers(
         : undefined;
       const canShare =
         !isSharedView && !isMountPath && !!registryEntry?.remote && input.kind !== "root";
-      const template: Electron.MenuItemConstructorOptions[] = isSharedView
+      const template: Electron.MenuItemConstructorOptions[] = isReadOnlySharedView
         ? input.kind === "root"
           ? [item("Export Workspace as Zip…", "export-zip")]
           : [
@@ -5544,6 +5601,268 @@ function registerIpcHandlers(
       input.generation,
     );
     notifyRenderer();
+  });
+
+  // ---- Share changes (#646 PR3a) ----
+  //
+  // Two lanes, and a workspace is only ever in one of them. The GRANTER lane
+  // reads and settles the changes a recipient sent for a workspace this
+  // machine owns; the RECIPIENT lane sends, lists, and takes back this
+  // machine's own changes from inside an edit-level share view. Each refuses
+  // the other's workspace before it reaches the relay, so a renderer that
+  // names the wrong workspace gets a refusal here rather than a generic 404
+  // from a route it should never have addressed.
+  //
+  // Neither lane trusts a client-supplied share id. The renderer names a
+  // workspace; the registry answers which share that workspace is, and at
+  // what level.
+
+  // The GRANTER lane's target. `remoteForWorkspace` already refuses an
+  // unsynced workspace, a signed-out session, and a session on the wrong
+  // account or server, so the only rule this adds is the lane split.
+  async function requireShareProposalGranter(workspaceId: string): Promise<{
+    relay: SyncRelayConnection;
+    remoteWorkspaceId: string;
+  }> {
+    assertShareProposalGranter(requireWorkspace(workspaceId).shareView);
+    const { remote, credentials } = await remoteForWorkspace(workspaceId);
+    if (!credentials.relayUrl) {
+      throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
+    }
+    return {
+      relay: {
+        baseUrl: normalizeServerUrl(credentials.relayUrl),
+        token: credentials.token,
+        fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+      },
+      remoteWorkspaceId: remote.remoteWorkspaceId,
+    };
+  }
+
+  // The RECIPIENT lane's scope. The level test, the pinned grant, and the
+  // share id all come from `requireShareViewProposalScope`; what is left here
+  // is the session, which must be signed in and on the share's ORIGIN relay.
+  // The refresh SKIPS a session on another relay because it runs on a cadence;
+  // this refuses, because a person pressed a button and is owed an answer.
+  async function requireShareProposalRecipient(workspaceId: string): Promise<{
+    workspace: RegistryEntry;
+    shareId: string;
+    grant: ShareViewSelector;
+    relay: SyncRelayConnection;
+  }> {
+    const workspace = requireWorkspace(workspaceId);
+    const scope = requireShareViewProposalScope(workspace.shareView);
+    await warmCredentialCache();
+    const credentials = cachedCredentials;
+    if (!credentials?.relayUrl) throw new Error("Sign in to dohc Cloud first.");
+    const shareRelayUrl = isRecordValue(workspace.shareView)
+      ? workspace.shareView.relayUrl
+      : undefined;
+    if (
+      typeof shareRelayUrl === "string" &&
+      !relayUrlsMatch(credentials.relayUrl, shareRelayUrl)
+    ) {
+      throw new Error("Sign in to the cloud server this share came from.");
+    }
+    return {
+      workspace,
+      ...scope,
+      relay: {
+        baseUrl: normalizeServerUrl(credentials.relayUrl),
+        token: credentials.token,
+        fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+      },
+    };
+  }
+
+  // Who sent the changes, in the name this surface already uses for the other
+  // person. The relay states a server-derived USER id on the proposal row;
+  // the granter's own share list states the email that share was addressed
+  // to. A path share has exactly one recipient, so the two name one person.
+  async function shareRecipientEmails(): Promise<Map<string, string>> {
+    const listed = await relayShareJson<{
+      granted?: Array<Record<string, unknown>>;
+    }>("/sync/shares");
+    const byShareId = new Map<string, string>();
+    for (const row of listed.granted ?? []) {
+      if (typeof row.shareId === "string" && typeof row.recipientEmail === "string") {
+        byShareId.set(row.shareId, row.recipientEmail);
+      }
+    }
+    return byShareId;
+  }
+
+  // The after content of one proposed change. Owner-scoped: the blob was
+  // uploaded into THIS workspace's storage, so the granter reads it back
+  // through the blob route its own sync already uses.
+  async function shareProposalIncomingText(
+    relay: SyncRelayConnection,
+    remoteWorkspaceId: string,
+    op: ShareProposalOp,
+  ): Promise<string | null> {
+    // A delete has no after side, and binary content is not something a text
+    // diff can show. Both are "no incoming text", which the review states.
+    if (op.operation === "delete" || !op.afterBlobSha256) return null;
+    if (op.afterContentKind !== "text") return null;
+    const response = await (relay.fetch ?? fetch)(
+      `${relay.baseUrl}/sync/${encodeURIComponent(remoteWorkspaceId)}/blobs/` +
+        encodeURIComponent(op.afterBlobSha256),
+      { headers: { authorization: `Bearer ${relay.token}` } },
+    );
+    if (!response.ok) {
+      throw new Error("dohc could not read that change from the relay. Try again.");
+    }
+    return new TextDecoder().decode(await response.arrayBuffer());
+  }
+
+  ipcMain.handle(CHANNELS.listShareProposals, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListShareProposalsPayload.parse(payload);
+    const target = await requireShareProposalGranter(input.workspaceId);
+    const [proposals, emails] = await Promise.all([
+      listShareProposals({
+        relay: target.relay,
+        workspaceId: target.remoteWorkspaceId,
+      }),
+      shareRecipientEmails(),
+    ]);
+    return ListShareProposalsResult.parse({
+      proposals: proposals
+        // Only what the granter still has to answer. A settled proposal is
+        // history, and this surface asks one question: what is waiting?
+        .filter((proposal) => proposal.state === "open")
+        .map((proposal) => ({
+          proposalId: proposal.proposalId,
+          shareId: proposal.shareId,
+          proposedByEmail: emails.get(proposal.shareId) ?? null,
+          createdAtMs: proposal.createdAtMs,
+          files: proposal.ops.flatMap((op) => {
+            const path = shareProposalOpPath(op);
+            return path
+              ? [{ opIndex: op.opIndex, path, operation: op.operation, drifted: op.drifted }]
+              : [];
+          }),
+        })),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.readShareProposalDiff, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ReadShareProposalDiffPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const target = await requireShareProposalGranter(input.workspaceId);
+    const proposals = await listShareProposals({
+      relay: target.relay,
+      workspaceId: target.remoteWorkspaceId,
+    });
+    const op = proposals
+      .find((proposal) => proposal.proposalId === input.proposalId)
+      ?.ops.find((candidate) => candidate.opIndex === input.opIndex);
+    const path = op ? shareProposalOpPath(op) : null;
+    if (!op || !path) {
+      throw new Error("dohc could not find that change. Refresh, then try again.");
+    }
+    // The two sides come from two different places on purpose: the granter's
+    // own file is read locally, at the path the granter holds it NOW, and the
+    // incoming side is the proposal's after-blob, which lives at the relay and
+    // has never touched this machine's files.
+    const [incomingText, currentText] = await Promise.all([
+      shareProposalIncomingText(target.relay, target.remoteWorkspaceId, op),
+      op.currentPath === null
+        ? Promise.resolve(null)
+        : readWorkspaceText(workspace.rootPath, op.currentPath).then(
+            (read) => (read.truncated ? null : read.text),
+            // A file this surface cannot read as text is "no current side",
+            // which the diff states rather than failing the whole review.
+            () => null,
+          ),
+    ]);
+    return ReadShareProposalDiffResult.parse({
+      path,
+      drifted: op.drifted,
+      operation: op.operation,
+      currentText,
+      incomingText,
+    });
+  });
+
+  ipcMain.handle(CHANNELS.settleShareProposal, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = SettleShareProposalPayload.parse(payload);
+    const target = await requireShareProposalGranter(input.workspaceId);
+    const settled = await settleShareProposal({
+      relay: target.relay,
+      workspaceId: target.remoteWorkspaceId,
+      proposalId: input.proposalId,
+      decision: input.decision,
+    });
+    if (settled.state !== "accepted" && settled.state !== "declined") {
+      // The relay answered with a state this decision cannot have produced —
+      // a withdraw that won the race, or a protocol this client does not
+      // speak. Either way the granter's screen must not claim it settled.
+      throw new Error("Those changes are no longer open. Refresh, then try again.");
+    }
+    // Accepted changes reach this workspace over the owner lane it already
+    // polls, so nudge that lane instead of applying anything here.
+    if (settled.state === "accepted") activity.queueCloudSync(input.workspaceId);
+    return SettleShareProposalResult.parse({ state: settled.state });
+  });
+
+  ipcMain.handle(CHANNELS.submitShareChanges, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = SubmitShareChangesPayload.parse(payload);
+    const scope = await requireShareProposalRecipient(input.workspaceId);
+    // The engine owns the submit: it reads this replica's own journal, so it
+    // has to be the process holding the store.
+    const result = await relayClientForWorkspace({
+      workspaceId: scope.workspace.workspaceId,
+      rootPath: scope.workspace.rootPath,
+      relay: scope.relay,
+    }).submitShareProposal({
+      shareId: scope.shareId,
+      grantedSelector: scope.grant,
+      // PR3a mints a fresh key per submit. It makes the relay's idempotency
+      // hold for a retry INSIDE one submit (blobs, then the POST), not for a
+      // second press: a second press sends whatever is pending then, which is
+      // a second set of changes and a second proposal.
+      submitId: randomUUID(),
+    });
+    return SubmitShareChangesResult.parse(result);
+  });
+
+  ipcMain.handle(CHANNELS.listMyShareChanges, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListMyShareChangesPayload.parse(payload);
+    const scope = await requireShareProposalRecipient(input.workspaceId);
+    const proposals = await listMyShareProposals({
+      relay: scope.relay,
+      shareId: scope.shareId,
+    });
+    return ListMyShareChangesResult.parse({
+      proposals: proposals.map((proposal) => ({
+        proposalId: proposal.proposalId,
+        state: proposal.state,
+        createdAtMs: proposal.createdAtMs,
+        files: proposal.ops,
+      })),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.withdrawShareChanges, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = WithdrawShareChangesPayload.parse(payload);
+    const scope = await requireShareProposalRecipient(input.workspaceId);
+    const settled = await withdrawShareProposal({
+      relay: scope.relay,
+      shareId: scope.shareId,
+      proposalId: input.proposalId,
+    });
+    if (settled.state !== "withdrawn") {
+      // The granter settled it first. Saying "withdrawn" here would tell the
+      // recipient their changes are back when the granter already has them.
+      throw new Error("Those changes were already answered. Refresh to see the result.");
+    }
+    return WithdrawShareChangesResult.parse({ state: settled.state });
   });
 
   // Where a share pull's refusals become durable. Called before the cursor

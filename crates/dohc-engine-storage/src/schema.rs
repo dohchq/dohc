@@ -132,6 +132,8 @@ const REQUIRED_TABLES: &[&str] = &[
     "shared_channel_peers",
     "shared_channel_push_state",
     "share_view_cursors",
+    // #646 PR3a proposal scan position (migration ordinal 36).
+    "share_proposal_push_state",
 ];
 
 /// How an existing file was classified by the fingerprint fence.

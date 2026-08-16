@@ -22,6 +22,7 @@ import {
   type PushSharedChannelResult,
   type PushWorkspaceToRelayResult,
   type RecoverRelayOriginResult,
+  type SubmitShareProposalResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
@@ -43,6 +44,21 @@ import {
   type EngineDaemonClientSource,
   type EngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
+
+// #646 PR3a. Reviewing, settling, listing and withdrawing a proposal touch
+// ONLY relay state, so they are plain authenticated relay calls and live in
+// their own module beside `shareViewInfo.ts`. They are re-exported here
+// because main reaches the whole proposal relay surface through one import.
+// Submitting is not among them: it reads this replica's own journal, so it
+// has to be the engine, and it is a method on the bound workspace client
+// below.
+export {
+  ShareProposalInvalidError,
+  listMyShareProposals,
+  listShareProposals,
+  settleShareProposal,
+  withdrawShareProposal,
+} from "./shareProposalRelay";
 
 export type RelayTransportMode = "typescript" | "daemon";
 
@@ -351,6 +367,23 @@ function numberField(
   return field;
 }
 
+// A field the engine states as a string OR as an explicit null, where null is
+// a real answer and not an absence. Strict on both sides: an empty string, a
+// missing key and any other type are all refused, because reading one of them
+// as null invents an answer the engine did not give.
+function nullableStringField(
+  value: Record<string, JsonValue | undefined>,
+  key: string,
+  label: string,
+): string | null {
+  const field = value[key];
+  if (field === null) return null;
+  if (typeof field !== "string" || field.length === 0) {
+    throw new Error(`Rust engine ${label}.${key} must be a string or null.`);
+  }
+  return field;
+}
+
 function booleanField(
   value: Record<string, JsonValue | undefined>,
   key: string,
@@ -522,11 +555,12 @@ function translateRelayError(method: string, error: unknown): never {
   ) {
     throw new SharedChannelReadOnlyError();
   }
-  // #646 PR2: the same relay refusal, one noun over. The relay answers ONE
-  // code for both — that is the anti-fingerprinting property — so the METHOD,
-  // not the code, decides which noun the reader sees.
+  // #646: the same relay refusal, one noun over. The relay answers ONE code
+  // for both — that is the anti-fingerprinting property — so the METHOD, not
+  // the code, decides which noun the reader sees. Chat (PR2) and changes
+  // (PR3) are both the file share, so both read as the file.
   if (
-    method === "share.view.push" &&
+    (method === "share.view.push" || method === "share.proposal.submit") &&
     error.wireCode === "INVALID_PARAMS" &&
     error.message === "share-read-only"
   ) {
@@ -614,6 +648,22 @@ export interface EngineRelayWorkspaceClient {
       access: ShareAccess;
     };
   }): Promise<RecordShareViewIdentityResult>;
+
+  // #646 PR3: this replica's own EDITS of the shared files, offered to the
+  // granter to accept or decline. Takes the same pinned selector, for the
+  // same reason, and the engine offers nothing below `edit`.
+  submitShareProposal(input: {
+    shareId: string;
+    grantedSelector: {
+      paths: readonly string[];
+      versionId: string | null;
+      access: ShareAccess;
+    };
+    // The idempotency key for ONE submit. The caller owns it so a retry of
+    // the same intent answers with the proposal the relay already holds
+    // instead of opening a second one.
+    submitId: string;
+  }): Promise<SubmitShareProposalResult>;
 }
 
 export interface EngineRelayClientOptions {
@@ -1025,6 +1075,42 @@ export class EngineRelayClient {
           );
         }
         return { identity };
+      },
+      submitShareProposal: async ({ shareId, grantedSelector, submitId }) => {
+        const result = resultRecord(
+          await request("share.proposal.submit", {
+            workspaceId: workspace.workspaceId,
+            shareId,
+            grantedSelector: {
+              paths: [...grantedSelector.paths],
+              versionId: grantedSelector.versionId,
+              access: grantedSelector.access,
+            },
+            submitId,
+          }),
+          "share.proposal.submit",
+        );
+        const submitted = numberField(
+          result,
+          "submitted",
+          "share.proposal.submit",
+        );
+        const proposalId = nullableStringField(
+          result,
+          "proposalId",
+          "share.proposal.submit",
+        );
+        // The two fields state ONE fact between them: a proposal exists, and
+        // it holds these changes. Either half alone is a result no caller can
+        // act on — an id with nothing in it, or changes with nothing to show
+        // the sender or to withdraw.
+        if ((proposalId === null) !== (submitted === 0)) {
+          throw new Error(
+            "Rust engine share.proposal.submit disagreed with itself about " +
+              "whether it opened a proposal.",
+          );
+        }
+        return { submitted, proposalId };
       },
       pullShareView: async ({ shareId, grantedSelector, recordRefusals }) => {
         let fetched = 0;

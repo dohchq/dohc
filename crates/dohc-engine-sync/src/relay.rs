@@ -220,6 +220,73 @@ pub struct ShareBlobRequest {
     pub sha256: String,
 }
 
+/// One blob a proposed change names, uploaded to the GRANTER's workspace
+/// before the submit that references it (#646 PR3a). The relay refuses a batch
+/// naming a blob it does not hold, at submit and again at accept, so content
+/// travels first and the ops travel second — the same ordering the owner's own
+/// drain uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareBlobUploadRequest {
+    pub share_id: String,
+    pub sha256: String,
+    pub bytes: Vec<u8>,
+}
+
+/// ONE net change to ONE file: "the file you have at `based_on_path` with
+/// content `based_on_blob_sha256` should now be at `after_path` with content
+/// `after_blob_sha256`" — or, for a delete, should be gone.
+///
+/// Deliberately NOT a replayed moment. The served moment drops `momentId`,
+/// `objectId` and every `before*` field, so a recipient never learns a granter
+/// moment id and could not state a lineage the granter recognizes. The base
+/// pair is the one identifier both sides genuinely share, and the relay
+/// resolves it to the granter's own moment at accept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareProposalChange {
+    /// The GRANTER's path for this file, or `None` for a file the recipient
+    /// created. Travels with `based_on_blob_sha256` or not at all.
+    pub based_on_path: Option<String>,
+    /// The after-hash of the last granter moment the recipient applied for
+    /// this file, or `None` for a file the recipient created.
+    pub based_on_blob_sha256: Option<String>,
+    /// `"write"` or `"delete"`, net over every local op in this submit.
+    pub operation: String,
+    /// Where the change puts the file. `None` for a delete.
+    pub after_path: Option<String>,
+    pub after_blob_sha256: Option<String>,
+    /// `"text"` or `"binary"` — the only two values the relay accepts.
+    pub after_content_kind: Option<String>,
+    pub after_byte_length: Option<i64>,
+    pub recorded_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareProposalSubmitRequest {
+    pub share_id: String,
+    /// The idempotency key for one submit. A repeat returns the existing
+    /// proposal and never creates a second one.
+    pub submit_id: String,
+    pub origin_id: String,
+    pub ops: Vec<ShareProposalChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareProposalSubmitResponse {
+    pub proposal_id: String,
+    pub ops: usize,
+    /// Whether this submit created the proposal. `false` is the idempotent
+    /// repeat answering with the proposal it already held.
+    pub created: bool,
+}
+
+/// What one submit offered. `proposal_id` is `None` exactly when nothing was
+/// offered — a share below edit level, or a scan that found no change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareProposalSubmitOutcome {
+    pub submitted: usize,
+    pub proposal_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoverResponse {
     pub old_origin_id: String,
@@ -459,6 +526,11 @@ pub trait RelayTransport {
     fn share_log_push(&self, req: ShareLogPushRequest) -> Result<PushResponse, RelayError>;
     fn share_view_pull(&self, req: ShareViewRequest) -> Result<ShareViewResponse, RelayError>;
     fn share_blob(&self, req: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError>;
+    fn share_blob_upload(&self, req: ShareBlobUploadRequest) -> Result<(), RelayError>;
+    fn share_proposal_submit(
+        &self,
+        req: ShareProposalSubmitRequest,
+    ) -> Result<ShareProposalSubmitResponse, RelayError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1486,6 +1558,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     [workspace_id],
                 )
                 .map_err(SyncError::persist)?;
+                tx.execute(
+                    "DELETE FROM share_proposal_push_state WHERE workspace_id=?1",
+                    [workspace_id],
+                )
+                .map_err(SyncError::persist)?;
                 usize::try_from(preserved_ops).map_err(|_| SyncError::CoordinateDiverged)
             })
             .map_err(local)?;
@@ -1802,6 +1879,149 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             faults,
         )?;
         Ok(SharedChannelPushOutcome { pushed })
+    }
+
+    /// Offer this replica's own edits to a RECEIVED file share back to the
+    /// granter, as ONE proposal the granter reads and then accepts or declines
+    /// (#646 PR3a).
+    ///
+    /// A proposal op is a NET CHANGE, not a replayed moment: "the file you
+    /// have at P with content H should now be at Q with content H2", or
+    /// "should be gone". The served moment drops `momentId`, `objectId` and
+    /// every `before*` field (`services/sync-relay/src/shareFilter.ts`), so a
+    /// recipient never learns a granter moment id and could not state a
+    /// lineage the granter recognizes. The base pair is the one identifier
+    /// both sides genuinely share, and the relay resolves it to the granter's
+    /// own moment at accept.
+    ///
+    /// The scan is bounded at the submit moment: the journal's high-water mark
+    /// for this origin is read ONCE, before the first page, and edits made
+    /// after it wait for the next submit. That integer is what makes one
+    /// submit one coherent unit rather than a debounce tick.
+    ///
+    /// `scanned_seq` advances only after the relay has accepted the submit, so
+    /// a failed submit re-offers the same changes rather than losing them.
+    pub fn submit_share_proposal(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        share_id: &str,
+        granted: &crate::ShareGrant,
+        submit_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<ShareProposalSubmitOutcome, RelayError> {
+        // The PINNED level, read here rather than trusted from the relay's own
+        // refusal — the defence in depth `share_view_push_path` states for
+        // chat. A recipient offers nothing it was not granted, so a view or
+        // comment share never contacts the relay at all.
+        if granted.access != crate::ShareAccess::Edit {
+            return Ok(ShareProposalSubmitOutcome {
+                submitted: 0,
+                proposal_id: None,
+            });
+        }
+        let identity = read_sync_identity(store, workspace_id)
+            .map_err(local)?
+            .ok_or(RelayError::InvalidResponse)?;
+        let scanned = read_share_proposal_scan_position(store, workspace_id, share_id)?;
+        let submit_through =
+            local_max_origin_seq(store, workspace_id, &identity.origin_id).map_err(local)?;
+        let mut changes = collect_share_proposal_changes(
+            store,
+            workspace_id,
+            granted,
+            &identity.origin_id,
+            scanned,
+            submit_through,
+        )?;
+        if changes.is_empty() {
+            // Nothing to offer, but this window is read. Recording it keeps
+            // the next submit from re-reading ops it already decided about.
+            write_share_proposal_scan_position(
+                store,
+                workspace_id,
+                share_id,
+                submit_through,
+                faults,
+            )?;
+            return Ok(ShareProposalSubmitOutcome {
+                submitted: 0,
+                proposal_id: None,
+            });
+        }
+        if changes.len() > crate::MAX_PUSH_OPS_PER_BATCH {
+            return Err(RelayError::Local(format!(
+                "share proposal exceeds changes per submit: limit {} changes, \
+                 observed {} changes",
+                crate::MAX_PUSH_OPS_PER_BATCH,
+                changes.len()
+            )));
+        }
+        self.upload_proposed_blobs(store, share_id, &mut changes)?;
+        let response = self
+            .transport
+            .share_proposal_submit(ShareProposalSubmitRequest {
+                share_id: share_id.to_owned(),
+                submit_id: submit_id.to_owned(),
+                origin_id: identity.origin_id.clone(),
+                ops: changes.clone(),
+            })?;
+        if response.proposal_id.is_empty() || response.ops != changes.len() {
+            return Err(RelayError::InvalidResponse);
+        }
+        write_share_proposal_scan_position(store, workspace_id, share_id, submit_through, faults)?;
+        Ok(ShareProposalSubmitOutcome {
+            submitted: changes.len(),
+            proposal_id: Some(response.proposal_id),
+        })
+    }
+
+    /// Upload the after-blob of every change that names one, BEFORE the submit
+    /// that references it. `appendLogBatch` refuses a batch naming a blob the
+    /// relay does not hold, and the submit route runs the same check, so
+    /// content travels first — the ordering the owner's own drain uses.
+    ///
+    /// The blob is also where a missing byte length comes from. A moment whose
+    /// stored `payloadAfterByteLength` is null would otherwise be offered with
+    /// a length nobody measured, and the relay writes that number into the
+    /// granter's own moment at accept.
+    fn upload_proposed_blobs(
+        &self,
+        store: &EngineStore,
+        share_id: &str,
+        changes: &mut [ShareProposalChange],
+    ) -> Result<(), RelayError> {
+        let mut uploaded: BTreeMap<String, i64> = BTreeMap::new();
+        for change in changes {
+            let Some(sha256) = change.after_blob_sha256.clone() else {
+                continue;
+            };
+            let byte_length = match uploaded.get(&sha256) {
+                Some(byte_length) => *byte_length,
+                None => {
+                    let kind = if change.after_content_kind.as_deref() == Some("binary") {
+                        BlobKind::Binary
+                    } else {
+                        BlobKind::Text
+                    };
+                    let bytes =
+                        local_blob_bytes(store, &sha256, kind)?.ok_or(RelayError::BlobMissing)?;
+                    let byte_length =
+                        i64::try_from(bytes.len()).map_err(|_| RelayError::BlobInvalid)?;
+                    self.transport.share_blob_upload(ShareBlobUploadRequest {
+                        share_id: share_id.to_owned(),
+                        sha256: sha256.clone(),
+                        bytes,
+                    })?;
+                    uploaded.insert(sha256, byte_length);
+                    byte_length
+                }
+            };
+            if change.after_byte_length.is_none() {
+                change.after_byte_length = Some(byte_length);
+            }
+        }
+        Ok(())
     }
 
     /// Pull one page of a received share.
@@ -3119,6 +3339,208 @@ fn write_shared_push_state(
     Ok(())
 }
 
+/// Where the last submit stopped reading this replica's own journal for this
+/// share (#646 PR3a). `-1` is "nothing read yet", the same floor every other
+/// durable coordinate in this file uses.
+fn read_share_proposal_scan_position(
+    store: &EngineStore,
+    workspace_id: &str,
+    share_id: &str,
+) -> Result<i64, RelayError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT scanned_seq FROM share_proposal_push_state \
+                 WHERE workspace_id=?1 AND share_id=?2",
+                params![workspace_id, share_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map(|value| value.unwrap_or(-1))
+            .map_err(SyncError::corrupt)
+        })
+        .map_err(local)
+}
+
+fn write_share_proposal_scan_position(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    share_id: &str,
+    scanned_seq: i64,
+    faults: &dyn FaultInjector,
+) -> Result<(), RelayError> {
+    if !(-1..=crate::MAX_WIRE_INTEGER).contains(&scanned_seq) {
+        return Err(RelayError::InvalidResponse);
+    }
+    let outcome = store
+        .write_with(faults, |tx| {
+            tx.execute(
+                "INSERT INTO share_proposal_push_state (workspace_id,share_id,scanned_seq) \
+                 VALUES (?1,?2,?3) ON CONFLICT(workspace_id,share_id) DO UPDATE SET \
+                 scanned_seq=excluded.scanned_seq",
+                params![workspace_id, share_id, scanned_seq],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<(), SyncError>(())
+        })
+        .map_err(local)?;
+    if matches!(outcome, TxnOutcome::Crashed { .. }) {
+        return Err(RelayError::Local("injected-crash".to_owned()));
+    }
+    Ok(())
+}
+
+/// Whether EVERY path this moment names sits inside the pinned grant.
+///
+/// The outbound twin of `enforce_share_view_boundary`'s containment loop,
+/// reading the same four fields through the same rule. A moment naming one
+/// path outside the grant is not this share's to offer, in either direction —
+/// and a moment naming no path at all describes no file, so there is nothing
+/// to propose.
+fn proposal_paths_within_grant(payload: &serde_json::Value, granted: &crate::ShareGrant) -> bool {
+    let mut named = false;
+    for field in crate::share::MOMENT_PATH_FIELDS {
+        let Some(path) = string_field(payload, field) else {
+            continue;
+        };
+        named = true;
+        if !crate::share::selected_path_within_grant(path, granted) {
+            return false;
+        }
+    }
+    named
+}
+
+/// This replica's local moments between `scanned_seq` and `submit_through`,
+/// consolidated into ONE net change per file.
+///
+/// One moment already states its object's COMPLETE post state rather than a
+/// delta — `store.rs` copies the before blob into `payloadAfterBlobSha256` for
+/// a rename, and `moment_apply.rs` materializes from the after side whatever
+/// the operation says. So a run of moments for one object collapses by taking
+/// the base from the FIRST and the destination from the LAST, and a write
+/// followed by a rename leaves as one change from the original path to the new
+/// one.
+fn collect_share_proposal_changes(
+    store: &EngineStore,
+    workspace_id: &str,
+    granted: &crate::ShareGrant,
+    origin_id: &str,
+    scanned_seq: i64,
+    submit_through: i64,
+) -> Result<Vec<ShareProposalChange>, RelayError> {
+    let mut order: Vec<String> = Vec::new();
+    let mut by_object: BTreeMap<String, ShareProposalChange> = BTreeMap::new();
+    let mut after = scanned_seq;
+    'pages: while after < submit_through {
+        let page = list_replication_ops(store, workspace_id, origin_id, after, crate::MAX_PULL_OPS)
+            .map_err(local)?;
+        let Some(page_last) = page.last().map(|op| op.origin_seq) else {
+            break;
+        };
+        for op in page {
+            // The submit bound. An op journaled after the mark this submit
+            // read belongs to the next one.
+            if op.origin_seq > submit_through {
+                break 'pages;
+            }
+            if op.op_kind != "moment.append" {
+                continue;
+            }
+            if !proposal_paths_within_grant(&op.payload, granted) {
+                continue;
+            }
+            let Some(object_id) = string_field(&op.payload, "objectId") else {
+                continue;
+            };
+            let change = by_object.entry(object_id.to_owned()).or_insert_with(|| {
+                order.push(object_id.to_owned());
+                ShareProposalChange {
+                    // The base is the FIRST moment's before side: what the
+                    // recipient started from, which is what the granter has to
+                    // resolve against its own log.
+                    based_on_path: string_field(&op.payload, "payloadBeforePath")
+                        .map(str::to_owned),
+                    based_on_blob_sha256: string_field(&op.payload, "payloadBeforeBlobSha256")
+                        .filter(|sha256| valid_sha256(sha256))
+                        .map(str::to_owned),
+                    operation: String::new(),
+                    after_path: None,
+                    after_blob_sha256: None,
+                    after_content_kind: None,
+                    after_byte_length: None,
+                    recorded_at_ms: 0,
+                }
+            });
+            // The destination is the LAST moment's after side, overwritten as
+            // the scan walks forward.
+            //
+            // `rename` is a local label for a moment; a proposal states only
+            // what the granter must end up with, and the relay derives the
+            // moment's own label from the two paths at accept.
+            change.operation = if string_field(&op.payload, "operation") == Some("delete") {
+                "delete".to_owned()
+            } else {
+                "write".to_owned()
+            };
+            change.after_path = string_field(&op.payload, "payloadAfterPath")
+                .or_else(|| string_field(&op.payload, "path"))
+                .map(str::to_owned);
+            change.after_blob_sha256 = string_field(&op.payload, "payloadAfterBlobSha256")
+                .filter(|sha256| valid_sha256(sha256))
+                .map(str::to_owned);
+            // The relay accepts exactly two content kinds, so state one of
+            // them. A moment carrying neither is text, the same reading
+            // `ContentKind::from_wire` applies on apply.
+            change.after_content_kind = Some(
+                if string_field(&op.payload, "payloadAfterContentKind") == Some("binary") {
+                    "binary".to_owned()
+                } else {
+                    "text".to_owned()
+                },
+            );
+            change.after_byte_length = op
+                .payload
+                .get("payloadAfterByteLength")
+                .and_then(serde_json::Value::as_i64)
+                .filter(|byte_length| *byte_length >= 0);
+            change.recorded_at_ms = op.recorded_at_ms;
+        }
+        after = page_last;
+    }
+    let mut changes = Vec::with_capacity(order.len());
+    for object_id in order {
+        let Some(mut change) = by_object.remove(&object_id) else {
+            continue;
+        };
+        // A half-stated base names a file without saying what the recipient
+        // read, which is exactly what the base rewrite cannot resolve. Both
+        // halves travel or neither does.
+        if change.based_on_path.is_none() || change.based_on_blob_sha256.is_none() {
+            change.based_on_path = None;
+            change.based_on_blob_sha256 = None;
+        }
+        if change.operation == "delete" {
+            change.after_path = None;
+            change.after_blob_sha256 = None;
+            change.after_content_kind = None;
+            change.after_byte_length = None;
+            // A delete of a file the granter never had removes nothing. The
+            // relay refuses that shape, so offering it would fail the whole
+            // submit for a change that describes nothing.
+            if change.based_on_path.is_none() {
+                continue;
+            }
+        } else if change.after_path.is_none() || change.after_blob_sha256.is_none() {
+            // A write with no destination content is not a change anyone can
+            // apply.
+            continue;
+        }
+        changes.push(change);
+    }
+    Ok(changes)
+}
+
 /// What a push is scoped to. The two share surfaces run the SAME outbound
 /// lane — one local scan, one dense per-share origin sequence, one batched
 /// POST — and differ only in which of this replica's ops belong to the share
@@ -3227,7 +3649,7 @@ fn share_view_push_path(
     };
     // Chat follows PATHS only, and the same containment rule the inbound
     // boundary applies — so a version share pushes nothing either.
-    if !crate::share::chat_path_within_grant(&path, granted) {
+    if !crate::share::selected_path_within_grant(&path, granted) {
         return Ok(None);
     }
     Ok(Some(path))

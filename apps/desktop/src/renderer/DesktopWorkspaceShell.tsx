@@ -11,6 +11,7 @@ import {
   PanelRight,
   RefreshCw,
   Search,
+  Send,
   Undo2,
   User,
   X,
@@ -33,6 +34,8 @@ import type {
   DmRecord,
   EngineMomentDetailRecord,
   EngineMomentRecord,
+  MyShareChangeRow,
+  ShareProposalRow,
   SyncStatusResult,
   TryInVersionRunState,
   WorkbenchMenuCommand,
@@ -118,6 +121,10 @@ import {
   VersionComparePage,
   VersionMenu,
 } from "./workbench/WorkspaceVersions";
+import {
+  ProposalReviewDialog,
+  proposerName,
+} from "./workbench/ProposalReviewDialog";
 import {
   TryInVersionBanner,
   TryInVersionReviewCard,
@@ -4366,6 +4373,17 @@ export function DesktopWorkspaceShell(props: {
     !shareViewDamaged &&
     (shareView?.access === "comment" || shareView?.access === "edit");
   const [shareViewEnded, setShareViewEnded] = useState(!!shareView?.ended);
+  // Whether this share grants DOCUMENT writes (#646 PR3a), read the same way
+  // and for the same reason: positive recognition only, so `view`, an absent
+  // level, and a damaged grant all stay read-only. An ended share grants
+  // nothing either — its recipient can no longer send anything back, so an
+  // editable copy would be a dead end the banner has already closed.
+  //
+  // Edit does not write the granter's files. It writes the recipient's own
+  // copy, which the recipient then sends for the granter to accept.
+  const shareViewDocumentsWritable =
+    !shareViewDamaged && !shareViewEnded && shareView?.access === "edit";
+  const shareGranterName = shareView?.granterEmail ?? "another dohc user";
   const [shareRefreshing, setShareRefreshing] = useState(false);
   // Ops this share's pulls skipped, read from the RECORD, not from the last
   // refresh. The skip is durable — the cursor committed past those ops — so a
@@ -4427,6 +4445,101 @@ export function DesktopWorkspaceShell(props: {
     if (shareView && !shareViewEnded && !shareViewDamaged) void refreshShareView();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
+
+  // ---- The recipient's own submitted changes (#646 PR3a) ----
+  // A submission exists only from Send changes: there is no draft at the
+  // relay, so this reads what was SENT, never what is unsent.
+  const [myShareChange, setMyShareChange] = useState<MyShareChangeRow | null>(null);
+  const [shareChangesSubmitting, setShareChangesSubmitting] = useState(false);
+  // Set by a submit that found nothing to send. Cleared by the next submit,
+  // so the line never outlives the click it answers.
+  const [shareChangesEmpty, setShareChangesEmpty] = useState(false);
+  // Latest-wins token, the same guard reloadShareSkipped uses: an answer for
+  // one workspace must never repaint another.
+  const myShareChangeToken = useRef(0);
+  const reloadMyShareChanges = useCallback(async () => {
+    const token = ++myShareChangeToken.current;
+    const result = await bridge().listMyShareChanges({ workspaceId });
+    if (token !== myShareChangeToken.current) return;
+    // The newest submission is the one the surface speaks for; older ones are
+    // settled history the granter's side already accounts for.
+    setMyShareChange(
+      result.proposals.reduce<MyShareChangeRow | null>(
+        (newest, candidate) =>
+          newest !== null && newest.createdAtMs >= candidate.createdAtMs
+            ? newest
+            : candidate,
+        null,
+      ),
+    );
+  }, [workspaceId]);
+  useEffect(() => {
+    setMyShareChange(null);
+    setShareChangesEmpty(false);
+    if (!shareViewDocumentsWritable) return;
+    void reloadMyShareChanges().catch(() => undefined);
+  }, [shareViewDocumentsWritable, reloadMyShareChanges]);
+  const sendShareChanges = useCallback(async () => {
+    const token = myShareChangeToken.current;
+    setShareChangesSubmitting(true);
+    try {
+      const result = await bridge().submitShareChanges({ workspaceId });
+      if (token !== myShareChangeToken.current) return;
+      setShareChangesEmpty(result.submitted === 0);
+      await reloadMyShareChanges();
+    } catch (error) {
+      reportShellError("Couldn't send your changes.", error);
+    } finally {
+      if (token === myShareChangeToken.current) setShareChangesSubmitting(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId, reloadMyShareChanges]);
+  const withdrawShareChanges = useCallback(
+    async (proposalId: string) => {
+      const token = myShareChangeToken.current;
+      setShareChangesSubmitting(true);
+      try {
+        await bridge().withdrawShareChanges({ workspaceId, proposalId });
+        if (token !== myShareChangeToken.current) return;
+        await reloadMyShareChanges();
+      } catch (error) {
+        reportShellError("Couldn't take your changes back.", error);
+      } finally {
+        if (token === myShareChangeToken.current) setShareChangesSubmitting(false);
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    },
+    [workspaceId, reloadMyShareChanges],
+  );
+
+  // ---- The granter's side of the same lane (#646 PR3a) ----
+  // Changes recipients sent to THIS workspace. One notice per submission, and
+  // the review dialog each notice opens.
+  const [shareProposals, setShareProposals] = useState<readonly ShareProposalRow[]>([]);
+  const [reviewProposalId, setReviewProposalId] = useState<string | null>(null);
+  const shareProposalsToken = useRef(0);
+  const reloadShareProposals = useCallback(async () => {
+    const token = ++shareProposalsToken.current;
+    const result = await bridge().listShareProposals({ workspaceId });
+    if (token !== shareProposalsToken.current) return;
+    setShareProposals(result.proposals);
+  }, [workspaceId]);
+  useEffect(() => {
+    setShareProposals([]);
+    setReviewProposalId(null);
+    // A share view holds someone else's files. It is never the granter who
+    // decides about them.
+    if (isShareView) return;
+    void reloadShareProposals().catch(() => undefined);
+  }, [isShareView, reloadShareProposals]);
+  const shareChangeNotices = useMemo(
+    () =>
+      shareProposals.map((proposal) => ({
+        proposalId: proposal.proposalId,
+        sender: proposerName(proposal),
+      })),
+    [shareProposals],
+  );
 
   // ONE history timeline element, rendered by the side panel's History view
   // and the history tab — the engine page state is root-owned (never a
@@ -4700,13 +4813,15 @@ export function DesktopWorkspaceShell(props: {
               ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
               : shareViewDamaged
                 ? "dohc can't read what this share grants. Open the share again to restore it."
-                : shareViewChatWritable
-                  ? // Edit reads the comment sentence on purpose (#646): its
-                    // document writes land in PR3, so until then its rights
-                    // are comment's, and a banner promising editing would be
-                    // a lie.
-                    `Shared view from ${shareView.granterEmail ?? "another dohc user"}. You can chat about these files, not edit them.`
-                  : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
+                : shareViewDocumentsWritable
+                  ? // Edit gets its own sentence from #646 PR3a. It states
+                    // the whole right, including the half that is NOT a
+                    // right: the granter's files change only when the
+                    // granter accepts.
+                    `Shared view from ${shareView.granterEmail ?? "another dohc user"}. Edit these files and send your changes for ${shareView.granterEmail ?? "another dohc user"} to accept.`
+                  : shareViewChatWritable
+                    ? `Shared view from ${shareView.granterEmail ?? "another dohc user"}. You can chat about these files, not edit them.`
+                    : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
           </span>
           {shareSkipped
             ? shareSkipNoticeLines(shareSkipped, shareView.granterEmail).map(
@@ -4750,6 +4865,74 @@ export function DesktopWorkspaceShell(props: {
                 ),
               )
             : null}
+          {/* Sending changes back (#646 PR3a). Edit level only, and only
+              while the share is live: an ended or damaged grant carries no
+              way to send, so offering one would be an affordance the grant
+              does not have. */}
+          {shareViewDocumentsWritable ? (
+            <>
+              {myShareChange && myShareChange.state !== "withdrawn" ? (
+                <span
+                  data-testid="share-changes-state"
+                  data-state={myShareChange.state}
+                  className="flex min-w-0 items-center gap-1.5 text-[11px]"
+                >
+                  <span className="min-w-0 truncate">
+                    {myShareChange.state === "open"
+                      ? `Sent to ${shareGranterName} for review.`
+                      : myShareChange.state === "accepted"
+                        ? `${shareGranterName} accepted your changes.`
+                        : // Declined owes a Next, and this one works right
+                          // here: the editor and the send control both stay.
+                          `${shareGranterName} declined your changes. Your copy still has them. Edit again and send new changes.`}
+                  </span>
+                  {myShareChange.state === "open" ? (
+                    <>
+                      <span
+                        data-testid="share-changes-count"
+                        className="shrink-0 rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px] text-muted"
+                      >
+                        {myShareChange.files === 1
+                          ? "1 file"
+                          : `${myShareChange.files} files`}
+                      </span>
+                      {/* Submitting is reversible, so the reverse path is
+                          visible for as long as it exists. */}
+                      <button
+                        type="button"
+                        data-testid="share-changes-withdraw"
+                        disabled={shareChangesSubmitting}
+                        onClick={() =>
+                          void withdrawShareChanges(myShareChange.proposalId)
+                        }
+                        className="shrink-0 rounded border border-line bg-panel px-2 py-0.5 text-[11px] text-muted hover:text-ink disabled:opacity-50"
+                      >
+                        Withdraw
+                      </button>
+                    </>
+                  ) : null}
+                </span>
+              ) : null}
+              {shareChangesEmpty ? (
+                <span
+                  data-testid="share-changes-empty"
+                  className="min-w-0 truncate text-[11px]"
+                >
+                  You have no changes to send yet.
+                </span>
+              ) : null}
+              <button
+                type="button"
+                data-testid="share-changes-send"
+                disabled={shareChangesSubmitting}
+                onClick={() => void sendShareChanges()}
+                className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel px-2 py-0.5 text-[11px] text-muted hover:text-ink disabled:opacity-50"
+              >
+                <Send size={11} aria-hidden />
+                {shareChangesSubmitting ? "Sending…" : "Send changes"}
+              </button>
+            </>
+          ) : null}
           {!shareViewEnded && !shareViewDamaged ? (
             <button
               type="button"
@@ -5215,7 +5398,10 @@ export function DesktopWorkspaceShell(props: {
                 registerSourceToggle={editorCallbacks.registerSourceToggle}
                 autoFocus={wb.activeEditorGroup === editorGroup.id}
                 knownMarkdownFiles={markdownWikilinkFiles}
-                readOnly={!!shareView || isMountedSharePath(tabPath)}
+                readOnly={
+                  (!!shareView && !shareViewDocumentsWritable) ||
+                  isMountedSharePath(tabPath)
+                }
                 {...(shareView || isMountedSharePath(tabPath)
                   ? {}
                   : { onSharePath: (path: string) => setShareTarget({ path }) })}
@@ -5359,6 +5545,8 @@ export function DesktopWorkspaceShell(props: {
         onConnectCloud={() => setCloudOpen(true)}
         onOpenHistory={openHistoryView}
         onOpenConflicts={() => setConflictReviewOpen(true)}
+        shareChangeNotices={shareChangeNotices}
+        onReviewShareChanges={setReviewProposalId}
         onOpenSettings={() => openSettings()}
         onToggleTheme={toggleTheme}
         onContextMenu={() => void showWorkbenchMenu("status")}
@@ -5443,6 +5631,14 @@ export function DesktopWorkspaceShell(props: {
           workspaceId={workspaceId}
           onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
           onClose={() => setConflictReviewOpen(false)}
+        />
+      ) : null}
+      {reviewProposalId ? (
+        <ProposalReviewDialog
+          workspaceId={workspaceId}
+          proposalId={reviewProposalId}
+          onSettled={() => void reloadShareProposals().catch(() => undefined)}
+          onClose={() => setReviewProposalId(null)}
         />
       ) : null}
       {settingsSection ? (

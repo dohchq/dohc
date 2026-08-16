@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   CloudOff,
   Download,
+  GitPullRequestArrow,
   MessageSquare,
   X,
 } from "lucide-react";
@@ -90,6 +91,12 @@ export function NoticeCenter(props: {
   // Opens the conflict review dialog (0P-C): the notice's "Review" action
   // lands the user directly on the side-by-side choices.
   onOpenConflicts: () => void;
+  // Changes a share recipient sent to this workspace, awaiting the granter
+  // (#646 PR3a). One notice per submission, because each names its sender and
+  // opens its own review — collapsing two senders into one row would have to
+  // invent a title neither of them wrote.
+  shareChangeNotices?: readonly { proposalId: string; sender: string }[];
+  onReviewShareChanges?: (proposalId: string) => void;
   // Agent -> user notifications (finished / needs-input / asked / error).
   // Informational ledger entries: the History rail shows what the run did,
   // and a blocked run raises its own permission card. Dismiss acknowledges.
@@ -219,6 +226,26 @@ export function NoticeCenter(props: {
       });
     }
 
+    // Above the sync notices: someone is waiting on the granter's decision,
+    // and until it comes their work sits where nobody can use it.
+    for (const sent of props.shareChangeNotices ?? []) {
+      next.push({
+        id: `share-changes-${sent.proposalId}`,
+        tone: "neutral",
+        title: `${sent.sender} sent you changes`,
+        body: "Review them to choose what to keep.",
+        ...(props.onReviewShareChanges
+          ? {
+              action: {
+                label: "Review",
+                onClick: () => props.onReviewShareChanges?.(sent.proposalId),
+              },
+            }
+          : {}),
+        Icon: GitPullRequestArrow,
+      });
+    }
+
     if (state === "conflict") {
       next.push({
         id: "sync-conflict",
@@ -282,10 +309,12 @@ export function NoticeCenter(props: {
     // name a cause that never happened, or promise "no history" for a
     // workspace that is recording.
     //
-    // A shared view leads the cascade (#540): it never gets a recorder BY
-    // DESIGN — a capability, not an opt-out and not a failure — and its
-    // banner already says what the surface is. No notice: every history-off
-    // body below states a cause that is false for a shared view.
+    // A shared view leads the cascade (#540) and takes no notice at all, at
+    // any level. At view and comment it gets no recorder BY DESIGN — a
+    // capability, not an opt-out and not a failure. At edit (#646 PR3a) it
+    // does get one, so there is nothing to warn about either. Both ways every
+    // history-off body below would state a cause that is false here, and the
+    // share banner already says what the surface is.
     if (props.syncStatus?.historyShareView) {
       // Nothing to warn about.
     } else if (props.syncStatus?.settingsWarning) {
@@ -367,6 +396,8 @@ export function NoticeCenter(props: {
     props.onOpenConflicts,
     props.onOpenHistory,
     props.onOpenSettings,
+    props.onReviewShareChanges,
+    props.shareChangeNotices,
     props.syncStatus,
     installPending,
     installUpdate,

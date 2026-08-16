@@ -12,6 +12,7 @@ import {
 import type { WorkspaceCaptureHooks } from "./workspaceActivity";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "./workspaceSettings";
 import {
   WORKSPACE_SETTINGS_FILE,
@@ -74,7 +75,7 @@ async function writeOptOut(root: string): Promise<void> {
 describe("captureForFlaggedWorkspace decision", () => {
   it("returns the unreadable-file reason with the null capture", async () => {
     const root = await tempRoot();
-    const workspace = { workspaceId: "ws-gate", rootPath: root, shareView: false };
+    const workspace = { workspaceId: "ws-gate", rootPath: root, shareView: null };
     await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
     await writeFile(join(root, ".dohc", WORKSPACE_SETTINGS_FILE), "{not json");
 
@@ -97,22 +98,70 @@ describe("captureForFlaggedWorkspace decision", () => {
   // cause, and the settings file — which a shared view does not even
   // materialize — is never read (a read would produce a warning or a
   // capture; the assertions refuse both).
-  it("gives a shared view a null capture with the share cause, before any read", async () => {
-    const decision = await captureForFlaggedWorkspace(
-      {
-        workspaceId: "ws-gate-share",
-        rootPath: join(tempBase, "does-not-exist-share-view"),
-        shareView: true,
-      },
+  //
+  // #646 PR3 made the rule level-aware. These cases drive every level plus
+  // the two damaged shapes, all against a root that does NOT exist: the
+  // decision has to be reached before any settings read either way.
+  const shareViewRoot = join(tempBase, "does-not-exist-share-view");
+
+  async function shareViewDecision(shareView: {
+    access: ShareAccess | null;
+    ended: boolean;
+  }) {
+    return captureForFlaggedWorkspace(
+      { workspaceId: "ws-gate-share", rootPath: shareViewRoot, shareView },
       hooks,
       unusedSessions,
     );
-    expect(decision).toEqual({ capture: null, shareView: true });
+  }
+
+  it("gives a VIEW share view a null capture with the share cause, before any read", async () => {
+    expect(await shareViewDecision({ access: "view", ended: false })).toEqual({
+      capture: null,
+      shareView: true,
+    });
+  });
+
+  it("gives a COMMENT share view a null capture with the share cause, before any read", async () => {
+    expect(await shareViewDecision({ access: "comment", ended: false })).toEqual({
+      capture: null,
+      shareView: true,
+    });
+  });
+
+  // The grant read back as damage. Positive recognition is the whole point:
+  // absence must never read as "not view".
+  it("gives a DAMAGED share view a null capture", async () => {
+    expect(await shareViewDecision({ access: null, ended: false })).toEqual({
+      capture: null,
+      shareView: true,
+    });
+  });
+
+  // An ended share is a frozen local copy: the submit route is gone, so a
+  // recorded edit would land durably and never reach anyone.
+  it("gives an ENDED edit share view a null capture", async () => {
+    expect(await shareViewDecision({ access: "edit", ended: true })).toEqual({
+      capture: null,
+      shareView: true,
+    });
+  });
+
+  // The lane PR3a exists for. The root does not exist and no settings file
+  // was ever written for it — a share view materializes none — so a capture
+  // here also proves the decision precedes the workspace-engine flag. Falling
+  // through to that flag would refuse every edit share view while every other
+  // test stayed green.
+  it("gives an EDIT share view a real capture with no settings file", async () => {
+    const decision = await shareViewDecision({ access: "edit", ended: false });
+    expect(decision.capture).not.toBeNull();
+    expect(decision.shareView).toBe(true);
+    expect(decision.warning).toBeUndefined();
   });
 
   it("carries no reason for a deliberate opt-out or a readable file", async () => {
     const root = await tempRoot();
-    const workspace = { workspaceId: "ws-gate", rootPath: root, shareView: false };
+    const workspace = { workspaceId: "ws-gate", rootPath: root, shareView: null };
     await writeOptOut(root);
     const optedOut = await captureForFlaggedWorkspace(
       workspace,
@@ -125,7 +174,7 @@ describe("captureForFlaggedWorkspace decision", () => {
 
     const on = await tempRoot();
     const recording = await captureForFlaggedWorkspace(
-      { workspaceId: "ws-gate-on", rootPath: on, shareView: false },
+      { workspaceId: "ws-gate-on", rootPath: on, shareView: null },
       hooks,
       unusedSessions,
     );
@@ -451,7 +500,7 @@ describe("dispatchScanEligible", () => {
     // workspace is still open must still dispatch, or it stays pending
     // forever; only the reopen — where captureFor reads the flag — opts out.
     const root = await tempRoot();
-    const workspace = { workspaceId: "ws-gate", rootPath: root, shareView: false };
+    const workspace = { workspaceId: "ws-gate", rootPath: root, shareView: null };
     const { capture: openCapture } = await captureForFlaggedWorkspace(
       workspace,
       hooks,
@@ -477,7 +526,7 @@ describe("dispatchScanEligible", () => {
 
   it("an unopened workspace answers from the settings file (its open-time read)", async () => {
     const root = await tempRoot();
-    const workspace = { workspaceId: "ws-gate", rootPath: root, shareView: false };
+    const workspace = { workspaceId: "ws-gate", rootPath: root, shareView: null };
     const closed = activityWith(null, []);
     await expect(dispatchScanEligible(workspace, closed)).resolves.toBe(true);
 
