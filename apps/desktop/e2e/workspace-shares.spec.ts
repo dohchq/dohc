@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { RelayFilePeer } from "../src/testing/relayFilePeer";
@@ -962,6 +962,275 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
     );
     expect(blob.status).toBe(200);
     expect(blob.body).toBe(EDITED);
+  } finally {
+    await relay?.stop();
+    if (desktop) await cleanupDesktopWorkspace(desktop, temp);
+    else await temp.cleanup();
+  }
+});
+
+test("edit side: a recipient creates, renames, deletes and imports, and the granter accepts all four", async () => {
+  // #802 — the other four writes a share view admits, through the real app,
+  // the real engine and a real relay. The text edit's loop is proved above;
+  // what this proves is that each of these operations becomes a change the
+  // submit lane can see, and that the accept door derives the RIGHT intent
+  // for each: a create, a rename, a delete, and an import that lands as a
+  // create.
+  test.setTimeout(300_000);
+  const temp = await createTempWorkspace();
+  const workspaceId = "share-file-ops-e2e";
+  let relay: SyncRelayHandle | null = null;
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const IMPORTED = "The imported ledger.\n";
+
+  try {
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
+    const granter = new RelayFilePeer({
+      baseUrl: relay.baseUrl,
+      token: GRANTER_TOKEN,
+      workspaceId,
+    });
+    const [renameSource, deleteSource] = await granter.writeTextFiles([
+      { path: "docs/rename-me.md", text: "# Rename me\n" },
+      { path: "docs/delete-me.md", text: "# Delete me\n" },
+      { path: "private/hidden.md", text: "The kraken ledger stays private.\n" },
+    ]);
+
+    const create = await relayJson(relay.baseUrl, GRANTER_TOKEN, `/sync/${workspaceId}/shares`, {
+      method: "POST",
+      body: JSON.stringify({
+        recipientEmail: RECIPIENT_EMAIL,
+        paths: ["docs"],
+        access: "edit",
+      }),
+    });
+    expect(create.status).toBe(200);
+    const shareId = (JSON.parse(create.body) as { shareId: string }).shareId;
+
+    // The import's source lives OUTSIDE the share view, where a user's own
+    // files are. The picker is replaced by its test seam; the bytes are real.
+    const importSource = join(temp.baseDir, "ledger.md");
+    await writeFile(importSource, IMPORTED, "utf8");
+
+    await seedCloudCredentials(temp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: RECIPIENT_EMAIL,
+      userId: "e2e-recipient",
+      token: RECIPIENT_TOKEN,
+    });
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+
+    await page.getByTestId("first-run-open-share").click();
+    await expect(page.getByTestId("open-shared-view")).toBeVisible();
+    await page.getByTestId("open-share-code").fill(`dohc-share:${shareId}:${relay.baseUrl}`);
+    await page.getByTestId("open-share-choose-folder").click();
+    await expect(page.getByTestId("open-shared-view")).toContainText(temp.rootPath);
+    await page.getByTestId("open-share-start").click();
+    await expect(page.getByTestId("workspace-shell")).toBeVisible();
+    await expect(page.getByTestId("shared-view-banner")).toContainText("send your changes");
+
+    // The four operations, each through the IPC boundary main owns.
+    await desktop.app.evaluate((_electron, paths: string[]) => {
+      process.env.DOHC_TEST_IMPORT_PATHS = JSON.stringify(paths);
+    }, [importSource]);
+
+    const outcome = await page.evaluate(async () => {
+      const api = (
+        window as unknown as {
+          dohcDesktop: Pick<
+            DohcDesktopBridge,
+            | "getWorkspaceRegistry"
+            | "createWorkspaceFile"
+            | "moveWorkspacePath"
+            | "deleteWorkspacePath"
+            | "importWorkspaceFiles"
+            | "createWorkspaceFolder"
+          >;
+        }
+      ).dohcDesktop;
+      const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
+      const attempt = async (label: string, run: () => Promise<unknown>) => {
+        try {
+          await run();
+          return `${label}: ok`;
+        } catch (error) {
+          return `${label}: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      };
+      return [
+        await attempt("create", () =>
+          api.createWorkspaceFile({
+            workspaceId,
+            relativePath: "docs/created.md",
+            initialText: "# Created by the recipient\n",
+          }),
+        ),
+        await attempt("rename", () =>
+          api.moveWorkspacePath({
+            workspaceId,
+            fromPath: "docs/rename-me.md",
+            toPath: "docs/renamed.md",
+          }),
+        ),
+        await attempt("delete", () =>
+          api.deleteWorkspacePath({ workspaceId, relativePath: "docs/delete-me.md" }),
+        ),
+        await attempt("import", () =>
+          api.importWorkspaceFiles({ workspaceId, targetDir: "docs" }),
+        ),
+        // The one operation that stays refused at EVERY level, because the
+        // engine has no folder object for it to write.
+        await attempt("folder", () =>
+          api.createWorkspaceFolder({ workspaceId, relativePath: "docs/plans" }),
+        ),
+      ];
+    });
+    expect(outcome.slice(0, 4)).toEqual([
+      "create: ok",
+      "rename: ok",
+      "delete: ok",
+      "import: ok",
+    ]);
+    expect(
+      outcome[4],
+      "MUTATION: routing create-folder promises a change no moment can state",
+    ).toContain("shared view");
+
+    // Each landed in the projection, because the projection follows the
+    // moment that made it.
+    expect(existsSync(join(temp.rootPath, "docs", "created.md"))).toBe(true);
+    expect(existsSync(join(temp.rootPath, "docs", "renamed.md"))).toBe(true);
+    expect(existsSync(join(temp.rootPath, "docs", "rename-me.md"))).toBe(false);
+    expect(existsSync(join(temp.rootPath, "docs", "delete-me.md"))).toBe(false);
+    expect(await readFile(join(temp.rootPath, "docs", "ledger.md"), "utf8")).toBe(IMPORTED);
+
+    await expect
+      .poll(
+        async () =>
+          await page.evaluate(async () => {
+            const api = (
+              window as unknown as {
+                dohcDesktop: Pick<
+                  DohcDesktopBridge,
+                  "getWorkspaceRegistry" | "submitShareChanges"
+                >;
+              }
+            ).dohcDesktop;
+            const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
+            try {
+              return (await api.submitShareChanges({ workspaceId })).submitted;
+            } catch (error) {
+              return error instanceof Error ? error.message : String(error);
+            }
+          }),
+        { timeout: 120_000, intervals: [2_000] },
+      )
+      // FOUR changes in one submit: `submitted` counts the files this press
+      // sent, and one press sends everything pending.
+      .toBe(4);
+
+    // ONE proposal holding FOUR net changes — one per object, which is what
+    // the submit consolidates to.
+    const listed = await relayJson(relay.baseUrl, GRANTER_TOKEN, `/sync/${workspaceId}/proposals`);
+    expect(listed.status).toBe(200);
+    const proposals = (
+      JSON.parse(listed.body) as {
+        proposals: Array<{
+          proposalId: string;
+          ops: Array<{
+            basedOnPath: string | null;
+            afterPath: string | null;
+            currentPath: string | null;
+          }>;
+        }>;
+      }
+    ).proposals;
+    expect(proposals.length).toBe(1);
+    const ops = [...proposals[0]!.ops].sort((left, right) =>
+      String(left.afterPath).localeCompare(String(right.afterPath)),
+    );
+    expect(ops.length).toBe(4);
+    // The review shows WHERE each change lands, per the intent rule.
+    expect(ops.map((op) => op.afterPath)).toEqual([
+      "docs/created.md",
+      "docs/delete-me.md",
+      "docs/ledger.md",
+      "docs/renamed.md",
+    ]);
+
+    const accepted = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${workspaceId}/proposals/${proposals[0]!.proposalId}/accept`,
+      { method: "POST" },
+    );
+    expect(accepted.status, accepted.body).toBe(200);
+
+    // The proof: four moments in the GRANTER's log, each carrying the intent
+    // the accept door derived from the granter's own current path.
+    const afterAccept = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${workspaceId}/log?since=0&limit=500`,
+    );
+    const landed = (
+      JSON.parse(afterAccept.body) as {
+        ops: Array<{ originId: string; opKind: string; payload: Record<string, unknown> }>;
+      }
+    ).ops.filter(
+      (op) => op.originId.startsWith(`share:${shareId}:`) && op.opKind === "moment.append",
+    );
+    expect(landed.length).toBe(4);
+    const byPath = new Map(
+      landed.map((op) => [
+        String(op.payload.payloadAfterPath ?? op.payload.payloadBeforePath),
+        op.payload,
+      ]),
+    );
+
+    // A create: no base in the granter's log, because the granter never had it.
+    const created = byPath.get("docs/created.md");
+    expect(created, "the recipient's new file must reach the granter").toBeTruthy();
+    expect(created!.operation).toBe("write");
+    expect(created!.beforeLatestMomentId ?? null).toBe(null);
+
+    // A rename: the granter's OWN object, moved to the path the recipient
+    // meant — the intent rule, not the path the recipient read.
+    const renamed = byPath.get("docs/renamed.md");
+    expect(renamed, "the recipient's rename must reach the granter").toBeTruthy();
+    expect(
+      renamed!.operation,
+      "MUTATION: a rename that lands as a write leaves the granter holding both paths",
+    ).toBe("rename");
+    expect(renamed!.objectId).toBe(renameSource!.objectId);
+    expect(renamed!.beforeLatestMomentId).toBe(renameSource!.latestMomentId);
+    expect(renamed!.payloadBeforePath).toBe("docs/rename-me.md");
+
+    // A delete: at the path the granter has it now.
+    const deleted = byPath.get("docs/delete-me.md");
+    expect(deleted, "the recipient's delete must reach the granter").toBeTruthy();
+    expect(
+      deleted!.operation,
+      "MUTATION: a delete that lands as a write resurrects the file",
+    ).toBe("delete");
+    expect(deleted!.objectId).toBe(deleteSource!.objectId);
+    expect(deleted!.beforeLatestMomentId).toBe(deleteSource!.latestMomentId);
+
+    // An import: a create carrying the bytes, which the granter can read out
+    // of its own workspace.
+    const imported = byPath.get("docs/ledger.md");
+    expect(imported, "the recipient's import must reach the granter").toBeTruthy();
+    expect(imported!.operation).toBe("write");
+    const blob = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${workspaceId}/blobs/${String(imported!.payloadAfterBlobSha256)}`,
+    );
+    expect(blob.status).toBe(200);
+    expect(blob.body).toBe(IMPORTED);
   } finally {
     await relay?.stop();
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);

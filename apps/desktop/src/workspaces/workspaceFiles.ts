@@ -329,6 +329,33 @@ function collisionVariants(
 }
 
 /**
+ * The same naming rule, for a caller whose collisions are answered by a SET
+ * rather than by the filesystem.
+ *
+ * A share view's import writes its engine store, so it cannot discover a
+ * collision by having `copyFile` refuse one. It asks here instead, and gets
+ * the ladder the disk copy walks: the name itself, then `name (2).ext`, and
+ * shorter spellings only where a composed-path limit applies. Returns null
+ * when the collision budget runs out — the same answer that counts a source
+ * as skipped in `copyWithoutOverwrite`.
+ */
+export function importNameFor(
+  name: string,
+  absDir: string,
+  taken: (candidate: string) => boolean,
+): string | null {
+  const maxEntryChars = entryCharBudget(absDir, process.platform);
+  for (let attempt = 1; attempt <= MAX_COLLISION_RENAMES + 1; attempt += 1) {
+    const candidates =
+      attempt === 1 ? [name] : collisionVariants(name, attempt, maxEntryChars);
+    for (const candidate of candidates) {
+      if (!taken(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+/**
  * COULD this copy failure be about the name being too long? Exported for unit
  * testing, as `extractFrontmatterIcon` above is: neither an ENOENT from a
  * vanished source nor a real MAX_PATH refusal is arrangeable on demand in that
@@ -594,7 +621,31 @@ export async function copyIntoWorkspace(
 // schema (a future internal caller, a test) still cannot flood the import.
 const MAX_IMPORT_PATHS = 100;
 
-// OS drag-in import. TRUST DELTA vs copyIntoWorkspace's dialog path: these
+// OS drag-in import: the screen below, then the picker-grade copy — the
+// same basename-only, COPYFILE_EXCL `copyIntoWorkspace` the import dialog
+// uses. A share view runs the same screen and writes its engine store
+// instead (`workspaceFileOps.ts`).
+export async function importDroppedPaths(
+  rootPath: string,
+  absolutePaths: string[],
+  registeredRoots: string[],
+  targetDir?: string,
+): Promise<ImportCopyOutcome> {
+  const screened = await screenDroppedPaths(absolutePaths, registeredRoots);
+  const outcome = await copyIntoWorkspace(rootPath, screened.usable, targetDir);
+  return {
+    imported: outcome.imported,
+    skipped: outcome.skipped + screened.refused,
+  };
+}
+
+// The drag-in screen, exported because a share view's import needs the same
+// one before it writes its engine store — the destination differs, the trust
+// question does not. `refused` counts the sources it dropped: the user handed
+// them over and deserves to see they did not land, same as a collision-budget
+// skip inside the copy.
+//
+// TRUST DELTA vs copyIntoWorkspace's dialog path: these
 // absolute source paths are RENDERER-supplied (webUtils.getPathForFile in the
 // preload), not minted by a main-process file dialog — a compromised renderer
 // could forge the IPC array and name any readable file (e.g. ~/.ssh/id_rsa) to
@@ -620,14 +671,11 @@ const MAX_IMPORT_PATHS = 100;
 // /tmp -> /private/tmp, /var -> /private/var), i.e. silent import loss for zero
 // security gain. The real defense if this matters is a visible import-confirm
 // quarantine (deferred — needs product sign-off); until then it is accepted and
-// named here. Past these guards the copy is picker-grade: the same basename-
-// only, COPYFILE_EXCL copyIntoWorkspace the import dialog uses.
-export async function importDroppedPaths(
-  rootPath: string,
+// named here.
+export async function screenDroppedPaths(
   absolutePaths: string[],
   registeredRoots: string[],
-  targetDir?: string,
-): Promise<ImportCopyOutcome> {
+): Promise<{ usable: string[]; refused: number }> {
   if (absolutePaths.length > MAX_IMPORT_PATHS) {
     throw new Error(`Too many files dropped at once (max ${MAX_IMPORT_PATHS})`);
   }
@@ -664,14 +712,7 @@ export async function importDroppedPaths(
     if (insideMetadata) continue;
     usable.push(real);
   }
-  // Sources the screen refused (symlinks, directories, special files, .dohc
-  // metadata) are reported as skipped — the user dropped them and deserves to
-  // see they did not land, same as a collision-budget skip inside the copy.
-  const outcome = await copyIntoWorkspace(rootPath, usable, targetDir);
-  return {
-    imported: outcome.imported,
-    skipped: outcome.skipped + (absolutePaths.length - usable.length),
-  };
+  return { usable, refused: absolutePaths.length - usable.length };
 }
 
 // Creates a folder (recursively) with the createFile containment sandwich:

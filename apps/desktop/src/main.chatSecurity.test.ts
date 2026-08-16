@@ -805,11 +805,13 @@ describe("main-process chat authorization", () => {
       "importToDatabase",
     ];
     const seams = [
-      "createFile(",
       "createFolder(",
       "routeWorkspaceTextWrite(",
+      "routeWorkspaceFileCreate(",
+      "routeWorkspacePathMove(",
+      "routeWorkspacePathDelete(",
+      "routeWorkspaceFileImport(",
       "writeWorkspaceAsset(",
-      "importDroppedPaths(",
       "applyDatabaseEdit(",
       "importToDatabase(",
       "withExclusiveWorkspaceOperation(",
@@ -897,24 +899,33 @@ describe("main-process chat authorization", () => {
     );
   });
 
-  // The menu is a UX MIRROR of the gate below, and it has to mirror the same
-  // rule: the four items it drops — create, rename, delete, import — are
-  // exactly the handlers `assertWritableWorkspace` refuses in a share view at
-  // every level. A menu that offered them at edit would be lying about what
-  // the handlers accept. Position only; what the handlers decide is driven in
-  // `workspaces/shareWriteGate.test.ts`.
-  it("keeps a shared view's explorer menu read-only at every level", () => {
+  // The menu is a UX MIRROR of the gates below it, and it has to mirror the
+  // SAME rule they ask. Create, rename, delete and import are routed to the
+  // engine for a share view (#802), so the menu offers them exactly where
+  // `shareViewTakesLocalWrites` says the handlers accept them — and asks that
+  // one rule rather than re-spelling a level here. Position only; what the
+  // handlers decide is driven in `workspaces/shareWriteGate.test.ts` and
+  // `workspaces/workspaceFileOps.test.ts`.
+  it("mirrors the routed write rule in a shared view's explorer menu", () => {
     const handler = handlerSource("showExplorerMenu");
-    expect(handler).toContain(
-      "const isSharedView = shareViewIsPresent(registryEntry?.shareView);",
-    );
+    // ONE reading of the share view, from the resolver whose presence rule is
+    // pinned above. A second copy beside it is a copy that can disagree.
+    expect(handler).toContain("const shareView = sharedViewOf(input.workspaceId);");
+    expect(handler).toContain("const isSharedView = shareView !== null;");
     expect(
       handler,
-      "MUTATION: a level-aware menu offers writes the handlers behind it refuse",
-    ).not.toContain("shareViewTakesLocalWrites(");
-    expect(handler).toContain(
-      "const template: Electron.MenuItemConstructorOptions[] = isSharedView",
-    );
+      "MUTATION: a second copy of the level rule in the menu is a copy that drifts",
+    ).toContain("shareViewTakesLocalWrites(shareView)");
+    expect(handler).not.toContain('access === "edit"');
+    // New Folder is offered nowhere in a share view, at any level: the engine
+    // has no folder object, so an empty folder is nothing the recipient could
+    // send, and `createWorkspaceFolder` keeps the blanket refusal.
+    const folderItems = handler.split('item("New Folder", "new-folder")').length - 1;
+    expect(folderItems).toBe(2);
+    expect(
+      handler.split('...(isSharedView ? [] : [item("New Folder", "new-folder")])').length - 1,
+      "MUTATION: a share view offering New Folder promises a change no moment can state",
+    ).toBe(2);
   });
 
   // #646 PR3a. The review's incoming side is fetched by main and validated by
@@ -950,12 +961,12 @@ describe("main-process chat authorization", () => {
     // projection of its engine store, so a write here would leave the
     // projection stating content no moment does — unsendable, and overwritten
     // by the next pull.
+    //
+    // `createWorkspaceFolder` stays here after #802 routed its four siblings:
+    // the engine has no folder object, so there is no moment for a routed
+    // create-folder to write.
     const rawDiskWriters = [
-      "createWorkspaceFile",
       "createWorkspaceFolder",
-      "moveWorkspacePath",
-      "deleteWorkspacePath",
-      "importWorkspaceFiles",
       "writeWorkspaceAsset",
       "pickImageFiles",
       "applyDatabaseEdit",
@@ -965,6 +976,10 @@ describe("main-process chat authorization", () => {
       expect(handlerSource(channel), channel).toContain(
         "assertWritableWorkspace(workspace);",
       );
+      expect(
+        handlerSource(channel),
+        `${channel}: MUTATION: a blanket-refused handler that reads the level is one the gate no longer covers`,
+      ).not.toContain("if (shareView === null) assertWritableWorkspace(workspace);");
     }
 
     // The plugin pipeline installs and runs plugin code against the workspace
