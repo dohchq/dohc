@@ -172,6 +172,7 @@ function parseOp(value: unknown, at: string): ShareProposalOp {
     afterPath: after,
     afterBlobSha256: nullableText(op, "afterBlobSha256", at),
     afterContentKind: nullableContentKind(op, at),
+    afterByteLength: nullableCount(op, "afterByteLength", at),
     currentPath: nullableText(op, "currentPath", at),
     drifted: flag(op, "drifted", at),
   };
@@ -243,6 +244,39 @@ export async function listShareProposals(input: {
   return array(body.proposals, "proposals").map((proposal, index) =>
     parseProposal(proposal, `proposals[${index}]`),
   );
+}
+
+/**
+ * ONE op of one open proposal, for the review that opened one file.
+ *
+ * The review lists metadata and loads a file's content only when the granter
+ * opens that file, so this asks for that one file rather than re-serving every
+ * op of every open proposal to reach it.
+ */
+export async function readShareProposalOp(input: {
+  relay: SyncRelayConnection;
+  workspaceId: string;
+  proposalId: string;
+  opIndex: number;
+}): Promise<ShareProposalOp> {
+  const body = record(
+    await relayFetch(
+      input.relay,
+      `/sync/${encodeURIComponent(input.workspaceId)}/proposals/${encodeURIComponent(
+        input.proposalId,
+      )}/ops/${String(input.opIndex)}`,
+    ),
+    "proposal op response",
+  );
+  const op = parseOp(body.op, "proposal op");
+  // The relay answering about another op is not a file this review can show —
+  // it would put one file's content under another file's row.
+  if (op.opIndex !== input.opIndex) {
+    throw unreadable(
+      `proposal op answered index ${op.opIndex} for ${input.opIndex}`,
+    );
+  }
+  return op;
 }
 
 /**

@@ -315,6 +315,10 @@ export interface ShareProposalOp {
   afterPath: string | null;
   afterBlobSha256: string | null;
   afterContentKind: "text" | "binary" | null;
+  // How big the incoming side is, so a review row can describe a file before
+  // anything fetches it. Null for a delete and for a size the relay did not
+  // state.
+  afterByteLength: number | null;
   // Where the granter holds this file NOW. Null when the granter no longer
   // has it.
   currentPath: string | null;

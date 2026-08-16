@@ -1,3 +1,4 @@
+import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { SHARE_ACCESS_VALUES } from "@dohc/security-contract/share-selector";
 import {
   WORKSPACE_KINDS,
@@ -2799,11 +2800,15 @@ export type RevokeRelaySharePayload = z.infer<typeof RevokeRelaySharePayload>;
 
 export const SHARE_PROPOSAL_ID = z.string().min(1).max(128);
 
-// One submit is one relay batch, so a proposal carries at most as many files
-// as the relay carries ops in one request (MAX_OPS_PER_REQUEST, 500). A body
-// over the cap is relay damage, not a listing this surface should try to
-// render.
-export const MAX_SHARE_PROPOSAL_FILES = 500;
+// A proposal carries at most what one submit carries, and that number is
+// measured rather than borrowed from a paging bound
+// (`@dohc/security-contract/share-proposal-bound`; the evidence is in
+// `docs/superpowers/plans/2026-08-17-share-submit-bound.md`). A body over the
+// cap is relay damage, not a listing this surface should try to render.
+//
+// This surface can hold the number because it no longer renders content to do
+// it: the rows carry paths, drift and sizes, and a file's text is fetched only
+// when the granter opens that file.
 // Rows a share-changes listing may carry, bounding a body dohc did not write
 // and must parse in one go. Same class of thing and the same number as the
 // chat-share lanes' own cap (MAX_CHAT_CHANNEL_SHARE_ROWS, declared below):
@@ -2832,12 +2837,16 @@ export type ListShareProposalsPayload = z.infer<typeof ListShareProposalsPayload
 export const ShareProposalFileRow = z.object({
   // Position in the submit, dense from 0, so the last valid index is one
   // below the number of files a submit may carry.
-  opIndex: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_FILES - 1),
+  opIndex: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_OPS - 1),
   path: PATH_STRING,
   operation: ShareProposalOperation,
   // The granter's copy changed since the recipient sent this. Accepting still
   // works; it opens a conflict with a correct three-way base.
   drifted: z.boolean(),
+  // How big the incoming side is. A row states this so the granter can judge a
+  // file before opening it, and so the surface never has to fetch content to
+  // describe it. null for a delete and for a size the relay did not state.
+  afterByteLength: z.number().int().nonnegative().nullable(),
 });
 export type ShareProposalFileRow = z.infer<typeof ShareProposalFileRow>;
 
@@ -2849,7 +2858,7 @@ export const ShareProposalRow = z.object({
   // to state rather than a name to invent.
   proposedByEmail: EMAIL_STRING.nullable(),
   createdAtMs: z.number().int().nonnegative(),
-  files: z.array(ShareProposalFileRow).max(MAX_SHARE_PROPOSAL_FILES),
+  files: z.array(ShareProposalFileRow).max(MAX_SHARE_PROPOSAL_OPS),
 });
 export type ShareProposalRow = z.infer<typeof ShareProposalRow>;
 
@@ -2858,10 +2867,17 @@ export const ListShareProposalsResult = z.object({
 });
 export type ListShareProposalsResult = z.infer<typeof ListShareProposalsResult>;
 
-// ONE read for the whole review. The dialog used to ask for the listing and
-// then ask again per file, and each of those asks re-read the entire proposal
-// list from the relay: a five-file review cost six listings. The relay states
-// every file of a proposal in one answer, so the review reads it once.
+// ONE read for the whole review, and it carries NO content.
+//
+// It used to carry both sides' text for every file, which made opening a
+// review cost one relay blob fetch and one local file read per file, all
+// before the first row appeared — about 19 MB over this channel for a
+// 500-file review, and the parse that would have refused an oversized body ran
+// only after all of that work was already done. A review of a repository-sized
+// folder was not openable at all.
+//
+// Now the read states what the rows say, and `readShareProposalFileContent`
+// fetches one file's text when the granter opens that file.
 export const ReadShareProposalChangesPayload = z.object({
   workspaceId: WORKSPACE_ID,
   proposalId: SHARE_PROPOSAL_ID,
@@ -2870,7 +2886,28 @@ export type ReadShareProposalChangesPayload = z.infer<
   typeof ReadShareProposalChangesPayload
 >;
 
-export const ShareProposalChangeRow = ShareProposalFileRow.extend({
+export const ReadShareProposalChangesResult = z.object({
+  proposedByEmail: EMAIL_STRING.nullable(),
+  files: z.array(ShareProposalFileRow).max(MAX_SHARE_PROPOSAL_OPS),
+});
+export type ReadShareProposalChangesResult = z.infer<
+  typeof ReadShareProposalChangesResult
+>;
+
+// ONE file's two sides, fetched when the granter opens that file.
+export const ReadShareProposalFileContentPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  proposalId: SHARE_PROPOSAL_ID,
+  // WHICH file, by its position in the submit. The renderer never names a
+  // path: a path from the renderer is a path this process would then read, and
+  // the granter's own files are what it would read them from.
+  opIndex: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_OPS - 1),
+});
+export type ReadShareProposalFileContentPayload = z.infer<
+  typeof ReadShareProposalFileContentPayload
+>;
+
+export const ReadShareProposalFileContentResult = z.object({
   // The GRANTER's content now. null when the granter does not have the file,
   // or when it is not text this surface can show.
   currentText: WORKSPACE_EDITOR_TEXT.nullable(),
@@ -2880,14 +2917,8 @@ export const ShareProposalChangeRow = ShareProposalFileRow.extend({
   // failing, because the granter can still decline what it cannot read.
   incomingText: WORKSPACE_EDITOR_TEXT.nullable(),
 });
-export type ShareProposalChangeRow = z.infer<typeof ShareProposalChangeRow>;
-
-export const ReadShareProposalChangesResult = z.object({
-  proposedByEmail: EMAIL_STRING.nullable(),
-  files: z.array(ShareProposalChangeRow).max(MAX_SHARE_PROPOSAL_FILES),
-});
-export type ReadShareProposalChangesResult = z.infer<
-  typeof ReadShareProposalChangesResult
+export type ReadShareProposalFileContentResult = z.infer<
+  typeof ReadShareProposalFileContentResult
 >;
 
 export const SettleShareProposalPayload = z.object({
@@ -2922,7 +2953,7 @@ export const SubmitShareChangesResult = z.object({
   // that was never in them — both are the same fact to the person who pressed
   // send. Silently dropping them is the failure this states: some of their
   // work is not sent, and nothing says so.
-  skippedOutsideShare: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_FILES),
+  skippedOutsideShare: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_OPS),
   // More changes are waiting than one submit carries. A flag rather than a
   // count: the scan stops AT the bound, so it never measures the remainder.
   morePending: z.boolean(),
@@ -2938,7 +2969,7 @@ export const MyShareChangeRow = z.object({
   proposalId: SHARE_PROPOSAL_ID,
   state: ShareProposalState,
   createdAtMs: z.number().int().nonnegative(),
-  files: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_FILES),
+  files: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_OPS),
 });
 export type MyShareChangeRow = z.infer<typeof MyShareChangeRow>;
 
@@ -4086,6 +4117,9 @@ export interface DohcDesktopBridge {
   readShareProposalChanges(
     payload: ReadShareProposalChangesPayload,
   ): Promise<ReadShareProposalChangesResult>;
+  readShareProposalFileContent(
+    payload: ReadShareProposalFileContentPayload,
+  ): Promise<ReadShareProposalFileContentResult>;
   settleShareProposal(
     payload: SettleShareProposalPayload,
   ): Promise<SettleShareProposalResult>;

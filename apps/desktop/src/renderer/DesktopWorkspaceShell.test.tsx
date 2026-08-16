@@ -36,6 +36,7 @@ import type {
   ListShareProposalsResult,
   ListWorkspaceVersionsResult,
   ReadShareProposalChangesResult,
+  ReadShareProposalFileContentResult,
   SettleShareProposalPayload,
   SettleShareProposalResult,
   SubmitShareChangesResult,
@@ -466,10 +467,15 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
             path: "docs/plan.md",
             operation: "write",
             drifted: false,
-            currentText: "one\n",
-            incomingText: "two\n",
+            afterByteLength: 4,
           },
         ],
+      }),
+    ),
+    readShareProposalFileContent: vi.fn(
+      async (): Promise<ReadShareProposalFileContentResult> => ({
+        currentText: "one\n",
+        incomingText: "two\n",
       }),
     ),
     settleShareProposal: vi.fn(
@@ -6075,7 +6081,13 @@ describe("share changes review", () => {
     proposedByEmail: "friend@dohc.test",
     createdAtMs: 1000,
     files: [
-      { opIndex: 0, path: "docs/plan.md", operation: "write" as const, drifted: false },
+      {
+        opIndex: 0,
+        path: "docs/plan.md",
+        operation: "write" as const,
+        drifted: false,
+        afterByteLength: 4,
+      },
     ],
   };
 

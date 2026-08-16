@@ -52,6 +52,7 @@ const OP = {
   afterPath: "docs/b.md",
   afterBlobSha256: "b".repeat(64),
   afterContentKind: "text",
+  afterByteLength: 12,
   currentPath: "docs/a.md",
   drifted: false,
 };
@@ -115,6 +116,7 @@ describe("listShareProposals", () => {
             afterPath: "docs/b.md",
             afterBlobSha256: "b".repeat(64),
             afterContentKind: "text",
+            afterByteLength: 12,
             currentPath: "docs/a.md",
             drifted: false,
           },
@@ -133,6 +135,7 @@ describe("listShareProposals", () => {
             afterPath: null,
             afterBlobSha256: null,
             afterContentKind: null,
+            afterByteLength: 12,
             currentPath: null,
             drifted: true,
           },

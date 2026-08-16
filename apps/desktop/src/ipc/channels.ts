@@ -695,6 +695,7 @@ export const CHANNELS = {
   // machine owns; the last three act from inside an edit-level share view.
   listShareProposals: "desktop:list-share-proposals",
   readShareProposalChanges: "desktop:read-share-proposal-changes",
+  readShareProposalFileContent: "desktop:read-share-proposal-file-content",
   settleShareProposal: "desktop:settle-share-proposal",
   submitShareChanges: "desktop:submit-share-changes",
   listMyShareChanges: "desktop:list-my-share-changes",

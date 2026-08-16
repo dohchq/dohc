@@ -226,6 +226,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.listShareProposals, payload),
   readShareProposalChanges: (payload) =>
     ipcRenderer.invoke(CHANNELS.readShareProposalChanges, payload),
+  readShareProposalFileContent: (payload) =>
+    ipcRenderer.invoke(CHANNELS.readShareProposalFileContent, payload),
   settleShareProposal: (payload) =>
     ipcRenderer.invoke(CHANNELS.settleShareProposal, payload),
   submitShareChanges: (payload) =>

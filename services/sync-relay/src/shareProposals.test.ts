@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { MAX_BLOB_BYTES, MAX_OPS_PER_REQUEST, createSyncRelayHandler, type SyncRelayHandler } from "./server";
 // The CONTRACT's shape, not a copy of it. A local re-declaration drifts, and a
 // test that proves the copy proves nothing about the route.
@@ -1604,19 +1605,101 @@ describe("the recipient's blob route", () => {
     ).toContain(sha256("never submitted"));
   });
 
-  it("refuses more changes than one submit carries, and names the limit and the count", async () => {
+  // The route the lazy review opens a file through. It exists so that opening
+  // one file of a 2,500-file review does not re-serve every op of every open
+  // proposal to reach it.
+  it("serves one op of one proposal, and refuses one that addresses nothing", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const granter = new Granter(h);
+    await granter.write("object-in", "docs/in.md", "granter one");
+    const shareId = await createShare(h, "edit");
+    expect((await uploadShareBlob(h, shareId, "recipient two")).status).toBe(200);
+    const sent = await submit(h, shareId, [change()]);
+    expect(sent.status, await sent.clone().text()).toBe(200);
+    const proposalId = (await json(sent)).proposalId as string;
+
+    const one = await h(
+      request(GRANTER, `/sync/${WORKSPACE}/proposals/${proposalId}/ops/0`),
+    );
+    expect(one.status, await one.clone().text()).toBe(200);
+    const op = (await json(one)).op as Record<string, unknown>;
+    expect(op.opIndex).toBe(0);
+    expect(op.afterPath).toBe("docs/in.md");
+    expect(op.afterBlobSha256).toBe(sha256("recipient two"));
+    expect(op, "the row states no content, only where it is").not.toHaveProperty(
+      "incomingText",
+    );
+
+    // An index past the proposal's own ops addresses no file.
+    expect((await h(request(GRANTER, `/sync/${WORKSPACE}/proposals/${proposalId}/ops/1`))).status).toBe(404);
+    // And a recipient cannot read the granter's workspace routes at all.
+    expect(
+      (await h(request(RECIPIENT, `/sync/${WORKSPACE}/proposals/${proposalId}/ops/0`))).status,
+      "MUTATION: serving this route outside the owner gate hands a recipient the granter's own files",
+    ).toBe(404);
+  });
+
+  // The measured bound, at its exact edge on both sides
+  // (`docs/superpowers/plans/2026-08-17-share-submit-bound.md`). Driven at the
+  // real number rather than a small stand-in, because a bound tested only near
+  // zero proves nothing about the number that ships.
+  it("carries a submit of exactly the bound", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
     const shareId = await createShare(h, "edit");
-    const tooMany = Array.from({ length: MAX_OPS_PER_REQUEST + 1 }, (_ignored, index) =>
-      change({ basedOnPath: null, basedOnBlobSha256: null, afterPath: `docs/f-${index}.md` }),
+    // Real content, because the submit door refuses a change naming a blob the
+    // relay does not hold. One body for all of them: blobs are addressed by
+    // content, so one upload covers every change that carries it.
+    const body = "recipient content";
+    expect((await uploadShareBlob(h, shareId, body)).status).toBe(200);
+    const atBound = Array.from({ length: MAX_SHARE_PROPOSAL_OPS }, (_ignored, index) =>
+      change({
+        basedOnPath: null,
+        basedOnBlobSha256: null,
+        afterPath: `docs/f-${index}.md`,
+        afterBlobSha256: sha256(body),
+        afterByteLength: body.length,
+      }),
+    );
+
+    const accepted = await submit(h, shareId, atBound);
+    expect(accepted.status, await accepted.clone().text()).toBe(200);
+    expect(
+      (await json(accepted)).ops,
+      "MUTATION: a bound one below the stated number refuses a submit it must carry",
+    ).toBe(MAX_SHARE_PROPOSAL_OPS);
+  });
+
+  it("refuses one change past the bound, and names the limit and the count", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const shareId = await createShare(h, "edit");
+    const tooMany = Array.from(
+      { length: MAX_SHARE_PROPOSAL_OPS + 1 },
+      (_ignored, index) =>
+        change({ basedOnPath: null, basedOnBlobSha256: null, afterPath: `docs/f-${index}.md` }),
     );
 
     const refused = await submit(h, shareId, tooMany);
     expect(refused.status).toBe(400);
     const body = await refused.text();
-    expect(body, "the refusal names the limit").toContain(String(MAX_OPS_PER_REQUEST));
-    expect(body, "and what was observed").toContain(String(MAX_OPS_PER_REQUEST + 1));
+    expect(body, "the refusal names the limit").toContain(String(MAX_SHARE_PROPOSAL_OPS));
+    expect(body, "and what was observed").toContain(String(MAX_SHARE_PROPOSAL_OPS + 1));
+  });
+
+  // The submit bound and the replication page size are two different numbers
+  // for two different things. Raising the page size to carry a submit would
+  // lengthen every replication stall; raising the submit bound to match a page
+  // would put it back inside the measured healthy range.
+  it("keeps the replication page size where it was", () => {
+    expect(MAX_OPS_PER_REQUEST).toBe(500);
+    expect(
+      MAX_SHARE_PROPOSAL_OPS,
+      "MUTATION: collapsing the two bounds into one re-couples a user act to a paging size",
+    ).not.toBe(MAX_OPS_PER_REQUEST);
   });
 });
