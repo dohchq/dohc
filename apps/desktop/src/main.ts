@@ -694,14 +694,12 @@ import {
   archiveChatBookmarkProjection,
   writeChatBookmarkProjection,
 } from "./workspaces/chatBookmarkProjectionWrite";
-import {
-  collectZipEntries,
-  createFolder,
-  listFiles,
-} from "./workspaces/workspaceFiles";
+import { collectZipEntries, listFiles } from "./workspaces/workspaceFiles";
+import { explorerMenuEntries } from "./workspaces/explorerMenu";
 import {
   routeWorkspaceFileCreate,
   routeWorkspaceFileImport,
+  routeWorkspaceFolderCreate,
   routeWorkspacePathDelete,
   routeWorkspacePathMove,
 } from "./workspaces/workspaceFileOps";
@@ -4148,9 +4146,21 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = CreateWorkspaceFolderPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    assertWritableWorkspace(workspace);
+    // A share view is refused here at EVERY level, as it always was — the
+    // engine has no folder object, so there is no moment for a routed create
+    // to write. It goes through the router only so the refusal can say that
+    // instead of pointing at the granter for a change nothing could send.
+    // `routeWorkspaceFolderCreate` decides on the share view's PRESENCE.
+    const shareView = sharedViewOf(workspace.workspaceId);
+    if (shareView === null) assertWritableWorkspace(workspace);
     return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async () => {
-      const path = await createFolder(workspace.rootPath, input.relativePath);
+      const path = await routeWorkspaceFolderCreate({
+        workspaceId: workspace.workspaceId,
+        rootPath: workspace.rootPath,
+        relativePath: input.relativePath,
+        shareView,
+        shareViewStore: () => sharedViewStoreFor(workspace),
+      });
       return CreateWorkspaceFileResult.parse({ path });
     });
   });
@@ -4390,32 +4400,15 @@ function registerIpcHandlers(
           picked = id;
         },
       });
-      const separator = { type: "separator" as const };
-      // The menu MIRRORS the write gates below it, and main owns the menu, so
-      // the reduction cannot be bypassed by the renderer.
-      //
-      // A share view offers create, rename, delete and import at EDIT level
-      // and at no other, because those four are the handlers #802 routed to
-      // the engine — the menu asks the same rule they ask. New Folder is
-      // offered nowhere in a share view: the engine has no folder object, so
-      // an empty folder is nothing the recipient could send (see
-      // `workspaceFileOps.ts`). A recipient makes a folder by making a file
-      // in it.
-      //
-      // Sharing onward is offered nowhere: someone else's files are not this
-      // account's to grant, and a share needs a relay-side workspace to grant
-      // from.
+      // The menu's shape is decided by `explorerMenuEntries`, where it can be
+      // driven at every level; main owns only the Electron plumbing. main
+      // still owns the MENU, so a renderer cannot add an item back.
       const registryEntry = findWorkspace(input.workspaceId);
-      // ONE reading of "is this a share view, and what does it grant?" —
-      // `sharedViewOf`, which is where the presence rule lives. A second copy
-      // beside it is a copy that can disagree.
       const shareView = sharedViewOf(input.workspaceId);
       const isSharedView = shareView !== null;
       // Share-mount paths (shared-with-me/…) are a read-only projection of
-      // someone else's files: no create/rename/delete/import/share — main
-      // owns the menu, so the reduction cannot be bypassed by the renderer.
-      // The mount root itself (shared-with-me/<label> with a matching mount
-      // record) additionally offers refresh and removal.
+      // someone else's files. The mount root itself (shared-with-me/<label>
+      // with a matching mount record) additionally offers refresh and removal.
       const isMountPath =
         !isSharedView && !!input.path && isSharedWithMePath(input.path);
       const mountForPath = isMountPath
@@ -4423,59 +4416,20 @@ function registerIpcHandlers(
             (mount) => input.path === `shared-with-me/${mount.label}`,
           )
         : undefined;
-      const canShare =
-        !isSharedView && !isMountPath && !!registryEntry?.remote && input.kind !== "root";
-      // The four routed operations, offered exactly where their handlers
-      // accept them: everywhere in an ordinary workspace, and in a share view
-      // only at the level `shareViewTakesLocalWrites` names.
-      const canWrite = shareView === null || shareViewTakesLocalWrites(shareView);
-      const template: Electron.MenuItemConstructorOptions[] = isMountPath
-        ? [
-            ...(mountForPath
-              ? [
-                  item("Refresh Share", "refresh-share-mount"),
-                  item("Remove Share from Workspace", "unmount-share"),
-                  separator,
-                ]
-              : [item("Refresh Shares", "refresh-share-mount"), separator]),
-            input.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
-            separator,
-            item("Export as Zip…", "export-zip"),
-            item("Reveal in File Manager", "open-externally"),
-          ]
-        : input.kind === "root"
-          ? [
-              ...(canWrite
-                ? [
-                    item("New File", "new-file"),
-                    ...(isSharedView ? [] : [item("New Folder", "new-folder")]),
-                    separator,
-                    item("Import Files…", "import-files"),
-                  ]
-                : []),
-              item("Export Workspace as Zip…", "export-zip"),
-            ]
-          : [
-              ...(canShare ? [item("Share…", "share"), separator] : []),
-              ...(canWrite && input.kind === "folder"
-                ? [
-                    item("New File", "new-file"),
-                    ...(isSharedView ? [] : [item("New Folder", "new-folder")]),
-                    // Folder-targeted import: files land IN this folder (the
-                    // renderer passes the folder as importWorkspaceFiles'
-                    // targetDir, re-validated main-side before any copy).
-                    item("Import Files…", "import-files"),
-                    separator,
-                  ]
-                : []),
-              ...(canWrite
-                ? [item("Rename", "rename"), item("Delete", "delete")]
-                : []),
-              input.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
-              separator,
-              item("Export as Zip…", "export-zip"),
-              item("Reveal in File Manager", "open-externally"),
-            ];
+      const template: Electron.MenuItemConstructorOptions[] = explorerMenuEntries({
+        kind: input.kind,
+        pinned: input.pinned === true,
+        isMountPath,
+        hasMountRecord: mountForPath !== undefined,
+        // Sharing onward is offered nowhere in a share view or a mount:
+        // someone else's files are not this account's to grant, and a share
+        // needs a relay-side workspace to grant from.
+        canShare:
+          !isSharedView && !isMountPath && !!registryEntry?.remote && input.kind !== "root",
+        shareView,
+      }).map((entry) =>
+        entry.kind === "separator" ? { type: "separator" as const } : item(entry.label, entry.id),
+      );
       const menu = Menu.buildFromTemplate(template);
       const window = BrowserWindow.fromWebContents(event.sender) ?? undefined;
       menu.popup({

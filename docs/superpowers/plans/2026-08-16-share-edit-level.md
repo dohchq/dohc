@@ -656,7 +656,10 @@ means the surface reflects a decision made elsewhere.
 | Share-view capture | none | none | none | server-side | `engineCaptureGate.ts:42-44` |
 | Share-view editor save | refuse | refuse | engine, then projection | server-side (main is the trust boundary) | `workspaceTextWrite.ts` |
 | `assertWritableWorkspace` in a share view | refuse | refuse | **refuse** | server-side (main is the trust boundary) | `shareWriteGate.ts` |
-| Share-view create / rename / delete / import | refuse | refuse | **refuse** | server-side | the row above |
+| Share-view create / rename / delete / import | refuse | refuse | engine, then projection | server-side (main is the trust boundary) | `workspaceFileOps.ts` |
+| Share-view create FOLDER | refuse | refuse | **refuse** | server-side (main is the trust boundary) | `workspaceFileOps.ts` |
+| Share-view op over content the store does not hold | refuse | refuse | **refuse** | server-side (main is the trust boundary) | `workspaceFileOps.ts` |
+| Explorer menu in a share view | read-only | read-only | the four routed ops, never New folder | UX mirror | `explorerMenu.ts` |
 | Granter's own files, written by a recipient | refuse | refuse | **refuse** | server-side | unchanged |
 | Live-session fence on accepted ops | n/a | n/a | retry until settled | server-side | `moment_apply.rs:245-249` |
 | Editor `readOnly` in a share view | true | true | false | UX mirror | `DesktopWorkspaceShell.tsx:5218` |
@@ -679,6 +682,30 @@ means the surface reflects a decision made elsewhere.
 > the ordinary gate is skipped only there, by name. The rule the gate asks
 > cannot see a level at all — its input carries the marker, never the grant —
 > so it cannot be widened by one.
+>
+> **Amended by #802: create, rename, delete and import are routed the same
+> way, and the explorer menu now offers exactly them at edit level.**
+> `assertWritableWorkspace` is unchanged and still refuses on presence; each of
+> the four skips it by name at its own seam in `workspaceFileOps.ts`, and each
+> asks the same one rule. Three properties came out of building them and are
+> part of the posture:
+>
+> - **The projection is not dohc's to spend.** A share view's folder holds the
+>   projection of the store AND whatever the recipient put there themselves,
+>   which no moment describes. Every operation asks both sides before it writes
+>   either: a create returns without journaling onto an occupied path, an
+>   import counts disk names as taken, a rename refuses a destination the
+>   folder already holds, and a folder move or delete refuses while a file the
+>   store does not hold sits under it. Refusing is the whole rule — dohc does
+>   not carry those files along, and invents no trash to put them in.
+> - **Nothing is applied until everything is checked**, and a failure part way
+>   through a folder operation puts the renames back or materializes the
+>   deletes that landed. A half-applied folder is a set of changes nobody asked
+>   to send.
+> - **A FOLDER is still refused at every level**, because the engine has no
+>   folder object for a moment to describe. `routeWorkspaceFolderCreate`
+>   refuses on the share view's presence, exactly as the gate it left did, and
+>   reads the level only to choose which true sentence to say.
 
 The row that matters most: **Edit never makes the granter's workspace writable
 by anyone but the granter.** A recipient at edit level writes only to its own
@@ -874,11 +901,18 @@ This PR is a fix. It should merge without waiting for the rest.
 Per-file accept, richer drift presentation, granter-side provenance beyond the
 proposal record, and auto-accept (Option A's future).
 
-Added by review round 3: **routing the other file operations through the
-engine**, one handler at a time — create, rename, delete, import. Each needs
-the same shape the text write got (engine moment, then projection) and its own
-gate at its own seam. Until then they stay refused at every level, and the
-explorer menu says so by offering none of them.
+~~Added by review round 3: **routing the other file operations through the
+engine**, one handler at a time — create, rename, delete, import.~~ **Shipped
+by #802**, in one change rather than four: each takes the shape the text write
+got (engine moment, then projection) and its own gate at its own seam, and the
+explorer menu offers exactly them at edit level. See the amendment under the
+enforcement table for the three rules that came out of building them. A FOLDER
+is still refused at every level and stays that way — the engine has no folder
+object for a moment to describe.
+
+Still deferred here: **edits made to a share view's files by external tools**,
+which need the policy-input design pipeline 1 describes rather than a widening.
+Tracked as its own issue.
 
 **Why not split PR3a further.** Any smaller cut ships a lane no user can reach,
 which is the failure mode this repo has paid for repeatedly: a green check over

@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -131,9 +131,37 @@ function scope(harnessed: Harness, access: "edit" = "edit") {
   return {
     workspaceId: harnessed.workspaceId,
     rootPath: harnessed.rootPath,
-    shareView: { access, ended: false },
+    shareView: { access, ended: false, granterEmail: "granter@dohc.test" },
     shareViewStore: () => harnessed.store,
   };
+}
+
+/**
+ * The same store, with one method made to fail at the Nth call.
+ *
+ * A mid-apply failure is the case a folder operation cannot test any other
+ * way: the engine has to accept some of the files and then refuse one, which
+ * no arrangement of inputs produces on demand.
+ */
+function storeFailingAt(
+  store: CaptureVersionedTextStore,
+  method: "renameTextFile" | "deleteTextFile",
+  call: number,
+): CaptureVersionedTextStore {
+  let seen = 0;
+  return new Proxy(store, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver) as unknown;
+      if (property !== method || typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        seen += 1;
+        if (seen === call) {
+          return Promise.reject(new Error(`engine refused ${method} call ${call}`));
+        }
+        return (value as (...inner: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  }) as CaptureVersionedTextStore;
 }
 
 async function storePaths(harnessed: Harness): Promise<string[]> {
@@ -171,12 +199,16 @@ function replicationLogRows(rootPath: string): number {
   }
 }
 
+// `lstat`, not a read: a DIRECTORY answers a read with EISDIR, so a read-based
+// probe reported every existing folder as absent — and a test asserting a
+// folder was removed then passed whether or not it was.
 async function exists(path: string): Promise<boolean> {
-  return readFile(path).then(
+  return lstat(path).then(
     () => true,
     () => false,
   );
 }
+
 
 describe("share-view file operations through the real store", () => {
   it.skipIf(engine.missing)(
@@ -285,6 +317,277 @@ describe("share-view file operations through the real store", () => {
     60_000,
   );
 
+  // THE PROJECTION IS NOT DOHC'S TO SPEND (sweep of #806, blockers 1-4).
+  //
+  // A share view's folder holds two kinds of file: the projection of the
+  // store, which dohc rewrites freely, and whatever the recipient put there
+  // themselves, which is their own data and which no moment describes. Every
+  // operation below used to rewrite the folder without asking which kind it
+  // was about to destroy. The rule is now the same one create and import
+  // already took: refuse, and say what to move first.
+
+  it.skipIf(engine.missing)(
+    "refuses a rename onto a name the folder already holds",
+    async () => {
+      const view = await harness("dohc-share-rename-onto-", "edit");
+      await seedSharedFiles(view, [{ path: "docs/note.md", text: "granter\n" }]);
+      await writeFile(join(view.rootPath, "docs", "mine.md"), "mine\n", "utf8");
+
+      await expect(
+        routeWorkspacePathMove({
+          ...scope(view),
+          fromPath: "docs/note.md",
+          toPath: "docs/mine.md",
+        }),
+        "MUTATION: a rename that asks only the store overwrites the recipient's own file",
+      ).rejects.toThrow(/already exists/);
+
+      await expect(
+        readFile(join(view.rootPath, "docs", "mine.md"), "utf8"),
+      ).resolves.toBe("mine\n");
+      await expect(
+        readFile(join(view.rootPath, "docs", "note.md"), "utf8"),
+      ).resolves.toBe("granter\n");
+      expect(await storePaths(view)).toEqual(["docs/note.md"]);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "renames a file whose name differs only in case",
+    async () => {
+      const view = await harness("dohc-share-rename-case-", "edit");
+      await seedSharedFiles(view, [{ path: "docs/note.md", text: "granter\n" }]);
+
+      // The carve-out `movePath` already makes: on a case-insensitive
+      // filesystem the destination "exists" because it IS the source, and
+      // refusing there would block a rename the user plainly meant.
+      const path = await routeWorkspacePathMove({
+        ...scope(view),
+        fromPath: "docs/note.md",
+        toPath: "docs/Note.md",
+      });
+
+      expect(path).toBe("docs/Note.md");
+      expect(
+        await storePaths(view),
+        "MUTATION: an occupied-name check without the case carve-out refuses a rename that only changes case",
+      ).toEqual(["docs/Note.md"]);
+      await expect(
+        readFile(join(view.rootPath, "docs", "Note.md"), "utf8"),
+      ).resolves.toBe("granter\n");
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "refuses to move a folder that holds files no moment describes",
+    async () => {
+      const view = await harness("dohc-share-rename-dir-local-", "edit");
+      await seedSharedFiles(view, [
+        { path: "docs/plans/one.md", text: "one\n" },
+        { path: "docs/plans/two.md", text: "two\n" },
+      ]);
+      await writeFile(join(view.rootPath, "docs", "plans", "mine.md"), "mine\n", "utf8");
+
+      await expect(
+        routeWorkspacePathMove({
+          ...scope(view),
+          fromPath: "docs/plans",
+          toPath: "docs/roadmap",
+        }),
+        "MUTATION: moving a folder removes it whole, destroying the files under it the store never held",
+      ).rejects.toThrow(/not part of this shared view/);
+
+      await expect(
+        readFile(join(view.rootPath, "docs", "plans", "mine.md"), "utf8"),
+      ).resolves.toBe("mine\n");
+      expect(await storePaths(view)).toEqual([
+        "docs/plans/one.md",
+        "docs/plans/two.md",
+      ]);
+      expect(await exists(join(view.rootPath, "docs", "roadmap"))).toBe(false);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "refuses to delete a folder that holds files no moment describes",
+    async () => {
+      const view = await harness("dohc-share-delete-dir-local-", "edit");
+      await seedSharedFiles(view, [
+        { path: "docs/plans/one.md", text: "one\n" },
+        { path: "docs/plans/two.md", text: "two\n" },
+      ]);
+      await writeFile(join(view.rootPath, "docs", "plans", "mine.md"), "mine\n", "utf8");
+
+      await expect(
+        routeWorkspacePathDelete({
+          ...scope(view),
+          relativePath: "docs/plans",
+          trashItem: async () => undefined,
+        }),
+        "MUTATION: deleting a folder removes it whole, destroying the files under it the store never held",
+      ).rejects.toThrow(/not part of this shared view/);
+
+      await expect(
+        readFile(join(view.rootPath, "docs", "plans", "mine.md"), "utf8"),
+      ).resolves.toBe("mine\n");
+      expect(await storePaths(view)).toEqual([
+        "docs/plans/one.md",
+        "docs/plans/two.md",
+      ]);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "renames a binary file without corrupting its bytes",
+    async () => {
+      const view = await harness("dohc-share-rename-binary-", "edit");
+      const main = await view.store.ensureMainVersion({ workspaceId: view.workspaceId });
+      // Bytes that are not valid UTF-8, so a text round trip cannot survive
+      // them: this is what a rename materializing through `readTextFile`
+      // would silently replace with an empty file.
+      const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0xfe, 0x01]);
+      await view.store.writeBinaryFile({
+        workspaceId: view.workspaceId,
+        versionId: main.id,
+        path: "docs/picture.png",
+        bytes,
+        metadata: { origin: "sync" },
+      });
+      await materializeSharedViewPaths(
+        view.rootPath,
+        view.workspaceId,
+        [{ path: "docs/picture.png", operation: "write", contentKind: "binary" }],
+        view.store,
+      );
+
+      const path = await routeWorkspacePathMove({
+        ...scope(view),
+        fromPath: "docs/picture.png",
+        toPath: "docs/renamed.png",
+      });
+
+      expect(path).toBe("docs/renamed.png");
+      expect(
+        await storePaths(view),
+        "MUTATION: a binary file the store lists as text is dropped from a folder scan entirely",
+      ).toEqual(["docs/renamed.png"]);
+      await expect(
+        readFile(join(view.rootPath, "docs", "renamed.png")),
+        "MUTATION: materializing a renamed binary through readTextFile lands an empty or corrupt file",
+      ).resolves.toEqual(bytes);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "puts a folder rename back when the engine refuses one of its files",
+    async () => {
+      const view = await harness("dohc-share-rename-midfail-", "edit");
+      await seedSharedFiles(view, [
+        { path: "docs/plans/one.md", text: "one\n" },
+        { path: "docs/plans/two.md", text: "two\n" },
+        { path: "docs/plans/three.md", text: "three\n" },
+        { path: "docs/plans/four.md", text: "four\n" },
+        { path: "docs/plans/five.md", text: "five\n" },
+      ]);
+
+      await expect(
+        routeWorkspacePathMove({
+          ...scope(view),
+          fromPath: "docs/plans",
+          toPath: "docs/roadmap",
+          shareViewStore: () => storeFailingAt(view.store, "renameTextFile", 3),
+        }),
+      ).rejects.toThrow(/engine refused renameTextFile call 3/);
+
+      expect(
+        await storePaths(view),
+        "MUTATION: a failure part way through leaves half a folder renamed, and every one of those halves is proposable",
+      ).toEqual([
+        "docs/plans/five.md",
+        "docs/plans/four.md",
+        "docs/plans/one.md",
+        "docs/plans/three.md",
+        "docs/plans/two.md",
+      ]);
+      // The projection never moved either: it follows the store, and the
+      // store went back to where it started.
+      expect(await exists(join(view.rootPath, "docs", "roadmap"))).toBe(false);
+      await expect(
+        readFile(join(view.rootPath, "docs", "plans", "one.md"), "utf8"),
+      ).resolves.toBe("one\n");
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "shows every delete that landed when the engine refuses one of them",
+    async () => {
+      const view = await harness("dohc-share-delete-midfail-", "edit");
+      await seedSharedFiles(view, [
+        { path: "docs/plans/one.md", text: "one\n" },
+        { path: "docs/plans/two.md", text: "two\n" },
+        { path: "docs/plans/three.md", text: "three\n" },
+      ]);
+
+      await expect(
+        routeWorkspacePathDelete({
+          ...scope(view),
+          relativePath: "docs/plans",
+          trashItem: async () => undefined,
+          shareViewStore: () => storeFailingAt(view.store, "deleteTextFile", 3),
+        }),
+      ).rejects.toThrow(/engine refused deleteTextFile call 3/);
+
+      // A delete cannot be put back, so the rule is the other one: what
+      // happened is visible. Files go in path order — one, three, two — so the
+      // THIRD call is the one that fails, and its file stays on both sides
+      // while the two before it are gone from both.
+      expect(await storePaths(view)).toEqual(["docs/plans/two.md"]);
+      expect(
+        await exists(join(view.rootPath, "docs", "plans", "one.md")),
+        "MUTATION: a delete that fails part way leaves the projection holding files the store no longer has",
+      ).toBe(false);
+      expect(await exists(join(view.rootPath, "docs", "plans", "three.md"))).toBe(false);
+      await expect(
+        readFile(join(view.rootPath, "docs", "plans", "two.md"), "utf8"),
+      ).resolves.toBe("two\n");
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "screens an OS drag-in before it writes a share view's store",
+    async () => {
+      const view = await harness("dohc-share-import-dropped-", "edit");
+      await seedSharedFiles(view, [{ path: "docs/note.md", text: "granter\n" }]);
+      const sourceDir = await createTestScratch("dohc-share-dropped-src-");
+      roots.push(sourceDir);
+      const file = join(sourceDir, "dropped.md");
+      await writeFile(file, "dropped\n", "utf8");
+      const directory = join(sourceDir, "folder");
+      await mkdir(directory);
+
+      const outcome = await routeWorkspaceFileImport({
+        ...scope(view),
+        absolutePaths: [file, directory],
+        screenAgainstRoots: [view.rootPath],
+        targetDir: "docs",
+      });
+
+      expect(
+        outcome,
+        "MUTATION: an unscreened drag-in writes a directory into the share view's store",
+      ).toEqual({ imported: ["docs/dropped.md"], skipped: 1 });
+      expect(await storePaths(view)).toEqual(["docs/dropped.md", "docs/note.md"]);
+    },
+    60_000,
+  );
+
   it.skipIf(engine.missing)(
     "deletes a file as a moment and removes its projection",
     async () => {
@@ -298,9 +601,7 @@ describe("share-view file operations through the real store", () => {
       const result = await routeWorkspacePathDelete({
         ...scope(view),
         relativePath: "docs/note.md",
-        trashItem: async () => {
-          throw new Error("a share view's delete must not reach the ordinary trash path");
-        },
+        trashItem: async () => undefined,
       });
 
       expect(result).toEqual({ trashed: false });
@@ -361,9 +662,7 @@ describe("share-view file operations through the real store", () => {
       await routeWorkspacePathDelete({
         ...scope(view),
         relativePath: "docs/plans",
-        trashItem: async () => {
-          throw new Error("a share view's delete must not reach the ordinary trash path");
-        },
+        trashItem: async () => undefined,
       });
 
       expect(

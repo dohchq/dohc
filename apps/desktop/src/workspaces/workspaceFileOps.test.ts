@@ -8,6 +8,7 @@ import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStor
 import {
   routeWorkspaceFileCreate,
   routeWorkspaceFileImport,
+  routeWorkspaceFolderCreate,
   routeWorkspacePathDelete,
   routeWorkspacePathMove,
 } from "./workspaceFileOps";
@@ -42,11 +43,20 @@ function forbiddenStore(): () => CaptureVersionedTextStore {
   };
 }
 
+const GRANTER = "granter@dohc.test";
+const READ_ONLY = `This shared view is read-only for you. Ask ${GRANTER} for changes.`;
+
 const refusedLevels = [
-  ["view", { access: "view" as ShareAccess, ended: false }],
-  ["comment", { access: "comment" as ShareAccess, ended: false }],
-  ["a grant this process cannot read", { access: null, ended: false }],
-  ["an ended edit share", { access: "edit" as ShareAccess, ended: true }],
+  ["view", { access: "view" as ShareAccess, ended: false, granterEmail: GRANTER }],
+  ["comment", { access: "comment" as ShareAccess, ended: false, granterEmail: GRANTER }],
+  [
+    "a grant this process cannot read",
+    { access: null, ended: false, granterEmail: GRANTER },
+  ],
+  [
+    "an ended edit share",
+    { access: "edit" as ShareAccess, ended: true, granterEmail: GRANTER },
+  ],
 ] as const;
 
 describe("share-view file operations, at every level that takes no local writes", () => {
@@ -106,8 +116,10 @@ describe("share-view file operations, at every level that takes no local writes"
   }
 
   // The same string at every refused level, so a refusal never tells the
-  // recipient which level they hold.
-  it("refuses view and comment with byte-identical messages", async () => {
+  // recipient which level they hold — and that string states what to do next,
+  // which naming the granter is: a person who cannot change a file needs to
+  // know who can.
+  it("refuses view and comment with the same message, and it names the next step", async () => {
     const rootPath = await scratch();
     const messages = await Promise.all(
       (["view", "comment"] as const).map(async (access) =>
@@ -116,7 +128,7 @@ describe("share-view file operations, at every level that takes no local writes"
           rootPath,
           relativePath: "new.md",
           initialText: "",
-          shareView: { access, ended: false },
+          shareView: { access, ended: false, granterEmail: GRANTER },
           shareViewStore: forbiddenStore(),
         }).then(
           () => "no refusal",
@@ -124,11 +136,64 @@ describe("share-view file operations, at every level that takes no local writes"
         ),
       ),
     );
+    // The EXACT string on both, not merely the same string: two refusals that
+    // both said "no refusal", or both said nothing useful, would satisfy an
+    // equality check and state nothing.
     expect(
       messages[0],
+      "MUTATION: a refusal with no next step leaves the reader nowhere to go",
+    ).toBe(READ_ONLY);
+    expect(
+      messages[1],
       "MUTATION: a level-specific refusal fingerprints the level",
-    ).toBe(messages[1]);
-    expect(messages[0]).not.toContain("comment");
+    ).toBe(READ_ONLY);
+  });
+
+  // A folder is refused at EVERY level, including edit, because the engine has
+  // no folder object for a moment to describe. Only the sentence changes.
+  it("refuses a folder in a share view at every level", async () => {
+    const rootPath = await scratch();
+    const folderScope = (shareView: {
+      access: ShareAccess | null;
+      ended: boolean;
+      granterEmail: string | null;
+    }) => ({
+      workspaceId: "ws-1",
+      rootPath,
+      relativePath: "plans",
+      shareView,
+      shareViewStore: forbiddenStore(),
+    });
+
+    for (const [label, shareView] of refusedLevels) {
+      await expect(
+        routeWorkspaceFolderCreate(folderScope(shareView)),
+        `MUTATION: a share view at ${label} makes a folder no moment can describe`,
+      ).rejects.toThrow(READ_ONLY);
+    }
+    await expect(
+      routeWorkspaceFolderCreate(
+        folderScope({ access: "edit", ended: false, granterEmail: GRANTER }),
+      ),
+      "MUTATION: routing create-folder at edit level makes a folder nothing can send",
+    ).rejects.toThrow(
+      "A shared view can't hold an empty folder. Make a file in the folder you want.",
+    );
+    expect(await readdir(rootPath)).toEqual([]);
+  });
+
+  it("makes a folder in an ordinary workspace", async () => {
+    const rootPath = await scratch();
+    await expect(
+      routeWorkspaceFolderCreate({
+        workspaceId: "ws-1",
+        rootPath,
+        relativePath: "plans",
+        shareView: null,
+        shareViewStore: forbiddenStore(),
+      }),
+    ).resolves.toBe("plans");
+    expect(await readdir(rootPath)).toEqual(["plans"]);
   });
 });
 

@@ -900,32 +900,30 @@ describe("main-process chat authorization", () => {
   });
 
   // The menu is a UX MIRROR of the gates below it, and it has to mirror the
-  // SAME rule they ask. Create, rename, delete and import are routed to the
-  // engine for a share view (#802), so the menu offers them exactly where
-  // `shareViewTakesLocalWrites` says the handlers accept them — and asks that
-  // one rule rather than re-spelling a level here. Position only; what the
-  // handlers decide is driven in `workspaces/shareWriteGate.test.ts` and
-  // `workspaces/workspaceFileOps.test.ts`.
-  it("mirrors the routed write rule in a shared view's explorer menu", () => {
+  // SAME rule they ask. Its SHAPE is decided by `explorerMenuEntries` and
+  // driven at every level in `workspaces/explorerMenu.test.ts`; what this pins
+  // is main's wiring — that the decision comes from there, over the registry's
+  // own answer, and that main does not re-spell a level beside it.
+  it("builds a shared view's explorer menu from the one rule, not from a level of its own", () => {
     const handler = handlerSource("showExplorerMenu");
-    // ONE reading of the share view, from the resolver whose presence rule is
-    // pinned above. A second copy beside it is a copy that can disagree.
     expect(handler).toContain("const shareView = sharedViewOf(input.workspaceId);");
-    expect(handler).toContain("const isSharedView = shareView !== null;");
+    expect(handler).toContain("explorerMenuEntries({");
+    expect(handler).toContain("shareView,");
     expect(
       handler,
-      "MUTATION: a second copy of the level rule in the menu is a copy that drifts",
-    ).toContain("shareViewTakesLocalWrites(shareView)");
+      "MUTATION: a second copy of the level rule in main is a copy that drifts",
+    ).not.toContain("shareViewTakesLocalWrites(");
     expect(handler).not.toContain('access === "edit"');
-    // New Folder is offered nowhere in a share view, at any level: the engine
-    // has no folder object, so an empty folder is nothing the recipient could
-    // send, and `createWorkspaceFolder` keeps the blanket refusal.
-    const folderItems = handler.split('item("New Folder", "new-folder")').length - 1;
-    expect(folderItems).toBe(2);
+    // And the decision itself asks the shared rule rather than a level.
+    const menu = readFileSync(
+      new URL("./workspaces/explorerMenu.ts", import.meta.url),
+      "utf8",
+    );
+    expect(menu).toContain("shareViewTakesLocalWrites(scope.shareView)");
     expect(
-      handler.split('...(isSharedView ? [] : [item("New Folder", "new-folder")])').length - 1,
-      "MUTATION: a share view offering New Folder promises a change no moment can state",
-    ).toBe(2);
+      menu,
+      "MUTATION: a menu that reads the level directly stops agreeing with the handlers",
+    ).not.toContain('access === "edit"');
   });
 
   // #646 PR3a. The review's incoming side is fetched by main and validated by
@@ -961,12 +959,7 @@ describe("main-process chat authorization", () => {
     // projection of its engine store, so a write here would leave the
     // projection stating content no moment does — unsendable, and overwritten
     // by the next pull.
-    //
-    // `createWorkspaceFolder` stays here after #802 routed its four siblings:
-    // the engine has no folder object, so there is no moment for a routed
-    // create-folder to write.
     const rawDiskWriters = [
-      "createWorkspaceFolder",
       "writeWorkspaceAsset",
       "pickImageFiles",
       "applyDatabaseEdit",
@@ -991,17 +984,48 @@ describe("main-process chat authorization", () => {
       "MUTATION: an ungated pipeline writes plugin state into someone else's workspace",
     ).toContain("assertWritableWorkspace(workspace);");
 
-    // And the ONE handler that does NOT take the blanket refusal, stated
-    // here so widening it is a visible edit rather than a silent one: a share
-    // view's text save is decided at the routed seam instead.
-    const textWrite = handlerSource("writeWorkspaceText");
-    expect(textWrite).toContain(
-      "if (shareView === null) assertWritableWorkspace(workspace);",
+    // And the handlers that do NOT take the blanket refusal, each stated here
+    // so widening one is a visible edit rather than a silent one. Every one of
+    // them is decided at its own routed seam instead, and none of them spells
+    // a level in main.
+    const routed = [
+      ["writeWorkspaceText", "routeWorkspaceTextWrite("],
+      ["createWorkspaceFile", "routeWorkspaceFileCreate("],
+      ["createWorkspaceFolder", "routeWorkspaceFolderCreate("],
+      ["moveWorkspacePath", "routeWorkspacePathMove("],
+      ["deleteWorkspacePath", "routeWorkspacePathDelete("],
+      ["importWorkspaceFiles", "routeWorkspaceFileImport("],
+    ] as const;
+    for (const [channel, seam] of routed) {
+      const handler = handlerSource(channel);
+      expect(
+        handler,
+        `${channel}: MUTATION: an unrouted share view takes the blanket refusal and its write never becomes a change`,
+      ).toContain("if (shareView === null) assertWritableWorkspace(workspace);");
+      expect(handler, channel).toContain(seam);
+      expect(
+        handler,
+        `${channel}: MUTATION: a second copy of the level rule in main is a copy that drifts`,
+      ).not.toContain("shareViewTakesLocalWrites(");
+    }
+
+    // The folder create is routed for its MESSAGE, not for a right: it refuses
+    // a share view on presence, exactly as the gate it left did. Driven in
+    // `workspaces/workspaceFileOps.test.ts`.
+    const fileOps = readFileSync(
+      new URL("./workspaces/workspaceFileOps.ts", import.meta.url),
+      "utf8",
     );
+    const folderAt = fileOps.indexOf("export async function routeWorkspaceFolderCreate(");
+    const folder = fileOps.slice(folderAt, fileOps.indexOf("\n}", folderAt));
+    expect(folderAt).toBeGreaterThan(-1);
     expect(
-      textWrite,
-      "MUTATION: a second copy of the level rule in main is a copy that drifts",
-    ).not.toContain("shareViewTakesLocalWrites(");
+      folder,
+      "MUTATION: a folder create that asks the level lets an edit share view make a folder no moment can state",
+    ).toContain("if (input.shareView) {");
+    expect(folder.indexOf("throw new SharedFileReadOnlyError(")).toBeLessThan(
+      folder.indexOf("createFolder("),
+    );
   });
 
   // #646 PR3a. Two lanes, and a workspace is only ever in one of them. The

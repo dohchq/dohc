@@ -100,6 +100,11 @@ export interface ExplorerProps {
   onImportFiles: (droppedPaths?: string[], targetDir?: string) => void;
   // Share mounts: refresh every mount in this workspace / remove the mount
   // that owns the given path (shared-with-me/<label>/…).
+  // A share view's delete removes the projection of a moment, not a file the
+  // workspace owns, so the confirmation must not promise a trash it has no
+  // path to. The granter's copy is what the change can still be taken back
+  // from.
+  isShareView: boolean;
   onRefreshShareMounts: () => void;
   onUnmountShare: (path: string) => void;
   // "Share…" (PR 18): offered by the main-owned context menu on synced,
@@ -1592,8 +1597,9 @@ export function Explorer(props: ExplorerProps) {
                 ?
               </p>
               <p className="mb-0 mt-2 text-xs text-muted">
-                It moves to the system trash — or to this workspace's .dohc/trash
-                folder on drives without one — and can be restored from there.
+                {props.isShareView
+                  ? "It goes from your copy now. The person who shared it still has the file until they accept the change you send."
+                  : "It moves to the system trash — or to this workspace's .dohc/trash folder on drives without one — and can be restored from there."}
               </p>
               {confirmDelete.length > 1 ? (
                 <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">

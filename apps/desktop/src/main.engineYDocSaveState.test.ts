@@ -84,11 +84,12 @@ describe("engine Y.Doc save-state reporting in main", () => {
 
   it("admits file and folder creation through stale-sensitive workspace scheduling", () => {
     for (const [channel, mutation] of [
-      // A file's create is routed (#802) — it lands in the engine store for a
-      // share view and on disk for every other workspace. Which one it takes
+      // Both creates are routed (#802) — a file lands in the engine store for
+      // a share view and on disk for every other workspace, and a folder is
+      // refused for a share view at every level. Which branch either takes
       // does not change what this pins: the mutation runs inside the schedule.
       ["createWorkspaceFile", "await routeWorkspaceFileCreate({"],
-      ["createWorkspaceFolder", "await createFolder("],
+      ["createWorkspaceFolder", "await routeWorkspaceFolderCreate({"],
     ] as const) {
       const handler = handlerSource(channel);
       const scheduledAt = handler.indexOf("withStaleSensitiveWorkspaceOperation(");

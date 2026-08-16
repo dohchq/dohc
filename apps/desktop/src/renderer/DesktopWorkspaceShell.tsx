@@ -4709,6 +4709,7 @@ export function DesktopWorkspaceShell(props: {
         onImportFiles={(droppedPaths, targetDir) =>
           void importFiles(droppedPaths, targetDir)
         }
+        isShareView={isShareView}
         onRefreshShareMounts={() => void refreshShareMounts(true)}
         onUnmountShare={(path) => void unmountShare(path)}
         onShare={(path) => setShareTarget({ path })}

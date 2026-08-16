@@ -1,4 +1,4 @@
-import { lstat, readdir } from "node:fs/promises";
+import { lstat, readdir, realpath } from "node:fs/promises";
 import { basename, join } from "node:path";
 import {
   validateUserMaterializePath,
@@ -17,6 +17,7 @@ import {
 import {
   copyIntoWorkspace,
   createFile,
+  createFolder,
   deletePath,
   importDroppedPaths,
   importNameFor,
@@ -41,24 +42,51 @@ import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStor
 //
 // Each operation asks the level ONCE, through `shareViewTakesLocalWrites`, at
 // the seam that would otherwise write. `assertWritableWorkspace` is untouched:
-// it still refuses a share view on PRESENCE at every level, which is what the
-// handlers it guards need, and `createWorkspaceFolder` is one of them — see
-// `shareViewCreate` for why a folder has nothing to state.
+// it still refuses a share view on PRESENCE at every level.
+//
+// THE PROJECTION IS NOT DOHC'S TO SPEND. A share view's folder holds two kinds
+// of file: the projection of the store, which this module rewrites freely, and
+// whatever the recipient put there themselves, which is their own data and
+// which no moment describes — `repairSharedViewProjection` leaves those alone
+// for exactly that reason. Every operation here therefore asks BOTH sides
+// before it writes either, and refuses when it would touch content the store
+// cannot state. Refusing is the whole fix: dohc does not carry those files
+// along, and does not invent a trash to put them in.
 
-// The refusal every level but edit takes, at every one of these seams. One
-// string for all four, and the same string for `view` and `comment`, so a
-// refusal never tells the recipient which level they hold.
-const SHARE_VIEW_READ_ONLY = "This shared view is read-only for you.";
+/** A share view, plus the granter a refusal has to name. */
+export type ShareViewFileOpTarget = ShareViewWriteScope & {
+  granterEmail: string | null;
+};
 
 export interface ShareViewFileOpScope {
   workspaceId: string;
   rootPath: string;
   // The share view this workspace IS, or null for an ordinary workspace.
-  shareView: ShareViewWriteScope | null;
+  shareView: ShareViewFileOpTarget | null;
   // The share view's engine store. Resolved lazily: an ordinary workspace must
   // never open one on a file operation.
   shareViewStore: () => CaptureVersionedTextStore;
 }
+
+/**
+ * The refusal every level but edit takes, at every one of these seams.
+ *
+ * The same sentence for `view` and `comment`, so a refusal never tells the
+ * recipient which level they hold, and the granter named the way the ordinary
+ * write gate names them — a person who cannot change a file needs to know who
+ * can.
+ */
+function readOnlyRefusal(shareView: ShareViewFileOpTarget): string {
+  const granter = shareView.granterEmail ?? "the person who shared it";
+  return `This shared view is read-only for you. Ask ${granter} for changes.`;
+}
+
+// A folder is not a thing the engine can hold, so this is true at every level.
+// It replaces no gate: `routeWorkspaceFolderCreate` refuses a share view on
+// PRESENCE, exactly as `assertWritableWorkspace` did, and only chooses which
+// true sentence to say.
+const NO_EMPTY_FOLDER =
+  "A shared view can't hold an empty folder. Make a file in the folder you want.";
 
 /**
  * The path is in the folder but not in the store, so no moment describes it —
@@ -70,9 +98,19 @@ function notInThisShareView(path: string, action: "Rename" | "Delete"): string {
   return `${path} is not part of this shared view, so dohc cannot send that change. ${action} it in your file manager to change your own copy.`;
 }
 
-function refuseUnlessWritable(shareView: ShareViewWriteScope): void {
+/**
+ * A folder holding files the store never had. Naming them is the point: the
+ * person has to know which files to move before the operation can run.
+ */
+function untrackedUnderRefusal(folder: string, untracked: readonly string[]): string {
+  const named = untracked.slice(0, 3).join(", ");
+  const rest = untracked.length > 3 ? `, and ${untracked.length - 3} more` : "";
+  return `${folder} holds ${untracked.length} file${untracked.length === 1 ? "" : "s"} that are not part of this shared view: ${named}${rest}. Move them out of the folder first.`;
+}
+
+function refuseUnlessWritable(shareView: ShareViewFileOpTarget): void {
   if (!shareViewTakesLocalWrites(shareView)) {
-    throw new SharedFileReadOnlyError(SHARE_VIEW_READ_ONLY);
+    throw new SharedFileReadOnlyError(readOnlyRefusal(shareView));
   }
 }
 
@@ -84,6 +122,26 @@ export async function routeWorkspaceFileCreate(
     return shareViewCreate(input);
   }
   return createFile(input.rootPath, input.relativePath, input.initialText);
+}
+
+/**
+ * A folder, which a share view cannot hold at any level.
+ *
+ * This is a refusal, not a route: nothing below it writes a share view, and
+ * the share view branch is decided on PRESENCE, never on the grant. The level
+ * chooses the sentence and nothing else, so there is no rule here to widen.
+ */
+export async function routeWorkspaceFolderCreate(
+  input: ShareViewFileOpScope & { relativePath: string },
+): Promise<string> {
+  if (input.shareView) {
+    throw new SharedFileReadOnlyError(
+      shareViewTakesLocalWrites(input.shareView)
+        ? NO_EMPTY_FOLDER
+        : readOnlyRefusal(input.shareView),
+    );
+  }
+  return createFolder(input.rootPath, input.relativePath);
 }
 
 export async function routeWorkspacePathMove(
@@ -135,18 +193,18 @@ export async function routeWorkspaceFileImport(
 /**
  * A new file in a share view: a moment first, then the projection.
  *
- * A file the store already holds is left exactly as it is and its path
- * returned, which is what `createFile` does on disk — a create never clobbers,
- * and a create that journaled an empty moment over someone's work would be
- * worse than one that did nothing.
+ * A create never clobbers, and BOTH sides can be occupied: the store, and the
+ * projection, which may hold a file the recipient put there by hand. The disk
+ * writer answers this with `wx` and a swallowed EEXIST; this answers it before
+ * it journals a moment over either one.
  *
  * THIS IS ALSO WHERE A FOLDER WOULD GO, AND WHY IT DOES NOT. The engine has no
  * folder object: `VersionedTextStore` names files, a moment names one file's
  * path, and `materializeSharedViewPaths` makes a directory only as the parent
- * of a file it writes. So an empty folder is nothing a recipient could send,
- * and `createWorkspaceFolder` keeps the blanket refusal. A recipient makes a
- * folder by making a file in it — the explorer already takes a typed path with
- * a `/` as root-relative — and the folder appears with it.
+ * of a file it writes. So an empty folder is nothing a recipient could send.
+ * A recipient makes a folder by making a file in it — the explorer already
+ * takes a typed path with a `/` as root-relative — and the folder appears with
+ * it. `routeWorkspaceFolderCreate` says so.
  */
 async function shareViewCreate(
   input: ShareViewFileOpScope & { relativePath: string; initialText: string },
@@ -156,11 +214,6 @@ async function shareViewCreate(
     "file path",
     input.relativePath,
   );
-  // A create never clobbers, and BOTH sides can be occupied: the store, and
-  // the projection, which may hold a file the recipient put there by hand —
-  // `repairSharedViewProjection` leaves such additions alone precisely because
-  // they are user data. The disk writer answers this with `wx` and a swallowed
-  // EEXIST; this answers it before it journals a moment over either one.
   if (await projectionHolds(input.rootPath, path)) return path;
   const store = input.shareViewStore();
   const main = await store.ensureMainVersion({ workspaceId: input.workspaceId });
@@ -169,7 +222,24 @@ async function shareViewCreate(
     versionId: main.id,
     path,
   });
-  if (existing !== null) return path;
+  if (existing !== null) {
+    // The store has it and the folder does not, so the projection lost a file
+    // the recipient can still see in the explorer. Put it back rather than
+    // reporting success over a path that stays missing.
+    await materializeSharedViewPaths(
+      input.rootPath,
+      input.workspaceId,
+      [
+        {
+          path,
+          operation: "write",
+          contentKind: existing.contentKind === "binary" ? "binary" : "text",
+        },
+      ],
+      store,
+    );
+    return path;
+  }
   await store.writeTextFile({
     workspaceId: input.workspaceId,
     versionId: main.id,
@@ -190,9 +260,14 @@ async function shareViewCreate(
  * A rename or move in a share view.
  *
  * A FOLDER is its files. The store holds no folder, so moving one is moving
- * every path under it, each as its own moment — which is the same net change
- * an ordinary workspace's watcher records for a folder rename, and which the
+ * every path under it, each as its own moment — the same net change an
+ * ordinary workspace's watcher records for a folder rename, and which the
  * submit lane consolidates per file exactly as it does for a single rename.
+ *
+ * Everything is decided before anything is applied: what moves, what it would
+ * land on, and whether the folder holds files no moment describes. A failure
+ * part way through then puts back what already moved, because half a renamed
+ * folder is a set of changes nobody asked to send.
  */
 async function shareViewMove(
   input: ShareViewFileOpScope & { fromPath: string; toPath: string },
@@ -213,27 +288,42 @@ async function shareViewMove(
   const store = input.shareViewStore();
   const main = await store.ensureMainVersion({ workspaceId: input.workspaceId });
   const held = await shareViewPaths(store, input.workspaceId, main.id);
-  // The destination question is the STORE's: a rename moves an engine record,
-  // and the engine refuses `target-path-exists` against its own paths.
-  const moves = [...held.keys()]
-    .filter((path) => path === from || path.startsWith(`${from}/`))
-    .sort()
-    .map((path) => ({
-      from: path,
-      to: path === from ? to : `${to}/${path.slice(from.length + 1)}`,
-    }));
-  if (moves.length === 0) {
-    throw new Error(notInThisShareView(input.fromPath, "Rename"));
+  const sources = pathsUnder(held, from);
+  if (sources.length === 0) {
+    throw new Error(notInThisShareView(from, "Rename"));
   }
+  await refuseUntrackedUnder(input.rootPath, from, held);
+  const moves = sources.map((path) => ({
+    from: path,
+    to: path === from ? to : `${to}/${path.slice(from.length + 1)}`,
+  }));
+  // Every destination, before ANY of them is applied. A collision found half
+  // way through would otherwise leave the files before it already moved.
+  for (const move of moves) {
+    if (held.has(move.to) || (await projectionOccupies(input.rootPath, move))) {
+      throw new Error(`Destination already exists: ${move.to}`);
+    }
+  }
+
+  const applied: { from: string; to: string }[] = [];
+  try {
+    for (const move of moves) {
+      await store.renameTextFile({
+        workspaceId: input.workspaceId,
+        versionId: main.id,
+        fromPath: move.from,
+        toPath: move.to,
+        metadata: { origin: "local-file" },
+      });
+      applied.push(move);
+    }
+  } catch (error) {
+    await putBackMoves(store, input.workspaceId, main.id, applied);
+    throw error;
+  }
+
   const changed: ShareViewChangedPath[] = [];
   for (const move of moves) {
-    await store.renameTextFile({
-      workspaceId: input.workspaceId,
-      versionId: main.id,
-      fromPath: move.from,
-      toPath: move.to,
-      metadata: { origin: "local-file" },
-    });
     changed.push({ path: move.from, operation: "delete", contentKind: "text" });
     changed.push({
       path: move.to,
@@ -252,9 +342,44 @@ async function shareViewMove(
 }
 
 /**
+ * Put back the renames that landed before one failed.
+ *
+ * The projection has not moved yet — it follows the store, and the store is
+ * being returned to where it started — so this leaves both sides as they were.
+ * A compensation that itself fails is the one case that must be loud: the
+ * store is then half moved, and every half is a change the recipient could
+ * send without ever having asked to.
+ */
+async function putBackMoves(
+  store: CaptureVersionedTextStore,
+  workspaceId: string,
+  versionId: string,
+  applied: readonly { from: string; to: string }[],
+): Promise<void> {
+  for (const move of [...applied].reverse()) {
+    try {
+      await store.renameTextFile({
+        workspaceId,
+        versionId,
+        fromPath: move.to,
+        toPath: move.from,
+        metadata: { origin: "local-file" },
+      });
+    } catch (cause) {
+      throw new Error(
+        `dohc moved some of these files and could not put them back. ${move.to} is still not at ${move.from}. Check the folder before you send changes.`,
+        { cause },
+      );
+    }
+  }
+}
+
+/**
  * A delete in a share view.
  *
- * A folder is its files here too. One projection removal covers both shapes:
+ * A folder is its files here too, and the same two questions are asked first:
+ * does the store hold anything at this path, and does the folder hold anything
+ * the store does not. One projection removal then covers both shapes —
  * `materializeSharedViewPaths` removes the named entry recursively, so a file
  * goes and so does the directory its files were in.
  *
@@ -274,19 +399,38 @@ async function shareViewDelete(
   const store = input.shareViewStore();
   const main = await store.ensureMainVersion({ workspaceId: input.workspaceId });
   const held = await shareViewPaths(store, input.workspaceId, main.id);
-  const deletes = [...held.keys()]
-    .filter((path) => path === target || path.startsWith(`${target}/`))
-    .sort();
-  if (deletes.length === 0) {
-    throw new Error(notInThisShareView(input.relativePath, "Delete"));
+  const targets = pathsUnder(held, target);
+  if (targets.length === 0) {
+    throw new Error(notInThisShareView(target, "Delete"));
   }
-  for (const path of deletes) {
-    await store.deleteTextFile({
-      workspaceId: input.workspaceId,
-      versionId: main.id,
-      path,
-      metadata: { origin: "local-file" },
-    });
+  await refuseUntrackedUnder(input.rootPath, target, held);
+
+  const applied: string[] = [];
+  try {
+    for (const path of targets) {
+      await store.deleteTextFile({
+        workspaceId: input.workspaceId,
+        versionId: main.id,
+        path,
+        metadata: { origin: "local-file" },
+      });
+      applied.push(path);
+    }
+  } catch (error) {
+    // A delete cannot be put back, so the other rule applies: what happened is
+    // visible. The projection follows the store for the files that actually
+    // went, so nothing is left describing content the store no longer has.
+    await materializeSharedViewPaths(
+      input.rootPath,
+      input.workspaceId,
+      applied.map((path) => ({
+        path,
+        operation: "delete" as const,
+        contentKind: "text" as const,
+      })),
+      store,
+    );
+    throw error;
   }
   await materializeSharedViewPaths(
     input.rootPath,
@@ -338,50 +482,118 @@ async function shareViewImport(
   const imported: string[] = [];
   const changed: ShareViewChangedPath[] = [];
   let skipped = screened.refused;
-  for (const source of screened.usable) {
-    const validated = validateUserMaterializePath(basename(source));
-    if (!validated.ok) {
-      skipped += 1;
-      continue;
+  try {
+    for (const source of screened.usable) {
+      const validated = validateUserMaterializePath(basename(source));
+      if (!validated.ok) {
+        skipped += 1;
+        continue;
+      }
+      // Read the content BEFORE claiming a name: a source the engine cannot
+      // own must not consume a collision variant it never used.
+      const content = await readDiskContent(source);
+      if (content.kind !== "text" && content.kind !== "binary") {
+        skipped += 1;
+        continue;
+      }
+      const name = importNameFor(validated.normalized, absDir, (candidate) =>
+        taken.has(candidate),
+      );
+      if (name === null) {
+        skipped += 1;
+        continue;
+      }
+      taken.add(name);
+      const path = relDir === "" ? name : `${relDir}/${name}`;
+      if (content.kind === "text") {
+        await store.writeTextFile({
+          workspaceId: input.workspaceId,
+          versionId: main.id,
+          path,
+          text: content.text,
+          metadata: { origin: "local-file" },
+        });
+      } else {
+        await store.writeBinaryFile({
+          workspaceId: input.workspaceId,
+          versionId: main.id,
+          path,
+          bytes: content.bytes,
+          metadata: { origin: "local-file" },
+        });
+      }
+      imported.push(path);
+      changed.push({ path, operation: "write", contentKind: content.kind });
     }
-    // Read the content BEFORE claiming a name: a source the engine cannot own
-    // must not consume a collision variant it never used.
-    const content = await readDiskContent(source);
-    if (content.kind !== "text" && content.kind !== "binary") {
-      skipped += 1;
-      continue;
-    }
-    const name = importNameFor(validated.normalized, absDir, (candidate) =>
-      taken.has(candidate),
-    );
-    if (name === null) {
-      skipped += 1;
-      continue;
-    }
-    taken.add(name);
-    const path = relDir === "" ? name : `${relDir}/${name}`;
-    if (content.kind === "text") {
-      await store.writeTextFile({
-        workspaceId: input.workspaceId,
-        versionId: main.id,
-        path,
-        text: content.text,
-        metadata: { origin: "local-file" },
-      });
-    } else {
-      await store.writeBinaryFile({
-        workspaceId: input.workspaceId,
-        versionId: main.id,
-        path,
-        bytes: content.bytes,
-        metadata: { origin: "local-file" },
-      });
-    }
-    imported.push(path);
-    changed.push({ path, operation: "write", contentKind: content.kind });
+  } finally {
+    // What landed is materialized even when a later source fails, so the
+    // projection never lags the store.
+    await materializeSharedViewPaths(input.rootPath, input.workspaceId, changed, store);
   }
-  await materializeSharedViewPaths(input.rootPath, input.workspaceId, changed, store);
   return { imported, skipped };
+}
+
+/**
+ * The store paths this operation is about: the path itself when it names a
+ * file, every path beneath it when it names a folder.
+ *
+ * Sorted, because a folder's files are applied in order and put back in the
+ * reverse of it.
+ */
+function pathsUnder(held: ReadonlyMap<string, unknown>, target: string): string[] {
+  return [...held.keys()]
+    .filter((path) => path === target || path.startsWith(`${target}/`))
+    .sort();
+}
+
+/**
+ * Refuse when a FOLDER holds files the store does not.
+ *
+ * Both operations that take a whole folder — move and delete — remove the
+ * folder from the projection when they finish, and that removal cannot tell a
+ * projected file from one the recipient put there. So neither runs while such
+ * a file is under it.
+ *
+ * A file target has nothing to scan: the store holds it, which is what made it
+ * a target.
+ */
+async function refuseUntrackedUnder(
+  rootPath: string,
+  target: string,
+  held: ReadonlyMap<string, unknown>,
+): Promise<void> {
+  if (held.has(target)) return;
+  const untracked = (await projectionFilesUnder(rootPath, target)).filter(
+    (path) => !held.has(path),
+  );
+  if (untracked.length > 0) {
+    throw new Error(untrackedUnderRefusal(target, untracked));
+  }
+}
+
+/**
+ * Every file the projection holds under a folder, workspace-relative.
+ *
+ * A symlink is counted as a file whatever it points at: `readdir` does not
+ * follow one, and a link is content dohc did not put there either.
+ */
+async function projectionFilesUnder(
+  rootPath: string,
+  folder: string,
+): Promise<string[]> {
+  const found: string[] = [];
+  async function walk(relative: string): Promise<void> {
+    const entries = await readdir(join(rootPath, relative), {
+      withFileTypes: true,
+    }).catch(() => []);
+    for (const entry of entries) {
+      const child = `${relative}/${entry.name}`;
+      if (entry.isDirectory()) await walk(child);
+      else found.push(child);
+    }
+  }
+  await walk(folder);
+  return found.sort();
 }
 
 /**
@@ -395,6 +607,27 @@ async function projectionHolds(rootPath: string, path: string): Promise<boolean>
     () => true,
     () => false,
   );
+}
+
+/**
+ * Would this move land on something the projection already holds?
+ *
+ * The case-only carve-out `movePath` makes, for the same reason: on a
+ * case-insensitive filesystem the destination "exists" because it IS the
+ * source, and refusing there would block a rename the user plainly meant. REAL
+ * paths are compared, never spellings, so a genuinely different file that
+ * case-collides still refuses.
+ */
+async function projectionOccupies(
+  rootPath: string,
+  move: { from: string; to: string },
+): Promise<boolean> {
+  if (!(await projectionHolds(rootPath, move.to))) return false;
+  const [fromReal, toReal] = await Promise.all([
+    realpath(join(rootPath, move.from)).catch(() => null),
+    realpath(join(rootPath, move.to)).catch(() => null),
+  ]);
+  return fromReal === null || toReal === null || fromReal !== toReal;
 }
 
 /** Every path the share view's store holds, with the kind its projection needs. */
