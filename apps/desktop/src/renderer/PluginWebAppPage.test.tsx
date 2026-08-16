@@ -94,6 +94,47 @@ describe("PluginWebAppPage", () => {
     });
   });
 
+  it("reports the manifest title its start answered with", async () => {
+    const titles: Array<[string, string, string]> = [];
+    render(
+      <PluginWebAppPage
+        workspaceId="ws-1"
+        pluginId="t3-code"
+        webAppId="app"
+        onTitle={(pluginId, webAppId, title) =>
+          titles.push([pluginId, webAppId, title])}
+      />,
+    );
+    await screen.findByTestId("plugin-web-app-frame");
+    // MUTATION (drop the report): the tab keeps the raw web app id.
+    expect(titles).toEqual([["t3-code", "app", "T3 Code"]]);
+  });
+
+  it("reports no title for a start that resolves after unmount", async () => {
+    const start = deferred<StartPluginWebAppResult>();
+    bridgeMock.startPluginWebApp.mockReturnValueOnce(start.promise);
+    const titles: string[] = [];
+    const { unmount } = render(
+      <PluginWebAppPage
+        workspaceId="ws-1"
+        pluginId="t3-code"
+        webAppId="app"
+        onTitle={(_pluginId, _webAppId, title) => titles.push(title)}
+      />,
+    );
+
+    unmount();
+    await act(async () => {
+      start.resolve({
+        status: "ok",
+        title: "Stale App",
+        origin: "http://127.0.0.1:49160",
+      });
+      await Promise.resolve();
+    });
+    expect(titles).toEqual([]);
+  });
+
   it("reports the guest hidden while an overlay covers it, and visible again after", async () => {
     const lastReport = () =>
       bridgeMock.setPluginWebAppBounds.mock.calls.at(-1)?.[0];

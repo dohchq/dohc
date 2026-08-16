@@ -484,29 +484,6 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       },
     ),
     onPluginWebAppOpened: vi.fn(() => () => {}),
-    // The shell reads web app titles from the manifests the same way the
-    // settings page does.
-    listPlugins: vi.fn(async () => ({
-      ok: true as const,
-      plugins: [
-        {
-          id: "t3-code",
-          directoryName: "t3-code",
-          rootPath: "C:/ws/plugins/t3-code",
-          valid: true,
-          status: "ready" as const,
-          disabledReason: null,
-          runtimeStatus: "ready" as const,
-          sourceHash: null,
-          approvedHash: null,
-          installedBaselineHash: null,
-          webApps: [{ id: "app", title: "T3 Code" }],
-          diagnostics: [],
-          warnings: [],
-          error: null,
-        },
-      ],
-    })),
     startPluginWebApp: vi.fn(async () => ({
       status: "ok" as const,
       title: "T3 Code",
@@ -885,9 +862,60 @@ describe("plugin web app tabs", () => {
 
     const tab = await screen.findByTestId(`tab-${path}`);
     // MUTATION (label from the tab path): the tab reads "app", the id, and
-    // the name the user installed never appears.
+    // the name the user installed never appears. The title arrives with the
+    // app's own start — no second trip to main, which racing the plugin's
+    // on-demand host start proved to break it (e2e, 4 of 6 runs).
     await waitFor(() => expect(tab.textContent).toContain("T3 Code"));
     await waitFor(() => expect(tab.title).toBe("t3-code — T3 Code"));
+  });
+
+  it("never carries one workspace's title onto another workspace's tab", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs([path], path)),
+    );
+    const view = renderShell(bridge);
+    const tab = await screen.findByTestId(`tab-${path}`);
+    await waitFor(() => expect(tab.textContent).toContain("T3 Code"));
+
+    // The same plugin id can be installed at another title in another
+    // workspace, so the learned title is scoped to the workspace that
+    // answered — and the next workspace's own start is what relabels it.
+    const pending = deferred<{ status: "ok"; title: string; origin: string }>();
+    bridge.startPluginWebApp.mockReturnValueOnce(pending.promise);
+    const otherWorkspace: Workspace = {
+      ...WORKSPACE,
+      workspaceId: "ws-other",
+      rootPath: "/home/ice/dohc/other",
+    };
+    view.rerender(
+      <DesktopWorkspaceShell
+        workspace={otherWorkspace}
+        workspaces={[otherWorkspace]}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+
+    // MUTATION (drop the workspace scope): the tab keeps showing the first
+    // workspace's title for an app that has not started here.
+    await waitFor(() =>
+      expect(screen.getByTestId(`tab-${path}`).textContent).not.toContain(
+        "T3 Code",
+      ),
+    );
+
+    await act(async () => {
+      pending.resolve({
+        status: "ok",
+        title: "T3 Code (other)",
+        origin: "http://127.0.0.1:49162",
+      });
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId(`tab-${path}`).textContent).toContain(
+        "T3 Code (other)",
+      ),
+    );
   });
 
   // A WebContentsView guest composites above the whole renderer. Nothing the

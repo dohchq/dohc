@@ -25,10 +25,16 @@ export function PluginWebAppPage(props: {
    * clicks meant for one. Nothing in the renderer can cover it; only main can
    * hide it, and this is how main is told. */
   hiddenByOverlay?: boolean;
+  /** Reports the manifest title this app started under, so the tab can carry
+   * the name the user installed instead of the raw web app id. */
+  onTitle?: (pluginId: string, webAppId: string, title: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [load, setLoad] = useState<LoadState>({ status: "starting" });
   const startRequestRef = useRef(0);
+  // Held in a ref so a new callback identity never restarts the app.
+  const onTitleRef = useRef(props.onTitle);
+  onTitleRef.current = props.onTitle;
   const contextRef = useRef("");
   const context = `${props.workspaceId}\0${props.pluginId}\0${props.webAppId}`;
   contextRef.current = context;
@@ -54,6 +60,7 @@ export function PluginWebAppPage(props: {
           return;
         }
         setLoad({ status: "ready", title: result.title });
+        onTitleRef.current?.(props.pluginId, props.webAppId, result.title);
       })
       .catch((error: unknown) => {
         if (!isCurrent()) return;

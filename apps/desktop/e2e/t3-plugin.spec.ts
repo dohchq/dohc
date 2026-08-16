@@ -161,7 +161,10 @@ test("t3-code installs, serves its paired web app in a hardened guest, and unins
 
     // 6. Closing the tab destroys the guest view; the pairing credential
     // never surfaced in any app log either.
-    await tab.getByRole("button", { name: "Close app" }).click();
+    // The tab carries the manifest's title, which the app's own start
+    // reported — the close control is named from it.
+    await expect(tab).toContainText("T3 Code");
+    await tab.getByRole("button", { name: "Close T3 Code" }).click();
     await expect.poll(async () => (await loopbackUrls()).length).toBe(0);
     // Both forms the access block prints the credential in: the pairing URL's
     // fragment and the bare `Token:` line. A chunk boundary can split either.

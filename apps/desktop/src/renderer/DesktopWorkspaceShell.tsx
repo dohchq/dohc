@@ -1823,49 +1823,28 @@ export function DesktopWorkspaceShell(props: {
     [dirtyRevision, openTabs],
   );
   // A plugin web app tab is labelled with the title its manifest declares.
-  // The path carries only ids, and a restored tab has no running page to ask,
-  // so the shell reads the manifests the same way settings does. The record
-  // carries the workspace it answered for: a slow response for one workspace
-  // must never relabel another's tabs.
-  const webAppTabKey = useMemo(
-    () =>
-      openTabs
-        .map((tab) => tab.path)
-        .filter((path) => isPluginWebAppTabPath(path))
-        .join("\n"),
-    [openTabs],
-  );
+  // The tab path carries only ids and the manifest lives in main, but the
+  // page's own start already answers with that title, so the label costs no
+  // extra call. Reading the manifests from here instead failed the desktop
+  // e2e in 4 of 6 runs: that request lands while the plugin host is still
+  // starting on demand, and the web app's own start then loses the race.
   const [webAppTitles, setWebAppTitles] = useState<{
     workspaceId: string;
     titles: ReadonlyMap<string, string>;
   }>({ workspaceId: "", titles: EMPTY_TAB_LABELS });
-  useEffect(() => {
-    if (webAppTabKey.length === 0) return;
-    let cancelled = false;
-    void bridge()
-      .listPlugins({ workspaceId })
-      .then((result) => {
-        if (cancelled || !result.ok) return;
-        setWebAppTitles({
-          workspaceId,
-          titles: new Map(
-            result.plugins.flatMap((plugin) =>
-              plugin.webApps.map(
-                (webApp) =>
-                  [
-                    pluginWebAppTabPath(plugin.id, webApp.id),
-                    webApp.title,
-                  ] as const,
-              ),
-            ),
-          ),
-        });
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [workspaceId, webAppTabKey]);
+  const rememberWebAppTitle = useCallback(
+    (pluginId: string, webAppId: string, title: string) => {
+      const tabPath = pluginWebAppTabPath(pluginId, webAppId);
+      setWebAppTitles((previous) => {
+        // A title learned for another workspace never labels this one's tabs.
+        const known =
+          previous.workspaceId === workspaceId ? previous.titles : EMPTY_TAB_LABELS;
+        if (known.get(tabPath) === title) return previous;
+        return { workspaceId, titles: new Map(known).set(tabPath, title) };
+      });
+    },
+    [workspaceId],
+  );
   const tabLabels =
     webAppTitles.workspaceId === workspaceId
       ? webAppTitles.titles
@@ -5226,6 +5205,7 @@ export function DesktopWorkspaceShell(props: {
                     pluginId={groupPluginWebApp.pluginId}
                     webAppId={groupPluginWebApp.webAppId}
                     hiddenByOverlay={overlayOpen}
+                    onTitle={rememberWebAppTitle}
                   />
                 </Suspense>
               ) : (
