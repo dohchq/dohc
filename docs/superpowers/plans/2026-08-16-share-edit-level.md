@@ -105,6 +105,18 @@ never a fall-through.
 
 ### 2. The proposal is a hold on ops already shaped for the owner lane
 
+> **Amended by PR3a: a proposal holds NET CHANGES, not moments.** Building it
+> found that a recipient cannot state a moment the granter can use. The served
+> moment drops `momentId`, `objectId` and every `before*` field
+> (`shareFilter.ts`), so a recipient never learns a granter moment id, and a
+> parked foreign moment would have to be rewritten so heavily at accept that
+> almost nothing of it survived. So a proposal op states what the recipient
+> read and what it wants — `basedOnPath`, `basedOnBlobSha256`, `operation`,
+> `afterPath`, `afterBlobSha256` — and the relay MINTS the moment at accept
+> from the granter's own facts (`services/sync-relay/src/shareProposals.ts`).
+> Everything below stays true: accept still calls the same `appendLogBatch`
+> under the same share-namespaced origin, and nothing new applies the result.
+
 A proposal is not new content. It is the recipient's ordinary `moment.append`
 ops, filtered and redacted, parked in a relay table instead of inserted into
 the granter's log.
@@ -156,6 +168,35 @@ open  ->  accepted
 product invariant in `AGENTS.md` requires a visible reverse path for one.
 
 ### 5. The relay rewrites each op's base to the granter's own moment
+
+> **Amended by PR3a, three ways.**
+>
+> **(a) `objectId` must be rewritten too, and the document did not say so.**
+> Apply looks the local file up BY OBJECT ID
+> (`select_snapshot_by_object`, `moment_apply.rs:420-426`), and a recipient's
+> object ids are its own. Left alone, every accepted change would look like a
+> create onto a path the granter already occupies — a conflict for the wrong
+> reason. The relay resolves the granter's object from `basedOnPath` and mints
+> a new one only for a file the granter does not have.
+>
+> **(b) ONE net change per object per proposal.** Two changes to one file would
+> both be given the same rewritten base and would then conflict with each
+> other at accept. The recipient consolidates before it submits — it knows its
+> own object ids — and the relay REFUSES a submit naming the same base path or
+> the same destination path twice, so the property is server-side rather than
+> client-promised. Consolidation is free because a moment's after side states
+> the object's COMPLETE post-state, not a delta: a rename copies
+> `before.blob_sha256` into `payload_after_blob_sha256`
+> (`crates/dohc-engine-domain/src/store.rs`), and apply materializes from the
+> after side whatever the `operation` says. So a rename and an edit collapse
+> into one change, and the relay derives `operation` from the granter's
+> current path against the change's destination — the same derivation the
+> domain uses for a compensating moment (`store.rs:809-811`).
+>
+> **(c) An unresolvable base states NO base.** The payload carries
+> `beforePresent: "null"`, which fast-forwards only onto an object the granter
+> does not have. A file the granter does have therefore opens a conflict
+> instead of being silently overwritten.
 
 This is the mechanism that makes accept free, and it is the most important
 decision in the document.
@@ -309,6 +350,28 @@ The recipient POSTs to a **new route**, `POST /shares/:shareId/proposals`, not
 to the existing share-log route. One route with two destinations is exactly the
 conflation decision 1 rejects.
 
+> **Amended by PR3a: the granter's routes live in the WORKSPACE namespace.**
+> Accept, decline, and the review listing are `POST
+> /sync/:workspaceId/proposals/:id/accept|decline` and `GET
+> /sync/:workspaceId/proposals`, not the share-scoped paths sketched below.
+> Ownership is then derived by the ONE line every owner route already sits
+> behind (`server.ts`, `workspaceIsOwnedBy`), rather than by a new per-route
+> check — and a recipient cannot even address them, because a received share
+> summary deliberately omits the workspace id. The recipient's own routes stay
+> share-scoped. Withdraw is `POST
+> /sync/shares/:shareId/proposals/:id/withdraw`.
+>
+> **Amended by PR3a: the proposal filter is its own function, not an arm of
+> `filterOpForShareAppend`.** `filterProposedChangeForShare`
+> (`shareFilter.ts`) answers a THIRD question — "may this recipient propose
+> this change?" — beside the read filter and the append filter. Nothing but
+> the proposal route calls it, and the append route cannot reach it, so the
+> share-log POST can never gain moment acceptance as a side effect.
+>
+> **Amended by PR3a: a submit carries a `submitId`.** It is idempotent per
+> share, so a lost response cannot become two proposals for one intent —
+> which decision 4 requires and the sketch below did not provide.
+
 The gauntlet mirrors `server.ts:489-611` stage for stage:
 
 1. `claimPendingShares`, then `shareForRecipient` — every failure is the same
@@ -375,6 +438,15 @@ before its ops can be accepted. New route,
 | Per blob | 20 MiB | `MAX_BLOB_BYTES`, `server.ts:88` |
 | Per workspace, charged to the GRANTER | 2 GiB | `DEFAULT_WORKSPACE_QUOTA_BYTES` `storage.ts:294`; `assertWorkspaceQuota` `storage.ts:1515`, called from `putBlob` `storage.ts:1067` |
 | Unreferenced sweep | 10 minutes | `DEFAULT_BLOB_GRACE_MS` `storage.ts:300`; `collectUnreferencedBlobs` `storage.ts:1090` |
+
+> **Amended by PR3a: the new bound reuses `quota_exceeded`, and it counts
+> UNCLAIMED uploads.** It is a quota, it already has a Rust twin, and adding a
+> code would have moved the pinned fixture and the Rust map for no new
+> meaning. The count is the blobs a share has uploaded that no stored change
+> references — uploading without submitting is the one way a recipient spends
+> the granter's quota with nothing to show for it, and it is the one thing
+> bounded. The refusal names the constraint, the limit, and the observed
+> count.
 
 One new bound is needed, and per the "measure limits that reject work" rule it
 is **derived from an existing contract rather than guessed**: a proposal
@@ -520,8 +592,15 @@ This document assumes the first and flags it rather than deciding silently.
 | Comment | enabled | `They can read what you selected and chat about it.` |
 | Edit | enabled | `They can read, chat, and send you changes to accept.` |
 
-The line `Comment and Edit are not ready yet.` is removed — all three levels
-are real from PR3.
+The pending line is removed — all three levels are real from PR3.
+
+> **Amended by PR3a: the shipped string is `Edit is not ready yet.`**, at
+> `RelayShareDialog.tsx:168`, not the two-level line quoted above; PR2 already
+> made Comment ready. Several other anchors in this document are stale against
+> the code: `NoticeCenter.tsx` and `WorkspaceVersions.tsx` live under
+> `renderer/workbench/`, `SharedByMeList.tsx` under `renderer/settings/`,
+> `captureForFlaggedWorkspace` spans `engineCaptureGate.ts:31-68`, and the
+> recipient banner spans `DesktopWorkspaceShell.tsx:4689-4769`.
 
 ### Recipient banner — `DesktopWorkspaceShell.tsx:4689-4753`
 
@@ -671,6 +750,16 @@ covered.
 - `crossUserIsolation.test.ts`: the sentinel shape this file already uses — a
   proposal from recipient A is invisible to recipient B of an overlapping
   share, asserted against real response bodies.
+
+> **Amended by PR3a: no single test holds both a real relay and a real engine
+> store, so the proof is layered and each layer says what it proves.**
+> The relay tests assert the rewrite CHOOSES the right base — that the
+> accepted moment names the granter's own head when the recipient was current
+> and the granter's own EARLIER moment when the file drifted. The Rust tests
+> assert the engine's rule — that a matching base applies with zero conflicts
+> and a stale one opens exactly one. The desktop e2e proves the whole loop
+> against a real relay and a real engine. Claiming "zero conflict rows" from a
+> relay-only test would have been a green check over a path nothing exercises.
 
 **Base rewrite — the mechanism that most needs proving.**
 
