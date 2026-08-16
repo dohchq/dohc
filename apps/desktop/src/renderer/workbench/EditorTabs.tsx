@@ -6,11 +6,13 @@ import {
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isPluginDetailsTabPath,
   isPluginPanelTabPath,
   isPluginWebAppTabPath,
   isSingletonEditorTabPath,
   isVersionCompareTabPath,
   parseHistoryDiffTabPath,
+  parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
   parsePluginWebAppTabPath,
 } from "./workbenchState";
@@ -27,6 +29,10 @@ function fileName(path: string, label?: string): string {
   }
   if (isPluginWebAppTabPath(path)) {
     return label ?? parsePluginWebAppTabPath(path)?.webAppId ?? "Plugin app";
+  }
+  // The plugin id is the only name a plugin has — manifests carry no title.
+  if (isPluginDetailsTabPath(path)) {
+    return parsePluginDetailsTabPath(path) ?? "Plugin";
   }
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
@@ -49,6 +55,12 @@ function tabTitle(path: string, label?: string): string {
     const webApp = parsePluginWebAppTabPath(path);
     if (!webApp) return "Plugin app";
     return `${webApp.pluginId} — ${label ?? webApp.webAppId}`;
+  }
+  // A plugin's details tab and its app tab can sit side by side under the
+  // same name, so the tooltip is what tells them apart.
+  if (isPluginDetailsTabPath(path)) {
+    const pluginId = parsePluginDetailsTabPath(path);
+    return pluginId ? `Plugin details: ${pluginId}` : "Plugin details";
   }
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);

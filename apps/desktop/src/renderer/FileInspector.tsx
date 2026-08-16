@@ -29,6 +29,7 @@ import type * as Y from "yjs";
 import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
+import { MARKDOWN_COMPONENTS } from "./markdown/markdownComponents";
 import { bridge } from "./bridge";
 import { binaryFileDataFromArtifact } from "./excalidrawAssets";
 import {
@@ -805,34 +806,6 @@ function PropertiesFallback() {
     </div>
   );
 }
-
-// Rendered markdown document — headings, lists, code, emphasis read as a
-// document, not raw source. react-markdown renders to React nodes (no raw
-// HTML execution). The incremental renderer consumes link navigation and
-// routes it through the audited external or workspace path.
-const MARKDOWN_COMPONENTS = {
-  h1: (p: { children?: React.ReactNode }) => (
-    <h1 className="mb-3 mt-1 text-2xl font-semibold tracking-tight text-ink">{p.children}</h1>
-  ),
-  h2: (p: { children?: React.ReactNode }) => (
-    <h2 className="mb-2 mt-4 text-xl font-semibold tracking-tight text-ink">{p.children}</h2>
-  ),
-  h3: (p: { children?: React.ReactNode }) => (
-    <h3 className="mb-1.5 mt-3 text-base font-semibold text-ink">{p.children}</h3>
-  ),
-  p: (p: { children?: React.ReactNode }) => (
-    <p className="mb-3 leading-relaxed text-ink">{p.children}</p>
-  ),
-  ul: (p: { children?: React.ReactNode }) => (
-    <ul className="mb-3 list-disc pl-5 text-ink">{p.children}</ul>
-  ),
-  ol: (p: { children?: React.ReactNode }) => (
-    <ol className="mb-3 list-decimal pl-5 text-ink">{p.children}</ol>
-  ),
-  code: (p: { children?: React.ReactNode }) => (
-    <code className="rounded bg-panel-2 px-1 py-0.5 font-mono text-[13px]">{p.children}</code>
-  ),
-};
 
 type SaveState = "saved" | "saving" | "error";
 export type FileSaveState = SaveState | "deleted";

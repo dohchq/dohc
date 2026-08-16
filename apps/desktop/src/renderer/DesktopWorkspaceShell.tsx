@@ -155,6 +155,7 @@ import {
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isPluginDetailsTabPath,
   isPluginPanelTabPath,
   isPluginWebAppTabPath,
   isSingletonEditorTabPath,
@@ -167,8 +168,10 @@ import {
   resizeEditorGroups,
   moveTabToNewGroup,
   parseHistoryDiffTabPath,
+  parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
   parsePluginWebAppTabPath,
+  pluginDetailsTabPath,
   pluginPanelTabPath,
   pluginWebAppTabPath,
   parseSiteTabPath,
@@ -670,6 +673,11 @@ const EMPTY_TAB_LABELS: ReadonlyMap<string, string> = new Map();
 
 const LazyPluginWebAppPage = lazy(() =>
   import("./PluginWebAppPage").then((mod) => ({ default: mod.PluginWebAppPage })),
+);
+const LazyPluginDetailsPage = lazy(() =>
+  import("./PluginDetailsPage").then((mod) => ({
+    default: mod.PluginDetailsPage,
+  })),
 );
 const LazyLinkedChatsPanel = lazy(() =>
   import("./workbench/LinkedChats").then((mod) => ({
@@ -1815,6 +1823,9 @@ export function DesktopWorkspaceShell(props: {
   );
   const focusedGroup = activeGroup(wb);
   const focusedTabPath = activeTabPath(wb);
+  // The plugins list marks the row whose details tab the user is looking at,
+  // the way the explorer marks the open file.
+  const activePluginDetailsId = parsePluginDetailsTabPath(focusedTabPath);
   const openTabs = useMemo(() => allTabs(wb), [wb.editorGroups]);
   const dirtyPaths = useMemo(
     () =>
@@ -3052,6 +3063,14 @@ export function DesktopWorkspaceShell(props: {
   const openVersionCompareTab = useCallback(
     (versionId: string) => {
       openVirtualTab(versionCompareTabPath(versionId));
+    },
+    [openVirtualTab],
+  );
+  // A plugin row opens its details tab the same way every other virtual tab
+  // opens, so the tab limit refuses it out loud rather than doing nothing.
+  const openPluginDetailsTab = useCallback(
+    (pluginId: string) => {
+      openVirtualTab(pluginDetailsTabPath(pluginId));
     },
     [openVirtualTab],
   );
@@ -4884,7 +4903,11 @@ export function DesktopWorkspaceShell(props: {
             ) : wb.activeView === "history" ? (
               historyTimeline
             ) : wb.activeView === "plugins" ? (
-              <PluginsView workspaceId={workspaceId} />
+              <PluginsView
+                workspaceId={workspaceId}
+                activePluginId={activePluginDetailsId}
+                onOpenDetails={openPluginDetailsTab}
+              />
             ) : null}
             </ErrorBoundary>
           </SidePanel>
@@ -4948,6 +4971,7 @@ export function DesktopWorkspaceShell(props: {
               const groupSiteRoot = parseSiteTabPath(tabPath);
               const groupPluginPanel = parsePluginPanelTabPath(tabPath);
               const groupPluginWebApp = parsePluginWebAppTabPath(tabPath);
+              const groupPluginDetailsId = parsePluginDetailsTabPath(tabPath);
               const groupScrollTarget =
                 searchScrollTarget?.groupId === editorGroup.id &&
                 searchScrollTarget.path === tabPath
@@ -5205,6 +5229,30 @@ export function DesktopWorkspaceShell(props: {
                 <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
                   <span className="text-sm text-ink">
                     {PLUGIN_WEB_APP_OPEN_ERROR}
+                  </span>
+                  <button
+                    type="button"
+                    className="text-xs text-accent hover:underline"
+                    onClick={() => {
+                      if (tabPath) closeFileTab(editorGroup.id, tabPath);
+                    }}
+                  >
+                    Close tab
+                  </button>
+                </div>
+              )
+            ) : isPluginDetailsTabPath(tabPath) ? (
+              groupPluginDetailsId ? (
+                <Suspense fallback={<PanelLoading label="plugin details" />}>
+                  <LazyPluginDetailsPage
+                    workspaceId={workspaceId}
+                    pluginId={groupPluginDetailsId}
+                  />
+                </Suspense>
+              ) : (
+                <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+                  <span className="text-sm text-ink">
+                    dohc could not open the plugin page
                   </span>
                   <button
                     type="button"

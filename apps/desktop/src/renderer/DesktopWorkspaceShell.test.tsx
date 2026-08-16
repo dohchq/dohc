@@ -88,6 +88,7 @@ import {
   OPEN_EDITORS_DEFAULT_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
   momentDiffTabPath,
+  pluginDetailsTabPath,
   pluginPanelTabPath,
   pluginWebAppTabPath,
   versionCompareTabPath,
@@ -1022,6 +1023,67 @@ describe("plugin web app tabs", () => {
     await userEvent.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
     await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(true));
+  });
+});
+
+describe("plugin details tabs", () => {
+  const detailsPath = pluginDetailsTabPath("t3-code");
+
+  function withPlugins(bridge: ReturnType<typeof makeBridge>) {
+    bridge.listPlugins = vi.fn(async () => ({
+      ok: true as const,
+      plugins: [
+        {
+          id: "t3-code",
+          directoryName: "t3-code",
+          rootPath: "/workspace/plugins/t3-code",
+          valid: true,
+          status: "ready",
+          disabledReason: null,
+          runtimeStatus: "ready",
+          sourceHash: "a".repeat(64),
+          approvedHash: "a".repeat(64),
+          installedBaselineHash: "a".repeat(64),
+          webApps: [],
+          diagnostics: [],
+          warnings: [],
+          error: null,
+        },
+      ] as PluginStatusRecord[],
+    }));
+    return bridge;
+  }
+
+  it("opens a plugin's details tab from its row in the plugins list", async () => {
+    const bridge = withPlugins(makeBridge(Promise.resolve(STORED_STATE)));
+    renderShell(bridge);
+
+    await userEvent.click(await screen.findByTestId("activity-plugins"));
+    await userEvent.click(await screen.findByTestId("plugin-open-details"));
+
+    const tab = await screen.findByTestId(`tab-${detailsPath}`);
+    // The plugin id is the only name a plugin has; the tooltip is what says
+    // which of a plugin's tabs this one is.
+    expect(tab.textContent).toContain("t3-code");
+    expect(tab.title).toBe("Plugin details: t3-code");
+    // The row now reads as the selected one, like the explorer's open file.
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("plugin-row").getAttribute("data-selected"),
+      ).toBe("true"),
+    );
+  });
+
+  it("restores a plugin's details tab and mounts its page", async () => {
+    const bridge = withPlugins(
+      makeBridge(Promise.resolve(storedStateWithTabs([detailsPath], detailsPath))),
+    );
+    renderShell(bridge);
+
+    const tab = await screen.findByTestId(`tab-${detailsPath}`);
+    expect(tab.title).toBe("Plugin details: t3-code");
+    const page = await screen.findByTestId("plugin-details-page");
+    expect(page.getAttribute("data-plugin-id")).toBe("t3-code");
   });
 });
 

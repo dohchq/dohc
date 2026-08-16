@@ -44,12 +44,14 @@ import {
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isPluginDetailsTabPath,
   isPluginPanelTabPath,
   isPluginWebAppTabPath,
   isSiteTabPath,
   isVersionCompareTabPath,
   isVirtualTabPath,
   parseHistoryDiffTabPath,
+  parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
   parsePluginWebAppTabPath,
   parseSiteTabPath,
@@ -190,6 +192,9 @@ export function editorTitle(path: string): string {
   }
   if (isPluginWebAppTabPath(path)) {
     return `Plugin: ${parsePluginWebAppTabPath(path)?.webAppId ?? "app"}`;
+  }
+  if (isPluginDetailsTabPath(path)) {
+    return `Plugin: ${parsePluginDetailsTabPath(path) ?? "details"}`;
   }
   if (isSiteTabPath(path)) return `Site: ${parseSiteTabPath(path) ?? "preview"}`;
   if (isVersionCompareTabPath(path)) return "Compare with Main";

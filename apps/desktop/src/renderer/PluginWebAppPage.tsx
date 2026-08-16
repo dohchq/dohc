@@ -203,7 +203,7 @@ export function PluginWebAppPage(props: {
           <Plug size={20} aria-hidden className="text-subtle" />
           <span className="text-sm text-ink">This plugin is not running yet.</span>
           <span className="max-w-sm text-xs text-muted">
-            Open the app from the plugin settings to start it.
+            Open the app from the plugin's page to start it.
           </span>
         </div>
       ) : (

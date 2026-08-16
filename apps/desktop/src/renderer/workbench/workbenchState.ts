@@ -23,6 +23,10 @@ export const HISTORY_DIFF_TAB_PREFIX = "dohc://history-diff/";
 export const SITE_TAB_PREFIX = "dohc://site/";
 export const PLUGIN_PANEL_TAB_PREFIX = "dohc://plugin-panel/";
 export const PLUGIN_WEB_APP_TAB_PREFIX = "dohc://plugin-web/";
+// One details page per plugin, keyed by the plugin id (version-compare
+// precedent). Deliberately NOT a singleton: singletons own a process and
+// refuse to split, and this page only reads.
+export const PLUGIN_DETAILS_TAB_PREFIX = "dohc://plugin-details/";
 export const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
 // Engine moment diff (PR 0M-5): flagged workspaces open history diffs by
 // MOMENT id, not legacy change-set id.
@@ -62,6 +66,24 @@ export function pluginPanelTabPath(pluginId: string, panelId: string): string {
 
 export function pluginWebAppTabPath(pluginId: string, webAppId: string): string {
   return `${PLUGIN_WEB_APP_TAB_PREFIX}${encodeURIComponent(pluginId)}/${encodeURIComponent(webAppId)}`;
+}
+
+export function pluginDetailsTabPath(pluginId: string): string {
+  return `${PLUGIN_DETAILS_TAB_PREFIX}${encodeURIComponent(pluginId)}`;
+}
+
+export function isPluginDetailsTabPath(path: string | null): boolean {
+  return typeof path === "string" && path.startsWith(PLUGIN_DETAILS_TAB_PREFIX);
+}
+
+export function parsePluginDetailsTabPath(path: string | null): string | null {
+  if (typeof path !== "string" || !isPluginDetailsTabPath(path)) return null;
+  try {
+    const pluginId = decodeURIComponent(path.slice(PLUGIN_DETAILS_TAB_PREFIX.length));
+    return pluginId.length > 0 ? pluginId : null;
+  } catch {
+    return null;
+  }
 }
 
 export function isGraphTabPath(path: string | null): boolean {
@@ -207,7 +229,8 @@ export function isVirtualTabPath(path: string | null): boolean {
     isVersionCompareTabPath(path) ||
     isSiteTabPath(path) ||
     isPluginPanelTabPath(path) ||
-    isPluginWebAppTabPath(path)
+    isPluginWebAppTabPath(path) ||
+    isPluginDetailsTabPath(path)
   );
 }
 
