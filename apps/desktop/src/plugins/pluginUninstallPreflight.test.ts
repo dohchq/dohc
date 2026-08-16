@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PluginUninstallPreflightRecord } from "../ipc/bridgeContract";
 import { PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT } from "../ipc/channels";
 import { createTestScratch } from "../workspaces/testTemp";
-import { hashPluginSourceFiles } from "./pluginSourceSnapshot";
+import { hashPluginSourceFiles, pluginStateRoot } from "./pluginSourceSnapshot";
 import {
   pluginBaselineManifestPath,
   pluginUninstallPreflight,
@@ -62,7 +62,7 @@ async function runPreflight(
     dohcDir: fixture.dohcDir,
     pluginId,
     pluginRoot: fixture.pluginRoot,
-    stateRoot: join(fixture.dohcDir, "state", pluginId),
+    stateRoot: pluginStateRoot(fixture.dohcDir, pluginId),
     installedBaselineHash,
     engineCaptureAvailable,
   });
@@ -79,7 +79,7 @@ describe("plugin uninstall preflight", () => {
     const fixture = await createFixture();
     await writeSourceFile(fixture, "dohc-plugin.json", "{}\n");
     const baseline = await saveBaseline(fixture);
-    const stateRoot = join(fixture.dohcDir, "state", pluginId);
+    const stateRoot = pluginStateRoot(fixture.dohcDir, pluginId);
     await mkdir(join(stateRoot, "t3", "userdata"), { recursive: true });
     await writeFile(join(stateRoot, "t3", "userdata", "state.sqlite"), "x".repeat(2048));
     await writeFile(join(stateRoot, "t3-owner.json"), "{}\n");
@@ -93,10 +93,35 @@ describe("plugin uninstall preflight", () => {
     });
     expect(result.warning?.kind).toBe("plugin-state");
     expect(result.warning?.summary).toContain("2 files");
+    expect(result.warning?.summary).toContain("2 KB");
     expect(result.warning?.summary).toContain("cannot be restored");
     expect(result.warning?.details.join("\n")).toContain(stateRoot);
     // The renderer summary carries it too.
     expect(summarizeUninstallPreflight(result).stateData).toEqual(result.stateData);
+  });
+
+  // The warning states a size the user can check against the directory. A
+  // floor of "0.1 MB" states a count that is not true of 40 bytes.
+  it.each([
+    [1, "1 byte"],
+    [40, "40 bytes"],
+    [1023, "1023 bytes"],
+    [1024, "1 KB"],
+    [1_048_575, "1023 KB"],
+    [1_572_864, "1.5 MB"],
+  ])("states %d stored bytes as %s", async (bytes, expected) => {
+    const fixture = await createFixture();
+    await writeSourceFile(fixture, "dohc-plugin.json", "{}\n");
+    const baseline = await saveBaseline(fixture);
+    const stateRoot = pluginStateRoot(fixture.dohcDir, pluginId);
+    await mkdir(stateRoot, { recursive: true });
+    await writeFile(join(stateRoot, "data.bin"), "x".repeat(bytes));
+
+    const result = await runPreflight(fixture, baseline);
+
+    expect(result.stateData?.totalBytes).toBe(bytes);
+    expect(result.warning?.summary).toContain(`(${expected})`);
+    expect(result.warning?.details.join("\n")).toContain(`(${expected})`);
   });
 
   it("appends the stored-data facts to an existing source warning", async () => {
@@ -104,7 +129,7 @@ describe("plugin uninstall preflight", () => {
     await writeSourceFile(fixture, "dohc-plugin.json", "{}\n");
     const baseline = await saveBaseline(fixture);
     await writeSourceFile(fixture, "dohc-plugin.json", '{"edited":true}\n');
-    const stateRoot = join(fixture.dohcDir, "state", pluginId);
+    const stateRoot = pluginStateRoot(fixture.dohcDir, pluginId);
     await mkdir(stateRoot, { recursive: true });
     await writeFile(join(stateRoot, "secrets.json"), "s");
 

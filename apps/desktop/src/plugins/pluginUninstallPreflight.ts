@@ -491,8 +491,15 @@ async function measurePluginStateData(
   return fileCount === 0 ? null : { path: root, fileCount, totalBytes };
 }
 
-function formatMegabytes(bytes: number): string {
-  return `${Math.max(0.1, bytes / 1_048_576).toFixed(1)} MB`;
+const BYTES_PER_KB = 1_024;
+const BYTES_PER_MB = 1_048_576;
+
+/** The size in the unit that states it truly: 40 bytes reads as "40 bytes",
+ * never as a rounded-up "0.1 MB" the user cannot check. */
+function formatSize(bytes: number): string {
+  if (bytes < BYTES_PER_KB) return `${bytes} ${plural(bytes, "byte")}`;
+  if (bytes < BYTES_PER_MB) return `${Math.floor(bytes / BYTES_PER_KB)} KB`;
+  return `${(bytes / BYTES_PER_MB).toFixed(1)} MB`;
 }
 
 /**
@@ -508,7 +515,7 @@ function withStateData(
 ): PluginUninstallPreflightResult {
   if (!stateData) return result;
   const details = [
-    `Uninstall also deletes this plugin's stored data: ${stateData.fileCount} ${plural(stateData.fileCount, "file")} (${formatMegabytes(stateData.totalBytes)}) at ${stateData.path}.`,
+    `Uninstall also deletes this plugin's stored data: ${stateData.fileCount} ${plural(stateData.fileCount, "file")} (${formatSize(stateData.totalBytes)}) at ${stateData.path}.`,
     "That data is not in the workspace and history holds no copy. It cannot be restored.",
   ];
   const warning: PluginUninstallWarning = result.warning
@@ -516,7 +523,7 @@ function withStateData(
     : {
       kind: "plugin-state",
       summary:
-        `Uninstall deletes this plugin's stored data: ${stateData.fileCount} ${plural(stateData.fileCount, "file")} (${formatMegabytes(stateData.totalBytes)}). It cannot be restored.`,
+        `Uninstall deletes this plugin's stored data: ${stateData.fileCount} ${plural(stateData.fileCount, "file")} (${formatSize(stateData.totalBytes)}). It cannot be restored.`,
       details: [...details, "Copy what you need before you uninstall."],
       counts: result.counts,
       notRecoverablePaths: result.notRecoverablePaths,
