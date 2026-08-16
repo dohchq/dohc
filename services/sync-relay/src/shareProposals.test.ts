@@ -316,6 +316,25 @@ async function reviewRows(h: SyncRelayHandler): Promise<Array<Record<string, unk
   return (await json(response)).proposals as Array<Record<string, unknown>>;
 }
 
+// ONE proposal, with its file rows. The listing above states counts, so a test
+// that asserts on what a review SHOWS opens the proposal the way the granter's
+// client does.
+async function reviewProposal(
+  h: SyncRelayHandler,
+  proposalId: string,
+): Promise<Record<string, unknown>> {
+  const response = await h(request(GRANTER, `/sync/${WORKSPACE}/proposals/${proposalId}`));
+  expect(response.status, await response.clone().text()).toBe(200);
+  return (await json(response)).proposal as Record<string, unknown>;
+}
+
+// The only open proposal, opened. Every caller here submits exactly one.
+async function onlyReview(h: SyncRelayHandler): Promise<Record<string, unknown>> {
+  const rows = await reviewRows(h);
+  expect(rows.length, "one open proposal").toBe(1);
+  return await reviewProposal(h, String(rows[0]!.proposalId));
+}
+
 // The whole response, byte for byte. Anti-fingerprinting is a claim about
 // BYTES, so comparing status codes alone would not test it.
 async function denialBytes(response: Response): Promise<string> {
@@ -592,9 +611,9 @@ describe("the base rewrite", () => {
     expect(submitted.status).toBe(200);
     const proposalId = (await json(submitted)).proposalId as string;
 
-    const rows = await reviewRows(h);
+    const opened = await onlyReview(h);
     expect(
-      (rows[0]!.ops as Array<Record<string, unknown>>)[0]!.drifted,
+      (opened.ops as Array<Record<string, unknown>>)[0]!.drifted,
       "MUTATION: the review surface must say this file changed since they sent it",
     ).toBe(true);
 
@@ -846,7 +865,7 @@ describe("what the granter does under an open proposal", () => {
     // The REVIEW names the destination the accept will use — the granter's
     // current path, not the one the recipient read. A pure rename leaves
     // `drifted: false`, so there is no drift line to warn them either.
-    const reviewed = (await reviewRows(h))[0]!;
+    const reviewed = await onlyReview(h);
     const reviewedOp = (reviewed.ops as Array<Record<string, unknown>>)[0]!;
     expect(
       reviewedOp.afterPath,
@@ -900,7 +919,7 @@ describe("what the granter does under an open proposal", () => {
     });
 
     // The REVIEW names the same destination the accept will use.
-    const reviewed = (await reviewRows(h))[0]!;
+    const reviewed = await onlyReview(h);
     expect(
       (reviewed.ops as Array<Record<string, unknown>>)[0]!.afterPath,
       "MUTATION: the review must name the path the write will use",
@@ -1093,7 +1112,7 @@ describe("the version a share exposes", () => {
     const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: main.blobSha256 })]);
     const proposalId = (await json(submitted)).proposalId as string;
 
-    const row = (await reviewRows(h))[0]!;
+    const row = await onlyReview(h);
     expect(
       (row.ops as Array<Record<string, unknown>>)[0]!.drifted,
       "MUTATION: drift read across versions calls a current file drifted",
@@ -1632,6 +1651,79 @@ describe("the recipient's blob route", () => {
       "incomingText",
     );
 
+  });
+
+  // The per-proposal route is a NEW surface too, and it owes the listing's gate
+  // and the listing's exact denial bytes. A route that denies differently can
+  // be compared against the other to learn what a workspace holds.
+  it("gates the single-proposal route exactly as the listing is gated", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const granter = new Granter(h);
+    await granter.write("object-in", "docs/in.md", "granter one");
+    const shareId = await createShare(h, "edit");
+    expect((await uploadShareBlob(h, shareId, "recipient two")).status).toBe(200);
+    const sent = await submit(h, shareId, [change()]);
+    const proposalId = (await json(sent)).proposalId as string;
+    const one = (id: string, as: string) =>
+      h(request(as, `/sync/${WORKSPACE}/proposals/${id}`));
+
+    // The owner reads it, and it carries the file rows the listing does not.
+    const mine = await one(proposalId, GRANTER);
+    expect(mine.status, await mine.clone().text()).toBe(200);
+    const proposal = (await json(mine)).proposal as Record<string, unknown>;
+    expect((proposal.ops as unknown[]).length).toBe(1);
+    expect(proposal.proposalId).toBe(proposalId);
+
+    const denied = await Promise.all([
+      one(proposalId, RECIPIENT),
+      one(proposalId, OTHER),
+      one("proposal-absent", GRANTER),
+    ]).then((responses) => Promise.all(responses.map(denialBytes)));
+    expect(
+      new Set(denied).size,
+      "MUTATION: a per-failure answer turns this route into a probe for what a workspace holds",
+    ).toBe(1);
+    expect(
+      await denialBytes(await h(request(OTHER, `/sync/${WORKSPACE}/proposals`))),
+      "MUTATION: a per-proposal route denying differently from the listing leaks which proposals exist",
+    ).toBe(denied[0]);
+
+    // Settled is history on this route, exactly as on the op route.
+    expect((await settle(h, proposalId, "decline")).status).toBe(200);
+    expect(
+      await denialBytes(await one(proposalId, GRANTER)),
+      "MUTATION: serving a settled proposal keeps a closed review readable",
+    ).toBe(denied[0]);
+  });
+
+  // The polled listing must state counts and nothing more. Carrying op rows
+  // here is what made every tick resolve a base per file of every open
+  // proposal.
+  it("states counts on the listing, never file rows", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const granter = new Granter(h);
+    await granter.write("object-in", "docs/in.md", "granter one");
+    const shareId = await createShare(h, "edit");
+    expect((await uploadShareBlob(h, shareId, "recipient two")).status).toBe(200);
+    expect((await submit(h, shareId, [change()])).status).toBe(200);
+
+    const rows = await reviewRows(h);
+    expect(rows.length).toBe(1);
+    expect(
+      rows[0]!.ops,
+      "MUTATION: an ops ARRAY here restores the per-tick work this listing exists to avoid",
+    ).toBe(1);
+    expect(Object.keys(rows[0]!).sort()).toEqual([
+      "createdAtMs",
+      "ops",
+      "proposalId",
+      "proposedByEmail",
+      "shareId",
+    ]);
   });
 
   // A per-op route is a NEW surface on the granter's workspace, so it owes the

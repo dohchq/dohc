@@ -91,6 +91,10 @@ type SyncRelayRoute =
   | { route: "share-proposals"; shareId: string }
   | { route: "share-proposal-withdraw"; shareId: string; proposalId: string }
   | { route: "workspace-proposals"; workspaceId: string }
+  // ONE proposal, with its file rows. The listing above carries counts only,
+  // so opening a review reads the proposal the granter opened rather than
+  // every open proposal in the workspace.
+  | { route: "workspace-proposal"; workspaceId: string; proposalId: string }
   // ONE op of one proposal. The review lists metadata and loads a file's
   // content only when the granter opens that file, so this route answers the
   // opening — without re-serving every op of every open proposal to do it.
@@ -1039,13 +1043,41 @@ export function createSyncRelayHandler({
       // serves OPEN proposals only, so it states no `state` and no
       // `settledAtMs` — both would be constants. A settled proposal is
       // history, and this surface asks one question.
+      // A SUMMARY, because this is what a timer polls. The review surface
+      // renders a sender and a count from it; it does not draw files until a
+      // granter opens one. Serving every op of every open proposal here
+      // resolved a base per op on every tick to build rows nobody read.
+      //
+      // WHO sent them is resolved here from the server-derived user id on the
+      // proposal row. The granter's client used to rebuild this by fetching
+      // its whole share list and matching share ids — a second request per
+      // review, and wrong the moment a share has more than one recipient.
       if (route.route === "workspace-proposals" && request.method === "GET") {
-        // WHO sent them, resolved here from the server-derived user id on the
-        // proposal row. The granter's client used to rebuild this by fetching
-        // its whole share list and matching share ids — a second request per
-        // review, and wrong the moment a share has more than one recipient.
         const rows = await Promise.all(
           storage.listShareProposalsForWorkspace(route.workspaceId).map(async (proposal) => ({
+            proposalId: proposal.proposalId,
+            shareId: proposal.shareId,
+            proposedByEmail: lookupUserEmail
+              ? await lookupUserEmail(proposal.proposedByUserId)
+              : null,
+            createdAtMs: proposal.createdAtMs,
+            ops: proposal.opCount,
+          })),
+        );
+        return jsonResponse({ ok: true, proposals: rows });
+      }
+      if (route.route === "workspace-proposals") throw methodNotAllowed();
+
+      // ONE proposal's file rows, for the review a granter opened. Still no
+      // content: the rows say where each change lands and whether it drifted,
+      // and a file's text arrives through the op route below.
+      if (route.route === "workspace-proposal" && request.method === "GET") {
+        const proposal = storage.getShareProposal(route.proposalId);
+        if (!proposal || proposal.workspaceId !== route.workspaceId) throw notFound();
+        if (proposal.state !== "open") throw notFound();
+        return jsonResponse({
+          ok: true,
+          proposal: {
             proposalId: proposal.proposalId,
             shareId: proposal.shareId,
             proposedByEmail: lookupUserEmail
@@ -1055,11 +1087,10 @@ export function createSyncRelayHandler({
             ops: proposal.ops.map((op) =>
               reviewOpRow(route.workspaceId, proposal.versionId, op),
             ),
-          })),
-        );
-        return jsonResponse({ ok: true, proposals: rows });
+          },
+        });
       }
-      if (route.route === "workspace-proposals") throw methodNotAllowed();
+      if (route.route === "workspace-proposal") throw methodNotAllowed();
 
       // ONE op, for the review that opened one file. Same resolution as the
       // listing above, so the row a granter expands states exactly what the
@@ -1623,6 +1654,13 @@ function parseRoute(request: Request): SyncRelayRoute {
   }
   if (parts.length === 3 && parts[2] === "proposals") {
     return { route: "workspace-proposals", workspaceId };
+  }
+  if (parts.length === 4 && parts[2] === "proposals") {
+    return {
+      route: "workspace-proposal",
+      workspaceId,
+      proposalId: parseShareId(parts[3]),
+    };
   }
   if (parts.length === 6 && parts[2] === "proposals" && parts[4] === "ops") {
     return {

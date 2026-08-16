@@ -3,6 +3,7 @@ import {
   ShareUnavailableError,
   type SentShareProposal,
   type ShareProposal,
+  type ShareProposalSummary,
   type ShareProposalDecision,
   type ShareProposalOp,
   type ShareProposalSettlement,
@@ -178,10 +179,12 @@ function parseOp(value: unknown, at: string): ShareProposalOp {
   };
 }
 
-// This route serves what the granter still has to ANSWER, so every proposal
-// on it is open. It states no state and no settled time, and this parser asks
-// for neither: a validator for a field that is always the same value refuses
-// responses over a constant it never reads.
+// The proposal a granter OPENED, with its file rows. Every proposal reachable
+// here is open — the relay refuses a settled one — so it states no state and no
+// settled time, and this parser asks for neither: a validator for a field that
+// is always the same value refuses responses over a constant it never reads.
+//
+// The listing has its own parser (`parseProposalSummary`); it carries counts.
 function parseProposal(value: unknown, at: string): ShareProposal {
   const proposal = record(value, at);
   return {
@@ -192,6 +195,19 @@ function parseProposal(value: unknown, at: string): ShareProposal {
     ops: array(proposal.ops, `${at}.ops`).map((op, index) =>
       parseOp(op, `${at}.ops[${index}]`),
     ),
+  };
+}
+
+// The listing's row: no ops array, a COUNT. A parser that demanded op rows
+// here would refuse the summary this route now serves.
+function parseProposalSummary(value: unknown, at: string): ShareProposalSummary {
+  const proposal = record(value, at);
+  return {
+    proposalId: text(proposal, "proposalId", at),
+    shareId: text(proposal, "shareId", at),
+    proposedByEmail: nullableText(proposal, "proposedByEmail", at),
+    createdAtMs: count(proposal, "createdAtMs", at),
+    ops: count(proposal, "ops", at),
   };
 }
 
@@ -224,7 +240,10 @@ function parseSettlement(
 }
 
 /**
- * The proposals waiting on the granter, with every op expanded for review.
+ * The proposals waiting on the granter, as SUMMARIES.
+ *
+ * A timer polls this, and what it feeds renders a sender and a count. The op
+ * rows of one proposal come from `readShareProposal`, when a granter opens it.
  *
  * Workspace-scoped, so ownership is derived by the relay's own owner gate. A
  * recipient cannot reach this route: a received share never states the
@@ -233,7 +252,7 @@ function parseSettlement(
 export async function listShareProposals(input: {
   relay: SyncRelayConnection;
   workspaceId: string;
-}): Promise<ShareProposal[]> {
+}): Promise<ShareProposalSummary[]> {
   const body = record(
     await relayFetch(
       input.relay,
@@ -242,8 +261,39 @@ export async function listShareProposals(input: {
     "proposals response",
   );
   return array(body.proposals, "proposals").map((proposal, index) =>
-    parseProposal(proposal, `proposals[${index}]`),
+    parseProposalSummary(proposal, `proposals[${index}]`),
   );
+}
+
+/**
+ * ONE proposal, with its file rows, for the review a granter opened.
+ *
+ * Same owner gate as the listing, and the same generic 404 for a proposal of
+ * another workspace, one that never existed, and one already settled.
+ */
+export async function readShareProposal(input: {
+  relay: SyncRelayConnection;
+  workspaceId: string;
+  proposalId: string;
+}): Promise<ShareProposal> {
+  const body = record(
+    await relayFetch(
+      input.relay,
+      `/sync/${encodeURIComponent(input.workspaceId)}/proposals/${encodeURIComponent(
+        input.proposalId,
+      )}`,
+    ),
+    "proposal response",
+  );
+  const proposal = parseProposal(body.proposal, "proposal");
+  // The relay answering about another proposal is not a review this client can
+  // show — it would put one sender's changes under another's name.
+  if (proposal.proposalId !== input.proposalId) {
+    throw unreadable(
+      `proposal answered ${proposal.proposalId} for ${input.proposalId}`,
+    );
+  }
+  return proposal;
 }
 
 /**

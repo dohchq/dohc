@@ -343,9 +343,14 @@ export interface SyncRelayStorage {
     proposalId: string,
   ): (ShareProposalRow & { ops: ShareProposalOpRow[] }) | null;
   listShareProposalsForShare(shareId: string): Array<ShareProposalRow & { opCount: number }>;
+  // The granter's OPEN proposals, as counts rather than op rows. The review
+  // surface polls this on a timer and renders a sender and a count from it, so
+  // serving every op of every open proposal would resolve a base per op on
+  // every tick to build rows nobody reads. One proposal's ops come from
+  // getShareProposal, when a granter opens it.
   listShareProposalsForWorkspace(
     workspaceId: string,
-  ): Array<ShareProposalRow & { ops: ShareProposalOpRow[] }>;
+  ): Array<ShareProposalRow & { opCount: number }>;
   // Move a proposal out of `open`. Returns false when it already moved, which
   // is how a double accept, a decline racing an accept, and a withdraw racing
   // either one all lose without a second check.
@@ -2248,20 +2253,19 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   listShareProposalsForWorkspace(
     workspaceId: string,
-  ): Array<ShareProposalRow & { ops: ShareProposalOpRow[] }> {
+  ): Array<ShareProposalRow & { opCount: number }> {
     return this.db
       .prepare(
-        `SELECT proposal_id, share_id, workspace_id, proposed_by_user_id, version_id,
-                state, created_at_ms, settled_at_ms
-         FROM sync_relay_share_proposals
-         WHERE workspace_id = ? AND state = 'open'
-         ORDER BY created_at_ms, proposal_id`,
+        `SELECT p.proposal_id, p.share_id, p.workspace_id, p.proposed_by_user_id, p.version_id,
+                p.state, p.created_at_ms, p.settled_at_ms,
+                (SELECT COUNT(*) FROM sync_relay_share_proposal_ops o
+                  WHERE o.proposal_id = p.proposal_id) AS op_count
+         FROM sync_relay_share_proposals p
+         WHERE p.workspace_id = ? AND p.state = 'open'
+         ORDER BY p.created_at_ms, p.proposal_id`,
       )
       .all(workspaceId)
-      .map((row) => {
-        const proposal = rowToProposalRow(row);
-        return { ...proposal, ops: this.proposalOps(proposal.proposalId) };
-      });
+      .map((row) => ({ ...rowToProposalRow(row), opCount: Number(row.op_count ?? 0) }));
   }
 
   settleShareProposal(

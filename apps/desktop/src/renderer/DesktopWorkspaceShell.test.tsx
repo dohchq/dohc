@@ -6080,15 +6080,7 @@ describe("share changes review", () => {
     shareId: "share-1",
     proposedByEmail: "friend@dohc.test",
     createdAtMs: 1000,
-    files: [
-      {
-        opIndex: 0,
-        path: "docs/plan.md",
-        operation: "write" as const,
-        drifted: false,
-        afterByteLength: 4,
-      },
-    ],
+    ops: 1,
   };
 
   it("announces waiting changes and opens the review", async () => {

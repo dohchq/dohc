@@ -2858,7 +2858,12 @@ export const ShareProposalRow = z.object({
   // to state rather than a name to invent.
   proposedByEmail: EMAIL_STRING.nullable(),
   createdAtMs: z.number().int().nonnegative(),
-  files: z.array(ShareProposalFileRow).max(MAX_SHARE_PROPOSAL_OPS),
+  // HOW MANY files, not which ones. A timer polls this listing and renders a
+  // sender and a count; carrying the rows made every tick cost the relay a
+  // base resolution per file of every open proposal, to build rows no surface
+  // read. `readShareProposalChanges` states the rows, for the one proposal a
+  // granter opened.
+  ops: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_OPS),
 });
 export type ShareProposalRow = z.infer<typeof ShareProposalRow>;
 

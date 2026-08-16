@@ -341,6 +341,17 @@ export interface ShareProposal {
   ops: ShareProposalOp[];
 }
 
+// A proposal as the granter's LISTING states it: who sent it, when, and how
+// many files it carries. No op rows — a timer polls that listing, and the
+// review draws files only once a granter opens one proposal.
+export interface ShareProposalSummary {
+  proposalId: string;
+  shareId: string;
+  proposedByEmail: string | null;
+  createdAtMs: number;
+  ops: number;
+}
+
 // A proposal as its own SENDER sees it: the states behind "sent", "accepted"
 // and "declined". The recipient gets a count, not the granter's review view.
 export interface SentShareProposal {

@@ -105,10 +105,19 @@ renderer that had been written to the relay's paging number.**
 | | before | after |
 | --- | --: | --: |
 | IPC payload to open the review | ~95 MB (projected; refused in practice) | **871 KB** |
-| Relay fetches to open the review | 2,500 blob GETs | **1 listing** |
+| Relay fetches to open the review | 2,500 blob GETs | **1 proposal read** |
 | Local file reads to open the review | 2,500 | **0** |
 | Diff lines rendered on open | up to 2,000,000 | **0** |
-| Fetches to read one file | — | **1** |
+| Cost of reading ONE file | — | **2 relay fetches + 1 local read** |
+
+The IPC figures measure the read that OPENS a review, not a file read. Opening
+one file costs two relay round trips — its op row, then its after-blob — and one
+local read of the granter's own copy, and it carries only that file's two sides.
+The 871 KB is the relay's own measured listing body at 2,500 ops; the IPC rows
+carry the same fields minus the ones the surface does not render.
+
+The granter's polled listing is separate again: it carries counts, so a tick
+costs no per-file work at all.
 
 ## Not chased
 

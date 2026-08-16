@@ -2185,29 +2185,19 @@ describe("share changes IPC contract (#646 PR3a)", () => {
     shareId: "share-1",
     proposedByEmail: "recipient@example.com",
     createdAtMs: 1,
-    files: [
-      {
-        opIndex: 0,
-        path: "docs/a.md",
-        operation: "write",
-        drifted: false,
-        afterByteLength: 12,
-      },
-      {
-        opIndex: 1,
-        path: "docs/b.md",
-        operation: "delete",
-        drifted: true,
-        afterByteLength: null,
-      },
-    ],
+    ops: 2,
   });
 
-  it("carries a granter's review listing whole", () => {
+  // The listing a timer polls. It says WHO and HOW MANY; the file rows come
+  // from the one proposal a granter opens.
+  it("carries a granter's review listing as counts, with no file rows", () => {
     const parsed = ListShareProposalsResult.parse({ proposals: [proposal()] });
-    expect(parsed.proposals[0]?.files).toHaveLength(2);
-    expect(parsed.proposals[0]?.files[1]?.operation).toBe("delete");
-    expect(parsed.proposals[0]?.files[1]?.drifted).toBe(true);
+    expect(parsed.proposals[0]?.ops).toBe(2);
+    expect(
+      Object.keys(parsed.proposals[0] ?? {}).sort(),
+      "MUTATION: carrying file rows on the polled listing costs a base resolution " +
+        "per file of every open proposal on every tick",
+    ).toEqual(["createdAtMs", "ops", "proposalId", "proposedByEmail", "shareId"]);
   });
 
   it("states a sender it could not name, rather than inventing one", () => {
@@ -2222,11 +2212,9 @@ describe("share changes IPC contract (#646 PR3a)", () => {
     expect(
       () =>
         ListShareProposalsResult.parse({
-          proposals: [
-            { ...proposal(), files: [{ opIndex: 0, path: "a.md", operation: "rename", drifted: false, afterByteLength: null }] },
-          ],
+          proposals: [{ ...proposal(), ops: -1 }],
         }),
-      "MUTATION: an unknown operation renders as a change nobody described",
+      "MUTATION: a negative count renders a review nobody can have",
     ).toThrow();
     expect(() =>
       ListMyShareChangesResult.parse({
@@ -2244,13 +2232,14 @@ describe("share changes IPC contract (#646 PR3a)", () => {
 
   // `drifted` decides whether the review warns that the granter's copy moved.
   // A missing flag read as false would hide the warning on every drifted file.
+  // Drift is the one thing a review row says that a diff cannot, and it lives
+  // on the review read now that the polled listing carries counts.
   it("refuses a file row with no drift answer", () => {
     expect(
       () =>
-        ListShareProposalsResult.parse({
-          proposals: [
-            { ...proposal(), files: [{ opIndex: 0, path: "a.md", operation: "write" }] },
-          ],
+        ReadShareProposalChangesResult.parse({
+          proposedByEmail: null,
+          files: [{ opIndex: 0, path: "a.md", operation: "write", afterByteLength: 1 }],
         }),
       "MUTATION: an absent drift flag reads as `not drifted` and hides the warning",
     ).toThrow();

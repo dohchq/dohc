@@ -6,6 +6,8 @@ import {
 import {
   listMyShareProposals,
   listShareProposals,
+  readShareProposal,
+  readShareProposalOp,
   settleShareProposal,
   withdrawShareProposal,
 } from "./shareProposalRelay";
@@ -65,29 +67,21 @@ const PROPOSAL = {
   ops: [OP],
 };
 
+const SUMMARY = {
+  proposalId: "proposal-1",
+  shareId: "share-1",
+  proposedByEmail: "recipient@dohc.test",
+  createdAtMs: 10,
+  ops: 1,
+};
+
 describe("listShareProposals", () => {
-  it("reads the granter's waiting changes with their drift against the granter's own state", async () => {
+  // A timer polls this, so it states counts. The file rows of one proposal
+  // come from readShareProposal, when a granter opens it.
+  it("reads the granter's waiting changes as counts", async () => {
     const { relay, calls } = relayAnswering({
       ok: true,
-      proposals: [
-        PROPOSAL,
-        {
-          ...PROPOSAL,
-          proposalId: "proposal-2",
-          ops: [
-            {
-              ...OP,
-              opIndex: 1,
-              operation: "delete",
-              afterPath: null,
-              afterBlobSha256: null,
-              afterContentKind: null,
-              currentPath: null,
-              drifted: true,
-            },
-          ],
-        },
-      ],
+      proposals: [SUMMARY, { ...SUMMARY, proposalId: "proposal-2", ops: 4 }],
     });
 
     const proposals = await listShareProposals({
@@ -103,44 +97,8 @@ describe("listShareProposals", () => {
       },
     ]);
     expect(proposals).toEqual([
-      {
-        proposalId: "proposal-1",
-        shareId: "share-1",
-        proposedByEmail: "recipient@dohc.test",
-        createdAtMs: 10,
-        ops: [
-          {
-            opIndex: 0,
-            basedOnPath: "docs/a.md",
-            operation: "write",
-            afterPath: "docs/b.md",
-            afterBlobSha256: "b".repeat(64),
-            afterContentKind: "text",
-            afterByteLength: 12,
-            currentPath: "docs/a.md",
-            drifted: false,
-          },
-        ],
-      },
-      {
-        proposalId: "proposal-2",
-        shareId: "share-1",
-        proposedByEmail: "recipient@dohc.test",
-        createdAtMs: 10,
-        ops: [
-          {
-            opIndex: 1,
-            basedOnPath: "docs/a.md",
-            operation: "delete",
-            afterPath: null,
-            afterBlobSha256: null,
-            afterContentKind: null,
-            afterByteLength: 12,
-            currentPath: null,
-            drifted: true,
-          },
-        ],
-      },
+      SUMMARY,
+      { ...SUMMARY, proposalId: "proposal-2", ops: 4 },
     ]);
   });
 
@@ -149,63 +107,20 @@ describe("listShareProposals", () => {
   // reviewable either way.
   it("states a sender the relay could not name", async () => {
     const { relay } = relayAnswering({
-      proposals: [{ ...PROPOSAL, proposedByEmail: null }],
+      proposals: [{ ...SUMMARY, proposedByEmail: null }],
     });
     const [proposal] = await listShareProposals({ relay, workspaceId: "workspace-a" });
     expect(proposal?.proposedByEmail).toBeNull();
   });
 
-  it("refuses a drift answer that is not a boolean, rather than reading it as false", async () => {
-    const { relay } = relayAnswering({
-      proposals: [{ ...PROPOSAL, ops: [{ ...OP, drifted: "no" }] }],
-    });
-
-    await expect(
-      listShareProposals({ relay, workspaceId: "workspace-a" }),
-      "MUTATION: a softened drift read hides that the granter's copy moved",
-    ).rejects.toThrow(/drifted is not a boolean/u);
-  });
-
-  it("refuses an op whose operation and after side contradict each other", async () => {
-    const writeWithoutTarget = relayAnswering({
-      proposals: [{ ...PROPOSAL, ops: [{ ...OP, afterPath: null }] }],
-    });
-    const deleteWithTarget = relayAnswering({
-      proposals: [{ ...PROPOSAL, ops: [{ ...OP, operation: "delete" }] }],
-    });
-
-    await expect(
-      listShareProposals({
-        relay: writeWithoutTarget.relay,
-        workspaceId: "workspace-a",
-      }),
-    ).rejects.toThrow(/write with an after path of null/u);
-    await expect(
-      listShareProposals({
-        relay: deleteWithTarget.relay,
-        workspaceId: "workspace-a",
-      }),
-    ).rejects.toThrow(/delete with an after path of a path/u);
-  });
-
-  it("refuses a drift flag the relay left out rather than reading it as no drift", async () => {
-    const { relay } = relayAnswering({
-      proposals: [
-        {
-          ...PROPOSAL,
-          ops: [
-            {
-              ...OP,
-              drifted: undefined,
-            },
-          ],
-        },
-      ],
-    });
-
-    await expect(
-      listShareProposals({ relay, workspaceId: "workspace-a" }),
-    ).rejects.toThrow(/drifted is not a boolean/u);
+  it("refuses a count that is not a count, rather than reading it as none", async () => {
+    for (const ops of [-1, 1.5, "3", null]) {
+      const { relay } = relayAnswering({ proposals: [{ ...SUMMARY, ops }] });
+      await expect(
+        listShareProposals({ relay, workspaceId: "workspace-a" }),
+        `MUTATION: a softened count read renders a review size nobody stated (${String(ops)})`,
+      ).rejects.toThrow(/ops is not a non-negative integer/u);
+    }
   });
 
   it("reports the relay's generic lookup failure and its auth failure apart", async () => {
@@ -224,6 +139,121 @@ describe("listShareProposals", () => {
         workspaceId: "workspace-a",
       }),
     ).rejects.toBeInstanceOf(RelayUnauthorizedError);
+  });
+});
+
+// ONE proposal, opened. This is where the op rows are read, so this is where
+// their strictness is proved.
+describe("readShareProposal", () => {
+  const read = (relay: Parameters<typeof readShareProposal>[0]["relay"]) =>
+    readShareProposal({ relay, workspaceId: "workspace a", proposalId: "proposal-1" });
+
+  it("reads one proposal's file rows, by id", async () => {
+    const { relay, calls } = relayAnswering({ ok: true, proposal: PROPOSAL });
+
+    const proposal = await read(relay);
+
+    expect(calls).toEqual([
+      {
+        url: "https://relay.test/sync/workspace%20a/proposals/proposal-1",
+        method: "GET",
+        authorization: "Bearer granter-token",
+      },
+    ]);
+    expect(proposal.ops).toHaveLength(1);
+    expect(proposal.ops[0]?.afterByteLength).toBe(12);
+  });
+
+  // The relay answering about ANOTHER proposal would put one sender's changes
+  // under another sender's name.
+  it("refuses a proposal answered for a different id", async () => {
+    const { relay } = relayAnswering({
+      proposal: { ...PROPOSAL, proposalId: "proposal-9" },
+    });
+    await expect(
+      read(relay),
+      "MUTATION: trusting the answered id shows one sender's changes under another's name",
+    ).rejects.toThrow(/proposal answered proposal-9 for proposal-1/u);
+  });
+
+  it("refuses a drift answer that is not a boolean, rather than reading it as false", async () => {
+    const { relay } = relayAnswering({
+      proposal: { ...PROPOSAL, ops: [{ ...OP, drifted: "no" }] },
+    });
+
+    await expect(
+      read(relay),
+      "MUTATION: a softened drift read hides that the granter's copy moved",
+    ).rejects.toThrow(/drifted is not a boolean/u);
+  });
+
+  it("refuses an op whose operation and after side contradict each other", async () => {
+    const writeWithoutTarget = relayAnswering({
+      proposal: { ...PROPOSAL, ops: [{ ...OP, afterPath: null }] },
+    });
+    const deleteWithTarget = relayAnswering({
+      proposal: { ...PROPOSAL, ops: [{ ...OP, operation: "delete" }] },
+    });
+
+    await expect(read(writeWithoutTarget.relay)).rejects.toThrow(
+      /write with an after path of null/u,
+    );
+    await expect(read(deleteWithTarget.relay)).rejects.toThrow(
+      /delete with an after path of a path/u,
+    );
+  });
+
+  it("refuses a drift flag the relay left out rather than reading it as no drift", async () => {
+    const { relay } = relayAnswering({
+      proposal: { ...PROPOSAL, ops: [{ ...OP, drifted: undefined }] },
+    });
+
+    await expect(read(relay)).rejects.toThrow(/drifted is not a boolean/u);
+  });
+});
+
+// The lazy review's content door. It names ONE op, and what comes back must be
+// that op.
+describe("readShareProposalOp", () => {
+  const readOp = (
+    relay: Parameters<typeof readShareProposalOp>[0]["relay"],
+    opIndex = 3,
+  ) =>
+    readShareProposalOp({
+      relay,
+      workspaceId: "workspace a",
+      proposalId: "proposal-1",
+      opIndex,
+    });
+
+  it("reads the op it asked for, by index", async () => {
+    const { relay, calls } = relayAnswering({
+      ok: true,
+      op: { ...OP, opIndex: 3 },
+    });
+
+    const op = await readOp(relay);
+
+    expect(calls[0]?.url).toBe(
+      "https://relay.test/sync/workspace%20a/proposals/proposal-1/ops/3",
+    );
+    expect(op.opIndex).toBe(3);
+  });
+
+  // A mismatched index would put one file's content under another file's row —
+  // the granter would read a diff for a file they did not open.
+  it("refuses an op answered for a different index", async () => {
+    const { relay } = relayAnswering({ op: { ...OP, opIndex: 4 } });
+
+    await expect(
+      readOp(relay),
+      "MUTATION: trusting the answered index shows one file's content under another file's row",
+    ).rejects.toThrow(/proposal op answered index 4 for 3/u);
+  });
+
+  it("reports the relay's generic lookup failure as an unavailable share", async () => {
+    const missing = relayAnswering({ error: "not_found" }, { status: 404 });
+    await expect(readOp(missing.relay)).rejects.toBeInstanceOf(ShareUnavailableError);
   });
 });
 

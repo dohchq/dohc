@@ -23610,8 +23610,12 @@ fn the_submit_bound_matches_the_relay_contract() {
 /// The submit bound and the replication page size are different numbers for
 /// different things. Collapsing them re-couples one user act to a paging size,
 /// which is how the bound came to sit inside measured healthy work.
-/// Checked when the crate COMPILES, because the relationship between the two
-/// is a fact about the constants rather than about any run.
+/// Checked when this crate's TEST TARGET compiles — this module is
+/// `cfg(test)`, so the assertion is evaluated by `cargo test`/`nextest`
+/// builds rather than by a plain `cargo build`. The gate compiles the tests,
+/// so a violation fails the gate before any test runs. It is a const
+/// assertion because the relationship between two constants is a fact about
+/// the constants, not about any run.
 const _: () = assert!(
     crate::MAX_SHARE_PROPOSAL_OPS > crate::MAX_PUSH_OPS_PER_BATCH,
     "MUTATION: a submit bounded by the page size rejects a week of ordinary work",

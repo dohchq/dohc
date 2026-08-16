@@ -216,7 +216,8 @@ export function ProposalReviewDialog(props: {
     setSettleError(null);
     void (async () => {
       try {
-        // ONE read: the files, their drift, and both sides of each diff.
+        // ONE read, and NO content: the files, their paths, sizes and drift.
+        // A file's two sides are read when its row is opened.
         const changes = await bridge().readShareProposalChanges({
           workspaceId,
           proposalId,
