@@ -286,14 +286,21 @@ async function fileHashes(
   return hashes;
 }
 
+/**
+ * Pass a function for any message that reads live state: a template string
+ * argument is built before the wait starts, so it reports the state the
+ * pipeline was in on the way in rather than the one it timed out in.
+ */
 async function waitFor(
   condition: () => boolean,
-  message: string,
+  message: string | (() => string),
   timeoutMs = 30_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!condition()) {
-    if (Date.now() >= deadline) throw new Error(message);
+    if (Date.now() >= deadline) {
+      throw new Error(typeof message === "string" ? message : message());
+    }
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
   }
 }
@@ -765,6 +772,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
   it("restores the running status after a watcher reconcile that finds no real change (fixround Section B item 12)", async () => {
     const fixture = await createPluginWorkspace();
+    let snapshotCalls = 0;
     let pipeline: PluginPipeline;
     const host = new PluginHost({
       stateDir: fixture.stateDir,
@@ -784,6 +792,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        snapshot: (input) => {
+          snapshotCalls += 1;
+          return snapshotPluginSource(input);
+        },
       },
     });
 
@@ -806,17 +818,25 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // or a sync tool settling.
       const originalSource = await readFile(fixture.entryPath, "utf8");
       await writeFile(fixture.entryPath, originalSource);
-      pipeline.handleWatcherEvents([{
+      const snapshotsBefore = snapshotCalls;
+      await pipeline.handleWatcherEvents([{
         path: "plugins/example-plugin/src/index.ts",
         operation: "update",
       }]);
 
-      // The reconcile briefly visits "snapshotting" — wait past that window,
-      // then assert it settled back to "ready" rather than staying stuck.
-      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      // The pipeline sets "snapshotting" on its way into the source check, so
+      // its snapshot call is the moment the plugin is inside that busy window.
+      // Reaching "ready" from there is the restore under test, not the status
+      // the plugin already carried.
+      await waitFor(
+        () => snapshotCalls > snapshotsBefore,
+        "The no-op watcher reconcile never checked the source.",
+      );
       await waitFor(
         () => pipeline.list()[0]?.status === "ready",
-        `No-op reconcile left status at "${pipeline.list()[0]?.status}" instead of restoring "ready".`,
+        () =>
+          `No-op reconcile left status at "${pipeline.list()[0]?.status}" ` +
+          `instead of restoring "ready".`,
       );
     } finally {
       await pipeline.dispose();
@@ -3486,12 +3506,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await waitFor(() => installCalls === 2, "The first door rebuild never started.");
 
       // The watcher observes door write 1's own disk change and queues a
-      // reconcile behind the running job.
-      pipeline.handleWatcherEvents([{
+      // reconcile behind the running job. Awaiting the batch is what makes
+      // the dedup below the thing under test: the reconcile holds the one
+      // refresh slot before door write 2 asks for it.
+      await pipeline.handleWatcherEvents([{
         path: "plugins/example-plugin/src/index.ts",
         operation: "update",
       }]);
-      await new Promise<void>((resolve) => setTimeout(resolve, 250));
 
       // Door write 2: its refresh notification is dropped by the dedup —
       // the watcher reconcile already holds the queue slot. The surviving
@@ -3504,15 +3525,21 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       ].join("\n"));
 
       installGate.resolve();
+      // Door write 1's own rebuild publishes its door-one tree first, and the
+      // plugin passes back through "ready" there while the surviving
+      // reconcile is still queued. The sequence has settled only once that
+      // reconcile's own rebuild — the third install — has finished.
       await waitFor(
         () => {
           const row = pipeline.list()[0];
-          return row?.status === "ready" &&
+          return installCalls === 3 && row?.status === "ready" &&
             row.disabledReason === null;
         },
-        `The deduped door sequence did not end ready; status is ` +
+        () =>
+          `The deduped door sequence did not end ready; status is ` +
           `"${pipeline.list()[0]?.status}" ` +
-          `(disabledReason "${pipeline.list()[0]?.disabledReason}").`,
+          `(disabledReason "${pipeline.list()[0]?.disabledReason}") ` +
+          `after ${installCalls} installs.`,
         120_000,
       );
       expect(await readFile(liveBundlePath(fixture, "example-plugin"), "utf8"))

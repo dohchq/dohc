@@ -778,8 +778,14 @@ export class PluginPipeline {
       this.reconcileApprovedCandidate(pluginId, true));
   }
 
-  handleWatcherEvents(events: readonly WatcherEvent[]): void {
-    if (this.disposed || !events.some(pluginTreeEvent)) return;
+  /**
+   * Reconciles one watcher batch, behind every batch already in flight. The
+   * returned promise settles once this batch has decided its refreshes and
+   * queued them; it never rejects, so a caller that only forwards events can
+   * ignore it.
+   */
+  handleWatcherEvents(events: readonly WatcherEvent[]): Promise<void> {
+    if (this.disposed || !events.some(pluginTreeEvent)) return Promise.resolve();
     const batch = events.map((event) => ({ ...event }));
     this.discoveryTail = this.discoveryTail.then(
       () => this.processWatcherBatch(batch),
@@ -790,6 +796,7 @@ export class PluginPipeline {
         error,
       );
     });
+    return this.discoveryTail;
   }
 
   noteRuntimeStatus(pluginId: string, runtimeStatus: PluginRuntimeStatus): void {
