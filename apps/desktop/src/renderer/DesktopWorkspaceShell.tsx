@@ -52,6 +52,7 @@ import {
   rendererMarks,
 } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
+import { PLUGIN_WEB_APP_OPEN_ERROR } from "./pluginWebAppCopy";
 import { useSnapshotLane } from "./snapshotLane";
 import { momentDiffSides } from "./workbench/momentDiffSides";
 import { CloudLogin } from "./CloudLogin";
@@ -5206,7 +5207,7 @@ export function DesktopWorkspaceShell(props: {
               ) : (
                 <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
                   <span className="text-sm text-ink">
-                    dohc could not open the plugin app
+                    {PLUGIN_WEB_APP_OPEN_ERROR}
                   </span>
                   <button
                     type="button"

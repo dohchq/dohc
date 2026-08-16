@@ -1,6 +1,7 @@
 import { AlertTriangle, Plug } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
+import { PLUGIN_WEB_APP_OPEN_ERROR } from "./pluginWebAppCopy";
 
 // The tab surface for a wrapper plugin's embedded web app. The app itself
 // renders in a main-process WebContentsView layered over this page, so this
@@ -185,12 +186,12 @@ export function PluginWebAppPage(props: {
       ) : load.status === "error" ? (
         <div
           role="alert"
-          aria-label="dohc could not open the plugin app"
+          aria-label={PLUGIN_WEB_APP_OPEN_ERROR}
           data-testid="plugin-web-app-error"
           className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
         >
           <AlertTriangle size={20} aria-hidden className="text-warning" />
-          <span className="text-sm text-ink">dohc could not open the plugin app</span>
+          <span className="text-sm text-ink">{PLUGIN_WEB_APP_OPEN_ERROR}</span>
           <span className="max-w-sm text-xs text-muted">{load.message}</span>
           <span className="max-w-sm text-xs text-muted">
             Close this tab and try again.

@@ -150,7 +150,9 @@ describe("plugin uninstall preflight", () => {
     expect(absent.stateData).toBeNull();
     expect(absent.warning).toBeNull();
 
-    await mkdir(join(fixture.dohcDir, "state", pluginId, "t3"), { recursive: true });
+    await mkdir(join(pluginStateRoot(fixture.dohcDir, pluginId), "t3"), {
+      recursive: true,
+    });
     const empty = await runPreflight(fixture, baseline);
     expect(empty.stateData).toBeNull();
     expect(empty.warning).toBeNull();

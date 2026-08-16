@@ -134,19 +134,36 @@ export function createT3Bridge(
     const logComplete = (line: string): void => {
       if (line.trim().length > 0) log(redactT3Output(line));
     };
-    await child.onOutput((output) => {
-      if (captured.pairingUrl === null) {
-        captured.raw = (captured.raw + output.text).slice(-RAW_BUFFER_LIMIT);
-        captured.pairingUrl = findPairingUrl(captured.raw);
-        if (captured.pairingUrl !== null) captured.raw = "";
-      }
-      let buffer = logBuffers.get(output.stream);
-      if (!buffer) {
-        buffer = createStreamLineBuffer(logComplete);
-        logBuffers.set(output.stream, buffer);
-      }
-      buffer.push(output.text);
-    });
+    // The broker refuses an output subscription for a child that already
+    // exited, and the allocate-then-bind race this loop exists for can kill
+    // one in the window since the spawn. A refused subscription is a failed
+    // attempt, not a failed start: the loop must get its remaining attempts
+    // instead of the raw broker error reaching the user.
+    const subscribed = await child
+      .onOutput((output) => {
+        if (captured.pairingUrl === null) {
+          captured.raw = (captured.raw + output.text).slice(-RAW_BUFFER_LIMIT);
+          captured.pairingUrl = findPairingUrl(captured.raw);
+          if (captured.pairingUrl !== null) captured.raw = "";
+        }
+        let buffer = logBuffers.get(output.stream);
+        if (!buffer) {
+          buffer = createStreamLineBuffer(logComplete);
+          logBuffers.set(output.stream, buffer);
+        }
+        buffer.push(output.text);
+      })
+      .then(
+        () => true,
+        () => false,
+      );
+    if (!subscribed) {
+      // A refusal for any other reason leaves a server this plugin can no
+      // longer read; ending it keeps the workspace's t3 refs free for the
+      // next attempt. Terminating an exited child is a no-op.
+      await child.terminate().catch(() => undefined);
+      return null;
+    }
     const exited = child.wait({ timeoutMs: CHILD_WAIT_TIMEOUT_MS });
     const flushLogs = (): void => {
       for (const buffer of logBuffers.values()) buffer.flush();

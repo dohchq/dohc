@@ -12,6 +12,8 @@ import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 import { Overlay } from "./Overlay";
 import { PluginWebAppPage } from "./PluginWebAppPage";
 import { RecoveryCloseGuard, resetGuardedExits } from "./RecoveryCloseGuard";
+import { AgentPermissionRequests } from "./workbench/AgentPermissionRequests";
+import type { AgentPermissionRequest } from "./workbench/useAgentNotifications";
 
 // The signal that hides a plugin web app's guest, driven the way the shell
 // drives it. The guest is a main-process view composited above this renderer,
@@ -27,6 +29,8 @@ const bridgeMock = {
     async (_payload: SetPluginWebAppBoundsPayload) => undefined,
   ),
   stopPluginWebApp: vi.fn(async () => undefined),
+  // The permission card answers through this one.
+  answerAgentPermission: vi.fn(async () => ({ drivers: [], session: null })),
   onPluginWebAppFailed: vi.fn(
     (_listener: (event: PluginWebAppFailedEvent) => void) => () => undefined,
   ),
@@ -103,6 +107,20 @@ function FloatingAsk(props: { pending: boolean }) {
   return props.pending ? <div data-testid="floating-ask">Allow?</div> : null;
 }
 
+const ASK: AgentPermissionRequest = {
+  requestId: "perm-1",
+  requestType: "file-change",
+  title: "Write notes/plan.md",
+  locations: ["notes/plan.md"],
+  options: [{ optionId: "o-allow", name: "Allow", kind: "allow_once" }],
+};
+
+function PermissionAsk(props: { requests: readonly AgentPermissionRequest[] }) {
+  return (
+    <AgentPermissionRequests workspaceId="ws-1" runId="run-1" requests={props.requests} />
+  );
+}
+
 const lastVisible = () =>
   bridgeMock.setPluginWebAppBounds.mock.calls.at(-1)?.[0]?.visible;
 
@@ -148,36 +166,35 @@ describe("the guest-blocking UI signal", () => {
     expect(lastVisible()).toBe(true);
   });
 
-  it("hides the guest for a floating ask that is not an overlay", async () => {
+  it("hides the guest for the agent's permission ask, which is not an overlay", async () => {
     const view = render(
       <Shell>
-        <FloatingAsk pending={false} />
+        <PermissionAsk requests={[]} />
       </Shell>,
     );
     await screen.findByTestId("plugin-web-app-frame");
     expect(lastVisible()).toBe(true);
 
-    // MUTATION (drop the registration): an agent permission card floats over
-    // the guest, its Allow button eats nothing, and the run stays blocked
-    // with no way to unblock it.
+    // MUTATION (drop the registration from AgentPermissionRequests): the card
+    // floats over the guest, its Allow button eats nothing, and the run stays
+    // blocked with no way to unblock it.
     await act(async () => {
       view.rerender(
         <Shell>
-          <FloatingAsk pending />
+          <PermissionAsk requests={[ASK]} />
         </Shell>,
       );
       await Promise.resolve();
     });
+    expect(screen.getByTestId("agent-permission-request")).toBeTruthy();
     expect(lastVisible()).toBe(false);
 
+    // Answering releases the guest, without waiting for the poll to confirm.
     await act(async () => {
-      view.rerender(
-        <Shell>
-          <FloatingAsk pending={false} />
-        </Shell>,
-      );
+      screen.getByTestId("agent-permission-allow_once").click();
       await Promise.resolve();
     });
+    expect(screen.queryByTestId("agent-permission-request")).toBeNull();
     expect(lastVisible()).toBe(true);
   });
 

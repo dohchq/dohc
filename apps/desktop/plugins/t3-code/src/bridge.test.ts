@@ -26,6 +26,7 @@ type FakeBoot =
   | "ready"
   | "ready-split-token"
   | "exit-early"
+  | "exit-before-subscribe"
   | "exit-split-token"
   | "wrong-version";
 
@@ -52,6 +53,10 @@ class FakeT3Child implements PluginChildProcessHandle {
   private exitResolve: (exit: PluginChildProcessExit) => void = () => undefined;
   private readonly exitPromise: Promise<PluginChildProcessExit>;
   private server: Server | null = null;
+  private exited = false;
+  /** A child that dies the moment the bridge starts listening. The
+   * subscription lands, and the readiness poll is what notices the exit. */
+  private exitOnSubscribe = false;
 
   constructor(index: number) {
     this.id = `child-${index}`;
@@ -70,7 +75,14 @@ class FakeT3Child implements PluginChildProcessHandle {
   async boot(mode: FakeBoot, port: number, token: string): Promise<void> {
     if (mode === "exit-early") {
       this.emit("bind failed: EADDRINUSE\n");
-      this.exitResolve({ code: 1, reason: "exited" });
+      this.exitOnSubscribe = true;
+      return;
+    }
+    if (mode === "exit-before-subscribe") {
+      // The same lost bind, one instant earlier: the child is already gone
+      // when the spawn call returns, so the broker refuses the subscription.
+      this.emit("bind failed: EADDRINUSE\n");
+      this.finishExit();
       return;
     }
     if (mode === "exit-split-token") {
@@ -79,7 +91,7 @@ class FakeT3Child implements PluginChildProcessHandle {
       for (const chunk of cutInsideTokenWord(`starting\nToken: ${token}`)) {
         this.emit(chunk);
       }
-      this.exitResolve({ code: 1, reason: "exited" });
+      this.exitOnSubscribe = true;
       return;
     }
     const serverVersion =
@@ -110,7 +122,12 @@ class FakeT3Child implements PluginChildProcessHandle {
   /** Simulates the server dying out from under the bridge. */
   async die(): Promise<void> {
     await this.closeServer();
-    this.exitResolve({ code: 1, reason: "exited" });
+    this.finishExit();
+  }
+
+  private finishExit(exit: PluginChildProcessExit = { code: 1, reason: "exited" }): void {
+    this.exited = true;
+    this.exitResolve(exit);
   }
 
   private async closeServer(): Promise<void> {
@@ -124,10 +141,21 @@ class FakeT3Child implements PluginChildProcessHandle {
   onOutput(
     listener: (output: PluginChildProcessOutput) => void,
   ): Promise<() => Promise<void>> {
+    // The broker's own contract: subscribe() asserts the child is live and
+    // throws for one that already exited (pluginChildProcessBroker.ts). A fake
+    // that accepts the subscription anyway certifies a broker that does not
+    // exist.
+    if (this.exited) {
+      return Promise.reject(new Error(`Child process "${this.id}" has exited.`));
+    }
     this.listeners.add(listener);
     // The real broker replays a child's buffered output to a new subscriber;
     // the bridge subscribes after spawn resolves and relies on it.
     for (const output of this.buffered) listener(output);
+    if (this.exitOnSubscribe) {
+      this.exitOnSubscribe = false;
+      this.finishExit();
+    }
     return Promise.resolve(async () => {
       this.listeners.delete(listener);
     });
@@ -148,7 +176,7 @@ class FakeT3Child implements PluginChildProcessHandle {
   async terminate(): Promise<PluginChildProcessExit> {
     this.terminated = true;
     await this.closeServer();
-    this.exitResolve({ code: null, reason: "terminated" });
+    this.finishExit({ code: null, reason: "terminated" });
     return { code: null, reason: "terminated" };
   }
 }
@@ -377,6 +405,36 @@ describe("createT3Bridge", () => {
     ]);
     await expect(bridge.startWebApp(T3_WEB_APP_ID)).rejects.toThrow("3 attempts");
     expect(spawns).toHaveLength(3);
+  });
+
+  it("counts a child that exits before the subscription as a failed attempt", async () => {
+    const { spawns, bridge } = await createFixture([
+      "exit-before-subscribe",
+      "exit-before-subscribe",
+      "exit-before-subscribe",
+    ]);
+    const error = await bridge
+      .startWebApp(T3_WEB_APP_ID)
+      .then(() => null)
+      .catch((thrown: unknown) => thrown);
+
+    // MUTATION (let the refused subscription escape spawnAttempt): the retry
+    // loop collapses to one attempt and the user reads a broker internal —
+    // `Child process "child-0" has exited.` — for a race the retry exists to
+    // absorb.
+    expect(spawns).toHaveLength(3);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("3 attempts");
+    expect((error as Error).message).not.toContain("has exited");
+  });
+
+  it("recovers on the next attempt after a child exits before the subscription", async () => {
+    const { spawns, bridge } = await createFixture(["exit-before-subscribe", "ready"]);
+    const started = await bridge.startWebApp(T3_WEB_APP_ID);
+
+    expect(spawns).toHaveLength(2);
+    expect(started.url).toContain(`:${portFromArgs(spawns[1]!.request.args)}/pair`);
+    await bridge.dispose();
   });
 
   it("destroys a server reporting any other version and reports the mismatch", async () => {
