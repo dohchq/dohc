@@ -1096,6 +1096,50 @@ mod tests {
         status: u16,
     }
 
+    /// The relay reads a proposed change's base pair as a STATED fact — both
+    /// halves or neither (`filterProposedChangeForShare`). An absent field and
+    /// a null field must therefore not look the same on the wire, so every
+    /// optional field is serialized rather than skipped.
+    #[test]
+    fn a_proposed_change_sends_every_absent_field_as_an_explicit_null() {
+        let change = ShareProposalChange {
+            based_on_path: None,
+            based_on_blob_sha256: None,
+            operation: "delete".to_owned(),
+            after_path: None,
+            after_blob_sha256: None,
+            after_content_kind: None,
+            after_byte_length: None,
+            recorded_at_ms: 7,
+        };
+        let wire = serde_json::to_value(WireShareProposalChange::from(&change)).expect("serialize");
+        let record = wire.as_object().expect("a change is a JSON object");
+        for field in [
+            "basedOnPath",
+            "basedOnBlobSha256",
+            "afterPath",
+            "afterBlobSha256",
+            "afterContentKind",
+            "afterByteLength",
+        ] {
+            assert_eq!(
+                record.get(field),
+                Some(&serde_json::Value::Null),
+                "MUTATION: {field} must be sent as an explicit null, never skipped",
+            );
+        }
+        assert_eq!(
+            record.get("operation").and_then(serde_json::Value::as_str),
+            Some("delete"),
+        );
+        assert_eq!(
+            record
+                .get("recordedAtMs")
+                .and_then(serde_json::Value::as_i64),
+            Some(7),
+        );
+    }
+
     #[test]
     fn mapped_server_codes_and_relay_fixture_are_bidirectional() {
         let fixture: Vec<RelayErrorFixture> = serde_json::from_str(include_str!(

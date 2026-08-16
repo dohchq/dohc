@@ -359,8 +359,9 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // Y.Doc relay-arbitration coordinate (ordinal 32), scene asset delete
     // authority (ordinal 33), the scene Y.Doc content-kind migration
     // (ordinal 34), scene support in Y.Doc recovery decisions (ordinal 35),
-    // and the share-view file lane (ordinal 36, #646 PR3-1).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 37);
+    // the share-view file lane (ordinal 36, #646 PR3-1), and the
+    // share-proposal submit scan position (ordinal 37, #646 PR3a).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 38);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(
