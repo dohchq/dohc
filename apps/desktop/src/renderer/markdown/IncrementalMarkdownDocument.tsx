@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   activateReadOnlyLinkHref,
   type WorkspaceLinkTarget,
@@ -31,11 +32,21 @@ const scheduleIdle: IdleScheduler = (cb) => {
   return () => clearTimeout(id);
 };
 
+// GFM is what people actually write in a README: tables, strikethrough, bare
+// URLs, task lists. Chunk boundaries sit at blank lines, and no GFM block
+// carries one, so every chunk parses the same extensions the whole document
+// would. Still no raw HTML — remark-gfm adds syntax, not an HTML escape.
+const REMARK_PLUGINS = [remarkGfm];
+
 const MarkdownChunk = memo(function MarkdownChunk(props: {
   source: string;
   components: Components;
 }) {
-  return <Markdown components={props.components}>{props.source}</Markdown>;
+  return (
+    <Markdown components={props.components} remarkPlugins={REMARK_PLUGINS}>
+      {props.source}
+    </Markdown>
+  );
 });
 
 export function IncrementalMarkdownDocument(props: {

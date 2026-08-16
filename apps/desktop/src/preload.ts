@@ -8,6 +8,12 @@ import type {
   MenuCommand,
   PluginPanelOpenedEvent,
   PluginStatusChangedEvent,
+  PluginWebAppFailedEvent,
+  PluginWebAppOpenedEvent,
+  OpenPluginWebAppPayload,
+  SetPluginWebAppBoundsPayload,
+  StartPluginWebAppPayload,
+  StopPluginWebAppPayload,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
   SitePackagePayload,
@@ -23,12 +29,17 @@ import type {
 import {
   ListPluginsResult,
   OpenPluginPanelResult,
+  OpenPluginWebAppResult,
   PluginActionResult,
+  PluginSettingsResult,
+  PluginSizesResult,
   PluginUninstallPreflightResult,
   StartPluginPanelResult,
+  StartPluginWebAppResult,
   parseInvokePluginPanelSdkPayloadForIpc,
   parseInvokeSiteSdkPayloadForIpc,
   parsePluginStatusChangedEventForIpc,
+  parsePluginWebAppFailedEventForIpc,
 } from "./ipc/bridgeContract";
 import {
   CHANNELS,
@@ -49,6 +60,9 @@ import {
 // mistyped method fails the desktop typecheck).
 const pluginPanelOpenedListeners = new Set<
   (event: PluginPanelOpenedEvent) => void
+>();
+const pluginWebAppOpenedListeners = new Set<
+  (event: PluginWebAppOpenedEvent) => void
 >();
 
 const bridge: DohcDesktopBridge = {
@@ -181,6 +195,37 @@ const bridge: DohcDesktopBridge = {
       CHANNELS.invokePluginPanelSdk,
       parseInvokePluginPanelSdkPayloadForIpc(payload),
     ),
+  openPluginWebApp: async (payload: OpenPluginWebAppPayload) => {
+    const result = OpenPluginWebAppResult.parse(
+      await ipcRenderer.invoke(CHANNELS.openPluginWebApp, payload),
+    );
+    const event: PluginWebAppOpenedEvent = {
+      workspaceId: payload.workspaceId,
+      ...result,
+    };
+    for (const listener of pluginWebAppOpenedListeners) listener(event);
+    return result;
+  },
+  onPluginWebAppOpened: (listener) => {
+    pluginWebAppOpenedListeners.add(listener);
+    return () => pluginWebAppOpenedListeners.delete(listener);
+  },
+  startPluginWebApp: async (payload: StartPluginWebAppPayload) =>
+    StartPluginWebAppResult.parse(
+      await ipcRenderer.invoke(CHANNELS.startPluginWebApp, payload),
+    ),
+  setPluginWebAppBounds: (payload: SetPluginWebAppBoundsPayload) =>
+    ipcRenderer.invoke(CHANNELS.setPluginWebAppBounds, payload),
+  stopPluginWebApp: (payload: StopPluginWebAppPayload) =>
+    ipcRenderer.invoke(CHANNELS.stopPluginWebApp, payload),
+  onPluginWebAppFailed: (listener: (event: PluginWebAppFailedEvent) => void) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      const parsed = parsePluginWebAppFailedEventForIpc(raw);
+      if (parsed) listener(parsed);
+    };
+    ipcRenderer.on(CHANNELS.pluginWebAppFailed, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.pluginWebAppFailed, handler);
+  },
   listPlugins: async (payload) =>
     ListPluginsResult.parse(await ipcRenderer.invoke(CHANNELS.listPlugins, payload)),
   installPlugin: async (payload) =>
@@ -195,8 +240,18 @@ const bridge: DohcDesktopBridge = {
     PluginUninstallPreflightResult.parse(
       await ipcRenderer.invoke(CHANNELS.pluginUninstallPreflight, payload),
     ),
+  pluginSizes: async (payload) =>
+    PluginSizesResult.parse(await ipcRenderer.invoke(CHANNELS.pluginSizes, payload)),
   uninstallPlugin: async (payload) =>
     PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.uninstallPlugin, payload)),
+  getPluginSettings: async (payload) =>
+    PluginSettingsResult.parse(
+      await ipcRenderer.invoke(CHANNELS.getPluginSettings, payload),
+    ),
+  setPluginSettings: async (payload) =>
+    PluginSettingsResult.parse(
+      await ipcRenderer.invoke(CHANNELS.setPluginSettings, payload),
+    ),
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),
   cloudLoginStart: (payload) =>

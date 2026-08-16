@@ -6,19 +6,34 @@ import {
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isPluginDetailsTabPath,
   isPluginPanelTabPath,
+  isPluginWebAppTabPath,
   isSingletonEditorTabPath,
   isVersionCompareTabPath,
   parseHistoryDiffTabPath,
+  parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
+  parsePluginWebAppTabPath,
 } from "./workbenchState";
 
-function fileName(path: string): string {
+// A plugin's own names — its display name and its web apps' titles — live in
+// its manifest, which the tab path cannot carry and this strip cannot read.
+// `label` is that name once a mounted plugin page has reported it, and the id
+// from the path is the fallback until then (a tab restored on launch has no
+// page yet).
+function fileName(path: string, label?: string): string {
   if (isGraphTabPath(path)) return "Graph";
   if (isHistoryTabPath(path)) return "History";
   if (isChatsTabPath(path)) return "Chats";
   if (isPluginPanelTabPath(path)) {
     return parsePluginPanelTabPath(path)?.panelId ?? "Plugin panel";
+  }
+  if (isPluginWebAppTabPath(path)) {
+    return label ?? parsePluginWebAppTabPath(path)?.webAppId ?? "Plugin app";
+  }
+  if (isPluginDetailsTabPath(path)) {
+    return label ?? parsePluginDetailsTabPath(path) ?? "Plugin";
   }
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
@@ -29,13 +44,24 @@ function fileName(path: string): string {
   return path.split("/").pop() ?? path;
 }
 
-function tabTitle(path: string): string {
+function tabTitle(path: string, label?: string): string {
   if (isGraphTabPath(path)) return "Workspace graph";
   if (isHistoryTabPath(path)) return "Workspace history";
   if (isChatsTabPath(path)) return "Workspace chats";
   if (isPluginPanelTabPath(path)) {
     const panel = parsePluginPanelTabPath(path);
     return panel ? `${panel.pluginId} — ${panel.panelId}` : "Plugin panel";
+  }
+  if (isPluginWebAppTabPath(path)) {
+    const webApp = parsePluginWebAppTabPath(path);
+    if (!webApp) return "Plugin app";
+    return `${webApp.pluginId} — ${label ?? webApp.webAppId}`;
+  }
+  // A plugin's details tab and its app tab can sit side by side under the
+  // same name, so the tooltip is what tells them apart.
+  if (isPluginDetailsTabPath(path)) {
+    const pluginId = parsePluginDetailsTabPath(path);
+    return pluginId ? `Plugin details: ${pluginId}` : "Plugin details";
   }
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
@@ -51,6 +77,9 @@ function tabTitle(path: string): string {
 const Tab = memo(function Tab(props: {
   groupId: string;
   path: string;
+  /** The tab's display name when the path alone cannot supply it. A string,
+   * not a lookup: this component is memoized on its props. */
+  label?: string;
   active: boolean;
   dirty: boolean;
   dragging: boolean;
@@ -63,7 +92,7 @@ const Tab = memo(function Tab(props: {
   onMove: (path: string, toIndex: number) => void;
   onMoveToGroup: (path: string, targetGroupId: string, toIndex: number) => void;
 }) {
-  const name = fileName(props.path);
+  const name = fileName(props.path, props.label);
   // Pointer-drag reorder (no dnd dep): a press only becomes a drag after 4px
   // of travel, so plain clicks never reorder. While captured, the tab lives
   // at "how many sibling midpoints sit left of the cursor" (live reorder,
@@ -101,7 +130,7 @@ const Tab = memo(function Tab(props: {
       aria-selected={props.active}
       data-testid={`tab-${props.path}`}
       data-active={props.active || undefined}
-      title={tabTitle(props.path)}
+      title={tabTitle(props.path, props.label)}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
@@ -314,6 +343,10 @@ export function EditorTabs(props: {
   tabs: Array<{ path: string }>;
   activeTab: string | null;
   activeTabDirty: boolean;
+  /** Display names the tab path cannot supply, keyed by path: what a plugin
+   * and its web apps call themselves in their manifest, reported by the pages
+   * that read it. */
+  tabLabels?: ReadonlyMap<string, string>;
   // Paths with a set-aside draft (#567). Unlike `activeTabDirty`, this is
   // knowable for EVERY tab — the store outlives the keyed inspectors — so an
   // inactive tab keeps its marker (#579 review, r4).
@@ -421,6 +454,7 @@ export function EditorTabs(props: {
             key={tab.path}
             groupId={props.groupId}
             path={tab.path}
+            label={props.tabLabels?.get(tab.path)}
             active={tab.path === props.activeTab}
             dirty={
               (tab.path === props.activeTab && props.activeTabDirty) ||
@@ -564,7 +598,9 @@ export function EditorTabs(props: {
                     : "text-muted hover:bg-line/50 hover:text-ink"
                 }`}
               >
-                <span className="truncate">{fileName(tab.path)}</span>
+                <span className="truncate">
+                  {fileName(tab.path, props.tabLabels?.get(tab.path))}
+                </span>
               </button>
             ))}
           </div>

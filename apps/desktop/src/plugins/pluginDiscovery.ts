@@ -7,6 +7,7 @@ import {
   type PluginManifestReadResult,
 } from "./pluginManifest";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
+import { verifyPluginIcon } from "./pluginIcon";
 import { EXCLUDED_SOURCE_NAMES } from "./pluginSourceSnapshot";
 import { errorMessage, lexicalCompare } from "./pluginShared";
 
@@ -17,6 +18,9 @@ interface PluginDiscoveryCandidate {
   rootPath: string;
   rootKind: PluginRootKind;
   manifestResult: PluginManifestReadResult | null;
+  /** The manifest's icon, once the file behind it checked out. */
+  iconPath: string | null;
+  iconDiagnostics: string[];
   nestedManifestPaths: string[];
   diagnostics: string[];
 }
@@ -26,6 +30,13 @@ export interface InstalledPluginRecord {
   directoryName: string;
   rootPath: string;
   manifest: DohcPluginManifest | null;
+  /**
+   * The manifest's declared icon, plugin-root-relative, and only when the
+   * file behind it is a real file inside the root and within the icon cap.
+   * An icon that fails any of those is null with a diagnostic, never a
+   * broken row.
+   */
+  iconPath: string | null;
   diagnostics: string[];
   valid: boolean;
 }
@@ -44,6 +55,7 @@ function recordFromCandidate(candidate: PluginDiscoveryCandidate): InstalledPlug
     candidate.directoryName.length > PLUGIN_ID_MAX_LENGTH;
   const diagnostics = [
     ...candidate.diagnostics,
+    ...candidate.iconDiagnostics,
     ...(overLongDirectoryName
       ? [
         `plugin directory name is ${candidate.directoryName.length} characters; ` +
@@ -65,6 +77,7 @@ function recordFromCandidate(candidate: PluginDiscoveryCandidate): InstalledPlug
     directoryName: candidate.directoryName,
     rootPath: candidate.rootPath,
     manifest,
+    iconPath: candidate.iconPath,
     diagnostics,
     valid:
       candidate.rootKind === "directory" &&
@@ -156,6 +169,8 @@ async function inspectCandidate(
       rootPath,
       rootKind: "invalid",
       manifestResult: null,
+      iconPath: null,
+      iconDiagnostics: [],
       nestedManifestPaths: [],
       diagnostics: [
         `plugin root at ${rootPath} could not be inspected: ${errorMessage(error)}`,
@@ -169,6 +184,8 @@ async function inspectCandidate(
       rootPath,
       rootKind: "symlink",
       manifestResult: null,
+      iconPath: null,
+      iconDiagnostics: [],
       nestedManifestPaths: [],
       diagnostics: [
         `plugin root at ${rootPath} is a symlink; plugin roots must be real directories`,
@@ -181,6 +198,8 @@ async function inspectCandidate(
       rootPath,
       rootKind: "invalid",
       manifestResult: null,
+      iconPath: null,
+      iconDiagnostics: [],
       nestedManifestPaths: [],
       diagnostics: [`plugin root at ${rootPath} is not a directory`],
     };
@@ -202,17 +221,29 @@ async function inspectCandidate(
       rootPath,
       rootKind: "invalid",
       manifestResult: null,
+      iconPath: null,
+      iconDiagnostics: [],
       nestedManifestPaths: [],
       diagnostics: [
         `plugin root at ${rootPath} could not be fully inspected: ${errorMessage(error)}`,
       ],
     };
   }
+  // Only a valid manifest can declare an icon, and only a checked icon is
+  // advertised. A refusal is a diagnostic, never a reason to invalidate the
+  // plugin — `valid` reads candidate.diagnostics, which this is not part of.
+  const declaredIcon = manifestResult.ok ? manifestResult.manifest.icon : undefined;
+  const iconCheck = declaredIcon
+    ? await verifyPluginIcon(rootPath, declaredIcon)
+    : { icon: null, diagnostic: null };
+
   return {
     directoryName,
     rootPath,
     rootKind: "directory",
     manifestResult,
+    iconPath: iconCheck.icon,
+    iconDiagnostics: iconCheck.diagnostic ? [iconCheck.diagnostic] : [],
     nestedManifestPaths,
     diagnostics: [],
   };

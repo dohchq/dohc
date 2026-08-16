@@ -4,8 +4,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PluginUninstallPreflightRecord } from "../ipc/bridgeContract";
 import { PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT } from "../ipc/channels";
 import { createTestScratch } from "../workspaces/testTemp";
-import { hashPluginSourceFiles } from "./pluginSourceSnapshot";
+import { hashPluginSourceFiles, pluginStateRoot } from "./pluginSourceSnapshot";
 import {
+  measurePluginDirectory,
   pluginBaselineManifestPath,
   pluginUninstallPreflight,
   summarizeUninstallPreflight,
@@ -62,6 +63,7 @@ async function runPreflight(
     dohcDir: fixture.dohcDir,
     pluginId,
     pluginRoot: fixture.pluginRoot,
+    stateRoot: pluginStateRoot(fixture.dohcDir, pluginId),
     installedBaselineHash,
     engineCaptureAvailable,
   });
@@ -74,6 +76,89 @@ afterEach(async () => {
 });
 
 describe("plugin uninstall preflight", () => {
+  it("names stored plugin data as permanently deleted even when the source is clean", async () => {
+    const fixture = await createFixture();
+    await writeSourceFile(fixture, "dohc-plugin.json", "{}\n");
+    const baseline = await saveBaseline(fixture);
+    const stateRoot = pluginStateRoot(fixture.dohcDir, pluginId);
+    await mkdir(join(stateRoot, "t3", "userdata"), { recursive: true });
+    await writeFile(join(stateRoot, "t3", "userdata", "state.sqlite"), "x".repeat(2048));
+    await writeFile(join(stateRoot, "t3-owner.json"), "{}\n");
+
+    const result = await runPreflight(fixture, baseline);
+
+    expect(result.stateData).toEqual({
+      path: stateRoot,
+      fileCount: 2,
+      totalBytes: 2048 + 3,
+    });
+    expect(result.warning?.kind).toBe("plugin-state");
+    expect(result.warning?.summary).toContain("2 files");
+    expect(result.warning?.summary).toContain("2 KB");
+    expect(result.warning?.summary).toContain("cannot be restored");
+    expect(result.warning?.details.join("\n")).toContain(stateRoot);
+    // The renderer summary carries it too.
+    expect(summarizeUninstallPreflight(result).stateData).toEqual(result.stateData);
+  });
+
+  // The warning states a size the user can check against the directory. A
+  // floor of "0.1 MB" states a count that is not true of 40 bytes.
+  it.each([
+    [1, "1 byte"],
+    [40, "40 bytes"],
+    [1023, "1023 bytes"],
+    [1024, "1 KB"],
+    [1_048_575, "1023 KB"],
+    [1_572_864, "1.5 MB"],
+  ])("states %d stored bytes as %s", async (bytes, expected) => {
+    const fixture = await createFixture();
+    await writeSourceFile(fixture, "dohc-plugin.json", "{}\n");
+    const baseline = await saveBaseline(fixture);
+    const stateRoot = pluginStateRoot(fixture.dohcDir, pluginId);
+    await mkdir(stateRoot, { recursive: true });
+    await writeFile(join(stateRoot, "data.bin"), "x".repeat(bytes));
+
+    const result = await runPreflight(fixture, baseline);
+
+    expect(result.stateData?.totalBytes).toBe(bytes);
+    expect(result.warning?.summary).toContain(`(${expected})`);
+    expect(result.warning?.details.join("\n")).toContain(`(${expected})`);
+  });
+
+  it("appends the stored-data facts to an existing source warning", async () => {
+    const fixture = await createFixture();
+    await writeSourceFile(fixture, "dohc-plugin.json", "{}\n");
+    const baseline = await saveBaseline(fixture);
+    await writeSourceFile(fixture, "dohc-plugin.json", '{"edited":true}\n');
+    const stateRoot = pluginStateRoot(fixture.dohcDir, pluginId);
+    await mkdir(stateRoot, { recursive: true });
+    await writeFile(join(stateRoot, "secrets.json"), "s");
+
+    const result = await runPreflight(fixture, baseline);
+
+    expect(result.warning?.kind).toBe("local-modifications");
+    expect(result.warning?.details.join("\n")).toContain("stored data");
+    expect(result.warning?.details.join("\n")).toContain(stateRoot);
+    expect(result.stateData?.fileCount).toBe(1);
+  });
+
+  it("reports no stored data when the state root is absent or empty", async () => {
+    const fixture = await createFixture();
+    await writeSourceFile(fixture, "dohc-plugin.json", "{}\n");
+    const baseline = await saveBaseline(fixture);
+
+    const absent = await runPreflight(fixture, baseline);
+    expect(absent.stateData).toBeNull();
+    expect(absent.warning).toBeNull();
+
+    await mkdir(join(pluginStateRoot(fixture.dohcDir, pluginId), "t3"), {
+      recursive: true,
+    });
+    const empty = await runPreflight(fixture, baseline);
+    expect(empty.stateData).toBeNull();
+    expect(empty.warning).toBeNull();
+  });
+
   it("warns instead of reporting a clean tree when a symlink was dropped into the source", async () => {
     const fixture = await createFixture();
     await writeSourceFile(fixture, "index.ts", "export const value = 1;\n");
@@ -286,5 +371,58 @@ describe("plugin uninstall preflight", () => {
     expect(result.counts.notRecoverableFromHistory).toBe(0);
     expect(result.summary).toContain("already deleted");
     expect(result.summary).not.toContain("cannot verify");
+  });
+});
+
+// The rail measures directories the preflight does not, with the same walk.
+// These pin the walk itself, so the rail and the uninstall dialog can never
+// report different bytes for the same directory.
+describe("measurePluginDirectory", () => {
+  it("counts every file under the directory, at any depth", async () => {
+    const fixture = await createFixture();
+    const root = join(fixture.dohcDir, "measure-me");
+    await mkdir(join(root, "a", "b"), { recursive: true });
+    await writeFile(join(root, "top.txt"), "x".repeat(10));
+    await writeFile(join(root, "a", "mid.txt"), "x".repeat(20));
+    await writeFile(join(root, "a", "b", "deep.txt"), "x".repeat(30));
+
+    const measured = await measurePluginDirectory(root);
+
+    expect(measured?.fileCount).toBe(3);
+    expect(measured?.totalBytes).toBe(60);
+  });
+
+  // Null, never a zero: "this directory holds nothing" and "this directory
+  // holds 0 bytes of something" are different facts, and the rail shows no
+  // row for the first.
+  it("answers null for a directory that is missing or empty", async () => {
+    const fixture = await createFixture();
+    const missing = join(fixture.dohcDir, "not-there");
+    const empty = join(fixture.dohcDir, "empty");
+    await mkdir(empty, { recursive: true });
+
+    expect(await measurePluginDirectory(missing)).toBeNull();
+    expect(await measurePluginDirectory(empty)).toBeNull();
+  });
+
+  it("does not follow a symlink out of the directory it was given", async () => {
+    const fixture = await createFixture();
+    const root = join(fixture.dohcDir, "linked");
+    const outside = join(fixture.dohcDir, "outside");
+    await mkdir(root, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, "big.bin"), "x".repeat(5000));
+    await writeFile(join(root, "own.txt"), "x".repeat(7));
+    try {
+      await symlink(outside, join(root, "escape"), "junction");
+    } catch {
+      // A machine that refuses to create links cannot prove this one.
+      return;
+    }
+
+    const measured = await measurePluginDirectory(root);
+
+    expect(measured?.fileCount).toBe(1);
+    expect(measured?.totalBytes).toBe(7);
   });
 });

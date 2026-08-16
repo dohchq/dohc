@@ -16,9 +16,11 @@ import { createWorkspaceEngineCapture } from "../workspaces/workspaceEngineCaptu
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import {
   mutatePluginRecord,
+  pluginDataDir,
   pluginStateFileName,
   readPluginLocalState,
 } from "./pluginLocalState";
+import { pluginStateRoot } from "./pluginSourceSnapshot";
 import { readPluginManifestFile } from "./pluginManifest";
 import { invokePluginSdkHost } from "./pluginSdkHost";
 import { createPluginPanelSdkAuthorityRegistry } from "./pluginPanelSdkAuthority";
@@ -2074,5 +2076,239 @@ describe("PluginHost", () => {
     } finally {
       consoleError.mockRestore();
     }
+  });
+});
+
+describe("PluginHost web apps", () => {
+  async function webAppManifest(): Promise<DohcPluginManifest> {
+    return {
+      ...(await fixtureManifest()),
+      webApps: [{ id: "main-app", title: "Hello App" }],
+    };
+  }
+
+  async function startWebAppHost(options: {
+    mode: string;
+    webAppStartTimeoutMs?: number;
+  }): Promise<PluginHost> {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": options.mode },
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+      webAppStartTimeoutMs: options.webAppStartTimeoutMs,
+    });
+    await host.start(helloPluginRoot, await webAppManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+    return host;
+  }
+
+  it("routes startWebApp through the real plugin process and returns its URL in memory", async () => {
+    const host = await startWebAppHost({ mode: "web-app" });
+    await expect(host.startWebApp("hello-plugin", "main-app")).resolves.toEqual({
+      url: "http://127.0.0.1:43210/pair#token=fixture-main-app",
+    });
+  });
+
+  it("refuses a web app the manifest does not declare", async () => {
+    const host = await startWebAppHost({ mode: "web-app" });
+    await expect(host.startWebApp("hello-plugin", "other")).rejects.toThrow(
+      'does not declare web app "other"',
+    );
+  });
+
+  it("reports a handler that does not implement startWebApp", async () => {
+    const host = await startWebAppHost({ mode: "hello" });
+    await expect(host.startWebApp("hello-plugin", "main-app")).rejects.toThrow(
+      "does not implement startWebApp",
+    );
+  });
+
+  it("rejects an empty url from the plugin", async () => {
+    const host = await startWebAppHost({ mode: "web-app-bad-result" });
+    await expect(host.startWebApp("hello-plugin", "main-app")).rejects.toThrow(
+      "non-empty string url",
+    );
+  });
+
+  it("bounds a hung web app start with an error naming the limit", async () => {
+    const host = await startWebAppHost({
+      mode: "web-app-hang",
+      webAppStartTimeoutMs: 200,
+    });
+    await expect(host.startWebApp("hello-plugin", "main-app")).rejects.toThrow(
+      "did not start within 200 ms",
+    );
+  });
+
+  it("refuses when the plugin is not running", async () => {
+    const root = await workspaceRoot();
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: createProcessHarness().spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+    await expect(host.startWebApp("hello-plugin", "main-app")).rejects.toThrow(
+      'Plugin "hello-plugin" is not running.',
+    );
+  });
+
+  it("carries a stop to the plugin, so the next start pairs again", async () => {
+    const host = await startWebAppHost({ mode: "web-app-pairing" });
+    const first = await host.startWebApp("hello-plugin", "main-app");
+    expect(first.url).toBe("http://127.0.0.1:43210/pair#token=fixture-1");
+    // Paired: a second start rides the session the first one established.
+    await expect(host.startWebApp("hello-plugin", "main-app")).resolves.toEqual({
+      url: "http://127.0.0.1:43210/?app=main-app",
+    });
+
+    await host.stopWebApp("hello-plugin", "main-app");
+
+    // MUTATION (drop the protocol stop dispatch, or the host method): the
+    // plugin never learns the guest is gone, so this start returns the paired
+    // URL into a guest with no session — the workspace-started host's whole
+    // failure mode.
+    await expect(host.startWebApp("hello-plugin", "main-app")).resolves.toEqual({
+      url: "http://127.0.0.1:43210/pair#token=fixture-2",
+    });
+  });
+
+  it("reports a handler that implements startWebApp without stopWebApp", async () => {
+    const host = await startWebAppHost({ mode: "web-app" });
+    await expect(host.stopWebApp("hello-plugin", "main-app")).rejects.toThrow(
+      "does not implement stopWebApp",
+    );
+  });
+
+  it("refuses to stop a web app the manifest does not declare", async () => {
+    const host = await startWebAppHost({ mode: "web-app-pairing" });
+    await expect(host.stopWebApp("hello-plugin", "other")).rejects.toThrow(
+      'does not declare web app "other"',
+    );
+  });
+
+  it("has nothing to unpair when the plugin is not running", async () => {
+    const root = await workspaceRoot();
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: createProcessHarness().spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+    // The broker takes a wrapper's whole process tree down with its spawn, so
+    // a dead plugin's server and session are already gone. The recovery must
+    // not turn that into a failure it reports.
+    await expect(
+      host.stopWebApp("hello-plugin", "main-app"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("hands every activation the same durable state root uninstall deletes", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "report-context" },
+    });
+    const host = trackHost({
+      stateDir: localStateDir,
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    const reported = await host.invokeCommand(
+      "hello-plugin",
+      "report.context",
+    ) as { stateRoot: string; workspaceRoot: string };
+    expect(reported.workspaceRoot).toBe(root);
+    expect(reported.stateRoot).toBe(
+      pluginStateRoot(pluginDataDir(localStateDir, root), "hello-plugin"),
+    );
+  });
+
+  it("gives a plugin its settings at activation and tells it about every change", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "report-settings" },
+    });
+    const host = trackHost({
+      stateDir: localStateDir,
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+      readPluginSettings: async () => ({ greeting: "Hei", shout: false }),
+    });
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    type Report = {
+      atActivation: Record<string, unknown>;
+      current: Record<string, unknown>;
+      heard: Record<string, unknown> | null;
+      changeCount: number;
+    };
+
+    // The plugin never asked for these: they arrived with its activation.
+    const started = await host.invokeCommand(
+      "hello-plugin",
+      "report.settings",
+    ) as Report;
+    expect(started.atActivation).toEqual({ greeting: "Hei", shout: false });
+    expect(started.current).toEqual({ greeting: "Hei", shout: false });
+    expect(started.heard).toBeNull();
+    expect(started.changeCount).toBe(0);
+
+    await host.notifySettingsChanged("hello-plugin", {
+      greeting: "Hello",
+      shout: true,
+    });
+
+    const changed = await host.invokeCommand(
+      "hello-plugin",
+      "report.settings",
+    ) as Report;
+    // Both halves of the SDK surface: the listener fired, and the snapshot
+    // getter now answers with the new values rather than the old ones.
+    expect(changed.heard).toEqual({ greeting: "Hello", shout: true });
+    expect(changed.current).toEqual({ greeting: "Hello", shout: true });
+    expect(changed.changeCount).toBe(1);
+    // The values it activated with are still what they were.
+    expect(changed.atActivation).toEqual({ greeting: "Hei", shout: false });
+  });
+
+  it("does not push settings at a plugin that is not running", async () => {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "report-settings" },
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+
+    // Never started: a plugin with no process reads its settings from its next
+    // activation, so this must resolve quietly rather than throw or hang.
+    await expect(
+      host.notifySettingsChanged("hello-plugin", { greeting: "Hello" }),
+    ).resolves.toBeUndefined();
   });
 });

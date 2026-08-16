@@ -31,7 +31,9 @@ import {
   shell,
   Tray,
   utilityProcess,
+  WebContentsView,
   type IpcMainInvokeEvent,
+  type WebContents,
 } from "electron";
 import * as Y from "yjs";
 import { existsSync, statSync } from "node:fs";
@@ -113,9 +115,12 @@ import {
   InvokePluginPanelSdkPayload,
   InvokePluginPanelSdkResult,
   ListPluginsPayload,
+  PluginSettingsResult,
+  SetPluginSettingsPayload,
   ListPluginsResult,
   PluginActionPayload,
   PluginActionResult,
+  PluginSizesResult,
   PluginUninstallPreflightResult,
   UninstallPluginPayload,
   PluginStatusChangedEvent,
@@ -133,6 +138,13 @@ import {
   StartPluginPanelPayload,
   StartPluginPanelResult,
   StopPluginPanelPayload,
+  OpenPluginWebAppPayload,
+  OpenPluginWebAppResult,
+  StartPluginWebAppPayload,
+  StartPluginWebAppResult,
+  SetPluginWebAppBoundsPayload,
+  StopPluginWebAppPayload,
+  PluginWebAppFailedEvent,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
   ListWorkspaceVersionsResult,
@@ -638,6 +650,7 @@ import { createPluginPanelSdkAuthorityRegistry } from "./plugins/pluginPanelSdkA
 import {
   forgetRemovedPlugin,
   forgetUninstalledPlugin,
+  loadPluginWebAppRegistration,
   forgetWorkspaceRegistrations,
   loadPluginPanelRegistration,
   pluginLifecycleKey,
@@ -649,6 +662,15 @@ import {
   disposeWorkspacePipeline,
   ensureWorkspacePipeline,
 } from "./plugins/pluginPipelineLifecycle";
+import {
+  clearPluginWebAppPartition,
+  createPluginWebAppGuest,
+} from "./plugins/pluginWebAppGuest";
+import { recoverConsumedWebAppCredential } from "./plugins/pluginWebAppRecovery";
+import {
+  PluginWebAppViewRegistry,
+  type PluginWebAppViewRecord,
+} from "./plugins/pluginWebAppViews";
 import type { DohcPluginManifest } from "./plugins/pluginManifestSchema";
 import {
   assertActiveWorkspaceForSitePreviewStop,
@@ -901,7 +923,10 @@ function notifyPluginStatusChanged(
 function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
   let pipeline: PluginPipeline | null = null;
   const dohcDir = pluginDataDir(stateDir(), workspace.rootPath);
-  const childProcessBroker = new PluginChildProcessBroker({ dohcDir });
+  const childProcessBroker = new PluginChildProcessBroker({
+    dohcDir,
+    workspaceRoot: workspace.rootPath,
+  });
   const pluginHost = new PluginHost({
     stateDir: stateDir(),
     workspaceRoot: workspace.rootPath,
@@ -939,6 +964,10 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
         method,
         params,
       }),
+    // The plugin gets its settings with its activation, so it never starts
+    // without them and never has to ask.
+    readPluginSettings: async (pluginId) =>
+      (await pipeline?.getPluginSettings(pluginId)) ?? {},
     onSpawnEnd: (pluginId, spawnId) =>
       childProcessBroker.disposeSpawn(pluginId, spawnId),
     onDispose: () => childProcessBroker.dispose(),
@@ -951,6 +980,11 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
         panels: runningPluginPanels.values(),
         revokePanel: pluginPanelSdkAuthorities.revokePanel,
       });
+      // A guest view outliving its plugin would keep showing a dead server:
+      // the broker tears the wrapper's process tree down with the spawn.
+      if (status === "crashed" || status === "failed" || status === "disabled") {
+        stopPluginWebAppsForPlugin(workspace.workspaceId, pluginId);
+      }
     },
   });
   pipeline = new PluginPipeline({
@@ -2855,6 +2889,61 @@ function pluginPanelKey(
 const withPluginPanelStartLock = <T>(key: string, operation: () => Promise<T>) =>
   withKeyedStartLock(pluginPanelStartLocks, key, operation);
 
+// Wrapper-plugin web apps (PR3): one main-owned WebContentsView per open web
+// app tab. The registry decides which record a request or teardown touches;
+// the helpers below apply the Electron effects.
+interface AttachedWebAppView {
+  view: WebContentsView;
+  window: BrowserWindow;
+}
+const pluginWebAppViews = new PluginWebAppViewRegistry<AttachedWebAppView>();
+const pluginWebAppStartLocks = new Map<string, Promise<void>>();
+const hardenedGuestPartitions = new Set<string>();
+const withPluginWebAppStartLock = <T>(key: string, operation: () => Promise<T>) =>
+  withKeyedStartLock(pluginWebAppStartLocks, key, operation);
+
+function pluginWebAppKey(
+  workspaceId: string,
+  pluginId: string,
+  webAppId: string,
+): string {
+  return `${workspaceId}\0${pluginId}\0${webAppId}`;
+}
+
+function destroyPluginWebAppViews(
+  records: readonly PluginWebAppViewRecord<AttachedWebAppView>[],
+): void {
+  for (const record of records) {
+    const { view, window } = record.view;
+    try {
+      if (!window.isDestroyed()) window.contentView.removeChildView(view);
+    } catch (error) {
+      console.warn("[desktop] failed to detach a plugin web app view", error);
+    }
+    try {
+      if (!view.webContents.isDestroyed()) view.webContents.close();
+    } catch (error) {
+      console.warn("[desktop] failed to close a plugin web app view", error);
+    }
+  }
+}
+
+// Tells one renderer its guest died after the start already answered "ok".
+// Without it the page keeps a `ready` state over an empty frame and the user
+// sees a blank tab with nothing to act on. The event carries no failure text:
+// the load error can embed the start URL, credential fragment included.
+function notifyPluginWebAppFailed(
+  sender: WebContents,
+  event: PluginWebAppFailedEvent,
+): void {
+  if (sender.isDestroyed()) return;
+  sender.send(CHANNELS.pluginWebAppFailed, PluginWebAppFailedEvent.parse(event));
+}
+
+function stopPluginWebAppsForPlugin(workspaceId: string, pluginId: string): void {
+  destroyPluginWebAppViews(pluginWebAppViews.removeForPlugin(workspaceId, pluginId));
+}
+
 const withPluginHostLifecycleLock = <T>(
   key: string,
   operation: () => Promise<T>,
@@ -2984,6 +3073,44 @@ async function stopRunningPluginPanelPreview(input: {
   );
 }
 
+// Releases this plugin's on-demand host claim and stops the host when that
+// claim was the only reason it runs. Both close paths — the last panel and
+// the last web app tab — share this accounting, so neither can stop a host
+// the other still needs. Callers hold the plugin's host lifecycle lock
+// (withPluginHostLifecycleLock); the claim check and the stop must not
+// interleave with another open or close for the same plugin.
+async function stopPluginHostIfUnclaimed(
+  workspaceId: string,
+  pluginId: string,
+): Promise<void> {
+  const hasAnotherPanel = [...runningPluginPanels.values()].some(
+    (candidate) =>
+      candidate.workspaceId === workspaceId && candidate.pluginId === pluginId,
+  );
+  if (
+    !hasAnotherPanel &&
+    // An open web app rides on the same host — its wrapper server dies
+    // with the host's spawn, so it holds the host open exactly like a
+    // sibling panel does.
+    !pluginWebAppViews.hasForPlugin(workspaceId, pluginId) &&
+    // Only stop the host if an on-demand open is the reason it's running at
+    // all — an enabled, workspace-started plugin has no panel or tab to
+    // answer to (#779 round 4 finding 3).
+    panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))
+  ) {
+    // Stops the shared host directly rather than through the pipeline's
+    // disable()/enable() actions — this is "nothing needs the process right
+    // now," not a user disable, so local state (disabled, approvedHash) must
+    // not change. PluginHost.stop() does not itself emit a status change, so
+    // the pipeline's cached status can go briefly stale here until the next
+    // real status-affecting event (any action, or the next ensureStarted);
+    // the pipeline never uses that cache to decide whether to start a
+    // process, only to display status, so this cannot start a second process
+    // for the same id.
+    await pluginPipelines.get(workspaceId)?.host.stop(pluginId);
+  }
+}
+
 async function stopPluginPanel(
   workspaceId: string,
   pluginId: string,
@@ -3000,29 +3127,36 @@ async function stopPluginPanel(
       const panel = runningPluginPanels.get(key);
       runningPluginPanels.delete(key);
       if (panel) await stopRunningPluginPanelPreview(panel);
-      const hasAnotherPanel = [...runningPluginPanels.values()].some(
-        (candidate) =>
-          candidate.workspaceId === workspaceId &&
-          candidate.pluginId === pluginId,
-      );
-      if (
-        !hasAnotherPanel &&
-        // Only stop the host if a panel is the reason it's running at all
-        // — an enabled, workspace-started plugin has no panel to answer to
-        // (#779 round 4 finding 3).
-        panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))
-      ) {
-        // Stops the shared host directly rather than through the pipeline's
-        // disable()/enable() actions — this is "no panel needs the process
-        // right now," not a user disable, so local state (disabled,
-        // approvedHash) must not change. PluginHost.stop() does not itself
-        // emit a status change, so the pipeline's cached status can go
-        // briefly stale here until the next real status-affecting event
-        // (any action, or the next ensureStarted); the pipeline never uses
-        // that cache to decide whether to start a process, only to display
-        // status, so this cannot start a second process for the same id.
-        await pluginPipelines.get(workspaceId)?.host.stop(pluginId);
-      }
+      await stopPluginHostIfUnclaimed(workspaceId, pluginId);
+    },
+  );
+}
+
+async function stopPluginWebApp(
+  workspaceId: string,
+  pluginId: string,
+  webAppId: string,
+): Promise<void> {
+  await withPluginWebAppStartLock(
+    pluginWebAppKey(workspaceId, pluginId, webAppId),
+    () => stopPluginWebAppUnderStartLock(workspaceId, pluginId, webAppId),
+  );
+}
+
+// The same stop for a caller that already holds this web app's start lock —
+// the failed-start recovery, which unpairs and stops the view in one section.
+// Taking the start lock again from inside that section would wait on itself.
+async function stopPluginWebAppUnderStartLock(
+  workspaceId: string,
+  pluginId: string,
+  webAppId: string,
+): Promise<void> {
+  await withPluginHostLifecycleLock(
+    pluginLifecycleKey(workspaceId, pluginId),
+    async () => {
+      const removed = pluginWebAppViews.remove({ workspaceId, pluginId, webAppId });
+      if (removed) destroyPluginWebAppViews([removed]);
+      await stopPluginHostIfUnclaimed(workspaceId, pluginId);
     },
   );
 }
@@ -3047,6 +3181,7 @@ async function stopPluginPanelsForWorkspace(workspaceId: string): Promise<void> 
 // disposes it via PluginPipeline.dispose() -> pluginHost.stopAll()); this only
 // stops the panels layered on top of it.
 async function stopPluginWorkspace(workspaceId: string): Promise<void> {
+  destroyPluginWebAppViews(pluginWebAppViews.removeForWorkspace(workspaceId));
   await stopPluginPanelsForWorkspace(workspaceId);
   await stopPluginPipelineForWorkspace(workspaceId);
   forgetWorkspaceRegistrations(pluginRegistrations, workspaceId);
@@ -3054,6 +3189,7 @@ async function stopPluginWorkspace(workspaceId: string): Promise<void> {
 
 async function stopAllPluginWorkspaces(): Promise<void> {
   pluginPanelSdkAuthorities.revokeAll();
+  destroyPluginWebAppViews(pluginWebAppViews.removeAll());
   await Promise.allSettled(
     [...new Set([
       ...pluginPipelines.keys(),
@@ -3454,6 +3590,7 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
   abortSitePreviewStartsForSender(senderId);
   sitePreviewSdkAuthorities.revokeSender(senderId);
   pluginPanelSdkAuthorities.revokeSender(senderId);
+  destroyPluginWebAppViews(pluginWebAppViews.removeForSender(senderId));
   searchRegistry.disposeOwner(senderId);
   latestSearchIdBySender.delete(senderId);
   await Promise.all([
@@ -6926,6 +7063,243 @@ function registerIpcHandlers(
     return InvokePluginPanelSdkResult.parse({ result });
   });
 
+  ipcMain.handle(CHANNELS.openPluginWebApp, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = OpenPluginWebAppPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const sender = event.sender;
+    const generation = rendererGeneration(sender.id);
+    const isCurrent = () =>
+      !sender.isDestroyed() &&
+      rendererGeneration(sender.id) === generation &&
+      activeWorkspaceIdBySender.get(sender.id) === workspace.workspaceId;
+    assertPluginPanelRequestCurrent(isCurrent);
+    assertWritableWorkspace(workspace);
+    const registration = await loadPluginPanelRegistrationForCurrentRenderer(
+      () =>
+        loadPluginWebAppRegistration({
+          workspaceRoot: workspace.rootPath,
+          pluginRoot: input.pluginRoot,
+          pluginId: input.pluginId,
+          webAppId: input.webAppId,
+        }),
+      isCurrent,
+    );
+    assertWritableWorkspace(workspace);
+    const plugin = rememberPluginRegistration(
+      pluginRegistrations,
+      workspace.workspaceId,
+      registration,
+    );
+    await withPluginWebAppStartLock(
+      pluginWebAppKey(workspace.workspaceId, input.pluginId, input.webAppId),
+      () =>
+        withPluginHostLifecycleLock(
+          pluginLifecycleKey(workspace.workspaceId, input.pluginId),
+          () => {
+            assertPluginPanelRequestCurrent(isCurrent);
+            assertWritableWorkspace(workspace);
+            return ensurePluginStarted(workspace, plugin);
+          },
+        ),
+    );
+    return OpenPluginWebAppResult.parse({
+      pluginId: input.pluginId,
+      webAppId: input.webAppId,
+    });
+  });
+
+  ipcMain.handle(CHANNELS.startPluginWebApp, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = StartPluginWebAppPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const sender = event.sender;
+    const generation = rendererGeneration(sender.id);
+    const isCurrent = () =>
+      !sender.isDestroyed() &&
+      rendererGeneration(sender.id) === generation &&
+      activeWorkspaceIdBySender.get(sender.id) === workspace.workspaceId;
+    assertPluginPanelRequestCurrent(isCurrent);
+    assertWritableWorkspace(workspace);
+    const plugin = registeredPlugin(workspace.workspaceId, input.pluginId);
+    if (!plugin) {
+      return StartPluginWebAppResult.parse({ status: "not-registered" });
+    }
+    const webApp = plugin.manifest.webApps?.find(
+      (candidate) => candidate.id === input.webAppId,
+    );
+    if (!webApp) {
+      throw new Error(
+        `Plugin "${input.pluginId}" does not declare web app "${input.webAppId}".`,
+      );
+    }
+    return withPluginWebAppStartLock(
+      pluginWebAppKey(workspace.workspaceId, input.pluginId, input.webAppId),
+      async () => {
+        const host = await withPluginHostLifecycleLock(
+          pluginLifecycleKey(workspace.workspaceId, input.pluginId),
+          () => {
+            assertPluginPanelRequestCurrent(isCurrent);
+            assertWritableWorkspace(workspace);
+            return ensurePluginStarted(workspace, plugin);
+          },
+        );
+        const spawnId = host.getSpawnId(input.pluginId);
+        if (!spawnId) {
+          throw new Error(`Plugin "${input.pluginId}" has no active process.`);
+        }
+        // The long await: the plugin spawns its server and polls readiness.
+        // The returned URL can carry a one-time credential in its fragment;
+        // it goes into loadURL below and nowhere else — never a log, never
+        // the renderer.
+        const started = await host.startWebApp(input.pluginId, input.webAppId);
+        if (host.getSpawnId(input.pluginId) !== spawnId) {
+          throw new Error(
+            `Plugin "${input.pluginId}" restarted while its web app was starting. Try again.`,
+          );
+        }
+        // Every path from here to a rendered guest can still fail, and the
+        // start URL's one-time credential is already spent. Whatever fails,
+        // the plugin's server must not stay paired to a guest that never
+        // arrived, so the recovery asks the PLUGIN to unpair. Stopping the
+        // view cannot do that job: it only stops the host when an on-demand
+        // open is the reason the host runs, and the default deployment is a
+        // workspace-started host, which survives — with a paired, cookieless
+        // server behind it.
+        //
+        // The teardown takes this web app's start lock, which is the lock a
+        // reopen queues on: the section is claimed before this handler's own
+        // one releases, so the reopen waits for the unpair instead of reading
+        // the doomed server's state. The recovery runs detached — it must not
+        // hold that section open waiting for the handler it runs inside.
+        const recoverConsumedCredential = (): void => {
+          void recoverConsumedWebAppCredential({
+            notifyFailed: () =>
+              notifyPluginWebAppFailed(sender, {
+                workspaceId: workspace.workspaceId,
+                pluginId: input.pluginId,
+                webAppId: input.webAppId,
+              }),
+            withTeardownLock: (teardown) =>
+              withPluginWebAppStartLock(
+                pluginWebAppKey(
+                  workspace.workspaceId,
+                  input.pluginId,
+                  input.webAppId,
+                ),
+                teardown,
+              ),
+            unpair: () => host.stopWebApp(input.pluginId, input.webAppId),
+            stopView: () =>
+              stopPluginWebAppUnderStartLock(
+                workspace.workspaceId,
+                input.pluginId,
+                input.webAppId,
+              ),
+            onError: (stage, error) => {
+              console.warn(
+                `[desktop] failed to ${stage} a plugin web app after a failed start`,
+                error,
+              );
+            },
+          });
+        };
+        try {
+          assertPluginPanelRequestCurrent(isCurrent);
+          const win = BrowserWindow.fromWebContents(sender);
+          if (!win || win.isDestroyed()) {
+            throw new Error("The plugin web app request has no open window.");
+          }
+          const guest = createPluginWebAppGuest({
+            workspaceRoot: workspace.rootPath,
+            pluginId: input.pluginId,
+            url: started.url,
+            hardenedPartitions: hardenedGuestPartitions,
+            ViewClass: WebContentsView,
+            attach: (view, { origin, partition }) => {
+              win.contentView.addChildView(view);
+              const displaced = pluginWebAppViews.register({
+                workspaceId: workspace.workspaceId,
+                pluginId: input.pluginId,
+                webAppId: input.webAppId,
+                senderId: sender.id,
+                generation,
+                origin,
+                partition,
+                view: { view, window: win },
+              });
+              if (displaced) destroyPluginWebAppViews([displaced]);
+            },
+            onLoadFailure: () => {
+              // The load error's message can embed the URL, credential
+              // fragment included — report the failure without it.
+              console.warn(
+                `[desktop] plugin "${input.pluginId}" web app "${input.webAppId}" failed to load its start URL.`,
+              );
+              recoverConsumedCredential();
+            },
+          });
+          return StartPluginWebAppResult.parse({
+            status: "ok",
+            title: webApp.title,
+            origin: guest.origin,
+          });
+        } catch (error) {
+          recoverConsumedCredential();
+          throw error;
+        }
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.setPluginWebAppBounds, (event, payload) => {
+    assertTrustedSender(event);
+    const input = SetPluginWebAppBoundsPayload.parse(payload);
+    // Stale updates are dropped, never applied: a slow bounds report from a
+    // previous renderer generation or another workspace's tab must not move
+    // the live view (async-guard invariant).
+    const record = pluginWebAppViews.authorizeBounds({
+      workspaceId: input.workspaceId,
+      pluginId: input.pluginId,
+      webAppId: input.webAppId,
+      senderId: event.sender.id,
+      generation: rendererGeneration(event.sender.id),
+    });
+    if (!record) return;
+    record.view.view.setBounds(input.bounds);
+    record.view.view.setVisible(input.visible);
+  });
+
+  ipcMain.handle(CHANNELS.stopPluginWebApp, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = StopPluginWebAppPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    if (activeWorkspaceIdBySender.get(event.sender.id) !== workspace.workspaceId) {
+      throw new Error(
+        "The plugin web app stop request does not target the active workspace.",
+      );
+    }
+    const record = pluginWebAppViews.get({
+      workspaceId: workspace.workspaceId,
+      pluginId: input.pluginId,
+      webAppId: input.webAppId,
+    });
+    if (
+      record &&
+      (record.senderId !== event.sender.id ||
+        record.generation !== rendererGeneration(event.sender.id))
+    ) {
+      throw new Error(
+        "The plugin web app stop request does not belong to this renderer.",
+      );
+    }
+    await stopPluginWebApp(
+      workspace.workspaceId,
+      input.pluginId,
+      input.webAppId,
+    );
+  });
+
   async function activePluginPipelineFor(
     event: IpcMainInvokeEvent,
     workspaceId: string,
@@ -7009,6 +7383,7 @@ function registerIpcHandlers(
     pipeline.install(pluginId));
   pluginAction(CHANNELS.disablePlugin, (pipeline, pluginId, workspaceId) => {
     revokePluginPanels(workspaceId, pluginId);
+    stopPluginWebAppsForPlugin(workspaceId, pluginId);
     return pipeline.disable(pluginId);
   });
   pluginAction(CHANNELS.enablePlugin, (pipeline, pluginId) =>
@@ -7032,6 +7407,57 @@ function registerIpcHandlers(
     }
   });
 
+  ipcMain.handle(CHANNELS.pluginSizes, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = PluginActionPayload.parse(payload);
+    try {
+      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      return PluginSizesResult.parse({
+        ok: true,
+        sizes: await pipeline.sizes(input.pluginId),
+      });
+    } catch (error) {
+      return PluginSizesResult.parse({
+        ok: false,
+        error: pluginIpcError(error),
+      });
+    }
+  });
+
+  ipcMain.handle(CHANNELS.getPluginSettings, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = PluginActionPayload.parse(payload);
+    try {
+      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      return PluginSettingsResult.parse({
+        ok: true,
+        values: await pipeline.getPluginSettings(input.pluginId),
+      });
+    } catch (error) {
+      return PluginSettingsResult.parse({
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  ipcMain.handle(CHANNELS.setPluginSettings, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = SetPluginSettingsPayload.parse(payload);
+    try {
+      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      return PluginSettingsResult.parse({
+        ok: true,
+        values: await pipeline.setPluginSettings(input.pluginId, input.values),
+      });
+    } catch (error) {
+      return PluginSettingsResult.parse({
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
   ipcMain.handle(CHANNELS.uninstallPlugin, async (event, payload) => {
     assertTrustedSender(event);
     const input = UninstallPluginPayload.parse(payload);
@@ -7041,6 +7467,7 @@ function registerIpcHandlers(
       // source, so no panel authority over it survives the attempt whether
       // or not the delete succeeds (#779 round 12 A4).
       revokePluginPanels(input.workspaceId, input.pluginId);
+      stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);
       const result = PluginActionResult.parse(
         await pipeline.uninstall(input.pluginId, input.confirmationToken),
       );
@@ -7051,6 +7478,22 @@ function registerIpcHandlers(
         pluginId: input.pluginId,
         uninstalled: result.ok,
       });
+      if (result.ok) {
+        // The guest partition holds the web app's session cookies — plugin
+        // state as much as its data directory. A reinstall starts unpaired.
+        await clearPluginWebAppPartition({
+          workspaceRoot: requireWorkspace(input.workspaceId).rootPath,
+          pluginId: input.pluginId,
+          hardenedPartitions: hardenedGuestPartitions,
+          fromPartition: (partition) => session.fromPartition(partition),
+          onError: (error) => {
+            console.warn(
+              "[desktop] failed to clear a plugin web app partition after uninstall",
+              error,
+            );
+          },
+        });
+      }
       return result;
     } catch (error) {
       return PluginActionResult.parse({

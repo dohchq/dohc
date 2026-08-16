@@ -31,7 +31,6 @@ import { bridge } from "../bridge";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { applyAppearanceSettings } from "../theme";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
-import { PluginSettings } from "./PluginSettings";
 import { PreferredNameControl } from "./PreferredNameControl";
 import { SegmentedControl, SettingRow, SwitchControl, TextControl } from "./SettingRow";
 import { SharedByMeList } from "./SharedByMeList";
@@ -756,12 +755,6 @@ export function SettingsDialog(props: {
                 />
               </SettingRow>
             ) : null}
-          </div>
-        );
-      case "plugins":
-        return (
-          <div data-testid="settings-section-plugins">
-            <PluginSettings workspaceId={props.workspaceId} />
           </div>
         );
       case "privacy":

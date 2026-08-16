@@ -55,14 +55,24 @@ export interface PluginChildProcessSpawnOptions {
   /** Plugin-built-root-relative JavaScript entry passed to utilityProcess.fork(). */
   modulePath: string;
   args?: string[];
-  /** Plugin-built-root-relative working directory. Defaults to the built root. */
-  cwd?: string;
+  /**
+   * Plugin-built-root-relative working directory, or
+   * `{ workspaceRoot: true }` for the canonical workspace root — the one
+   * location outside the plugin's built root a wrapper's server may run in
+   * (its provider sessions work on the workspace). Defaults to the built
+   * root.
+   */
+  cwd?: string | { workspaceRoot: true };
   /** String environment overrides merged over the host environment. */
   env?: Record<string, string>;
 }
 
 export interface PluginChildProcessHandle {
   readonly id: string;
+  /** The child's OS pid at spawn time, or null if it exited before one was
+   * observed. Wrapper plugins record it beside their server's state so a
+   * later start can tell a live orphan from a stale runtime file. */
+  readonly pid: number | null;
   onOutput(
     listener: (output: PluginChildProcessOutput) => void,
     options?: DohcRequestOptions,
@@ -109,19 +119,77 @@ export interface CreateProcessTransportOptions {
   output?: NodeJS.WritableStream;
 }
 
+/** A setting's value. The manifest's declared type decides which of these. */
+export type PluginSettingValue = string | number | boolean;
+
+/**
+ * The plugin's own settings, as declared in its manifest and answered by the
+ * user. Two members and no more: read them now, and hear about it when they
+ * change.
+ *
+ * Every declared key is always present and always the declared type, so a
+ * plugin never checks whether a setting exists. A stored answer that no longer
+ * fits the manifest never arrives — the host resolves it back to the declared
+ * default first.
+ */
+export interface PluginSettings {
+  /** This plugin's settings as they stand now. */
+  get(): Record<string, PluginSettingValue>;
+  /**
+   * Runs the listener with the complete new settings each time the user
+   * changes one. Returns a function that stops it.
+   */
+  onChange(
+    listener: (values: Record<string, PluginSettingValue>) => void,
+  ): () => void;
+}
+
 export interface PluginActivateContext {
   pluginId: string;
   workspaceRoot: string;
   pluginRoot: string;
+  /**
+   * The plugin's durable per-workspace data directory, under the app's own
+   * userData beside the built plugin — never inside the workspace. It
+   * survives rebuilds and reinstalls; uninstalling the plugin deletes it,
+   * and the uninstall warning names it. The host only computes the path;
+   * a plugin that wants it creates it.
+   */
+  stateRoot: string;
   client: DohcClient;
   childProcesses: PluginChildProcessClient;
+  settings: PluginSettings;
   commands: {
     register(id: string, run: (...args: unknown[]) => unknown): void;
   };
 }
 
+/** What PluginHandler.startWebApp returns: the URL the host navigates the
+ * guest WebContentsView to. It may carry a one-time credential in its
+ * fragment, so it crosses process boundaries in memory only — never logs. */
+export interface PluginWebAppStart {
+  url: string;
+}
+
 export interface PluginHandler {
   activate(ctx: PluginActivateContext): Promise<void> | void;
+  /**
+   * Starts (or reuses) the embedded web app declared under the manifest's
+   * `webApps` and returns the loopback URL to show. Called on demand when
+   * the user opens the web app's tab, never during activate — a wrapper's
+   * server start is exactly the long-running readiness work activation must
+   * not await.
+   */
+  startWebApp?(webAppId: string): Promise<PluginWebAppStart> | PluginWebAppStart;
+  /**
+   * Ends the session the matching `startWebApp` began, so the next start
+   * pairs from scratch. The host calls this when the guest it started the app
+   * for never arrived: a start URL's one-time credential is spent by then, and
+   * only the plugin can retire the session it paired. A handler that
+   * implements `startWebApp` must implement this too — the host reports a
+   * handler that does not.
+   */
+  stopWebApp?(webAppId: string): Promise<void> | void;
   deactivate?(): Promise<void> | void;
 }
 
@@ -434,8 +502,12 @@ function pluginChildProcessExit(
 export function createPluginChildProcessClient(
   transport: ProcessTransport,
 ): PluginChildProcessClient {
-  const handle = (childId: string): PluginChildProcessHandle => ({
+  const handle = (
+    childId: string,
+    pid: number | null,
+  ): PluginChildProcessHandle => ({
     id: childId,
+    pid,
     async onOutput(listener, options) {
       if (typeof listener !== "function") {
         throw new DohcSdkError(
@@ -522,14 +594,15 @@ export function createPluginChildProcessClient(
       if (
         !isRecord(result) ||
         typeof result.childId !== "string" ||
-        result.childId.length === 0
+        result.childId.length === 0 ||
+        (result.pid !== null && !Number.isSafeInteger(result.pid))
       ) {
         throw new DohcSdkError(
           DohcSdkErrorCodes.badResponse,
           "dohc host returned an invalid child-process spawn response.",
         );
       }
-      return handle(result.childId);
+      return handle(result.childId, result.pid as number | null);
     },
   };
 }

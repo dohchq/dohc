@@ -199,15 +199,15 @@ describe("DesktopSettings", () => {
     expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
   });
 
-  it("finds and opens Plugins from settings search", async () => {
+  it("no longer carries plugins — they live in the activity bar", async () => {
     const user = userEvent.setup();
     render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
 
     await user.type(await screen.findByTestId("settings-search"), "uninstall");
 
-    expect(screen.getByTestId("settings-nav-plugins")).toBeTruthy();
-    expect(await screen.findByTestId("settings-section-plugins")).toBeTruthy();
-    expect(screen.getByTestId("plugins-empty")).toBeTruthy();
+    expect(screen.queryByTestId("settings-nav-plugins")).toBeNull();
+    expect(screen.queryByTestId("settings-section-plugins")).toBeNull();
+    expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
   });
 
   it("closes from Escape", async () => {

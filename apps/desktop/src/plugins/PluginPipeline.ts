@@ -22,17 +22,28 @@ import {
   type PluginRecordShape,
 } from "./pluginLocalState";
 import { readPluginManifestFile } from "./pluginManifest";
-import type { DohcPluginManifest } from "./pluginManifestSchema";
+import type {
+  DohcPluginManifest,
+  PluginSettingDeclaration,
+  PluginSettingValue,
+} from "./pluginManifestSchema";
+import {
+  readPluginSettingsFile,
+  resolvePluginSettings,
+  savePluginSettings,
+} from "./pluginSettingsFile";
 import type { PluginRuntimeStatus } from "./pluginHostProtocol";
 import {
   canonicalPluginSourceHash,
   EXCLUDED_SOURCE_NAMES,
   isPluginRootArtifact,
   pluginIdToSafePath,
+  pluginStateRoot,
   snapshotPluginSource,
   type PluginSourceSnapshotResult,
 } from "./pluginSourceSnapshot";
 import {
+  measurePluginDirectory,
   pluginUninstallPreflight,
   readPluginBaselineManifest,
   summarizeUninstallPreflight,
@@ -54,7 +65,36 @@ export interface PluginPipelineError {
   message: string;
 }
 
-export interface PluginPipelinePluginStatus {
+/**
+ * What the manifest says a plugin is, for the list row and the details header.
+ * Every field is optional in the manifest, so every field can be null and each
+ * surface falls back on its own: the id names an unnamed plugin, and the
+ * glyph tile stands in for a missing icon.
+ */
+export interface PluginMetadata {
+  displayName: string | null;
+  description: string | null;
+  publisher: string | null;
+  /** Plugin-root-relative, already checked by discovery. */
+  icon: string | null;
+  /** What the plugin calls this build. Display only — never compared. */
+  pluginVersion: string | null;
+  repository: string | null;
+  issues: string | null;
+  license: string | null;
+}
+
+/**
+ * Bytes on this machine, measured rather than recorded. Null means the
+ * directory holds no files, which is the honest answer for a plugin that was
+ * never installed or never wrote any data.
+ */
+export interface PluginPipelineSizes {
+  installedBytes: number | null;
+  dataBytes: number | null;
+}
+
+export interface PluginPipelinePluginStatus extends PluginMetadata {
   id: string;
   directoryName: string;
   rootPath: string;
@@ -65,6 +105,13 @@ export interface PluginPipelinePluginStatus {
   sourceHash: string | null;
   approvedHash: string | null;
   installedBaselineHash: string | null;
+  /** The manifest's declared web apps, so the settings surface can offer an
+   * Open control without a second manifest read. */
+  webApps: { id: string; title: string }[];
+  /** The manifest's declared settings, so the details page can render the
+   * controls without a second manifest read. Values live per workspace and
+   * travel separately. */
+  settings: PluginSettingDeclaration[];
   diagnostics: string[];
   warnings: string[];
   error: PluginPipelineError | null;
@@ -127,7 +174,7 @@ export interface PluginPipelineOptions {
   pluginHost: PluginHost;
   resourcesBasePath?: string;
   /** See pluginInstallRunner's InstallPluginDependenciesInput.pnpmRunnerEntry. */
-  pnpmRunnerEntry?: string;
+  pnpmRunnerEntry: string;
   onStatusChange?: (event: PluginPipelineStatusEvent) => void;
   /** Whether this workspace's engine capture is running right now — used
    * only to keep uninstall preflight's recovery promises honest (a file
@@ -260,9 +307,47 @@ function cloneError(error: PluginPipelineError | null): PluginPipelineError | nu
 function cloneStatus(status: PluginPipelinePluginStatus): PluginPipelinePluginStatus {
   return {
     ...status,
+    settings: status.settings.map((setting) => ({ ...setting })),
+    webApps: status.webApps.map((webApp) => ({ ...webApp })),
     diagnostics: [...status.diagnostics],
     warnings: [...status.warnings],
     error: cloneError(status.error),
+  };
+}
+
+function manifestWebApps(
+  manifest: { webApps?: { id: string; title: string }[] } | null,
+): { id: string; title: string }[] {
+  return (manifest?.webApps ?? []).map((webApp) => ({
+    id: webApp.id,
+    title: webApp.title,
+  }));
+}
+
+/**
+ * What a plugin says about itself, for the surfaces that show a plugin before
+ * anyone installs it. Derived from the candidate on every status change for
+ * the same reason webApps is: an approved manifest edit that renames a plugin
+ * or rewrites its description must reach the list, not stay frozen at first
+ * discovery. The icon comes from the candidate rather than the manifest —
+ * discovery is what checked the file behind it.
+ */
+function manifestSettings(
+  manifest: { settings?: PluginSettingDeclaration[] } | null,
+): PluginSettingDeclaration[] {
+  return (manifest?.settings ?? []).map((setting) => ({ ...setting }));
+}
+
+function manifestMetadata(candidate: InstalledPluginRecord): PluginMetadata {
+  return {
+    displayName: candidate.manifest?.displayName ?? null,
+    description: candidate.manifest?.description ?? null,
+    publisher: candidate.manifest?.publisher ?? null,
+    icon: candidate.iconPath,
+    pluginVersion: candidate.manifest?.pluginVersion ?? null,
+    repository: candidate.manifest?.repository ?? null,
+    issues: candidate.manifest?.issues ?? null,
+    license: candidate.manifest?.license ?? null,
   };
 }
 
@@ -367,6 +452,76 @@ export class PluginPipeline {
     return this.options.pluginHost;
   }
 
+  /**
+   * What this plugin declares the user may set. Refusing an unknown plugin is
+   * what keeps one plugin's settings out of another's reach: every settings
+   * call names a plugin, and only a plugin this workspace discovered has
+   * declarations to answer with.
+   */
+  private declaredSettings(pluginId: string): PluginSettingDeclaration[] {
+    const status = this.statuses.get(pluginId);
+    if (status) return status.settings;
+    const candidate = this.discovery.find((entry) => entry.id === pluginId);
+    if (!candidate) throw new Error(`Unknown plugin: ${pluginId}`);
+    return manifestSettings(candidate.manifest);
+  }
+
+  /**
+   * What this plugin takes up on this machine, in two numbers the details
+   * rail shows separately because uninstall treats them differently: the
+   * installed tree dohc built under its own userData (snapshot source, its
+   * node_modules, the bundle), and the state root the plugin itself wrote.
+   * A directory that holds no files answers null, and the rail then shows no
+   * row — a plugin that was never installed has no installed size, and
+   * printing a "0 bytes" would state something dohc does not know.
+   *
+   * Not queued behind the action lock: this only reads, and a reader opening
+   * the page while an install runs should not have to wait for it.
+   */
+  async sizes(pluginId: string): Promise<PluginPipelineSizes> {
+    const [installed, data] = await Promise.all([
+      measurePluginDirectory(this.liveRoot(pluginId)),
+      measurePluginDirectory(pluginStateRoot(this.dohcDir, pluginId)),
+    ]);
+    return {
+      installedBytes: installed?.totalBytes ?? null,
+      dataBytes: data?.totalBytes ?? null,
+    };
+  }
+
+  /** This plugin's settings: its declared defaults under the stored answers. */
+  async getPluginSettings(
+    pluginId: string,
+  ): Promise<Record<string, PluginSettingValue>> {
+    const declared = this.declaredSettings(pluginId);
+    const stored = await readPluginSettingsFile(this.workspaceRoot);
+    return resolvePluginSettings(declared, stored[pluginId]);
+  }
+
+  /** Records the user's answers and tells the plugin, if it is running. */
+  async setPluginSettings(
+    pluginId: string,
+    patch: Readonly<Record<string, unknown>>,
+  ): Promise<Record<string, PluginSettingValue>> {
+    const declared = this.declaredSettings(pluginId);
+    const values = await savePluginSettings(
+      this.workspaceRoot,
+      pluginId,
+      declared,
+      patch,
+    );
+    // Not awaited: the value is already saved, and a plugin that is slow to
+    // take the change must not make the user wait for a save that landed.
+    void this.options.pluginHost.notifySettingsChanged(pluginId, values).catch(
+      (error: unknown) => {
+        console.warn(
+          `[desktop] plugin "${pluginId}" did not take a settings change: ${errorMessage(error)}`,
+        );
+      },
+    );
+    return values;
+  }
+
   start(): Promise<void> {
     if (this.startPromise) return this.startPromise;
     this.startPromise = this.startInternal();
@@ -401,6 +556,9 @@ export class PluginPipeline {
           sourceHash: null,
           approvedHash: null,
           installedBaselineHash: null,
+          ...manifestMetadata(candidate),
+          settings: manifestSettings(candidate.manifest),
+          webApps: manifestWebApps(candidate.manifest),
           diagnostics: boundedStatusLines(candidate.diagnostics),
           warnings: [],
           error: invalidPluginError(candidate),
@@ -673,6 +831,7 @@ export class PluginPipeline {
           dohcDir: this.dohcDir,
           pluginId,
           pluginRoot,
+          stateRoot: pluginStateRoot(this.dohcDir, pluginId),
           installedBaselineHash: record?.installedBaselineHash,
           engineCaptureAvailable: this.engineCaptureAvailable(),
         });
@@ -737,6 +896,7 @@ export class PluginPipeline {
         dohcDir: this.dohcDir,
         pluginId,
         pluginRoot: candidate.rootPath,
+        stateRoot: pluginStateRoot(this.dohcDir, pluginId),
         installedBaselineHash: record?.installedBaselineHash,
         engineCaptureAvailable: this.engineCaptureAvailable(),
       });
@@ -780,6 +940,7 @@ export class PluginPipeline {
           dohcDir: this.dohcDir,
           pluginId,
           pluginRoot: candidate.rootPath,
+          stateRoot: pluginStateRoot(this.dohcDir, pluginId),
           installedBaselineHash: record?.installedBaselineHash,
           engineCaptureAvailable: this.engineCaptureAvailable(),
         });
@@ -1366,7 +1527,7 @@ export class PluginPipeline {
       }
 
       this.setStatus(candidate, { status: "installing", error: null });
-      this.unwrap("install", await this.operations.install({
+      const installResult = await this.operations.install({
         workspaceRoot: this.workspaceRoot,
         pluginId: candidate.id,
         snapshotRoot: snapshot.snapshotRoot,
@@ -1374,7 +1535,8 @@ export class PluginPipeline {
         resourcesBasePath: this.options.resourcesBasePath,
         pnpmRunnerEntry: this.options.pnpmRunnerEntry,
         signal: this.abortController.signal,
-      }));
+      });
+      this.unwrap("install", installResult);
 
       this.setStatus(candidate, { status: "scanning" });
       const scan = this.unwrap("scan", await this.operations.scan({
@@ -1818,6 +1980,7 @@ export class PluginPipeline {
       directoryName: status.directoryName,
       rootPath: status.rootPath,
       manifest: null,
+      iconPath: null,
       diagnostics: status.diagnostics,
       valid: status.valid,
     };
@@ -1892,6 +2055,9 @@ export class PluginPipeline {
     });
     return [
       liveRoot,
+      // The plugin's durable data (a wrapper's sessions, logs, secrets) is
+      // deleted with the plugin; the uninstall preflight warned about it.
+      pluginStateRoot(this.dohcDir, pluginId),
       ...siblings
         .filter((name) => isPluginRootArtifact(liveRootName, name))
         .map((name) => join(parent, name)),
@@ -2021,6 +2187,9 @@ export class PluginPipeline {
       sourceHash: null,
       approvedHash: null,
       installedBaselineHash: null,
+      ...manifestMetadata(candidate),
+      settings: manifestSettings(candidate.manifest),
+      webApps: manifestWebApps(candidate.manifest),
       diagnostics: boundedStatusLines(candidate.diagnostics),
       warnings: [],
       error: null,
@@ -2045,6 +2214,18 @@ export class PluginPipeline {
       // still-valid plugin's discovery entry was replaced always read back
       // as invalid).
       valid: patch.valid ?? (candidate.valid && candidate.manifest !== null),
+      // Derived from the candidate like directoryName/rootPath: an approved
+      // manifest edit that adds or renames a web app must become visible on
+      // the next status change, not stay frozen at first discovery. The
+      // manifest's own metadata is derived the same way — except from a
+      // synthetic candidate (failure()'s fallback, a sourceless uninstall),
+      // which has no manifest to read. The status keeps the name and icon it
+      // already carried rather than losing them mid-action.
+      ...(candidate.manifest ? manifestMetadata(candidate) : {}),
+      settings: candidate.manifest
+        ? manifestSettings(candidate.manifest)
+        : current.settings,
+      webApps: patch.webApps ?? manifestWebApps(candidate.manifest),
       diagnostics: boundedStatusLines(patch.diagnostics ?? current.diagnostics),
       warnings: boundedStatusLines(patch.warnings ?? current.warnings),
       error: patch.error === undefined ? cloneError(current.error) : cloneError(patch.error),
@@ -2067,6 +2248,7 @@ export class PluginPipeline {
           directoryName: current.directoryName,
           rootPath: current.rootPath,
           manifest: null,
+          iconPath: null,
           diagnostics: current.diagnostics,
           valid: current.valid,
         },

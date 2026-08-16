@@ -47,6 +47,9 @@ interface Deferred<T> {
 }
 
 const roots: string[] = [];
+// The one entry every install forks, here and in the app: production runs the
+// built copy of this file, and Node runs its TypeScript source directly.
+const PNPM_RUNNER_ENTRY = join(import.meta.dirname, "pluginPnpmRunnerProcess.ts");
 
 class FakeInstallProcess implements PluginInstallProcessHandle {
   readonly stdout = new PassThrough();
@@ -116,6 +119,7 @@ async function createInstallFixture(
     pluginId: options.pluginId ?? "example-plugin",
     snapshotRoot,
     resourcesBasePath,
+    pnpmRunnerEntry: PNPM_RUNNER_ENTRY,
     // Fake-driven tests must never signal a real process table entry for
     // FakeInstallProcess's made-up pid. The descendant-teardown test below
     // supplies its own tree walker instead.
@@ -192,8 +196,8 @@ describe("installPluginDependencies", () => {
     expect(forkProcess).toHaveBeenCalledTimes(1);
     const homeDir = fixture.input.pnpmPaths.homeDir;
     expect(forkProcess).toHaveBeenCalledWith(
-      resolvePluginPnpmEntry(fixture.resourcesBasePath),
-      [...PLUGIN_INSTALL_ARGS],
+      PNPM_RUNNER_ENTRY,
+      [resolvePluginPnpmEntry(fixture.resourcesBasePath), ...PLUGIN_INSTALL_ARGS],
       {
         cwd: fixture.snapshotRoot,
         // R18 (CodeRabbit #779): an explicit allowlist, never a full
@@ -290,6 +294,50 @@ describe("installPluginDependencies", () => {
     expect(escaped.error.message).toContain("node_modules");
   });
 
+  it("rejects an install that reported success and wrote no dependency tree", async () => {
+    const fixture = await createInstallFixture({ pluginId: "truncated-plugin" });
+    // Exactly what the pnpm-runner wrapper used to do: exit 0 with the
+    // snapshot untouched. pnpm writes node_modules/.modules.yaml when an
+    // install completes, so its absence beside a declared dependency is what
+    // makes a truncated install unreportable as success.
+    await writeFile(
+      join(fixture.snapshotRoot, "package.json"),
+      `${JSON.stringify({ name: "truncated", dependencies: { zod: "4.4.3" } })}\n`,
+    );
+    const child = new FakeInstallProcess();
+    const forkProcess = vi.fn<PluginInstallFork>(() => {
+      queueMicrotask(() => child.exit(0));
+      return child;
+    });
+
+    const failed = requireFailure(await installPluginDependencies({
+      ...fixture.input,
+      forkProcess,
+    }));
+
+    expect(failed.error.code).toBe("install-not-materialized");
+    expect(failed.error.message).toContain(".modules.yaml");
+    expect(failed.error.message).toContain("declared dependencies: 1");
+  });
+
+  it("accepts a completed install of a snapshot that declares no dependencies", async () => {
+    const fixture = await createInstallFixture({ pluginId: "no-deps-plugin" });
+    // Measured pnpm@11.20.0 behavior: a frozen install with nothing to
+    // install writes no node_modules at all, and that is a real success.
+    await writeFile(
+      join(fixture.snapshotRoot, "package.json"),
+      `${JSON.stringify({ name: "no-deps" })}\n`,
+    );
+    const child = new FakeInstallProcess();
+    const forkProcess = vi.fn<PluginInstallFork>(() => {
+      queueMicrotask(() => child.exit(0));
+      return child;
+    });
+
+    await expect(installPluginDependencies({ ...fixture.input, forkProcess }))
+      .resolves.toMatchObject({ ok: true, exitCode: 0 });
+  });
+
   it("classifies a lockfile mismatch even when its marker token is split across stream chunks (CodeRabbit #779 R17)", async () => {
     const fixture = await createInstallFixture();
     const child = new FakeInstallProcess();
@@ -320,11 +368,11 @@ describe("installPluginDependencies", () => {
   it("names the real forked module (the runner entry, not pnpmEntry) on the default production fork path (CodeRabbit #779 R19)", async () => {
     const fixture = await createInstallFixture();
     const pnpmRunnerEntry = join(fixture.root, "pnpm-runner.js");
-    // No forkProcess override: this exercises usingDefaultFork === true,
-    // previously untested. The real forkElectronUtilityProcess dynamically
-    // imports "electron" and calls utilityProcess.fork — outside a real
-    // Electron process that fails immediately, which is exactly the
-    // spawn-failed path this test pins the message for.
+    // No forkProcess override, so this takes the default fork. The real
+    // forkElectronUtilityProcess dynamically imports "electron" and calls
+    // utilityProcess.fork — outside a real Electron process that fails
+    // immediately, which is exactly the spawn-failed path this test pins the
+    // message for.
     const failure = requireFailure(
       await installPluginDependencies({ ...fixture.input, pnpmRunnerEntry }),
     );
@@ -717,6 +765,43 @@ afterAll(async () => {
     retryDelay: 100,
   });
 });
+
+it.skipIf(!realInstallAvailable)(
+  "runs the real pnpm-runner wrapper until pnpm finishes, not until its import settles",
+  async () => {
+    const fixture = await createInstallFixture({ pluginId: "runner-plugin" });
+    await writeFixtureProject(fixture.snapshotRoot);
+    const pnpmRoot = join(fixture.root, "pnpm");
+
+    // The production command line: fork pluginPnpmRunnerProcess, hand it
+    // pnpm's own entry. Only the spawn is local — a plain Node child instead
+    // of Electron's utility process.
+    const installed = await installPluginDependencies({
+      ...fixture.input,
+      resourcesBasePath: stagedResources,
+      pnpmPaths: {
+        storeDir: join(pnpmRoot, "store"),
+        cacheDir: join(pnpmRoot, "cache"),
+        stateDir: join(pnpmRoot, "state"),
+        homeDir: join(pnpmRoot, "home"),
+      },
+      forkProcess: nodeForkProcess,
+    });
+
+    // pnpm's bin starts its CLI in a floating async IIFE, so a wrapper that
+    // exits when `await import()` settles reports this same exit 0 over an
+    // empty snapshot. Measured: 623 ms, no node_modules, no pnpm output.
+    expect(installed).toMatchObject({ ok: true, exitCode: 0 });
+    expect(existsSync(join(fixture.snapshotRoot, "node_modules", ".modules.yaml")))
+      .toBe(true);
+    expect(existsSync(join(fixture.snapshotRoot, "node_modules", "zod", "package.json")))
+      .toBe(true);
+    // The child's own output reached the parent's log buffer.
+    expect(installed.ok && installed.logs.some((entry) => entry.text.includes("zod")))
+      .toBe(true);
+  },
+  180_000,
+);
 
 it.skipIf(!realInstallAvailable)(
   "runs actual staged pnpm and ignores a plugin-authored .npmrc registry (#779 round 8 D1)",

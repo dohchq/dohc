@@ -1,4 +1,5 @@
 import {
+  Blocks,
   Cloud,
   Files,
   Globe2,
@@ -21,6 +22,7 @@ const ICONS: Record<ViewId, typeof Files> = {
   graph: Workflow,
   sites: Globe2,
   history: History,
+  plugins: Blocks,
 };
 
 const LABELS: Record<ViewId, string> = {
@@ -29,6 +31,7 @@ const LABELS: Record<ViewId, string> = {
   graph: "Graph",
   sites: "Sites",
   history: "History",
+  plugins: "Plugins",
 };
 
 export function activityViewLabel(view: ViewId): string {
