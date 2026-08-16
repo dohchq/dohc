@@ -77,6 +77,13 @@ function callHandleAuxClick(
   );
 }
 
+/** openLinkExternally asks the confirm gate before it reaches the bridge, so
+ *  the open lands a microtask after the click handler returns. Await this
+ *  before asserting that the bridge was — or was not — called. */
+async function flushExternalOpen(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe("normalizeLinkUrl", () => {
   it("prefixes a bare host with https://", () => {
     expect(normalizeLinkUrl("example.com")).toBe("https://example.com/");
@@ -336,7 +343,7 @@ describe("makeLinkMenuPlugin: click", () => {
     editor.destroy();
   });
 
-  it("opens externally via the safe bridge on Cmd/Ctrl+click, without opening the popover", () => {
+  it("opens externally via the safe bridge on Cmd/Ctrl+click, without opening the popover", async () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
@@ -364,12 +371,13 @@ describe("makeLinkMenuPlugin: click", () => {
 
     expect(handled).toBe(true);
     expect(event.preventDefault).toHaveBeenCalled();
+    await flushExternalOpen();
     expect(openExternalUrl).toHaveBeenCalledWith({ url: "https://example.com/" });
     expect(setState).not.toHaveBeenCalled();
     editor.destroy();
   });
 
-  it("keeps percent encoding when opening an external read-only link", () => {
+  it("keeps percent encoding when opening an external read-only link", async () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
@@ -395,6 +403,7 @@ describe("makeLinkMenuPlugin: click", () => {
 
     expect(callHandleDomClick(plugin, editor.view, event)).toBe(true);
     expect(event.preventDefault).toHaveBeenCalled();
+    await flushExternalOpen();
     expect(openExternalUrl).toHaveBeenCalledWith({
       url: "https://example.com/a%20path",
     });
@@ -402,7 +411,7 @@ describe("makeLinkMenuPlugin: click", () => {
     editor.destroy();
   });
 
-  it("opens a read-only mail link through the safe bridge", () => {
+  it("opens a read-only mail link through the safe bridge", async () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
@@ -423,11 +432,12 @@ describe("makeLinkMenuPlugin: click", () => {
 
     expect(callHandleDomClick(plugin, editor.view, event)).toBe(true);
     expect(event.preventDefault).toHaveBeenCalled();
+    await flushExternalOpen();
     expect(openExternalUrl).toHaveBeenCalledWith({ url: "mailto:hi@dohc.ai" });
     editor.destroy();
   });
 
-  it("routes a read-only workspace-relative link through workspace navigation", () => {
+  it("routes a read-only workspace-relative link through workspace navigation", async () => {
     const openWorkspaceLink = vi.fn();
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
@@ -458,6 +468,7 @@ describe("makeLinkMenuPlugin: click", () => {
       path: "../plans/launch.md",
       rawFragment: "risks",
     });
+    await flushExternalOpen();
     expect(openExternalUrl).not.toHaveBeenCalled();
     editor.destroy();
   });
@@ -564,7 +575,7 @@ describe("makeLinkMenuPlugin: click", () => {
     editor.destroy();
   });
 
-  it("keeps an external link query outside workspace navigation", () => {
+  it("keeps an external link query outside workspace navigation", async () => {
     const openWorkspaceLink = vi.fn();
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
@@ -587,6 +598,7 @@ describe("makeLinkMenuPlugin: click", () => {
     } as unknown as MouseEvent;
 
     expect(callHandleDomClick(plugin, editor.view, event)).toBe(true);
+    await flushExternalOpen();
     expect(openExternalUrl).toHaveBeenCalledWith({
       url: "https://example.com/plan?mode=preview#risks",
     });
@@ -623,7 +635,7 @@ describe("makeLinkMenuPlugin: click", () => {
       "../plans/%E0%A4%A.md",
       { path: "../plans/%E0%A4%A.md" },
     ],
-  ])("decodes %s in a read-only workspace link", (_label, href, expected) => {
+  ])("decodes %s in a read-only workspace link", async (_label, href, expected) => {
     const openWorkspaceLink = vi.fn();
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
@@ -647,6 +659,7 @@ describe("makeLinkMenuPlugin: click", () => {
     expect(callHandleDomClick(plugin, editor.view, event)).toBe(true);
     expect(event.preventDefault).toHaveBeenCalled();
     expect(openWorkspaceLink).toHaveBeenCalledWith(expected);
+    await flushExternalOpen();
     expect(openExternalUrl).not.toHaveBeenCalled();
     editor.destroy();
   });
@@ -674,7 +687,7 @@ describe("makeLinkMenuPlugin: click", () => {
       "%2F%2Fexample.com%2Fpath%3Fnext%3Da%2526admin%253Dtrue%23risks",
       "https://example.com/path?next=a%26admin%3Dtrue#risks",
     ],
-  ])("opens a %s network-path read-only URL externally", (_label, href, expected) => {
+  ])("opens a %s network-path read-only URL externally", async (_label, href, expected) => {
     const openWorkspaceLink = vi.fn();
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
@@ -699,6 +712,7 @@ describe("makeLinkMenuPlugin: click", () => {
 
     expect(callHandleDomClick(plugin, editor.view, event)).toBe(true);
     expect(event.preventDefault).toHaveBeenCalled();
+    await flushExternalOpen();
     expect(openExternalUrl).toHaveBeenCalledWith({
       url: expected,
     });
@@ -710,7 +724,7 @@ describe("makeLinkMenuPlugin: click", () => {
     ["an encoded unsafe scheme", "javascript%3Aalert(1)"],
     ["an encoded external scheme", "https%3A%2F%2Fexample.com"],
     ["a control-mangled encoded scheme", "java%0Ascript%3Aalert(1)"],
-  ])("consumes %s without routing it", (_label, href) => {
+  ])("consumes %s without routing it", async (_label, href) => {
     const openWorkspaceLink = vi.fn();
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
@@ -736,6 +750,7 @@ describe("makeLinkMenuPlugin: click", () => {
     expect(callHandleDomClick(plugin, editor.view, event)).toBe(true);
     expect(event.preventDefault).toHaveBeenCalled();
     expect(openWorkspaceLink).not.toHaveBeenCalled();
+    await flushExternalOpen();
     expect(openExternalUrl).not.toHaveBeenCalled();
     editor.destroy();
   });
@@ -787,7 +802,7 @@ describe("makeLinkMenuPlugin: click", () => {
     editor.destroy();
   });
 
-  it("routes a read-only heading fragment through workspace navigation", () => {
+  it("routes a read-only heading fragment through workspace navigation", async () => {
     const openWorkspaceLink = vi.fn();
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
@@ -814,6 +829,7 @@ describe("makeLinkMenuPlugin: click", () => {
       path: "",
       rawFragment: "risks",
     });
+    await flushExternalOpen();
     expect(openExternalUrl).not.toHaveBeenCalled();
     editor.destroy();
   });
@@ -843,7 +859,7 @@ describe("makeLinkMenuPlugin: click", () => {
     editor.destroy();
   });
 
-  it("opens a focused read-only link once and consumes repeated Enter events", () => {
+  it("opens a focused read-only link once and consumes repeated Enter events", async () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
@@ -873,6 +889,7 @@ describe("makeLinkMenuPlugin: click", () => {
       expect(callHandleKeyDown(plugin, editor.view, event)).toBe(true);
       expect(event.preventDefault).toHaveBeenCalled();
     }
+    await flushExternalOpen();
     expect(openExternalUrl).toHaveBeenCalledWith({
       url: "https://example.com/keyboard",
     });
@@ -880,7 +897,7 @@ describe("makeLinkMenuPlugin: click", () => {
     editor.destroy();
   });
 
-  it("blocks unsafe read-only link schemes without calling either navigation path", () => {
+  it("blocks unsafe read-only link schemes without calling either navigation path", async () => {
     const openWorkspaceLink = vi.fn();
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
@@ -912,6 +929,7 @@ describe("makeLinkMenuPlugin: click", () => {
     expect(callHandleDomClick(plugin, editor.view, event)).toBe(true);
     expect(event.preventDefault).toHaveBeenCalled();
     expect(openWorkspaceLink).not.toHaveBeenCalled();
+    await flushExternalOpen();
     expect(openExternalUrl).not.toHaveBeenCalled();
     editor.destroy();
   });

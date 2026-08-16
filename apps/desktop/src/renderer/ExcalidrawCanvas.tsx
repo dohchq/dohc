@@ -20,7 +20,7 @@ import type {
 } from "@excalidraw/excalidraw/types";
 import type * as Y from "yjs";
 import type { ExcalidrawDocument } from "./excalidrawDocument";
-import { bridge } from "./bridge";
+import { openLinkExternally } from "./editor/linkMenu";
 import {
   applyCanvasSceneChange,
   createSceneRemoteEchoes,
@@ -240,9 +240,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
           // Excalidraw otherwise calls window.open, which the desktop shell
           // denies. Keep navigation inside dohc's audited URL bridge.
           event.preventDefault();
-          void bridge()
-            .openExternalUrl({ url: element.link })
-            .catch(() => undefined);
+          void openLinkExternally(element.link);
         }}
         UIOptions={{
           canvasActions: {

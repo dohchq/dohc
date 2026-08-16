@@ -60,6 +60,7 @@ import { useSnapshotLane } from "./snapshotLane";
 import { momentDiffSides } from "./workbench/momentDiffSides";
 import { CloudLogin } from "./CloudLogin";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { ExternalLinkConfirm } from "./ExternalLinkConfirm";
 import { CommandPalette, type Command } from "./CommandPalette";
 import {
   classifyForView,
@@ -5950,6 +5951,7 @@ export function DesktopWorkspaceShell(props: {
           />
         </Overlay>
       ) : null}
+      <ExternalLinkConfirm workspaceId={workspaceId} />
     </div>
   );
 }
