@@ -21,13 +21,17 @@ class FakeUtilityProcess extends EventEmitter {
   }
 }
 
-const forked: FakeUtilityProcess[] = [];
+/** Set by `fork()` before every call, so the mock below hands the test the
+ * child it just made. The fork under test only reaches the mock after
+ * `await import("electron")`, so the test cannot read the child until this
+ * resolves. */
+let announceChild: (child: FakeUtilityProcess) => void = () => {};
 
 vi.mock("electron", () => ({
   utilityProcess: {
     fork: () => {
       const child = new FakeUtilityProcess();
-      forked.push(child);
+      announceChild(child);
       return child;
     },
   },
@@ -42,37 +46,39 @@ const OPTIONS: PluginChildProcessForkOptions = {
 
 function fork(): {
   handle: ReturnType<typeof forkElectronUtilityProcess>;
+  child: Promise<FakeUtilityProcess>;
   onExit: ReturnType<typeof vi.fn>;
   onError: ReturnType<typeof vi.fn>;
 } {
   const onExit = vi.fn();
   const onError = vi.fn();
+  const child = new Promise<FakeUtilityProcess>((resolve) => {
+    announceChild = resolve;
+  });
   return {
     handle: forkElectronUtilityProcess("main.mjs", [], OPTIONS, {
       onExit,
       onError,
     }),
+    child,
     onExit,
     onError,
   };
 }
 
-/** One macrotask: enough for every microtask the fork could still be waiting
- * on, so an unsettled promise here is genuinely waiting on the child. */
-function tick(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
 describe("forkElectronUtilityProcess", () => {
   it("waits for the spawn, so the handle carries the child's pid", async () => {
-    const { handle } = fork();
+    const { handle, child: forking } = fork();
     let settled = false;
     void handle.then(() => {
       settled = true;
     });
-    await tick();
-    const child = forked.at(-1)!;
+    const child = await forking;
     expect(child.pid).toBeUndefined();
+
+    // Every job the fork queued has run by the next macrotask, so a handle
+    // still unsettled here is parked on the child, not merely late.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
     // MUTATION (return the handle straight from fork): settled is already
     // true here, every handle reports no pid, and the ownership record a
@@ -85,9 +91,8 @@ describe("forkElectronUtilityProcess", () => {
   });
 
   it("returns a child that ended before it spawned, so the caller can retry", async () => {
-    const { handle, onExit } = fork();
-    await tick();
-    const child = forked.at(-1)!;
+    const { handle, child: forking, onExit } = fork();
+    const child = await forking;
     child.emit("exit", 1);
 
     // No pid was ever assigned: the caller reads null and treats the attempt
@@ -97,9 +102,8 @@ describe("forkElectronUtilityProcess", () => {
   });
 
   it("returns a child whose launch errored", async () => {
-    const { handle, onError } = fork();
-    await tick();
-    const child = forked.at(-1)!;
+    const { handle, child: forking, onError } = fork();
+    const child = await forking;
     child.emit("error", "FatalError", "utility_process", "launch failed");
 
     expect((await handle).pid).toBeUndefined();
