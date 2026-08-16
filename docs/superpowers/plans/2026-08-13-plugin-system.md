@@ -31,6 +31,10 @@ a row.
 | `displayName` | What to call the plugin on screen | 120 chars |
 | `description` | One line: what the plugin does | 280 chars |
 | `publisher` | Who publishes it | 120 chars |
+| `pluginVersion` | What the plugin calls this build | 40 chars |
+| `repository` | Where the source lives, `https://` only | 2,048 chars |
+| `issues` | Where to report a problem, `https://` only | 2,048 chars |
+| `license` | Licence name, SPDX id, or `https://` URL | 120 chars |
 | `icon` | Plugin-root-relative `.png` or `.svg` | 1,024-char path |
 | `entry` | Plugin-root-relative module | 1,024-char path |
 | `panels` | `{ id, title, entry }` | 100 entries |
@@ -47,6 +51,37 @@ These per-field bounds do not sum to the reader's 256 KiB file cap, and are
 not meant to. `readPluginManifestFile` checks the file's size before it parses
 anything, so a manifest at every bound at once is refused by size with the cap
 named. Each bound only has to be right for its own field.
+
+### What the details page shows
+
+The plugin's page carries a right rail of what dohc knows about the plugin as
+an installation: its identifier, the version it calls this build, the content
+hash of the source the user approved, what it takes up on disk, and links to
+its source, its issues, and its licence.
+
+Every row appears only where its fact exists, and a section with no rows
+prints no heading. This is the whole rule, and it is what keeps the rail
+honest: dohc has no marketplace, so it has no publish date, no update date, no
+rating, no install count, and no category to put a plugin in. VS Code's rail
+shows all of those. Inventing any of them would be the one thing a reference
+surface must never do.
+
+Two of these rows are dohc's own, and a marketplace could not print them.
+**Approved source** is the content hash the user approved, which is dohc's
+version-of-record for what actually runs — `pluginVersion` is a string the
+author chose and dohc never compares it to anything. **Installed size** and
+**Stored data** are measured on request rather than recorded, by the same walk
+the uninstall preflight uses, so the rail and the uninstall dialog can never
+report different bytes for the same directory.
+
+There are no install or approval timestamps, because the pipeline records
+none. `PluginRecord` holds five fields and not one of them is a time. A "last
+updated" row would have to be invented, so there is not one.
+
+`pluginVersion`, `repository`, `issues`, and `license` are display only.
+`repository` and `issues` are `https://` only and capped at exactly the length
+the audited external-open path accepts, so a manifest can never declare a link
+that every click refuses.
 
 ### Settings
 

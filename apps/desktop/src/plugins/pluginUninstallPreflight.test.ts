@@ -6,6 +6,7 @@ import { PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT } from "../ipc/channels";
 import { createTestScratch } from "../workspaces/testTemp";
 import { hashPluginSourceFiles, pluginStateRoot } from "./pluginSourceSnapshot";
 import {
+  measurePluginDirectory,
   pluginBaselineManifestPath,
   pluginUninstallPreflight,
   summarizeUninstallPreflight,
@@ -370,5 +371,58 @@ describe("plugin uninstall preflight", () => {
     expect(result.counts.notRecoverableFromHistory).toBe(0);
     expect(result.summary).toContain("already deleted");
     expect(result.summary).not.toContain("cannot verify");
+  });
+});
+
+// The rail measures directories the preflight does not, with the same walk.
+// These pin the walk itself, so the rail and the uninstall dialog can never
+// report different bytes for the same directory.
+describe("measurePluginDirectory", () => {
+  it("counts every file under the directory, at any depth", async () => {
+    const fixture = await createFixture();
+    const root = join(fixture.dohcDir, "measure-me");
+    await mkdir(join(root, "a", "b"), { recursive: true });
+    await writeFile(join(root, "top.txt"), "x".repeat(10));
+    await writeFile(join(root, "a", "mid.txt"), "x".repeat(20));
+    await writeFile(join(root, "a", "b", "deep.txt"), "x".repeat(30));
+
+    const measured = await measurePluginDirectory(root);
+
+    expect(measured?.fileCount).toBe(3);
+    expect(measured?.totalBytes).toBe(60);
+  });
+
+  // Null, never a zero: "this directory holds nothing" and "this directory
+  // holds 0 bytes of something" are different facts, and the rail shows no
+  // row for the first.
+  it("answers null for a directory that is missing or empty", async () => {
+    const fixture = await createFixture();
+    const missing = join(fixture.dohcDir, "not-there");
+    const empty = join(fixture.dohcDir, "empty");
+    await mkdir(empty, { recursive: true });
+
+    expect(await measurePluginDirectory(missing)).toBeNull();
+    expect(await measurePluginDirectory(empty)).toBeNull();
+  });
+
+  it("does not follow a symlink out of the directory it was given", async () => {
+    const fixture = await createFixture();
+    const root = join(fixture.dohcDir, "linked");
+    const outside = join(fixture.dohcDir, "outside");
+    await mkdir(root, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, "big.bin"), "x".repeat(5000));
+    await writeFile(join(root, "own.txt"), "x".repeat(7));
+    try {
+      await symlink(outside, join(root, "escape"), "junction");
+    } catch {
+      // A machine that refuses to create links cannot prove this one.
+      return;
+    }
+
+    const measured = await measurePluginDirectory(root);
+
+    expect(measured?.fileCount).toBe(1);
+    expect(measured?.totalBytes).toBe(7);
   });
 });

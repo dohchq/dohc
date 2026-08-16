@@ -4200,6 +4200,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         displayName: "Example plugin",
         description: "Does one example thing on this workspace.",
         publisher: "dohc",
+        pluginVersion: "0.0.33",
+        repository: "https://github.com/pingdotgg/t3code",
+        issues: "https://github.com/pingdotgg/t3code/issues",
+        license: "MIT",
         icon: "icon.svg",
         entry: "src/index.ts",
       }, null, 2)}\n`,
@@ -4233,6 +4237,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         displayName: "Example plugin",
         description: "Does one example thing on this workspace.",
         publisher: "dohc",
+        pluginVersion: "0.0.33",
+        repository: "https://github.com/pingdotgg/t3code",
+        issues: "https://github.com/pingdotgg/t3code/issues",
+        license: "MIT",
         icon: "icon.svg",
       });
       // The renderer only ever sees what survives this parse, so the
@@ -4240,6 +4248,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const parsed = ListPluginsResult.safeParse({ ok: true, plugins: listed });
       if (!parsed.success) throw new Error(parsed.error.message);
       expect(parsed.data.ok && parsed.data.plugins[0]?.publisher).toBe("dohc");
+      expect(parsed.data.ok && parsed.data.plugins[0]?.pluginVersion)
+        .toBe("0.0.33");
+      expect(parsed.data.ok && parsed.data.plugins[0]?.repository)
+        .toBe("https://github.com/pingdotgg/t3code");
+      expect(parsed.data.ok && parsed.data.plugins[0]?.license).toBe("MIT");
     } finally {
       await pipeline.dispose();
     }

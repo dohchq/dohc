@@ -32,6 +32,7 @@ import {
   OpenPluginWebAppResult,
   PluginActionResult,
   PluginSettingsResult,
+  PluginSizesResult,
   PluginUninstallPreflightResult,
   StartPluginPanelResult,
   StartPluginWebAppResult,
@@ -239,6 +240,8 @@ const bridge: DohcDesktopBridge = {
     PluginUninstallPreflightResult.parse(
       await ipcRenderer.invoke(CHANNELS.pluginUninstallPreflight, payload),
     ),
+  pluginSizes: async (payload) =>
+    PluginSizesResult.parse(await ipcRenderer.invoke(CHANNELS.pluginSizes, payload)),
   uninstallPlugin: async (payload) =>
     PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.uninstallPlugin, payload)),
   getPluginSettings: async (payload) =>

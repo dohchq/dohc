@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { OpenExternalUrlPayload } from "../ipc/bridgeContract";
 import { MAX_PLUGIN_MANIFEST_FILE_BYTES } from "./pluginManifest";
 import {
   DohcPluginManifest,
   MAX_PLUGIN_DESCRIPTION_CHARS,
+  MAX_PLUGIN_LICENSE_CHARS,
   MAX_PLUGIN_PUBLISHER_CHARS,
   MAX_PLUGIN_SETTINGS,
+  MAX_PLUGIN_URL_CHARS,
+  MAX_PLUGIN_VERSION_CHARS,
   MAX_SETTING_OPTIONS,
   MAX_SETTING_VALUE_CHARS,
 } from "./pluginManifestSchema";
@@ -240,6 +244,144 @@ describe("DohcPluginManifest", () => {
       expect(DohcPluginManifest.safeParse({
         ...minimalManifest,
         description: "a".repeat(MAX_PLUGIN_DESCRIPTION_CHARS),
+      }).success).toBe(true);
+    });
+
+    it("parses a version, repository, issues, and license", () => {
+      expect(DohcPluginManifest.parse({
+        ...minimalManifest,
+        pluginVersion: "0.0.33",
+        repository: "https://github.com/pingdotgg/t3code",
+        issues: "https://github.com/pingdotgg/t3code/issues",
+        license: "MIT",
+      })).toEqual({
+        ...minimalManifest,
+        pluginVersion: "0.0.33",
+        repository: "https://github.com/pingdotgg/t3code",
+        issues: "https://github.com/pingdotgg/t3code/issues",
+        license: "MIT",
+      });
+    });
+
+    // Display only. dohc's version-of-record is the approved content hash, so
+    // a manifest may call its build whatever the author calls it.
+    it.each([
+      ["semver", "1.2.3"],
+      ["a prerelease and build tag", "10.20.30-rc.1+build.20260817"],
+      ["a date", "2026.08.17"],
+      ["a word", "nightly"],
+    ])("accepts %s as a version", (_case, pluginVersion) => {
+      expect(
+        DohcPluginManifest.safeParse({ ...minimalManifest, pluginVersion })
+          .success,
+      ).toBe(true);
+    });
+
+    // The caps themselves, stated as numbers. Every other limit test here
+    // reads its constant, which proves the wording and the boundary but
+    // cannot notice the constant moving — widen the constant and the test
+    // widens with it. These record the decision, so a change to a limit that
+    // rejects real work has to be a deliberate edit.
+    it("holds the measured metadata caps", () => {
+      // 40 clears every version scheme measured: semver with a prerelease and
+      // build tag reached 28 characters, and no dated scheme reached 30.
+      expect(MAX_PLUGIN_VERSION_CHARS).toBe(40);
+      // The bound every other display name in this manifest carries.
+      expect(MAX_PLUGIN_LICENSE_CHARS).toBe(120);
+    });
+
+    // A manifest URL exists to be opened, and the audited open path caps the
+    // URL it accepts. If these two ever disagree, a manifest is accepting a
+    // link that every click refuses.
+    it("caps a URL exactly where the external-open path caps it", () => {
+      const atCap = `https://example.com/${"a".repeat(MAX_PLUGIN_URL_CHARS - 20)}`;
+      expect(atCap.length).toBe(MAX_PLUGIN_URL_CHARS);
+      const overCap = `${atCap}a`;
+
+      expect(OpenExternalUrlPayload.safeParse({ url: atCap }).success).toBe(true);
+      expect(
+        DohcPluginManifest.safeParse({ ...minimalManifest, repository: atCap })
+          .success,
+      ).toBe(true);
+
+      expect(OpenExternalUrlPayload.safeParse({ url: overCap }).success)
+        .toBe(false);
+      expect(
+        DohcPluginManifest.safeParse({ ...minimalManifest, repository: overCap })
+          .success,
+      ).toBe(false);
+    });
+
+    it("names the limit when a version is too long", () => {
+      const result = DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        pluginVersion: "a".repeat(MAX_PLUGIN_VERSION_CHARS + 1),
+      });
+
+      if (result.success) throw new Error("expected the version limit to reject the manifest");
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        message: `pluginVersion: must be ${MAX_PLUGIN_VERSION_CHARS} characters or fewer`,
+      }));
+      expect(DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        pluginVersion: "a".repeat(MAX_PLUGIN_VERSION_CHARS),
+      }).success).toBe(true);
+    });
+
+    it("names the limit when a license is too long", () => {
+      const result = DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        license: "a".repeat(MAX_PLUGIN_LICENSE_CHARS + 1),
+      });
+
+      if (result.success) throw new Error("expected the license limit to reject the manifest");
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        message: `license: must be ${MAX_PLUGIN_LICENSE_CHARS} characters or fewer`,
+      }));
+      expect(DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        license: "a".repeat(MAX_PLUGIN_LICENSE_CHARS),
+      }).success).toBe(true);
+    });
+
+    // These URLs are handed to the OS browser. http: would send the reader
+    // somewhere a network can rewrite, and the rest are not web addresses at
+    // all — one of them executes.
+    it.each([
+      ["repository", "http://github.com/dohc/plugin"],
+      ["repository", "javascript:alert(1)"],
+      ["repository", "file:///etc/passwd"],
+      ["repository", "github.com/dohc/plugin"],
+      ["issues", "http://github.com/dohc/plugin/issues"],
+      ["issues", "not a url"],
+    ] as const)("refuses a %s that is not an https URL: %s", (field, value) => {
+      const result = DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        [field]: value,
+      });
+
+      if (result.success) throw new Error(`expected ${field} "${value}" to be refused`);
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        message: "must be an https:// URL",
+      }));
+    });
+
+    // The manifest must never accept a URL the audited open path then
+    // refuses: OpenExternalUrlPayload caps the same 2048 characters.
+    it("names the limit when a repository URL is too long", () => {
+      const tooLong = `https://example.com/${"a".repeat(MAX_PLUGIN_URL_CHARS)}`;
+      const result = DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        repository: tooLong,
+      });
+
+      if (result.success) throw new Error("expected the URL limit to reject the manifest");
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        message: `must be ${MAX_PLUGIN_URL_CHARS} characters or fewer`,
+      }));
+      expect(DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        repository: `https://example.com/${"a".repeat(MAX_PLUGIN_URL_CHARS - 20)}`,
       }).success).toBe(true);
     });
 

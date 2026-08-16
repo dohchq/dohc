@@ -52,7 +52,10 @@ import {
 // parse over a value the manifest itself allows.
 import {
   MAX_PLUGIN_DESCRIPTION_CHARS,
+  MAX_PLUGIN_LICENSE_CHARS,
   MAX_PLUGIN_PUBLISHER_CHARS,
+  MAX_PLUGIN_URL_CHARS,
+  MAX_PLUGIN_VERSION_CHARS,
   MAX_PLUGIN_SETTINGS,
   PluginSettingDeclarationSchema,
   PluginSettingValueSchema,
@@ -2413,6 +2416,16 @@ export function parsePluginWebAppFailedEventForIpc(
 const PLUGIN_SOURCE_HASH = z.string().regex(/^[0-9a-f]{64}$/);
 const PLUGIN_DIAGNOSTIC = z.string().min(1).max(10_000);
 
+// The same rule the manifest applies, restated on the wire so a link the
+// details rail is about to hand the OS browser cannot arrive over http.
+const HTTPS_URL = z.string().min(1).max(MAX_PLUGIN_URL_CHARS).refine((value) => {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}, "must be an https:// URL");
+
 export const PluginPipelineError = z.object({
   stage: z.enum(PLUGIN_PIPELINE_ERROR_STAGES),
   code: z.string().min(1).max(100),
@@ -2440,6 +2453,15 @@ export const PluginStatusRecord = z.object({
   description: z.string().min(1).max(MAX_PLUGIN_DESCRIPTION_CHARS).nullable(),
   publisher: z.string().min(1).max(MAX_PLUGIN_PUBLISHER_CHARS).nullable(),
   icon: z.string().min(1).max(1024).nullable(),
+  // What the plugin declares about itself that dohc cannot derive: the
+  // version string it calls this build, and where its source, its issues, and
+  // its licence are. The URLs are re-checked as https here rather than
+  // trusted from main, because this contract is also what a test fixture and
+  // the demo bridge have to satisfy.
+  pluginVersion: z.string().min(1).max(MAX_PLUGIN_VERSION_CHARS).nullable(),
+  repository: HTTPS_URL.nullable(),
+  issues: HTTPS_URL.nullable(),
+  license: z.string().min(1).max(MAX_PLUGIN_LICENSE_CHARS).nullable(),
   /** What the plugin declares the user may set. Values travel separately —
    * they are per-workspace state, not part of the plugin's identity. */
   settings: z.array(PluginSettingDeclarationSchema).max(MAX_PLUGIN_SETTINGS),
@@ -2567,6 +2589,21 @@ export const PluginUninstallPreflightResult = z.discriminatedUnion("ok", [
 export type PluginUninstallPreflightResult = z.infer<
   typeof PluginUninstallPreflightResult
 >;
+
+// What this plugin takes up on this machine. Measured on request rather than
+// carried on PluginStatusRecord: the walk reads every file in the installed
+// tree, and the list surface shows many plugins at once and needs none of it.
+export const PluginSizesRecord = z.object({
+  installedBytes: z.number().int().nonnegative().nullable(),
+  dataBytes: z.number().int().nonnegative().nullable(),
+}).strict();
+export type PluginSizesRecord = z.infer<typeof PluginSizesRecord>;
+
+export const PluginSizesResult = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), sizes: PluginSizesRecord }).strict(),
+  z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
+]);
+export type PluginSizesResult = z.infer<typeof PluginSizesResult>;
 
 export const UninstallPluginPayload = PluginActionPayload.extend({
   confirmationToken: z.uuid(),
@@ -4043,6 +4080,7 @@ export interface DohcDesktopBridge {
   pluginUninstallPreflight(
     payload: PluginActionPayload,
   ): Promise<PluginUninstallPreflightResult>;
+  pluginSizes(payload: PluginActionPayload): Promise<PluginSizesResult>;
   uninstallPlugin(payload: UninstallPluginPayload): Promise<PluginActionResult>;
   getPluginSettings(payload: PluginSettingsPayload): Promise<PluginSettingsResult>;
   setPluginSettings(payload: SetPluginSettingsPayload): Promise<PluginSettingsResult>;

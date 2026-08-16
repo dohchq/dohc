@@ -18,6 +18,7 @@ import {
   type PluginSourceDigest,
   type PluginSourceFileDigest,
 } from "./pluginSourceSnapshot";
+import { formatSize, plural } from "./pluginFormat";
 import { errorMessage, lexicalCompare } from "./pluginShared";
 
 const BASELINE_MANIFEST_FILE_NAME = "baseline-manifest.json";
@@ -99,12 +100,14 @@ export interface PluginUninstallWarning {
 }
 
 /**
- * What the plugin stored under its state root — a wrapper's sessions, logs,
- * and secrets. It lives beside the app's userData, not in the workspace, and
- * the engine never captures it, so uninstall deleting it is genuinely
- * irreversible and the warning must say so (decision 7 of the t3 brief).
+ * What one of a plugin's directories holds. Two surfaces ask: the uninstall
+ * warning, about the state root a wrapper filled with sessions, logs, and
+ * secrets — it lives beside the app's userData, not in the workspace, and the
+ * engine never captures it, so uninstall deleting it is genuinely
+ * irreversible and the warning must say so (decision 7 of the t3 brief) — and
+ * the details rail, about that same state root and the installed tree.
  */
-export interface PluginStateData {
+export interface PluginDirectorySize {
   path: string;
   fileCount: number;
   totalBytes: number;
@@ -119,7 +122,7 @@ export interface PluginUninstallPreflightResult {
   counts: PluginUninstallPreflightCounts;
   files: PluginUninstallFileInventory[];
   notRecoverablePaths: string[];
-  stateData: PluginStateData | null;
+  stateData: PluginDirectorySize | null;
   warning: PluginUninstallWarning | null;
 }
 
@@ -133,7 +136,7 @@ export interface PluginUninstallPreflightSummary {
   baselineManifestPath: string;
   summary: string;
   counts: PluginUninstallPreflightCounts;
-  stateData: PluginStateData | null;
+  stateData: PluginDirectorySize | null;
   warning:
     | {
       kind: PluginUninstallWarning["kind"];
@@ -202,10 +205,6 @@ type BaselineManifestRead =
   | { kind: "ok"; manifest: PluginBaselineManifest }
   | { kind: "missing" }
   | { kind: "invalid"; problem: string };
-
-function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
-  return count === 1 ? singular : pluralForm;
-}
 
 function emptyCounts(): PluginUninstallPreflightCounts {
   return {
@@ -455,13 +454,15 @@ function verifiedInventory(
   return files;
 }
 
-/** Counts the files and bytes under the plugin's state root, or null when
- * nothing is stored there. Unreadable entries are skipped rather than failing
- * the preflight: the inventory informs a warning, it does not gate. */
-async function measurePluginStateData(
-  stateRoot: string,
-): Promise<PluginStateData | null> {
-  const root = resolve(stateRoot);
+/** Counts the files and bytes under one of a plugin's directories, or null
+ * when it holds no files. Unreadable entries are skipped rather than failing
+ * the caller: this inventory informs a warning and a rail row, it does not
+ * gate. Symlinks are counted as neither file nor directory, so the walk never
+ * follows one out of the tree it was given. */
+export async function measurePluginDirectory(
+  directoryRoot: string,
+): Promise<PluginDirectorySize | null> {
+  const root = resolve(directoryRoot);
   let fileCount = 0;
   let totalBytes = 0;
   const pending = [root];
@@ -491,17 +492,6 @@ async function measurePluginStateData(
   return fileCount === 0 ? null : { path: root, fileCount, totalBytes };
 }
 
-const BYTES_PER_KB = 1_024;
-const BYTES_PER_MB = 1_048_576;
-
-/** The size in the unit that states it truly: 40 bytes reads as "40 bytes",
- * never as a rounded-up "0.1 MB" the user cannot check. */
-function formatSize(bytes: number): string {
-  if (bytes < BYTES_PER_KB) return `${bytes} ${plural(bytes, "byte")}`;
-  if (bytes < BYTES_PER_MB) return `${Math.floor(bytes / BYTES_PER_KB)} KB`;
-  return `${(bytes / BYTES_PER_MB).toFixed(1)} MB`;
-}
-
 /**
  * Folds the state-root inventory into the result. Plugin state is deleted by
  * every successful uninstall, is not part of the workspace, and is never
@@ -511,7 +501,7 @@ function formatSize(bytes: number): string {
  */
 function withStateData(
   result: PluginUninstallPreflightResult,
-  stateData: PluginStateData | null,
+  stateData: PluginDirectorySize | null,
 ): PluginUninstallPreflightResult {
   if (!stateData) return result;
   const details = [
@@ -536,7 +526,7 @@ export async function pluginUninstallPreflight(
 ): Promise<PluginUninstallPreflightResult> {
   return withStateData(
     await sourceUninstallPreflight(input),
-    await measurePluginStateData(input.stateRoot),
+    await measurePluginDirectory(input.stateRoot),
   );
 }
 

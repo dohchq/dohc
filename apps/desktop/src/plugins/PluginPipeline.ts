@@ -43,6 +43,7 @@ import {
   type PluginSourceSnapshotResult,
 } from "./pluginSourceSnapshot";
 import {
+  measurePluginDirectory,
   pluginUninstallPreflight,
   readPluginBaselineManifest,
   summarizeUninstallPreflight,
@@ -76,6 +77,21 @@ export interface PluginMetadata {
   publisher: string | null;
   /** Plugin-root-relative, already checked by discovery. */
   icon: string | null;
+  /** What the plugin calls this build. Display only — never compared. */
+  pluginVersion: string | null;
+  repository: string | null;
+  issues: string | null;
+  license: string | null;
+}
+
+/**
+ * Bytes on this machine, measured rather than recorded. Null means the
+ * directory holds no files, which is the honest answer for a plugin that was
+ * never installed or never wrote any data.
+ */
+export interface PluginPipelineSizes {
+  installedBytes: number | null;
+  dataBytes: number | null;
 }
 
 export interface PluginPipelinePluginStatus extends PluginMetadata {
@@ -328,6 +344,10 @@ function manifestMetadata(candidate: InstalledPluginRecord): PluginMetadata {
     description: candidate.manifest?.description ?? null,
     publisher: candidate.manifest?.publisher ?? null,
     icon: candidate.iconPath,
+    pluginVersion: candidate.manifest?.pluginVersion ?? null,
+    repository: candidate.manifest?.repository ?? null,
+    issues: candidate.manifest?.issues ?? null,
+    license: candidate.manifest?.license ?? null,
   };
 }
 
@@ -444,6 +464,29 @@ export class PluginPipeline {
     const candidate = this.discovery.find((entry) => entry.id === pluginId);
     if (!candidate) throw new Error(`Unknown plugin: ${pluginId}`);
     return manifestSettings(candidate.manifest);
+  }
+
+  /**
+   * What this plugin takes up on this machine, in two numbers the details
+   * rail shows separately because uninstall treats them differently: the
+   * installed tree dohc built under its own userData (snapshot source, its
+   * node_modules, the bundle), and the state root the plugin itself wrote.
+   * A directory that holds no files answers null, and the rail then shows no
+   * row — a plugin that was never installed has no installed size, and
+   * printing a "0 bytes" would state something dohc does not know.
+   *
+   * Not queued behind the action lock: this only reads, and a reader opening
+   * the page while an install runs should not have to wait for it.
+   */
+  async sizes(pluginId: string): Promise<PluginPipelineSizes> {
+    const [installed, data] = await Promise.all([
+      measurePluginDirectory(this.liveRoot(pluginId)),
+      measurePluginDirectory(pluginStateRoot(this.dohcDir, pluginId)),
+    ]);
+    return {
+      installedBytes: installed?.totalBytes ?? null,
+      dataBytes: data?.totalBytes ?? null,
+    };
   }
 
   /** This plugin's settings: its declared defaults under the stored answers. */

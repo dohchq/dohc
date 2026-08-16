@@ -108,6 +108,7 @@ import {
   ListPluginsResult,
   PluginActionPayload,
   PluginActionResult,
+  PluginSizesResult,
   PluginUninstallPreflightResult,
   UninstallPluginPayload,
   PluginStatusChangedEvent,
@@ -6968,6 +6969,23 @@ function registerIpcHandlers(
       );
     } catch (error) {
       return PluginUninstallPreflightResult.parse({
+        ok: false,
+        error: pluginIpcError(error),
+      });
+    }
+  });
+
+  ipcMain.handle(CHANNELS.pluginSizes, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = PluginActionPayload.parse(payload);
+    try {
+      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      return PluginSizesResult.parse({
+        ok: true,
+        sizes: await pipeline.sizes(input.pluginId),
+      });
+    } catch (error) {
+      return PluginSizesResult.parse({
         ok: false,
         error: pluginIpcError(error),
       });

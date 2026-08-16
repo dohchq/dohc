@@ -1,11 +1,13 @@
 import { AlertTriangle, Blocks, ChevronDown, ChevronRight } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import type { PluginStatusRecord } from "../ipc/bridgeContract";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { PluginSizesRecord, PluginStatusRecord } from "../ipc/bridgeContract";
+import { formatSize } from "../plugins/pluginFormat";
 import {
   MAX_SETTING_VALUE_CHARS,
   type PluginSettingDeclaration,
   type PluginSettingValue,
 } from "../plugins/pluginManifestSchema";
+import { activateReadOnlyLinkHref } from "./editor/linkMenu";
 import { SettingRow, SwitchControl } from "./settings/SettingRow";
 import { bridge } from "./bridge";
 import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
@@ -375,6 +377,235 @@ function PluginSettingTextControl(props: {
   );
 }
 
+// The right rail: what dohc knows about this plugin as an installation,
+// beside the README that says what it does. VS Code's extension page is the
+// model, minus every row that needs a marketplace — no ratings, no install
+// count, no published or updated date, no categories, because dohc has no
+// marketplace to publish through and no taxonomy to sort a plugin into. What
+// stands in their place is the one thing dohc knows and a marketplace cannot:
+// the content hash the user approved, which is what dohc actually runs.
+//
+// Every row appears only where its fact exists, and a section with no rows
+// does not print its heading. Nothing here is ever blanked or dashed out: a
+// reader must never have to work out whether dohc lost a fact or the plugin
+// never declared one.
+
+// Enough hash to tell two builds apart by eye. The whole digest is on the
+// element for anyone who needs to compare it in full.
+const RAIL_HASH_CHARS = 12;
+
+type RailRow = { label: string; testId: string; value: ReactNode };
+
+type SizesState =
+  | { status: "loading" }
+  | { status: "ready"; sizes: PluginSizesRecord }
+  | { status: "unavailable" };
+
+/**
+ * Measures on mount, because these are bytes on disk rather than a recorded
+ * fact and they change with every build. A failure answers "unavailable" and
+ * the rows simply do not appear — a size dohc could not read is not a size
+ * worth printing, and this rail has nothing the reader must act on.
+ */
+function usePluginSizes(workspaceId: string, pluginId: string): SizesState {
+  const [state, setState] = useState<SizesState>({ status: "loading" });
+  // The same guard the README and the settings section use: the effect
+  // re-runs for every workspace or plugin and its cleanup raises the token,
+  // so a measurement of the workspace the user just left can never repaint
+  // the workspace they are now looking at.
+  const requestToken = useRef(0);
+
+  useEffect(() => {
+    const request = ++requestToken.current;
+    setState({ status: "loading" });
+    void bridge()
+      .pluginSizes({ workspaceId, pluginId })
+      .then((result) => {
+        if (request !== requestToken.current) return;
+        setState(
+          result.ok
+            ? { status: "ready", sizes: result.sizes }
+            : { status: "unavailable" },
+        );
+      })
+      .catch(() => {
+        if (request !== requestToken.current) return;
+        setState({ status: "unavailable" });
+      });
+    return () => {
+      requestToken.current += 1;
+    };
+  }, [workspaceId, pluginId]);
+
+  return state;
+}
+
+function RailMono(props: { children: string; title?: string }) {
+  return (
+    <span
+      title={props.title}
+      className="block break-all font-mono text-[11px] leading-snug text-muted"
+    >
+      {props.children}
+    </span>
+  );
+}
+
+/**
+ * A link out of dohc. It goes through the same audited path the README's own
+ * links take — activateReadOnlyLinkHref preventDefaults and hands the URL to
+ * the openExternalUrl IPC, which is the only route from this renderer to the
+ * OS browser. Click, middle-click, and Enter all route the same way.
+ */
+function RailLink(props: { href: string }) {
+  const activate = (
+    event:
+      | React.MouseEvent<HTMLAnchorElement>
+      | React.KeyboardEvent<HTMLAnchorElement>,
+  ) => activateReadOnlyLinkHref(props.href, event);
+  return (
+    <a
+      href={props.href}
+      title={props.href}
+      onClick={activate}
+      onAuxClick={(event) => {
+        if (event.button === 1) activate(event);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") activate(event);
+      }}
+      className="block truncate text-[11px] leading-snug text-accent underline"
+    >
+      {props.href.replace(/^https:\/\//, "")}
+    </a>
+  );
+}
+
+function httpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function RailSection(props: { title: string; rows: RailRow[] }) {
+  if (props.rows.length === 0) return null;
+  return (
+    <section className="mt-5 first:mt-0">
+      <h2 className="m-0 text-[10px] font-semibold uppercase tracking-wider text-subtle">
+        {props.title}
+      </h2>
+      <dl className="m-0 mt-2">
+        {props.rows.map((row) => (
+          <div key={row.testId} data-testid={row.testId} className="mt-2 first:mt-0">
+            <dt className="text-[11px] leading-snug text-subtle">{row.label}</dt>
+            <dd className="m-0 text-[11px] leading-snug text-muted">{row.value}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  );
+}
+
+function PluginDetailsRail(props: {
+  workspaceId: string;
+  plugin: PluginStatusRecord;
+}) {
+  const { plugin } = props;
+  const sizes = usePluginSizes(props.workspaceId, plugin.id);
+
+  const installation: RailRow[] = [
+    {
+      label: "Identifier",
+      testId: "plugin-identifier",
+      value: <RailMono>{plugin.id}</RailMono>,
+    },
+  ];
+  if (plugin.pluginVersion !== null) {
+    installation.push({
+      label: "Version",
+      testId: "plugin-rail-version",
+      value: plugin.pluginVersion,
+    });
+  }
+  if (plugin.approvedHash !== null) {
+    installation.push({
+      label: "Approved source",
+      testId: "plugin-rail-approved-source",
+      value: (
+        <RailMono title={plugin.approvedHash}>
+          {plugin.approvedHash.slice(0, RAIL_HASH_CHARS)}
+        </RailMono>
+      ),
+    });
+  }
+  if (sizes.status === "loading") {
+    installation.push({
+      label: "Installed size",
+      testId: "plugin-rail-installed-size",
+      value: <span className="text-subtle">Measuring…</span>,
+    });
+  } else if (sizes.status === "ready" && sizes.sizes.installedBytes !== null) {
+    installation.push({
+      label: "Installed size",
+      testId: "plugin-rail-installed-size",
+      value: formatSize(sizes.sizes.installedBytes),
+    });
+  }
+  if (sizes.status === "loading") {
+    installation.push({
+      label: "Stored data",
+      testId: "plugin-rail-stored-data",
+      value: <span className="text-subtle">Measuring…</span>,
+    });
+  } else if (sizes.status === "ready" && sizes.sizes.dataBytes !== null) {
+    installation.push({
+      label: "Stored data",
+      testId: "plugin-rail-stored-data",
+      value: formatSize(sizes.sizes.dataBytes),
+    });
+  }
+
+  const resources: RailRow[] = [];
+  if (plugin.repository !== null) {
+    resources.push({
+      label: "Repository",
+      testId: "plugin-rail-repository",
+      value: <RailLink href={plugin.repository} />,
+    });
+  }
+  if (plugin.issues !== null) {
+    resources.push({
+      label: "Issues",
+      testId: "plugin-rail-issues",
+      value: <RailLink href={plugin.issues} />,
+    });
+  }
+  if (plugin.license !== null) {
+    resources.push({
+      label: "License",
+      testId: "plugin-rail-license",
+      value: httpsUrl(plugin.license) ? (
+        <RailLink href={plugin.license} />
+      ) : (
+        plugin.license
+      ),
+    });
+  }
+
+  return (
+    <aside
+      data-testid="plugin-details-rail"
+      aria-label="Plugin details"
+      className="w-full shrink-0 border-t border-line px-6 py-5 lg:w-60 lg:border-l lg:border-t-0"
+    >
+      <RailSection title="Installation" rows={installation} />
+      <RailSection title="Resources" rows={resources} />
+    </aside>
+  );
+}
+
 export function PluginDetailsPage(props: {
   workspaceId: string;
   pluginId: string;
@@ -433,21 +664,29 @@ export function PluginDetailsPage(props: {
       data-plugin-id={plugin.id}
       className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-bg"
     >
-      <PluginDetailsHeader
-        plugin={plugin}
-        catalog={catalog}
-        workspaceId={props.workspaceId}
-      />
-      <PluginSettingsSection
-        workspaceId={props.workspaceId}
-        plugin={plugin}
-      />
-      <section className="border-t border-line px-6 py-5">
-        <PluginReadme
-          workspaceId={props.workspaceId}
-          directoryName={plugin.directoryName}
-        />
-      </section>
+      {/* The rail sits beside the content on a wide window and drops below it
+          on a narrow one, so a reader never has to scroll sideways to read
+          the README. */}
+      <div className="flex flex-col lg:flex-row lg:items-stretch">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <PluginDetailsHeader
+            plugin={plugin}
+            catalog={catalog}
+            workspaceId={props.workspaceId}
+          />
+          <PluginSettingsSection
+            workspaceId={props.workspaceId}
+            plugin={plugin}
+          />
+          <section className="border-t border-line px-6 py-5">
+            <PluginReadme
+              workspaceId={props.workspaceId}
+              directoryName={plugin.directoryName}
+            />
+          </section>
+        </div>
+        <PluginDetailsRail workspaceId={props.workspaceId} plugin={plugin} />
+      </div>
       {catalog.confirmation ? (
         <PluginUninstallDialog catalog={catalog} />
       ) : null}
@@ -513,21 +752,9 @@ function PluginDetailsHeader(props: {
             <span className="truncate font-mono text-subtle">
               {`plugins/${plugin.directoryName}`}
             </span>
-            {/* A named plugin's heading is its display name, so the id it is
-                installed and acted on under would otherwise appear nowhere. */}
-            {plugin.displayName ? (
-              <>
-                <span aria-hidden className="text-line">
-                  ·
-                </span>
-                <span
-                  data-testid="plugin-identifier"
-                  className="truncate font-mono text-subtle"
-                >
-                  {plugin.id}
-                </span>
-              </>
-            ) : null}
+            {/* The id a plugin is installed and acted on under is the rail's
+                first row now, where it reads as a fact rather than as one
+                more chip after the status. */}
           </div>
         </div>
       </div>

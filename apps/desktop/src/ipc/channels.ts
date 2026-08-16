@@ -676,6 +676,7 @@ export const CHANNELS = {
   enablePlugin: "desktop:enable-plugin",
   approvePlugin: "desktop:approve-plugin",
   pluginUninstallPreflight: "desktop:plugin-uninstall-preflight",
+  pluginSizes: "desktop:plugin-sizes",
   uninstallPlugin: "desktop:uninstall-plugin",
   getPluginSettings: "desktop:get-plugin-settings",
   setPluginSettings: "desktop:set-plugin-settings",

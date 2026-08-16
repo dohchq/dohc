@@ -19,6 +19,8 @@ const bridgeMock = {
   enablePlugin: vi.fn(),
   approvePlugin: vi.fn(),
   pluginUninstallPreflight: vi.fn(),
+  pluginSizes: vi.fn(),
+  openExternalUrl: vi.fn(),
   uninstallPlugin: vi.fn(),
   readWorkspaceText: vi.fn(),
   getPluginSettings: vi.fn(),
@@ -58,6 +60,10 @@ function plugin(
     displayName: null,
     description: null,
     publisher: null,
+    pluginVersion: null,
+    repository: null,
+    issues: null,
+    license: null,
     icon: null,
     settings: [],
     webApps: [],
@@ -123,6 +129,14 @@ beforeEach(() => {
     confirmationToken: "00000000-0000-4000-8000-000000000001",
     preflight: cleanPreflight,
   });
+  // Nothing measured is the quiet default: a test that says nothing about
+  // sizes gets no size rows, so a row appearing is always something a test
+  // asked for.
+  bridgeMock.pluginSizes.mockResolvedValue({
+    ok: true,
+    sizes: { installedBytes: null, dataBytes: null },
+  });
+  bridgeMock.openExternalUrl.mockResolvedValue(undefined);
   bridgeMock.getPluginSettings.mockResolvedValue({ ok: true, values: {} });
   bridgeMock.setPluginSettings.mockResolvedValue({ ok: true, values: {} });
   bridgeMock.readWorkspaceText.mockRejectedValue(
@@ -177,8 +191,11 @@ describe("PluginDetailsPage", () => {
       "dohc-file://ws-1/plugins/t3-code-src/icon.svg",
     );
     // A named plugin's id has to stay visible somewhere: it is what every
-    // action, folder, and error message calls this plugin.
-    expect(screen.getByTestId("plugin-identifier").textContent).toBe("t3-code");
+    // action, folder, and error message calls this plugin. It is the rail's
+    // first row now rather than a chip in the header.
+    expect(screen.getByTestId("plugin-identifier").textContent).toContain(
+      "t3-code",
+    );
   });
 
   it("falls back to the id and the glyph when the manifest says nothing", async () => {
@@ -194,8 +211,12 @@ describe("PluginDetailsPage", () => {
     expect(screen.queryByTestId("plugin-description")).toBeNull();
     expect(screen.queryByTestId("plugin-publisher")).toBeNull();
     expect(screen.queryByTestId("plugin-icon")).toBeNull();
-    // No display name means no second name to disambiguate.
-    expect(screen.queryByTestId("plugin-identifier")).toBeNull();
+    // The id is the heading here, and it is still the rail's Identifier row:
+    // the rail states what dohc knows whether or not the manifest named the
+    // plugin, so this row never depends on a display name.
+    expect(screen.getByTestId("plugin-identifier").textContent).toContain(
+      "bare-plugin",
+    );
   });
 
   it("sends the workspace and plugin id for every action", async () => {
@@ -1388,5 +1409,314 @@ describe("PluginDetailsPage", () => {
           .value,
       ).toBe("New");
     });
+  });
+});
+
+// The right rail states what dohc knows about this plugin as an installation.
+// The rule these pins exist to hold: a row appears only where its fact
+// exists. dohc has no marketplace, so a marketplace row would have to be
+// invented, and an invented row is worse than a missing one.
+describe("the details rail", () => {
+  const REPOSITORY = "https://github.com/pingdotgg/t3code";
+  const ISSUES = "https://github.com/pingdotgg/t3code/issues";
+
+  function railRow(testId: string): HTMLElement | null {
+    return screen.queryByTestId(testId);
+  }
+
+  async function renderRail(overrides: Partial<PluginStatusRecord> = {}) {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [plugin("t3-code", overrides)],
+    });
+    renderPage("t3-code");
+    return await screen.findByTestId("plugin-details-rail");
+  }
+
+  it("shows every fact the manifest declared", async () => {
+    const rail = await renderRail({
+      pluginVersion: "0.0.33",
+      repository: REPOSITORY,
+      issues: ISSUES,
+      license: "MIT",
+    });
+
+    expect(within(rail).getByText("Installation")).toBeTruthy();
+    expect(within(rail).getByText("Resources")).toBeTruthy();
+    expect(railRow("plugin-rail-version")!.textContent).toContain("0.0.33");
+    expect(railRow("plugin-rail-license")!.textContent).toContain("MIT");
+    // The link text drops the scheme so a 15rem rail can show the rest of
+    // the address; the href stays the whole URL.
+    const repository = within(railRow("plugin-rail-repository")!)
+      .getByRole("link");
+    expect(repository.getAttribute("href")).toBe(REPOSITORY);
+    expect(repository.textContent).toBe("github.com/pingdotgg/t3code");
+    expect(
+      within(railRow("plugin-rail-issues")!).getByRole("link")
+        .getAttribute("href"),
+    ).toBe(ISSUES);
+  });
+
+  // Absence is the pin, not a blank row: a reader must never have to work out
+  // whether dohc lost a fact or the plugin never declared one.
+  it("renders no row and no heading for a fact the manifest never declared", async () => {
+    const rail = await renderRail();
+
+    expect(railRow("plugin-rail-version")).toBeNull();
+    expect(railRow("plugin-rail-repository")).toBeNull();
+    expect(railRow("plugin-rail-issues")).toBeNull();
+    expect(railRow("plugin-rail-license")).toBeNull();
+    // Every Resources row was absent, so the section prints no heading.
+    expect(within(rail).queryByText("Resources")).toBeNull();
+    // Installation always has the identifier, so it keeps its heading.
+    expect(within(rail).getByText("Installation")).toBeTruthy();
+  });
+
+  // dohc has no marketplace and no plugin taxonomy. VS Code's Marketplace and
+  // Categories sections have no honest content here, so they do not exist.
+  it("shows no marketplace or categories section", async () => {
+    const rail = await renderRail({
+      pluginVersion: "0.0.33",
+      repository: REPOSITORY,
+      license: "MIT",
+    });
+
+    expect(within(rail).queryByText("Marketplace")).toBeNull();
+    expect(within(rail).queryByText("Categories")).toBeNull();
+    // Nothing in this rail claims a date. The pipeline records no install or
+    // approval time anywhere, so any date here would be invented.
+    expect(within(rail).queryByText(/Last updated/i)).toBeNull();
+    expect(within(rail).queryByText(/Released/i)).toBeNull();
+  });
+
+  // dohc's own version-of-record, which a marketplace cannot give: the
+  // content hash of the source the user approved, which is what actually runs.
+  it("shows the approved source hash from the record", async () => {
+    await renderRail({ approvedHash: HASH_B });
+
+    const row = railRow("plugin-rail-approved-source")!;
+    expect(row.textContent).toContain(HASH_B.slice(0, 12));
+    // Truncated for the eye, whole for anyone comparing it.
+    expect(within(row).getByTitle(HASH_B)).toBeTruthy();
+    // Never the live source hash, which can differ from what was approved.
+    expect(row.textContent).not.toContain(HASH_A.slice(0, 12));
+  });
+
+  it("shows no approved source row for a plugin that was never installed", async () => {
+    await renderRail({
+      status: "discovered",
+      approvedHash: null,
+      installedBaselineHash: null,
+      runtimeStatus: null,
+    });
+
+    expect(railRow("plugin-rail-approved-source")).toBeNull();
+  });
+
+  it("measures sizes after the page paints and formats them like the uninstall dialog", async () => {
+    const slow = deferred<{
+      ok: true;
+      sizes: { installedBytes: number; dataBytes: number };
+    }>();
+    bridgeMock.pluginSizes.mockReturnValue(slow.promise);
+
+    await renderRail();
+
+    // A quiet placeholder while the walk runs, never a fabricated zero.
+    expect(railRow("plugin-rail-installed-size")!.textContent).toContain(
+      "Measuring",
+    );
+    expect(railRow("plugin-rail-stored-data")!.textContent).toContain(
+      "Measuring",
+    );
+
+    await act(async () => {
+      slow.resolve({
+        ok: true,
+        sizes: { installedBytes: 1_572_864, dataBytes: 40 },
+      });
+      await slow.promise;
+    });
+
+    // The preflight's own formatter: 1.5 MB, and 40 bytes rather than 0.0 MB.
+    await waitFor(() =>
+      expect(railRow("plugin-rail-installed-size")!.textContent).toContain(
+        "1.5 MB",
+      )
+    );
+    expect(railRow("plugin-rail-stored-data")!.textContent).toContain(
+      "40 bytes",
+    );
+    expect(bridgeMock.pluginSizes).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      pluginId: "t3-code",
+    });
+  });
+
+  it("drops a size row for a directory that holds nothing", async () => {
+    bridgeMock.pluginSizes.mockResolvedValue({
+      ok: true,
+      sizes: { installedBytes: 4096, dataBytes: null },
+    });
+
+    await renderRail();
+
+    await waitFor(() =>
+      expect(railRow("plugin-rail-installed-size")!.textContent).toContain(
+        "4 KB",
+      )
+    );
+    // The plugin has written no data, so there is no stored-data fact to show.
+    expect(railRow("plugin-rail-stored-data")).toBeNull();
+  });
+
+  it("shows no size rows when dohc could not measure", async () => {
+    bridgeMock.pluginSizes.mockResolvedValue({
+      ok: false,
+      error: { stage: "discovery", code: "boom", message: "no" },
+    });
+
+    await renderRail();
+
+    await waitFor(() => expect(railRow("plugin-rail-installed-size")).toBeNull());
+    expect(railRow("plugin-rail-stored-data")).toBeNull();
+  });
+
+  // The async-guard invariant, proved where the guard is the only thing
+  // holding it. Switching plugin on an already-loaded catalog keeps this rail
+  // mounted, so a slow measurement for the plugin the reader left can still
+  // reach the live component and repaint it. The request token is what
+  // refuses it.
+  it("cannot paint one plugin's sizes onto another", async () => {
+    const slow = deferred<{
+      ok: true;
+      sizes: { installedBytes: number; dataBytes: number };
+    }>();
+    bridgeMock.pluginSizes.mockReturnValueOnce(slow.promise);
+    bridgeMock.pluginSizes.mockResolvedValue({
+      ok: true,
+      sizes: { installedBytes: 40, dataBytes: null },
+    });
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [plugin("t3-code"), plugin("other-plugin")],
+    });
+
+    const view = render(
+      <PluginDetailsPage workspaceId="ws-1" pluginId="t3-code" />,
+    );
+    const rail = await screen.findByTestId("plugin-details-rail");
+
+    view.rerender(
+      <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" />,
+    );
+    await waitFor(() =>
+      expect(railRow("plugin-rail-installed-size")!.textContent).toContain(
+        "40 bytes",
+      )
+    );
+    // The same rail element throughout: nothing unmounted, so nothing but the
+    // token can be refusing the stale answer.
+    expect(screen.getByTestId("plugin-details-rail")).toBe(rail);
+
+    // The t3-code answer lands late. It must not overwrite other-plugin.
+    await act(async () => {
+      slow.resolve({
+        ok: true,
+        sizes: { installedBytes: 999_999_999, dataBytes: 999_999_999 },
+      });
+      await slow.promise;
+    });
+
+    expect(railRow("plugin-rail-installed-size")!.textContent).toContain(
+      "40 bytes",
+    );
+    expect(railRow("plugin-rail-stored-data")).toBeNull();
+  });
+
+  // The workspace case reaches the same invariant by a different road: the
+  // catalog goes back to loading, so the whole rail unmounts and re-measures
+  // against the workspace now on screen. Pinned because the rail must ask for
+  // the new workspace, not keep showing the old one's numbers.
+  it("re-measures for the workspace the reader switched to", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [plugin("t3-code")],
+    });
+    bridgeMock.pluginSizes.mockResolvedValue({
+      ok: true,
+      sizes: { installedBytes: 4096, dataBytes: null },
+    });
+
+    const view = render(
+      <PluginDetailsPage workspaceId="ws-1" pluginId="t3-code" />,
+    );
+    await screen.findByTestId("plugin-details-rail");
+
+    view.rerender(
+      <PluginDetailsPage workspaceId="ws-2" pluginId="t3-code" />,
+    );
+
+    await waitFor(() =>
+      expect(bridgeMock.pluginSizes).toHaveBeenCalledWith({
+        workspaceId: "ws-2",
+        pluginId: "t3-code",
+      })
+    );
+  });
+
+  // The only route from this renderer to the OS browser is the audited
+  // openExternalUrl IPC. A bare window.open would leave the gate behind.
+  it("opens a resource link through the audited external-open path", async () => {
+    const openSpy = vi.fn();
+    vi.stubGlobal("open", openSpy);
+    try {
+      await renderRail({ repository: REPOSITORY });
+
+      await userEvent.click(
+        within(railRow("plugin-rail-repository")!).getByRole("link"),
+      );
+
+      expect(bridgeMock.openExternalUrl).toHaveBeenCalledWith({
+        url: REPOSITORY,
+      });
+      expect(openSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("renders a license that is not a URL as plain text", async () => {
+    await renderRail({ license: "MIT" });
+
+    const row = railRow("plugin-rail-license")!;
+    expect(row.textContent).toContain("MIT");
+    expect(within(row).queryByRole("link")).toBeNull();
+  });
+
+  it("renders a license that is a URL as a link", async () => {
+    const licenseUrl = "https://example.com/LICENSE";
+    await renderRail({ license: licenseUrl });
+
+    expect(
+      within(railRow("plugin-rail-license")!).getByRole("link")
+        .getAttribute("href"),
+    ).toBe(licenseUrl);
+  });
+
+  // Structural, not visual: jsdom runs no layout engine and resolves no media
+  // query, so this pins the classes that decide the two layouts rather than
+  // the pixels they produce. A wide window puts the rail beside the content;
+  // a narrow one drops it below, so the README never scrolls sideways.
+  it("stacks below the content on a narrow window", async () => {
+    const rail = await renderRail();
+
+    const className = rail.getAttribute("class") ?? "";
+    expect(className).toContain("w-full");
+    expect(className).toContain("border-t");
+    expect(className).toContain("lg:w-60");
+    expect(className).toContain("lg:border-l");
+    expect(className).toContain("lg:border-t-0");
+    expect(rail.parentElement?.getAttribute("class")).toContain("lg:flex-row");
   });
 });

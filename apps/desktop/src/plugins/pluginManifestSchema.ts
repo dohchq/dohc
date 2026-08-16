@@ -53,6 +53,43 @@ export const MAX_PLUGIN_DESCRIPTION_CHARS = 280;
 // The same bound every other display name in this manifest carries.
 export const MAX_PLUGIN_PUBLISHER_CHARS = 120;
 
+// What the plugin calls this build, for a reader comparing what they have
+// against what the author published. Display only: dohc never parses it,
+// compares it, or requires semver, because dohc's own version-of-record is
+// the approved content hash and a declared string cannot be trusted to order
+// anything. 40 characters holds a semver core with a prerelease and build tag
+// ("10.20.30-rc.1+build.20260817", 28) and every date-stamped scheme measured
+// beside it, none of which reached 30.
+export const MAX_PLUGIN_VERSION_CHARS = 40;
+
+// A licence name, an SPDX id, or a short SPDX expression. The same bound every
+// other display name in this manifest carries; the longest SPDX id in the
+// current list is under 60 characters, so an expression joining two of them
+// still fits.
+export const MAX_PLUGIN_LICENSE_CHARS = 120;
+
+// Exactly OpenExternalUrlPayload's own bound (bridgeContract.ts). A manifest
+// URL exists to be opened, and the audited open path refuses a longer one — a
+// looser cap here would accept a link that every click rejects.
+export const MAX_PLUGIN_URL_CHARS = 2048;
+
+// https only. These URLs travel to the OS browser from a full-trust plugin's
+// own manifest, and http: would send the reader somewhere a network can
+// rewrite. isSafeExternalUrl also permits http: and mailto:, deliberately not
+// narrowed here — this is the tighter rule a manifest can afford.
+const PluginHttpsUrl = z.string()
+  .max(
+    MAX_PLUGIN_URL_CHARS,
+    `must be ${MAX_PLUGIN_URL_CHARS} characters or fewer`,
+  )
+  .refine((value) => {
+    try {
+      return new URL(value).protocol === "https:";
+    } catch {
+      return false;
+    }
+  }, "must be an https:// URL");
+
 // The renderer serves the icon over dohc-file://, which types a file by its
 // extension. These two are the raster and vector answers, and both are in
 // that server's media-type table; anything else would serve as a download.
@@ -222,6 +259,27 @@ export const DohcPluginManifest = z.object({
     )
     .optional(),
   icon: PluginIconPath.optional(),
+  // What the plugin says about itself that dohc cannot work out on its own:
+  // the version it calls this build, where its source and its issues live, and
+  // what it is licensed under. Every one is optional and every one is shown
+  // only where it was declared — the details rail drops the row rather than
+  // print an empty one, because a blank field reads as a fact dohc lost.
+  pluginVersion: z.string()
+    .min(1)
+    .max(
+      MAX_PLUGIN_VERSION_CHARS,
+      `pluginVersion: must be ${MAX_PLUGIN_VERSION_CHARS} characters or fewer`,
+    )
+    .optional(),
+  repository: PluginHttpsUrl.optional(),
+  issues: PluginHttpsUrl.optional(),
+  license: z.string()
+    .min(1)
+    .max(
+      MAX_PLUGIN_LICENSE_CHARS,
+      `license: must be ${MAX_PLUGIN_LICENSE_CHARS} characters or fewer`,
+    )
+    .optional(),
   entry: PluginPath,
   // These bounds do not add up to the reader's 256 KiB file cap, and are not
   // meant to: 100 panels at a 1,024-character entry path spend half of it on
