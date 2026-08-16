@@ -8,8 +8,10 @@ import {
   type PresenceSnapshot,
 } from "./presence";
 import {
+  MAIN_VERSION_ID,
   filterOpForShare,
   filterOpForShareAppend,
+  filterProposedChangeForShare,
   isChatChannelSelector,
   parseAnyShareSelectorJson,
   presenceTopicAllowedForShare,
@@ -25,10 +27,12 @@ import {
   SyncRelayConflictError,
   SyncRelayQuotaExceededError,
   type EnforceWorkspaceIdentityResult,
+  type ShareProposalOpRow,
   type SyncRelayLogInput,
   type SyncRelayShareRow,
   type SyncRelayStorage,
 } from "./storage";
+import { proposalMomentPayload } from "./shareProposals";
 import { RELAY_ERRORS, type RelayErrorCode, type RelayErrorDefinition } from "./errorCodes";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
@@ -47,6 +51,11 @@ export interface CreateSyncRelayHandlerOptions {
   // Display-only reverse lookup for share listings; never used for authz.
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
   newShareId?: () => string;
+  // #646 PR3a: ids the relay MINTS — proposal ids, and the moment and object
+  // ids a proposal's accept stamps on the granter's own log. Minted, never
+  // taken from the recipient: a recipient-supplied moment id could name a
+  // moment the granter already holds. Injectable so tests can pin them.
+  newId?: () => string;
   // The EPHEMERAL awareness transport (presence/typing). Injectable so a
   // self-hoster's single relay process shares one hub across requests, and so
   // tests can assert it holds only in-memory state (never a storage row).
@@ -70,6 +79,20 @@ type SyncRelayRoute =
   | { route: "share-revoke"; shareId: string }
   | { route: "share-log"; shareId: string }
   | { route: "share-blob"; shareId: string; sha256: string }
+  // #646 PR3a. The recipient's half of the proposal lane is share-scoped; the
+  // granter's half is WORKSPACE-scoped, so its authorization is the one
+  // ownership line every owner route already sits behind rather than a new
+  // per-route check. A recipient cannot even address it: a received share
+  // summary deliberately omits the workspace id.
+  | { route: "share-proposals"; shareId: string }
+  | { route: "share-proposal-withdraw"; shareId: string; proposalId: string }
+  | { route: "workspace-proposals"; workspaceId: string }
+  | {
+      route: "workspace-proposal-settle";
+      workspaceId: string;
+      proposalId: string;
+      decision: "accept" | "decline";
+    }
   | { route: "presence"; workspaceId: string }
   | { route: "share-presence"; shareId: string };
 
@@ -134,6 +157,7 @@ export function createSyncRelayHandler({
   resolveUserIdByEmail,
   lookupUserEmail,
   newShareId = () => randomUUID(),
+  newId = () => randomUUID(),
   presence = new PresenceHub(),
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler {
   // Handle a publish (POST) or long-poll (GET) against an already-authorized
@@ -209,6 +233,17 @@ export function createSyncRelayHandler({
         // it accepts no append either, at any level.
         selector.paths.length > 0 &&
         (selector.access === "comment" || selector.access === "edit");
+
+  // #646 PR3a: whether a recipient may PROPOSE changes to the files this
+  // selector shares. Edit and nothing else — and the refusal is the same
+  // `shareNotAppendable()` code and body a comment or a view share gets on the
+  // append route, because a level-specific refusal would tell a probing
+  // recipient the selector's level. Changes follow PATHS, so a version share
+  // (no paths) proposes nothing at any level.
+  const selectorAcceptsProposals = (selector: AnyShareSelector): boolean =>
+    !isChatChannelSelector(selector) &&
+    selector.paths.length > 0 &&
+    selector.access === "edit";
 
   // Loads a share for RECIPIENT access. Every failure mode — no such share,
   // revoked share, caller is not the recipient, granter lost the workspace —
@@ -648,7 +683,169 @@ export function createSyncRelayHandler({
           headers: { "content-type": "application/octet-stream" },
         });
       }
+      // #646 PR3a. A recipient's blob, charged to the GRANTER's workspace.
+      // Same level gate as the proposal route, same refusal, so a probe cannot
+      // tell the level from the code. Three bounds already exist and all three
+      // apply — MAX_BLOB_BYTES, the granter's workspace quota, and the
+      // unreferenced-blob sweep — and one is added here: a share may hold at
+      // most MAX_OPS_PER_REQUEST blobs that no proposal claims, because a
+      // healthy submit references at most one after-blob per change and a
+      // submit carries at most that many changes.
+      if (route.route === "share-blob" && request.method === "PUT") {
+        await claimPendingShares(actor.userId);
+        const share = shareForRecipient(route.shareId, actor.userId);
+        if (!selectorAcceptsProposals(share.selector)) throw shareNotAppendable();
+        assertSha256(route.sha256);
+        const unclaimed = storage.unclaimedShareBlobUploads(route.shareId);
+        if (unclaimed >= MAX_OPS_PER_REQUEST) {
+          throw relayHttpError(
+            RELAY_ERRORS.quota_exceeded,
+            `this share holds ${unclaimed} uploaded blobs that no proposed change claims; ` +
+              `the limit is ${MAX_OPS_PER_REQUEST} blobs. Submit the changes that use them, ` +
+              `or wait for the unreferenced-blob sweep`,
+          );
+        }
+        const bytes = await readBytes(request, MAX_BLOB_BYTES);
+        const actual = sha256Hex(bytes);
+        if (actual !== route.sha256) {
+          throw badRequest("blob content does not match sha256 path");
+        }
+        const put = storage.putBlob({
+          workspaceId: share.workspaceId,
+          sha256: route.sha256,
+          content: bytes,
+          createdAtMs: nowMs(),
+        });
+        storage.recordShareBlobUpload(route.shareId, route.sha256, nowMs());
+        // Re-check the grant immediately before answering, mirroring the read
+        // routes: a revoke that raced this upload aborts rather than
+        // confirming a write into the granter's workspace.
+        shareForRecipient(route.shareId, actor.userId);
+        return jsonResponse({
+          ok: true,
+          shareId: route.shareId,
+          sha256: route.sha256,
+          byteLength: put.byteLength,
+          alreadyHad: put.alreadyHad,
+        });
+      }
       if (route.route === "share-blob") throw methodNotAllowed();
+
+      // #646 PR3a — the proposal lane's front door. The gauntlet mirrors the
+      // share-log POST above stage for stage, and the two routes stay
+      // separate on purpose: one route with two destinations is the
+      // conflation that let a recipient's file moments reach the granter's log
+      // in the first place (fixed by PR3-0). Nothing here can append, and
+      // nothing on the append route can propose.
+      if (route.route === "share-proposals" && request.method === "POST") {
+        await claimPendingShares(actor.userId);
+        const share = shareForRecipient(route.shareId, actor.userId);
+        if (!selectorAcceptsProposals(share.selector)) throw shareNotAppendable();
+        const input = await readJsonObject(request);
+        const submitId = parseString(input.submitId, "submitId", MAX_SHARE_ID_CHARS);
+        const originId = parseString(input.originId, "originId", MAX_ORIGIN_ID_CHARS);
+        if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
+        if (input.ops.length === 0) throw badRequest("ops must not be empty");
+        if (input.ops.length > MAX_OPS_PER_REQUEST) throw badRequest("too many ops");
+        const ops: ShareProposalOpRow[] = [];
+        // ONE net change per file, proven here rather than trusted. The
+        // recipient consolidates before it submits — it knows its own object
+        // ids — but a proposal carrying two changes for one file would give
+        // both the SAME rewritten base and make them conflict with each other
+        // at accept. So the relay refuses the shape instead of relying on the
+        // client to avoid it.
+        const basePaths = new Set<string>();
+        const afterPaths = new Set<string>();
+        const referencedShas = new Set<string>();
+        for (const [index, raw] of (input.ops as unknown[]).entries()) {
+          const decision = filterProposedChangeForShare(share.selector, raw);
+          if (!decision.allowed) throw shareOpRejected();
+          const change = decision.change;
+          if (change.basedOnPath !== null) {
+            if (basePaths.has(change.basedOnPath)) throw shareOpRejected();
+            basePaths.add(change.basedOnPath);
+          }
+          if (change.afterPath !== null) {
+            if (afterPaths.has(change.afterPath)) throw shareOpRejected();
+            afterPaths.add(change.afterPath);
+          }
+          if (change.afterBlobSha256 !== null) referencedShas.add(change.afterBlobSha256);
+          ops.push({ opIndex: index, ...change });
+        }
+        // The same data-integrity gate appendLogBatch applies, run at SUBMIT
+        // so a recipient learns its blob is missing while it can still
+        // re-upload — rather than at accept, where the granter would meet a
+        // failure it did not cause.
+        if (referencedShas.size > 0) {
+          const missing = storage.missingBlobs(share.workspaceId, [...referencedShas]);
+          if (missing.length > 0) {
+            throw new SyncRelayBlobMissingError(
+              `this submit references ${missing.length} blob(s) not stored on the relay ` +
+                `(first: ${missing[0]}); (re-)upload the blob(s) and retry`,
+            );
+          }
+        }
+        const result = storage.insertShareProposal({
+          proposalId: newId(),
+          shareId: share.shareId,
+          workspaceId: share.workspaceId,
+          // SERVER-derived. The body never states who proposed anything.
+          proposedByUserId: actor.userId,
+          originId,
+          submitId,
+          createdAtMs: nowMs(),
+          ops,
+          // The revoke race, closed exactly as the append route closes it: the
+          // full gauntlet re-runs inside the write's own BEGIN IMMEDIATE, so a
+          // revoke or a level narrowed mid-flight loses.
+          guard: () => {
+            const fresh = shareForRecipient(route.shareId, actor.userId);
+            if (fresh.workspaceId !== share.workspaceId) throw notFound();
+            if (!selectorAcceptsProposals(fresh.selector)) throw shareNotAppendable();
+          },
+        });
+        return jsonResponse({
+          ok: true,
+          proposalId: result.proposalId,
+          state: "open",
+          ops: ops.length,
+          created: result.created,
+        });
+      }
+
+      if (route.route === "share-proposals" && request.method === "GET") {
+        await claimPendingShares(actor.userId);
+        const share = shareForRecipient(route.shareId, actor.userId);
+        if (!selectorAcceptsProposals(share.selector)) throw shareNotAppendable();
+        return jsonResponse({
+          ok: true,
+          proposals: storage.listShareProposalsForShare(share.shareId).map((proposal) => ({
+            proposalId: proposal.proposalId,
+            state: proposal.state,
+            createdAtMs: proposal.createdAtMs,
+            settledAtMs: proposal.settledAtMs,
+            ops: proposal.opCount,
+          })),
+        });
+      }
+      if (route.route === "share-proposals") throw methodNotAllowed();
+
+      // The reverse path submitting owes (`AGENTS.md`): a recipient can take
+      // its changes back while they are still open.
+      if (route.route === "share-proposal-withdraw" && request.method === "POST") {
+        await claimPendingShares(actor.userId);
+        const share = shareForRecipient(route.shareId, actor.userId);
+        if (!selectorAcceptsProposals(share.selector)) throw shareNotAppendable();
+        const proposal = storage.getShareProposal(route.proposalId);
+        // A proposal of another share is the same generic 404 as one that
+        // never existed.
+        if (!proposal || proposal.shareId !== share.shareId) throw notFound();
+        if (!storage.settleShareProposal(route.proposalId, "withdrawn", nowMs())) {
+          throw proposalNotOpen();
+        }
+        return jsonResponse({ ok: true, proposalId: route.proposalId, state: "withdrawn" });
+      }
+      if (route.route === "share-proposal-withdraw") throw methodNotAllowed();
 
       if (route.route === "share-presence") {
         // Cross-user presence: a recipient joins the ephemeral scope for a
@@ -688,6 +885,145 @@ export function createSyncRelayHandler({
       }
 
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
+
+      // #646 PR3a — the granter's half. Everything below this line is
+      // owner-scoped by the ONE check above, which is why accept and decline
+      // live in the workspace namespace rather than the share's: ownership is
+      // derived from the workspace, never from the share, so a recipient can
+      // never accept its own changes.
+      if (route.route === "workspace-proposals" && request.method === "GET") {
+        const proposals = storage.listShareProposalsForWorkspace(route.workspaceId);
+        const rows = await Promise.all(
+          proposals.map(async (proposal) => ({
+            proposalId: proposal.proposalId,
+            shareId: proposal.shareId,
+            proposedByUserId: proposal.proposedByUserId,
+            proposedByEmail: lookupUserEmail
+              ? await lookupUserEmail(proposal.proposedByUserId)
+              : null,
+            state: proposal.state,
+            createdAtMs: proposal.createdAtMs,
+            settledAtMs: proposal.settledAtMs,
+            ops: proposal.ops.map((op) => {
+              const objectId = op.basedOnPath
+                ? storage.objectIdAtPath(route.workspaceId, op.basedOnPath)
+                : undefined;
+              const head = objectId
+                ? storage.objectHeadMoment(route.workspaceId, objectId)
+                : null;
+              return {
+                opIndex: op.opIndex,
+                basedOnPath: op.basedOnPath,
+                basedOnBlobSha256: op.basedOnBlobSha256,
+                operation: op.operation,
+                afterPath: op.afterPath,
+                afterBlobSha256: op.afterBlobSha256,
+                afterContentKind: op.afterContentKind,
+                currentPath: head?.path ?? null,
+                currentBlobSha256: head?.blobSha256 ?? null,
+                // What the review surface says out loud: this file changed
+                // since they sent it. Read from the granter's own head, never
+                // from anything the recipient claimed.
+                drifted:
+                  op.basedOnBlobSha256 !== null &&
+                  (head?.blobSha256 ?? null) !== op.basedOnBlobSha256,
+              };
+            }),
+          })),
+        );
+        return jsonResponse({ ok: true, proposals: rows });
+      }
+      if (route.route === "workspace-proposals") throw methodNotAllowed();
+
+      if (route.route === "workspace-proposal-settle" && request.method === "POST") {
+        const proposal = storage.getShareProposal(route.proposalId);
+        // A proposal of another workspace is the same generic 404 the relay
+        // gives for one that never existed.
+        if (!proposal || proposal.workspaceId !== route.workspaceId) throw notFound();
+        if (proposal.state !== "open") throw proposalNotOpen();
+        if (route.decision === "decline") {
+          // Decline never moves the changes. They stay marked declined and are
+          // swept with the share; the recipient's own copy still has them.
+          if (!storage.settleShareProposal(route.proposalId, "declined", nowMs())) {
+            throw proposalNotOpen();
+          }
+          return jsonResponse({ ok: true, proposalId: route.proposalId, state: "declined" });
+        }
+        const share = storage.getShare(proposal.shareId);
+        if (!share) throw notFound();
+        const selector = parseAnyShareSelectorJson(share.selectorJson);
+        if (!selector || isChatChannelSelector(selector)) throw notFound();
+        const proposerEmail = lookupUserEmail
+          ? await lookupUserEmail(proposal.proposedByUserId)
+          : null;
+        // Provenance that survives into the granter's History. A moment cannot
+        // name a human author, so this line is what History shows and the
+        // proposal record is the real provenance.
+        const summary = proposerEmail ? `Accepted changes from ${proposerEmail}` : null;
+        const versionId = selector.versionId ?? MAIN_VERSION_ID;
+        const originId = `share:${proposal.shareId}:${proposal.originId}`;
+        // The relay assigns the coordinates, because a proposal's ops carry
+        // none: they were never a log. A concurrent accept that took the same
+        // numbers loses on appendLogBatch's own dense-sequence check.
+        let originSeq = storage.maxOriginSeq(route.workspaceId, originId);
+        const logOps: SyncRelayLogInput[] = [];
+        for (const op of proposal.ops) {
+          const objectId = op.basedOnPath
+            ? storage.objectIdAtPath(route.workspaceId, op.basedOnPath)
+            : undefined;
+          const base =
+            objectId && op.basedOnBlobSha256
+              ? storage.objectMomentForBlob(route.workspaceId, objectId, op.basedOnBlobSha256)
+              : null;
+          const head = objectId ? storage.objectHeadMoment(route.workspaceId, objectId) : null;
+          const built = proposalMomentPayload(op, {
+            versionId,
+            // A file the granter does not have gets a NEW object id, minted
+            // here. The recipient's own id names nothing in this workspace.
+            objectId: objectId ?? newId(),
+            objectCreatedAtMs: op.recordedAtMs,
+            base,
+            currentPath: head?.path ?? null,
+            momentId: newId(),
+            summary,
+          });
+          if (!built.ok) throw badRequest(built.reason);
+          originSeq += 1;
+          logOps.push({
+            originSeq,
+            opKind: "moment.append",
+            payloadJson: stableJsonStringify(built.payload),
+            recordedAtMs: op.recordedAtMs,
+          });
+        }
+        const result = storage.appendLogBatch({
+          workspaceId: route.workspaceId,
+          // The SAME share-namespaced origin the chat path already writes, so
+          // accepted changes reach the granter over the owner lane the relay
+          // already runs. Nothing new applies them.
+          originId,
+          ops: logOps,
+          // The settle rides INSIDE the release's own transaction: the changes
+          // enter the log and the proposal leaves `open` together, or neither
+          // happens. A second accept finds the row already moved and its whole
+          // batch rolls back.
+          guard: () => {
+            if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
+            if (
+              !storage.settleShareProposalInTransaction(route.proposalId, "accepted", nowMs())
+            ) {
+              throw proposalNotOpen();
+            }
+          },
+        });
+        return jsonResponse({
+          ok: true,
+          proposalId: route.proposalId,
+          state: "accepted",
+          inserted: result.inserted,
+        });
+      }
+      if (route.route === "workspace-proposal-settle") throw methodNotAllowed();
 
       if (route.route === "presence") {
         // The owner's own workspace presence (multi-device co-presence in
@@ -1098,6 +1434,16 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 5 && parts[3] === "blobs" && parts[4]) {
       return { route: "share-blob", shareId, sha256: parts[4] };
     }
+    if (parts.length === 4 && parts[3] === "proposals") {
+      return { route: "share-proposals", shareId };
+    }
+    if (parts.length === 6 && parts[3] === "proposals" && parts[5] === "withdraw") {
+      return {
+        route: "share-proposal-withdraw",
+        shareId,
+        proposalId: parseProposalId(parts[4]),
+      };
+    }
     throw notFound();
   }
   const workspaceId = parseWorkspaceId(parts[1]);
@@ -1134,7 +1480,29 @@ function parseRoute(request: Request): SyncRelayRoute {
   if (parts.length === 3 && parts[2] === "shares") {
     return { route: "shares-create", workspaceId };
   }
+  if (parts.length === 3 && parts[2] === "proposals") {
+    return { route: "workspace-proposals", workspaceId };
+  }
+  if (
+    parts.length === 5 &&
+    parts[2] === "proposals" &&
+    (parts[4] === "accept" || parts[4] === "decline")
+  ) {
+    return {
+      route: "workspace-proposal-settle",
+      workspaceId,
+      proposalId: parseProposalId(parts[3]),
+      decision: parts[4],
+    };
+  }
   throw notFound();
+}
+
+// The same rule as a share id, and for the same reason: an id the relay minted
+// is the only shape this route ever addresses, so anything else is the generic
+// 404 rather than a lookup that reveals whether the id exists.
+function parseProposalId(value: string | undefined): string {
+  return parseShareId(value);
 }
 
 function parseShareId(value: string | undefined): string {
@@ -1629,6 +1997,16 @@ function shareNotAppendable(): HttpError {
 // Deliberately does not name which op failed or why.
 function shareOpRejected(): HttpError {
   return relayHttpError(RELAY_ERRORS.share_op_rejected, "an op is outside the shared channel");
+}
+
+// #646 PR3a: the proposal already moved out of `open`. Every mover — accept,
+// decline, withdraw — races through the same single-row UPDATE, so exactly one
+// wins and the losers all land here rather than acting on stale state.
+function proposalNotOpen(): HttpError {
+  return relayHttpError(
+    RELAY_ERRORS.conflict,
+    "these changes were already accepted, declined, or withdrawn",
+  );
 }
 
 function notFound(): HttpError {
