@@ -448,7 +448,7 @@ import {
   SharePinInvalidError,
   recordedShareSelector,
   refreshSharedViewOnce,
-  shareViewEnrolmentSelector,
+  shareViewIdentitySelector,
 } from "./workspaces/sharedView";
 import { assertShareChatWritable } from "./workspaces/shareChatGate";
 import {
@@ -5670,7 +5670,15 @@ function registerIpcHandlers(
       // Before the first pull: a share view that writes back needs its own
       // sync identity, and the pull is what gives it the share cursor that
       // makes local writes journal.
-      await enrollShareViewIdentity(requireWorkspace(created.workspaceId));
+      //
+      // SOFT, like the refresh site. Opening a share is a read, and a failure
+      // here costs the recipient the ability to send changes, not the ability
+      // to open what they were given. The next refresh records it.
+      await recordShareViewIdentity(requireWorkspace(created.workspaceId)).catch(
+        (error) => {
+          console.error("[desktop] share view identity:", error);
+        },
+      );
       const outcome = await refreshSharedViewOnce({
         rootDir: created.rootPath,
         workspaceId: created.workspaceId,
@@ -5766,7 +5774,7 @@ function registerIpcHandlers(
     // Before the push, because the push needs the identity this writes. A
     // share view opened before #646 PR3-1 has none, and this is where it gains
     // one.
-    await enrollShareViewIdentity(workspace).catch((error) => {
+    await recordShareViewIdentity(workspace).catch((error) => {
       console.error("[desktop] share view enrolment:", error);
     });
     await pushShareViewChat(workspace).catch((error) => {
@@ -6837,12 +6845,12 @@ function registerIpcHandlers(
   // damaged pin, an ended share, no credentials, or a session on a relay that
   // is not this share's origin. A `view` share is skipped as well: it may push
   // nothing, so it needs no identity and must not be given one.
-  async function enrollShareViewIdentity(
+  async function recordShareViewIdentity(
     workspace: RegistryEntry,
   ): Promise<void> {
     await warmCredentialCache();
     const credentials = cachedCredentials;
-    const grantedSelector = shareViewEnrolmentSelector({
+    const grantedSelector = shareViewIdentitySelector({
       shareView: workspace.shareView,
       relayUrl: credentials?.relayUrl,
       relayUrlsMatch,
@@ -6852,7 +6860,7 @@ function registerIpcHandlers(
       workspaceId: workspace.workspaceId,
       rootPath: workspace.rootPath,
       relay: { baseUrl: credentials.relayUrl, token: credentials.token },
-    }).enrollShareView({ grantedSelector });
+    }).recordShareViewIdentity({ grantedSelector });
   }
 
   async function pushShareViewChat(workspace: RegistryEntry): Promise<void> {
@@ -6865,6 +6873,12 @@ function registerIpcHandlers(
     // was already refused if the level was unreadable.
     const grantedSelector = recordedShareSelector(shareView.grantedSelector);
     if (!grantedSelector) return;
+    // Positive recognition of a level that may write, before anything reaches
+    // the engine. A `view` share pushes nothing, and letting it try produced a
+    // refusal in the log that read like a defect and was not one.
+    if (grantedSelector.access !== "comment" && grantedSelector.access !== "edit") {
+      return;
+    }
     await warmCredentialCache();
     const credentials = cachedCredentials;
     if (!credentials?.relayUrl) return;

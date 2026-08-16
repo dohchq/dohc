@@ -3281,7 +3281,10 @@ async fn never_synced_mutations_keep_only_the_diagnostic_journal() {
 /// position of any kind. `enrolled` writes the identity the way
 /// `share.view.enroll` does at comment or edit; without it this is a `view`
 /// share view.
-fn initialize_share_view(db: &Path, workspace_id: &str, enrolled: bool) {
+/// `recorded` is the LEVEL's consequence: `None` never records an
+/// identity (a `view` share), `Some(false)` records one without the file lane
+/// (a `comment` share), `Some(true)` records both (an `edit` share).
+fn initialize_share_view(db: &Path, workspace_id: &str, recorded: Option<bool>) {
     let mut store = EngineStore::open(db, 1).expect("open store");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(workspace_id, "main", 1, &NoFaults)
@@ -3297,20 +3300,21 @@ fn initialize_share_view(db: &Path, workspace_id: &str, enrolled: bool) {
             Ok::<_, StorageError>(())
         })
         .expect("seed share cursor");
-    if enrolled {
-        match dohc_engine_sync::enroll_share_view_identity(
+    if let Some(drains_file_moments) = recorded {
+        match dohc_engine_sync::record_share_view_identity(
             &mut store,
             workspace_id,
             "origin-share-view",
             "epoch-share",
             "stream-share",
+            drains_file_moments,
             1,
             &NoFaults,
         )
-        .expect("enrol share view")
+        .expect("record share view identity")
         {
             TxnOutcome::Committed(_) => {}
-            TxnOutcome::Crashed { .. } => panic!("enrolment crashed"),
+            TxnOutcome::Crashed { .. } => panic!("recording crashed"),
         }
     }
 }
@@ -3328,7 +3332,7 @@ async fn an_enrolled_share_view_journals_a_file_write_and_no_ydoc_update() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let workspace_id = "ws-share-view-enrolled";
-    initialize_share_view(&db, workspace_id, true);
+    initialize_share_view(&db, workspace_id, Some(true));
 
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 2).expect("open actor").actor;
@@ -3375,7 +3379,7 @@ async fn a_view_share_view_journals_nothing_and_its_write_still_commits() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let workspace_id = "ws-share-view-unenrolled";
-    initialize_share_view(&db, workspace_id, false);
+    initialize_share_view(&db, workspace_id, None);
 
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 2).expect("open actor").actor;

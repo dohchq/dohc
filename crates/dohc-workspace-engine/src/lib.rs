@@ -913,8 +913,9 @@ impl EngineService {
             "share.view.push" => {
                 Box::pin(self.share_view_push(&ctx, request.workspace, request.params)).await?
             }
-            "share.view.enroll" => {
-                Box::pin(self.share_view_enroll(&ctx, request.workspace, request.params)).await?
+            "share.view.recordIdentity" => {
+                Box::pin(self.share_view_record_identity(&ctx, request.workspace, request.params))
+                    .await?
             }
             "versionedText.write" => {
                 self.versioned_text_write(&ctx, &request, request.params.clone())
@@ -2429,7 +2430,7 @@ impl EngineService {
     /// log in two. The origin is a REPLICA id — the relay namespaces this
     /// recipient's ops as `share:<shareId>:<originId>` — so it must never be
     /// a user id, which two devices would share.
-    async fn share_view_enroll(
+    async fn share_view_record_identity(
         &self,
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
@@ -2449,19 +2450,20 @@ impl EngineService {
                 ctx,
                 &open,
                 configuration,
-                RelayOperation::EnrollShareView {
+                // The RPC still parses the WHOLE selector above, because a
+                // caller that sends a malformed one must be refused here. The
+                // operation carries only the access: the level is the entire
+                // decision it makes, and handing it paths would suggest they
+                // matter to it.
+                RelayOperation::RecordShareViewIdentity {
                     workspace_id: open.workspace_id.clone(),
-                    granted: dohc_engine_sync::ShareGrant {
-                        paths: params.granted_selector.paths,
-                        version_id: params.granted_selector.version_id,
-                        access,
-                    },
+                    access,
                     origin_id: sync_identifier("origin")?,
                     replication_epoch: sync_identifier("epoch")?,
                     stream_identity: sync_identifier("stream")?,
                     created_at_ms: now_ms()?,
                 },
-                "share.view.enroll",
+                "share.view.recordIdentity",
             )
             .await?;
         relay_outcome_json(outcome)
@@ -11394,14 +11396,16 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
         RelayOperationOutcome::SharedChannelPushed(outcome) => {
             json!({ "pushed": outcome.pushed })
         }
-        RelayOperationOutcome::ShareViewEnrolled(enrolment) => json!({
-            "enrolment": match enrolment {
-                dohc_engine_sync::ShareViewEnrolment::Enrolled => "enrolled",
-                dohc_engine_sync::ShareViewEnrolment::AlreadyEnrolled => "already-enrolled",
+        RelayOperationOutcome::ShareViewIdentity(record) => json!({
+            "identity": match record {
+                dohc_engine_runtime::ShareViewIdentityRecord::Recorded => "recorded",
+                dohc_engine_runtime::ShareViewIdentityRecord::AlreadyRecorded => {
+                    "already-recorded"
+                }
                 // A `view` share may push nothing, so it is given no identity
-                // — and saying "already enrolled" would claim a row that does
+                // — and saying "already recorded" would claim a row that does
                 // not exist.
-                dohc_engine_sync::ShareViewEnrolment::NotRequired => "not-required",
+                dohc_engine_runtime::ShareViewIdentityRecord::NotRequired => "not-required",
             },
         }),
         RelayOperationOutcome::ShareViewPulled(outcome) => json!({

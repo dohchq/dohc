@@ -124,7 +124,7 @@ export function recordedShareSelector(
  * Returning null means SKIP, never fail. A share view that cannot enroll is
  * still readable, and its local writes stay local.
  */
-export function shareViewEnrolmentSelector(input: {
+export function shareViewIdentitySelector(input: {
   shareView:
     | {
         grantedSelector?: unknown;

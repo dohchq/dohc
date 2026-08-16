@@ -10,7 +10,7 @@ import {
   SharePinInvalidError,
   materializeSharedViewPaths,
   refreshSharedViewOnce as refreshSharedViewOnceWithPull,
-  shareViewEnrolmentSelector,
+  shareViewIdentitySelector,
 } from "./sharedView";
 import type { ShareViewRefusal } from "@dohc/workspace-contracts/relay";
 import { createTestScratch } from "./testTemp";
@@ -579,17 +579,17 @@ describe("shared view refresh", () => {
 // The main process runs this before every pull and push. It must fail closed
 // on every tri-state: skip, never throw, and never enrol a share that may not
 // push.
-describe("shareViewEnrolmentSelector", () => {
+describe("shareViewIdentitySelector", () => {
   const COMMENT = { paths: ["docs"], versionId: null, access: "comment" };
   const match = (left: string, right: string): boolean => left === right;
 
   function decide(
     shareView: Parameters<
-      typeof shareViewEnrolmentSelector
+      typeof shareViewIdentitySelector
     >[0]["shareView"],
     relayUrl: string | null = "https://relay.example",
   ) {
-    return shareViewEnrolmentSelector({
+    return shareViewIdentitySelector({
       shareView,
       relayUrl,
       relayUrlsMatch: match,
