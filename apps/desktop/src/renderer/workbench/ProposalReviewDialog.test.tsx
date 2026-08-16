@@ -210,6 +210,18 @@ describe("ProposalReviewDialog", () => {
     expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
       false,
     );
+
+    // A failure is not a permanent verdict on that file. Reopening tries again.
+    bridgeMock.readShareProposalFileContent.mockResolvedValue({
+      currentText: "one\n",
+      incomingText: "two\n",
+    });
+    await openFile(user);
+    await openFile(user);
+    expect(
+      (await screen.findByTestId("proposal-review-diff-lines")).textContent,
+      "MUTATION: caching a failed read leaves a transient relay error looking permanent",
+    ).toContain("two");
   });
 
   // The relay could not state who sent them. The review still works, and the

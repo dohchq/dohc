@@ -93,7 +93,9 @@ function ProposalFileSection(props: {
     setOpen(nowOpen);
     // Fetched once per row. Closing and reopening shows what was already read
     // rather than asking again.
-    if (!nowOpen || content !== null) return;
+    // Read once per row. A row that FAILED is read again, so a granter can
+    // retry a file the relay could not serve without reopening the review.
+    if (!nowOpen || (content !== null && content.status !== "error")) return;
     const token = ++liveToken.current;
     setContent({ status: "loading" });
     void (async () => {
