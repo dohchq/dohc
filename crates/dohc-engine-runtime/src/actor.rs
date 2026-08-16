@@ -6811,9 +6811,11 @@ fn execute_relay_operation(
             match dohc_engine_sync::record_share_view_identity(
                 store,
                 &workspace_id,
-                &origin_id,
-                &replication_epoch,
-                &stream_identity,
+                dohc_engine_sync::ShareViewIdentity {
+                    origin_id: &origin_id,
+                    replication_epoch: &replication_epoch,
+                    stream_identity: &stream_identity,
+                },
                 drains_file_moments,
                 created_at_ms,
                 &NoFaults,

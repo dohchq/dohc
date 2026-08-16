@@ -52,10 +52,10 @@ pub use hydration::{
     BlobContent, BlobHydration, BlobKind, MAX_INGEST_BLOB_BYTES, blob_ceiling, hydrate_blob_content,
 };
 pub use journal::{
-    AdoptJoinIdentityOutcome, ShareViewIdentityOutcome, SyncIdentity, ack_replication_peer,
-    adopt_join_identity, journal_local_op_in_tx, journal_local_replication_op,
-    list_replication_ops, read_replication_acked_seq, read_sync_identity,
-    record_share_view_identity, workspace_journals_file_moments_in_tx,
+    AdoptJoinIdentityOutcome, ShareViewIdentity, ShareViewIdentityOutcome, SyncIdentity,
+    ack_replication_peer, adopt_join_identity, journal_local_op_in_tx,
+    journal_local_replication_op, list_replication_ops, read_replication_acked_seq,
+    read_sync_identity, record_share_view_identity, workspace_journals_file_moments_in_tx,
     workspace_replicates_with_relay_in_tx,
 };
 pub use model::{

@@ -37,6 +37,18 @@ pub enum AdoptJoinIdentityOutcome {
 ///
 /// Deliberately not called "enrolment": in this crate that word already means
 /// the owner-lane backfill in `enrolment.rs`, and one name for one thing.
+/// The three components of a replica identity, which always travel together.
+///
+/// Grouped because they are one fact in three fields, not three arguments a
+/// caller chooses independently — and passing them separately made this
+/// function's parameter list long enough that the shape was the warning.
+#[derive(Debug, Clone, Copy)]
+pub struct ShareViewIdentity<'a> {
+    pub origin_id: &'a str,
+    pub replication_epoch: &'a str,
+    pub stream_identity: &'a str,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShareViewIdentityOutcome {
     Recorded,
@@ -487,13 +499,16 @@ pub fn adopt_join_identity(
 pub fn record_share_view_identity(
     store: &mut EngineStore,
     workspace_id: &str,
-    origin_id: &str,
-    replication_epoch: &str,
-    stream_identity: &str,
+    identity: ShareViewIdentity<'_>,
     drains_file_moments: bool,
     created_at_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<ShareViewIdentityOutcome>, SyncError> {
+    let ShareViewIdentity {
+        origin_id,
+        replication_epoch,
+        stream_identity,
+    } = identity;
     bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
     relay_identity_component(
         origin_id,

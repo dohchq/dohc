@@ -3304,9 +3304,11 @@ fn initialize_share_view(db: &Path, workspace_id: &str, recorded: Option<bool>) 
         match dohc_engine_sync::record_share_view_identity(
             &mut store,
             workspace_id,
-            "origin-share-view",
-            "epoch-share",
-            "stream-share",
+            dohc_engine_sync::ShareViewIdentity {
+                origin_id: "origin-share-view",
+                replication_epoch: "epoch-share",
+                stream_identity: "stream-share",
+            },
             drains_file_moments,
             1,
             &NoFaults,

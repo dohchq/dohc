@@ -23015,9 +23015,11 @@ fn record(
     match record_share_view_identity(
         engine,
         "ws",
-        origin_id,
-        "epoch-share",
-        "stream-share",
+        ShareViewIdentity {
+            origin_id,
+            replication_epoch: "epoch-share",
+            stream_identity: "stream-share",
+        },
         drains_file_moments,
         1_000,
         &NoFaults,
