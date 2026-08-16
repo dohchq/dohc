@@ -44,7 +44,11 @@ import {
   resolveWikilinkNavigation,
 } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
-import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
+import {
+  captureOrphanedDraft,
+  orphanedDraftStoreVersionForTests,
+  resetOrphanedDrafts,
+} from "./orphanedDrafts";
 import * as orphanedDraftsModule from "./orphanedDrafts";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import {
@@ -66,28 +70,46 @@ afterEach(async () => {
 // re-stubbed the same bridge object. The next test then sees a call it never
 // made and fails on a count or an argument that has nothing to do with it.
 //
-// Turning the event loop until the bridge goes quiet keeps every call inside
-// the test that caused it. Quiescence is the condition, not a fixed number of
+// Turning the event loop until that work goes quiet keeps every call inside the
+// test that caused it. Quiescence is the condition, not a fixed number of
 // turns: a test that deliberately holds a write unresolved makes no further
 // calls, so the loop still ends on the next turn (#797).
-async function settleBridgeAfterUnmount(): Promise<void> {
-  const countCalls = () => {
+//
+// The bridge is not the only thing the flush can end in. When writes are
+// blocked it sets the draft aside instead, which touches no mock at all and
+// notifies the draft store a microtask later — re-rendering the recovery notice
+// inside the next test, under the button it was about to click. So the wait
+// covers both: bridge calls AND draft-store mutations.
+async function settleAfterUnmount(): Promise<void> {
+  const activity = () => {
     const stubbed = window.dohcDesktop as unknown as
       | Record<string, unknown>
       | undefined;
-    if (!stubbed) return 0;
-    return Object.values(stubbed).reduce(
-      (total: number, value) =>
-        total + (vi.isMockFunction(value) ? value.mock.calls.length : 0),
-      0,
-    );
+    const calls = stubbed
+      ? Object.values(stubbed).reduce(
+          (total: number, value) =>
+            total + (vi.isMockFunction(value) ? value.mock.calls.length : 0),
+          0,
+        )
+      : 0;
+    return calls + orphanedDraftStoreVersionForTests();
   };
   await act(async () => {
     let previous = -1;
-    while (previous !== countCalls()) {
-      previous = countCalls();
+    while (previous !== activity()) {
+      previous = activity();
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
+  });
+}
+
+// `resetOrphanedDrafts` notifies through a microtask of its own, so the reset
+// has to be drained too — otherwise teardown's own notification is what lands
+// mid-click in the next test.
+async function resetOrphanedDraftsAndSettle(): Promise<void> {
+  resetOrphanedDrafts();
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
 }
 
@@ -694,8 +716,8 @@ describe("markdown editor unmount flush", () => {
 
   afterEach(async () => {
     cleanup();
-    await settleBridgeAfterUnmount();
-    resetOrphanedDrafts();
+    await settleAfterUnmount();
+    await resetOrphanedDraftsAndSettle();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
@@ -6228,10 +6250,10 @@ describe("engine markdown source view", () => {
 
   afterEach(async () => {
     cleanup();
-    await settleBridgeAfterUnmount();
+    await settleAfterUnmount();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
-    resetOrphanedDrafts();
+    await resetOrphanedDraftsAndSettle();
   });
 
   async function renderEngineDoc(options?: {
@@ -9537,10 +9559,10 @@ describe("markdown document opening state", () => {
 
   afterEach(async () => {
     cleanup();
-    await settleBridgeAfterUnmount();
+    await settleAfterUnmount();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
-    resetOrphanedDrafts();
+    await resetOrphanedDraftsAndSettle();
   });
 
   // The user's real attempt: click the header's edit control, then type into

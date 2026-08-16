@@ -360,6 +360,15 @@ export function useAllOrphanedDrafts(): readonly OrphanedDraftRow[] {
   });
 }
 
+// Test seam: counts the mutations this run has made. Resetting the store is
+// not enough on its own — an unmounted view can still capture a draft on a
+// later turn, and the notification that follows re-renders the recovery notice
+// inside the NEXT test, under whatever it was about to click. A teardown reads
+// this to tell "the capture already landed" from "it is still coming".
+export function orphanedDraftStoreVersionForTests(): number {
+  return storeVersion;
+}
+
 // Test seam: the store is module state, so suites that capture drafts reset
 // it between tests instead of leaking keys into each other.
 export function resetOrphanedDrafts(): void {
