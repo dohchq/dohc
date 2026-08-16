@@ -61,6 +61,30 @@ function decodeDescriptor(value: unknown): T3EnvironmentDescriptor | null {
   return null;
 }
 
+/**
+ * One request against the environment endpoint. Returns the descriptor only
+ * for HTTP 200 with a decodable body; every other answer — another status, an
+ * undecodable body, a refused or timed-out request — is `null`. This is the
+ * only liveness truth about a t3 server: readiness polls it, and stale-state
+ * recovery proves ownership with it before it signals anything.
+ */
+export async function fetchT3Descriptor(
+  environmentUrl: string,
+  options: { fetchFn?: typeof fetch; requestTimeoutMs?: number } = {},
+): Promise<T3EnvironmentDescriptor | null> {
+  const fetchFn = options.fetchFn ?? fetch;
+  const requestTimeoutMs = options.requestTimeoutMs ?? READINESS_REQUEST_TIMEOUT_MS;
+  try {
+    const response = await fetchFn(environmentUrl, {
+      signal: AbortSignal.timeout(requestTimeoutMs),
+    });
+    if (response.status !== 200) return null;
+    return decodeDescriptor(await response.json());
+  } catch {
+    return null;
+  }
+}
+
 export async function pollT3Readiness(
   input: PollT3ReadinessInput,
 ): Promise<T3EnvironmentDescriptor> {
@@ -84,22 +108,17 @@ export async function pollT3Readiness(
   while (true) {
     if (exited) throw new T3ChildExitError();
     if (now() >= deadline) throw new T3ReadinessTimeoutError(overallTimeoutMs);
-    try {
-      const response = await fetchFn(input.environmentUrl, {
-        signal: AbortSignal.timeout(requestTimeoutMs),
-      });
-      if (response.status === 200) {
-        const descriptor = decodeDescriptor(await response.json());
-        if (descriptor) {
-          if (descriptor.serverVersion !== T3_PINNED_VERSION) {
-            throw new T3VersionMismatchError(descriptor.serverVersion);
-          }
-          return descriptor;
-        }
+    // A null descriptor means "not a ready t3 server yet": not listening, a
+    // request timeout, another status, or an undecodable body. Poll on.
+    const descriptor = await fetchT3Descriptor(input.environmentUrl, {
+      fetchFn,
+      requestTimeoutMs,
+    });
+    if (descriptor) {
+      if (descriptor.serverVersion !== T3_PINNED_VERSION) {
+        throw new T3VersionMismatchError(descriptor.serverVersion);
       }
-    } catch (error) {
-      if (error instanceof T3VersionMismatchError) throw error;
-      // Not listening yet, request timeout, or an undecodable body: poll on.
+      return descriptor;
     }
     if (exited) throw new T3ChildExitError();
     await new Promise((resolve) => setTimeout(resolve, intervalMs));

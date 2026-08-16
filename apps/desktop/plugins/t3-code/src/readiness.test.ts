@@ -101,6 +101,51 @@ describe("pollT3Readiness", () => {
     await expect(poll).resolves.toEqual({ serverVersion: T3_PINNED_VERSION });
   });
 
+  // The two halves of "only HTTP 200 with a decodable descriptor" — each
+  // serves the wrong-but-tempting answer three times, so a poller that
+  // accepted it would resolve on the FIRST request instead of the fourth.
+  it("keeps polling a 200 whose body carries no serverVersion", async () => {
+    let requests = 0;
+    const { port } = await listen((_request, response) => {
+      requests += 1;
+      const body =
+        requests < 4
+          ? JSON.stringify({ status: "starting" })
+          : JSON.stringify({ serverVersion: T3_PINNED_VERSION });
+      response.writeHead(200, { "content-type": "application/json" }).end(body);
+    });
+
+    // MUTATION (accept an undecodable descriptor as the pinned version):
+    // resolves on request 1.
+    const descriptor = await pollT3Readiness({
+      environmentUrl: environmentUrl(port),
+      childExited: never,
+      intervalMs: 5,
+    });
+    expect(descriptor.serverVersion).toBe(T3_PINNED_VERSION);
+    expect(requests).toBeGreaterThanOrEqual(4);
+  });
+
+  it("keeps polling a non-200 that carries a valid descriptor", async () => {
+    let requests = 0;
+    const { port } = await listen((_request, response) => {
+      requests += 1;
+      response
+        .writeHead(requests < 4 ? 503 : 200, { "content-type": "application/json" })
+        .end(JSON.stringify({ serverVersion: T3_PINNED_VERSION }));
+    });
+
+    // MUTATION (status === 200 → status >= 100): resolves on request 1, from
+    // a server that just said it cannot serve.
+    const descriptor = await pollT3Readiness({
+      environmentUrl: environmentUrl(port),
+      childExited: never,
+      intervalMs: 5,
+    });
+    expect(descriptor.serverVersion).toBe(T3_PINNED_VERSION);
+    expect(requests).toBeGreaterThanOrEqual(4);
+  });
+
   it("rejects with a version mismatch on any other serverVersion", async () => {
     const { port } = await listen((_request, response) => {
       response

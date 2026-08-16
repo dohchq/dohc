@@ -22,7 +22,20 @@ import { T3_ENTRY_MODULE_PATH, T3_PINNED_VERSION } from "./t3Entry";
 // parsing, polling, redaction, and retry logic all run against the true
 // shapes.
 
-type FakeBoot = "ready" | "exit-early" | "wrong-version";
+type FakeBoot =
+  | "ready"
+  | "ready-split-token"
+  | "exit-early"
+  | "exit-split-token"
+  | "wrong-version";
+
+// A real stream chunk boundary can fall anywhere. The worst place for the
+// log path is inside the word `Token`, because that word is the redaction
+// anchor: "Tok" + "en: <credential>" defeats every per-chunk redaction.
+function cutInsideTokenWord(text: string): [string, string] {
+  const cut = text.indexOf("Token:") + 3;
+  return [text.slice(0, cut), text.slice(cut)];
+}
 
 interface FakeSpawn {
   request: PluginChildProcessSpawnOptions;
@@ -60,7 +73,17 @@ class FakeT3Child implements PluginChildProcessHandle {
       this.exitResolve({ code: 1, reason: "exited" });
       return;
     }
-    const serverVersion = mode === "ready" ? T3_PINNED_VERSION : "9.9.9";
+    if (mode === "exit-split-token") {
+      // Prints its credential, then dies before binding. The last line has no
+      // newline: the buffer only sees it when the child's exit flushes it.
+      for (const chunk of cutInsideTokenWord(`starting\nToken: ${token}`)) {
+        this.emit(chunk);
+      }
+      this.exitResolve({ code: 1, reason: "exited" });
+      return;
+    }
+    const serverVersion =
+      mode === "wrong-version" ? "9.9.9" : T3_PINNED_VERSION;
     this.server = createServer((_request, response) => {
       response
         .writeHead(200, { "content-type": "application/json" })
@@ -70,15 +93,18 @@ class FakeT3Child implements PluginChildProcessHandle {
       this.server!.once("error", reject);
       this.server!.listen(port, "127.0.0.1", () => resolve());
     });
-    this.emit(
-      [
-        "T3 Code server is ready.",
-        `Connection string: http://127.0.0.1:${port}`,
-        `Token: ${token}`,
-        `Pairing URL: http://127.0.0.1:${port}/pair#token=${token}`,
-        "",
-      ].join("\n"),
-    );
+    const accessBlock = [
+      "T3 Code server is ready.",
+      `Connection string: http://127.0.0.1:${port}`,
+      `Token: ${token}`,
+      `Pairing URL: http://127.0.0.1:${port}/pair#token=${token}`,
+      "",
+    ].join("\n");
+    if (mode === "ready-split-token") {
+      for (const chunk of cutInsideTokenWord(accessBlock)) this.emit(chunk);
+      return;
+    }
+    this.emit(accessBlock);
   }
 
   /** Simulates the server dying out from under the bridge. */
@@ -272,6 +298,45 @@ describe("createT3Bridge", () => {
     await bridge.dispose();
   });
 
+  it("redacts a credential whose line arrives split inside the word Token", async () => {
+    const { logs, bridge } = await createFixture(["ready-split-token"]);
+    const started = await bridge.startWebApp(T3_WEB_APP_ID);
+    expect(started.url).toContain("tok-secret-0");
+
+    // MUTATION (per-chunk logging): redacting each chunk instead of each
+    // complete line logs "en: tok-secret-0" verbatim — the anchor word sits
+    // in the previous chunk.
+    const joined = logs.join("\n");
+    expect(joined).not.toContain("tok-secret-0");
+    expect(joined).not.toContain("secret");
+    expect(joined).toContain("Token: [redacted]");
+    expect(joined).toContain("#token=[redacted]");
+    await bridge.dispose();
+  });
+
+  it("keeps a split credential out of the spawn-failure error the renderer sees", async () => {
+    const { logs, bridge } = await createFixture([
+      "exit-split-token",
+      "exit-split-token",
+      "exit-split-token",
+    ]);
+    const error = await bridge
+      .startWebApp(T3_WEB_APP_ID)
+      .then(() => null)
+      .catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain("3 attempts");
+    // The unterminated last line only reaches the log through the exit
+    // flush, and it must arrive redacted.
+    expect(message).toContain("Token: [redacted]");
+    for (const index of [0, 1, 2]) {
+      expect(message).not.toContain(`tok-secret-${index}`);
+      expect(logs.join("\n")).not.toContain(`tok-secret-${index}`);
+    }
+  });
+
   it("records ownership of the spawned server beside its state", async () => {
     const { spawns, bridge, stateRoot } = await createFixture();
     await bridge.startWebApp(T3_WEB_APP_ID);
@@ -349,6 +414,18 @@ describe("createT3Bridge", () => {
     await bridge.dispose();
     expect(spawns[0]!.child.terminated).toBe(true);
     await expect(bridge.startWebApp(T3_WEB_APP_ID)).rejects.toThrow("deactivated");
+  });
+
+  it("clears the owner record on dispose, leaving no armed pid behind", async () => {
+    const { bridge, stateRoot } = await createFixture();
+    const ownerPath = join(stateRoot, "t3-owner.json");
+    await bridge.startWebApp(T3_WEB_APP_ID);
+    expect(existsSync(ownerPath)).toBe(true);
+
+    // MUTATION (drop the clear): every clean session then leaves a record
+    // naming a pid the operating system is free to reuse.
+    await bridge.dispose();
+    expect(existsSync(ownerPath)).toBe(false);
   });
 
   it("rejects a web app id the manifest does not declare", async () => {

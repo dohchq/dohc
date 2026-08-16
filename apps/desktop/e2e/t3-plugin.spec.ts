@@ -163,7 +163,10 @@ test("t3-code installs, serves its paired web app in a hardened guest, and unins
     // never surfaced in any app log either.
     await tab.getByRole("button", { name: "Close app" }).click();
     await expect.poll(async () => (await loopbackUrls()).length).toBe(0);
-    const leakedLog = desktop.logs.find((entry) => entry.text.includes("#token="));
+    // Both forms the access block prints the credential in: the pairing URL's
+    // fragment and the bare `Token:` line. A chunk boundary can split either.
+    const credentialInLog = /#token=(?!\[redacted\])|Token:\s*(?!\[redacted\])\S/;
+    const leakedLog = desktop.logs.find((entry) => credentialInLog.test(entry.text));
     expect(
       leakedLog ? leakedLog.text.slice(0, 40) : undefined,
       "a log line carried the pairing credential",

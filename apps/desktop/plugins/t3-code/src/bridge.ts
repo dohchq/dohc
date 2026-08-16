@@ -5,7 +5,11 @@ import type {
   PluginChildProcessHandle,
   PluginWebAppStart,
 } from "@dohc/sdk/node";
-import { findPairingUrl, redactT3Output } from "./accessBlock";
+import {
+  createStreamLineBuffer,
+  findPairingUrl,
+  redactT3Output,
+} from "./accessBlock";
 import { allocateLoopbackPort } from "./ports";
 import {
   pollT3Readiness,
@@ -13,6 +17,7 @@ import {
   type PollT3ReadinessInput,
 } from "./readiness";
 import {
+  clearOwnerRecord,
   recoverStaleState,
   T3_OWNER_FILE_NAME,
   writeOwnerRecord,
@@ -65,6 +70,7 @@ interface ReadyServer {
   /** Held in memory only. Never logged, never persisted, never in an error. */
   pairingUrl: string;
   child: PluginChildProcessHandle;
+  ownerPath: string;
   alive: boolean;
   paired: boolean;
 }
@@ -114,17 +120,28 @@ export function createT3Bridge(
     // this bounded buffer, until the pairing URL is parsed out of it. Every
     // line leaves this closure redacted.
     const captured = { raw: "", pairingUrl: null as string | null };
+    const logBuffers = new Map<string, ReturnType<typeof createStreamLineBuffer>>();
+    const logComplete = (line: string): void => {
+      if (line.trim().length > 0) log(redactT3Output(line));
+    };
     await child.onOutput((output) => {
       if (captured.pairingUrl === null) {
         captured.raw = (captured.raw + output.text).slice(-RAW_BUFFER_LIMIT);
         captured.pairingUrl = findPairingUrl(captured.raw);
         if (captured.pairingUrl !== null) captured.raw = "";
       }
-      for (const line of output.text.split("\n")) {
-        if (line.trim().length > 0) log(redactT3Output(line));
+      let buffer = logBuffers.get(output.stream);
+      if (!buffer) {
+        buffer = createStreamLineBuffer(logComplete);
+        logBuffers.set(output.stream, buffer);
       }
+      buffer.push(output.text);
     });
     const exited = child.wait({ timeoutMs: CHILD_WAIT_TIMEOUT_MS });
+    const flushLogs = (): void => {
+      for (const buffer of logBuffers.values()) buffer.flush();
+    };
+    void exited.then(flushLogs, flushLogs);
 
     try {
       await pollT3Readiness({
@@ -148,16 +165,13 @@ export function createT3Bridge(
       );
     }
     if (child.pid !== null) {
-      await writeOwnerRecord(ownerPath, {
-        pid: child.pid,
-        port,
-        startedAt: new Date().toISOString(),
-      });
+      await writeOwnerRecord(ownerPath, { pid: child.pid, port });
     }
     const server: ReadyServer = {
       origin: `http://127.0.0.1:${port}`,
       pairingUrl: captured.pairingUrl,
       child,
+      ownerPath,
       alive: true,
       paired: false,
     };
@@ -248,9 +262,18 @@ export function createT3Bridge(
       serverPromise = null;
       if (!current) return;
       const server = await current.catch(() => null);
-      if (server?.alive) {
-        await server.child.terminate().catch(() => undefined);
-      }
+      if (!server) return;
+      // The owner record exists to authorize a signal against a leftover
+      // process. Once this server is gone, the record must go with it —
+      // otherwise every routine exit arms the next start against a pid the
+      // operating system is free to hand to someone else.
+      const gone = server.alive
+        ? await server.child.terminate().then(
+            () => true,
+            () => false,
+          )
+        : true;
+      if (gone) await clearOwnerRecord(server.ownerPath);
     },
   };
 }
