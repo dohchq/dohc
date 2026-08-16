@@ -932,3 +932,143 @@ export function filterOpForShareAppend(
     ? filterChatOpForChannelShare(selector, opKind, payload, chat)
     : filterFileChatOpForPathShare(selector, opKind, payload, chat);
 }
+
+// #646 PR3a. One change a recipient proposes to one file.
+//
+// This is NOT a moment. A recipient never supplies a moment payload: the
+// served moment drops `momentId`, `objectId` and every `before*` field
+// (see the read filter above), so a recipient could not state a lineage the
+// granter recognizes even if it tried. It states the NET CHANGE — "the file
+// you have at `basedOnPath` with content `basedOnBlobSha256` should now be at
+// `afterPath` with content `afterBlobSha256`" — and the relay mints the moment
+// from the granter's own facts when the granter accepts it.
+export interface ProposedChange {
+  // Where the GRANTER has this file. `null` for a file the recipient created,
+  // which the granter therefore has nowhere.
+  basedOnPath: string | null;
+  // The after-hash of the last granter moment the recipient applied for this
+  // file, and the one identifier both sides genuinely share. `null` for a new
+  // file.
+  basedOnBlobSha256: string | null;
+  operation: "write" | "delete";
+  // Absent for a delete: the change removes the file, so it lands nowhere and
+  // carries no content.
+  afterPath: string | null;
+  afterBlobSha256: string | null;
+  afterContentKind: "text" | "binary" | null;
+  afterByteLength: number | null;
+  recordedAtMs: number;
+}
+
+export type ProposedChangeDecision =
+  | { allowed: false }
+  | { allowed: true; change: ProposedChange };
+
+const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/u;
+
+// The single decision point for what a recipient may PROPOSE. It is a third
+// question, next to "may this recipient see this op?" (`filterOpForShare`) and
+// "may this recipient append this op?" (`filterOpForShareAppend`), and it has
+// its own function for the same reason those two do: a route must never widen
+// by inheriting a neighbour's allowlist. Nothing calls this but the proposal
+// route, and the append route cannot reach it.
+//
+// Fails closed on every field. The proven, NORMALIZED paths travel back in the
+// decision, so the caller stores the strings this relay validated rather than
+// the recipient's own spelling.
+export function filterProposedChangeForShare(
+  selector: AnyShareSelector,
+  raw: unknown,
+): ProposedChangeDecision {
+  // A chat-channel grant shares no files, so it can propose no change to one.
+  if (isChatChannelSelector(selector)) return { allowed: false };
+  // Changes follow PATHS. A version share names none, so it proposes nothing.
+  if (selector.paths.length === 0) return { allowed: false };
+  const record = asRecord(raw);
+  if (!record) return { allowed: false };
+
+  const operation = record.operation;
+  if (operation !== "write" && operation !== "delete") return { allowed: false };
+
+  const recordedAtMs = record.recordedAtMs;
+  if (typeof recordedAtMs !== "number" || !Number.isSafeInteger(recordedAtMs)) {
+    return { allowed: false };
+  }
+
+  // The base side. A new file states neither half; an existing one states
+  // both. A half-stated base names a file without saying what the recipient
+  // read, which is exactly the case the base rewrite cannot resolve.
+  const claimedBasePath = record.basedOnPath;
+  const claimedBaseSha = record.basedOnBlobSha256;
+  let basedOnPath: string | null = null;
+  let basedOnBlobSha256: string | null = null;
+  if (claimedBasePath !== null || claimedBaseSha !== null) {
+    if (typeof claimedBasePath !== "string" || typeof claimedBaseSha !== "string") {
+      return { allowed: false };
+    }
+    if (!SHA256_HEX_PATTERN.test(claimedBaseSha)) return { allowed: false };
+    basedOnPath = visibleSharePath(selector, claimedBasePath);
+    if (basedOnPath === null) return { allowed: false };
+    basedOnBlobSha256 = claimedBaseSha;
+  }
+
+  if (operation === "delete") {
+    // A delete removes a file the granter has. It cannot delete a file the
+    // granter never had, and it lands nowhere, so it states no after side.
+    if (basedOnPath === null) return { allowed: false };
+    if (record.afterPath != null || record.afterBlobSha256 != null) {
+      return { allowed: false };
+    }
+    return {
+      allowed: true,
+      change: {
+        basedOnPath,
+        basedOnBlobSha256,
+        operation,
+        afterPath: null,
+        afterBlobSha256: null,
+        afterContentKind: null,
+        afterByteLength: null,
+        recordedAtMs,
+      },
+    };
+  }
+
+  const claimedAfterPath = record.afterPath;
+  const claimedAfterSha = record.afterBlobSha256;
+  if (typeof claimedAfterPath !== "string" || typeof claimedAfterSha !== "string") {
+    return { allowed: false };
+  }
+  if (!SHA256_HEX_PATTERN.test(claimedAfterSha)) return { allowed: false };
+  // The destination is tested exactly as the source is: a change that lands
+  // outside the selector is refused rather than admitted and clipped later.
+  const afterPath = visibleSharePath(selector, claimedAfterPath);
+  if (afterPath === null) return { allowed: false };
+
+  const afterContentKind = record.afterContentKind;
+  if (afterContentKind !== "text" && afterContentKind !== "binary") {
+    return { allowed: false };
+  }
+  const afterByteLength = record.afterByteLength;
+  if (
+    typeof afterByteLength !== "number" ||
+    !Number.isSafeInteger(afterByteLength) ||
+    afterByteLength < 0
+  ) {
+    return { allowed: false };
+  }
+
+  return {
+    allowed: true,
+    change: {
+      basedOnPath,
+      basedOnBlobSha256,
+      operation,
+      afterPath,
+      afterBlobSha256: claimedAfterSha,
+      afterContentKind,
+      afterByteLength,
+      recordedAtMs,
+    },
+  };
+}

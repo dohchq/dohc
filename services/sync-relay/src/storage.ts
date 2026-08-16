@@ -73,6 +73,51 @@ export interface SyncRelayShareRow {
   revokedAtMs: number | null;
 }
 
+// #646 PR3a. A recipient's submitted changes, held at the relay until the
+// granter accepts or declines them. `open` is the only state that can change.
+export type ShareProposalState = "open" | "accepted" | "declined" | "withdrawn";
+
+export interface ShareProposalRow {
+  proposalId: string;
+  shareId: string;
+  workspaceId: string;
+  // SERVER-derived from the authenticated submitter. Never client-supplied.
+  proposedByUserId: string;
+  // The recipient's own origin id, kept so accept can release the changes
+  // under the same `share:<shareId>:<originId>` the chat path already writes.
+  originId: string;
+  state: ShareProposalState;
+  createdAtMs: number;
+  settledAtMs: number | null;
+}
+
+// One net change to one file. Not a moment: the relay mints the moment from
+// the granter's own facts at accept (see `shareProposals.ts`).
+export interface ShareProposalOpRow {
+  opIndex: number;
+  basedOnPath: string | null;
+  basedOnBlobSha256: string | null;
+  operation: "write" | "delete";
+  afterPath: string | null;
+  afterBlobSha256: string | null;
+  afterContentKind: "text" | "binary" | null;
+  afterByteLength: number | null;
+  recordedAtMs: number;
+}
+
+// One moment the granter's log holds for one object, as the base rewrite needs
+// to describe it. `path` and `blobSha256` are null when the moment deletes the
+// object.
+export interface ObjectMomentRow {
+  momentId: string;
+  versionId: string;
+  path: string | null;
+  blobSha256: string | null;
+  contentKind: string | null;
+  byteLength: number | null;
+  recordedAtMs: number;
+}
+
 export interface WorkspaceSyncIdentity {
   replicationEpoch: string;
   streamIdentity: string;
