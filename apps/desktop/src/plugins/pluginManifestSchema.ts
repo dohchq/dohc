@@ -45,6 +45,27 @@ const PluginPath = z.string()
     return z.NEVER;
   });
 
+// One line of shelf copy, the length a list row can show and a reader can
+// scan. Marketplace short descriptions run to about 200 characters; 280
+// clears that with room and still fits one truncated row.
+export const MAX_PLUGIN_DESCRIPTION_CHARS = 280;
+
+// The same bound every other display name in this manifest carries.
+export const MAX_PLUGIN_PUBLISHER_CHARS = 120;
+
+// The renderer serves the icon over dohc-file://, which types a file by its
+// extension. These two are the raster and vector answers, and both are in
+// that server's media-type table; anything else would serve as a download.
+export const PLUGIN_ICON_EXTENSIONS = ["png", "svg"] as const;
+
+const PluginIconPath = PluginPath.refine(
+  (path) =>
+    PLUGIN_ICON_EXTENSIONS.some((extension) =>
+      path.toLowerCase().endsWith(`.${extension}`)
+    ),
+  `icon: must be a .${PLUGIN_ICON_EXTENSIONS.join(" or .")} file`,
+);
+
 const PluginPanel = z.object({
   id: z.string().min(1).max(120).refine(
     (value) => !value.includes("\0"),
@@ -77,15 +98,32 @@ export const DohcPluginManifest = z.object({
   version: z.literal(1),
   name: NpmPackageName,
   displayName: z.string().min(1).max(120).optional(),
+  // What the plugin is, in one line, for a reader deciding whether to install
+  // it. Who publishes it, and the icon that stands for it in a list.
+  description: z.string()
+    .min(1)
+    .max(
+      MAX_PLUGIN_DESCRIPTION_CHARS,
+      `description: must be ${MAX_PLUGIN_DESCRIPTION_CHARS} characters or fewer`,
+    )
+    .optional(),
+  publisher: z.string()
+    .min(1)
+    .max(
+      MAX_PLUGIN_PUBLISHER_CHARS,
+      `publisher: must be ${MAX_PLUGIN_PUBLISHER_CHARS} characters or fewer`,
+    )
+    .optional(),
+  icon: PluginIconPath.optional(),
   entry: PluginPath,
-  // For ordinary UTF-8 content, compact JSON at these bounds is 77 + 214 +
-  // 120 + 1,024 + (100 × 1,295 + 99) + (200 × 260 + 199) + (100 × 260 + 99)
-  // = 209,332 bytes, 52,812 below the reader's 262,144-byte cap. The
-  // optional skipped-script
-  // override adds at most 300 package names. A string built almost
-  // entirely from characters JSON must escape (e.g. `"`, `\`) can inflate
-  // past that on paper; the reader's byte-size gate — not this schema — is
-  // what safely rejects an oversize file before parsing either way.
+  // These bounds do not add up to the reader's 256 KiB file cap, and are not
+  // meant to: 100 panels at a 1,024-character entry path spend half of it on
+  // their own. readPluginManifestFile checks the file's size before it parses
+  // anything, so a manifest at every bound is refused by size, with the cap
+  // named — the byte gate is the real limit, and each bound below only has to
+  // be right for its own field. pluginManifestSchema.test.ts measures both
+  // ends of that relationship, so this note cannot drift the way a hand-summed
+  // byte count did.
   panels: z.array(PluginPanel)
     .max(100, "panels: at most 100 entries allowed")
     .optional(),

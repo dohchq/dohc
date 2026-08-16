@@ -2422,6 +2422,15 @@ export const PluginStatusRecord = z.object({
   sourceHash: PLUGIN_SOURCE_HASH.nullable(),
   approvedHash: PLUGIN_SOURCE_HASH.nullable(),
   installedBaselineHash: PLUGIN_SOURCE_HASH.nullable(),
+  // Manifest metadata. Bounds mirror DohcPluginManifest in
+  // plugins/pluginManifestSchema.ts — duplicated as literals rather than
+  // imported, because the sandboxed preload validates against this file and
+  // must not pull the manifest schema across with it. A value over any bound
+  // here would fail the whole list's parse, so the two must not drift.
+  displayName: z.string().min(1).max(120).nullable(),
+  description: z.string().min(1).max(280).nullable(),
+  publisher: z.string().min(1).max(120).nullable(),
+  icon: z.string().min(1).max(1024).nullable(),
   webApps: z.array(
     z.object({
       id: z.string().min(1).max(120),

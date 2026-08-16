@@ -53,6 +53,10 @@ function plugin(
     sourceHash: HASH_A,
     approvedHash: HASH_A,
     installedBaselineHash: HASH_A,
+    displayName: null,
+    description: null,
+    publisher: null,
+    icon: null,
     webApps: [],
     diagnostics: [],
     warnings: [],
@@ -141,6 +145,52 @@ describe("PluginDetailsPage", () => {
       "ready",
     );
     expect(screen.getByText("plugins/t3-code-src")).toBeTruthy();
+  });
+
+  it("heads the page with the manifest's name, description, publisher, and icon", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [
+        plugin("t3-code", {
+          directoryName: "t3-code-src",
+          displayName: "T3 Code",
+          description: "Runs the t3 coding agent server on this workspace.",
+          publisher: "dohc",
+          icon: "icon.svg",
+        }),
+      ],
+    });
+
+    renderPage("t3-code");
+
+    expect(await screen.findByRole("heading", { name: "T3 Code" })).toBeTruthy();
+    expect(screen.getByTestId("plugin-description").textContent).toBe(
+      "Runs the t3 coding agent server on this workspace.",
+    );
+    expect(screen.getByTestId("plugin-publisher").textContent).toBe("dohc");
+    expect(screen.getByTestId("plugin-icon").getAttribute("src")).toBe(
+      "dohc-file://ws-1/plugins/t3-code-src/icon.svg",
+    );
+    // A named plugin's id has to stay visible somewhere: it is what every
+    // action, folder, and error message calls this plugin.
+    expect(screen.getByTestId("plugin-identifier").textContent).toBe("t3-code");
+  });
+
+  it("falls back to the id and the glyph when the manifest says nothing", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [plugin("bare-plugin")],
+    });
+
+    renderPage("bare-plugin");
+
+    expect(await screen.findByRole("heading", { name: "bare-plugin" }))
+      .toBeTruthy();
+    expect(screen.queryByTestId("plugin-description")).toBeNull();
+    expect(screen.queryByTestId("plugin-publisher")).toBeNull();
+    expect(screen.queryByTestId("plugin-icon")).toBeNull();
+    // No display name means no second name to disambiguate.
+    expect(screen.queryByTestId("plugin-identifier")).toBeNull();
   });
 
   it("sends the workspace and plugin id for every action", async () => {

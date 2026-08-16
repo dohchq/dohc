@@ -77,6 +77,7 @@ describe("discoverInstalledPlugins", () => {
           name: "manifest-name",
           entry: "src/index.ts",
         },
+        iconPath: null,
         diagnostics: [
           "nested manifest ignored at plugins/directory-name/panel/dohc-plugin.json",
         ],
@@ -168,6 +169,7 @@ describe("discoverInstalledPlugins", () => {
         directoryName: "linked-plugin",
         rootPath: linkedRoot,
         manifest: null,
+        iconPath: null,
         diagnostics: [
           `plugin root at ${linkedRoot} is a symlink; plugin roots must be real directories`,
         ],
@@ -278,6 +280,10 @@ describe("discoverInstalledPlugins", () => {
         sourceHash: null,
         approvedHash: null,
         installedBaselineHash: null,
+        displayName: record.manifest?.displayName ?? null,
+        description: record.manifest?.description ?? null,
+        publisher: record.manifest?.publisher ?? null,
+        icon: record.iconPath,
         webApps: [],
         diagnostics: record.diagnostics,
         warnings: [],
@@ -286,5 +292,65 @@ describe("discoverInstalledPlugins", () => {
     });
 
     expect(parsed.success).toBe(true);
+  });
+
+  describe("manifest icon", () => {
+    async function writeIconManifest(
+      root: string,
+      directoryName: string,
+      icon: string,
+    ): Promise<string> {
+      const pluginRoot = join(root, "plugins", directoryName);
+      await mkdir(pluginRoot, { recursive: true });
+      await writeFile(
+        join(pluginRoot, PLUGIN_MANIFEST_FILE_NAME),
+        JSON.stringify({
+          version: 1,
+          name: directoryName,
+          displayName: "Iconic",
+          description: "Shows an icon.",
+          publisher: "dohc",
+          icon,
+          entry: "src/index.ts",
+        }),
+      );
+      return pluginRoot;
+    }
+
+    it("advertises an icon whose file checks out", async () => {
+      const root = await createWorkspace();
+      const pluginRoot = await writeIconManifest(root, "iconic", "icon.svg");
+      await writeFile(join(pluginRoot, "icon.svg"), "<svg/>");
+
+      const [record] = await discoverInstalledPlugins(root, new Map());
+
+      expect(record.iconPath).toBe("icon.svg");
+      expect(record.diagnostics).toEqual([]);
+      expect(record.valid).toBe(true);
+    });
+
+    it("reports a missing icon as a diagnostic and still keeps the plugin valid", async () => {
+      const root = await createWorkspace();
+      await writeIconManifest(root, "iconic", "icon.svg");
+
+      const [record] = await discoverInstalledPlugins(root, new Map());
+
+      expect(record.iconPath).toBeNull();
+      expect(record.diagnostics).toHaveLength(1);
+      expect(record.diagnostics[0]).toContain("could not be read");
+      // An icon is decoration. A plugin that ships a broken one still runs.
+      expect(record.valid).toBe(true);
+      expect(record.manifest?.description).toBe("Shows an icon.");
+    });
+
+    it("carries no icon when the manifest declares none", async () => {
+      const root = await createWorkspace();
+      await writeManifest(root, "plain");
+
+      const [record] = await discoverInstalledPlugins(root, new Map());
+
+      expect(record.iconPath).toBeNull();
+      expect(record.diagnostics).toEqual([]);
+    });
   });
 });

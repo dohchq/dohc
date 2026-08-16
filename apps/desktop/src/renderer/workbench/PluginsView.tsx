@@ -2,11 +2,13 @@ import { AlertTriangle, Blocks, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { PluginStatusRecord } from "../../ipc/bridgeContract";
 import { EmptyState, SectionLabel } from "../ui/controls";
+import { PluginIcon } from "./PluginIcon";
 import {
   actionLabel,
   canInstall,
   isPipelineBusy,
   matchesFilter,
+  pluginTitle,
   statusText,
   statusTone,
   usePluginCatalog,
@@ -15,13 +17,15 @@ import {
 // The plugin browser, in the side panel behind the activity bar's Plugins
 // item. VS Code's Extensions view is the model: a filter box pinned at the
 // top, Installed above what the workspace merely offers, and one quiet row
-// per plugin. A row says what a plugin IS — name, folder, status — and opens
-// the plugin's details tab, which is where everything a plugin can DO lives.
-// Install is the one exception: it stays here so a workspace's offered
-// plugins can be taken up without a detour.
+// per plugin. A row says what a plugin IS — icon, name, what it does, who
+// publishes it, folder, status — and opens the plugin's details tab, which is
+// where everything a plugin can DO lives. Install is the one exception: it
+// stays here so a workspace's offered plugins can be taken up without a
+// detour.
 //
-// dohc has no marketplace and manifests carry no version, description, or
-// icon, so a row shows only what the pipeline actually knows.
+// Every line below the name is optional, because every manifest field behind
+// it is. A plugin that declares nothing still gets the row it had before
+// manifests carried metadata: glyph, id, status, folder.
 
 const installButton =
   "shrink-0 rounded-md bg-accent px-2 py-1 text-[11px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50";
@@ -71,13 +75,24 @@ export function PluginsView(props: {
             onClick={() => props.onOpenDetails(plugin.id)}
             className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-md px-1.5 py-1.5 text-left outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ink/30"
           >
-            <span className="grid size-8 shrink-0 place-items-center rounded-md border border-line bg-bg text-subtle">
-              <Blocks size={15} aria-hidden />
-            </span>
+            <PluginIcon
+              workspaceId={props.workspaceId}
+              plugin={plugin}
+              glyphSize={15}
+              className="grid size-8 shrink-0 place-items-center overflow-hidden rounded-md border border-line bg-bg text-subtle"
+            />
             <span className="min-w-0 flex-1">
               <span className="block truncate text-[13px] font-medium text-ink">
-                {plugin.id}
+                {pluginTitle(plugin)}
               </span>
+              {plugin.description ? (
+                <span
+                  data-testid="plugin-description"
+                  className="mt-0.5 block truncate text-[11px] text-muted"
+                >
+                  {plugin.description}
+                </span>
+              ) : null}
               <span className="mt-0.5 flex items-center gap-1 text-[11px]">
                 {plugin.error ? (
                   <AlertTriangle
@@ -93,6 +108,19 @@ export function PluginsView(props: {
                 >
                   {statusText(plugin)}
                 </span>
+                {plugin.publisher ? (
+                  <>
+                    <span aria-hidden className="shrink-0 text-line">
+                      ·
+                    </span>
+                    <span
+                      data-testid="plugin-publisher"
+                      className="truncate text-subtle"
+                    >
+                      {plugin.publisher}
+                    </span>
+                  </>
+                ) : null}
                 {plugin.directoryName === plugin.id ? null : (
                   <>
                     <span aria-hidden className="shrink-0 text-line">

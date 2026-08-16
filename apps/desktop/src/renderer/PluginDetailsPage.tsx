@@ -7,6 +7,7 @@ import { MARKDOWN_COMPONENTS } from "./markdown/markdownComponents";
 import { parseFrontmatter } from "./markdown/frontmatter";
 import { Overlay } from "./Overlay";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
+import { PluginIcon } from "./workbench/PluginIcon";
 import {
   actionLabel,
   canApprove,
@@ -17,6 +18,7 @@ import {
   canRetryInstall,
   isInstalled,
   isPipelineBusy,
+  pluginTitle,
   statusText,
   statusTone,
   usePluginCatalog,
@@ -239,14 +241,35 @@ function PluginDetailsHeader(props: {
   return (
     <header className="px-6 pb-5 pt-6">
       <div className="flex items-start gap-4">
-        <span className="grid size-14 shrink-0 place-items-center rounded-xl border border-line bg-panel text-subtle">
-          <Blocks size={26} aria-hidden />
-        </span>
+        <PluginIcon
+          workspaceId={props.workspaceId}
+          plugin={plugin}
+          glyphSize={26}
+          className="grid size-14 shrink-0 place-items-center overflow-hidden rounded-xl border border-line bg-panel text-subtle"
+        />
         <div className="min-w-0 flex-1">
           <h1 className="m-0 truncate text-xl font-semibold tracking-tight text-ink">
-            {plugin.id}
+            {pluginTitle(plugin)}
           </h1>
+          {plugin.description ? (
+            <p
+              data-testid="plugin-description"
+              className="m-0 mt-1 max-w-2xl text-[13px] text-muted"
+            >
+              {plugin.description}
+            </p>
+          ) : null}
           <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+            {plugin.publisher ? (
+              <>
+                <span data-testid="plugin-publisher" className="text-muted">
+                  {plugin.publisher}
+                </span>
+                <span aria-hidden className="text-line">
+                  ·
+                </span>
+              </>
+            ) : null}
             <span
               data-testid="plugin-status"
               data-status={plugin.status}
@@ -263,6 +286,21 @@ function PluginDetailsHeader(props: {
             <span className="truncate font-mono text-subtle">
               {`plugins/${plugin.directoryName}`}
             </span>
+            {/* A named plugin's heading is its display name, so the id it is
+                installed and acted on under would otherwise appear nowhere. */}
+            {plugin.displayName ? (
+              <>
+                <span aria-hidden className="text-line">
+                  ·
+                </span>
+                <span
+                  data-testid="plugin-identifier"
+                  className="truncate font-mono text-subtle"
+                >
+                  {plugin.id}
+                </span>
+              </>
+            ) : null}
           </div>
         </div>
       </div>

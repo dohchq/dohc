@@ -2984,6 +2984,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       directoryName: "noisy-plugin",
       rootPath: join(fixture.workspaceRoot, "plugins", "noisy-plugin"),
       manifest: null,
+      iconPath: null,
       valid: false,
       diagnostics: Array.from(
         { length: 400 },
@@ -4188,4 +4189,103 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.dispose();
     }
   }, 240_000);
+
+  it("carries the manifest's metadata through the pipeline into the IPC contract", async () => {
+    const fixture = await createPluginWorkspace();
+    await writeFile(
+      join(fixture.pluginRoot, "dohc-plugin.json"),
+      `${JSON.stringify({
+        version: 1,
+        name: "example-plugin",
+        displayName: "Example plugin",
+        description: "Does one example thing on this workspace.",
+        publisher: "dohc",
+        icon: "icon.svg",
+        entry: "src/index.ts",
+      }, null, 2)}\n`,
+    );
+    await writeFile(join(fixture.pluginRoot, "icon.svg"), "<svg/>");
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      const listed = pipeline.list();
+
+      expect(listed[0]).toMatchObject({
+        id: "example-plugin",
+        displayName: "Example plugin",
+        description: "Does one example thing on this workspace.",
+        publisher: "dohc",
+        icon: "icon.svg",
+      });
+      // The renderer only ever sees what survives this parse, so the
+      // contract's bounds are part of the plumbing, not a separate check.
+      const parsed = ListPluginsResult.safeParse({ ok: true, plugins: listed });
+      if (!parsed.success) throw new Error(parsed.error.message);
+      expect(parsed.data.ok && parsed.data.plugins[0]?.publisher).toBe("dohc");
+    } finally {
+      await pipeline.dispose();
+    }
+  });
+
+  it("advertises no icon, and says why, when the declared file is missing", async () => {
+    const fixture = await createPluginWorkspace();
+    await writeFile(
+      join(fixture.pluginRoot, "dohc-plugin.json"),
+      `${JSON.stringify({
+        version: 1,
+        name: "example-plugin",
+        icon: "icon.svg",
+        entry: "src/index.ts",
+      }, null, 2)}\n`,
+    );
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      const listed = pipeline.list();
+
+      expect(listed[0]?.icon).toBeNull();
+      expect(listed[0]?.diagnostics.join(" ")).toContain("could not be read");
+      // A broken icon is not a broken plugin.
+      expect(listed[0]?.valid).toBe(true);
+      expect(listed[0]?.status).toBe("discovered");
+    } finally {
+      await pipeline.dispose();
+    }
+  });
 });

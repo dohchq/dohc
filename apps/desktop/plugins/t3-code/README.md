@@ -60,3 +60,11 @@ so the manifest's `allowSkippedScripts` lists them:
 
 Verified against a real isolated install of this lockfile on 2026-08-15: the
 server starts, serves its UI, and answers readiness with scripts skipped.
+
+## Icon
+
+`icon.svg` is the T3 Code project's own logo, copied unchanged from
+[`assets/prod/logo.svg`](https://github.com/pingdotgg/t3code/blob/6bc6cb6be4ebecd5bd7a3b7b88f07cb61815ded5/assets/prod/logo.svg)
+at commit `6bc6cb6be4ebecd5bd7a3b7b88f07cb61815ded5`. The repository is MIT
+licensed. It marks which upstream project this plugin wraps; it does not
+imply the project endorses the plugin.

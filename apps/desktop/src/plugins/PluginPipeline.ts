@@ -55,7 +55,21 @@ export interface PluginPipelineError {
   message: string;
 }
 
-export interface PluginPipelinePluginStatus {
+/**
+ * What the manifest says a plugin is, for the list row and the details header.
+ * Every field is optional in the manifest, so every field can be null and each
+ * surface falls back on its own: the id names an unnamed plugin, and the
+ * glyph tile stands in for a missing icon.
+ */
+export interface PluginMetadata {
+  displayName: string | null;
+  description: string | null;
+  publisher: string | null;
+  /** Plugin-root-relative, already checked by discovery. */
+  icon: string | null;
+}
+
+export interface PluginPipelinePluginStatus extends PluginMetadata {
   id: string;
   directoryName: string;
   rootPath: string;
@@ -281,6 +295,23 @@ function manifestWebApps(
 }
 
 /**
+ * What a plugin says about itself, for the surfaces that show a plugin before
+ * anyone installs it. Derived from the candidate on every status change for
+ * the same reason webApps is: an approved manifest edit that renames a plugin
+ * or rewrites its description must reach the list, not stay frozen at first
+ * discovery. The icon comes from the candidate rather than the manifest —
+ * discovery is what checked the file behind it.
+ */
+function manifestMetadata(candidate: InstalledPluginRecord): PluginMetadata {
+  return {
+    displayName: candidate.manifest?.displayName ?? null,
+    description: candidate.manifest?.description ?? null,
+    publisher: candidate.manifest?.publisher ?? null,
+    icon: candidate.iconPath,
+  };
+}
+
+/**
  * Why a confirmed uninstall must not delete, or null when the live tree still
  * hashes to what the confirmation covered. A null hash means preflight could
  * not fingerprint the tree, so nothing proves the warning the user approved
@@ -415,6 +446,7 @@ export class PluginPipeline {
           sourceHash: null,
           approvedHash: null,
           installedBaselineHash: null,
+          ...manifestMetadata(candidate),
           webApps: manifestWebApps(candidate.manifest),
           diagnostics: boundedStatusLines(candidate.diagnostics),
           warnings: [],
@@ -1837,6 +1869,7 @@ export class PluginPipeline {
       directoryName: status.directoryName,
       rootPath: status.rootPath,
       manifest: null,
+      iconPath: null,
       diagnostics: status.diagnostics,
       valid: status.valid,
     };
@@ -2043,6 +2076,7 @@ export class PluginPipeline {
       sourceHash: null,
       approvedHash: null,
       installedBaselineHash: null,
+      ...manifestMetadata(candidate),
       webApps: manifestWebApps(candidate.manifest),
       diagnostics: boundedStatusLines(candidate.diagnostics),
       warnings: [],
@@ -2070,7 +2104,12 @@ export class PluginPipeline {
       valid: patch.valid ?? (candidate.valid && candidate.manifest !== null),
       // Derived from the candidate like directoryName/rootPath: an approved
       // manifest edit that adds or renames a web app must become visible on
-      // the next status change, not stay frozen at first discovery.
+      // the next status change, not stay frozen at first discovery. The
+      // manifest's own metadata is derived the same way — except from a
+      // synthetic candidate (failure()'s fallback, a sourceless uninstall),
+      // which has no manifest to read. The status keeps the name and icon it
+      // already carried rather than losing them mid-action.
+      ...(candidate.manifest ? manifestMetadata(candidate) : {}),
       webApps: patch.webApps ?? manifestWebApps(candidate.manifest),
       diagnostics: boundedStatusLines(patch.diagnostics ?? current.diagnostics),
       warnings: boundedStatusLines(patch.warnings ?? current.warnings),
@@ -2094,6 +2133,7 @@ export class PluginPipeline {
           directoryName: current.directoryName,
           rootPath: current.rootPath,
           manifest: null,
+          iconPath: null,
           diagnostics: current.diagnostics,
           valid: current.valid,
         },

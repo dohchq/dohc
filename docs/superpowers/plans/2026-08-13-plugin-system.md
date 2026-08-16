@@ -17,6 +17,45 @@ required. Do not frame plugins as "for the human" plus "for the agents";
 Ice rejected that framing. Agent tools are one optional contribution among
 many.
 
+## The manifest
+
+`dohc-plugin.json` is the whole declaration. Every field except `version`,
+`name`, and `entry` is optional, and every surface falls back on its own when
+one is absent — a plugin that declares nothing still installs, runs, and gets
+a row.
+
+| Field | Shape | Bound |
+| --- | --- | --- |
+| `version` | `1` | The only accepted value |
+| `name` | npm package name | 214 chars |
+| `displayName` | What to call the plugin on screen | 120 chars |
+| `description` | One line: what the plugin does | 280 chars |
+| `publisher` | Who publishes it | 120 chars |
+| `icon` | Plugin-root-relative `.png` or `.svg` | 1,024-char path |
+| `entry` | Plugin-root-relative module | 1,024-char path |
+| `panels` | `{ id, title, entry }` | 100 entries |
+| `commands` | `{ id, title }` | 200 entries |
+| `webApps` | `{ id, title }` | 100 entries |
+| `allowSkippedScripts` | `true`, or npm package names | 300 names |
+
+Two rules the bounds follow. Ids and titles are unique within their array.
+Every path is refused if it is absolute, carries a `..` segment, or holds a
+NUL byte — the manifest cannot name a file outside the plugin's own folder.
+
+These per-field bounds do not sum to the reader's 256 KiB file cap, and are
+not meant to. `readPluginManifestFile` checks the file's size before it parses
+anything, so a manifest at every bound at once is refused by size with the cap
+named. Each bound only has to be right for its own field.
+
+The icon is checked twice, because the schema can only read the path. The
+manifest must name a `.png` or `.svg` inside the plugin root; discovery then
+confirms the file is really there, is a real file rather than a link or a
+directory, and is 512 KiB or smaller — an order of magnitude above the largest
+icon measured (t3's own logo is 1 KiB). An icon that fails any of those checks
+is reported as a diagnostic and simply not advertised. The plugin stays valid
+and its row falls back to the glyph tile, because an icon is decoration and
+decoration must never cost a reader a row.
+
 ## Design rules
 
 1. **Plugins are code, not prompts.** TypeScript against one SDK. Skills and

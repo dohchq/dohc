@@ -226,14 +226,28 @@ export function canDisable(plugin: PluginStatusRecord): boolean {
   );
 }
 
-// The id and the folder are the only names a plugin has here.
+/**
+ * What to call a plugin on screen. A manifest may name the plugin for people;
+ * where it does not, the id is the name, which is what every plugin surface
+ * showed before manifests carried a display name.
+ */
+export function pluginTitle(plugin: PluginStatusRecord): string {
+  return plugin.displayName ?? plugin.id;
+}
+
+// Every name a plugin answers to, plus what it says it does. A reader
+// searching "agent" should find the plugin whose description says so, not
+// only the one whose folder happens to spell it.
 export function matchesFilter(plugin: PluginStatusRecord, filter: string): boolean {
   const needle = filter.trim().toLowerCase();
   if (needle.length === 0) return true;
-  return (
-    plugin.id.toLowerCase().includes(needle) ||
-    plugin.directoryName.toLowerCase().includes(needle)
-  );
+  return [
+    plugin.id,
+    plugin.directoryName,
+    plugin.displayName,
+    plugin.description,
+    plugin.publisher,
+  ].some((field) => field !== null && field.toLowerCase().includes(needle));
 }
 
 export interface PluginCatalog {

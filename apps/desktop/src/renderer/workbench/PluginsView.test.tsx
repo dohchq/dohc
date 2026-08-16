@@ -51,6 +51,10 @@ function plugin(
     sourceHash: HASH_A,
     approvedHash: HASH_A,
     installedBaselineHash: HASH_A,
+    displayName: null,
+    description: null,
+    publisher: null,
+    icon: null,
     webApps: [],
     diagnostics: [],
     warnings: [],
@@ -342,6 +346,94 @@ describe("PluginsView", () => {
 
     await userEvent.clear(filter);
     expect(screen.getAllByTestId("plugin-row")).toHaveLength(2);
+  });
+
+  describe("manifest metadata", () => {
+    const described = () =>
+      plugin("t3-code", {
+        displayName: "T3 Code",
+        description: "Runs the t3 coding agent server on this workspace.",
+        publisher: "dohc",
+        icon: "icon.svg",
+      });
+
+    it("shows the plugin's name, description, publisher, and icon", async () => {
+      bridgeMock.listPlugins.mockResolvedValue({
+        ok: true,
+        plugins: [described()],
+      });
+
+      renderList();
+
+      expect(await screen.findByText("T3 Code")).toBeTruthy();
+      expect(screen.getByTestId("plugin-description").textContent).toBe(
+        "Runs the t3 coding agent server on this workspace.",
+      );
+      expect(screen.getByTestId("plugin-publisher").textContent).toBe("dohc");
+      const icon = screen.getByTestId("plugin-icon");
+      expect(icon.getAttribute("src")).toBe(
+        "dohc-file://ws-1/plugins/t3-code/icon.svg",
+      );
+      // The name is beside it, so the icon adds nothing for a screen reader.
+      expect(icon.getAttribute("alt")).toBe("");
+    });
+
+    it("falls back to the id and the glyph when the manifest says nothing", async () => {
+      bridgeMock.listPlugins.mockResolvedValue({
+        ok: true,
+        plugins: [plugin("bare-plugin")],
+      });
+
+      renderList();
+
+      expect(await screen.findByText("bare-plugin")).toBeTruthy();
+      expect(screen.queryByTestId("plugin-description")).toBeNull();
+      expect(screen.queryByTestId("plugin-publisher")).toBeNull();
+      expect(screen.queryByTestId("plugin-icon")).toBeNull();
+    });
+
+    it("keeps the row when the icon file fails to load", async () => {
+      bridgeMock.listPlugins.mockResolvedValue({
+        ok: true,
+        plugins: [described()],
+      });
+
+      renderList();
+      const icon = await screen.findByTestId("plugin-icon");
+      await act(async () => {
+        fireEvent.error(icon);
+      });
+
+      expect(screen.queryByTestId("plugin-icon")).toBeNull();
+      // The row itself survives: an icon is decoration, never the row.
+      expect(screen.getByTestId("plugin-row")).toBeTruthy();
+      expect(screen.getByText("T3 Code")).toBeTruthy();
+    });
+
+    it("finds a plugin by its description and by its publisher", async () => {
+      bridgeMock.listPlugins.mockResolvedValue({
+        ok: true,
+        plugins: [described(), plugin("notes-widget")],
+      });
+
+      renderList();
+      await screen.findByText("T3 Code");
+      const filter = screen.getByTestId("plugins-filter");
+
+      // Nothing in the id, folder, or display name spells "coding agent".
+      await userEvent.type(filter, "coding agent");
+      expect(screen.getAllByTestId("plugin-row")).toHaveLength(1);
+      expect(screen.getByTestId("plugin-row").getAttribute("data-plugin-id"))
+        .toBe("t3-code");
+
+      await userEvent.clear(filter);
+      await userEvent.type(filter, "dohc");
+      expect(screen.getAllByTestId("plugin-row")).toHaveLength(1);
+
+      await userEvent.clear(filter);
+      await userEvent.type(filter, "T3 Code");
+      expect(screen.getAllByTestId("plugin-row")).toHaveLength(1);
+    });
   });
 
   it("tells the user where plugins come from when the workspace has none", async () => {

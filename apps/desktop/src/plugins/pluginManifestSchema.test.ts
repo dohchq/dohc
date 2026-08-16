@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { DohcPluginManifest } from "./pluginManifestSchema";
+import { MAX_PLUGIN_MANIFEST_FILE_BYTES } from "./pluginManifest";
+import {
+  DohcPluginManifest,
+  MAX_PLUGIN_DESCRIPTION_CHARS,
+  MAX_PLUGIN_PUBLISHER_CHARS,
+} from "./pluginManifestSchema";
 
 const minimalManifest = {
   version: 1,
@@ -201,5 +206,171 @@ describe("DohcPluginManifest", () => {
     expect(result.error.issues).toContainEqual(expect.objectContaining({
       message: "commands: at most 200 entries allowed",
     }));
+  });
+
+  describe("metadata", () => {
+    it("parses a description, publisher, and icon", () => {
+      expect(DohcPluginManifest.parse({
+        ...minimalManifest,
+        description: "Runs a coding agent on this workspace.",
+        publisher: "dohc",
+        icon: "assets\\./icon.png",
+      })).toEqual({
+        ...minimalManifest,
+        description: "Runs a coding agent on this workspace.",
+        publisher: "dohc",
+        // Normalized by the same path rule every other plugin path uses.
+        icon: "assets/icon.png",
+      });
+    });
+
+    it("names the limit when a description is too long", () => {
+      const result = DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        description: "a".repeat(MAX_PLUGIN_DESCRIPTION_CHARS + 1),
+      });
+
+      if (result.success) throw new Error("expected the description limit to reject the manifest");
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        message: `description: must be ${MAX_PLUGIN_DESCRIPTION_CHARS} characters or fewer`,
+      }));
+      expect(DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        description: "a".repeat(MAX_PLUGIN_DESCRIPTION_CHARS),
+      }).success).toBe(true);
+    });
+
+    it("names the limit when a publisher is too long", () => {
+      const result = DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        publisher: "a".repeat(MAX_PLUGIN_PUBLISHER_CHARS + 1),
+      });
+
+      if (result.success) throw new Error("expected the publisher limit to reject the manifest");
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        message: `publisher: must be ${MAX_PLUGIN_PUBLISHER_CHARS} characters or fewer`,
+      }));
+    });
+
+    it.each([
+      ["POSIX absolute path", "/icon.png"],
+      ["Windows drive path", "C:\\icon.png"],
+      ["parent segment", "../icon.png"],
+      ["nested escape", "assets/../../icon.png"],
+      ["empty path", ""],
+    ])("refuses an icon with a %s", (_case, icon) => {
+      const result = DohcPluginManifest.safeParse({ ...minimalManifest, icon });
+
+      if (result.success) throw new Error("expected the icon path rule to reject the manifest");
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        message:
+          "must be a non-empty plugin-root-relative path without NUL bytes, " +
+          "absolute prefixes, or '..' segments",
+      }));
+    });
+
+    it.each([
+      ["a format dohc cannot serve", "icon.ico"],
+      ["no extension at all", "icon"],
+      ["an executable wearing an image name", "icon.png.exe"],
+    ])("refuses an icon that is %s", (_case, icon) => {
+      const result = DohcPluginManifest.safeParse({ ...minimalManifest, icon });
+
+      if (result.success) throw new Error("expected the icon format rule to reject the manifest");
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        message: "icon: must be a .png or .svg file",
+      }));
+    });
+
+    it.each(["icon.png", "icon.svg", "assets/Logo.SVG"])(
+      "accepts %s",
+      (icon) => {
+        expect(DohcPluginManifest.safeParse({ ...minimalManifest, icon }).success)
+          .toBe(true);
+      },
+    );
+
+    it("rejects an empty description or publisher rather than storing a blank line", () => {
+      expect(DohcPluginManifest.safeParse({ ...minimalManifest, description: "" }).success)
+        .toBe(false);
+      expect(DohcPluginManifest.safeParse({ ...minimalManifest, publisher: "" }).success)
+        .toBe(false);
+    });
+  });
+
+  it("keeps a real plugin's manifest, metadata at every bound, far inside the reader's byte cap", () => {
+    // What a shipping manifest actually looks like — t3-code's shape — with
+    // every metadata string at its maximum. This is the size that has to fit,
+    // and it has to fit with obvious room.
+    const realistic = {
+      version: 1,
+      name: "t3-code",
+      displayName: "a".repeat(120),
+      description: "a".repeat(MAX_PLUGIN_DESCRIPTION_CHARS),
+      publisher: "a".repeat(MAX_PLUGIN_PUBLISHER_CHARS),
+      icon: "icon.svg",
+      entry: "src/main.ts",
+      webApps: [{ id: "app", title: "T3 Code" }],
+      allowSkippedScripts: Array.from({ length: 12 }, (_, index) => `pkg-${index}`),
+    };
+
+    expect(DohcPluginManifest.safeParse(realistic).success).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(realistic), "utf8"))
+      .toBeLessThan(MAX_PLUGIN_MANIFEST_FILE_BYTES / 100);
+  });
+
+  it("leaves the reader's byte gate, not this schema, to refuse a manifest at every bound", () => {
+    // The schema's per-field bounds multiply past the file cap: 100 panels
+    // carrying 1,024-character entry paths alone spend half of it. That is
+    // not a defect — readPluginManifestFile checks the file's size before it
+    // parses anything, so a manifest this large is refused by size with the
+    // cap named. Measured here so the note above the schema states the real
+    // relationship instead of an arithmetic sum that drifts every time a
+    // field is added. Do NOT "fix" this by raising the reader's cap.
+    const fill = (length: number) => "a".repeat(length);
+    const largest = {
+      version: 1,
+      name: fill(214),
+      displayName: fill(120),
+      description: fill(MAX_PLUGIN_DESCRIPTION_CHARS),
+      publisher: fill(MAX_PLUGIN_PUBLISHER_CHARS),
+      icon: `${fill(1020)}.png`,
+      entry: fill(1024),
+      panels: Array.from({ length: 100 }, (_, index) => ({
+        id: `${index}`.padEnd(120, "a"),
+        title: fill(120),
+        entry: fill(1024),
+      })),
+      commands: Array.from({ length: 200 }, (_, index) => ({
+        id: `${index}`.padEnd(120, "a"),
+        title: fill(120),
+      })),
+      webApps: Array.from({ length: 100 }, (_, index) => ({
+        id: `${index}`.padEnd(120, "a"),
+        title: fill(120),
+      })),
+      allowSkippedScripts: Array.from({ length: 300 }, (_, index) =>
+        `${index}`.padEnd(214, "a")),
+    };
+
+    expect(DohcPluginManifest.safeParse(largest).success).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(largest), "utf8"))
+      .toBeGreaterThan(MAX_PLUGIN_MANIFEST_FILE_BYTES);
+  });
+
+  it("costs the reader almost nothing to declare metadata", () => {
+    // The three metadata fields are bounded so that adding all of them to a
+    // manifest cannot meaningfully move it toward the file cap.
+    const withoutMetadata = { ...minimalManifest };
+    const withMetadata = {
+      ...minimalManifest,
+      description: "a".repeat(MAX_PLUGIN_DESCRIPTION_CHARS),
+      publisher: "a".repeat(MAX_PLUGIN_PUBLISHER_CHARS),
+      icon: `${"a".repeat(1020)}.png`,
+    };
+
+    const cost = Buffer.byteLength(JSON.stringify(withMetadata), "utf8") -
+      Buffer.byteLength(JSON.stringify(withoutMetadata), "utf8");
+    expect(cost).toBeLessThan(MAX_PLUGIN_MANIFEST_FILE_BYTES / 100);
   });
 });

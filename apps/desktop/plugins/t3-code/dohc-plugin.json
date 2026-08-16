@@ -2,6 +2,9 @@
   "version": 1,
   "name": "t3-code",
   "displayName": "T3 Code",
+  "description": "Runs the t3 coding agent server on this workspace and opens its web app in dohc.",
+  "publisher": "dohc",
+  "icon": "icon.svg",
   "entry": "src/main.ts",
   "webApps": [{ "id": "app", "title": "T3 Code" }],
   "allowSkippedScripts": [

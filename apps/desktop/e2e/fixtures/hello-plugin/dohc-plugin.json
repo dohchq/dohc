@@ -2,6 +2,9 @@
   "version": 1,
   "name": "hello-plugin",
   "displayName": "Hello Plugin",
+  "description": "Writes a hello note and shows a panel, for the end-to-end plugin tests.",
+  "publisher": "dohc test fixtures",
+  "icon": "icon.svg",
   "entry": "plugin.mjs",
   "panels": [{ "id": "main", "title": "Hello", "entry": "panel/index.html" }],
   "commands": [{ "id": "hello.write", "title": "Write hello note" }]
