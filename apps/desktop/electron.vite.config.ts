@@ -23,7 +23,6 @@ export const mainBundledWorkspaceDeps = [
 
 export const preloadBundledRuntimeDeps = [
   // Sandboxed preloads cannot resolve app/workspace packages at runtime.
-  "@dohc/security-contract",
   "@dohc/workspace-contracts",
   "@dohc/workspace-core",
   // The bridge contract reads the share access levels from the ONE place both
