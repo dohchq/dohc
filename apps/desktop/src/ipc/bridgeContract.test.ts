@@ -2357,6 +2357,13 @@ describe("share changes IPC contract (#646 PR3a)", () => {
       ReadShareProposalChangesResult.parse(row("x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES)))
         .files[0]?.incomingText?.length,
     ).toBe(WORKSPACE_TEXT_EDITOR_MAX_BYTES);
+    // BYTES, not characters. One "é" is two bytes in UTF-8, so a string of
+    // exactly the bound in CHARACTERS is twice the bound in bytes — and a
+    // guard that counted characters would admit a body the relay then refuses.
+    expect(
+      () => ReadShareProposalChangesResult.parse(row("é".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES))),
+      "MUTATION: counting characters instead of bytes doubles the real bound",
+    ).toThrow();
   });
 
   // What a submit LEFT BEHIND is not optional. Softened to a default, a

@@ -4460,10 +4460,14 @@ export function DesktopWorkspaceShell(props: {
   // Latest-wins token, the same guard reloadShareSkipped uses: an answer for
   // one workspace must never repaint another.
   const myShareChangeToken = useRef(0);
-  const reloadMyShareChanges = useCallback(async () => {
+  // Returns the token IT took. A caller that reloads mid-flight has to know
+  // that number: this read advances the shared counter, so a caller still
+  // comparing the token it started with would find it stale and skip its own
+  // cleanup for ever.
+  const reloadMyShareChanges = useCallback(async (): Promise<number> => {
     const token = ++myShareChangeToken.current;
     const result = await bridge().listMyShareChanges({ workspaceId });
-    if (token !== myShareChangeToken.current) return;
+    if (token !== myShareChangeToken.current) return token;
     // The newest submission is the one the surface speaks for; older ones are
     // settled history the granter's side already accounts for.
     setMyShareChange(
@@ -4475,6 +4479,7 @@ export function DesktopWorkspaceShell(props: {
         null,
       ),
     );
+    return token;
   }, [workspaceId]);
   useEffect(() => {
     setMyShareChange(null);
@@ -4488,6 +4493,11 @@ export function DesktopWorkspaceShell(props: {
   }, [isShareView, reloadMyShareChanges]);
   const sendShareChanges = useCallback(async () => {
     const token = myShareChangeToken.current;
+    // The newest token this call owns. The reload below takes a fresh one, and
+    // the cleanup has to compare against THAT — comparing against the token
+    // this call started with finds it stale every time and leaves the control
+    // reading "Sending…" for ever.
+    let owned = token;
     setShareChangesSubmitting(true);
     try {
       const result = await bridge().submitShareChanges({ workspaceId });
@@ -4501,26 +4511,32 @@ export function DesktopWorkspaceShell(props: {
             }
           : null,
       );
-      await reloadMyShareChanges();
+      owned = await reloadMyShareChanges();
     } catch (error) {
       reportShellError("Couldn't send your changes.", error);
     } finally {
-      if (token === myShareChangeToken.current) setShareChangesSubmitting(false);
+      if (owned === myShareChangeToken.current) setShareChangesSubmitting(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId, reloadMyShareChanges]);
   const withdrawShareChanges = useCallback(
     async (proposalId: string) => {
       const token = myShareChangeToken.current;
+      let owned = token;
       setShareChangesSubmitting(true);
       try {
         await bridge().withdrawShareChanges({ workspaceId, proposalId });
         if (token !== myShareChangeToken.current) return;
-        await reloadMyShareChanges();
+        // Taking the changes back retires what the last submit reported about
+        // them. Leaving those lines up would describe a submission that is no
+        // longer out there.
+        setShareChangesEmpty(false);
+        setShareChangesSkipped(null);
+        owned = await reloadMyShareChanges();
       } catch (error) {
         reportShellError("Couldn't take your changes back.", error);
       } finally {
-        if (token === myShareChangeToken.current) setShareChangesSubmitting(false);
+        if (owned === myShareChangeToken.current) setShareChangesSubmitting(false);
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     },

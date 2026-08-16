@@ -287,14 +287,10 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
             sessionId: string;
             path: string;
           }): Promise<{ available: boolean }>;
-          applyEngineYDocUpdate(payload: {
-            sessionId: string;
-            update: Uint8Array;
-            // REQUIRED by the real contract. The hand-written shape here had
-            // drifted from `bridgeContract.ts`, so the call was rejected at
-            // the schema and never reached the refusal this asserts.
-            lineageGeneration: number;
-          }): Promise<void>;
+          // Taken from the CONTRACT, not re-typed here. The hand-written
+          // shape drifted once already, so the call was rejected at the
+          // schema and never reached the refusal this asserts.
+          applyEngineYDocUpdate: DohcDesktopBridge["applyEngineYDocUpdate"];
         };
       }).dohcDesktop;
       const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
@@ -325,6 +321,10 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
           sessionId: "shared-view-bypass",
           update: new Uint8Array([1, 2, 3]),
           lineageGeneration: 1,
+          // Typing this from the contract surfaced a SECOND drift the
+          // hand-written shape hid: `seq` is required too, so the call would
+          // have been rejected at the schema again.
+          seq: 1,
         }),
       );
       return {

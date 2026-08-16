@@ -5844,6 +5844,56 @@ describe("shared view send changes", () => {
     ).toBe("2 files weren't sent — they're not part of this share.");
   });
 
+  // The control has to come back. Sending re-reads the sent changes, and that
+  // read takes a new latest-wins token — so a cleanup still comparing the
+  // token the click started with never matches, and the button stays disabled
+  // reading "Sending…" until the workspace is reopened.
+  it("re-enables Send after a submit that reloads its own state", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    renderShell(bridge, EDIT_SHARE);
+
+    const send = await screen.findByTestId("share-changes-send");
+    await user.click(send);
+    await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("share-changes-send").hasAttribute("disabled"),
+        "MUTATION: comparing the pre-reload token leaves Send stuck on Sending…",
+      ).toBe(false),
+    );
+    expect(screen.getByTestId("share-changes-send").textContent).toContain("Send changes");
+  });
+
+  // Taking the changes back retires what the last submit said about them.
+  it("clears the last submit's lines when the changes are taken back", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.submitShareChanges.mockResolvedValue({
+      submitted: 1,
+      skippedOutsideShare: 2,
+      morePending: false,
+    });
+    bridge.listMyShareChanges.mockResolvedValue({
+      proposals: [
+        { proposalId: "proposal-1", state: "open", createdAtMs: 10, files: 1 },
+      ],
+    });
+    renderShell(bridge, EDIT_SHARE);
+
+    await user.click(await screen.findByTestId("share-changes-send"));
+    await screen.findByTestId("share-changes-skipped");
+
+    await user.click(await screen.findByTestId("share-changes-withdraw"));
+    await waitFor(() => expect(bridge.withdrawShareChanges).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("share-changes-skipped"),
+        "MUTATION: a withdrawn submission keeps describing what it skipped",
+      ).toBeNull(),
+    );
+  });
+
   // Both facts, when both are true. An either/or line drops "more pending"
   // exactly when a submit was largest — which is the case the count exists to
   // report.
