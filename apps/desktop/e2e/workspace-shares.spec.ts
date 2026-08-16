@@ -253,7 +253,12 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
         return error instanceof Error ? error.message : String(error);
       }
     }, UNUSED_CONTENT_HASH);
-    expect(writeAttempt).toContain("This is a shared view — ask e2e-granter@dohc.test for changes.");
+    // A share view's text save is the one write decided at its own routed
+    // seam rather than by the workspace-wide gate (#646 PR3), so a VIEW share
+    // is refused there by the shared-file rule. Every other write handler
+    // below still meets the workspace gate and its wording.
+    expect(writeAttempt).toContain("SharedFileReadOnlyError");
+    expect(writeAttempt).toContain("This shared file is read-only for you.");
 
     // The other three mutation side-doors are refused at the IPC boundary too:
     // a managed agent run, a code-executing site preview, and a write-capable
@@ -889,13 +894,15 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
       JSON.parse(listed.body) as {
         proposals: Array<{
           proposalId: string;
-          proposedByUserId: string;
+          proposedByEmail: string;
           ops: Array<{ basedOnPath: string; afterPath: string; drifted: boolean }>;
         }>;
       }
     ).proposals;
     expect(proposals.length).toBe(1);
-    expect(proposals[0]!.proposedByUserId).toBe("e2e-recipient");
+    // WHO sent them, resolved by the relay from the server-derived user id on
+    // the proposal row — never rebuilt by the client from its share list.
+    expect(proposals[0]!.proposedByEmail).toBe("e2e-recipient@dohc.test");
     expect(proposals[0]!.ops.length).toBe(1);
     expect(proposals[0]!.ops[0]!.afterPath).toBe("docs/shared.md");
     expect(proposals[0]!.ops[0]!.drifted).toBe(false);
