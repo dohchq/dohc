@@ -493,6 +493,7 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       async (_payload: SetPluginWebAppBoundsPayload) => undefined,
     ),
     stopPluginWebApp: vi.fn(async () => undefined),
+    onPluginWebAppFailed: vi.fn(() => () => undefined),
     emitMenuCommand: (command: MenuCommandId) => menuCallback?.(command),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.

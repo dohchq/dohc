@@ -19,11 +19,12 @@ export function PluginWebAppPage(props: {
   workspaceId: string;
   pluginId: string;
   webAppId: string;
-  /** True while the shell paints a full-screen overlay — a dialog, the
-   * command palette, quick open. The guest is a main-process view layered
-   * over this page, so it composites above every overlay and would take the
-   * clicks meant for one. Nothing in the renderer can cover it; only main can
-   * hide it, and this is how main is told. */
+  /** True while the shell paints UI that needs its own clicks — a dialog, the
+   * command palette, an agent's floating permission ask. The guest is a
+   * main-process view layered over this page, so it composites above all of
+   * it and would take the clicks meant for it. Nothing in the renderer can
+   * cover the guest; only main can hide it, and this is how main is told.
+   * See guestBlockingUi.ts for what registers. */
   hiddenByOverlay?: boolean;
   /** Reports the manifest title this app started under, so the tab can carry
    * the name the user installed instead of the raw web app id. */
