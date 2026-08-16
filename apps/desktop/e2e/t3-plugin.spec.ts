@@ -125,36 +125,17 @@ test("t3-code installs, serves its paired web app in a hardened guest, and unins
 
     // 4. Exactly one guest WebContents on a loopback origin, and the SPA
     // strips the pairing credential from its own URL once it exchanges it.
-    const guestUrl = await expect
-      .poll(async () => {
-        const urls = await desktop!.app.evaluate(({ webContents }) =>
-          webContents
-            .getAllWebContents()
-            .map((contents) => contents.getURL())
-            .filter((url) => url.startsWith("http://127.0.0.1:")),
-        );
-        return urls.length === 1 ? urls[0] : null;
-      })
-      .not.toBeNull()
-      .then(() =>
-        desktop!.app.evaluate(({ webContents }) =>
-          webContents
-            .getAllWebContents()
-            .map((contents) => contents.getURL())
-            .find((url) => url.startsWith("http://127.0.0.1:")) ?? "",
-        ),
+    const loopbackUrls = () =>
+      desktop!.app.evaluate(({ webContents }) =>
+        webContents
+          .getAllWebContents()
+          .map((contents) => contents.getURL())
+          .filter((url) => url.startsWith("http://127.0.0.1:")),
       );
-    const origin = new URL(guestUrl).origin;
+    await expect.poll(async () => (await loopbackUrls()).length).toBe(1);
+    const origin = new URL((await loopbackUrls()).at(0) ?? "").origin;
     await expect
-      .poll(() =>
-        desktop!.app.evaluate(({ webContents }) =>
-          webContents
-            .getAllWebContents()
-            .map((contents) => contents.getURL())
-            .filter((url) => url.startsWith("http://127.0.0.1:"))
-            .every((url) => !url.includes("#token=")),
-        ),
-      )
+      .poll(async () => (await loopbackUrls()).every((url) => !url.includes("#token=")))
       .toBe(true);
 
     // 5. The real t3 answers readiness from the test process too, and the
@@ -181,16 +162,7 @@ test("t3-code installs, serves its paired web app in a hardened guest, and unins
     // 6. Closing the tab destroys the guest view; the pairing credential
     // never surfaced in any app log either.
     await tab.getByRole("button", { name: "Close app" }).click();
-    await expect
-      .poll(() =>
-        desktop!.app.evaluate(({ webContents }) =>
-          webContents
-            .getAllWebContents()
-            .filter((contents) => contents.getURL().startsWith("http://127.0.0.1:"))
-            .length,
-        ),
-      )
-      .toBe(0);
+    await expect.poll(async () => (await loopbackUrls()).length).toBe(0);
     const leakedLog = desktop.logs.find((entry) => entry.text.includes("#token="));
     expect(
       leakedLog ? leakedLog.text.slice(0, 40) : undefined,
