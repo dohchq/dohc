@@ -1,11 +1,24 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import {
   PINNED_ESBUILD_VERSION,
   PINNED_PNPM_VERSION,
+  aggregateTreeSha512,
   esbuildPlatformPackageName,
   parseStagingTarget,
   stagePluginTools,
@@ -15,7 +28,11 @@ import {
 const roots = [];
 
 test.afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  // A test that holds a file open on Windows leaves a directory that cannot be
+  // deleted. The temporary directory is not the subject of any test.
+  await Promise.all(
+    roots.splice(0).map((root) => rm(root, { recursive: true, force: true }).catch(() => {})),
+  );
 });
 
 async function scratch() {
@@ -79,6 +96,11 @@ async function treeFiles(root, current = root) {
     else files.push(relative(root, path).replaceAll("\\", "/"));
   }
   return files.sort();
+}
+
+async function siblingScratchDirectories(root) {
+  const entries = await readdir(root);
+  return entries.filter((name) => name.startsWith("staged.")).sort();
 }
 
 test("missing source packages fail loudly", async () => {
@@ -255,7 +277,211 @@ test("re-running overwrites cleanly without retaining stale output", async () =>
 
   const second = await stagePluginTools(options);
 
+  assert.equal(second.swapped, true);
   assert.equal(await readFile(join(destinationRoot, "pnpm", "dist", "pnpm.cjs"), "utf8"), "updated dist\n");
   assert.equal((await treeFiles(destinationRoot)).includes("pnpm/stale.txt"), false);
   assert.notEqual(second.pnpm.sha512, first.pnpm.sha512);
+  assert.deepEqual(await siblingScratchDirectories(root), []);
 });
+
+test("a staged tree that already matches the source is left in place", async () => {
+  const root = await scratch();
+  const source = await createSources(root);
+  const destinationRoot = join(root, "staged");
+  const options = {
+    desktopRoot: root,
+    nodeModulesRoot: source.nodeModulesRoot,
+    destinationRoot,
+  };
+  const first = await stagePluginTools(options);
+
+  // A delete and re-copy cannot preserve either mark: fs.cp writes a new file
+  // with the current time. Digests ignore both, so the trees still match.
+  const stagedEntry = join(destinationRoot, "pnpm", "dist", "pnpm.cjs");
+  const marked = new Date("2001-02-03T04:05:06.000Z");
+  await utimes(stagedEntry, marked, marked);
+  const before = await stat(stagedEntry);
+
+  const second = await stagePluginTools(options);
+
+  const after = await stat(stagedEntry);
+  assert.equal(second.swapped, false);
+  assert.equal(after.mtimeMs, marked.getTime());
+  assert.equal(after.ino, before.ino);
+  assert.equal(second.pnpm.sha512, first.pnpm.sha512);
+  assert.equal(second.esbuild.sha512, first.esbuild.sha512);
+  assert.deepEqual(await siblingScratchDirectories(root), []);
+});
+
+test("a tree an earlier run could not delete is deleted by the next run", async () => {
+  const root = await scratch();
+  const source = await createSources(root);
+  const destinationRoot = join(root, "staged");
+  const options = {
+    desktopRoot: root,
+    nodeModulesRoot: source.nodeModulesRoot,
+    destinationRoot,
+  };
+  await stagePluginTools(options);
+  const leftover = join(root, "staged.replaced-1234-5678");
+  await write(join(leftover, "esbuild", "held.exe"), "held\n");
+
+  const result = await stagePluginTools(options);
+
+  assert.deepEqual(result.retained, []);
+  assert.deepEqual(await siblingScratchDirectories(root), []);
+});
+
+test("a run that fails leaves the staged tree unchanged", async () => {
+  const root = await scratch();
+  const source = await createSources(root);
+  const destinationRoot = join(root, "staged");
+  const options = {
+    desktopRoot: root,
+    nodeModulesRoot: source.nodeModulesRoot,
+    destinationRoot,
+  };
+  await stagePluginTools(options);
+  const before = await aggregateTreeSha512(destinationRoot);
+
+  await rm(join(source.nodeModulesRoot, "pnpm", "dist"), { recursive: true, force: true });
+  await write(join(source.nodeModulesRoot, "pnpm", "dist"), "not a directory\n");
+
+  await assert.rejects(stagePluginTools(options), /pnpm dist source at .* must be a directory/);
+
+  assert.equal(await aggregateTreeSha512(destinationRoot), before);
+  assert.deepEqual(await siblingScratchDirectories(root), []);
+});
+
+test(
+  "a file a running app holds open never leaves a half-deleted tree",
+  {
+    skip:
+      process.platform === "win32"
+        ? false
+        : "Only Windows refuses to delete a file that a running process executes.",
+  },
+  async () => {
+    const root = await scratch();
+    const source = await createSources(root);
+    const destinationRoot = join(root, "staged");
+    const options = {
+      desktopRoot: root,
+      nodeModulesRoot: source.nodeModulesRoot,
+      destinationRoot,
+    };
+    await stagePluginTools(options);
+
+    // The dev app's esbuild service executes a binary inside the staged tree
+    // and holds it open for as long as the app runs.
+    const heldExe = join(
+      destinationRoot,
+      "esbuild",
+      source.platformKey,
+      "node_modules",
+      "@esbuild",
+      source.platformKey,
+      "held.exe",
+    );
+    await copyFile(process.execPath, heldExe);
+    const held = spawn(heldExe, ["-e", "console.log('held'); setTimeout(() => {}, 30_000);"], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    try {
+      await once(held.stdout, "data");
+      await write(join(source.nodeModulesRoot, "pnpm", "dist", "pnpm.cjs"), "updated dist\n");
+
+      const result = await stagePluginTools(options);
+
+      assert.equal(result.swapped, true);
+      assert.deepEqual(await treeFiles(destinationRoot), [
+        `esbuild/${source.platformKey}/node_modules/@esbuild/${source.platformKey}/bin/esbuild`,
+        `esbuild/${source.platformKey}/node_modules/@esbuild/${source.platformKey}/package.json`,
+        `esbuild/${source.platformKey}/node_modules/esbuild/LICENSE.md`,
+        `esbuild/${source.platformKey}/node_modules/esbuild/bin/esbuild`,
+        `esbuild/${source.platformKey}/node_modules/esbuild/lib/main.js`,
+        `esbuild/${source.platformKey}/node_modules/esbuild/package.json`,
+        "pnpm/LICENSE",
+        "pnpm/bin/pnpm.mjs",
+        "pnpm/dist/pnpm.cjs",
+        "pnpm/package.json",
+      ]);
+      assert.equal(await readFile(join(destinationRoot, "pnpm", "bin", "pnpm.mjs"), "utf8"), "pnpm entry\n");
+      assert.equal(
+        await readFile(join(destinationRoot, "pnpm", "dist", "pnpm.cjs"), "utf8"),
+        "updated dist\n",
+      );
+
+      // The held file is reported, and it is in the replaced tree, not the
+      // live one.
+      assert.equal(result.retained.length, 1);
+      assert.match(result.retained[0].root, /staged\.replaced-/);
+      assert.match(result.retained[0].message, /held\.exe/);
+      assert.equal(result.retained[0].message.includes(result.retained[0].root), true);
+
+      // The app still runs, so the next run still cannot delete that tree and
+      // still reports it.
+      const next = await stagePluginTools(options);
+      assert.equal(next.swapped, false);
+      assert.deepEqual(
+        next.retained.map(({ root }) => root),
+        [result.retained[0].root],
+      );
+      assert.match(next.retained[0].message, /held\.exe/);
+    } finally {
+      held.kill();
+      await once(held, "exit").catch(() => {});
+    }
+  },
+);
+
+test(
+  "a swap the running app blocks keeps the staged tree and says what to stop",
+  {
+    skip:
+      process.platform === "win32"
+        ? false
+        : "Only Windows refuses to rename a directory a running process uses.",
+  },
+  async () => {
+    const root = await scratch();
+    const source = await createSources(root);
+    const destinationRoot = join(root, "staged");
+    const options = {
+      desktopRoot: root,
+      nodeModulesRoot: source.nodeModulesRoot,
+      destinationRoot,
+    };
+    await stagePluginTools(options);
+    const before = await aggregateTreeSha512(destinationRoot);
+
+    // A process that works inside the staged tree holds the directory itself.
+    const busy = spawn(process.execPath, ["-e", "console.log('busy'); setTimeout(() => {}, 30_000);"], {
+      cwd: destinationRoot,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    try {
+      await once(busy.stdout, "data");
+      await write(join(source.nodeModulesRoot, "pnpm", "dist", "pnpm.cjs"), "updated dist\n");
+
+      await assert.rejects(
+        stagePluginTools(options),
+        (error) => {
+          assert.match(error.message, /could not move .*staged aside/);
+          assert.match(error.message, /Stop the app that runs from this worktree/);
+          assert.match(error.message, /The existing tree is unchanged\./);
+          return true;
+        },
+      );
+
+      assert.equal(await aggregateTreeSha512(destinationRoot), before);
+      assert.deepEqual(
+        (await siblingScratchDirectories(root)).filter((name) => name.includes(".replaced-")),
+        [],
+      );
+    } finally {
+      busy.kill();
+      await once(busy, "exit").catch(() => {});
+    }
+  },
+);
