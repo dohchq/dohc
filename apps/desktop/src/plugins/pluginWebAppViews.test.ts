@@ -20,8 +20,6 @@ function record(
   };
 }
 
-const bounds = { x: 0, y: 0, width: 100, height: 100 };
-
 describe("PluginWebAppViewRegistry", () => {
   it("returns the displaced record when the same identity registers again", () => {
     const registry = new PluginWebAppViewRegistry<string>();
@@ -40,8 +38,6 @@ describe("PluginWebAppViewRegistry", () => {
         ...record(),
         senderId: 7,
         generation: 2,
-        bounds,
-        visible: true,
       }),
     ).not.toBeNull();
     // A stale generation — the renderer reloaded — must not move the view.
@@ -50,8 +46,6 @@ describe("PluginWebAppViewRegistry", () => {
         ...record(),
         senderId: 7,
         generation: 1,
-        bounds,
-        visible: true,
       }),
     ).toBeNull();
     // Another renderer must not move the view.
@@ -60,8 +54,6 @@ describe("PluginWebAppViewRegistry", () => {
         ...record(),
         senderId: 8,
         generation: 2,
-        bounds,
-        visible: true,
       }),
     ).toBeNull();
   });
@@ -73,8 +65,6 @@ describe("PluginWebAppViewRegistry", () => {
       registry.authorizeBounds({
         ...record(),
         workspaceId: "ws-2",
-        bounds,
-        visible: true,
       }),
     ).toBeNull();
   });

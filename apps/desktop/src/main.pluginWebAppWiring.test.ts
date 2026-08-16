@@ -16,6 +16,14 @@ function handler(channel: string): string {
   return mainSource.slice(start, mainSource.indexOf("\n  });", start));
 }
 
+function functionSource(signature: string): string {
+  const start = mainSource.indexOf(signature);
+  expect(start).toBeGreaterThan(-1);
+  const end = mainSource.indexOf("\n}\n", start);
+  expect(end).toBeGreaterThan(start);
+  return mainSource.slice(start, end);
+}
+
 describe("plugin web app main-process wiring", () => {
   it("validates the web app registration before starting its host", () => {
     const open = handler("openPluginWebApp");
@@ -84,19 +92,17 @@ describe("plugin web app main-process wiring", () => {
   });
 
   it("leaves a normal tab close paired", () => {
-    const stopWebApp = mainSource.slice(
-      mainSource.indexOf("async function stopPluginWebAppUnderStartLock("),
-      mainSource.indexOf(
-        "\n}\n",
-        mainSource.indexOf("async function stopPluginWebAppUnderStartLock("),
-      ),
-    );
+    // Both halves of the close: this path and the host release it delegates
+    // to. An unpair added to either one would unpair every tab close.
+    const closePath =
+      functionSource("async function stopPluginWebAppUnderStartLock(") +
+      functionSource("async function stopPluginHostIfUnclaimed(");
     // MUTATION (unpair on every close): an enabled plugin's server would then
     // be torn down and respawned on every tab close, and the guest's session
     // cookie — which already landed, and which the next open reuses — would
     // be worthless. Only the recovery path unpairs.
-    expect(stopWebApp).not.toContain("stopWebApp(pluginId");
-    expect(stopWebApp).not.toContain("recoverConsumedWebAppCredential");
+    expect(closePath).not.toContain("stopWebApp(pluginId");
+    expect(closePath).not.toContain("recoverConsumedWebAppCredential");
   });
 
   it("applies bounds only through the registry's sender-and-generation guard", () => {
@@ -112,27 +118,24 @@ describe("plugin web app main-process wiring", () => {
   });
 
   it("shares the host claim accounting between panels and web apps", () => {
-    const stopWebApp = mainSource.slice(
-      mainSource.indexOf("async function stopPluginWebAppUnderStartLock("),
-      mainSource.indexOf(
-        "\n}\n",
-        mainSource.indexOf("async function stopPluginWebAppUnderStartLock("),
-      ),
+    // One helper, both close paths: neither can grow a claim rule the other
+    // does not have.
+    const call = "await stopPluginHostIfUnclaimed(workspaceId, pluginId);";
+    expect(functionSource("async function stopPluginWebAppUnderStartLock(")).toContain(
+      call,
     );
-    expect(stopWebApp).toContain("hasAnotherPanel");
-    expect(stopWebApp).toContain("!pluginWebAppViews.hasForPlugin(workspaceId, pluginId)");
-    expect(stopWebApp).toContain(
-      "panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))",
-    );
+    expect(functionSource("async function stopPluginPanel(")).toContain(call);
 
-    const stopPanel = mainSource.slice(
-      mainSource.indexOf("async function stopPluginPanel("),
-      mainSource.indexOf("\n}\n\nasync function stopPluginWebApp"),
-    );
+    const unclaimed = functionSource("async function stopPluginHostIfUnclaimed(");
+    expect(unclaimed).toContain("hasAnotherPanel");
     // MUTATION (shared claim): without this, closing the last panel stops a
-    // host whose web app tab is still open on the same plugin.
-    expect(stopPanel).toContain(
+    // host whose web app tab is still open on the same plugin — and closing
+    // the last tab stops a host a panel still needs.
+    expect(unclaimed).toContain(
       "!pluginWebAppViews.hasForPlugin(workspaceId, pluginId) &&",
+    );
+    expect(unclaimed).toContain(
+      "panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))",
     );
   });
 

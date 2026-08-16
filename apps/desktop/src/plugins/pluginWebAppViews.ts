@@ -4,8 +4,6 @@
 // (attach, position, destroy) to what it gets back. That split is what keeps
 // the async-guard rules here testable without Electron.
 
-import type { GuestBounds } from "./pluginWebAppGuest";
-
 export interface PluginWebAppViewIdentity {
   workspaceId: string;
   pluginId: string;
@@ -19,13 +17,6 @@ export interface PluginWebAppViewRecord<TView>
   origin: string;
   partition: string;
   view: TView;
-}
-
-export interface PluginWebAppBoundsRequest extends PluginWebAppViewIdentity {
-  senderId: number;
-  generation: number;
-  bounds: GuestBounds;
-  visible: boolean;
 }
 
 function viewKey(identity: PluginWebAppViewIdentity): string {
@@ -53,7 +44,7 @@ export class PluginWebAppViewRegistry<TView> {
    * for workspace A must never reposition workspace B's view.
    */
   authorizeBounds(
-    request: PluginWebAppBoundsRequest,
+    request: PluginWebAppViewIdentity & { senderId: number; generation: number },
   ): PluginWebAppViewRecord<TView> | null {
     const record = this.views.get(viewKey(request));
     if (

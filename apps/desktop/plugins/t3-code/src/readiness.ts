@@ -46,7 +46,6 @@ export interface PollT3ReadinessInput {
   intervalMs?: number;
   requestTimeoutMs?: number;
   overallTimeoutMs?: number;
-  now?: () => number;
 }
 
 function decodeDescriptor(value: unknown): T3EnvironmentDescriptor | null {
@@ -92,8 +91,7 @@ export async function pollT3Readiness(
   const intervalMs = input.intervalMs ?? READINESS_INTERVAL_MS;
   const requestTimeoutMs = input.requestTimeoutMs ?? READINESS_REQUEST_TIMEOUT_MS;
   const overallTimeoutMs = input.overallTimeoutMs ?? READINESS_OVERALL_TIMEOUT_MS;
-  const now = input.now ?? Date.now;
-  const deadline = now() + overallTimeoutMs;
+  const deadline = Date.now() + overallTimeoutMs;
 
   let exited = false;
   void Promise.resolve(input.childExited).then(
@@ -107,7 +105,7 @@ export async function pollT3Readiness(
 
   while (true) {
     if (exited) throw new T3ChildExitError();
-    if (now() >= deadline) throw new T3ReadinessTimeoutError(overallTimeoutMs);
+    if (Date.now() >= deadline) throw new T3ReadinessTimeoutError(overallTimeoutMs);
     // A null descriptor means "not a ready t3 server yet": not listening, a
     // request timeout, another status, or an undecodable body. Poll on.
     const descriptor = await fetchT3Descriptor(input.environmentUrl, {

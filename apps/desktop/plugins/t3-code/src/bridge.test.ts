@@ -248,7 +248,6 @@ async function createFixture(
   const { client, spawns } = createFakeBroker(bootModes);
   const logs: string[] = [];
   const ctx: T3BridgeContext = {
-    pluginId: "t3-code",
     pluginRoot,
     workspaceRoot,
     stateRoot,

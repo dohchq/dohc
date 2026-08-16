@@ -2991,6 +2991,44 @@ async function stopRunningPluginPanelPreview(input: {
   );
 }
 
+// Releases this plugin's on-demand host claim and stops the host when that
+// claim was the only reason it runs. Both close paths — the last panel and
+// the last web app tab — share this accounting, so neither can stop a host
+// the other still needs. Callers hold the plugin's host lifecycle lock
+// (withPluginHostLifecycleLock); the claim check and the stop must not
+// interleave with another open or close for the same plugin.
+async function stopPluginHostIfUnclaimed(
+  workspaceId: string,
+  pluginId: string,
+): Promise<void> {
+  const hasAnotherPanel = [...runningPluginPanels.values()].some(
+    (candidate) =>
+      candidate.workspaceId === workspaceId && candidate.pluginId === pluginId,
+  );
+  if (
+    !hasAnotherPanel &&
+    // An open web app rides on the same host — its wrapper server dies
+    // with the host's spawn, so it holds the host open exactly like a
+    // sibling panel does.
+    !pluginWebAppViews.hasForPlugin(workspaceId, pluginId) &&
+    // Only stop the host if an on-demand open is the reason it's running at
+    // all — an enabled, workspace-started plugin has no panel or tab to
+    // answer to (#779 round 4 finding 3).
+    panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))
+  ) {
+    // Stops the shared host directly rather than through the pipeline's
+    // disable()/enable() actions — this is "nothing needs the process right
+    // now," not a user disable, so local state (disabled, approvedHash) must
+    // not change. PluginHost.stop() does not itself emit a status change, so
+    // the pipeline's cached status can go briefly stale here until the next
+    // real status-affecting event (any action, or the next ensureStarted);
+    // the pipeline never uses that cache to decide whether to start a
+    // process, only to display status, so this cannot start a second process
+    // for the same id.
+    await pluginPipelines.get(workspaceId)?.host.stop(pluginId);
+  }
+}
+
 async function stopPluginPanel(
   workspaceId: string,
   pluginId: string,
@@ -3007,33 +3045,7 @@ async function stopPluginPanel(
       const panel = runningPluginPanels.get(key);
       runningPluginPanels.delete(key);
       if (panel) await stopRunningPluginPanelPreview(panel);
-      const hasAnotherPanel = [...runningPluginPanels.values()].some(
-        (candidate) =>
-          candidate.workspaceId === workspaceId &&
-          candidate.pluginId === pluginId,
-      );
-      if (
-        !hasAnotherPanel &&
-        // An open web app rides on the same host — its wrapper server dies
-        // with the host's spawn, so it holds the host open exactly like a
-        // sibling panel does.
-        !pluginWebAppViews.hasForPlugin(workspaceId, pluginId) &&
-        // Only stop the host if a panel is the reason it's running at all
-        // — an enabled, workspace-started plugin has no panel to answer to
-        // (#779 round 4 finding 3).
-        panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))
-      ) {
-        // Stops the shared host directly rather than through the pipeline's
-        // disable()/enable() actions — this is "no panel needs the process
-        // right now," not a user disable, so local state (disabled,
-        // approvedHash) must not change. PluginHost.stop() does not itself
-        // emit a status change, so the pipeline's cached status can go
-        // briefly stale here until the next real status-affecting event
-        // (any action, or the next ensureStarted); the pipeline never uses
-        // that cache to decide whether to start a process, only to display
-        // status, so this cannot start a second process for the same id.
-        await pluginPipelines.get(workspaceId)?.host.stop(pluginId);
-      }
+      await stopPluginHostIfUnclaimed(workspaceId, pluginId);
     },
   );
 }
@@ -3062,20 +3074,7 @@ async function stopPluginWebAppUnderStartLock(
     async () => {
       const removed = pluginWebAppViews.remove({ workspaceId, pluginId, webAppId });
       if (removed) destroyPluginWebAppViews([removed]);
-      const hasAnotherPanel = [...runningPluginPanels.values()].some(
-        (candidate) =>
-          candidate.workspaceId === workspaceId &&
-          candidate.pluginId === pluginId,
-      );
-      if (
-        !hasAnotherPanel &&
-        !pluginWebAppViews.hasForPlugin(workspaceId, pluginId) &&
-        // Same claim accounting as stopPluginPanel: stop the host only when
-        // an on-demand open is the reason it runs, and nothing else needs it.
-        panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))
-      ) {
-        await pluginPipelines.get(workspaceId)?.host.stop(pluginId);
-      }
+      await stopPluginHostIfUnclaimed(workspaceId, pluginId);
     },
   );
 }
@@ -6825,8 +6824,6 @@ function registerIpcHandlers(
       webAppId: input.webAppId,
       senderId: event.sender.id,
       generation: rendererGeneration(event.sender.id),
-      bounds: input.bounds,
-      visible: input.visible,
     });
     if (!record) return;
     record.view.view.setBounds(input.bounds);

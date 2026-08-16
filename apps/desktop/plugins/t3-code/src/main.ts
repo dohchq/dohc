@@ -14,7 +14,6 @@ let bridge: T3Bridge | null = null;
 const handler: PluginHandler = {
   activate(ctx: PluginActivateContext): void {
     bridge = createT3Bridge({
-      pluginId: ctx.pluginId,
       pluginRoot: ctx.pluginRoot,
       workspaceRoot: ctx.workspaceRoot,
       stateRoot: ctx.stateRoot,

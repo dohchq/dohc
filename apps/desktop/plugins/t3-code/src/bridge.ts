@@ -44,7 +44,6 @@ const RAW_BUFFER_LIMIT = 16_384;
 const RECENT_LOG_LIMIT = 20;
 
 export interface T3BridgeContext {
-  pluginId: string;
   pluginRoot: string;
   workspaceRoot: string;
   stateRoot: string;

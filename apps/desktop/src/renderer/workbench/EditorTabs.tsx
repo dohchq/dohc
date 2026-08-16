@@ -440,9 +440,7 @@ export function EditorTabs(props: {
             key={tab.path}
             groupId={props.groupId}
             path={tab.path}
-            {...(props.tabLabels?.has(tab.path)
-              ? { label: props.tabLabels.get(tab.path) }
-              : {})}
+            label={props.tabLabels?.get(tab.path)}
             active={tab.path === props.activeTab}
             dirty={
               (tab.path === props.activeTab && props.activeTabDirty) ||
