@@ -786,6 +786,93 @@ describe("accept, decline, and withdraw", () => {
   });
 });
 
+describe("what an open proposal survives", () => {
+  it("keeps its content out of the unreferenced-blob sweep", async () => {
+    // A proposed change is not in the log — that is the whole point of holding
+    // it — so the sweep cannot see the reference and would reclaim the content
+    // after the grace window. A proposal that outlived its own blobs could
+    // never be accepted, and the granter's only honest answer would be
+    // "decline".
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const granter = new Granter(h);
+    const head = await granter.write("object-in", "docs/in.md", "granter one");
+    const shareId = await createShare(h, "edit");
+    await uploadShareBlob(h, shareId, "recipient two");
+    const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })]);
+    const proposalId = (await json(submitted)).proposalId as string;
+
+    // Long past any grace window.
+    const swept = await storage.collectUnreferencedBlobs(WORKSPACE, {
+      nowMs: 4242 + 365 * 24 * 60 * 60 * 1000,
+    });
+    expect(
+      swept.removedSha256s,
+      "MUTATION: an open proposal's content must survive the sweep",
+    ).not.toContain(sha256("recipient two"));
+
+    // And the proof that it still works: the accept lands the content.
+    expect((await settle(h, proposalId, "accept")).status).toBe(200);
+    expect((await granter.sharedMoments(shareId))[0]!.payloadAfterBlobSha256).toBe(
+      sha256("recipient two"),
+    );
+  });
+
+  it("stops protecting its content once it is declined", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const granter = new Granter(h);
+    const head = await granter.write("object-in", "docs/in.md", "granter one");
+    const shareId = await createShare(h, "edit");
+    await uploadShareBlob(h, shareId, "recipient two");
+    const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })]);
+    expect(
+      (await settle(h, (await json(submitted)).proposalId as string, "decline")).status,
+    ).toBe(200);
+
+    const swept = await storage.collectUnreferencedBlobs(WORKSPACE, {
+      nowMs: 4242 + 365 * 24 * 60 * 60 * 1000,
+    });
+    expect(
+      swept.removedSha256s,
+      "MUTATION: declined content is never going into the log, so it must be reclaimable",
+    ).toContain(sha256("recipient two"));
+  });
+
+  it("stays acceptable after the granter ends the share", async () => {
+    // The lifecycle edge the design states: revoking stops the RECIPIENT
+    // writing. The granter acting on their own workspace is not a recipient
+    // write, and changes already sent are still theirs to decide on.
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const granter = new Granter(h);
+    const head = await granter.write("object-in", "docs/in.md", "granter one");
+    const shareId = await createShare(h, "edit");
+    await uploadShareBlob(h, shareId, "recipient two");
+    const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })]);
+    const proposalId = (await json(submitted)).proposalId as string;
+
+    expect(
+      (await h(request(GRANTER, `/sync/shares/${shareId}/revoke`, { method: "POST" }))).status,
+    ).toBe(200);
+    expect(
+      (await reviewRows(h)).length,
+      "MUTATION: ending a share must not hide changes already sent",
+    ).toBe(1);
+    expect((await settle(h, proposalId, "accept")).status).toBe(200);
+    expect((await granter.sharedMoments(shareId)).length).toBe(1);
+    // The recipient, meanwhile, can do nothing more.
+    expect(
+      (await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })], {
+        submitId: "after-revoke",
+      })).status,
+    ).toBe(404);
+  });
+});
+
 describe("who may do what", () => {
   it("never lets a recipient accept its own changes", async () => {
     const storage = await testStorage();

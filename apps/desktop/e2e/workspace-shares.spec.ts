@@ -729,3 +729,186 @@ test("comment side: a recipient chats about a shared file and the message reache
     else await temp.cleanup();
   }
 });
+
+test("edit side: a recipient edits a shared file, sends the changes, and the granter accepts them", async () => {
+  // #646 PR3a — the whole proposal loop, through the real app and a real
+  // relay. This is the only place in the repo where a real engine and a real
+  // relay meet, so it is the only place that can prove the loop rather than
+  // one half of it: the recipient's engine journals the edit, the relay holds
+  // it as a change, the granter accepts, and the change lands in the
+  // GRANTER's log carrying a base the granter's own log can name.
+  test.setTimeout(300_000);
+  const temp = await createTempWorkspace();
+  const workspaceId = "share-edit-e2e";
+  let relay: SyncRelayHandle | null = null;
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const EDITED = "# Shared\n\nThe comet-tail draft, corrected.\n";
+
+  try {
+    relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay.sqlite") });
+    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
+    const granter = new RelayFilePeer({
+      baseUrl: relay.baseUrl,
+      token: GRANTER_TOKEN,
+      workspaceId,
+    });
+    const [shared] = await granter.writeTextFiles([
+      { path: "docs/shared.md", text: "# Shared\n\nThe comet-tail draft.\n" },
+      { path: "private/hidden.md", text: "The kraken ledger stays private.\n" },
+    ]);
+
+    const create = await relayJson(relay.baseUrl, GRANTER_TOKEN, `/sync/${workspaceId}/shares`, {
+      method: "POST",
+      body: JSON.stringify({
+        recipientEmail: RECIPIENT_EMAIL,
+        paths: ["docs"],
+        access: "edit",
+      }),
+    });
+    expect(create.status).toBe(200);
+    const shareId = (JSON.parse(create.body) as { shareId: string }).shareId;
+
+    await seedCloudCredentials(temp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: RECIPIENT_EMAIL,
+      userId: "e2e-recipient",
+      token: RECIPIENT_TOKEN,
+    });
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+
+    await page.getByTestId("first-run-open-share").click();
+    await expect(page.getByTestId("open-shared-view")).toBeVisible();
+    await page.getByTestId("open-share-code").fill(`dohc-share:${shareId}:${relay.baseUrl}`);
+    await page.getByTestId("open-share-choose-folder").click();
+    await expect(page.getByTestId("open-shared-view")).toContainText(temp.rootPath);
+    await page.getByTestId("open-share-start").click();
+    await expect(page.getByTestId("workspace-shell")).toBeVisible();
+
+    // The banner states the right the share actually grants.
+    const banner = page.getByTestId("shared-view-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText("send your changes");
+
+    // The edit, written through the IPC boundary main owns. At view and
+    // comment this same call is refused; the receive-side spec pins that.
+    const wrote = await page.evaluate(async (text) => {
+      const api = (
+        window as unknown as {
+          dohcDesktop: Pick<DohcDesktopBridge, "getWorkspaceRegistry" | "writeWorkspaceText">;
+        }
+      ).dohcDesktop;
+      const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
+      try {
+        await api.writeWorkspaceText({ workspaceId, path: "docs/shared.md", text });
+        return "written";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }, EDITED);
+    expect(wrote, "an edit-level recipient may write to its own share view").toBe("written");
+
+    // Sending waits for the capture to settle the write into a moment. A
+    // submit that finds nothing pending makes no proposal, so polling it is
+    // safe and never mints an empty one.
+    await expect
+      .poll(
+        async () =>
+          await page.evaluate(async () => {
+            const api = (
+              window as unknown as {
+                dohcDesktop: Pick<
+                  DohcDesktopBridge,
+                  "getWorkspaceRegistry" | "submitShareChanges"
+                >;
+              }
+            ).dohcDesktop;
+            const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
+            try {
+              return (await api.submitShareChanges({ workspaceId })).submitted;
+            } catch (error) {
+              return error instanceof Error ? error.message : String(error);
+            }
+          }),
+        { timeout: 120_000, intervals: [2_000] },
+      )
+      .toBe(1);
+
+    // The granter's side, read over HTTP as the granter: one change, on the
+    // shared file, not drifted.
+    const listed = await relayJson(relay.baseUrl, GRANTER_TOKEN, `/sync/${workspaceId}/proposals`);
+    expect(listed.status).toBe(200);
+    const proposals = (
+      JSON.parse(listed.body) as {
+        proposals: Array<{
+          proposalId: string;
+          proposedByUserId: string;
+          ops: Array<{ basedOnPath: string; afterPath: string; drifted: boolean }>;
+        }>;
+      }
+    ).proposals;
+    expect(proposals.length).toBe(1);
+    expect(proposals[0]!.proposedByUserId).toBe("e2e-recipient");
+    expect(proposals[0]!.ops.length).toBe(1);
+    expect(proposals[0]!.ops[0]!.afterPath).toBe("docs/shared.md");
+    expect(proposals[0]!.ops[0]!.drifted).toBe(false);
+
+    // Nothing is in the granter's log until the granter says so.
+    const beforeAccept = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${workspaceId}/log?since=0&limit=500`,
+    );
+    const sharedOpsBefore = (
+      JSON.parse(beforeAccept.body) as { ops: Array<{ originId: string }> }
+    ).ops.filter((op) => op.originId.startsWith(`share:${shareId}:`));
+    expect(sharedOpsBefore.length, "an open change must not be in the granter's log").toBe(0);
+
+    const accepted = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${workspaceId}/proposals/${proposals[0]!.proposalId}/accept`,
+      { method: "POST" },
+    );
+    expect(accepted.status, accepted.body).toBe(200);
+
+    // The proof. The change is in the GRANTER's log, under this share's
+    // namespaced origin, naming the GRANTER's own object and the GRANTER's
+    // own moment as its base — which is what lets the granter's engine
+    // fast-forward instead of opening a conflict for a lineage it never saw.
+    const afterAccept = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${workspaceId}/log?since=0&limit=500`,
+    );
+    const landed = (
+      JSON.parse(afterAccept.body) as {
+        ops: Array<{ originId: string; opKind: string; payload: Record<string, unknown> }>;
+      }
+    ).ops.filter(
+      (op) => op.originId.startsWith(`share:${shareId}:`) && op.opKind === "moment.append",
+    );
+    expect(landed.length).toBe(1);
+    expect(landed[0]!.payload.objectId).toBe(shared!.objectId);
+    expect(landed[0]!.payload.beforeLatestMomentId).toBe(shared!.latestMomentId);
+    expect(landed[0]!.payload.beforeBlobSha256).toBe(shared!.blobSha256);
+    expect(landed[0]!.payload.payloadAfterPath).toBe("docs/shared.md");
+    expect(landed[0]!.payload.operation).toBe("write");
+
+    // And the content really crossed: the granter can read the recipient's
+    // bytes out of its own workspace.
+    const digest = String(landed[0]!.payload.payloadAfterBlobSha256);
+    const blob = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${workspaceId}/blobs/${digest}`,
+    );
+    expect(blob.status).toBe(200);
+    expect(blob.body).toBe(EDITED);
+  } finally {
+    await relay?.stop();
+    if (desktop) await cleanupDesktopWorkspace(desktop, temp);
+    else await temp.cleanup();
+  }
+});

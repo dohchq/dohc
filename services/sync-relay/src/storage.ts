@@ -1421,6 +1421,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     // a blob uploaded just before its referencing log op is appended survives
     // the gap between the two phases. cutoff is the newest created_at_ms still
     // eligible for collection.
+    //
+    // #646 PR3a: an OPEN proposal's content is referenced too, and the log
+    // cannot say so — a proposed change is not in the log, which is the whole
+    // point of holding it. Without this second clause a proposal left open
+    // past the grace window would lose its content to the sweep and could
+    // never be accepted, so the granter's only honest answer would be
+    // "decline". A settled proposal stops protecting its blobs: an accepted
+    // one has them in the log, and a declined one never will.
     const cutoff = options.nowMs - this.blobGraceMs;
     // Phase 1 (read only, no write lock): candidate shas that are unreferenced
     // AND aged past the grace window.
@@ -1435,6 +1443,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
              FROM sync_relay_log l
              WHERE l.workspace_id = b.workspace_id
                AND l.payload_json LIKE '%' || b.sha256 || '%'
+           )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM sync_relay_share_proposal_ops o
+             JOIN sync_relay_share_proposals p ON p.proposal_id = o.proposal_id
+             WHERE p.workspace_id = b.workspace_id
+               AND p.state = 'open'
+               AND o.after_blob_sha256 = b.sha256
            )
          ORDER BY b.sha256`,
       )
@@ -1454,6 +1470,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
            FROM sync_relay_log l
            WHERE l.workspace_id = ?
              AND l.payload_json LIKE '%' || ? || '%'
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM sync_relay_share_proposal_ops o
+           JOIN sync_relay_share_proposals p ON p.proposal_id = o.proposal_id
+           WHERE p.workspace_id = ? AND p.state = 'open' AND o.after_blob_sha256 = ?
          )`,
     );
     const CHUNK = 200;
@@ -1462,7 +1484,15 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       this.db.exec("BEGIN IMMEDIATE");
       try {
         for (const sha256 of chunk) {
-          const result = deleteStmt.run(workspaceId, sha256, cutoff, workspaceId, sha256);
+          const result = deleteStmt.run(
+            workspaceId,
+            sha256,
+            cutoff,
+            workspaceId,
+            sha256,
+            workspaceId,
+            sha256,
+          );
           if (result.changes > 0) removedSha256s.push(sha256);
         }
         this.db.exec("COMMIT");
