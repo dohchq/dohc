@@ -91,6 +91,38 @@ async function settleBridgeAfterUnmount(): Promise<void> {
   });
 }
 
+// A text view's test id appears one commit BEFORE CodeMirror exists: the view
+// creates its EditorView — and with it `.cm-content` — in a passive effect. A
+// `querySelector` on the render that found the test id therefore returns null
+// often enough to matter, and `as HTMLElement` used to hide exactly that null
+// until a later line failed on it. Waiting for the element is the honest read,
+// and it is what every interaction here needs anyway: no user can click into an
+// editor that has not been built (#797).
+async function textEditorContent(host: HTMLElement): Promise<HTMLElement> {
+  return await waitFor(() => {
+    const content = host.querySelector(".cm-content");
+    if (!(content instanceof HTMLElement)) {
+      throw new Error("CodeMirror has not mounted .cm-content yet");
+    }
+    return content;
+  });
+}
+
+async function findTextEditorContent(): Promise<HTMLElement> {
+  return await textEditorContent(await screen.findByTestId("view-text-editor"));
+}
+
+// The same wait for a pane count: `findAllByTestId` resolves on the FIRST
+// match, so a test that wants two panes can otherwise index into one.
+async function findTextEditorContents(count: number): Promise<HTMLElement[]> {
+  const hosts = await waitFor(() => {
+    const found = screen.getAllByTestId("view-text-editor");
+    expect(found).toHaveLength(count);
+    return found;
+  });
+  return await Promise.all(hosts.map(textEditorContent));
+}
+
 // Build legacy app-model path markers through interpolation so this test does
 // not contain the raw deprecated folder or manifest filenames that the
 // no-legacy scanner is meant to catch.
@@ -959,7 +991,7 @@ describe("markdown editor unmount flush", () => {
     });
     const user = userEvent.setup();
     let editors = screen.getAllByTestId("view-text-editor");
-    const firstContent = editors[0]!.querySelector(".cm-content") as HTMLElement;
+    const firstContent = await textEditorContent(editors[0]!);
     await waitFor(() => expect(firstContent.textContent).toBe("New"));
     await user.click(firstContent);
     await user.keyboard("{End} peer");
@@ -981,7 +1013,7 @@ describe("markdown editor unmount flush", () => {
     });
 
     editors = screen.getAllByTestId("view-text-editor");
-    const secondContent = editors[1]!.querySelector(".cm-content") as HTMLElement;
+    const secondContent = await textEditorContent(editors[1]!);
     await waitFor(() => expect(secondContent.textContent).toBe("New peer"));
     await user.click(secondContent);
     await user.keyboard("{End} second");
@@ -1070,9 +1102,9 @@ describe("markdown editor unmount flush", () => {
     // first pane's own edit is what its own lift sets aside.
     const user = userEvent.setup();
     let editors = screen.getAllByTestId("view-text-editor");
-    await user.click(editors[1]!.querySelector(".cm-content") as HTMLElement);
+    await user.click(await textEditorContent(editors[1]!));
     await user.keyboard("{End} blocked-b");
-    await user.click(editors[0]!.querySelector(".cm-content") as HTMLElement);
+    await user.click(await textEditorContent(editors[0]!));
     await user.keyboard("{End} blocked-a");
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
 
@@ -1085,7 +1117,7 @@ describe("markdown editor unmount flush", () => {
       await firstSwitch;
     });
     editors = screen.getAllByTestId("view-text-editor");
-    const firstContent = editors[0]!.querySelector(".cm-content") as HTMLElement;
+    const firstContent = await textEditorContent(editors[0]!);
     await waitFor(() => expect(firstContent.textContent).toBe("New"));
     await user.click(firstContent);
     await user.keyboard("{End} peer");
@@ -1116,7 +1148,7 @@ describe("markdown editor unmount flush", () => {
       }),
     );
     editors = screen.getAllByTestId("view-text-editor");
-    const secondContent = editors[1]!.querySelector(".cm-content") as HTMLElement;
+    const secondContent = await textEditorContent(editors[1]!);
     await waitFor(() => expect(secondContent.textContent).toBe("New peer"));
     // ...and the write that follows carries the peer's edit, not the disk
     // snapshot the lift would have restored.
@@ -1156,7 +1188,7 @@ describe("markdown editor unmount flush", () => {
     );
     const view = render(<>{first}{second}</>);
     const editors = await screen.findAllByTestId("view-text-editor");
-    const firstContent = editors[0]!.querySelector(".cm-content") as HTMLElement;
+    const firstContent = await textEditorContent(editors[0]!);
     const user = userEvent.setup();
     await user.click(firstContent);
     await user.keyboard("{End} dirty");
@@ -1314,7 +1346,7 @@ describe("markdown editor unmount flush", () => {
     const view = render(<>{textPane("first", 0, 0)}{textPane("second", 0, 1)}</>);
     let editors = await screen.findAllByTestId("view-text-editor");
     const user = userEvent.setup();
-    const firstContent = editors[0]!.querySelector(".cm-content") as HTMLElement;
+    const firstContent = await textEditorContent(editors[0]!);
     await user.click(firstContent);
     await user.keyboard("{End} local");
     await waitFor(() => expect(flushes).toHaveLength(2));
@@ -1335,7 +1367,7 @@ describe("markdown editor unmount flush", () => {
       expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(3),
     );
     editors = screen.getAllByTestId("view-text-editor");
-    const secondContent = editors[1]!.querySelector(".cm-content") as HTMLElement;
+    const secondContent = await textEditorContent(editors[1]!);
     await user.click(secondContent);
     await user.keyboard("{End} peer");
 
@@ -2106,7 +2138,7 @@ describe("markdown editor unmount flush", () => {
     const view = render(<FileInspector workspaceId="ws-1" path="notes/plain.txt" />);
 
     const editor = await screen.findByTestId("view-text-editor");
-    const content = editor.querySelector(".cm-content") as HTMLElement;
+    const content = await textEditorContent(editor);
     await user.click(content);
     await user.keyboard("hello world");
     view.unmount();
@@ -2149,9 +2181,7 @@ describe("markdown editor unmount flush", () => {
       </>,
     );
 
-    const editors = await screen.findAllByTestId("view-text-editor");
-    const first = editors[0]!.querySelector(".cm-content") as HTMLElement;
-    const second = editors[1]!.querySelector(".cm-content") as HTMLElement;
+    const [first, second] = await findTextEditorContents(2);
     await user.click(first);
     await user.keyboard("{End} shared");
 
@@ -2201,9 +2231,7 @@ describe("markdown editor unmount flush", () => {
       </>,
     );
 
-    const editors = await screen.findAllByTestId("view-text-editor");
-    const first = editors[0]!.querySelector(".cm-content") as HTMLElement;
-    const second = editors[1]!.querySelector(".cm-content") as HTMLElement;
+    const [first, second] = await findTextEditorContents(2);
     await user.click(first);
     await user.keyboard("{End} first");
     await waitFor(() => expect(second.textContent).toContain("before first"));
@@ -2247,9 +2275,7 @@ describe("markdown editor unmount flush", () => {
       />
     );
     const view = render(first);
-    const firstContent = (
-      await screen.findByTestId("view-text-editor")
-    ).querySelector(".cm-content") as HTMLElement;
+    const firstContent = await findTextEditorContent();
     await user.click(firstContent);
     await user.keyboard("{End} dirty");
     await waitFor(() => expect(firstContent.textContent).toContain("before dirty"));
@@ -2297,7 +2323,7 @@ describe("markdown editor unmount flush", () => {
       </>,
     );
     const editors = await screen.findAllByTestId("view-text-editor");
-    const first = editors[0]!.querySelector(".cm-content") as HTMLElement;
+    const first = await textEditorContent(editors[0]!);
     await user.click(first);
     await user.keyboard("{End} peer draft");
     const buffer = getSharedLocalDocument(
@@ -2478,7 +2504,7 @@ describe("markdown editor unmount flush", () => {
       return next;
     });
 
-    const content = editor.querySelector(".cm-content") as HTMLElement;
+    const content = await textEditorContent(editor);
     await user.click(content);
     await user.keyboard("{Control>}a{/Control}newer saved");
     await waitFor(() => expect(flush).not.toBeNull());
@@ -2741,7 +2767,7 @@ describe("markdown editor unmount flush", () => {
     );
     const views = await screen.findAllByTestId("view-text-editor");
     expect(views).toHaveLength(2);
-    const editor = views[1]!.querySelector(".cm-content") as HTMLElement;
+    const editor = await textEditorContent(views[1]!);
     await user.click(editor);
     await user.keyboard("{End} edit");
     await waitFor(
@@ -3292,11 +3318,22 @@ describe("markdown editor unmount flush", () => {
         />
       </>,
     );
-    const toggles = await screen.findAllByTestId("markdown-edit-toggle");
-    expect(toggles.map((toggle) => toggle.textContent)).toEqual([
-      "Source",
-      "Source",
-    ]);
+    const toggles = await waitFor(() => {
+      const found = screen.getAllByTestId("markdown-edit-toggle");
+      expect(found).toHaveLength(2);
+      return found;
+    });
+    // Both documents must finish opening before the shortcut means anything: an
+    // opening document is forced to read mode, so its toggle still offers
+    // "Edit" and the keystroke is refused outright. The labels are the readable
+    // signal that the phase closed — waiting for them is the precondition, and
+    // the routing assertions below are unchanged (#797).
+    await waitFor(() =>
+      expect(toggles.map((toggle) => toggle.textContent)).toEqual([
+        "Source",
+        "Source",
+      ]),
+    );
 
     fireEvent.keyDown(window, { key: "/", ctrlKey: true });
 
@@ -3738,7 +3775,7 @@ describe("markdown editor unmount flush", () => {
       await heldSecondRead;
     });
     const secondEditor = await screen.findByTestId("view-text-editor");
-    const content = secondEditor.querySelector(".cm-content") as HTMLElement;
+    const content = await textEditorContent(secondEditor);
     expect(content.textContent).toContain("Workspace B");
     await user.click(content);
     await user.keyboard("{End} edit");
@@ -3778,9 +3815,7 @@ describe("markdown editor unmount flush", () => {
     const view = render(
       <FileInspector workspaceId="ws-1" path="notes/plain.txt" />,
     );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("One");
     await waitFor(
@@ -3855,9 +3890,7 @@ describe("markdown editor unmount flush", () => {
         registerDraftFlush={registerFlush}
       />,
     );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("{End} One");
     await waitFor(
@@ -3971,7 +4004,7 @@ describe("markdown editor unmount flush", () => {
       </>,
     );
     const editors = await screen.findAllByTestId("view-text-editor");
-    const first = editors[0]!.querySelector(".cm-content") as HTMLElement;
+    const first = await textEditorContent(editors[0]!);
     await user.click(first);
     await user.keyboard("{End} Local");
 
@@ -4062,9 +4095,7 @@ describe("markdown editor unmount flush", () => {
         refreshKey={1}
       />,
     );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("{End} Local");
     await waitFor(
@@ -4140,9 +4171,7 @@ describe("markdown editor unmount flush", () => {
         }}
       />,
     );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const content = await findTextEditorContent();
     await waitFor(() => expect(flush).not.toBeNull());
 
     await user.click(content);
@@ -4215,9 +4244,7 @@ describe("markdown editor unmount flush", () => {
         }}
       />,
     );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("{End} One");
     await waitFor(() => expect(flush).not.toBeNull());
@@ -4261,9 +4288,7 @@ describe("markdown editor unmount flush", () => {
     const view = render(
       <FileInspector workspaceId="ws-1" path="notes/plain.txt" />,
     );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("{End} Draft");
     await waitFor(
@@ -4331,9 +4356,7 @@ describe("markdown editor unmount flush", () => {
             }}
           />,
         );
-        const content = (
-          await screen.findByTestId("view-text-editor")
-        ).querySelector(".cm-content") as HTMLElement;
+        const content = await findTextEditorContent();
         await user.click(content);
         await user.keyboard("{End} Draft");
         await waitFor(
@@ -4401,9 +4424,7 @@ describe("markdown editor unmount flush", () => {
     const view = render(
       <FileInspector workspaceId="ws-1" path="notes/plain.txt" />,
     );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("{End} Draft");
     view.unmount();
@@ -4427,9 +4448,7 @@ describe("markdown editor unmount flush", () => {
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toBe("Base Draft"),
     );
-    const recovered = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const recovered = await findTextEditorContent();
     await waitFor(() => expect(recovered.textContent).toBe("External"));
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
   });
@@ -4468,9 +4487,7 @@ describe("markdown editor unmount flush", () => {
     view.rerender(
       <FileInspector workspaceId="ws-1" path="notes/second.txt" />,
     );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const content = await findTextEditorContent();
     await waitFor(() => expect(content.textContent).toBe("Second"));
 
     await act(async () => {
@@ -4520,9 +4537,7 @@ describe("markdown editor unmount flush", () => {
           }}
         />,
       );
-      const content = (
-        await screen.findByTestId("view-text-editor")
-      ).querySelector(".cm-content") as HTMLElement;
+      const content = await findTextEditorContent();
       await user.click(content);
       await user.keyboard("Draft");
       await act(async () => vi.advanceTimersByTimeAsync(800));
@@ -4581,9 +4596,7 @@ describe("markdown editor unmount flush", () => {
         }}
       />,
     );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("One");
     await waitFor(() => expect(flush).not.toBeNull());
@@ -4653,9 +4666,7 @@ describe("markdown editor unmount flush", () => {
         }}
       />,
     );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("One");
     await waitFor(() => expect(flush).not.toBeNull());
@@ -4732,9 +4743,7 @@ describe("markdown editor unmount flush", () => {
         }}
       />,
     );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("One");
     await waitFor(() => expect(flush).not.toBeNull());
@@ -4824,9 +4833,7 @@ describe("markdown editor unmount flush", () => {
         }}
       />,
     );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("One");
     await waitFor(() => expect(flush).not.toBeNull());
@@ -4882,9 +4889,7 @@ describe("markdown editor unmount flush", () => {
     const view = render(
       <FileInspector workspaceId="ws-1" path="notes/plain.txt" refreshKey={1} />,
     );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const content = await findTextEditorContent();
     await waitFor(() => expect(content.textContent).toBe("before"));
 
     view.rerender(
@@ -5175,7 +5180,7 @@ describe("markdown editor unmount flush", () => {
       />,
     );
     let editor = await screen.findByTestId("view-text-editor");
-    const content = editor.querySelector(".cm-content") as HTMLElement;
+    const content = await textEditorContent(editor);
     await user.click(content);
 
     view.rerender(
@@ -5246,7 +5251,7 @@ describe("markdown editor unmount flush", () => {
       />,
     );
     const editor = await screen.findByTestId("view-text-editor");
-    const content = editor.querySelector(".cm-content") as HTMLElement;
+    const content = await textEditorContent(editor);
     await user.click(content);
     await user.keyboard("{End} captured");
     const oldBuffer = getSharedLocalDocument(oldKey);
@@ -5366,9 +5371,7 @@ describe("markdown editor unmount flush", () => {
         refreshKey={1}
       />,
     );
-    const firstContent = (
-      await screen.findByTestId("view-text-editor")
-    ).querySelector(".cm-content") as HTMLElement;
+    const firstContent = await findTextEditorContent();
     await user.click(firstContent);
     await user.keyboard("{End} v1");
     await waitFor(
@@ -5395,7 +5398,7 @@ describe("markdown editor unmount flush", () => {
       }),
     );
     const secondEditor = screen.getByTestId("view-text-editor");
-    const secondContent = secondEditor.querySelector(".cm-content") as HTMLElement;
+    const secondContent = await textEditorContent(secondEditor);
     await user.click(secondContent);
     await user.keyboard("{Control>}a{/Control}Version two v2");
 
@@ -5440,9 +5443,7 @@ describe("markdown editor unmount flush", () => {
         engineVersionKey={1}
       />,
     );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("{End} Draft");
     await waitFor(
@@ -5598,9 +5599,7 @@ describe("markdown editor unmount flush", () => {
         refreshKey={1}
       />,
     );
-    const firstContent = (
-      await screen.findByTestId("view-text-editor")
-    ).querySelector(".cm-content") as HTMLElement;
+    const firstContent = await findTextEditorContent();
     await user.click(firstContent);
     await user.keyboard("{End} v1");
     await waitFor(() =>
@@ -5625,9 +5624,7 @@ describe("markdown editor unmount flush", () => {
         contentHash: secondHash,
       }),
     );
-    const secondContent = screen
-      .getByTestId("view-text-editor")
-      .querySelector(".cm-content") as HTMLElement;
+    const secondContent = await findTextEditorContent();
     await user.click(secondContent);
     await user.keyboard("{Control>}a{/Control}Version two v2");
     await waitFor(() =>
@@ -5701,9 +5698,7 @@ describe("markdown editor unmount flush", () => {
         refreshKey={1}
       />,
     );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("{End} v1");
     await waitFor(() =>
@@ -5739,9 +5734,7 @@ describe("markdown editor unmount flush", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
-    const secondContent = screen
-      .getByTestId("view-text-editor")
-      .querySelector(".cm-content") as HTMLElement;
+    const secondContent = await findTextEditorContent();
     await user.click(secondContent);
     await user.keyboard("{Control>}a{/Control}Version two pending");
     await new Promise((resolve) => setTimeout(resolve, 900));
@@ -5859,9 +5852,7 @@ describe("markdown editor unmount flush", () => {
         engineVersionKey={1}
       />,
     );
-    const content = (await screen.findByTestId("view-text-editor")).querySelector(
-      ".cm-content",
-    ) as HTMLElement;
+    const content = await findTextEditorContent();
     await user.click(content);
     await user.keyboard("{End} Draft");
     view.unmount();
@@ -5935,8 +5926,8 @@ describe("markdown editor unmount flush", () => {
       expect(next).toHaveLength(2);
       return next;
     });
-    const firstContent = editors[0].querySelector(".cm-content") as HTMLElement;
-    const peerContent = editors[1].querySelector(".cm-content") as HTMLElement;
+    const firstContent = await textEditorContent(editors[0]);
+    const peerContent = await textEditorContent(editors[1]);
     await user.click(firstContent);
     await user.keyboard("{End} First");
     await waitFor(() =>
