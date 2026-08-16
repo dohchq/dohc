@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { PluginSizesRecord, PluginStatusRecord } from "../ipc/bridgeContract";
 import { formatSize } from "../plugins/pluginFormat";
 import {
+  isHttpsUrl,
   MAX_SETTING_VALUE_CHARS,
   type PluginSettingDeclaration,
   type PluginSettingValue,
@@ -74,7 +75,7 @@ function isMissingFileError(error: unknown): boolean {
   return error instanceof Error && /\bENOENT\b/.test(error.message);
 }
 
-export function readmePath(directoryName: string): string {
+function readmePath(directoryName: string): string {
   return `plugins/${directoryName}/README.md`;
 }
 
@@ -481,14 +482,6 @@ function RailLink(props: { href: string }) {
   );
 }
 
-function httpsUrl(value: string): boolean {
-  try {
-    return new URL(value).protocol === "https:";
-  } catch {
-    return false;
-  }
-}
-
 function RailSection(props: { title: string; rows: RailRow[] }) {
   if (props.rows.length === 0) return null;
   return (
@@ -540,31 +533,23 @@ function PluginDetailsRail(props: {
       ),
     });
   }
-  if (sizes.status === "loading") {
-    installation.push({
-      label: "Installed size",
-      testId: "plugin-rail-installed-size",
-      value: <span className="text-subtle">Measuring…</span>,
-    });
-  } else if (sizes.status === "ready" && sizes.sizes.installedBytes !== null) {
-    installation.push({
-      label: "Installed size",
-      testId: "plugin-rail-installed-size",
-      value: formatSize(sizes.sizes.installedBytes),
-    });
-  }
-  if (sizes.status === "loading") {
-    installation.push({
-      label: "Stored data",
-      testId: "plugin-rail-stored-data",
-      value: <span className="text-subtle">Measuring…</span>,
-    });
-  } else if (sizes.status === "ready" && sizes.sizes.dataBytes !== null) {
-    installation.push({
-      label: "Stored data",
-      testId: "plugin-rail-stored-data",
-      value: formatSize(sizes.sizes.dataBytes),
-    });
+  // Both size rows read the same measurement and say the same thing while it
+  // runs. A size dohc could not read prints nothing at all — see usePluginSizes.
+  const measured = sizes.status === "ready" ? sizes.sizes : null;
+  const sizeRows: Array<[label: string, testId: string, bytes: number | null]> = [
+    ["Installed size", "plugin-rail-installed-size", measured?.installedBytes ?? null],
+    ["Stored data", "plugin-rail-stored-data", measured?.dataBytes ?? null],
+  ];
+  for (const [label, testId, bytes] of sizeRows) {
+    if (sizes.status === "loading") {
+      installation.push({
+        label,
+        testId,
+        value: <span className="text-subtle">Measuring…</span>,
+      });
+    } else if (bytes !== null) {
+      installation.push({ label, testId, value: formatSize(bytes) });
+    }
   }
 
   const resources: RailRow[] = [];
@@ -586,7 +571,7 @@ function PluginDetailsRail(props: {
     resources.push({
       label: "License",
       testId: "plugin-rail-license",
-      value: httpsUrl(plugin.license) ? (
+      value: isHttpsUrl(plugin.license) ? (
         <RailLink href={plugin.license} />
       ) : (
         plugin.license
@@ -609,12 +594,29 @@ function PluginDetailsRail(props: {
 export function PluginDetailsPage(props: {
   workspaceId: string;
   pluginId: string;
+  /** Reports what this plugin calls itself, so its tab can carry the name the
+   * user installed instead of the raw plugin id. This page is the only surface
+   * that reads the plugin's manifest, the same way the web app page is the
+   * only one that hears its app's title. */
+  onTitle?: (pluginId: string, title: string) => void;
 }) {
   const catalog = usePluginCatalog(props.workspaceId);
   const plugin =
     catalog.load.status === "ready"
       ? (catalog.load.plugins.find((entry) => entry.id === props.pluginId) ?? null)
       : null;
+
+  // Held in a ref so a new callback identity never re-reports, and written
+  // after the commit: a ref written while rendering keeps the value of a
+  // render React discarded (PluginWebAppPage precedent).
+  const onTitleRef = useRef(props.onTitle);
+  useEffect(() => {
+    onTitleRef.current = props.onTitle;
+  });
+  const title = plugin ? pluginTitle(plugin) : null;
+  useEffect(() => {
+    if (title !== null) onTitleRef.current?.(props.pluginId, title);
+  }, [props.pluginId, title]);
 
   if (catalog.load.status === "loading") {
     return (

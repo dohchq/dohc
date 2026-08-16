@@ -549,6 +549,13 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       ok: true as const,
       plugins: [] as PluginStatusRecord[],
     })),
+    // The details rail measures on mount. Without this the page crashes into
+    // the editor's error boundary a tick after it paints, so anything the
+    // page does later is a race the test can only lose.
+    pluginSizes: vi.fn(async () => ({
+      ok: true as const,
+      sizes: { installedBytes: null, dataBytes: null },
+    })),
     onPluginStatusChanged: vi.fn(() => () => undefined),
     startPluginWebApp: vi.fn(async () => ({
       status: "ok" as const,
@@ -1093,7 +1100,10 @@ describe("plugin web app tabs", () => {
 describe("plugin details tabs", () => {
   const detailsPath = pluginDetailsTabPath("t3-code");
 
-  function withPlugins(bridge: ReturnType<typeof makeBridge>) {
+  function withPlugins(
+    bridge: ReturnType<typeof makeBridge>,
+    displayName: string | null = null,
+  ) {
     bridge.listPlugins = vi.fn(async () => ({
       ok: true as const,
       plugins: [
@@ -1108,7 +1118,7 @@ describe("plugin details tabs", () => {
           sourceHash: "a".repeat(64),
           approvedHash: "a".repeat(64),
           installedBaselineHash: "a".repeat(64),
-          displayName: null,
+          displayName,
           description: null,
           publisher: null,
           pluginVersion: null,
@@ -1135,8 +1145,8 @@ describe("plugin details tabs", () => {
     await userEvent.click(await screen.findByTestId("plugin-open-details"));
 
     const tab = await screen.findByTestId(`tab-${detailsPath}`);
-    // The plugin id is the only name a plugin has; the tooltip is what says
-    // which of a plugin's tabs this one is.
+    // This plugin declares no name of its own, so the id is its name. The
+    // tooltip is what says which of a plugin's tabs this one is.
     expect(tab.textContent).toContain("t3-code");
     expect(tab.title).toBe("Plugin details: t3-code");
     // The row now reads as the selected one, like the explorer's open file.
@@ -1157,6 +1167,29 @@ describe("plugin details tabs", () => {
     expect(tab.title).toBe("Plugin details: t3-code");
     const page = await screen.findByTestId("plugin-details-page");
     expect(page.getAttribute("data-plugin-id")).toBe("t3-code");
+  });
+
+  // The row, the page header, and the tab are three views of one plugin. Once
+  // the page has read the manifest, all three say the name the user installed.
+  it("relabels the details tab with the plugin's name once its page reads it", async () => {
+    const bridge = withPlugins(
+      makeBridge(Promise.resolve(storedStateWithTabs([detailsPath], detailsPath))),
+      "T3 Code",
+    );
+    renderShell(bridge);
+
+    const tab = await screen.findByTestId(`tab-${detailsPath}`);
+    // MUTATION (drop the label from the details branch): the tab keeps
+    // reading "t3-code" while the page header reads "T3 Code".
+    await waitFor(() => expect(tab.textContent).toContain("T3 Code"));
+    expect(
+      within(await screen.findByTestId("plugin-details-page")).getByRole(
+        "heading",
+        { name: "T3 Code" },
+      ),
+    ).toBeTruthy();
+    // The id still separates this tab from the plugin's app tab.
+    expect(tab.title).toBe("Plugin details: t3-code");
   });
 });
 

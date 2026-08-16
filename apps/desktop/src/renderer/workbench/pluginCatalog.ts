@@ -68,12 +68,6 @@ function applyStatusEvents(
 }
 
 export function statusText(plugin: PluginStatusRecord): string {
-  if (plugin.status === "disabled-pending-approval") {
-    return "Disabled — approval required";
-  }
-  if (plugin.status === "disabled-pending-repair") {
-    return "Disabled — repair required";
-  }
   if (plugin.status === "disabled") {
     return plugin.disabledReason === "crash-loop"
       ? "Disabled after repeated crashes"

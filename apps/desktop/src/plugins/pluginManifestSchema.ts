@@ -73,27 +73,35 @@ export const MAX_PLUGIN_LICENSE_CHARS = 120;
 // looser cap here would accept a link that every click rejects.
 export const MAX_PLUGIN_URL_CHARS = 2048;
 
-// https only. These URLs travel to the OS browser from a full-trust plugin's
-// own manifest, and http: would send the reader somewhere a network can
-// rewrite. isSafeExternalUrl also permits http: and mailto:, deliberately not
-// narrowed here — this is the tighter rule a manifest can afford.
+/**
+ * The one https test dohc applies to a plugin's declared links, asked by the
+ * manifest schema, by the IPC contract that carries those links to the
+ * renderer, and by the details rail that decides whether a licence is a link.
+ *
+ * https only. These URLs travel to the OS browser from a full-trust plugin's
+ * own manifest, and http: would send the reader somewhere a network can
+ * rewrite. isSafeExternalUrl also permits http: and mailto:, deliberately not
+ * narrowed here — this is the tighter rule a manifest can afford.
+ */
+export function isHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 const PluginHttpsUrl = z.string()
   .max(
     MAX_PLUGIN_URL_CHARS,
     `must be ${MAX_PLUGIN_URL_CHARS} characters or fewer`,
   )
-  .refine((value) => {
-    try {
-      return new URL(value).protocol === "https:";
-    } catch {
-      return false;
-    }
-  }, "must be an https:// URL");
+  .refine(isHttpsUrl, "must be an https:// URL");
 
 // The renderer serves the icon over dohc-file://, which types a file by its
 // extension. These two are the raster and vector answers, and both are in
 // that server's media-type table; anything else would serve as a download.
-export const PLUGIN_ICON_EXTENSIONS = ["png", "svg"] as const;
+const PLUGIN_ICON_EXTENSIONS = ["png", "svg"] as const;
 
 const PluginIconPath = PluginPath.refine(
   (path) =>
@@ -138,7 +146,7 @@ const PluginWebApp = z.object({
 export const MAX_PLUGIN_SETTINGS = 20;
 export const MAX_SETTING_OPTIONS = 8;
 export const MAX_SETTING_VALUE_CHARS = 200;
-export const MAX_SETTING_OPTION_CHARS = 60;
+const MAX_SETTING_OPTION_CHARS = 60;
 
 const SettingKey = z.string()
   .min(1)

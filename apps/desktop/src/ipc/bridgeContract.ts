@@ -51,6 +51,7 @@ import {
 // a second copy of it. A copy that drifts would fail the whole plugin list's
 // parse over a value the manifest itself allows.
 import {
+  isHttpsUrl,
   MAX_PLUGIN_DESCRIPTION_CHARS,
   MAX_PLUGIN_LICENSE_CHARS,
   MAX_PLUGIN_PUBLISHER_CHARS,
@@ -2418,13 +2419,8 @@ const PLUGIN_DIAGNOSTIC = z.string().min(1).max(10_000);
 
 // The same rule the manifest applies, restated on the wire so a link the
 // details rail is about to hand the OS browser cannot arrive over http.
-const HTTPS_URL = z.string().min(1).max(MAX_PLUGIN_URL_CHARS).refine((value) => {
-  try {
-    return new URL(value).protocol === "https:";
-  } catch {
-    return false;
-  }
-}, "must be an https:// URL");
+const HTTPS_URL = z.string().min(1).max(MAX_PLUGIN_URL_CHARS)
+  .refine(isHttpsUrl, "must be an https:// URL");
 
 export const PluginPipelineError = z.object({
   stage: z.enum(PLUGIN_PIPELINE_ERROR_STAGES),
@@ -2499,12 +2495,6 @@ const PluginSettingsValues = z.record(
   (values) => Object.keys(values).length <= MAX_PLUGIN_SETTINGS,
   `settings: at most ${MAX_PLUGIN_SETTINGS} values allowed`,
 );
-
-export const PluginSettingsPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  pluginId: PLUGIN_ID,
-}).strict();
-export type PluginSettingsPayload = z.infer<typeof PluginSettingsPayload>;
 
 export const SetPluginSettingsPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -4253,7 +4243,7 @@ export interface DohcDesktopBridge {
   ): Promise<PluginUninstallPreflightResult>;
   pluginSizes(payload: PluginActionPayload): Promise<PluginSizesResult>;
   uninstallPlugin(payload: UninstallPluginPayload): Promise<PluginActionResult>;
-  getPluginSettings(payload: PluginSettingsPayload): Promise<PluginSettingsResult>;
+  getPluginSettings(payload: PluginActionPayload): Promise<PluginSettingsResult>;
   setPluginSettings(payload: SetPluginSettingsPayload): Promise<PluginSettingsResult>;
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;

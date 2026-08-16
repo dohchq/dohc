@@ -17,9 +17,11 @@ import {
   parsePluginWebAppTabPath,
 } from "./workbenchState";
 
-// A plugin web app's own name lives in its manifest, which only the shell can
-// read; the tab path carries the id. `label` is that manifest title when the
-// shell has it, and the id is the fallback until then.
+// A plugin's own names — its display name and its web apps' titles — live in
+// its manifest, which the tab path cannot carry and this strip cannot read.
+// `label` is that name once a mounted plugin page has reported it, and the id
+// from the path is the fallback until then (a tab restored on launch has no
+// page yet).
 function fileName(path: string, label?: string): string {
   if (isGraphTabPath(path)) return "Graph";
   if (isHistoryTabPath(path)) return "History";
@@ -30,9 +32,8 @@ function fileName(path: string, label?: string): string {
   if (isPluginWebAppTabPath(path)) {
     return label ?? parsePluginWebAppTabPath(path)?.webAppId ?? "Plugin app";
   }
-  // The plugin id is the only name a plugin has — manifests carry no title.
   if (isPluginDetailsTabPath(path)) {
-    return parsePluginDetailsTabPath(path) ?? "Plugin";
+    return label ?? parsePluginDetailsTabPath(path) ?? "Plugin";
   }
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
@@ -342,8 +343,9 @@ export function EditorTabs(props: {
   tabs: Array<{ path: string }>;
   activeTab: string | null;
   activeTabDirty: boolean;
-  /** Display names the tab path cannot supply, keyed by path. Today: a plugin
-   * web app's manifest title, which only the shell can read. */
+  /** Display names the tab path cannot supply, keyed by path: what a plugin
+   * and its web apps call themselves in their manifest, reported by the pages
+   * that read it. */
   tabLabels?: ReadonlyMap<string, string>;
   // Paths with a set-aside draft (#567). Unlike `activeTabDirty`, this is
   // knowable for EVERY tab — the store outlives the keyed inspectors — so an

@@ -1851,20 +1851,20 @@ export function DesktopWorkspaceShell(props: {
       ),
     [dirtyRevision, openTabs],
   );
-  // A plugin web app tab is labelled with the title its manifest declares.
-  // The tab path carries only ids and the manifest lives in main, but the
-  // page's own start already answers with that title, so the label costs no
-  // extra call. Reading the manifests from here instead failed the desktop
-  // e2e in 4 of 6 runs: that request lands while the plugin host is still
-  // starting on demand, and the web app's own start then loses the race.
-  const [webAppTitles, setWebAppTitles] = useState<{
+  // A plugin tab is labelled with the name its manifest declares — the plugin's
+  // own display name on its details tab, a web app's title on its app tab. The
+  // tab path carries only ids and the manifests live in main, but each page
+  // already holds the name it heads itself with, so the label costs no extra
+  // call. Reading the manifests from here instead failed the desktop e2e in 4
+  // of 6 runs: that request lands while the plugin host is still starting on
+  // demand, and the web app's own start then loses the race.
+  const [pluginTabTitles, setPluginTabTitles] = useState<{
     workspaceId: string;
     titles: ReadonlyMap<string, string>;
   }>({ workspaceId: "", titles: EMPTY_TAB_LABELS });
-  const rememberWebAppTitle = useCallback(
-    (pluginId: string, webAppId: string, title: string) => {
-      const tabPath = pluginWebAppTabPath(pluginId, webAppId);
-      setWebAppTitles((previous) => {
+  const rememberPluginTabTitle = useCallback(
+    (tabPath: string, title: string) => {
+      setPluginTabTitles((previous) => {
         // A title learned for another workspace never labels this one's tabs.
         const known =
           previous.workspaceId === workspaceId ? previous.titles : EMPTY_TAB_LABELS;
@@ -1874,9 +1874,19 @@ export function DesktopWorkspaceShell(props: {
     },
     [workspaceId],
   );
+  const rememberWebAppTitle = useCallback(
+    (pluginId: string, webAppId: string, title: string) =>
+      rememberPluginTabTitle(pluginWebAppTabPath(pluginId, webAppId), title),
+    [rememberPluginTabTitle],
+  );
+  const rememberPluginDetailsTitle = useCallback(
+    (pluginId: string, title: string) =>
+      rememberPluginTabTitle(pluginDetailsTabPath(pluginId), title),
+    [rememberPluginTabTitle],
+  );
   const tabLabels =
-    webAppTitles.workspaceId === workspaceId
-      ? webAppTitles.titles
+    pluginTabTitles.workspaceId === workspaceId
+      ? pluginTabTitles.titles
       : EMPTY_TAB_LABELS;
   const anyTabDirty = dirtyPaths.size > 0;
   const activeDocumentPath = isVirtualTabPath(focusedTabPath)
@@ -5545,6 +5555,7 @@ export function DesktopWorkspaceShell(props: {
                   <LazyPluginDetailsPage
                     workspaceId={workspaceId}
                     pluginId={groupPluginDetailsId}
+                    onTitle={rememberPluginDetailsTitle}
                   />
                 </Suspense>
               ) : (

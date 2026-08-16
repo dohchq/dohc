@@ -166,6 +166,47 @@ describe("PluginDetailsPage", () => {
     expect(screen.getByText("plugins/t3-code-src")).toBeTruthy();
   });
 
+  // The page is the only surface that reads this plugin's manifest, so it is
+  // what tells the shell the name its tab should carry — the same route the
+  // web app page's start title takes.
+  it("reports the name it heads the page with, so its tab can carry it", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [plugin("hello-plugin", { displayName: "Hello Plugin" })],
+    });
+    const titles: Array<[string, string]> = [];
+
+    render(
+      <PluginDetailsPage
+        workspaceId="ws-1"
+        pluginId="hello-plugin"
+        onTitle={(pluginId, title) => titles.push([pluginId, title])}
+      />,
+    );
+
+    await screen.findByTestId("plugin-details-page");
+    await waitFor(() => expect(titles).toEqual([["hello-plugin", "Hello Plugin"]]));
+  });
+
+  it("reports the plugin id when the manifest declares no name", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [plugin("hello-plugin")],
+    });
+    const titles: string[] = [];
+
+    render(
+      <PluginDetailsPage
+        workspaceId="ws-1"
+        pluginId="hello-plugin"
+        onTitle={(_pluginId, title) => titles.push(title)}
+      />,
+    );
+
+    await screen.findByTestId("plugin-details-page");
+    await waitFor(() => expect(titles).toEqual(["hello-plugin"]));
+  });
+
   it("heads the page with the manifest's name, description, publisher, and icon", async () => {
     bridgeMock.listPlugins.mockResolvedValue({
       ok: true,

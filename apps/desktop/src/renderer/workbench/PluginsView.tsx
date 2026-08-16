@@ -6,6 +6,7 @@ import { PluginIcon } from "./PluginIcon";
 import {
   actionLabel,
   canInstall,
+  isInstalled,
   isPipelineBusy,
   matchesFilter,
   pluginTitle,
@@ -47,8 +48,8 @@ export function PluginsView(props: {
     () => plugins.filter((plugin) => matchesFilter(plugin, filter)),
     [plugins, filter],
   );
-  const installedPlugins = matched.filter((plugin) => plugin.approvedHash !== null);
-  const candidatePlugins = matched.filter((plugin) => plugin.approvedHash === null);
+  const installedPlugins = matched.filter(isInstalled);
+  const candidatePlugins = matched.filter((plugin) => !isInstalled(plugin));
 
   function renderRow(plugin: PluginStatusRecord) {
     const busyAction = catalog.busy[plugin.id];

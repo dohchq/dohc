@@ -115,7 +115,6 @@ import {
   InvokePluginPanelSdkPayload,
   InvokePluginPanelSdkResult,
   ListPluginsPayload,
-  PluginSettingsPayload,
   PluginSettingsResult,
   SetPluginSettingsPayload,
   ListPluginsResult,
@@ -7427,7 +7426,7 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.getPluginSettings, async (event, payload) => {
     assertTrustedSender(event);
-    const input = PluginSettingsPayload.parse(payload);
+    const input = PluginActionPayload.parse(payload);
     try {
       const pipeline = await activePluginPipelineFor(event, input.workspaceId);
       return PluginSettingsResult.parse({
