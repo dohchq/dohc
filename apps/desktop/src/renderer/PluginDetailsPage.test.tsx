@@ -885,6 +885,25 @@ describe("PluginDetailsPage", () => {
       ).toBeTruthy();
     });
 
+    it("renders a README table as a table, not raw pipes", async () => {
+      bridgeMock.listPlugins.mockResolvedValue({
+        ok: true,
+        plugins: [plugin("t3-code")],
+      });
+      bridgeMock.readWorkspaceText.mockResolvedValue({
+        text: "| Setting | Default |\n| --- | --- |\n| Port | 4317 |\n",
+        truncated: false,
+        contentHash: HASH_A,
+      });
+
+      renderPage("t3-code");
+
+      const readme = await screen.findByTestId("plugin-readme");
+      expect(readme.querySelectorAll("th")).toHaveLength(2);
+      expect(readme.querySelector("td")?.textContent).toBe("Port");
+      expect(readme.textContent).not.toContain("|");
+    });
+
     it("strips frontmatter before rendering", async () => {
       bridgeMock.listPlugins.mockResolvedValue({
         ok: true,
