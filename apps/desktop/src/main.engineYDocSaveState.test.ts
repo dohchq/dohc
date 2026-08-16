@@ -43,8 +43,8 @@ describe("engine Y.Doc save-state reporting in main", () => {
           : handler.indexOf("settleAndCloseLiveSessionsForPath(");
       const mutationAt =
         channel === "moveWorkspacePath"
-          ? handler.indexOf("await movePath(")
-          : handler.indexOf("await deletePath(");
+          ? handler.indexOf("await routeWorkspacePathMove({")
+          : handler.indexOf("await routeWorkspacePathDelete({");
       const successAt =
         channel === "moveWorkspacePath"
           ? handler.indexOf("finishRename?.(true)")
@@ -82,10 +82,14 @@ describe("engine Y.Doc save-state reporting in main", () => {
     expect(handler).toContain("cannot change a live document's kind");
   });
 
-  it("admits unconditional file and folder creation through stale-sensitive workspace scheduling", () => {
+  it("admits file and folder creation through stale-sensitive workspace scheduling", () => {
     for (const [channel, mutation] of [
-      ["createWorkspaceFile", "await createFile("],
-      ["createWorkspaceFolder", "await createFolder("],
+      // Both creates are routed (#802) — a file lands in the engine store for
+      // a share view and on disk for every other workspace, and a folder is
+      // refused for a share view at every level. Which branch either takes
+      // does not change what this pins: the mutation runs inside the schedule.
+      ["createWorkspaceFile", "await routeWorkspaceFileCreate({"],
+      ["createWorkspaceFolder", "await routeWorkspaceFolderCreate({"],
     ] as const) {
       const handler = handlerSource(channel);
       const scheduledAt = handler.indexOf("withStaleSensitiveWorkspaceOperation(");
@@ -96,24 +100,38 @@ describe("engine Y.Doc save-state reporting in main", () => {
 
   it("admits imports through stale-sensitive scheduling without holding the native dialog", () => {
     const handler = handlerSource("importWorkspaceFiles");
-    const droppedAt = handler.indexOf("importDroppedPaths(");
-    const firstScheduleAt = handler.indexOf("withStaleSensitiveWorkspaceOperation(");
+    // ONE scheduled operation since #802, named and shared by both
+    // entrypoints, rather than the same wrapper written out twice.
+    const scheduleAt = handler.indexOf("withStaleSensitiveWorkspaceOperation(");
+    expect(scheduleAt).toBeGreaterThan(-1);
+    expect(
+      handler.indexOf("withStaleSensitiveWorkspaceOperation(", scheduleAt + 1),
+      "a second schedule site is a second place this property has to hold",
+    ).toBe(-1);
+    // The import runs INSIDE it.
+    const importAt = handler.indexOf("routeWorkspaceFileImport({");
+    expect(importAt).toBeGreaterThan(scheduleAt);
+    // The native dialog does NOT: it is opened outside the scheduled call,
+    // and the drag-in entrypoint reaches the schedule without opening it at
+    // all. A dialog awaited inside would hold the workspace's stale-sensitive
+    // lane open for as long as the user browsed.
+    const scheduled = handler.slice(scheduleAt, handler.indexOf("      );", importAt));
+    // The slice really covers the scheduled callback: without this, an empty
+    // slice would satisfy the refusal below by containing nothing at all.
+    expect(scheduled).toContain("routeWorkspaceFileImport({");
+    expect(
+      scheduled,
+      "MUTATION: a dialog inside the scheduled operation holds the lane open while the user browses",
+    ).not.toContain("showOpenDialog");
     const dialogAt = handler.indexOf("await dialog.showOpenDialog(");
-    const secondScheduleAt = handler.indexOf(
-      "withStaleSensitiveWorkspaceOperation(",
-      firstScheduleAt + 1,
-    );
-    const copyAt = handler.indexOf("copyIntoWorkspace(");
-    expect(firstScheduleAt).toBeGreaterThan(-1);
-    expect(droppedAt).toBeGreaterThan(firstScheduleAt);
-    expect(dialogAt).toBeGreaterThan(droppedAt);
-    expect(secondScheduleAt).toBeGreaterThan(dialogAt);
-    expect(copyAt).toBeGreaterThan(secondScheduleAt);
+    expect(dialogAt).toBeGreaterThan(importAt);
+    // And the picked paths reach the schedule only after the dialog answered.
+    expect(handler.lastIndexOf("await importInto(")).toBeGreaterThan(dialogAt);
   });
 
   it("notifies live renderer sessions only after the disk delete succeeds", () => {
     const handler = handlerSource("deleteWorkspacePath");
-    const deleteAt = handler.indexOf("await deletePath(");
+    const deleteAt = handler.indexOf("await routeWorkspacePathDelete({");
     const notifyAt = handler.indexOf("notifyEngineYDocSessionsDeleted(");
     const successAt = handler.indexOf("finishDebts?.(true)");
     const failureAt = handler.indexOf("finishDebts?.(false)");

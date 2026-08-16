@@ -58,7 +58,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   type ActiveAgentRun,
@@ -1066,7 +1066,7 @@ function assertGeneratedTextRecoveryIdentity(
   }
 }
 
-type DiskTextState =
+export type DiskTextState =
   // Confirmed absent (ENOENT/ENOTDIR): the engine file, if any, was deleted.
   | { kind: "absent" }
   // Engine-ownable UTF-8 text within the size cap.
@@ -1115,6 +1115,20 @@ async function pathConfirmedAbsentOnDisk(rootPath: string, path: string): Promis
     const code = (error as NodeJS.ErrnoException).code;
     return code === "ENOENT" || code === "ENOTDIR";
   }
+}
+
+/**
+ * What the engine can own of a file the caller names ABSOLUTELY, for an
+ * import into a share view's store.
+ *
+ * The rule is the capture's, not a second copy of it: the same media-type
+ * test, the same UTF-8 round trip, the same caps. An import that classified
+ * content its own way would disagree with the capture about the same bytes.
+ * A symlink source reads as `untracked-content` here, so a share view refuses
+ * to propose content reached through a link.
+ */
+export function readDiskContent(absolutePath: string): Promise<DiskTextState> {
+  return readDiskTextState(dirname(absolutePath), basename(absolutePath));
 }
 
 async function readDiskTextState(rootPath: string, path: string): Promise<DiskTextState> {

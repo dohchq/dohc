@@ -26,6 +26,7 @@ function explorerProps(
     ],
     activeEditorGroup: "group-1",
     dirtyPaths: new Set(),
+    shareView: null,
     recoveryPaths: new Set(),
     expandedFolders: [],
     pinned: [],

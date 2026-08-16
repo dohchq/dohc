@@ -379,7 +379,10 @@ import {
   shareViewIsPresent,
 } from "./workspaces/shareViewMarker";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaces/workspaceTextLimits";
-import { workspaceWriteRefusal } from "./workspaces/shareWriteGate";
+import {
+  shareViewTakesLocalWrites,
+  workspaceWriteRefusal,
+} from "./workspaces/shareWriteGate";
 import {
   assertShareProposalGranter,
   requireShareViewMembership,
@@ -713,16 +716,15 @@ import {
   archiveChatBookmarkProjection,
   writeChatBookmarkProjection,
 } from "./workspaces/chatBookmarkProjectionWrite";
+import { collectZipEntries, listFiles } from "./workspaces/workspaceFiles";
+import { explorerMenuEntries } from "./workspaces/explorerMenu";
 import {
-  collectZipEntries,
-  copyIntoWorkspace,
-  createFile,
-  createFolder,
-  deletePath,
-  importDroppedPaths,
-  listFiles,
-  movePath,
-} from "./workspaces/workspaceFiles";
+  routeWorkspaceFileCreate,
+  routeWorkspaceFileImport,
+  routeWorkspaceFolderCreate,
+  routeWorkspacePathDelete,
+  routeWorkspacePathMove,
+} from "./workspaces/workspaceFileOps";
 import { buildStoreZip } from "./workspaces/zipWriter";
 import { readUiStateFile, writeUiStateFile } from "./workspaces/workspaceUiState";
 import {
@@ -4258,13 +4260,21 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = CreateWorkspaceFilePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    assertWritableWorkspace(workspace);
+    // Routed like the text save (#802): a share view's create is decided at
+    // the seam that would otherwise write, where `routeWorkspaceFileCreate`
+    // asks `shareViewTakesLocalWrites` and refuses every level but edit.
+    // Every other workspace takes the ordinary refusal, unchanged.
+    const shareView = sharedViewOf(workspace.workspaceId);
+    if (shareView === null) assertWritableWorkspace(workspace);
     return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async () => {
-      const path = await createFile(
-        workspace.rootPath,
-        input.relativePath,
-        input.initialText,
-      );
+      const path = await routeWorkspaceFileCreate({
+        workspaceId: workspace.workspaceId,
+        rootPath: workspace.rootPath,
+        relativePath: input.relativePath,
+        initialText: input.initialText,
+        shareView,
+        shareViewStore: () => sharedViewStoreFor(workspace),
+      });
       return CreateWorkspaceFileResult.parse({ path });
     });
   });
@@ -4273,9 +4283,19 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = CreateWorkspaceFolderPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    assertWritableWorkspace(workspace);
+    // A share view is refused here at EVERY level, as it always was — the
+    // engine has no folder object, so there is no moment for a routed create
+    // to write. It goes through the router only so the refusal can say that
+    // instead of pointing at the granter for a change nothing could send.
+    // `routeWorkspaceFolderCreate` decides on the share view's PRESENCE.
+    const shareView = sharedViewOf(workspace.workspaceId);
+    if (shareView === null) assertWritableWorkspace(workspace);
     return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async () => {
-      const path = await createFolder(workspace.rootPath, input.relativePath);
+      const path = await routeWorkspaceFolderCreate({
+        rootPath: workspace.rootPath,
+        relativePath: input.relativePath,
+        shareView,
+      });
       return CreateWorkspaceFileResult.parse({ path });
     });
   });
@@ -4284,7 +4304,9 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = MoveWorkspacePathPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    assertWritableWorkspace(workspace);
+    // Routed like the text save (#802). See createWorkspaceFile above.
+    const shareView = sharedViewOf(workspace.workspaceId);
+    if (shareView === null) assertWritableWorkspace(workspace);
     return withExclusiveWorkspaceOperation(
       workspace.rootPath,
       async (markWorkspaceChanged) => {
@@ -4302,7 +4324,10 @@ function registerIpcHandlers(
         // Kind changes go through a new file, not a rename.
         const fromKind = liveDocumentKindForPath(input.fromPath);
         const toKind = liveDocumentKindForPath(input.toPath);
-        if (capture && fromKind !== null && fromKind !== toKind) {
+        // A share view's rename keeps the object too — it renames the engine
+        // record — so it takes the same refusal. Its files have no capture.
+        const keepsTheObject = capture !== null || shareView !== null;
+        if (keepsTheObject && fromKind !== null && fromKind !== toKind) {
           throw new Error(
             `A rename cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`,
           );
@@ -4311,11 +4336,14 @@ function registerIpcHandlers(
           ? await capture.beginFileRename(input.fromPath, input.toPath)
           : null;
         try {
-          const path = await movePath(
-            workspace.rootPath,
-            input.fromPath,
-            input.toPath,
-          );
+          const path = await routeWorkspacePathMove({
+            workspaceId: workspace.workspaceId,
+            rootPath: workspace.rootPath,
+            fromPath: input.fromPath,
+            toPath: input.toPath,
+            shareView,
+            shareViewStore: () => sharedViewStoreFor(workspace),
+          });
           markWorkspaceChanged();
           await finishRename?.(true);
           return CreateWorkspaceFileResult.parse({ path });
@@ -4331,7 +4359,9 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = DeleteWorkspacePathPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    assertWritableWorkspace(workspace);
+    // Routed like the text save (#802). See createWorkspaceFile above.
+    const shareView = sharedViewOf(workspace.workspaceId);
+    if (shareView === null) assertWritableWorkspace(workspace);
     return withExclusiveWorkspaceOperation(
       workspace.rootPath,
       async (markWorkspaceChanged) => {
@@ -4351,11 +4381,14 @@ function registerIpcHandlers(
         // handle that blocks the write can block the trash and the fallback
         // move, and a failed delete leaves a file that still owes its write.
         try {
-          const result = await deletePath(
-            workspace.rootPath,
-            input.relativePath,
-            (p) => shell.trashItem(p),
-          );
+          const result = await routeWorkspacePathDelete({
+            workspaceId: workspace.workspaceId,
+            rootPath: workspace.rootPath,
+            relativePath: input.relativePath,
+            trashItem: (p) => shell.trashItem(p),
+            shareView,
+            shareViewStore: () => sharedViewStoreFor(workspace),
+          });
           markWorkspaceChanged();
           // `deletePath` matches its own disk target against the CANONICAL form
           // `validateUserWritePath` normalizes to (a trailing slash stripped, for
@@ -4502,25 +4535,15 @@ function registerIpcHandlers(
           picked = id;
         },
       });
-      const separator = { type: "separator" as const };
-      // Shared views (PR 18) get a READ-ONLY menu: no create/rename/delete/
-      // import — main owns the menu, so the reduction cannot be bypassed by
-      // the renderer. It stays read-only at EVERY level, including edit:
-      // those four handlers write the workspace folder, which a share view
-      // does not own, and `assertWritableWorkspace` refuses them. A menu
-      // offering them would be lying about what the handlers accept.
-      //
-      // Editing a shared FILE is offered where it belongs, in the editor.
-      // Sharing onward is offered nowhere: someone else's files are not this
-      // account's to grant, and a share needs a relay-side workspace to grant
-      // from.
+      // The menu's shape is decided by `explorerMenuEntries`, where it can be
+      // driven at every level; main owns only the Electron plumbing. main
+      // still owns the MENU, so a renderer cannot add an item back.
       const registryEntry = findWorkspace(input.workspaceId);
-      const isSharedView = shareViewIsPresent(registryEntry?.shareView);
+      const shareView = sharedViewOf(input.workspaceId);
+      const isSharedView = shareView !== null;
       // Share-mount paths (shared-with-me/…) are a read-only projection of
-      // someone else's files: no create/rename/delete/import/share — main
-      // owns the menu, so the reduction cannot be bypassed by the renderer.
-      // The mount root itself (shared-with-me/<label> with a matching mount
-      // record) additionally offers refresh and removal.
+      // someone else's files. The mount root itself (shared-with-me/<label>
+      // with a matching mount record) additionally offers refresh and removal.
       const isMountPath =
         !isSharedView && !!input.path && isSharedWithMePath(input.path);
       const mountForPath = isMountPath
@@ -4528,59 +4551,20 @@ function registerIpcHandlers(
             (mount) => input.path === `shared-with-me/${mount.label}`,
           )
         : undefined;
-      const canShare =
-        !isSharedView && !isMountPath && !!registryEntry?.remote && input.kind !== "root";
-      const template: Electron.MenuItemConstructorOptions[] = isSharedView
-        ? input.kind === "root"
-          ? [item("Export Workspace as Zip…", "export-zip")]
-          : [
-              input.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
-              separator,
-              item("Export as Zip…", "export-zip"),
-              item("Reveal in File Manager", "open-externally"),
-            ]
-        : isMountPath
-          ? [
-              ...(mountForPath
-                ? [
-                    item("Refresh Share", "refresh-share-mount"),
-                    item("Remove Share from Workspace", "unmount-share"),
-                    separator,
-                  ]
-                : [item("Refresh Shares", "refresh-share-mount"), separator]),
-              input.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
-              separator,
-              item("Export as Zip…", "export-zip"),
-              item("Reveal in File Manager", "open-externally"),
-            ]
-        : input.kind === "root"
-          ? [
-              item("New File", "new-file"),
-              item("New Folder", "new-folder"),
-              separator,
-              item("Import Files…", "import-files"),
-              item("Export Workspace as Zip…", "export-zip"),
-            ]
-          : [
-              ...(canShare ? [item("Share…", "share"), separator] : []),
-              ...(input.kind === "folder"
-                ? [
-                    item("New File", "new-file"),
-                    item("New Folder", "new-folder"),
-                    // Folder-targeted import: files land IN this folder (the
-                    // renderer passes the folder as importWorkspaceFiles'
-                    // targetDir, re-validated main-side before any copy).
-                    item("Import Files…", "import-files"),
-                    separator,
-                  ]
-                : []),
-              item("Rename", "rename"),
-              item("Delete", "delete"),
-              input.pinned ? item("Unpin", "unpin") : item("Pin", "pin"),
-              separator,
-              item("Export as Zip…", "export-zip"),
-              item("Reveal in File Manager", "open-externally"),
-            ];
+      const template: Electron.MenuItemConstructorOptions[] = explorerMenuEntries({
+        kind: input.kind,
+        pinned: input.pinned === true,
+        isMountPath,
+        hasMountRecord: mountForPath !== undefined,
+        // Sharing onward is offered nowhere in a share view or a mount:
+        // someone else's files are not this account's to grant, and a share
+        // needs a relay-side workspace to grant from.
+        canShare:
+          !isSharedView && !isMountPath && !!registryEntry?.remote && input.kind !== "root",
+        shareView,
+      }).map((entry) =>
+        entry.kind === "separator" ? { type: "separator" as const } : item(entry.label, entry.id),
+      );
       const menu = Menu.buildFromTemplate(template);
       const window = BrowserWindow.fromWebContents(event.sender) ?? undefined;
       menu.popup({
@@ -4684,25 +4668,37 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = ImportWorkspaceFilesPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    assertWritableWorkspace(workspace);
+    // Routed like the text save (#802). See createWorkspaceFile above.
+    const shareView = sharedViewOf(workspace.workspaceId);
+    if (shareView === null) assertWritableWorkspace(workspace);
+    const importInto = (
+      absolutePaths: string[],
+      screenAgainstRoots: string[] | null,
+    ) =>
+      withStaleSensitiveWorkspaceOperation(workspace.rootPath, () =>
+        routeWorkspaceFileImport({
+          workspaceId: workspace.workspaceId,
+          rootPath: workspace.rootPath,
+          absolutePaths,
+          screenAgainstRoots,
+          targetDir: input.targetDir,
+          shareView,
+          shareViewStore: () => sharedViewStoreFor(workspace),
+        }),
+      );
     // OS drag-in path: renderer-supplied absolute paths (see the trust-delta
-    // note on the payload) re-validated by importDroppedPaths — regular
+    // note on the payload) re-validated by the drag-in screen — regular
     // files only, never any registered workspace's .dohc metadata. The
     // renderer-supplied targetDir is re-validated inside the import path
     // (resolveImportDestination) before any copy.
     const droppedPaths = input.droppedPaths;
     if (droppedPaths !== undefined) {
-      const outcome = await withStaleSensitiveWorkspaceOperation(
-        workspace.rootPath,
-        () =>
-          importDroppedPaths(
-            workspace.rootPath,
-            droppedPaths,
-            listWorkspaces().map((ws) => ws.rootPath),
-            input.targetDir,
-          ),
+      return ImportWorkspaceFilesResult.parse(
+        await importInto(
+          droppedPaths,
+          listWorkspaces().map((ws) => ws.rootPath),
+        ),
       );
-      return ImportWorkspaceFilesResult.parse(outcome);
     }
     const picked = testImportPaths();
     const result =
@@ -4715,11 +4711,7 @@ function registerIpcHandlers(
     if (result.canceled) {
       return ImportWorkspaceFilesResult.parse({ imported: [], skipped: 0 });
     }
-    const outcome = await withStaleSensitiveWorkspaceOperation(
-      workspace.rootPath,
-      () => copyIntoWorkspace(workspace.rootPath, result.filePaths, input.targetDir),
-    );
-    return ImportWorkspaceFilesResult.parse(outcome);
+    return ImportWorkspaceFilesResult.parse(await importInto(result.filePaths, null));
   });
 
   // Site preview SDK reads use the combined helper to make the main-process

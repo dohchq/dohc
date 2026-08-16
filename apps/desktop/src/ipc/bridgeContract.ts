@@ -362,7 +362,10 @@ export type DeleteWorkspacePathPayload = z.infer<
 >;
 
 // trashed: true = OS trash; false = the .dohc/trash fallback (cross-
-// filesystem mounts where g_file_trash rejects). Both are recoverable.
+// filesystem mounts where g_file_trash rejects), which is recoverable too — or
+// a share view, whose delete removes the projection of a moment rather than a
+// file the workspace owns. There the change is what can be taken back: the
+// granter's copy is untouched until they accept it.
 export const DeleteWorkspacePathResult = z.object({
   trashed: z.boolean(),
 });

@@ -805,11 +805,13 @@ describe("main-process chat authorization", () => {
       "importToDatabase",
     ];
     const seams = [
-      "createFile(",
       "createFolder(",
       "routeWorkspaceTextWrite(",
+      "routeWorkspaceFileCreate(",
+      "routeWorkspacePathMove(",
+      "routeWorkspacePathDelete(",
+      "routeWorkspaceFileImport(",
       "writeWorkspaceAsset(",
-      "importDroppedPaths(",
       "applyDatabaseEdit(",
       "importToDatabase(",
       "withExclusiveWorkspaceOperation(",
@@ -897,24 +899,31 @@ describe("main-process chat authorization", () => {
     );
   });
 
-  // The menu is a UX MIRROR of the gate below, and it has to mirror the same
-  // rule: the four items it drops — create, rename, delete, import — are
-  // exactly the handlers `assertWritableWorkspace` refuses in a share view at
-  // every level. A menu that offered them at edit would be lying about what
-  // the handlers accept. Position only; what the handlers decide is driven in
-  // `workspaces/shareWriteGate.test.ts`.
-  it("keeps a shared view's explorer menu read-only at every level", () => {
+  // The menu is a UX MIRROR of the gates below it, and it has to mirror the
+  // SAME rule they ask. Its SHAPE is decided by `explorerMenuEntries` and
+  // driven at every level in `workspaces/explorerMenu.test.ts`; what this pins
+  // is main's wiring — that the decision comes from there, over the registry's
+  // own answer, and that main does not re-spell a level beside it.
+  it("builds a shared view's explorer menu from the one rule, not from a level of its own", () => {
     const handler = handlerSource("showExplorerMenu");
-    expect(handler).toContain(
-      "const isSharedView = shareViewIsPresent(registryEntry?.shareView);",
-    );
+    expect(handler).toContain("const shareView = sharedViewOf(input.workspaceId);");
+    expect(handler).toContain("explorerMenuEntries({");
+    expect(handler).toContain("shareView,");
     expect(
       handler,
-      "MUTATION: a level-aware menu offers writes the handlers behind it refuse",
+      "MUTATION: a second copy of the level rule in main is a copy that drifts",
     ).not.toContain("shareViewTakesLocalWrites(");
-    expect(handler).toContain(
-      "const template: Electron.MenuItemConstructorOptions[] = isSharedView",
+    expect(handler).not.toContain('access === "edit"');
+    // And the decision itself asks the shared rule rather than a level.
+    const menu = readFileSync(
+      new URL("./workspaces/explorerMenu.ts", import.meta.url),
+      "utf8",
     );
+    expect(menu).toContain("shareViewTakesLocalWrites(scope.shareView)");
+    expect(
+      menu,
+      "MUTATION: a menu that reads the level directly stops agreeing with the handlers",
+    ).not.toContain('access === "edit"');
   });
 
   // #646 PR3a. The review's incoming side is fetched by main and validated by
@@ -951,11 +960,6 @@ describe("main-process chat authorization", () => {
     // projection stating content no moment does — unsendable, and overwritten
     // by the next pull.
     const rawDiskWriters = [
-      "createWorkspaceFile",
-      "createWorkspaceFolder",
-      "moveWorkspacePath",
-      "deleteWorkspacePath",
-      "importWorkspaceFiles",
       "writeWorkspaceAsset",
       "pickImageFiles",
       "applyDatabaseEdit",
@@ -965,6 +969,10 @@ describe("main-process chat authorization", () => {
       expect(handlerSource(channel), channel).toContain(
         "assertWritableWorkspace(workspace);",
       );
+      expect(
+        handlerSource(channel),
+        `${channel}: MUTATION: a blanket-refused handler that reads the level is one the gate no longer covers`,
+      ).not.toContain("if (shareView === null) assertWritableWorkspace(workspace);");
     }
 
     // The plugin pipeline installs and runs plugin code against the workspace
@@ -976,17 +984,54 @@ describe("main-process chat authorization", () => {
       "MUTATION: an ungated pipeline writes plugin state into someone else's workspace",
     ).toContain("assertWritableWorkspace(workspace);");
 
-    // And the ONE handler that does NOT take the blanket refusal, stated
-    // here so widening it is a visible edit rather than a silent one: a share
-    // view's text save is decided at the routed seam instead.
-    const textWrite = handlerSource("writeWorkspaceText");
-    expect(textWrite).toContain(
-      "if (shareView === null) assertWritableWorkspace(workspace);",
+    // And the handlers that do NOT take the blanket refusal, each stated here
+    // so widening one is a visible edit rather than a silent one. Every one of
+    // them is decided at its own routed seam instead, and none of them spells
+    // a level in main.
+    const routed = [
+      ["writeWorkspaceText", "routeWorkspaceTextWrite("],
+      ["createWorkspaceFile", "routeWorkspaceFileCreate("],
+      ["createWorkspaceFolder", "routeWorkspaceFolderCreate("],
+      ["moveWorkspacePath", "routeWorkspacePathMove("],
+      ["deleteWorkspacePath", "routeWorkspacePathDelete("],
+      ["importWorkspaceFiles", "routeWorkspaceFileImport("],
+    ] as const;
+    for (const [channel, seam] of routed) {
+      const handler = handlerSource(channel);
+      expect(
+        handler,
+        `${channel}: MUTATION: an unrouted share view takes the blanket refusal and its write never becomes a change`,
+      ).toContain("if (shareView === null) assertWritableWorkspace(workspace);");
+      expect(handler, channel).toContain(seam);
+      expect(
+        handler,
+        `${channel}: MUTATION: a second copy of the level rule in main is a copy that drifts`,
+      ).not.toContain("shareViewTakesLocalWrites(");
+    }
+
+    // The folder create is routed for its MESSAGE, not for a right: it refuses
+    // a share view on presence, exactly as the gate it left did. Driven in
+    // `workspaces/workspaceFileOps.test.ts`.
+    const fileOps = readFileSync(
+      new URL("./workspaces/workspaceFileOps.ts", import.meta.url),
+      "utf8",
     );
+    const folderAt = fileOps.indexOf("export async function routeWorkspaceFolderCreate(");
+    // To the NEXT top-level declaration, not to the first `\n}`: the signature
+    // is a multi-line object type, and its own closing brace would end the
+    // slice before the body this pin is about.
+    const folder = fileOps.slice(
+      folderAt,
+      fileOps.indexOf("\nexport ", folderAt + 1),
+    );
+    expect(folderAt).toBeGreaterThan(-1);
     expect(
-      textWrite,
-      "MUTATION: a second copy of the level rule in main is a copy that drifts",
-    ).not.toContain("shareViewTakesLocalWrites(");
+      folder,
+      "MUTATION: a folder create that asks the level lets an edit share view make a folder no moment can state",
+    ).toContain("if (input.shareView) {");
+    expect(folder.indexOf("throw new SharedFileReadOnlyError(")).toBeLessThan(
+      folder.indexOf("createFolder("),
+    );
   });
 
   // #646 PR3a. Two lanes, and a workspace is only ever in one of them. The
