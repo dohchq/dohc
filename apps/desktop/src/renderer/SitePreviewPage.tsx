@@ -22,6 +22,7 @@ import type {
   StartSitePreviewResult,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import { openLinkExternally } from "./editor/linkMenu";
 import {
   frameUrlWithHostOrigin,
   isActiveFrameOrigin,
@@ -447,7 +448,7 @@ export function SitePreviewPage(props: {
                     data-testid="site-preview-open-external"
                     aria-label="Open preview externally"
                     title="Open preview externally"
-                    onClick={() => void bridge().openExternalUrl({ url: preview.url })}
+                    onClick={() => void openLinkExternally(preview.url)}
                     className="size-7"
                   >
                     <ExternalLink size={13} aria-hidden />

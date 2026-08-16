@@ -175,7 +175,11 @@ describe("IncrementalMarkdownDocument", () => {
     expect(openWorkspaceLink).toHaveBeenCalledOnce();
   });
 
-  it("keeps root-relative, external, and unsafe link routing separate", () => {
+  it("keeps root-relative, external, and unsafe link routing separate", async () => {
+    // The external open waits on the confirm gate, so it lands a microtask
+    // after the click. Await it before asserting either way.
+    const flushExternalOpen = () =>
+      new Promise((resolve) => setTimeout(resolve, 0));
     const openWorkspaceLink = vi.fn();
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
@@ -201,6 +205,7 @@ describe("IncrementalMarkdownDocument", () => {
       detail: 1,
     });
     expect(root.dispatchEvent(rootClick)).toBe(false);
+    await flushExternalOpen();
     expect(openWorkspaceLink).toHaveBeenCalledWith({
       path: "/plan.md",
       rawFragment: "risks",
@@ -214,6 +219,7 @@ describe("IncrementalMarkdownDocument", () => {
       detail: 1,
     });
     expect(external.dispatchEvent(externalClick)).toBe(false);
+    await flushExternalOpen();
     expect(openExternalUrl).toHaveBeenCalledWith({
       url: "https://example.com/plan?mode=preview#risks",
     });

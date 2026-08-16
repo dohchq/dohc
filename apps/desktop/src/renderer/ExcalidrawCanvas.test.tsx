@@ -136,12 +136,14 @@ describe("ExcalidrawCanvas", () => {
     );
   });
 
-  it("opens links through the audited desktop bridge", () => {
+  it("opens links through the audited desktop bridge", async () => {
     const openExternalUrl = vi.fn(async () => undefined);
     vi.stubGlobal("dohcDesktop", { openExternalUrl });
     render(<ExcalidrawCanvas document={document} readOnly={false} />);
 
     fireEvent.click(screen.getByTestId("mock-drawing-link"));
+    // The open waits on the confirm gate, so it lands a microtask later.
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(openExternalUrl).toHaveBeenCalledWith({
       url: "https://example.com/drawing",
@@ -149,13 +151,14 @@ describe("ExcalidrawCanvas", () => {
     expect(drawingLink.preventDefault).toHaveBeenCalledOnce();
   });
 
-  it("leaves internal element links to Excalidraw", () => {
+  it("leaves internal element links to Excalidraw", async () => {
     const openExternalUrl = vi.fn(async () => undefined);
     vi.stubGlobal("dohcDesktop", { openExternalUrl });
     drawingLink.href = "#element=target&group=group";
     render(<ExcalidrawCanvas document={document} readOnly={false} />);
 
     fireEvent.click(screen.getByTestId("mock-drawing-link"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(drawingLink.preventDefault).not.toHaveBeenCalled();
     expect(openExternalUrl).not.toHaveBeenCalled();

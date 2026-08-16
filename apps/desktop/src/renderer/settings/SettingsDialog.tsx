@@ -762,7 +762,7 @@ export function SettingsDialog(props: {
           <div data-testid="settings-section-privacy">
             <SettingRow
               title="Confirm external links"
-              description="Require confirmation before future settings-driven external-link shortcuts open outside dohc."
+              description="Ask before dohc opens a link in another app."
               modified={isModified(
                 workspaceSettings.privacy.confirmExternalLinks,
                 DEFAULT_WORKSPACE_SETTINGS.privacy.confirmExternalLinks,

@@ -24,6 +24,7 @@ import { Plugin, PluginKey } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import { ExternalLink, Link as LinkIcon, Trash2 } from "lucide-react";
 import { bridge } from "../bridge";
+import { confirmExternalOpen } from "../ExternalLinkConfirm";
 import {
   FLOATING_MENU_MAX_HEIGHT,
   resolveFloatingMenuPosition,
@@ -75,10 +76,14 @@ export function normalizeLinkUrl(raw: string): string | null {
 
 /** Opens a URL through the app's audited external-open pathway
  *  (desktop:open-external-url → shell.openExternal, gated to http(s)/mailto
- *  by isSafeExternalUrl). Invalid URLs and OS open failures are contained. */
+ *  by isSafeExternalUrl). Invalid URLs and OS open failures are contained.
+ *
+ *  Every renderer surface that leaves dohc goes through here, so this is also
+ *  where the workspace's privacy.confirmExternalLinks setting is honored. */
 export async function openLinkExternally(rawUrl: string): Promise<void> {
   const normalized = normalizeLinkUrl(rawUrl);
   if (!normalized) return;
+  if (!(await confirmExternalOpen(normalized))) return;
   try {
     await bridge().openExternalUrl({ url: normalized });
   } catch (error) {
