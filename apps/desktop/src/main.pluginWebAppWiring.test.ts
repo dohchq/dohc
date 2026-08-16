@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-// Wiring order only. Every decision these handlers delegate to is pinned by
-// behavior elsewhere: guest hardening in pluginWebAppGuest.test.ts, the
-// async-guard registry in pluginWebAppViews.test.ts, the plugin round-trip in
-// PluginHost.test.ts, and the whole surface end to end in t3-plugin.spec.ts.
+// Wiring order only, and only for order this file's handlers own. Every
+// decision they delegate is pinned by behavior elsewhere: the guest's
+// preferences, origin lock, session hardening, credential handling, and the
+// uninstall partition clear in pluginWebAppGuest.test.ts; the async-guard
+// registry in pluginWebAppViews.test.ts; the plugin round-trip in
+// PluginHost.test.ts; the whole surface end to end in t3-plugin.spec.ts.
 
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
 
@@ -30,7 +32,7 @@ describe("plugin web app main-process wiring", () => {
     expect(open).toContain("assertPluginPanelRequestCurrent(isCurrent);");
   });
 
-  it("creates the hardened guest only after readiness, and never hands the URL to the renderer", () => {
+  it("builds the guest only after readiness and both post-start rechecks", () => {
     const start = handler("startPluginWebApp");
     const startWebAppAt = start.indexOf(
       "await host.startWebApp(input.pluginId, input.webAppId)",
@@ -43,12 +45,7 @@ describe("plugin web app main-process wiring", () => {
       "assertPluginPanelRequestCurrent(isCurrent);",
       startWebAppAt,
     );
-    const parseAt = start.indexOf("parsePluginWebAppUrl(started.url)", startWebAppAt);
-    const viewAt = start.indexOf("new WebContentsView({", parseAt);
-    const sessionHardenAt = start.indexOf("hardenGuestSession(", viewAt);
-    const contentsHardenAt = start.indexOf("hardenGuestWebContents(", viewAt);
-    const attachAt = start.indexOf("win.contentView.addChildView(view);", viewAt);
-    const loadAt = start.indexOf("view.webContents.loadURL(started.url)", attachAt);
+    const guestAt = start.indexOf("createPluginWebAppGuest({", currentRecheckAt);
 
     // MUTATION (stale renderer): dropping either recheck lets a start that
     // finished after a workspace switch or a plugin respawn attach a live
@@ -56,17 +53,11 @@ describe("plugin web app main-process wiring", () => {
     expect(startWebAppAt).toBeGreaterThan(-1);
     expect(spawnRecheckAt).toBeGreaterThan(startWebAppAt);
     expect(currentRecheckAt).toBeGreaterThan(startWebAppAt);
-    expect(parseAt).toBeGreaterThan(startWebAppAt);
-    expect(viewAt).toBeGreaterThan(parseAt);
-    expect(sessionHardenAt).toBeGreaterThan(viewAt);
-    expect(contentsHardenAt).toBeGreaterThan(viewAt);
-    expect(attachAt).toBeGreaterThan(contentsHardenAt);
-    expect(loadAt).toBeGreaterThan(attachAt);
-    expect(start).toContain("guestWebPreferences(partition)");
-    expect(start).toContain("view.setVisible(false);");
-    // The renderer result carries the credential-free origin, never the URL.
-    expect(start).toContain("origin: parsed.origin,");
-    expect(start).not.toContain("url: started.url");
+    expect(guestAt).toBeGreaterThan(currentRecheckAt);
+    // The renderer result carries the guest's origin. That the origin is
+    // credential-free is pinned in pluginWebAppGuest.test.ts, where it is
+    // derived; the start URL reaches this handler only to be passed on.
+    expect(start).toContain("origin: guest.origin,");
     expect(start).toContain("if (displaced) destroyPluginWebAppViews([displaced]);");
   });
 
@@ -157,14 +148,14 @@ describe("plugin web app main-process wiring", () => {
       "await pipeline.uninstall(input.pluginId, input.confirmationToken),",
     );
     const guardAt = uninstall.indexOf("if (result.ok) {", uninstallCallAt);
-    const clearAt = uninstall.indexOf(".clearStorageData()", guardAt);
+    const clearAt = uninstall.indexOf("clearPluginWebAppPartition({", guardAt);
 
     // MUTATION (session credential): without the clear, a reinstalled plugin
     // inherits the previous installation's authenticated session cookies.
+    // What the clear targets is pinned in pluginWebAppGuest.test.ts.
     expect(stopViewsAt).toBeGreaterThan(-1);
     expect(uninstallCallAt).toBeGreaterThan(stopViewsAt);
     expect(guardAt).toBeGreaterThan(uninstallCallAt);
     expect(clearAt).toBeGreaterThan(guardAt);
-    expect(uninstall).toContain("hardenedGuestPartitions.delete(partition);");
   });
 });

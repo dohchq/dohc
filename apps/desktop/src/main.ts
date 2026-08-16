@@ -615,11 +615,8 @@ import {
   ensureWorkspacePipeline,
 } from "./plugins/pluginPipelineLifecycle";
 import {
-  guestWebPreferences,
-  hardenGuestSession,
-  hardenGuestWebContents,
-  parsePluginWebAppUrl,
-  pluginWebAppPartition,
+  clearPluginWebAppPartition,
+  createPluginWebAppGuest,
 } from "./plugins/pluginWebAppGuest";
 import {
   PluginWebAppViewRegistry,
@@ -6696,50 +6693,67 @@ function registerIpcHandlers(
             `Plugin "${input.pluginId}" restarted while its web app was starting. Try again.`,
           );
         }
-        assertPluginPanelRequestCurrent(isCurrent);
-        const parsed = parsePluginWebAppUrl(started.url);
-        const win = BrowserWindow.fromWebContents(sender);
-        if (!win || win.isDestroyed()) {
-          throw new Error("The plugin web app request has no open window.");
+        // Every path from here to a rendered guest can still fail, and the
+        // start URL's one-time credential is already spent. Whatever fails,
+        // the plugin's server must not stay paired to a guest that never
+        // arrived: stop the web app so the next open spawns and pairs again.
+        // The stop queues behind this handler's own start lock.
+        const recoverConsumedCredential = (): void => {
+          void stopPluginWebApp(
+            workspace.workspaceId,
+            input.pluginId,
+            input.webAppId,
+          ).catch((error: unknown) => {
+            console.warn(
+              "[desktop] failed to stop a plugin web app after a failed start",
+              error,
+            );
+          });
+        };
+        try {
+          assertPluginPanelRequestCurrent(isCurrent);
+          const win = BrowserWindow.fromWebContents(sender);
+          if (!win || win.isDestroyed()) {
+            throw new Error("The plugin web app request has no open window.");
+          }
+          const guest = createPluginWebAppGuest({
+            workspaceRoot: workspace.rootPath,
+            pluginId: input.pluginId,
+            url: started.url,
+            hardenedPartitions: hardenedGuestPartitions,
+            ViewClass: WebContentsView,
+            attach: (view, { origin, partition }) => {
+              win.contentView.addChildView(view);
+              const displaced = pluginWebAppViews.register({
+                workspaceId: workspace.workspaceId,
+                pluginId: input.pluginId,
+                webAppId: input.webAppId,
+                senderId: sender.id,
+                generation,
+                origin,
+                partition,
+                view: { view, window: win },
+              });
+              if (displaced) destroyPluginWebAppViews([displaced]);
+            },
+            onLoadFailure: () => {
+              // The load error's message can embed the URL, credential
+              // fragment included — report the failure without it.
+              console.warn(
+                `[desktop] plugin "${input.pluginId}" web app "${input.webAppId}" failed to load its start URL.`,
+              );
+              recoverConsumedCredential();
+            },
+          });
+          return StartPluginWebAppResult.parse({
+            status: "ok",
+            title: webApp.title,
+            origin: guest.origin,
+          });
+        } catch (error) {
+          recoverConsumedCredential();
+          throw error;
         }
-        const partition = pluginWebAppPartition(
-          workspace.rootPath,
-          input.pluginId,
-        );
-        const view = new WebContentsView({
-          webPreferences: guestWebPreferences(partition),
-        });
-        if (!hardenedGuestPartitions.has(partition)) {
-          hardenGuestSession(view.webContents.session);
-          hardenedGuestPartitions.add(partition);
-        }
-        hardenGuestWebContents(view.webContents, parsed.origin);
-        // Invisible until the renderer reports its placeholder's bounds.
-        view.setVisible(false);
-        win.contentView.addChildView(view);
-        const displaced = pluginWebAppViews.register({
-          workspaceId: workspace.workspaceId,
-          pluginId: input.pluginId,
-          webAppId: input.webAppId,
-          senderId: sender.id,
-          generation,
-          origin: parsed.origin,
-          partition,
-          view: { view, window: win },
-        });
-        if (displaced) destroyPluginWebAppViews([displaced]);
-        view.webContents.loadURL(started.url).catch(() => {
-          // The load error's message can embed the URL, credential fragment
-          // included — report the failure without it.
-          console.warn(
-            `[desktop] plugin "${input.pluginId}" web app "${input.webAppId}" failed to load its start URL.`,
-          );
-        });
-        return StartPluginWebAppResult.parse({
-          status: "ok",
-          title: webApp.title,
-          origin: parsed.origin,
-        });
       },
     );
   });
@@ -6924,21 +6938,18 @@ function registerIpcHandlers(
       if (result.ok) {
         // The guest partition holds the web app's session cookies — plugin
         // state as much as its data directory. A reinstall starts unpaired.
-        const workspace = requireWorkspace(input.workspaceId);
-        const partition = pluginWebAppPartition(
-          workspace.rootPath,
-          input.pluginId,
-        );
-        hardenedGuestPartitions.delete(partition);
-        await session
-          .fromPartition(partition)
-          .clearStorageData()
-          .catch((error: unknown) => {
+        await clearPluginWebAppPartition({
+          workspaceRoot: requireWorkspace(input.workspaceId).rootPath,
+          pluginId: input.pluginId,
+          hardenedPartitions: hardenedGuestPartitions,
+          fromPartition: (partition) => session.fromPartition(partition),
+          onError: (error) => {
             console.warn(
               "[desktop] failed to clear a plugin web app partition after uninstall",
               error,
             );
-          });
+          },
+        });
       }
       return result;
     } catch (error) {
