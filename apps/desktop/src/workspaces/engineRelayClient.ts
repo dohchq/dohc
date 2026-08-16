@@ -14,6 +14,7 @@ import {
   type RelayWorkspaceIdentity,
   type PullSharedChannelResult,
   MAX_REPORTED_REFUSALS,
+  type RecordShareViewIdentityResult,
   type PullShareViewResult,
   type ShareViewRefusal,
   type SharingDeclined,
@@ -591,6 +592,28 @@ export interface EngineRelayWorkspaceClient {
       access: ShareAccess;
     };
   }): Promise<PushSharedChannelResult>;
+  // #646 PR3-1: give this share view the sync identity its share lane needs,
+  // before the first pull or push. Run at open and at every refresh — the
+  // engine writes the row once and later calls answer "already-recorded".
+  //
+  // Takes the pinned selector and no share id. `sync_identity` is per
+  // WORKSPACE and a share view mirrors exactly one share, so the id it would
+  // carry decides nothing; the LEVEL does, because a `view` share may push
+  // nothing and so never records one.
+  //
+  // The identity components are minted by the ENGINE, the same way sync.claim
+  // mints its own. The origin is a REPLICA id — the relay namespaces this
+  // recipient's ops as `share:<shareId>:<originId>` — so it must never be the
+  // recipient's user id, which two of their devices would share. Minting it
+  // engine-side is also what makes a refresh safe: the durable row is the
+  // record, so nothing here has to remember an id between calls.
+  recordShareViewIdentity(input: {
+    grantedSelector: {
+      paths: readonly string[];
+      versionId: string | null;
+      access: ShareAccess;
+    };
+  }): Promise<RecordShareViewIdentityResult>;
 }
 
 export interface EngineRelayClientOptions {
@@ -975,6 +998,33 @@ export class EngineRelayClient {
         return {
           pushed: numberField(result, "pushed", "share.view.push"),
         };
+      },
+      recordShareViewIdentity: async ({ grantedSelector }) => {
+        const result = resultRecord(
+          await request("share.view.recordIdentity", {
+            workspaceId: workspace.workspaceId,
+            grantedSelector: {
+              paths: [...grantedSelector.paths],
+              versionId: grantedSelector.versionId,
+              access: grantedSelector.access,
+            },
+          }),
+          "share.view.recordIdentity",
+        );
+        const identity = stringField(result, "identity", "share.view.recordIdentity");
+        // Fail closed on an answer this build cannot read: an unknown state
+        // is not a narrower one, and reporting it as recorded would claim a
+        // row nobody checked.
+        if (
+          identity !== "recorded" &&
+          identity !== "already-recorded" &&
+          identity !== "not-required"
+        ) {
+          throw new Error(
+            `Rust engine share.view.recordIdentity returned an unknown identity state: ${identity}`,
+          );
+        }
+        return { identity };
       },
       pullShareView: async ({ shareId, grantedSelector, recordRefusals }) => {
         let fetched = 0;

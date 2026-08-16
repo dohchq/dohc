@@ -214,6 +214,24 @@ export class ShareUnavailableError extends Error {
   }
 }
 
+// What a share view's identity call did (#646 PR3-1).
+//
+// A share view replicates through its SHARE, not the owner relay lane, so it
+// needs a sync identity of its own before it can journal a local write or
+// push one back. The engine writes that row once; every later refresh answers
+// "already-recorded".
+//
+// "not-required" is a `view` share, which may push nothing and so is given no
+// identity — the absence is what keeps its local writes local.
+export type ShareViewEnrolment =
+  | "recorded"
+  | "already-recorded"
+  | "not-required";
+
+export interface RecordShareViewIdentityResult {
+  identity: ShareViewEnrolment;
+}
+
 export interface ShareViewChangedPath {
   path: string;
   operation: "write" | "delete";

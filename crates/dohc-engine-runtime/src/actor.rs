@@ -358,6 +358,21 @@ pub enum RelayOperation {
         /// recipient on first read. Required: there is no unscoped pull.
         granted: dohc_engine_sync::ShareGrant,
     },
+    /// Record a share view's own replica identity, once, before the first
+    /// pull or push.
+    ///
+    /// Carries the ACCESS and nothing else of the grant. The RPC boundary
+    /// still parses the whole selector, but this operation expresses exactly
+    /// one decision — the level gate — and carrying paths it never reads
+    /// would invite a later reader to think they matter here.
+    RecordShareViewIdentity {
+        workspace_id: String,
+        access: dohc_engine_sync::ShareAccess,
+        origin_id: String,
+        replication_epoch: String,
+        stream_identity: String,
+        created_at_ms: i64,
+    },
     /// Push this replica's own chat about a RECEIVED file share back to the
     /// granter (#646 PR2). The grant is required for the same reason the pull
     /// requires it: it decides which of this replica's ops belong to the
@@ -835,6 +850,21 @@ pub enum RelayOperationOutcome {
     SharedChannelPulled(SharedChannelPullOutcome),
     SharedChannelPushed(SharedChannelPushOutcome),
     ShareViewPulled(ShareViewPullOutcome),
+    ShareViewIdentity(ShareViewIdentityRecord),
+}
+
+/// What a share view's identity call settled on, including the answer the
+/// journal layer cannot give.
+///
+/// `NotRequired` lives HERE rather than in `dohc-engine-sync` because it is
+/// the LEVEL's answer, and the level is read here: a `view` share never
+/// reaches the store at all. Keeping it out of the journal layer means that
+/// function has no variant it can never return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareViewIdentityRecord {
+    Recorded,
+    AlreadyRecorded,
+    NotRequired,
 }
 
 /// Daemon-owned sink for identities written by settlement. Recording before
@@ -6756,6 +6786,53 @@ fn execute_relay_operation(
             .pull_share_view(store, &workspace_id, &share_id, &granted, &NoFaults)
             .map(RelayOperationOutcome::ShareViewPulled)
             .map_err(RuntimeError::from),
+        RelayOperation::RecordShareViewIdentity {
+            workspace_id,
+            access,
+            origin_id,
+            replication_epoch,
+            stream_identity,
+            created_at_ms,
+        } => {
+            // THE level gate, and the only place it is read. A `view` share
+            // may push nothing, so it needs no identity and the store is not
+            // touched at all.
+            if access == dohc_engine_sync::ShareAccess::View {
+                return Ok(RelayOperationOutcome::ShareViewIdentity(
+                    ShareViewIdentityRecord::NotRequired,
+                ));
+            }
+            // Only `edit` can send file changes back, so only `edit` gets the
+            // lane fact. A `comment` share gets the identity its chat push
+            // uses and no lane: its file writes are refused at the desktop's
+            // write gate, and journaling them would leave rows the share
+            // cannot drain.
+            let drains_file_moments = access == dohc_engine_sync::ShareAccess::Edit;
+            match dohc_engine_sync::record_share_view_identity(
+                store,
+                &workspace_id,
+                dohc_engine_sync::ShareViewIdentity {
+                    origin_id: &origin_id,
+                    replication_epoch: &replication_epoch,
+                    stream_identity: &stream_identity,
+                },
+                drains_file_moments,
+                created_at_ms,
+                &NoFaults,
+            )? {
+                TxnOutcome::Committed(outcome) => {
+                    Ok(RelayOperationOutcome::ShareViewIdentity(match outcome {
+                        dohc_engine_sync::ShareViewIdentityOutcome::Recorded => {
+                            ShareViewIdentityRecord::Recorded
+                        }
+                        dohc_engine_sync::ShareViewIdentityOutcome::AlreadyRecorded => {
+                            ShareViewIdentityRecord::AlreadyRecorded
+                        }
+                    }))
+                }
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        }
         RelayOperation::PushShareView {
             workspace_id,
             share_id,
@@ -10975,13 +11052,25 @@ fn relay_enabled_in_tx(
         .map_err(outbound_domain)
 }
 
+/// File moments are the ONE kind a share view can carry, so this reads the
+/// wider `workspace_journals_file_moments_in_tx`. It is not the only site
+/// that does: `ydoc_recovery.rs` journals a recovered FILE moment and asks
+/// the same question, and the two must agree or a recovery would strand a
+/// change the recipient can see but never send.
+///
+/// Every sibling below stays on the owner-lane predicate: a share view
+/// creates no versions and writes no secrets, and journaling either would
+/// leave rows nothing drains.
 fn journal_moment_outbound_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
     moment_id: &str,
     deduped: bool,
 ) -> Result<(), DomainError> {
-    if deduped || !relay_enabled_in_tx(tx, workspace_id)? {
+    if deduped
+        || !dohc_engine_sync::workspace_journals_file_moments_in_tx(tx, workspace_id)
+            .map_err(outbound_domain)?
+    {
         return Ok(());
     }
     dohc_engine_sync::journal_moment_append_in_tx(tx, workspace_id, moment_id)
@@ -13223,5 +13312,135 @@ mod scene_seed_transaction_tests {
             std::fs::read(target).expect("materialized asset"),
             [1, 2, 3, 4]
         );
+    }
+}
+
+/// #646 PR3-1 — the level gate on share-view enrolment, read at the one place
+/// that writes the row. `EnrollShareView` never touches the transport, so
+/// this drives `execute_relay_operation` directly.
+#[cfg(test)]
+mod share_view_identity_tests {
+    use super::*;
+    use dohc_engine_sync::ShareAccess;
+    use dohc_engine_testkit::ScratchDir;
+
+    fn record(store: &mut EngineStore, access: ShareAccess) -> ShareViewIdentityRecord {
+        let outcome = execute_relay_operation(
+            store,
+            DeferredRelayTransport::default(),
+            RelayOperation::RecordShareViewIdentity {
+                workspace_id: "ws".to_owned(),
+                access,
+                origin_id: "origin_share-view".to_owned(),
+                replication_epoch: "epoch_share-view".to_owned(),
+                stream_identity: "stream_share-view".to_owned(),
+                created_at_ms: 1_000,
+            },
+            &LeaseRegistry::default(),
+        )
+        .expect("recording runs");
+        match outcome {
+            RelayOperationOutcome::ShareViewIdentity(record) => record,
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    fn identity(store: &EngineStore) -> Option<String> {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT origin_id FROM sync_identity WHERE workspace_id='ws'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+            })
+            .expect("read identity")
+    }
+
+    /// A `view` share may push nothing, so it is given no identity — and the
+    /// absence is what keeps its file writes local.
+    #[test]
+    fn a_view_share_is_never_enrolled() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let path = scratch.engine_db_path().expect("db path");
+        let mut store = EngineStore::open(&path, 1_000).expect("open");
+        assert_eq!(
+            record(&mut store, ShareAccess::View),
+            ShareViewIdentityRecord::NotRequired,
+        );
+        assert_eq!(
+            identity(&store),
+            None,
+            "MUTATION: a view share must never gain a sync identity",
+        );
+    }
+
+    fn file_lane(store: &EngineStore) -> bool {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM share_view_file_lane WHERE workspace_id='ws')",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+            })
+            .expect("read file lane")
+    }
+
+    /// THE level mapping, at the one place that makes it: only `edit` can send
+    /// file changes back, so only `edit` takes the lane fact. A `comment`
+    /// share gets the identity its chat push uses and nothing more — its file
+    /// writes are refused at the desktop's write gate, and journaling them
+    /// would leave rows the share cannot drain.
+    #[test]
+    fn only_an_edit_share_takes_the_file_lane() {
+        for (access, expected) in [(ShareAccess::Comment, false), (ShareAccess::Edit, true)] {
+            let scratch = ScratchDir::new().expect("scratch");
+            let path = scratch.engine_db_path().expect("db path");
+            let mut store = EngineStore::open(&path, 1_000).expect("open");
+            assert_eq!(
+                record(&mut store, access),
+                ShareViewIdentityRecord::Recorded
+            );
+            assert_eq!(
+                file_lane(&store),
+                expected,
+                "MUTATION: {access:?} must {} the file lane",
+                if expected { "take" } else { "not take" },
+            );
+        }
+        let scratch = ScratchDir::new().expect("scratch");
+        let path = scratch.engine_db_path().expect("db path");
+        let mut store = EngineStore::open(&path, 1_000).expect("open");
+        assert_eq!(
+            record(&mut store, ShareAccess::View),
+            ShareViewIdentityRecord::NotRequired,
+        );
+        assert!(
+            !file_lane(&store),
+            "MUTATION: a view share takes neither an identity nor a lane",
+        );
+    }
+
+    /// Comment and edit both write back, so both record — once.
+    #[test]
+    fn a_writable_share_enrols_once_per_workspace() {
+        for access in [ShareAccess::Comment, ShareAccess::Edit] {
+            let scratch = ScratchDir::new().expect("scratch");
+            let path = scratch.engine_db_path().expect("db path");
+            let mut store = EngineStore::open(&path, 1_000).expect("open");
+            assert_eq!(
+                record(&mut store, access),
+                ShareViewIdentityRecord::Recorded,
+                "MUTATION: {access:?} writes back, so it needs an identity",
+            );
+            assert_eq!(identity(&store).as_deref(), Some("origin_share-view"));
+            assert_eq!(
+                record(&mut store, access),
+                ShareViewIdentityRecord::AlreadyRecorded,
+                "MUTATION: every refresh calls this; a second row would split the log",
+            );
+        }
     }
 }

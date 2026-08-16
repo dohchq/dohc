@@ -1683,9 +1683,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         scope: &SharePushScope<'_>,
         faults: &dyn FaultInjector,
     ) -> Result<SharedChannelPushOutcome, RelayError> {
+        // Names the missing thing, because an agent reads this, not a user.
+        // A view-level share view never arrives here — `share_view_push_path`
+        // refuses first — so reaching this is a real bug in the caller.
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
-            .ok_or(RelayError::InvalidResponse)?;
+            .ok_or_else(|| {
+                RelayError::Local(
+                    "share view has no sync identity: one is written at open when the \
+                     share grants comment or edit"
+                        .to_owned(),
+                )
+            })?;
         let state = read_shared_push_state(store, workspace_id, share_id)?;
         let scanned = state.scanned_seq;
         let mut dense_seq = match state.dense_seq {

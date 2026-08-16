@@ -448,6 +448,7 @@ import {
   SharePinInvalidError,
   recordedShareSelector,
   refreshSharedViewOnce,
+  shareViewIdentitySelector,
 } from "./workspaces/sharedView";
 import { assertShareChatWritable } from "./workspaces/shareChatGate";
 import {
@@ -5666,6 +5667,18 @@ function registerIpcHandlers(
         rootPath: created.rootPath,
         relay,
       });
+      // Before the first pull: a share view that writes back needs its own
+      // sync identity, and the pull is what gives it the share cursor that
+      // makes local writes journal.
+      //
+      // SOFT, like the refresh site. Opening a share is a read, and a failure
+      // here costs the recipient the ability to send changes, not the ability
+      // to open what they were given. The next refresh records it.
+      await recordShareViewIdentity(requireWorkspace(created.workspaceId)).catch(
+        (error) => {
+          console.error("[desktop] share view identity:", error);
+        },
+      );
       const outcome = await refreshSharedViewOnce({
         rootDir: created.rootPath,
         workspaceId: created.workspaceId,
@@ -5758,6 +5771,12 @@ function registerIpcHandlers(
     // that failed — offline, a rotated session, a relay blip — is retried
     // here, before the pull, so a refresh drains the backlog instead of
     // leaving it until the recipient happens to write again.
+    // Before the push, because the push needs the identity this writes. A
+    // share view opened before #646 PR3-1 has none, and this is where it gains
+    // one.
+    await recordShareViewIdentity(workspace).catch((error) => {
+      console.error("[desktop] share view enrolment:", error);
+    });
     await pushShareViewChat(workspace).catch((error) => {
       console.error("[desktop] share view chat push (refresh backstop):", error);
     });
@@ -6815,6 +6834,35 @@ function registerIpcHandlers(
   // handler, with the share's refresh cadence as the backstop, and skipped
   // whenever a refresh would be skipped: an ended share, a signed-out user, or
   // a session on a relay that is not this share's origin.
+  // #646 PR3-1: give this share view the sync identity its share lane needs,
+  // before the first pull or push. Without it the share view journals no local
+  // write and every push refuses before the relay is contacted.
+  //
+  // Run at open and again at every refresh. The engine writes the row once, so
+  // a refresh costs one call and changes nothing.
+  //
+  // Skipped — never thrown — for the same reasons a refresh is skipped: a
+  // damaged pin, an ended share, no credentials, or a session on a relay that
+  // is not this share's origin. A `view` share is skipped as well: it may push
+  // nothing, so it needs no identity and must not be given one.
+  async function recordShareViewIdentity(
+    workspace: RegistryEntry,
+  ): Promise<void> {
+    await warmCredentialCache();
+    const credentials = cachedCredentials;
+    const grantedSelector = shareViewIdentitySelector({
+      shareView: workspace.shareView,
+      relayUrl: credentials?.relayUrl,
+      relayUrlsMatch,
+    });
+    if (!grantedSelector || !credentials?.relayUrl) return;
+    await relayClientForWorkspace({
+      workspaceId: workspace.workspaceId,
+      rootPath: workspace.rootPath,
+      relay: { baseUrl: credentials.relayUrl, token: credentials.token },
+    }).recordShareViewIdentity({ grantedSelector });
+  }
+
   async function pushShareViewChat(workspace: RegistryEntry): Promise<void> {
     const shareView = workspace.shareView;
     if (!shareView || shareView.ended) return;
@@ -6825,6 +6873,12 @@ function registerIpcHandlers(
     // was already refused if the level was unreadable.
     const grantedSelector = recordedShareSelector(shareView.grantedSelector);
     if (!grantedSelector) return;
+    // Positive recognition of a level that may write, before anything reaches
+    // the engine. A `view` share pushes nothing, and letting it try produced a
+    // refusal in the log that read like a defect and was not one.
+    if (grantedSelector.access !== "comment" && grantedSelector.access !== "edit") {
+      return;
+    }
     await warmCredentialCache();
     const credentials = cachedCredentials;
     if (!credentials?.relayUrl) return;

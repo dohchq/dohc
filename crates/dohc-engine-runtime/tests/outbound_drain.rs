@@ -3271,3 +3271,133 @@ async fn never_synced_mutations_keep_only_the_diagnostic_journal() {
     assert!(local_ops(&db).is_empty());
     assert_eq!(replication_journal_count(&db), 30);
 }
+
+// #646 PR3-1 — a share view's FILE writes. The share lane is the only one it
+// has, so `journal_moment_outbound_in_tx` reads
+// `workspace_journals_file_moments_in_tx` and every sibling journal keeps the
+// owner-lane answer.
+
+/// A share view that has pulled once: a share cursor, and no owner-lane
+/// position of any kind. `enrolled` writes the identity the way
+/// `share.view.enroll` does at comment or edit; without it this is a `view`
+/// share view.
+/// `recorded` is the LEVEL's consequence: `None` never records an
+/// identity (a `view` share), `Some(false)` records one without the file lane
+/// (a `comment` share), `Some(true)` records both (an `edit` share).
+fn initialize_share_view(db: &Path, workspace_id: &str, recorded: Option<bool>) {
+    let mut store = EngineStore::open(db, 1).expect("open store");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(workspace_id, "main", 1, &NoFaults)
+        .expect("ensure main version");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO share_view_cursors (workspace_id,share_id,cursor) \
+                 VALUES (?1,'share-1','3')",
+                [workspace_id],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed share cursor");
+    if let Some(drains_file_moments) = recorded {
+        match dohc_engine_sync::record_share_view_identity(
+            &mut store,
+            workspace_id,
+            dohc_engine_sync::ShareViewIdentity {
+                origin_id: "origin-share-view",
+                replication_epoch: "epoch-share",
+                stream_identity: "stream-share",
+            },
+            drains_file_moments,
+            1,
+            &NoFaults,
+        )
+        .expect("record share view identity")
+        {
+            TxnOutcome::Committed(_) => {}
+            TxnOutcome::Crashed { .. } => panic!("recording crashed"),
+        }
+    }
+}
+
+/// The PR3 proposal lane's precondition: an enrolled share view journals the
+/// file it writes, so the share has something to push back.
+///
+/// It must journal the moment and NOTHING ELSE. Nothing drains a
+/// `ydoc.update` from a share view — the share push scope serves only what
+/// the share covers — so a `ydoc.update` here would sit in the recipient's
+/// database forever. That is why the owner-lane predicate was left alone and
+/// a narrower one was added.
+#[tokio::test]
+async fn an_enrolled_share_view_journals_a_file_write_and_no_ydoc_update() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let workspace_id = "ws-share-view-enrolled";
+    initialize_share_view(&db, workspace_id, Some(true));
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 2).expect("open actor").actor;
+    actor
+        .versioned_text_write_indexed(
+            write_input(workspace_id, "moment-share-view", "recipient edit\n", 10),
+            scratch.path().to_path_buf(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("share view file write commits");
+    supervisor.close(&db).expect("close actor");
+
+    let ops = local_ops(&db);
+    assert!(
+        ops.iter().any(|op| op.op_kind == "moment.append"
+            && op.origin_id == "origin-share-view"
+            && op.payload["momentId"] == "moment-share-view"),
+        "MUTATION: an enrolled share view must journal its file writes: {ops:?}",
+    );
+    // Deliberately NOT asserting the absence of a `ydoc.update` here. This
+    // write opens no live session and claims no lineage, so none could be
+    // journaled whatever the Y.Doc gate reads — the assertion would pass with
+    // the gate widened and prove nothing. The lane boundary is pinned where it
+    // can actually fail: `only_the_file_moment_journal_reads_the_share_lane`
+    // (both predicates, behaviourally) and
+    // `the_ydoc_journal_reads_the_owner_lane_predicate` (the call site), both
+    // in `crates/dohc-engine-sync/src/tests.rs`.
+    assert!(
+        ops.iter().all(|op| op.op_kind != "version.create"),
+        "MUTATION: a share view creates no versions, so none may journal: {ops:?}",
+    );
+}
+
+/// The safety property behind the identity conjunct.
+///
+/// `journal_local_payload_json_in_tx` REFUSES without a sync identity, and
+/// that refusal rolls the user's edit back with it. So a predicate that
+/// answered true for a share view WITHOUT an identity would not journal the
+/// write — it would destroy it. A `view` share view is exactly that state.
+#[tokio::test]
+async fn a_view_share_view_journals_nothing_and_its_write_still_commits() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let workspace_id = "ws-share-view-unenrolled";
+    initialize_share_view(&db, workspace_id, None);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 2).expect("open actor").actor;
+    actor
+        .versioned_text_write_indexed(
+            write_input(workspace_id, "moment-local-only", "local only\n", 10),
+            scratch.path().to_path_buf(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("MUTATION: a view share view's write must still commit");
+    supervisor.close(&db).expect("close actor");
+
+    assert!(
+        local_ops(&db).is_empty(),
+        "MUTATION: a share view with no identity must journal nothing",
+    );
+}

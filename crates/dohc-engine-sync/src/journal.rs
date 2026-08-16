@@ -26,6 +26,35 @@ pub enum AdoptJoinIdentityOutcome {
     AlreadyMatched,
 }
 
+/// What [`record_share_view_identity`] did.
+///
+/// Two states, because this layer does two things: it writes the row or it
+/// finds one. Whether a share view should be recorded at all is the LEVEL's
+/// question, and the level is answered one layer up
+/// (`RelayOperation::RecordShareViewIdentity`) — a function that is never
+/// called cannot report a third state, and a variant it can never return is
+/// one every reader has to be told to ignore.
+///
+/// Deliberately not called "enrolment": in this crate that word already means
+/// the owner-lane backfill in `enrolment.rs`, and one name for one thing.
+/// The three components of a replica identity, which always travel together.
+///
+/// Grouped because they are one fact in three fields, not three arguments a
+/// caller chooses independently — and passing them separately made this
+/// function's parameter list long enough that the shape was the warning.
+#[derive(Debug, Clone, Copy)]
+pub struct ShareViewIdentity<'a> {
+    pub origin_id: &'a str,
+    pub replication_epoch: &'a str,
+    pub stream_identity: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareViewIdentityOutcome {
+    Recorded,
+    AlreadyRecorded,
+}
+
 #[cfg(any(test, feature = "fault-injection"))]
 pub(crate) fn crashes(faults: &dyn FaultInjector, point: FaultPoint) -> bool {
     faults.poll(point) == dohc_engine_storage::FaultAction::Crash
@@ -51,6 +80,11 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 /// succeeds; both run behind `relay-not-configured`, which the desktop
 /// satisfies only for a workspace the user explicitly enabled cloud sync on
 /// (`RegistryEntry.remote` plus matching credentials).
+///
+/// A SHARE lane is deliberately not read here. This predicate answers for the
+/// OWNER lane, and for a share view the honest answer is no. The narrower
+/// [`workspace_journals_file_moments_in_tx`] holds the share-lane term, and
+/// only the file-moment journal reads it.
 ///
 /// These two tables are a SUBSET of what `adopt_join_identity` below calls
 /// pristine local replication state. That check is deliberately wider — it also
@@ -95,6 +129,51 @@ pub fn workspace_replicates_with_relay_in_tx(
         "SELECT EXISTS(SELECT 1 FROM sync_identity WHERE workspace_id = ?1) \
            AND (EXISTS(SELECT 1 FROM sync_relay_cursors WHERE workspace_id = ?1) \
              OR EXISTS(SELECT 1 FROM sync_relay_push_state WHERE workspace_id = ?1))",
+        [workspace_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
+/// Whether `workspace_id` journals FILE MOMENTS for replication: the owner
+/// relay lane, or a share view's own share lane.
+///
+/// Deliberately narrower than [`workspace_replicates_with_relay_in_tx`]. A
+/// share view can carry file moments through its share and nothing else
+/// (#646), so the Y.Doc lanes, the conflict outbox and cursor advancement
+/// keep the owner-lane answer. Journaling anything a share cannot carry would
+/// leave rows in the recipient's database that nothing ever drains: the share
+/// push scope serves only the ops the share covers, so a `ydoc.update` there
+/// would accumulate forever.
+///
+/// The share-lane term is `share_view_file_lane`, and it is a FACT rather
+/// than a proxy: [`record_share_view_identity`] writes that row only for an
+/// `edit` grant, which is the only level whose file changes a share can
+/// drain. A `comment` share refuses file writes at the desktop's write gate
+/// and journals its chat through the chat path, so it records an identity and
+/// no lane row; a `view` share records neither.
+///
+/// `EXISTS(sync_identity)` must NEVER stand in for that. The doc on
+/// [`workspace_replicates_with_relay_in_tx`] above says why, and it predicted
+/// this exact mistake: ordinary chat activity mints an identity
+/// unconditionally, so the row cannot tell a share view that may send file
+/// changes from one that may not. An earlier revision of this function read
+/// it and would have journaled file moments in a `view` share that had ever
+/// been chatted in.
+///
+/// The identity a journal append needs still exists whenever this answers
+/// true, because the lane row and the identity are written in ONE
+/// transaction. That matters: `journal_local_payload_json_in_tx` REFUSES
+/// without an identity, and the refusal rolls the user's edit back with it.
+pub fn workspace_journals_file_moments_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+) -> Result<bool, SyncError> {
+    if workspace_replicates_with_relay_in_tx(tx, workspace_id)? {
+        return Ok(true);
+    }
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM share_view_file_lane WHERE workspace_id = ?1)",
         [workspace_id],
         |row| row.get(0),
     )
@@ -389,6 +468,104 @@ pub fn adopt_join_identity(
         )
         .map_err(SyncError::persist)?;
         Ok(AdoptJoinIdentityOutcome::Adopted)
+    })
+}
+
+/// Record a share view's own replica identity, and whether its share can
+/// drain a file moment.
+///
+/// A share view replicates through a SHARE, not the owner lane, so it holds
+/// `share_view_cursors` long before it holds an identity — which is exactly
+/// the state [`adopt_join_identity`] refuses, and rightly: that primitive
+/// adopts an OWNER's coordinate onto a pristine replica, and a share view is
+/// neither pristine nor adopting anyone's coordinate. This is a different
+/// thing, so it is a different function.
+///
+/// The origin is a REPLICA id, local to this machine, and it is what
+/// `push_share_ops` sends: the relay namespaces this recipient's ops as
+/// `share:<share_id>:<origin_id>`. The epoch and stream are owner-lane fields
+/// a share view never sends; they are stored because the row requires them.
+///
+/// `drains_file_moments` is the LEVEL's consequence, decided by the caller
+/// and stored as its own fact. True for `edit` and nothing else: that is the
+/// only grant whose file changes a share can carry back. Passing it as a
+/// parameter rather than inferring it here is the point — nothing in this
+/// store can tell an `edit` share view from a `comment` one, and guessing
+/// from a row that chat also writes is the mistake this replaced.
+///
+/// Idempotent by design — the caller runs it on every open and every refresh.
+/// An existing identity wins, so a later call cannot re-mint an origin and
+/// split this replica's log in two.
+pub fn record_share_view_identity(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    identity: ShareViewIdentity<'_>,
+    drains_file_moments: bool,
+    created_at_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<ShareViewIdentityOutcome>, SyncError> {
+    let ShareViewIdentity {
+        origin_id,
+        replication_epoch,
+        stream_identity,
+    } = identity;
+    bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
+    relay_identity_component(
+        origin_id,
+        "origin_id must be 1-512 UTF-8 bytes, ECMAScript-trimmed, and contain no ASCII controls",
+    )?;
+    relay_identity_component(
+        replication_epoch,
+        "replication_epoch must be 1-512 UTF-8 bytes, ECMAScript-trimmed, and contain no ASCII controls",
+    )?;
+    relay_identity_component(
+        stream_identity,
+        "stream_identity must be 1-512 UTF-8 bytes, ECMAScript-trimmed, and contain no ASCII controls",
+    )?;
+
+    store.write_with(faults, |tx| {
+        let recorded: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sync_identity WHERE workspace_id = ?1)",
+                [workspace_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        if !recorded {
+            tx.execute(
+                "INSERT INTO sync_identity \
+                 (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    workspace_id,
+                    origin_id,
+                    replication_epoch,
+                    stream_identity,
+                    created_at_ms
+                ],
+            )
+            .map_err(SyncError::persist)?;
+        }
+        // The lane fact, in the SAME transaction as the identity, which is
+        // what lets `workspace_journals_file_moments_in_tx` read this row
+        // alone and still know an identity is there for the append.
+        //
+        // `INSERT OR IGNORE`, not a second existence probe: a share whose
+        // level was raised to edit after its identity was already recorded
+        // must still gain the lane, and one recorded twice must not fail.
+        if drains_file_moments {
+            tx.execute(
+                "INSERT OR IGNORE INTO share_view_file_lane \
+                 (workspace_id, recorded_at_ms) VALUES (?1, ?2)",
+                params![workspace_id, created_at_ms],
+            )
+            .map_err(SyncError::persist)?;
+        }
+        Ok(if recorded {
+            ShareViewIdentityOutcome::AlreadyRecorded
+        } else {
+            ShareViewIdentityOutcome::Recorded
+        })
     })
 }
 

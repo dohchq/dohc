@@ -358,8 +358,9 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // apply disposition used by compound-shadow replay (ordinal 31), the
     // Y.Doc relay-arbitration coordinate (ordinal 32), scene asset delete
     // authority (ordinal 33), the scene Y.Doc content-kind migration
-    // (ordinal 34), and scene support in Y.Doc recovery decisions (ordinal 35).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 36);
+    // (ordinal 34), scene support in Y.Doc recovery decisions (ordinal 35),
+    // and the share-view file lane (ordinal 36, #646 PR3-1).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 37);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(

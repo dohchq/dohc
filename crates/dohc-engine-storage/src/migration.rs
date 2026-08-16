@@ -2714,6 +2714,25 @@ ALTER TABLE ydoc_recovery_decisions_v35 RENAME TO ydoc_recovery_decisions;
 
 pub(crate) const YDOC_SCENE_RECOVERY_KIND_MIGRATION_ID: &str = "v1-ydoc-scene-recovery-kind";
 
+/// Ordinal 36. Which share views may drain a FILE MOMENT through their share
+/// (#646 PR3-1). A row here is written only by `record_share_view_identity`,
+/// and only for an `edit` grant, in the same transaction as the identity it
+/// records — so the row's existence means both "this is a share view that may
+/// send file changes" and "it has the identity such a journal append needs".
+///
+/// It is a fact, not a proxy. The obvious shortcut — reading
+/// `EXISTS(sync_identity)` — is wrong, and `journal.rs` says why: ordinary
+/// chat activity mints an identity unconditionally, so that row cannot tell a
+/// share view that may send file changes from one that may not.
+const V1_SHARE_VIEW_FILE_LANE_DDL: &str = "\
+CREATE TABLE share_view_file_lane (
+    workspace_id  TEXT    NOT NULL PRIMARY KEY,
+    recorded_at_ms INTEGER NOT NULL
+) STRICT;
+";
+
+pub(crate) const SHARE_VIEW_FILE_LANE_MIGRATION_ID: &str = "v1-share-view-file-lane";
+
 /// Ordinal 32. Persist the relay arbitration coordinate for Y.Doc bases.
 /// Candidate coordinates are only hints recovered from the local append-only
 /// log; sync must authenticate each exact
@@ -3082,6 +3101,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: YDOC_SCENE_RECOVERY_KIND_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_YDOC_SCENE_RECOVERY_KIND_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 36,
+        id: SHARE_VIEW_FILE_LANE_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SHARE_VIEW_FILE_LANE_DDL,
         sets_user_version: None,
     },
 ];
@@ -4841,7 +4867,15 @@ mod tests {
 
         let disposition = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("apply the later replication-log disposition migration");
-        assert_eq!(disposition, MigrationOutcome::Applied { newly_applied: 5 });
+        assert_eq!(
+            disposition,
+            MigrationOutcome::Applied {
+                // Every migration registered after this one. A literal here is
+                // a count that goes stale the next time the ledger grows.
+                newly_applied: u32::try_from(BASELINE_MIGRATIONS.len() - (migration_index + 1))
+                    .expect("the ledger length fits a migration count")
+            }
+        );
         let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("rerun current migrations");
         assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 0 });
@@ -4899,7 +4933,15 @@ mod tests {
         .expect_err("unknown apply dispositions must fail closed");
         let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("rerun current migrations");
-        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 4 });
+        assert_eq!(
+            rerun,
+            MigrationOutcome::Applied {
+                // Every migration registered after this one. A literal here is
+                // a count that goes stale the next time the ledger grows.
+                newly_applied: u32::try_from(BASELINE_MIGRATIONS.len() - (migration_index + 1))
+                    .expect("the ledger length fits a migration count")
+            }
+        );
     }
 
     #[test]
@@ -5051,7 +5093,15 @@ mod tests {
         );
         let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("rerun current migrations");
-        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 3 });
+        assert_eq!(
+            rerun,
+            MigrationOutcome::Applied {
+                // Every migration registered after this one. A literal here is
+                // a count that goes stale the next time the ledger grows.
+                newly_applied: u32::try_from(BASELINE_MIGRATIONS.len() - (migration_index + 1))
+                    .expect("the ledger length fits a migration count")
+            }
+        );
     }
 
     fn seed_hex_binary_blobs(conn: &Connection) {

@@ -913,6 +913,10 @@ impl EngineService {
             "share.view.push" => {
                 Box::pin(self.share_view_push(&ctx, request.workspace, request.params)).await?
             }
+            "share.view.recordIdentity" => {
+                Box::pin(self.share_view_record_identity(&ctx, request.workspace, request.params))
+                    .await?
+            }
             "versionedText.write" => {
                 self.versioned_text_write(&ctx, &request, request.params.clone())
                     .await?
@@ -2405,6 +2409,61 @@ impl EngineService {
                     },
                 },
                 "share.view.push",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    /// Give this share view the sync identity its share lane needs (#646
+    /// PR3-1). Run at open and again at every refresh; the engine writes the
+    /// row once and later calls answer `already-enrolled`.
+    ///
+    /// Takes no `shareId`: `sync_identity` is per WORKSPACE, and a share view
+    /// mirrors exactly one share. It takes the pinned selector because the
+    /// LEVEL decides — a `view` share may push nothing, so it is never
+    /// enrolled — and refuses an unreadable level the same way the pull and
+    /// the push do.
+    ///
+    /// The three identity components are minted HERE, not by the caller, for
+    /// the same reason `sync.claim` mints its own: the durable row is the
+    /// record, so a refresh cannot re-mint an origin and split this replica's
+    /// log in two. The origin is a REPLICA id — the relay namespaces this
+    /// recipient's ops as `share:<shareId>:<originId>` — so it must never be
+    /// a user id, which two devices would share.
+    async fn share_view_record_identity(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ShareViewEnrollParams = parse(params)?;
+        let access = dohc_engine_sync::ShareAccess::parse(&params.granted_selector.access)
+            .ok_or_else(|| {
+                wire(
+                    ErrorCode::InvalidParams,
+                    r#"access must be "view", "comment", or "edit""#,
+                )
+            })?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                // The RPC still parses the WHOLE selector above, because a
+                // caller that sends a malformed one must be refused here. The
+                // operation carries only the access: the level is the entire
+                // decision it makes, and handing it paths would suggest they
+                // matter to it.
+                RelayOperation::RecordShareViewIdentity {
+                    workspace_id: open.workspace_id.clone(),
+                    access,
+                    origin_id: sync_identifier("origin")?,
+                    replication_epoch: sync_identifier("epoch")?,
+                    stream_identity: sync_identifier("stream")?,
+                    created_at_ms: now_ms()?,
+                },
+                "share.view.recordIdentity",
             )
             .await?;
         relay_outcome_json(outcome)
@@ -8863,6 +8922,15 @@ struct ShareViewParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShareViewEnrollParams {
+    workspace_id: String,
+    /// REQUIRED, for the level it carries. Enrolment is a level decision, and
+    /// a caller that cannot state the level must not enroll.
+    granted_selector: GrantedSelectorParams,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GrantedSelectorParams {
     paths: Vec<String>,
     #[serde(default)]
@@ -11328,6 +11396,18 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
         RelayOperationOutcome::SharedChannelPushed(outcome) => {
             json!({ "pushed": outcome.pushed })
         }
+        RelayOperationOutcome::ShareViewIdentity(record) => json!({
+            "identity": match record {
+                dohc_engine_runtime::ShareViewIdentityRecord::Recorded => "recorded",
+                dohc_engine_runtime::ShareViewIdentityRecord::AlreadyRecorded => {
+                    "already-recorded"
+                }
+                // A `view` share may push nothing, so it is given no identity
+                // — and saying "already recorded" would claim a row that does
+                // not exist.
+                dohc_engine_runtime::ShareViewIdentityRecord::NotRequired => "not-required",
+            },
+        }),
         RelayOperationOutcome::ShareViewPulled(outcome) => json!({
             "fetched": outcome.fetched,
             "hasMore": outcome.has_more,
