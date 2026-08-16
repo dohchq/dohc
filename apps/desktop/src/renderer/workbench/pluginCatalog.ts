@@ -41,7 +41,7 @@ type PendingStatusEvent = {
   event: PluginStatusChangedEvent;
 };
 
-export function upsertPlugin(
+function upsertPlugin(
   plugins: readonly PluginStatusRecord[],
   plugin: PluginStatusRecord,
 ): PluginStatusRecord[] {
@@ -54,7 +54,7 @@ export function upsertPlugin(
   );
 }
 
-export function applyStatusEvents(
+function applyStatusEvents(
   plugins: readonly PluginStatusRecord[],
   events: readonly PendingStatusEvent[],
 ): PluginStatusRecord[] {

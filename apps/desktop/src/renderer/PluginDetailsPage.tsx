@@ -257,6 +257,9 @@ function PluginDetailsHeader(props: {
             <span aria-hidden className="text-line">
               ·
             </span>
+            {/* The list row hides this when the folder repeats the id, because
+                a dense row cannot spend a line on it. A reference page always
+                answers where the plugin lives. */}
             <span className="truncate font-mono text-subtle">
               {`plugins/${plugin.directoryName}`}
             </span>
