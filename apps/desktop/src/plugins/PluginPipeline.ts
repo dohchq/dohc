@@ -131,7 +131,7 @@ export interface PluginPipelineOptions {
   pluginHost: PluginHost;
   resourcesBasePath?: string;
   /** See pluginInstallRunner's InstallPluginDependenciesInput.pnpmRunnerEntry. */
-  pnpmRunnerEntry?: string;
+  pnpmRunnerEntry: string;
   onStatusChange?: (event: PluginPipelineStatusEvent) => void;
   /** Whether this workspace's engine capture is running right now — used
    * only to keep uninstall preflight's recovery promises honest (a file
@@ -1384,7 +1384,7 @@ export class PluginPipeline {
       }
 
       this.setStatus(candidate, { status: "installing", error: null });
-      this.unwrap("install", await this.operations.install({
+      const installResult = await this.operations.install({
         workspaceRoot: this.workspaceRoot,
         pluginId: candidate.id,
         snapshotRoot: snapshot.snapshotRoot,
@@ -1392,7 +1392,8 @@ export class PluginPipeline {
         resourcesBasePath: this.options.resourcesBasePath,
         pnpmRunnerEntry: this.options.pnpmRunnerEntry,
         signal: this.abortController.signal,
-      }));
+      });
+      this.unwrap("install", installResult);
 
       this.setStatus(candidate, { status: "scanning" });
       const scan = this.unwrap("scan", await this.operations.scan({

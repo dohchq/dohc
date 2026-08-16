@@ -57,6 +57,9 @@ interface Deferred {
 const roots: string[] = [];
 let resourcesParent: string;
 let resourcesBasePath: string;
+// The production install forks this file, and so does every install here:
+// Node runs its TypeScript source directly.
+const pnpmRunnerEntry = join(import.meta.dirname, "pluginPnpmRunnerProcess.ts");
 
 function deferred(): Deferred {
   let resolvePromise: (() => void) | undefined;
@@ -361,6 +364,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: async (input) => {
           installCalls += 1;
@@ -561,6 +565,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -628,6 +633,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -716,6 +722,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         // Real discovery once (to seed a real, valid status), then empty —
         // simulating the plugin's directory disappearing while its own
@@ -773,6 +780,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -832,6 +840,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -931,6 +940,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -979,6 +989,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1056,6 +1067,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1151,6 +1163,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1233,6 +1246,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: async (input) => {
           installCalls += 1;
@@ -1326,6 +1340,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1405,6 +1420,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1474,6 +1490,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1547,6 +1564,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         stateDir: fixture.stateDir,
         pluginHost: host,
         resourcesBasePath,
+        pnpmRunnerEntry,
         operations: {
           install: (input) =>
             installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1634,6 +1652,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1736,6 +1755,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: () => Promise.reject(new Error("synthetic install failure")),
       },
@@ -1788,6 +1808,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1863,6 +1884,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1943,6 +1965,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2020,6 +2043,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         stateDir: fixture.stateDir,
         pluginHost: host,
         resourcesBasePath,
+        pnpmRunnerEntry,
         operations: {
           install: (input) =>
             installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2105,6 +2129,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         stateDir: fixture.stateDir,
         pluginHost: host,
         resourcesBasePath,
+        pnpmRunnerEntry,
         operations: {
           install: (input) =>
             installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2211,6 +2236,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         stateDir: fixture.stateDir,
         pluginHost: host,
         resourcesBasePath,
+        pnpmRunnerEntry,
         operations: {
           install: (input) =>
             installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2281,6 +2307,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2349,6 +2376,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2430,6 +2458,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2511,6 +2540,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2565,6 +2595,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2663,6 +2694,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2787,6 +2819,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: newHost(),
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2820,6 +2853,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: newHost(),
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2875,6 +2909,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2984,6 +3019,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       onStatusChange: (event) => events.push(event),
       operations: {
         discover: async () => [noisy],
@@ -3037,6 +3073,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: async (input) => {
           installCalls += 1;
@@ -3117,6 +3154,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: async (input) => {
           installCalls += 1;
@@ -3206,6 +3244,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -3278,6 +3317,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -3414,6 +3454,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: async (input) => {
           installCalls += 1;
@@ -3507,6 +3548,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -3568,6 +3610,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -3637,6 +3680,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -3715,6 +3759,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -3824,6 +3869,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) => {
           installCalls += 1;
@@ -3939,6 +3985,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       onStatusChange: (event) => events.push(event),
     });
 
@@ -4010,6 +4057,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       onStatusChange: (event) => events.push(event),
       operations: {
         install: (input) =>
@@ -4066,6 +4114,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
