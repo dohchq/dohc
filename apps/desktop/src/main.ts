@@ -3043,11 +3043,22 @@ async function stopPluginWebApp(
   pluginId: string,
   webAppId: string,
 ): Promise<void> {
-  await stopPluginPanelWithLock(
+  await withPluginWebAppStartLock(
     pluginWebAppKey(workspaceId, pluginId, webAppId),
+    () => stopPluginWebAppUnderStartLock(workspaceId, pluginId, webAppId),
+  );
+}
+
+// The same stop for a caller that already holds this web app's start lock —
+// the failed-start recovery, which unpairs and stops the view in one section.
+// Taking the start lock again from inside that section would wait on itself.
+async function stopPluginWebAppUnderStartLock(
+  workspaceId: string,
+  pluginId: string,
+  webAppId: string,
+): Promise<void> {
+  await withPluginHostLifecycleLock(
     pluginLifecycleKey(workspaceId, pluginId),
-    withPluginWebAppStartLock,
-    withPluginHostLifecycleLock,
     async () => {
       const removed = pluginWebAppViews.remove({ workspaceId, pluginId, webAppId });
       if (removed) destroyPluginWebAppViews([removed]);
@@ -6715,8 +6726,13 @@ function registerIpcHandlers(
         // view cannot do that job: it only stops the host when an on-demand
         // open is the reason the host runs, and the default deployment is a
         // workspace-started host, which survives — with a paired, cookieless
-        // server behind it. The view stop queues behind this handler's own
-        // start lock.
+        // server behind it.
+        //
+        // The teardown takes this web app's start lock, which is the lock a
+        // reopen queues on: the section is claimed before this handler's own
+        // one releases, so the reopen waits for the unpair instead of reading
+        // the doomed server's state. The recovery runs detached — it must not
+        // hold that section open waiting for the handler it runs inside.
         const recoverConsumedCredential = (): void => {
           void recoverConsumedWebAppCredential({
             notifyFailed: () =>
@@ -6725,9 +6741,18 @@ function registerIpcHandlers(
                 pluginId: input.pluginId,
                 webAppId: input.webAppId,
               }),
+            withTeardownLock: (teardown) =>
+              withPluginWebAppStartLock(
+                pluginWebAppKey(
+                  workspace.workspaceId,
+                  input.pluginId,
+                  input.webAppId,
+                ),
+                teardown,
+              ),
             unpair: () => host.stopWebApp(input.pluginId, input.webAppId),
             stopView: () =>
-              stopPluginWebApp(
+              stopPluginWebAppUnderStartLock(
                 workspace.workspaceId,
                 input.pluginId,
                 input.webAppId,

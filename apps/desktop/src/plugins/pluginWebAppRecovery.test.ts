@@ -11,11 +11,20 @@ function trace(): {
   return { steps: [], errors: [] };
 }
 
+// The section the caller hands in — in main, the web app's start lock, the
+// same one a reopen queues on.
+const runTeardown = (teardown: () => Promise<void>) => teardown();
+
 describe("recoverConsumedWebAppCredential", () => {
-  it("tells the page, unpairs the plugin, then releases the view", async () => {
+  it("tells the page, then unpairs and releases the view in one section", async () => {
     const seen = trace();
     await recoverConsumedWebAppCredential({
       notifyFailed: () => seen.steps.push("notify"),
+      withTeardownLock: async (teardown) => {
+        seen.steps.push("enter");
+        await teardown();
+        seen.steps.push("leave");
+      },
       unpair: async () => {
         seen.steps.push("unpair");
       },
@@ -31,7 +40,11 @@ describe("recoverConsumedWebAppCredential", () => {
     // that never arrived. Order matters twice: the page must leave its ready
     // state even if a teardown hangs, and the unpair needs the plugin's
     // transport, which the view stop may take away.
-    expect(seen.steps).toEqual(["notify", "unpair", "stop"]);
+    //
+    // MUTATION (unpair outside the section): a reopen queued on that same
+    // lock runs while the unpair is still in flight, reads the plugin's
+    // pre-unpair server state, and gets the doomed server's origin.
+    expect(seen.steps).toEqual(["notify", "enter", "unpair", "stop", "leave"]);
     expect(seen.errors).toEqual([]);
   });
 
@@ -40,6 +53,7 @@ describe("recoverConsumedWebAppCredential", () => {
     const failure = new Error("plugin is stopping");
     await recoverConsumedWebAppCredential({
       notifyFailed: () => seen.steps.push("notify"),
+      withTeardownLock: runTeardown,
       unpair: () => Promise.reject(failure),
       stopView: async () => {
         seen.steps.push("stop");
@@ -57,6 +71,7 @@ describe("recoverConsumedWebAppCredential", () => {
     await expect(
       recoverConsumedWebAppCredential({
         notifyFailed: () => seen.steps.push("notify"),
+        withTeardownLock: runTeardown,
         unpair: async () => {
           seen.steps.push("unpair");
         },
@@ -68,23 +83,27 @@ describe("recoverConsumedWebAppCredential", () => {
     expect(seen.errors).toEqual([["stop", failure]]);
   });
 
-  it("notifies before it waits on anything", async () => {
+  it("notifies before it waits on anything, the section included", async () => {
     const notifyFailed = vi.fn();
-    let releaseUnpair = (): void => undefined;
+    let enterTeardown = (): void => undefined;
     const recovery = recoverConsumedWebAppCredential({
       notifyFailed,
-      unpair: () =>
+      // A section somebody else still holds — the state the start lock is in
+      // whenever a stop or another start is already running for this web app.
+      withTeardownLock: (teardown) =>
         new Promise<void>((resolve) => {
-          releaseUnpair = resolve;
+          enterTeardown = () => resolve(teardown());
         }),
+      unpair: () => Promise.resolve(),
       stopView: () => Promise.resolve(),
       onError: () => undefined,
     });
 
-    // MUTATION (notify after the teardown): a plugin whose stop hangs leaves
-    // the tab painting an empty frame with no error for the whole timeout.
+    // MUTATION (notify inside the section, or after the teardown): a busy lock
+    // or a plugin whose stop hangs leaves the tab painting an empty frame with
+    // no error for the whole timeout.
     expect(notifyFailed).toHaveBeenCalledTimes(1);
-    releaseUnpair();
+    enterTeardown();
     await recovery;
   });
 });

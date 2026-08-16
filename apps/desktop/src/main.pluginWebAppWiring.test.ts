@@ -73,12 +73,23 @@ describe("plugin web app main-process wiring", () => {
     expect(start).toContain("notifyFailed: () =>");
     expect(start).toContain("onLoadFailure: () => {");
     expect(start).toContain("recoverConsumedCredential();");
+    // The teardown runs in a section on the lock a reopen queues on, and its
+    // view stop must be the variant that does NOT take that lock again.
+    // MUTATION (stopPluginWebApp here): the section waits on itself and the
+    // web app can never be opened again in this app run.
+    expect(start).toContain("withTeardownLock: (teardown) =>");
+    expect(start).toContain("withPluginWebAppStartLock(");
+    expect(start).toContain("stopPluginWebAppUnderStartLock(");
+    expect(start).not.toContain("stopPluginWebApp(");
   });
 
   it("leaves a normal tab close paired", () => {
     const stopWebApp = mainSource.slice(
-      mainSource.indexOf("async function stopPluginWebApp("),
-      mainSource.indexOf("\n}\n", mainSource.indexOf("async function stopPluginWebApp(")),
+      mainSource.indexOf("async function stopPluginWebAppUnderStartLock("),
+      mainSource.indexOf(
+        "\n}\n",
+        mainSource.indexOf("async function stopPluginWebAppUnderStartLock("),
+      ),
     );
     // MUTATION (unpair on every close): an enabled plugin's server would then
     // be torn down and respawned on every tab close, and the guest's session
@@ -102,8 +113,11 @@ describe("plugin web app main-process wiring", () => {
 
   it("shares the host claim accounting between panels and web apps", () => {
     const stopWebApp = mainSource.slice(
-      mainSource.indexOf("async function stopPluginWebApp("),
-      mainSource.indexOf("\n}\n", mainSource.indexOf("async function stopPluginWebApp(")),
+      mainSource.indexOf("async function stopPluginWebAppUnderStartLock("),
+      mainSource.indexOf(
+        "\n}\n",
+        mainSource.indexOf("async function stopPluginWebAppUnderStartLock("),
+      ),
     );
     expect(stopWebApp).toContain("hasAnotherPanel");
     expect(stopWebApp).toContain("!pluginWebAppViews.hasForPlugin(workspaceId, pluginId)");

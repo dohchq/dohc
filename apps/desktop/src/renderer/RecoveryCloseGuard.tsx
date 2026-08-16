@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { UpdateActionResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import { useGuestBlockingUiWhile } from "./guestBlockingUi";
 import { atRiskOrphanedDraftIds, useAllOrphanedDrafts } from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
 
@@ -178,6 +179,12 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
   useEffect(() => {
     if (warningOpen && liveCount === 0) setCloseWarning(null);
   }, [warningOpen, liveCount]);
+  // An open plugin web app's guest composites above this renderer, so the
+  // dialog below paints inside it and the guest takes the clicks that answer
+  // it — the user cannot answer the warning blocking their own exit. The guest
+  // hides while the dialog is up. Blocker only: this dialog takes no part in
+  // Escape handling, so it never steals a keystroke from an open overlay.
+  useGuestBlockingUiWhile(warningOpen && liveCount > 0);
   const bypassRearmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The drafts the warning LISTED when the user confirmed. An approval covers
   // exactly those (#579 review, r13 + r14) — never a draft a queued reopen

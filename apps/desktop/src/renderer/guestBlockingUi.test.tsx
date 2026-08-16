@@ -8,8 +8,10 @@ import type {
   StartPluginWebAppResult,
 } from "../ipc/bridgeContract";
 import { useGuestBlockingUi, useGuestBlockingUiWhile } from "./guestBlockingUi";
+import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 import { Overlay } from "./Overlay";
 import { PluginWebAppPage } from "./PluginWebAppPage";
+import { RecoveryCloseGuard, resetGuardedExits } from "./RecoveryCloseGuard";
 
 // The signal that hides a plugin web app's guest, driven the way the shell
 // drives it. The guest is a main-process view composited above this renderer,
@@ -28,6 +30,13 @@ const bridgeMock = {
   onPluginWebAppFailed: vi.fn(
     (_listener: (event: PluginWebAppFailedEvent) => void) => () => undefined,
   ),
+  // The close guard calls these directly: a stub that omits them is a
+  // mismatched build (RecoveryCloseGuard.test.tsx).
+  onQuitRequested: vi.fn(() => () => undefined),
+  onRecoveryCheckRequested: vi.fn(() => () => undefined),
+  answerRecoveryCheck: vi.fn(async () => undefined),
+  holdQuit: vi.fn(async () => undefined),
+  resumeQuit: vi.fn(async () => undefined),
 };
 
 const RECT = {
@@ -106,6 +115,8 @@ describe("the guest-blocking UI signal", () => {
 
   afterEach(() => {
     cleanup();
+    resetGuardedExits();
+    resetOrphanedDrafts();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     vi.clearAllMocks();
@@ -167,6 +178,42 @@ describe("the guest-blocking UI signal", () => {
       );
       await Promise.resolve();
     });
+    expect(lastVisible()).toBe(true);
+  });
+
+  it("hides the guest for the exit warning that guards set-aside edits", async () => {
+    // Storage refuses the write, so the draft lives in renderer memory only —
+    // the draft an exit destroys, and the only one the guard warns about.
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    render(
+      <Shell>
+        <RecoveryCloseGuard>
+          <div />
+        </RecoveryCloseGuard>
+      </Shell>,
+    );
+    await screen.findByTestId("plugin-web-app-frame");
+    expect(lastVisible()).toBe(true);
+
+    // MUTATION (drop the registration): the warning paints inside the guest's
+    // rectangle, the guest keeps compositing above it, and neither "Go back"
+    // nor "Close anyway" takes its click — the user cannot answer the dialog
+    // blocking their own exit.
+    await act(async () => {
+      window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("recovery-close-warning")).toBeTruthy();
+    expect(lastVisible()).toBe(false);
+
+    await act(async () => {
+      screen.getByTestId("recovery-close-goback").click();
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
     expect(lastVisible()).toBe(true);
   });
 
