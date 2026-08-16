@@ -1606,3 +1606,91 @@ describe("MarkdownEditor read-only links", () => {
     }
   });
 });
+
+// A tiptap editor reports the user's edits through `onUpdate`. This component
+// used to ignore every one of them until an animation frame set a
+// `dirtyTrackingReady` ref, which made "did the app hear the edit?" a question
+// about timing: an edit that arrived before the frame was applied to
+// ProseMirror's document and never reported, so the editor showed the text
+// while the app said "Saved" and scheduled no save at all (#797).
+//
+// Holding the frame open is what makes that window permanent instead of a
+// 16ms race. These tests fail deterministically if the gate returns, and they
+// are the reason it cannot: nothing about a frame decides whether a keystroke
+// counts.
+describe("MarkdownEditor dirty tracking", () => {
+  function holdAnimationFrames(): void {
+    vi.stubGlobal("requestAnimationFrame", () => 1);
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+  }
+
+  const BODY = "# Plan\n\nBase paragraph.\n";
+
+  function editorProps(onDirty: () => void) {
+    return {
+      value: BODY,
+      onDirty,
+      workspaceId: "workspace-1",
+      path: "notes/plan.md",
+      knownFiles: [],
+    };
+  }
+
+  it("reports an edit that lands before the first animation frame", async () => {
+    holdAnimationFrames();
+    const onDirty = vi.fn();
+    const user = userEvent.setup();
+    const view = render(createElement(MarkdownEditor, editorProps(onDirty)));
+
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+      await waitFor(() =>
+        expect(editor.textContent).toContain("Base paragraph."),
+      );
+      await user.click(editor);
+      await user.type(editor, "Z");
+
+      await waitFor(() => expect(onDirty).toHaveBeenCalled());
+      expect(editor.textContent).toContain("Z");
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The rebuild case, and the more dangerous one: the user is already in the
+  // document when the engine session ends and the view falls back to the local
+  // editor. `collab` drops, the extensions change, and tiptap builds a NEW
+  // editor underneath a user who never stopped typing.
+  it("reports an edit that lands after the editor is rebuilt mid-session", async () => {
+    holdAnimationFrames();
+    const onDirty = vi.fn();
+    const user = userEvent.setup();
+    const ydoc = markdownToYDoc(BODY);
+    const view = render(
+      createElement(MarkdownEditor, {
+        ...editorProps(onDirty),
+        collab: { ydoc, status: "connected" as const, peerCount: 0, synced: true },
+      }),
+    );
+
+    try {
+      await screen.findByTestId("markdown-editor");
+      view.rerender(
+        createElement(MarkdownEditor, { ...editorProps(onDirty), collab: null }),
+      );
+
+      const editor = await screen.findByTestId("markdown-editor");
+      await waitFor(() =>
+        expect(editor.textContent).toContain("Base paragraph."),
+      );
+      await user.click(editor);
+      await user.type(editor, "Z");
+
+      await waitFor(() => expect(onDirty).toHaveBeenCalled());
+      expect(editor.textContent).toContain("Z");
+    } finally {
+      view.unmount();
+      ydoc.destroy();
+    }
+  });
+});
