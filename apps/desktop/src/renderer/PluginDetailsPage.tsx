@@ -1,4 +1,4 @@
-import { AlertTriangle, Blocks } from "lucide-react";
+import { AlertTriangle, Blocks, ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { PluginStatusRecord } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
@@ -362,22 +362,61 @@ function PluginDetailsHeader(props: {
         </p>
       ) : null}
       {plugin.warnings.length > 0 ? (
-        <ul
-          data-testid="plugin-warnings"
-          className="m-0 mt-3 list-none space-y-1 p-0"
-        >
-          {plugin.warnings.map((warning) => (
-            <li
-              key={warning}
-              className="flex items-start gap-1.5 text-xs text-warning"
-            >
-              <AlertTriangle size={13} aria-hidden className="mt-0.5 shrink-0" />
-              {warning}
-            </li>
-          ))}
-        </ul>
+        <PluginSkippedHooks warnings={plugin.warnings} />
       ) : null}
     </header>
+  );
+}
+
+// The lifecycle scan writes one line per package whose install hook the
+// manifest lets dohc skip, so the list grows with the dependency tree. It
+// records a protection that held, so it stays a count until the reader asks.
+function PluginSkippedHooks(props: { warnings: string[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const count = props.warnings.length;
+
+  return (
+    <div
+      data-testid="plugin-warnings"
+      className="mt-3 max-w-3xl overflow-hidden rounded-lg border border-line"
+    >
+      <button
+        type="button"
+        data-testid="plugin-warnings-toggle"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((current) => !current)}
+        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] text-muted transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+      >
+        {expanded ? (
+          <ChevronDown size={12} aria-hidden className="shrink-0 text-subtle" />
+        ) : (
+          <ChevronRight size={12} aria-hidden className="shrink-0 text-subtle" />
+        )}
+        <span className="min-w-0 truncate">
+          {`dohc skipped ${count} install hook${count === 1 ? "" : "s"} in this plugin's packages`}
+        </span>
+      </button>
+      {expanded ? (
+        <div className="border-t border-line px-2.5 py-2">
+          <p className="m-0 text-[11px] text-subtle">
+            dohc turns these hooks off during install. None of them ran.
+          </p>
+          <ul
+            data-testid="plugin-warnings-list"
+            className="m-0 mt-1.5 max-h-48 list-none space-y-0.5 overflow-y-auto p-0"
+          >
+            {props.warnings.map((warning) => (
+              <li
+                key={warning}
+                className="break-all font-mono text-[11px] leading-snug text-muted"
+              >
+                {warning}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

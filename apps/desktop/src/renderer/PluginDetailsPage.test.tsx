@@ -500,6 +500,122 @@ describe("PluginDetailsPage", () => {
     });
   });
 
+  describe("skipped install hooks", () => {
+    // The real lines come from the lifecycle scan, one per package the plugin
+    // manifest allows a skipped hook for (pluginLifecycleScan.ts warningLine).
+    function skippedHookLines(count: number): string[] {
+      return Array.from(
+        { length: count },
+        (_unused, index) =>
+          `Package "dep-${index}" 1.0.${index} allows skipped postinstall hook.`,
+      );
+    }
+
+    it("keeps the list collapsed behind a summary that counts it", async () => {
+      bridgeMock.listPlugins.mockResolvedValue({
+        ok: true,
+        plugins: [plugin("t3-code", { warnings: skippedHookLines(34) })],
+      });
+
+      renderPage("t3-code");
+
+      const toggle = await screen.findByTestId("plugin-warnings-toggle");
+      expect(toggle.getAttribute("aria-expanded")).toBe("false");
+      expect(toggle.textContent).toBe(
+        "dohc skipped 34 install hooks in this plugin's packages",
+      );
+      // The reason the block collapses at all: the list scales with the
+      // dependency tree, so none of it may occupy the page unasked.
+      expect(screen.queryByTestId("plugin-warnings-list")).toBeNull();
+      expect(screen.queryByText(skippedHookLines(34)[0])).toBeNull();
+    });
+
+    it("counts a single skipped hook in the singular", async () => {
+      bridgeMock.listPlugins.mockResolvedValue({
+        ok: true,
+        plugins: [plugin("t3-code", { warnings: skippedHookLines(1) })],
+      });
+
+      renderPage("t3-code");
+
+      expect((await screen.findByTestId("plugin-warnings-toggle")).textContent)
+        .toBe("dohc skipped 1 install hook in this plugin's packages");
+    });
+
+    it("opens and closes the list from its disclosure", async () => {
+      const lines = skippedHookLines(3);
+      bridgeMock.listPlugins.mockResolvedValue({
+        ok: true,
+        plugins: [plugin("t3-code", { warnings: lines })],
+      });
+
+      renderPage("t3-code");
+
+      const toggle = await screen.findByTestId("plugin-warnings-toggle");
+      await userEvent.click(toggle);
+
+      expect(toggle.getAttribute("aria-expanded")).toBe("true");
+      const list = screen.getByTestId("plugin-warnings-list");
+      for (const line of lines) {
+        expect(list.textContent).toContain(line);
+      }
+      // The expanded list says what dohc did, so the record cannot read as a
+      // failure the user has to act on.
+      expect(screen.getByTestId("plugin-warnings").textContent).toContain(
+        "dohc turns these hooks off during install. None of them ran.",
+      );
+
+      await userEvent.click(toggle);
+
+      expect(toggle.getAttribute("aria-expanded")).toBe("false");
+      expect(screen.queryByTestId("plugin-warnings-list")).toBeNull();
+    });
+
+    it("bounds the expanded list instead of growing the page", async () => {
+      bridgeMock.listPlugins.mockResolvedValue({
+        ok: true,
+        plugins: [plugin("t3-code", { warnings: skippedHookLines(400) })],
+      });
+
+      renderPage("t3-code");
+
+      await userEvent.click(await screen.findByTestId("plugin-warnings-toggle"));
+
+      // Structural pin: jsdom lays nothing out, so the bound is read from the
+      // classes that carry it. A 400-entry list must scroll inside its own box.
+      const list = screen.getByTestId("plugin-warnings-list");
+      expect(list.className).toContain("max-h-48");
+      expect(list.className).toContain("overflow-y-auto");
+    });
+
+    it("never collapses a pipeline error behind the summary", async () => {
+      bridgeMock.listPlugins.mockResolvedValue({
+        ok: true,
+        plugins: [
+          plugin("t3-code", {
+            status: "failed",
+            warnings: skippedHookLines(12),
+            error: {
+              stage: "install",
+              code: "install-failed",
+              message: "pnpm install exited with code 1",
+            },
+          }),
+        ],
+      });
+
+      renderPage("t3-code");
+
+      // The error is the one thing the user must act on. It stays on the page
+      // with no disclosure to open.
+      expect((await screen.findByTestId("plugin-pipeline-error")).textContent)
+        .toContain("pnpm install exited with code 1");
+      expect(screen.getByTestId("plugin-warnings-toggle").getAttribute(
+        "aria-expanded",
+      )).toBe("false");
+    });
+  });
+
   it("shows uninstall warnings and names files history cannot recover", async () => {
     bridgeMock.listPlugins.mockResolvedValue({
       ok: true,
