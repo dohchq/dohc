@@ -807,7 +807,7 @@ describe("main-process chat authorization", () => {
     const seams = [
       "createFile(",
       "createFolder(",
-      "writeWorkspaceText(",
+      "routeWorkspaceTextWrite(",
       "writeWorkspaceAsset(",
       "importDroppedPaths(",
       "applyDatabaseEdit(",
@@ -878,24 +878,21 @@ describe("main-process chat authorization", () => {
     expect(resolver).toContain("readableShareLevel(marker.grantedSelector)");
     expect(resolver).toContain("ended: marker.ended === true");
 
-    // The capture gate asks the SAME rule, from the same registry answer. A
-    // capture without the write gate records nothing; a write gate without the
-    // capture writes changes the recipient can never send.
-    expect(mainSource).toContain("shareView: sharedViewOf(workspace.workspaceId),");
-    const captureGate = readFileSync(
-      new URL("./workspaces/engineCaptureGate.ts", import.meta.url),
+    // The WRITE PATH asks the same rule, from the same registry answer, and it
+    // is the only thing that decides where an editor save lands. A share view
+    // has no watcher, so a save routed to disk alone would leave the recipient
+    // nothing to send.
+    const writeRouter = readFileSync(
+      new URL("./workspaces/workspaceTextWrite.ts", import.meta.url),
       "utf8",
     );
     expect(
-      captureGate,
-      "MUTATION: an unconditional capture records a view recipient's edits",
-    ).toContain("shareViewTakesLocalWrites(workspace.shareView)");
-    // Decided BEFORE the settings read. A share view materializes no settings
-    // file, so falling through would refuse every edit share view.
-    expect(
-      captureGate.indexOf("if (workspace.shareView) {"),
-      "MUTATION: reading settings first makes the edit lane green and dead",
-    ).toBeLessThan(captureGate.indexOf("await readWorkspaceSettingsFile("));
+      writeRouter,
+      "MUTATION: a second copy of the level rule is a copy that drifts",
+    ).toContain("shareViewTakesLocalWrites(input.shareView)");
+    expect(handlerSource("writeWorkspaceText")).toContain(
+      "shareView: sharedViewOf(workspace.workspaceId),",
+    );
   });
 
   // #646 PR3a. Two lanes, and a workspace is only ever in one of them. The

@@ -195,15 +195,19 @@ describe("engine Y.Doc registry: a registration never replaces a live session", 
 });
 
 describe("workspace text writes: a live Y.Doc stays canonical", () => {
-  it("refuses the direct disk writer while any session owns the path", () => {
+  it("refuses the direct writer while any session owns the path", () => {
     const handler = handlerSource("writeWorkspaceText");
     const sessionGuardAt = handler.indexOf(
       "for (const entry of engineYDocSessions.values())",
     );
-    const diskWriteAt = handler.indexOf("await writeWorkspaceText(");
+    // The router, not the disk writer: since #646 PR3 a share view's save goes
+    // to its engine store instead, and the live-document rule must precede
+    // BOTH destinations.
+    const directWriteAt = handler.indexOf("await routeWorkspaceTextWrite(");
 
     expect(sessionGuardAt).toBeGreaterThan(-1);
-    expect(sessionGuardAt).toBeLessThan(diskWriteAt);
+    expect(directWriteAt).toBeGreaterThan(-1);
+    expect(sessionGuardAt).toBeLessThan(directWriteAt);
     expect(handler).toContain("entry.workspaceId === workspace.workspaceId");
     expect(handler).toContain("const writePath = validateUserWritePath(input.relativePath)");
     expect(handler).toContain("entry.path === writePath.normalized");

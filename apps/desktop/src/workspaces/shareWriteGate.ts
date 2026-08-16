@@ -2,15 +2,18 @@ import type { ShareAccess } from "@dohc/security-contract/share-selector";
 
 // The LOCAL-WRITE gate for a share view (#646 PR3), as one rule in one place.
 //
-// Two surfaces ask it and they must agree, because they fail in opposite
+// Several surfaces ask it and they must agree, because they fail in opposite
 // directions when they do not:
 //
 //   main's `assertWritableWorkspace` decides whether a write handler runs at
 //   all. Read it too widely and someone else's files become writable.
 //
-//   `captureForFlaggedWorkspace` decides whether the watcher records what
-//   that write produced. Read it too narrowly and the recipient edits a file
-//   whose change nothing journals, so nothing can ever be sent.
+//   `routeWorkspaceTextWrite` decides where the write lands. Read it too
+//   narrowly and the recipient edits a file whose change nothing journals, so
+//   nothing can ever be sent.
+//
+//   `requireShareViewProposalScope` decides whether the recipient may send
+//   what it wrote.
 //
 // It lives here rather than inside main's IPC closure for the reason
 // `shareChatGate.ts` states: a hand-copied re-implementation in a test proves

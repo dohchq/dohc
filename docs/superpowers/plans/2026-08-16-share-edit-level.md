@@ -286,6 +286,31 @@ nothing.**
 
 ### Pipeline 1 — recipient capture
 
+> **Amended by PR3a: there is no recipient capture. The write goes through the
+> engine.** Built and measured, a capture did not produce a moment: the editor's
+> save handler wrote the FILE, and a share view's engine store — not its
+> folder — is what the submit lane reads. Rather than teach a watcher to observe
+> a write the app already makes, the write itself goes through the engine, and
+> the moment is a consequence of it. That is the shape the share view's chat
+> writes already use.
+>
+> So `captureForFlaggedWorkspace` keeps the #540 rule unchanged: a share view
+> gets `capture: null` at EVERY level, decided before the settings read. The
+> editor's save routes through `routeWorkspaceTextWrite`
+> (`apps/desktop/src/workspaces/workspaceTextWrite.ts`), which asks the same
+> `shareViewTakesLocalWrites` rule and, for a share view that takes local
+> writes, writes the engine moment and then materializes the projection through
+> `materializeSharedViewPaths`. Decisions 2 and 3 below, and the write gate and
+> `readOnly` changes, are unaffected.
+>
+> **Stated limitation.** Edits made to a share view's files by external tools do
+> not become proposable changes. The app's editor is the edit surface. The
+> machinery that would observe an external edit is the capture this ruling
+> removed, and reaching a mounted or externally written file would mean opening
+> the effective-policy floor (`resolveEffectivePolicy`,
+> `classifyEngineFilePath`), which decision 7 refuses. A future policy-input
+> design can widen that deliberately.
+
 Today a share view has **no capture at all**. `captureForFlaggedWorkspace`
 returns `{ capture: null, shareView: true }` for any share view before it even
 reads settings (`apps/desktop/src/workspaces/engineCaptureGate.ts:42-44`), and
@@ -541,12 +566,16 @@ means the surface reflects a decision made elsewhere.
 | Proposal accept / decline | granter only | granter only | granter only | server-side | new route, owner-scoped |
 | Recipient pull boundary | pinned grant + level | same | same | server-side | `share.rs:489` |
 | Recipient push scope | nothing | chat only | chat + in-grant moments | server-side | `relay.rs:3175-3225` |
-| Share-view capture | none | none | real capture | server-side | `engineCaptureGate.ts:42-44` |
+| Share-view capture | none | none | none | server-side | `engineCaptureGate.ts:42-44` |
+| Share-view editor save | refuse | refuse | engine, then projection | server-side (main is the trust boundary) | `workspaceTextWrite.ts` |
 | `assertWritableWorkspace` in a share view | refuse | refuse | allow | server-side (main is the trust boundary) | `main.ts:758-764` |
 | Granter's own files, written by a recipient | refuse | refuse | **refuse** | server-side | unchanged |
 | Live-session fence on accepted ops | n/a | n/a | retry until settled | server-side | `moment_apply.rs:245-249` |
 | Editor `readOnly` in a share view | true | true | false | UX mirror | `DesktopWorkspaceShell.tsx:5218` |
 | Recipient banner | read-only line | chat line | proposal line | UX mirror | `DesktopWorkspaceShell.tsx:4689-4753` |
+
+> **Amended by PR3a: the capture row is `none` at every level, and the row
+> below it replaces it.** See pipeline 1.
 
 The row that matters most: **Edit never makes the granter's workspace writable
 by anyone but the granter.** A recipient at edit level writes only to its own
@@ -707,7 +736,8 @@ This PR is a fix. It should merge without waiting for the rest.
 
 **Desktop.**
 
-9. `engineCaptureGate.ts:42-44` — a real capture at edit level.
+9. ~~`engineCaptureGate.ts:42-44` — a real capture at edit level.~~ Replaced by
+   the engine-direct write in pipeline 1; the gate is unchanged.
 10. `main.ts:758-764` — `assertWritableWorkspace` becomes level-aware.
 11. `DesktopWorkspaceShell.tsx:5218` — `readOnly` becomes level-aware.
 12. The submit action, the recipient state copy, and the banner line.
@@ -789,9 +819,13 @@ covered.
   the gate precedes every store and sync seam; the same property must hold for
   the new file-write seams. Add a pin that every file-write handler calls
   `assertWritableWorkspace` before any store call.
-- A view-level and a comment-level share view still get `capture: null`; only
-  edit gets a capture. *Inverse mutation:* make the capture unconditional →
-  fails.
+- An edit-level share view's save through the real write path produces a moment
+  that is not the replayed one, a `replication_log` row, and a matching file on
+  disk; a comment-level save is refused
+  (`shareViewTextWrite.e2e.test.ts`, against a real daemon). *Inverse
+  mutations:* route the share-view write back to the disk writer → the moment
+  test fails; drop the level branch → the ordinary-workspace test fails; drop
+  the `expectedContentHash` check → the stale-save test fails.
 - Source-scan pins prove position, never behaviour. Pair each with a
   behavioural test, as `main.chatSecurity.test.ts:600-602` itself requires.
 

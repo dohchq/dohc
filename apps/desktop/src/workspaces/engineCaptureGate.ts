@@ -8,10 +8,6 @@ import type {
   WorkspaceCaptureHooks,
 } from "./workspaceActivity";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
-import {
-  shareViewTakesLocalWrites,
-  type ShareViewWriteScope,
-} from "./shareWriteGate";
 
 // THE captureFor gate (single owner). Workspace-engine alpha (PR 0M-3/0M-5):
 // when the per-workspace flag is on, the engine store under .dohc/engine/ is
@@ -33,21 +29,33 @@ import {
 // reach here without one. Accepting a null would mean silently recording history
 // through the legacy TypeScript engine instead.
 export async function captureForFlaggedWorkspace(
-  workspace: {
-    workspaceId: string;
-    rootPath: string;
-    // The share view this workspace IS, or null for an ordinary workspace.
-    // The caller states the share identity (it owns the registry); the gate
-    // owns what that identity means for the decision. It carries the LEVEL
-    // rather than a boolean because the decision now differs by level, and a
-    // boolean could only say "restricted somehow".
-    shareView: ShareViewWriteScope | null;
-  },
+  workspace: { workspaceId: string; rootPath: string; shareView: boolean },
   hooks: WorkspaceCaptureHooks,
   rustEngineSessions: EngineWorkspaceSessions,
 ): Promise<WorkspaceCaptureDecision> {
-  const buildCapture = () =>
-    createWorkspaceEngineCapture({
+  // A shared view never gets a recorder (#540): it is fed exclusively by
+  // the share's filtered pull, and a watcher would re-journal materialized
+  // files. Decided BEFORE the settings read — a shared view materializes no
+  // settings file, so reading defaults here would start a capture. The
+  // caller states the share identity (it owns the registry); the gate owns
+  // what that identity means for the decision.
+  //
+  // At EDIT level too (#646 PR3): the recipient's edits reach the engine
+  // because the app writes them there itself, so a watcher here would only
+  // observe writes this process already journaled.
+  if (workspace.shareView) {
+    return { capture: null, shareView: true };
+  }
+  // ONE read decides both the recorder and what the user is told about it.
+  // A second read taken later (the renderer's) could disagree with this one
+  // and give the notice a cause that never happened.
+  const { settings, warning } = await readWorkspaceSettingsFile(workspace.rootPath);
+  if (!settings.experimental.workspaceEngineAlpha) {
+    return { capture: null, shareView: false, ...(warning ? { warning } : {}) };
+  }
+  return {
+    shareView: false,
+    capture: createWorkspaceEngineCapture({
       workspaceId: workspace.workspaceId,
       rootPath: workspace.rootPath,
       // Feeds the persistent history-capture notice (PR 0M-7): with legacy
@@ -59,31 +67,8 @@ export async function captureForFlaggedWorkspace(
       activeAgentRun: hooks.activeAgentRun,
       rustEngineSessions,
       daemonOwnsCapture: true,
-    });
-  // A share view answers its LEVEL, and answers it BEFORE the settings read
-  // either way (#646 PR3). A share view materializes no settings file, so
-  // falling through to the workspace-engine flag would refuse every edit
-  // share view on a toggle its workspace can never carry — a lane that is
-  // green and dead.
-  if (workspace.shareView) {
-    // At EDIT the recipient's own edits are what the share exists to collect:
-    // the share view records them into its own store, and the submit lane
-    // reads exactly that log. Every other level — and a grant this process
-    // cannot read — keeps the #540 rule: no recorder at all, because the view
-    // is fed exclusively by the share's filtered pull and a watcher would
-    // re-journal materialized files.
-    return shareViewTakesLocalWrites(workspace.shareView)
-      ? { shareView: true, capture: buildCapture() }
-      : { capture: null, shareView: true };
-  }
-  // ONE read decides both the recorder and what the user is told about it.
-  // A second read taken later (the renderer's) could disagree with this one
-  // and give the notice a cause that never happened.
-  const { settings, warning } = await readWorkspaceSettingsFile(workspace.rootPath);
-  if (!settings.experimental.workspaceEngineAlpha) {
-    return { capture: null, shareView: false, ...(warning ? { warning } : {}) };
-  }
-  return { shareView: false, capture: buildCapture() };
+    }),
+  };
 }
 
 // How the caller's path recovers from a failed capture build (#541, codex P2

@@ -660,8 +660,8 @@ import {
   withExclusiveWorkspaceOperation,
   withStaleSensitiveWorkspaceOperation,
   writeWorkspaceAsset,
-  writeWorkspaceText,
 } from "./workspaces/workspaceAssets";
+import { routeWorkspaceTextWrite } from "./workspaces/workspaceTextWrite";
 import {
   applyDatabaseEdit,
   importToDatabase,
@@ -2124,16 +2124,15 @@ const activity = createWorkspaceActivity(notifyRenderer, {
   engineFor: engineForWorkspace,
   // The flag-gated engine capture (see engineCaptureGate.ts — shared with the
   // arc-gate QA harness so the harness asserts against the REAL gate). The
-  // gate also owns the shared-view rule (#540, level-aware since #646 PR3):
-  // main only states the share identity from the registry, and the decision
-  // carries the cause so the null capture never wears the Settings opt-out's
-  // copy.
+  // gate also owns the shared-view rule (#540): main only states whether the
+  // workspace is one, and the decision carries the cause so the null capture
+  // never wears the Settings opt-out's copy.
   captureFor: async (workspace, hooks) =>
     captureForFlaggedWorkspace(
       {
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
-        shareView: sharedViewOf(workspace.workspaceId),
+        shareView: sharedViewOf(workspace.workspaceId) !== null,
       },
       hooks,
       requireEngineSessions(),
@@ -2494,7 +2493,7 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
         // Guarded above: a shared view already returned false.
-        shareView: null,
+        shareView: false,
       },
       {
         activeAgentRun: () => null,
@@ -4616,12 +4615,15 @@ function registerIpcHandlers(
       }
     }
     return WriteWorkspaceTextResult.parse(
-      await writeWorkspaceText(
-        workspace.rootPath,
-        input.relativePath,
-        input.text,
-        input.expectedContentHash,
-      ),
+      await routeWorkspaceTextWrite({
+        workspaceId: workspace.workspaceId,
+        rootPath: workspace.rootPath,
+        relativePath: input.relativePath,
+        text: input.text,
+        expectedContentHash: input.expectedContentHash,
+        shareView: sharedViewOf(workspace.workspaceId),
+        shareViewStore: () => sharedViewStoreFor(workspace),
+      }),
     );
   });
 
@@ -6038,6 +6040,18 @@ function registerIpcHandlers(
         "Couldn't open the share. Nothing was added on this machine — check your connection and try again.",
       );
     }
+    // A share view is opened HERE, not wherever a status read happens to land
+    // first (#646 PR3). It needs the activity entry: that entry is what states
+    // `historyShareView` to the status bar and the notice center, so the null
+    // capture below is explained by a decision this open made.
+    //
+    // It deliberately gets NO recorder and no cloud engine. Its files are
+    // written straight to its engine store by the write path, so a watcher
+    // here would only observe writes this process already journaled, and it
+    // replicates through its share rather than through a workspace remote.
+    //
+    // After the refresh, because a failed refresh rolls the whole open back.
+    await openWorkspaceActivity(requireWorkspace(created.workspaceId));
     notifyRenderer();
     // Through the PROJECTION, not a raw parse: the level lives under the
     // record's pinned grant, and a raw parse would strip it and hand the
