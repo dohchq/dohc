@@ -105,6 +105,49 @@ export function recordedShareSelector(
   };
 }
 
+/**
+ * The selector to enroll this share view's sync identity with (#646 PR3-1),
+ * or null when it must not enroll.
+ *
+ * A share view replicates through its SHARE, so it needs a sync identity of
+ * its own before a local write can journal or a push can leave. This decides
+ * whether to ask for one, and it fails closed on every tri-state — the same
+ * guard sequence the chat push-back and the refresh already use:
+ *
+ * - no share view record, or the share has ended;
+ * - a pinned grant this build cannot read completely (a damaged record);
+ * - no dohc Cloud credentials;
+ * - a session signed into a relay that is not this share's origin;
+ * - a `view` share, which may push nothing, so it needs no identity and must
+ *   not be given one.
+ *
+ * Returning null means SKIP, never fail. A share view that cannot enroll is
+ * still readable, and its local writes stay local.
+ */
+export function shareViewEnrolmentSelector(input: {
+  shareView:
+    | {
+        grantedSelector?: unknown;
+        ended?: boolean;
+        relayUrl?: string | null;
+      }
+    | null
+    | undefined;
+  relayUrl: string | null | undefined;
+  relayUrlsMatch: (left: string, right: string) => boolean;
+}): ShareViewSelector | null {
+  const { shareView, relayUrl, relayUrlsMatch } = input;
+  if (!shareView || shareView.ended === true) return null;
+  const grantedSelector = recordedShareSelector(shareView.grantedSelector);
+  if (!grantedSelector) return null;
+  if (grantedSelector.access === "view") return null;
+  if (!relayUrl) return null;
+  if (shareView.relayUrl && !relayUrlsMatch(relayUrl, shareView.relayUrl)) {
+    return null;
+  }
+  return grantedSelector;
+}
+
 // Containment before any disk write: the engine already restricts paths to
 // validated workspace-relative ones, but a defense layer this close to
 // fs writes is cheap and permanent.

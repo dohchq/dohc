@@ -22968,3 +22968,379 @@ fn share_view_push_composes_paths_with_a_version() {
         );
     }
 }
+
+// #646 PR3-1 — a share view's own sync identity, and the narrow lane term
+// that lets its file writes journal.
+//
+// A share view replicates through a SHARE, so it holds `share_view_cursors`
+// and none of the owner-lane tables. Before this it had no identity at all:
+// its file writes never journalled and every push refused before the relay
+// was contacted.
+
+/// The share-lane state a real share view holds after its first pull: a
+/// cursor for the share, and no owner-lane position of any kind.
+fn seed_share_view_cursor(engine: &mut EngineStore, share_id: &str) {
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO share_view_cursors (workspace_id,share_id,cursor) \
+                 VALUES ('ws',?1,'3')",
+                [share_id],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<(), SyncError>(())
+        })
+        .expect("share view cursor");
+}
+
+fn recorded_origin(engine: &EngineStore) -> Option<String> {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT origin_id FROM sync_identity WHERE workspace_id='ws'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)
+        })
+        .expect("read identity")
+}
+
+fn enrol(engine: &mut EngineStore, origin_id: &str) -> ShareViewEnrolment {
+    match enroll_share_view_identity(
+        engine,
+        "ws",
+        origin_id,
+        "epoch-share",
+        "stream-share",
+        1_000,
+        &NoFaults,
+    )
+    .expect("enrol share view")
+    {
+        TxnOutcome::Committed(enrolment) => enrolment,
+        TxnOutcome::Crashed { .. } => panic!("enrolment crashed"),
+    }
+}
+
+/// Both predicates, read through the real functions inside one transaction.
+fn lane_answers(engine: &mut EngineStore) -> (bool, bool) {
+    let outcome = engine
+        .write_with(&NoFaults, |tx| {
+            Ok::<(bool, bool), SyncError>((
+                workspace_replicates_with_relay_in_tx(tx, "ws")?,
+                crate::workspace_journals_file_moments_in_tx(tx, "ws")?,
+            ))
+        })
+        .expect("lane answers");
+    match outcome {
+        TxnOutcome::Committed(answers) => answers,
+        TxnOutcome::Crashed { .. } => panic!("lane read crashed"),
+    }
+}
+
+/// The end-to-end claim, with NOTHING seeded: enrol, write chat through the
+/// real domain path, and the granter gets it. PR2's own suite seeded
+/// `sync_identity` for itself, so it never proved a share view could reach
+/// this state on its own.
+#[test]
+fn a_comment_share_view_enrols_and_its_chat_write_leaves() {
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    seed_text_head(&mut engine, "object-in", "shared/docs/in.md", "inside");
+    seed_share_view_cursor(&mut engine, "share-comment");
+    assert_eq!(recorded_origin(&engine), None, "nothing is seeded");
+
+    assert_eq!(
+        enrol(&mut engine, "origin-share-view"),
+        ShareViewEnrolment::Enrolled
+    );
+    assert_eq!(
+        recorded_origin(&engine).as_deref(),
+        Some("origin-share-view"),
+        "MUTATION: enrolment must write the identity the share lane pushes under",
+    );
+
+    LinkedChatStore::new(&mut engine)
+        .create_thread(
+            &CreateFileThread {
+                workspace_id: "ws".to_owned(),
+                thread_id: "thread-in".to_owned(),
+                title: "About the shared file".to_owned(),
+                linked_object_id: "object-in".to_owned(),
+                linked_path_hint: None,
+                now_ms: 1_100,
+                request_id: "thread-in-request".to_owned(),
+            },
+            &NoFaults,
+        )
+        .expect("recipient thread");
+    LinkedChatStore::new(&mut engine)
+        .send_message(
+            &SendMessage {
+                workspace_id: "ws".to_owned(),
+                thread_id: "thread-in".to_owned(),
+                message_id: "m-recipient".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Recipient".to_owned(),
+                author_user_id: Some("recipient-user".to_owned()),
+                parent_message_id: None,
+                origin: None,
+                body: "A question about this file".to_owned(),
+                needs_decision: false,
+                attachments: Vec::new(),
+                now_ms: 1_200,
+                request_id: Some("m-recipient".to_owned()),
+            },
+            &NoFaults,
+        )
+        .expect("recipient message");
+
+    let logged = list_replication_ops(&engine, "ws", "origin-share-view", -1, MAX_PULL_OPS)
+        .expect("read journal");
+    assert!(
+        logged.iter().any(|op| op.op_kind == "chat.message.append"),
+        "MUTATION: the recipient's chat op must journal under the ENROLLED origin",
+    );
+
+    let granted = ShareGrant {
+        paths: vec!["shared/docs".to_owned()],
+        version_id: None,
+        access: crate::ShareAccess::Comment,
+    };
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    let pushed = client
+        .push_share_view(&mut engine, "ws", "share-comment", &granted, &NoFaults)
+        .expect("share view push")
+        .pushed;
+    assert!(
+        pushed >= 1,
+        "MUTATION: the enrolled share view must reach the relay",
+    );
+    let pushes = client
+        .transport()
+        .shared_pushes
+        .lock()
+        .expect("shared push calls");
+    assert!(
+        pushes
+            .iter()
+            .all(|push| push.origin_id == "origin-share-view"),
+        "MUTATION: the relay namespaces this recipient by the enrolled origin",
+    );
+    assert!(
+        pushes.iter().any(|push| push
+            .ops
+            .iter()
+            .any(|op| op.op_kind == "chat.message.append")),
+        "MUTATION: the chat op must be the thing that leaves",
+    );
+}
+
+/// The `RELAY_INVALID_RESPONSE` the desktop saw, with the relay never
+/// contacted. An unenrolled share view refuses its own push, and the refusal
+/// must name what is missing.
+#[test]
+fn an_unenrolled_share_view_push_names_the_missing_identity() {
+    let (_scratch, _path, mut engine) = store();
+    seed_share_view_cursor(&mut engine, "share-comment");
+    let granted = ShareGrant {
+        paths: vec!["shared/docs".to_owned()],
+        version_id: None,
+        access: crate::ShareAccess::Comment,
+    };
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    let error = client
+        .push_share_view(&mut engine, "ws", "share-comment", &granted, &NoFaults)
+        .expect_err("an unenrolled share view cannot push");
+    let RelayError::Local(reason) = &error else {
+        panic!("MUTATION: a missing identity is a LOCAL constraint, not a relay answer: {error:?}");
+    };
+    assert!(
+        reason.contains("sync identity") && reason.contains("comment"),
+        "MUTATION: the refusal must name the constraint and when it is satisfied: {reason}",
+    );
+
+    // Enrolment is the whole fix: the same push now succeeds with nothing to
+    // send, instead of failing before the first local write exists.
+    assert_eq!(
+        enrol(&mut engine, "origin-share-view"),
+        ShareViewEnrolment::Enrolled
+    );
+    assert_eq!(
+        client
+            .push_share_view(&mut engine, "ws", "share-comment", &granted, &NoFaults)
+            .expect("an enrolled share view pushes an empty batch")
+            .pushed,
+        0,
+    );
+}
+
+/// A view share may push nothing, so it is never enrolled, and the identity
+/// half of the predicate is what keeps its writes local.
+///
+/// This is also the safety test for that conjunct.
+/// `journal_local_payload_json_in_tx` REFUSES without an identity, and the
+/// refusal rolls the user's edit back with it — so a predicate that answered
+/// true here would not journal a moment, it would destroy the write.
+#[test]
+fn a_view_share_view_enrols_nothing_and_its_writes_stay_local() {
+    let (_scratch, _path, mut engine) = store();
+    seed_share_view_cursor(&mut engine, "share-view-only");
+    assert_eq!(
+        recorded_origin(&engine),
+        None,
+        "MUTATION: a view share must never be given an identity",
+    );
+    assert_eq!(
+        lane_answers(&mut engine),
+        (false, false),
+        "MUTATION: a share cursor without an identity must journal nothing",
+    );
+}
+
+#[test]
+fn enrolling_twice_keeps_the_first_identity() {
+    let (_scratch, _path, mut engine) = store();
+    seed_share_view_cursor(&mut engine, "share-comment");
+    assert_eq!(
+        enrol(&mut engine, "origin-first"),
+        ShareViewEnrolment::Enrolled
+    );
+    assert_eq!(
+        enrol(&mut engine, "origin-second"),
+        ShareViewEnrolment::AlreadyEnrolled,
+        "MUTATION: a refresh must not re-mint an origin",
+    );
+    assert_eq!(
+        recorded_origin(&engine).as_deref(),
+        Some("origin-first"),
+        "MUTATION: a second origin would split this replica's log in two",
+    );
+}
+
+/// Which lane makes a workspace journal, read through both real predicates.
+///
+/// The share-view row is the whole point: the file-moment journal answers
+/// true, and the OWNER-lane predicate — which the Y.Doc lanes, the conflict
+/// outbox and cursor advancement read — still answers false. Nothing drains a
+/// `ydoc.update` from a share view, so widening the shared predicate would
+/// leave rows in the recipient's database forever.
+///
+/// The shared-channel rows are the term this PR deliberately did NOT add: a
+/// channel is joined by an ORDINARY workspace, so counting it would make
+/// every local file moment journal in a workspace whose owner never enabled
+/// cloud sync.
+#[test]
+fn only_the_file_moment_journal_reads_the_share_lane() {
+    for (label, identity, lane, expected) in [
+        ("nothing at all", false, None, (false, false)),
+        ("an identity and no lane", true, None, (false, false)),
+        (
+            "an owner push position",
+            true,
+            Some("sync_relay_push_state"),
+            (true, true),
+        ),
+        (
+            "a share view cursor",
+            true,
+            Some("share_view_cursors"),
+            (false, true),
+        ),
+        (
+            "a share cursor and no identity",
+            false,
+            Some("share_view_cursors"),
+            (false, false),
+        ),
+        (
+            "a shared channel cursor",
+            true,
+            Some("shared_channel_cursors"),
+            (false, false),
+        ),
+        (
+            "a shared channel push position",
+            true,
+            Some("shared_channel_push_state"),
+            (false, false),
+        ),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        if identity {
+            assert_eq!(
+                enrol(&mut engine, "origin-lane"),
+                ShareViewEnrolment::Enrolled
+            );
+        }
+        if let Some(table) = lane {
+            let sql = match table {
+                "sync_relay_push_state" => {
+                    "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                     VALUES ('ws','origin-lane',0)"
+                }
+                "share_view_cursors" => {
+                    "INSERT INTO share_view_cursors (workspace_id,share_id,cursor) \
+                     VALUES ('ws','share','3')"
+                }
+                "shared_channel_cursors" => {
+                    "INSERT INTO shared_channel_cursors (workspace_id,share_id,cursor) \
+                     VALUES ('ws','share','3')"
+                }
+                "shared_channel_push_state" => {
+                    "INSERT INTO shared_channel_push_state \
+                     (workspace_id,share_id,pushed_seq) VALUES ('ws','share',0)"
+                }
+                other => panic!("no fixture for {other}"),
+            };
+            engine
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(sql, []).map_err(SyncError::persist)?;
+                    Ok::<(), SyncError>(())
+                })
+                .expect("lane fixture");
+        }
+        assert_eq!(
+            lane_answers(&mut engine),
+            expected,
+            "MUTATION: a predicate read the wrong lane ({label})",
+        );
+    }
+}
+
+/// The Y.Doc journal must keep reading the OWNER-lane predicate.
+///
+/// This is a POSITION pin, and it is here because the behavioural version is
+/// not cheap: journaling a `ydoc.update` needs a live session that settles
+/// with an exact lineage claim, which no share-view fixture in this repo
+/// builds. Its sibling above proves the two predicates genuinely disagree for
+/// a share view; this proves the Y.Doc site still asks the one that answers
+/// no.
+///
+/// What it protects: a share serves the ops the share covers, so a
+/// `ydoc.update` journaled in a share view is a row nothing ever drains. The
+/// same holds for the conflict outbox and cursor advancement, so they are
+/// pinned here too.
+#[test]
+fn the_ydoc_journal_reads_the_owner_lane_predicate() {
+    for (label, source) in [
+        ("ydoc_apply", include_str!("ydoc_apply.rs")),
+        ("ydoc_origination", include_str!("ydoc_origination.rs")),
+        ("conflict_outbox", include_str!("conflict_outbox.rs")),
+        ("cursor", include_str!("cursor.rs")),
+    ] {
+        assert!(
+            source.contains("workspace_replicates_with_relay_in_tx"),
+            "MUTATION: {label} must ask the OWNER-lane predicate",
+        );
+        assert!(
+            !source.contains("workspace_journals_file_moments_in_tx"),
+            "MUTATION: {label} must NOT read the share lane — a share cannot \
+             carry what it journals, so the rows would never drain",
+        );
+    }
+}

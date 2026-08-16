@@ -26,6 +26,21 @@ pub enum AdoptJoinIdentityOutcome {
     AlreadyMatched,
 }
 
+/// What a share view's enrolment call did.
+///
+/// `NotRequired` is the answer for a `view` share, which may push nothing and
+/// so is never given an identity. [`enroll_share_view_identity`] never
+/// returns it — the LEVEL decides that, and the level is read one layer up
+/// (`RelayOperation::EnrollShareView`). It lives here because it is one of
+/// the three states a caller must tell apart, and reporting a view share as
+/// `AlreadyEnrolled` would claim a row that does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareViewEnrolment {
+    Enrolled,
+    AlreadyEnrolled,
+    NotRequired,
+}
+
 #[cfg(any(test, feature = "fault-injection"))]
 pub(crate) fn crashes(faults: &dyn FaultInjector, point: FaultPoint) -> bool {
     faults.poll(point) == dohc_engine_storage::FaultAction::Crash
@@ -51,6 +66,11 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 /// succeeds; both run behind `relay-not-configured`, which the desktop
 /// satisfies only for a workspace the user explicitly enabled cloud sync on
 /// (`RegistryEntry.remote` plus matching credentials).
+///
+/// A SHARE lane is deliberately not read here. This predicate answers for the
+/// OWNER lane, and for a share view the honest answer is no. The narrower
+/// [`workspace_journals_file_moments_in_tx`] holds the share-lane term, and
+/// only the file-moment journal reads it.
 ///
 /// These two tables are a SUBSET of what `adopt_join_identity` below calls
 /// pristine local replication state. That check is deliberately wider — it also
@@ -95,6 +115,45 @@ pub fn workspace_replicates_with_relay_in_tx(
         "SELECT EXISTS(SELECT 1 FROM sync_identity WHERE workspace_id = ?1) \
            AND (EXISTS(SELECT 1 FROM sync_relay_cursors WHERE workspace_id = ?1) \
              OR EXISTS(SELECT 1 FROM sync_relay_push_state WHERE workspace_id = ?1))",
+        [workspace_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
+/// Whether `workspace_id` journals FILE MOMENTS for replication: the owner
+/// relay lane, or a share view's own share lane.
+///
+/// Deliberately narrower than [`workspace_replicates_with_relay_in_tx`]. A
+/// share view can carry file moments through its share and nothing else
+/// (#646), so the Y.Doc lanes, the conflict outbox and cursor advancement
+/// keep the owner-lane answer. Journaling anything a share cannot carry would
+/// leave rows in the recipient's database that nothing ever drains: the share
+/// push scope serves only the ops the share covers, so a `ydoc.update` there
+/// would accumulate forever.
+///
+/// `share_view_cursors` is the share-lane term. That table is unique to a
+/// share view — a workspace that exists only to mirror one received share.
+/// The `shared_channel_*` tables are absent for the same drain reason in
+/// reverse: a channel is joined by an ORDINARY workspace, so reading them
+/// would make every local moment journal in a workspace whose owner never
+/// enabled cloud sync.
+///
+/// The identity conjunct is load-bearing, not decoration.
+/// [`journal_local_payload_json_in_tx`] REFUSES without an identity, and that
+/// refusal rolls the user's edit back with it. It is also the level gate: a
+/// `view` share view is never enrolled, so it holds a share cursor, no
+/// identity, and its writes stay local.
+pub fn workspace_journals_file_moments_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+) -> Result<bool, SyncError> {
+    if workspace_replicates_with_relay_in_tx(tx, workspace_id)? {
+        return Ok(true);
+    }
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_identity WHERE workspace_id = ?1) \
+           AND EXISTS(SELECT 1 FROM share_view_cursors WHERE workspace_id = ?1)",
         [workspace_id],
         |row| row.get(0),
     )
@@ -389,6 +448,74 @@ pub fn adopt_join_identity(
         )
         .map_err(SyncError::persist)?;
         Ok(AdoptJoinIdentityOutcome::Adopted)
+    })
+}
+
+/// Give a share view the sync identity its share lane needs, once.
+///
+/// A share view replicates through a SHARE, not the owner lane, so it holds
+/// `share_view_cursors` long before it holds an identity — which is exactly
+/// the state [`adopt_join_identity`] refuses, and rightly: that primitive
+/// adopts an OWNER's coordinate onto a pristine replica, and a share view is
+/// neither pristine nor adopting anyone's coordinate. This is a different
+/// thing, so it is a different function.
+///
+/// The origin is a REPLICA id, local to this machine, and it is what
+/// `push_share_ops` sends: the relay namespaces this recipient's ops as
+/// `share:<share_id>:<origin_id>`. The epoch and stream are owner-lane fields
+/// a share view never sends; they are stored because the row requires them.
+///
+/// Idempotent by design — the caller runs it on every open and every refresh.
+/// An existing row wins, so a later call cannot re-mint an origin and split
+/// this replica's log in two.
+pub fn enroll_share_view_identity(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    origin_id: &str,
+    replication_epoch: &str,
+    stream_identity: &str,
+    created_at_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<ShareViewEnrolment>, SyncError> {
+    bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
+    relay_identity_component(
+        origin_id,
+        "origin_id must be 1-512 UTF-8 bytes, ECMAScript-trimmed, and contain no ASCII controls",
+    )?;
+    relay_identity_component(
+        replication_epoch,
+        "replication_epoch must be 1-512 UTF-8 bytes, ECMAScript-trimmed, and contain no ASCII controls",
+    )?;
+    relay_identity_component(
+        stream_identity,
+        "stream_identity must be 1-512 UTF-8 bytes, ECMAScript-trimmed, and contain no ASCII controls",
+    )?;
+
+    store.write_with(faults, |tx| {
+        let enrolled: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sync_identity WHERE workspace_id = ?1)",
+                [workspace_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        if enrolled {
+            return Ok(ShareViewEnrolment::AlreadyEnrolled);
+        }
+        tx.execute(
+            "INSERT INTO sync_identity \
+             (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                workspace_id,
+                origin_id,
+                replication_epoch,
+                stream_identity,
+                created_at_ms
+            ],
+        )
+        .map_err(SyncError::persist)?;
+        Ok(ShareViewEnrolment::Enrolled)
     })
 }
 
