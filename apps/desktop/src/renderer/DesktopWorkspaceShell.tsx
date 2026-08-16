@@ -631,6 +631,11 @@ const LazyRelayShareDialog = lazy(() =>
 );
 const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
 
+// How often an open workspace re-reads the share state only the relay knows:
+// a recipient's mounts, and a granter's waiting changes. Slow on purpose —
+// neither is urgent, and both cost a relay round trip per workspace.
+const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
+
 function scheduleMarkdownEditorPreload(): () => void {
   let idleHandle: number | null = null;
   let fired = false;
@@ -3673,16 +3678,7 @@ export function DesktopWorkspaceShell(props: {
     void reloadShareMounts();
   }, [reloadShareMounts]);
 
-  // Mounts follow their shares while the workspace is open: one pull on
-  // open, then a slow poll. Manual refresh stays available in the explorer
-  // context menu.
   const mountCount = shareMounts.length;
-  useEffect(() => {
-    if (mountCount === 0) return;
-    void refreshShareMounts();
-    const timer = setInterval(() => void refreshShareMounts(), 5 * 60 * 1000);
-    return () => clearInterval(timer);
-  }, [mountCount, refreshShareMounts]);
 
   const unmountShare = useCallback(
     async (path: string) => {
@@ -4454,6 +4450,13 @@ export function DesktopWorkspaceShell(props: {
   // Set by a submit that found nothing to send. Cleared by the next submit,
   // so the line never outlives the click it answers.
   const [shareChangesEmpty, setShareChangesEmpty] = useState(false);
+  // What the last submit left behind: files an edit put outside the shared
+  // paths, and whether the bound held changes back for the next submit. Null
+  // when the last submit took everything, which is the ordinary case.
+  const [shareChangesSkipped, setShareChangesSkipped] = useState<{
+    outsideShare: number;
+    morePending: boolean;
+  } | null>(null);
   // Latest-wins token, the same guard reloadShareSkipped uses: an answer for
   // one workspace must never repaint another.
   const myShareChangeToken = useRef(0);
@@ -4476,9 +4479,13 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     setMyShareChange(null);
     setShareChangesEmpty(false);
-    if (!shareViewDocumentsWritable) return;
+    setShareChangesSkipped(null);
+    // Read for ANY share view, not only one that can still send: changes
+    // already sent stay withdrawable after a downgrade, and a surface that
+    // stopped reading them would hide the only way back.
+    if (!isShareView) return;
     void reloadMyShareChanges().catch(() => undefined);
-  }, [shareViewDocumentsWritable, reloadMyShareChanges]);
+  }, [isShareView, reloadMyShareChanges]);
   const sendShareChanges = useCallback(async () => {
     const token = myShareChangeToken.current;
     setShareChangesSubmitting(true);
@@ -4486,6 +4493,14 @@ export function DesktopWorkspaceShell(props: {
       const result = await bridge().submitShareChanges({ workspaceId });
       if (token !== myShareChangeToken.current) return;
       setShareChangesEmpty(result.submitted === 0);
+      setShareChangesSkipped(
+        result.skippedOutsideShare > 0 || result.morePending
+          ? {
+              outsideShare: result.skippedOutsideShare,
+              morePending: result.morePending,
+            }
+          : null,
+      );
       await reloadMyShareChanges();
     } catch (error) {
       reportShellError("Couldn't send your changes.", error);
@@ -4527,11 +4542,32 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     setShareProposals([]);
     setReviewProposalId(null);
-    // A share view holds someone else's files. It is never the granter who
-    // decides about them.
-    if (isShareView) return;
-    void reloadShareProposals().catch(() => undefined);
-  }, [isShareView, reloadShareProposals]);
+  }, [workspaceId]);
+
+  // Relay-side share state follows its shares while the workspace is open:
+  // one pull on open, then a slow poll. Manual refresh stays available in the
+  // explorer context menu.
+  //
+  // Both sides of a share ride this ONE cadence. A recipient's mounts change
+  // when the granter changes them, and a granter's waiting changes arrive at
+  // the relay — and neither reaches this machine as workspace activity,
+  // because a proposal is deliberately not in anyone's log (#646 PR3a). A
+  // timer of its own would poll the same relay twice on two schedules.
+  //
+  // A share view holds someone else's files, so it is never the granter who
+  // decides about them.
+  const pollsShareMounts = mountCount > 0;
+  const pollsShareProposals = !isShareView;
+  useEffect(() => {
+    if (!pollsShareMounts && !pollsShareProposals) return;
+    const pull = () => {
+      if (pollsShareMounts) void refreshShareMounts();
+      if (pollsShareProposals) void reloadShareProposals().catch(() => undefined);
+    };
+    pull();
+    const timer = setInterval(pull, SHARE_RELAY_POLL_MS);
+    return () => clearInterval(timer);
+  }, [pollsShareMounts, pollsShareProposals, refreshShareMounts, reloadShareProposals]);
   const shareChangeNotices = useMemo(
     () =>
       shareProposals.map((proposal) => ({
@@ -4818,10 +4854,10 @@ export function DesktopWorkspaceShell(props: {
                     // the whole right, including the half that is NOT a
                     // right: the granter's files change only when the
                     // granter accepts.
-                    `Shared view from ${shareView.granterEmail ?? "another dohc user"}. Edit these files and send your changes for ${shareView.granterEmail ?? "another dohc user"} to accept.`
+                    `Shared view from ${shareGranterName}. Edit these files and send your changes for ${shareGranterName} to accept.`
                   : shareViewChatWritable
-                    ? `Shared view from ${shareView.granterEmail ?? "another dohc user"}. You can chat about these files, not edit them.`
-                    : `Shared view from ${shareView.granterEmail ?? "another dohc user"} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
+                    ? `Shared view from ${shareGranterName}. You can chat about these files, not edit them.`
+                    : `Shared view from ${shareGranterName} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
           </span>
           {shareSkipped
             ? shareSkipNoticeLines(shareSkipped, shareView.granterEmail).map(
@@ -4865,12 +4901,13 @@ export function DesktopWorkspaceShell(props: {
                 ),
               )
             : null}
-          {/* Sending changes back (#646 PR3a). Edit level only, and only
-              while the share is live: an ended or damaged grant carries no
-              way to send, so offering one would be an affordance the grant
-              does not have. */}
-          {shareViewDocumentsWritable ? (
-            <>
+          {/* Changes already SENT, and the way to take them back (#646
+              PR3a). Deliberately not behind the level: a granter can narrow
+              the share while changes wait, and a reverse path a downgrade
+              removes is not a reverse path — it would strand work in front of
+              someone who may never answer it. The relay agrees; withdraw asks
+              for membership, not for edit. */}
+          <>
               {myShareChange && myShareChange.state !== "withdrawn" ? (
                 <span
                   data-testid="share-changes-state"
@@ -4913,12 +4950,34 @@ export function DesktopWorkspaceShell(props: {
                   ) : null}
                 </span>
               ) : null}
+          </>
+          {/* Sending. Edit level only, and only while the share is live: an
+              ended or damaged grant carries no way to send, so offering one
+              would be an affordance the grant does not have. */}
+          {shareViewDocumentsWritable ? (
+            <>
               {shareChangesEmpty ? (
                 <span
                   data-testid="share-changes-empty"
                   className="min-w-0 truncate text-[11px]"
                 >
                   You have no changes to send yet.
+                </span>
+              ) : null}
+              {/* What the submit did NOT take. Both are things the recipient
+                  would otherwise discover by their work simply not arriving. */}
+              {shareChangesSkipped !== null ? (
+                <span
+                  data-testid="share-changes-skipped"
+                  data-skipped={shareChangesSkipped.outsideShare || undefined}
+                  data-more-pending={shareChangesSkipped.morePending || undefined}
+                  className="min-w-0 truncate text-[11px] text-warning"
+                >
+                  {shareChangesSkipped.outsideShare > 0
+                    ? shareChangesSkipped.outsideShare === 1
+                      ? "1 file wasn't sent — it's outside what this share covers."
+                      : `${shareChangesSkipped.outsideShare} files weren't sent — they're outside what this share covers.`
+                    : "More changes are waiting. Send again to send the rest."}
                 </span>
               ) : null}
               <button

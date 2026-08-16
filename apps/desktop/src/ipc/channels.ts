@@ -694,7 +694,7 @@ export const CHANNELS = {
   // Share changes (#646 PR3a). The first three act on a workspace this
   // machine owns; the last three act from inside an edit-level share view.
   listShareProposals: "desktop:list-share-proposals",
-  readShareProposalDiff: "desktop:read-share-proposal-diff",
+  readShareProposalChanges: "desktop:read-share-proposal-changes",
   settleShareProposal: "desktop:settle-share-proposal",
   submitShareChanges: "desktop:submit-share-changes",
   listMyShareChanges: "desktop:list-my-share-changes",

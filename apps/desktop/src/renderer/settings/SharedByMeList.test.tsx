@@ -7,7 +7,7 @@ import { SharedByMeList } from "./SharedByMeList";
 const bridgeMock = {
   listRelayShares: vi.fn(),
   listShareProposals: vi.fn(),
-  readShareProposalDiff: vi.fn(),
+  readShareProposalChanges: vi.fn(),
   settleShareProposal: vi.fn(),
   revokeRelayShare: vi.fn(),
   writeClipboardText: vi.fn(),
@@ -143,12 +143,18 @@ describe("SharedByMeList", () => {
         },
       ],
     });
-    bridgeMock.readShareProposalDiff.mockResolvedValue({
-      path: "docs/plan.md",
-      drifted: false,
-      operation: "write",
-      currentText: "before",
-      incomingText: "after",
+    bridgeMock.readShareProposalChanges.mockResolvedValue({
+      proposedByEmail: "friend@dohc.test",
+      files: [
+        {
+          opIndex: 0,
+          path: "docs/plan.md",
+          operation: "write",
+          drifted: false,
+          currentText: "before",
+          incomingText: "after",
+        },
+      ],
     });
     render(<SharedByMeList workspaceId="ws-1" />);
 
@@ -160,10 +166,9 @@ describe("SharedByMeList", () => {
     // longest is decided first.
     await user.click(review);
     await screen.findByTestId("proposal-review-dialog");
-    expect(bridgeMock.readShareProposalDiff).toHaveBeenCalledWith({
+    expect(bridgeMock.readShareProposalChanges).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       proposalId: "proposal-old",
-      opIndex: 0,
     });
   });
 

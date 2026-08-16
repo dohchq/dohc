@@ -156,7 +156,12 @@ class MockDaemon implements EngineDaemonClient {
             pendingCursor: { kind: "shareView", token: "share-cursor-13" },
           };
         case "share.proposal.submit":
-          return { submitted: 2, proposalId: "proposal-1" };
+          return {
+            submitted: 2,
+            proposalId: "proposal-1",
+            skippedOutsideShare: 0,
+            morePending: false,
+          };
         case "versions.ensureMain":
           return {
             id: "main",
@@ -629,7 +634,12 @@ describe("EngineRelayClient", () => {
         grantedSelector: EDIT_SELECTOR,
         submitId: "submit-1",
       }),
-    ).resolves.toEqual({ submitted: 2, proposalId: "proposal-1" });
+    ).resolves.toEqual({
+      submitted: 2,
+      proposalId: "proposal-1",
+      skippedOutsideShare: 0,
+      morePending: false,
+    });
     expect(
       daemon.requests
         .filter((request) => request.method === "share.proposal.submit")
@@ -652,7 +662,7 @@ describe("EngineRelayClient", () => {
   it("reports an empty share proposal submit as offering nothing, not as a failure", async () => {
     const daemon = new MockDaemon((request) =>
       request.method === "share.proposal.submit"
-        ? { submitted: 0, proposalId: null }
+        ? { submitted: 0, proposalId: null, skippedOutsideShare: 3, morePending: false }
         : undefined,
     );
     const { client, sessions } = await harness(daemon);
@@ -663,12 +673,47 @@ describe("EngineRelayClient", () => {
         grantedSelector: EDIT_SELECTOR,
         submitId: "submit-empty",
       }),
-    ).resolves.toEqual({ submitted: 0, proposalId: null });
+    ).resolves.toEqual({
+      submitted: 0,
+      proposalId: null,
+      // A submit that offered nothing still says what it dropped: every
+      // change it found was outside what this share covers.
+      skippedOutsideShare: 3,
+      morePending: false,
+    });
     await sessions.closeAll();
   });
 
+  // What a submit LEFT BEHIND is not optional. A missing field read as zero
+  // would tell the recipient everything went when some of it did not.
+  it("refuses a share proposal submit that does not say what it left behind", async () => {
+    for (const [label, reply] of [
+      ["no skipped count", { submitted: 1, proposalId: "p", morePending: false }],
+      ["no pending flag", { submitted: 1, proposalId: "p", skippedOutsideShare: 0 }],
+    ] as const) {
+      const daemon = new MockDaemon((request) =>
+        request.method === "share.proposal.submit" ? (reply as JsonValue) : undefined,
+      );
+      const { client, sessions } = await harness(daemon);
+      await expect(
+        client.submitShareProposal({
+          shareId: "share-file",
+          grantedSelector: EDIT_SELECTOR,
+          submitId: `submit-${label}`,
+        }),
+        `MUTATION: ${label} softened to a default hides work that was not sent`,
+      ).rejects.toThrow(/share\.proposal\.submit\./u);
+      await sessions.closeAll();
+    }
+  });
+
   it("refuses a share proposal submit that disagrees with itself about opening a proposal", async () => {
-    let reply: JsonValue = { submitted: 2, proposalId: null };
+    let reply: JsonValue = {
+      submitted: 2,
+      proposalId: null,
+      skippedOutsideShare: 0,
+      morePending: false,
+    };
     const daemon = new MockDaemon((request) =>
       request.method === "share.proposal.submit" ? reply : undefined,
     );
@@ -685,7 +730,12 @@ describe("EngineRelayClient", () => {
       /disagreed with itself/u,
     );
     // A proposal opened over nothing.
-    reply = { submitted: 0, proposalId: "proposal-empty" };
+    reply = {
+      submitted: 0,
+      proposalId: "proposal-empty",
+      skippedOutsideShare: 0,
+      morePending: false,
+    };
     await expect(submit("submit-b")).rejects.toThrow(
       /disagreed with itself/u,
     );

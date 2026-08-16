@@ -6,6 +6,24 @@ an honest sketch that defers the write-back model to this document.
 
 Anchors are against `main` at commit `1767de7d` (PR #780 and PR #782 merged).
 
+> **What Edit v1 is, in one sentence.** A recipient at edit level may make
+> **text edits to files the share already contains**, and send them for the
+> granter to accept.
+>
+> It is not general write access to the share view. Creating, renaming,
+> deleting and importing files stay refused at every level, because those
+> handlers write the share view's FOLDER — which is a projection of its engine
+> store — and a raw-disk write there produces nothing the recipient could send
+> and is overwritten by the next pull. The one write that is supported is
+> routed to the engine at its own seam (`routeWorkspaceTextWrite`), and the
+> workspace-wide write gate (`assertWritableWorkspace`) still refuses every
+> share view at every level: it guards 27 handlers, and widening it for one
+> would have opened all of them.
+>
+> Routing create, rename, delete and import through the engine as well is a
+> follow-up, one handler at a time. This document describes the lane; the
+> narrower v1 is what PR3a ships.
+
 ---
 
 ## Context
@@ -122,12 +140,26 @@ ops, filtered and redacted, parked in a relay table instead of inserted into
 the granter's log.
 
 **Accept releases them into the owner lane unchanged.** Accept calls the same
-`appendLogBatch` (`storage.ts:1135`) with the same share-namespaced origin id
-`share:<shareId>:<originId>` that PR2's chat path already writes
-(`server.ts:587`), so accepted ops reach the granter over the owner lane the
-relay already uses (`server.ts:452-455`), and apply through
-`apply_moment_envelope_detailed`
+`appendLogBatch` (`storage.ts:1135`) with a share-namespaced origin id, so
+accepted ops reach the granter over the owner lane the relay already uses
+(`server.ts:452-455`), and apply through `apply_moment_envelope_detailed`
 (`crates/dohc-engine-sync/src/moment_apply.rs:216`). Nothing new applies them.
+
+> **Amended by review round 3: accept writes its OWN origin stream,
+> `share:<shareId>:proposal:<proposalId>`, dense from 0.** Releasing them
+> under the recipient's own push origin — which is what "the same
+> share-namespaced origin the chat path writes" meant — wedges the recipient
+> permanently. A recipient numbers that stream densely from its own journal,
+> so ops the relay inserted there take the sequence numbers the recipient's
+> next push will claim, and `appendLogBatch` refuses a re-used sequence
+> carrying different content. One accept silences the recipient's chat for the
+> life of the share, with nothing either side can do about it. A fresh origin
+> per proposal collides with nothing, because nothing else ever writes it.
+>
+> The recipient names its own origin on the wire, so `proposal:` is reserved:
+> the share-log route refuses a client-supplied origin id that begins with it.
+> The submit body no longer carries an origin id at all — the relay mints the
+> stream from facts it already holds.
 
 **Decline never moves them.** They stay marked declined and are swept with the
 share.
@@ -197,6 +229,50 @@ product invariant in `AGENTS.md` requires a visible reverse path for one.
 > `beforePresent: "null"`, which fast-forwards only onto an object the granter
 > does not have. A file the granter does have therefore opens a conflict
 > instead of being silently overwritten.
+>
+> **Amended again by review round 3: the object is resolved at the SUBMIT
+> door, not at accept.** Resolving `basedOnPath` at accept follows a PATH
+> across the gap between the two doors, and a path is not an identity. If the
+> granter renames the file in that gap, the path resolves to a different file
+> or to none; if the granter deletes it, it resolves to none — and "none"
+> mints a new object id, so the accepted change lands as a CREATE that puts
+> back a file the granter removed, with no conflict for the granter to see.
+>
+> So the relay resolves `basedOnPath` to the granter's object id while the
+> recipient is standing at the door, stores it on the proposal op, and accept
+> follows the STORED id. An object id does not move. A path that resolves to
+> nothing at submit refuses the whole submit, atomically, with a message that
+> names the file — the recipient can act on that, and the granter never meets
+> a failure they did not cause.
+>
+> Two consequences worth stating, both now tested:
+>
+> - the granter **renames** the file under an open proposal → the change still
+>   names the granter's own object, and lands at the path the granter moved it
+>   to. There is no conflict, and that is correct: a rename changes no
+>   content, so the content the recipient read is still the content the
+>   granter has. Drift is a claim about content.
+> - the granter **deletes** the file under an open proposal → the base is the
+>   granter's own earlier moment, the head is the delete, so the engine opens a
+>   conflict. The file is not resurrected as a create.
+>
+> **Where the change lands follows rename INTENT, not the path the recipient
+> read.** Stating the same path on both sides of a change is stating no
+> opinion about where the file lives, so a content-only change lands at the
+> granter's CURRENT path — a deliberate rename by the granter must survive an
+> accepted content edit, and naming the recipient's stale path would silently
+> undo it. A change whose base and destination differ is a move the recipient
+> meant, and it applies; if the granter moved the file elsewhere meanwhile,
+> the review shows where it is now and the granter accepts knowing that. A
+> delete lands where the granter has the file now, for the same reason.
+>
+> **And the base and head lookups are scoped to the share's ONE version.** A
+> share exposes exactly one version; the same object can hold the same content
+> in another one, and an unscoped lookup takes the latest match wherever it
+> sits. That hands a main share a base its main line never held. The version
+> is pinned onto the proposal row at submit — from the selector the recipient
+> proved against — so a selector edited mid-flight cannot move a proposal onto
+> a version its author never read.
 
 This is the mechanism that makes accept free, and it is the most important
 decision in the document.
@@ -464,30 +540,41 @@ before its ops can be accepted. New route,
 | Per workspace, charged to the GRANTER | 2 GiB | `DEFAULT_WORKSPACE_QUOTA_BYTES` `storage.ts:294`; `assertWorkspaceQuota` `storage.ts:1515`, called from `putBlob` `storage.ts:1067` |
 | Unreferenced sweep | 10 minutes | `DEFAULT_BLOB_GRACE_MS` `storage.ts:300`; `collectUnreferencedBlobs` `storage.ts:1090` |
 
-> **Amended by PR3a: the new bound reuses `quota_exceeded`, and it counts
-> UNCLAIMED uploads.** It is a quota, it already has a Rust twin, and adding a
-> code would have moved the pinned fixture and the Rust map for no new
-> meaning. The count is the blobs a share has uploaded that no stored change
-> references — uploading without submitting is the one way a recipient spends
-> the granter's quota with nothing to show for it, and it is the one thing
-> bounded. The refusal names the constraint, the limit, and the observed
-> count.
+> **Amended by review round 3: there is NO fourth bound.** PR3a briefly added
+> one — a count of a share's uploaded-but-unclaimed blobs, with its own table
+> and two storage methods — and it was removed. It duplicated a bound the
+> three above already state more tightly: `putBlob` charges every upload to
+> the granter's byte quota, and the sweep reclaims anything no OPEN proposal
+> claims. A blob COUNT bounds bytes less tightly than the byte quota that
+> already refuses them, and the table it needed was ~70 lines of machinery for
+> a number nothing else reads.
+>
+> The residual is unchanged and still worth stating: inside the grace window a
+> recipient can upload unreferenced blobs against the granter's quota. What
+> bounds it is the granter's quota, which is the number that was measured.
 
-One new bound is needed, and per the "measure limits that reject work" rule it
-is **derived from an existing contract rather than guessed**: a proposal
-carries at most `MAX_OPS_PER_REQUEST` ops (500, `server.ts:90`), so one submit
-is one batch and one transaction. Bound the recipient's in-flight unreferenced
-blobs to the same 500, for the same reason — a healthy submit references at
-most one after-blob per op. The refusal must name the constraint, the limit,
-and the observed count.
+The three bounds above are the whole answer. Proposal insert re-checks blob
+presence exactly as `appendLogBatch` does (`storage.ts:1397-1408`) — run at
+SUBMIT, so a recipient learns its content is missing while it can still
+re-upload, rather than at accept where the granter would meet a failure they
+did not cause.
 
-The residual worth stating: inside the 10-minute grace window a recipient can
-upload unreferenced blobs against the granter's quota, which would make the
-granter's own writes fail with a quota error. The 500 bound is what keeps that
-bounded rather than open-ended.
+**One submit still carries at most `MAX_OPS_PER_REQUEST` changes** (500,
+`server.ts:90`), because one submit is one batch and one transaction.
 
-Proposal insert re-checks blob presence exactly as `appendLogBatch` does
-(`storage.ts:1397-1408`).
+> **Amended by review round 3: that bound must not wedge the recipient.** The
+> engine used to collect every pending change and then refuse the submit when
+> there were more than 500 — and refuse it forever, because the scan position
+> only advances on success and nothing a person can do reduces a net-per-file
+> count. Now the SCAN stops at the bound, the submit sends those changes, and
+> the scan position advances to exactly the journal op it stopped at, so the
+> rest travel in the next submit. The bound never splits one file across two
+> submits.
+>
+> **Stated limitation:** a recipient with more than 500 changed files sends
+> them as several proposals, one press at a time. The surface says so
+> (`More changes are waiting. Send again to send the rest.`) rather than
+> leaving the recipient to notice.
 
 ### Pipeline 4 — granter review, accept, decline
 
@@ -568,7 +655,8 @@ means the surface reflects a decision made elsewhere.
 | Recipient push scope | nothing | chat only | chat + in-grant moments | server-side | `relay.rs:3175-3225` |
 | Share-view capture | none | none | none | server-side | `engineCaptureGate.ts:42-44` |
 | Share-view editor save | refuse | refuse | engine, then projection | server-side (main is the trust boundary) | `workspaceTextWrite.ts` |
-| `assertWritableWorkspace` in a share view | refuse | refuse | allow | server-side (main is the trust boundary) | `main.ts:758-764` |
+| `assertWritableWorkspace` in a share view | refuse | refuse | **refuse** | server-side (main is the trust boundary) | `shareWriteGate.ts` |
+| Share-view create / rename / delete / import | refuse | refuse | **refuse** | server-side | the row above |
 | Granter's own files, written by a recipient | refuse | refuse | **refuse** | server-side | unchanged |
 | Live-session fence on accepted ops | n/a | n/a | retry until settled | server-side | `moment_apply.rs:245-249` |
 | Editor `readOnly` in a share view | true | true | false | UX mirror | `DesktopWorkspaceShell.tsx:5218` |
@@ -576,6 +664,21 @@ means the surface reflects a decision made elsewhere.
 
 > **Amended by PR3a: the capture row is `none` at every level, and the row
 > below it replaces it.** See pipeline 1.
+>
+> **Amended by review round 3: `assertWritableWorkspace` refuses at EVERY
+> level, and so does the explorer menu.** That gate stands in front of 27
+> handlers — create, rename, move, delete, import, asset writes, database
+> edits, the plugin pipeline — every one of which writes the workspace
+> FOLDER. A share view's folder is a projection of its engine store, so a
+> raw-disk write there states content no moment does: unsendable, and
+> overwritten by the next pull. Making the gate level-aware opened all 27 at
+> once to buy one of them.
+>
+> The one write Edit v1 supports is routed instead: `routeWorkspaceTextWrite`
+> asks `shareViewTakesLocalWrites` at the seam that would otherwise write, and
+> the ordinary gate is skipped only there, by name. The rule the gate asks
+> cannot see a level at all — its input carries the marker, never the grant —
+> so it cannot be widened by one.
 
 The row that matters most: **Edit never makes the granter's workspace writable
 by anyone but the granter.** A recipient at edit level writes only to its own
@@ -679,16 +782,35 @@ Notice, shaped like the conflict notice (`NoticeCenter.tsx:222-235`):
 today with one action, `End share`, and no detail view, so the row links to the
 dialog rather than growing one.
 
+> **Amended by review round 3, three ways.**
+>
+> **The review is ONE read.** The dialog asked for the listing and then asked
+> again per file, and each of those asks re-read the whole proposal list from
+> the relay: a five-file review cost six listings and six more requests to
+> rebuild the sender's name. `readShareProposalChanges` answers all of it once.
+>
+> **A change the review cannot PREVIEW is still decidable.** Binary content,
+> content over the editor's text bound, and a blob the relay will not serve
+> now read as "no incoming side" rather than failing the read — because
+> failing it disabled Accept and Decline together, leaving the granter unable
+> to say no to something they could not see.
+>
+> **The granter's waiting changes are re-read on the share cadence.** They
+> were read once per workspace open, so a proposal arriving afterwards stayed
+> invisible until the workspace was reopened. They now ride the same slow poll
+> the recipient's mounts already use — no second timer, because a proposal is
+> deliberately not in anyone's log and so never arrives as workspace activity.
+
 ---
 
 ## Lifecycle edges
 
 | Edge | Answer | Why |
 | --- | --- | --- |
-| Revoke with an open proposal | The recipient cannot submit or add. The granter can still accept or decline. | The transactional guard (`server.ts:598-602`) governs the recipient's writes. The granter acting on their own workspace is not a recipient write. |
-| Downgrade edit → comment mid-flight | Same as revoke: the submit loses the race inside `BEGIN IMMEDIATE`. | The guard already re-runs the level test (`server.ts:601`). |
-| Rename or delete under an in-flight proposal | Caught by decision 5: `based_on_blob_sha256` no longer matches, the review shows drift, and accept opens a correct conflict. | One mechanism covers rename, delete, and concurrent edit. |
-| Path renamed out of the selector | The op's path fails `visibleSharePath` at accept, and the proposal is refused whole. | Matches the batch-atomic rule (`server.ts:529`). |
+| Revoke with an open proposal | Ending the share SETTLES its open proposals as declined. | Amended by review round 3, replacing "the granter can still accept or decline". An open proposal outlives the grant it arrived through: the recipient can no longer withdraw it, and its content stays pinned out of the blob sweep for as long as it stays open. Declined is the honest state, and the recipient's own copy still has the changes. |
+| Downgrade edit → comment mid-flight | The submit loses the race inside `BEGIN IMMEDIATE`. Changes already SENT stay listable and withdrawable. | The guard re-runs the level test (`server.ts:601`). Withdraw asks for membership, not for edit: submitting is a reversible state change, and a reverse path a downgrade removes is not one. |
+| Rename or delete under an in-flight proposal | Caught by decision 5, through the object id resolved at submit. A delete opens a conflict; a rename applies cleanly, because a rename changes no content. | One mechanism covers rename, delete, and concurrent edit. |
+| Path renamed out of the selector | The recipient's own scan drops that file WHOLE and counts it, and the surface states the count. A change that still named an out-of-share path would fail `visibleSharePath` at submit and refuse the whole submit. | Amended by review round 3: dropping it silently meant pressing send and having some work simply not go, and offering the pre-rename state instead would propose content the recipient had moved away from. |
 | Damaged share record | `parseShareSelectorJson` returns null → generic 404 → no submit. Existing proposals stay readable to the granter, keyed by workspace. | Decision G, and the banner already states the damaged case (`:4702`). |
 | Ended share, recipient side | Existing copy unchanged: `This share was ended by {granter}...` | `:4700`. |
 | Granter accepts while the file is open | The op returns `RetryableState { "ydoc-session-live" }` and retries after the session releases. | `moment_apply.rs:245-249`. |
@@ -738,7 +860,10 @@ This PR is a fix. It should merge without waiting for the rest.
 
 9. ~~`engineCaptureGate.ts:42-44` — a real capture at edit level.~~ Replaced by
    the engine-direct write in pipeline 1; the gate is unchanged.
-10. `main.ts:758-764` — `assertWritableWorkspace` becomes level-aware.
+10. ~~`main.ts:758-764` — `assertWritableWorkspace` becomes level-aware.~~
+    Withdrawn by review round 3: it guards 27 folder-writing handlers and
+    stays a presence refusal. The one supported write is gated at its own
+    routed seam instead. See the enforcement table.
 11. `DesktopWorkspaceShell.tsx:5218` — `readOnly` becomes level-aware.
 12. The submit action, the recipient state copy, and the banner line.
 13. The notice, `ProposalReviewDialog`, and the diff, reusing
@@ -748,6 +873,12 @@ This PR is a fix. It should merge without waiting for the rest.
 
 Per-file accept, richer drift presentation, granter-side provenance beyond the
 proposal record, and auto-accept (Option A's future).
+
+Added by review round 3: **routing the other file operations through the
+engine**, one handler at a time — create, rename, delete, import. Each needs
+the same shape the text write got (engine moment, then projection) and its own
+gate at its own seam. Until then they stay refused at every level, and the
+explorer menu says so by offering none of them.
 
 **Why not split PR3a further.** Any smaller cut ships a lane no user can reach,
 which is the failure mode this repo has paid for repeatedly: a green check over

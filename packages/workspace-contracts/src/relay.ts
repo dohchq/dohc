@@ -292,6 +292,14 @@ export type ShareProposalDecision = "accept" | "decline";
 export interface SubmitShareProposalResult {
   submitted: number;
   proposalId: string | null;
+  // Files the scan dropped because an edit put them outside the shared paths.
+  // The recipient is told; silence would mean pressing send and having some of
+  // the work simply not go.
+  skippedOutsideShare: number;
+  // More changes are waiting than one submit carries, so the next submit
+  // sends the rest. A flag, not a count: the scan stops at the bound and never
+  // measures what is behind it.
+  morePending: boolean;
 }
 
 // One net change to one file, as the GRANTER sees it. The `current*` fields
@@ -302,31 +310,30 @@ export interface ShareProposalOp {
   // The granter's path for this file when the recipient started, or null for
   // a file the recipient created.
   basedOnPath: string | null;
-  basedOnBlobSha256: string | null;
   operation: "write" | "delete";
   // Where the change puts the file. Null for a delete.
   afterPath: string | null;
   afterBlobSha256: string | null;
   afterContentKind: "text" | "binary" | null;
-  // Where the granter holds this file NOW, and what it holds. Null when the
-  // granter no longer has it.
+  // Where the granter holds this file NOW. Null when the granter no longer
+  // has it.
   currentPath: string | null;
-  currentBlobSha256: string | null;
-  // The granter moved on since the recipient's base. Accepting still works —
-  // the relay rewrites the base to a real granter moment — but it opens a
-  // conflict instead of fast-forwarding.
+  // The granter moved on since the recipient's base — decided by the RELAY,
+  // against the granter's own head in the version this share exposes.
+  // Accepting still works, but it opens a conflict instead of
+  // fast-forwarding.
   drifted: boolean;
 }
 
-// A proposal waiting on the granter, with every op expanded for review.
+// A proposal waiting on the granter, with every op expanded for review. This
+// surface serves only what is still OPEN, so there is no state to carry.
 export interface ShareProposal {
   proposalId: string;
   shareId: string;
-  // Server-derived at submit. Never read from a submit body.
-  proposedByUserId: string;
-  state: ShareProposalState;
+  // Who sent it, resolved by the relay from the server-derived user id on the
+  // proposal row. Null when the relay cannot name them.
+  proposedByEmail: string | null;
   createdAtMs: number;
-  settledAtMs: number | null;
   ops: ShareProposalOp[];
 }
 

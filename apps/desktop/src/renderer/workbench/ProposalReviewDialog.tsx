@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
-  ReadShareProposalDiffResult,
+  ReadShareProposalChangesResult,
   ShareProposalOperation,
-  ShareProposalRow,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
@@ -22,8 +21,10 @@ import {
 
 // The name the granter reads. A submitter whose email the relay could not
 // state reads the same way the share banner names an unknown account.
-export function proposerName(proposal: ShareProposalRow | null): string {
-  return proposal?.proposedByEmail ?? "another dohc user";
+export function proposerName(
+  sent: { proposedByEmail: string | null } | null,
+): string {
+  return sent?.proposedByEmail ?? "another dohc user";
 }
 
 // The words the version compare page already uses for the same two facts.
@@ -54,11 +55,7 @@ function ProposalFileDiff(props: {
 type LoadState =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | {
-      status: "ready";
-      proposal: ShareProposalRow;
-      diffs: ReadShareProposalDiffResult[];
-    };
+  | { status: "ready"; changes: ReadShareProposalChangesResult };
 
 export function ProposalReviewDialog(props: {
   workspaceId: string;
@@ -89,29 +86,13 @@ export function ProposalReviewDialog(props: {
     setSettleError(null);
     void (async () => {
       try {
-        const listing = await bridge().listShareProposals({ workspaceId });
+        // ONE read: the files, their drift, and both sides of each diff.
+        const changes = await bridge().readShareProposalChanges({
+          workspaceId,
+          proposalId,
+        });
         if (token !== liveToken.current) return;
-        const proposal = listing.proposals.find(
-          (candidate) => candidate.proposalId === proposalId,
-        );
-        if (!proposal) {
-          setLoad({
-            status: "error",
-            message: "These changes are no longer waiting for you.",
-          });
-          return;
-        }
-        const diffs = await Promise.all(
-          proposal.files.map((file) =>
-            bridge().readShareProposalDiff({
-              workspaceId,
-              proposalId,
-              opIndex: file.opIndex,
-            }),
-          ),
-        );
-        if (token !== liveToken.current) return;
-        setLoad({ status: "ready", proposal, diffs });
+        setLoad({ status: "ready", changes });
       } catch (error) {
         if (token !== liveToken.current) return;
         setLoad({
@@ -143,8 +124,8 @@ export function ProposalReviewDialog(props: {
     [props, workspaceId, proposalId],
   );
 
-  const sender = proposerName(load.status === "ready" ? load.proposal : null);
-  const files = load.status === "ready" ? load.proposal.files : [];
+  const sender = proposerName(load.status === "ready" ? load.changes : null);
+  const files = load.status === "ready" ? load.changes.files : [];
 
   return (
     <Overlay onClose={() => (settling ? undefined : props.onClose())}>
@@ -174,7 +155,7 @@ export function ProposalReviewDialog(props: {
           ) : null}
           {load.status === "ready" ? (
             <div className="flex flex-col gap-4">
-              {files.map((file, index) => (
+              {files.map((file) => (
                 <section
                   key={file.opIndex}
                   data-testid="proposal-review-file"
@@ -199,8 +180,8 @@ export function ProposalReviewDialog(props: {
                     </p>
                   ) : null}
                   <ProposalFileDiff
-                    currentText={load.diffs[index]?.currentText ?? null}
-                    incomingText={load.diffs[index]?.incomingText ?? null}
+                    currentText={file.currentText}
+                    incomingText={file.incomingText}
                   />
                 </section>
               ))}

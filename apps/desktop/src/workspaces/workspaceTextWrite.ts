@@ -3,6 +3,7 @@ import { validateUserWritePath } from "@dohc/workspace-core";
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import {
   readWorkspaceText,
+  withOrderedWorkspaceTextPath,
   writeWorkspaceText,
   type WorkspaceTextWriteResult,
 } from "./workspaceAssets";
@@ -79,36 +80,41 @@ async function writeShareViewText(input: {
   if (!path.ok) {
     throw new Error(`Invalid write path (${path.reason}): ${input.relativePath}`);
   }
-  // The optimistic guard every editor save carries, answered from the bytes the
-  // editor read. Checked BEFORE the moment: a stale save must be refused, not
-  // journaled and then refused.
-  const current = await currentContentHash(input.rootPath, input.relativePath);
-  if (current !== input.expectedContentHash) {
-    return { status: "conflict", currentContentHash: current };
-  }
-  const store = input.shareViewStore();
-  const main = await store.ensureMainVersion({ workspaceId: input.workspaceId });
-  await store.writeTextFile({
-    workspaceId: input.workspaceId,
-    versionId: main.id,
-    path: path.normalized,
-    text: input.text,
-    metadata: { origin: "local-file" },
+  // Under the SAME per-file ordering the disk writer takes. Two saves racing
+  // on one path would otherwise both read the pre-save bytes, both pass the
+  // compare below, and both journal a moment.
+  return withOrderedWorkspaceTextPath(input.rootPath, input.relativePath, async () => {
+    // The optimistic guard every editor save carries, answered from the bytes
+    // the editor read. Checked BEFORE the moment: a stale save must be
+    // refused, not journaled and then refused.
+    const current = await currentContentHash(input.rootPath, input.relativePath);
+    if (current !== input.expectedContentHash) {
+      return { status: "conflict", currentContentHash: current };
+    }
+    const store = input.shareViewStore();
+    const main = await store.ensureMainVersion({ workspaceId: input.workspaceId });
+    await store.writeTextFile({
+      workspaceId: input.workspaceId,
+      versionId: main.id,
+      path: path.normalized,
+      text: input.text,
+      metadata: { origin: "local-file" },
+    });
+    // The projection follows the moment, through the SAME materializer the
+    // share's pull uses: a share view's disk writes keep the realpath
+    // containment that module owns, and the bytes on disk come from the store
+    // rather than from a second copy of the text.
+    await materializeSharedViewPaths(
+      input.rootPath,
+      input.workspaceId,
+      [{ path: path.normalized, operation: "write", contentKind: "text" }],
+      store,
+    );
+    return {
+      status: "written",
+      contentHash: createHash("sha256").update(input.text).digest("hex"),
+    };
   });
-  // The projection follows the moment, through the SAME materializer the
-  // share's pull uses: a share view's disk writes keep the realpath containment
-  // that module owns, and the bytes on disk come from the store rather than
-  // from a second copy of the text.
-  await materializeSharedViewPaths(
-    input.rootPath,
-    input.workspaceId,
-    [{ path: path.normalized, operation: "write", contentKind: "text" }],
-    store,
-  );
-  return {
-    status: "written",
-    contentHash: createHash("sha256").update(input.text).digest("hex"),
-  };
 }
 
 // The hash the disk writer would have compared against. A MISSING file reads as

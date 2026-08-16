@@ -3,6 +3,7 @@ import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
   assertShareProposalGranter,
+  requireShareViewMembership,
   requireShareViewProposalScope,
   shareProposalOpPath,
 } from "./shareProposals";
@@ -29,6 +30,44 @@ function marker(
         : { paths: overrides.paths ?? ["docs"], versionId: null, access },
   };
 }
+
+// The reverse path submitting owes, and what it is allowed to depend on.
+// Listing and withdrawing already-sent changes ask for MEMBERSHIP, never for
+// the level: a granter can narrow a share while changes wait, and a withdraw
+// a downgrade removes would strand them in front of someone who may never
+// answer. The relay draws the same line on its own withdraw route.
+describe("requireShareViewMembership (seeing and taking back)", () => {
+  it("resolves the share at every level, including the ones that cannot send", () => {
+    for (const access of ["view", "comment", "edit"] as const) {
+      const scope = requireShareViewMembership(marker({ access }));
+      expect(
+        scope.shareId,
+        `${access}: MUTATION: a level test here loses the reverse path to a downgrade`,
+      ).toBe("share-1");
+      expect(scope.grant.access).toBe(access);
+    }
+  });
+
+  it("resolves an ended share too, and lets the relay refuse it", () => {
+    expect(requireShareViewMembership(marker({ ended: true })).shareId).toBe("share-1");
+  });
+
+  it("refuses a workspace that is not a share view at all", () => {
+    expect(() => requireShareViewMembership(undefined)).toThrow(
+      "This workspace is not a shared view.",
+    );
+  });
+
+  it("refuses a grant that reads back as damage, and a marker with no share id", () => {
+    expect(
+      () => requireShareViewMembership(marker({ access: null })),
+      "MUTATION: a damaged grant must never resolve a share id",
+    ).toThrow(SharedFileReadOnlyError);
+    expect(() => requireShareViewMembership(marker({ shareId: "" }))).toThrow(
+      SharedFileReadOnlyError,
+    );
+  });
+});
 
 describe("requireShareViewProposalScope (the recipient lane)", () => {
   it("resolves the share and its pinned grant at edit level", () => {

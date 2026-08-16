@@ -706,21 +706,35 @@ test("comment side: a recipient chats about a shared file and the message reache
             `/sync/${workspaceId}/log?since=0&limit=500`,
           );
           if (page.status !== 200) return `status ${page.status}`;
-          const ops = (
+          const all = (
             JSON.parse(page.body) as {
               ops: Array<{ originId: string; opKind: string; payload: Record<string, unknown> }>;
             }
-          ).ops.filter((op) => op.originId.startsWith(`share:${shareId}:`));
+          ).ops;
+          // The GRANTER's own object id for the shared file, read from the
+          // granter's own log. This is what the recipient's binding has to
+          // resolve to, and it is knowable here rather than assumed.
+          const granterObjectId = all
+            .filter(
+              (op) =>
+                op.opKind === "moment.append" &&
+                !op.originId.startsWith(`share:${shareId}:`) &&
+                (op.payload.payloadAfterPath === "docs/shared.md" ||
+                  op.payload.path === "docs/shared.md"),
+            )
+            .map((op) => op.payload.objectId)
+            .at(-1);
+          const ops = all.filter((op) => op.originId.startsWith(`share:${shareId}:`));
           const create = ops.find((op) => op.opKind === "chat.thread.create");
           const message = ops.find((op) => op.opKind === "chat.message.append");
           if (!create || !message) return `kinds: ${ops.map((op) => op.opKind).join(",")}`;
+          if (typeof granterObjectId !== "string") return "no granter object for docs/shared.md";
           return {
             // The relay's accept door CONVERTS the binding before it stores
-            // it, so the stored op names the granter's object and no path.
-            // The exact object id is the granter's to mint, so its shape is
-            // what this asserts.
+            // it, so the stored op names the granter's own object and no
+            // path — the SAME object the granter's own moments name.
             carriesPath: create.payload.linkedPath !== undefined,
-            boundToGranterObject: typeof create.payload.linkedObjectId === "string",
+            boundToGranterObject: create.payload.linkedObjectId === granterObjectId,
             body: message.payload.body,
             authorUserId: message.payload.authorUserId,
           };
@@ -733,7 +747,8 @@ test("comment side: a recipient chats about a shared file and the message reache
         // resolves that path to the granter's object and persists THAT —
         // which is what makes the thread follow the file through a rename
         // inside the share. `services/sync-relay/src/fileChatShares.test.ts`
-        // pins the conversion; this is the same fact end to end.
+        // pins the conversion; this is the same fact end to end, against the
+        // granter's real object id rather than against the shape of one.
         carriesPath: false,
         boundToGranterObject: true,
         body: "Which comet is this?",

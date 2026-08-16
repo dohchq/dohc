@@ -4,7 +4,6 @@ import {
   ShareUnavailableError,
 } from "@dohc/workspace-contracts/relay";
 import {
-  ShareProposalInvalidError,
   listMyShareProposals,
   listShareProposals,
   settleShareProposal,
@@ -49,28 +48,24 @@ function relayAnswering(
 const OP = {
   opIndex: 0,
   basedOnPath: "docs/a.md",
-  basedOnBlobSha256: "a".repeat(64),
   operation: "write",
   afterPath: "docs/b.md",
   afterBlobSha256: "b".repeat(64),
   afterContentKind: "text",
   currentPath: "docs/a.md",
-  currentBlobSha256: "a".repeat(64),
   drifted: false,
 };
 
 const PROPOSAL = {
   proposalId: "proposal-1",
   shareId: "share-1",
-  proposedByUserId: "user-recipient",
-  state: "open",
+  proposedByEmail: "recipient@dohc.test",
   createdAtMs: 10,
-  settledAtMs: null,
   ops: [OP],
 };
 
 describe("listShareProposals", () => {
-  it("reads the granter's open proposals with their drift against the granter's own state", async () => {
+  it("reads the granter's waiting changes with their drift against the granter's own state", async () => {
     const { relay, calls } = relayAnswering({
       ok: true,
       proposals: [
@@ -78,8 +73,6 @@ describe("listShareProposals", () => {
         {
           ...PROPOSAL,
           proposalId: "proposal-2",
-          state: "accepted",
-          settledAtMs: 20,
           ops: [
             {
               ...OP,
@@ -89,7 +82,6 @@ describe("listShareProposals", () => {
               afterBlobSha256: null,
               afterContentKind: null,
               currentPath: null,
-              currentBlobSha256: null,
               drifted: true,
             },
           ],
@@ -113,21 +105,17 @@ describe("listShareProposals", () => {
       {
         proposalId: "proposal-1",
         shareId: "share-1",
-        proposedByUserId: "user-recipient",
-        state: "open",
+        proposedByEmail: "recipient@dohc.test",
         createdAtMs: 10,
-        settledAtMs: null,
         ops: [
           {
             opIndex: 0,
             basedOnPath: "docs/a.md",
-            basedOnBlobSha256: "a".repeat(64),
             operation: "write",
             afterPath: "docs/b.md",
             afterBlobSha256: "b".repeat(64),
             afterContentKind: "text",
             currentPath: "docs/a.md",
-            currentBlobSha256: "a".repeat(64),
             drifted: false,
           },
         ],
@@ -135,21 +123,17 @@ describe("listShareProposals", () => {
       {
         proposalId: "proposal-2",
         shareId: "share-1",
-        proposedByUserId: "user-recipient",
-        state: "accepted",
+        proposedByEmail: "recipient@dohc.test",
         createdAtMs: 10,
-        settledAtMs: 20,
         ops: [
           {
             opIndex: 1,
             basedOnPath: "docs/a.md",
-            basedOnBlobSha256: "a".repeat(64),
             operation: "delete",
             afterPath: null,
             afterBlobSha256: null,
             afterContentKind: null,
             currentPath: null,
-            currentBlobSha256: null,
             drifted: true,
           },
         ],
@@ -157,14 +141,26 @@ describe("listShareProposals", () => {
     ]);
   });
 
-  it("refuses a state outside the closed set instead of reading it as open", async () => {
+  // This route serves what the granter still has to ANSWER, so a sender it
+  // could not name is stated rather than invented — and the row stays
+  // reviewable either way.
+  it("states a sender the relay could not name", async () => {
     const { relay } = relayAnswering({
-      proposals: [{ ...PROPOSAL, state: "pending" }],
+      proposals: [{ ...PROPOSAL, proposedByEmail: null }],
+    });
+    const [proposal] = await listShareProposals({ relay, workspaceId: "workspace-a" });
+    expect(proposal?.proposedByEmail).toBeNull();
+  });
+
+  it("refuses a drift answer that is not a boolean, rather than reading it as false", async () => {
+    const { relay } = relayAnswering({
+      proposals: [{ ...PROPOSAL, ops: [{ ...OP, drifted: "no" }] }],
     });
 
     await expect(
       listShareProposals({ relay, workspaceId: "workspace-a" }),
-    ).rejects.toBeInstanceOf(ShareProposalInvalidError);
+      "MUTATION: a softened drift read hides that the granter's copy moved",
+    ).rejects.toThrow(/drifted is not a boolean/u);
   });
 
   it("refuses an op whose operation and after side contradict each other", async () => {

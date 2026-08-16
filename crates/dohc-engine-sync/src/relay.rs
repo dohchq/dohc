@@ -5,6 +5,7 @@ use dohc_engine_storage::{
     EngineStore, FaultInjector, FaultPoint, StorageError, TxnOutcome, hex_sha256,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::apply::apply_chat_lww_projection_tx;
@@ -241,7 +242,13 @@ pub struct ShareBlobUploadRequest {
 /// moment id and could not state a lineage the granter recognizes. The base
 /// pair is the one identifier both sides genuinely share, and the relay
 /// resolves it to the granter's own moment at accept.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Every optional field serializes as an explicit `null` rather than being
+/// skipped. The relay reads the base pair as a stated fact — both halves or
+/// neither — so an absent field and a null field must not look the same on the
+/// wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ShareProposalChange {
     /// The GRANTER's path for this file, or `None` for a file the recipient
     /// created. Travels with `based_on_blob_sha256` or not at all.
@@ -266,7 +273,6 @@ pub struct ShareProposalSubmitRequest {
     /// The idempotency key for one submit. A repeat returns the existing
     /// proposal and never creates a second one.
     pub submit_id: String,
-    pub origin_id: String,
     pub ops: Vec<ShareProposalChange>,
 }
 
@@ -274,17 +280,25 @@ pub struct ShareProposalSubmitRequest {
 pub struct ShareProposalSubmitResponse {
     pub proposal_id: String,
     pub ops: usize,
-    /// Whether this submit created the proposal. `false` is the idempotent
-    /// repeat answering with the proposal it already held.
-    pub created: bool,
 }
 
 /// What one submit offered. `proposal_id` is `None` exactly when nothing was
 /// offered — a share below edit level, or a scan that found no change.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShareProposalSubmitOutcome {
     pub submitted: usize,
     pub proposal_id: Option<String>,
+    /// Files this scan dropped because one of their local ops named a path
+    /// the pinned grant does not cover. Counted once per file, not per op:
+    /// the file is not offerable at all, so a partly collected one is dropped
+    /// whole.
+    pub skipped_outside_share: usize,
+    /// Whether the per-submit change bound stopped this scan before the
+    /// journal mark it read, so a further submit has more to offer.
+    ///
+    /// A flag, not a count. The scan stops AT the bound rather than reading
+    /// on, so this replica has not measured what is left.
+    pub more_pending: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1885,15 +1899,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// granter, as ONE proposal the granter reads and then accepts or declines
     /// (#646 PR3a).
     ///
-    /// A proposal op is a NET CHANGE, not a replayed moment: "the file you
-    /// have at P with content H should now be at Q with content H2", or
-    /// "should be gone". The served moment drops `momentId`, `objectId` and
-    /// every `before*` field (`services/sync-relay/src/shareFilter.ts`), so a
-    /// recipient never learns a granter moment id and could not state a
-    /// lineage the granter recognizes. The base pair is the one identifier
-    /// both sides genuinely share, and the relay resolves it to the granter's
-    /// own moment at accept.
-    ///
     /// The scan is bounded at the submit moment: the journal's high-water mark
     /// for this origin is read ONCE, before the first page, and edits made
     /// after it wait for the next submit. That integer is what makes one
@@ -1901,6 +1906,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     ///
     /// `scanned_seq` advances only after the relay has accepted the submit, so
     /// a failed submit re-offers the same changes rather than losing them.
+    ///
+    /// One submit carries at most `MAX_PUSH_OPS_PER_BATCH` changes. The scan
+    /// STOPS at that bound instead of failing after it, and records the
+    /// journal position it stopped at, so the rest travels in the next submit.
+    /// `more_pending` on the outcome says a further submit has more to offer.
     pub fn submit_share_proposal(
         &self,
         store: &mut EngineStore,
@@ -1915,10 +1925,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // chat. A recipient offers nothing it was not granted, so a view or
         // comment share never contacts the relay at all.
         if granted.access != crate::ShareAccess::Edit {
-            return Ok(ShareProposalSubmitOutcome {
-                submitted: 0,
-                proposal_id: None,
-            });
+            return Ok(ShareProposalSubmitOutcome::default());
         }
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
@@ -1926,7 +1933,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let scanned = read_share_proposal_scan_position(store, workspace_id, share_id)?;
         let submit_through =
             local_max_origin_seq(store, workspace_id, &identity.origin_id).map_err(local)?;
-        let mut changes = collect_share_proposal_changes(
+        let mut scan = collect_share_proposal_changes(
             store,
             workspace_id,
             granted,
@@ -1934,45 +1941,45 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             scanned,
             submit_through,
         )?;
-        if changes.is_empty() {
+        if scan.changes.is_empty() {
             // Nothing to offer, but this window is read. Recording it keeps
             // the next submit from re-reading ops it already decided about.
             write_share_proposal_scan_position(
                 store,
                 workspace_id,
                 share_id,
-                submit_through,
+                scan.scanned_through,
                 faults,
             )?;
             return Ok(ShareProposalSubmitOutcome {
-                submitted: 0,
-                proposal_id: None,
+                skipped_outside_share: scan.skipped_outside_share,
+                more_pending: scan.more_pending,
+                ..ShareProposalSubmitOutcome::default()
             });
         }
-        if changes.len() > crate::MAX_PUSH_OPS_PER_BATCH {
-            return Err(RelayError::Local(format!(
-                "share proposal exceeds changes per submit: limit {} changes, \
-                 observed {} changes",
-                crate::MAX_PUSH_OPS_PER_BATCH,
-                changes.len()
-            )));
-        }
-        self.upload_proposed_blobs(store, share_id, &mut changes)?;
+        self.upload_proposed_blobs(store, share_id, &mut scan.changes)?;
         let response = self
             .transport
             .share_proposal_submit(ShareProposalSubmitRequest {
                 share_id: share_id.to_owned(),
                 submit_id: submit_id.to_owned(),
-                origin_id: identity.origin_id.clone(),
-                ops: changes.clone(),
+                ops: scan.changes.clone(),
             })?;
-        if response.proposal_id.is_empty() || response.ops != changes.len() {
+        if response.proposal_id.is_empty() || response.ops != scan.changes.len() {
             return Err(RelayError::InvalidResponse);
         }
-        write_share_proposal_scan_position(store, workspace_id, share_id, submit_through, faults)?;
+        write_share_proposal_scan_position(
+            store,
+            workspace_id,
+            share_id,
+            scan.scanned_through,
+            faults,
+        )?;
         Ok(ShareProposalSubmitOutcome {
-            submitted: changes.len(),
+            submitted: scan.changes.len(),
             proposal_id: Some(response.proposal_id),
+            skipped_outside_share: scan.skipped_outside_share,
+            more_pending: scan.more_pending,
         })
     }
 
@@ -3411,6 +3418,57 @@ fn proposal_paths_within_grant(payload: &serde_json::Value, granted: &crate::Sha
     named
 }
 
+/// What one scan of this replica's journal found.
+struct ShareProposalScan {
+    changes: Vec<ShareProposalChange>,
+    /// The journal position this scan read THROUGH, and the position the
+    /// submit records once the relay accepts it. Below `submit_through`
+    /// exactly when the change bound stopped the scan early.
+    scanned_through: i64,
+    more_pending: bool,
+    skipped_outside_share: usize,
+}
+
+/// One local moment read as a complete net change: the base from its before
+/// side, the destination from its after side.
+///
+/// `rename` is a local label for a moment; a proposal states only what the
+/// granter must end up with, and the relay derives the moment's own label from
+/// the two paths at accept.
+fn proposed_change(op: &ReplicationEnvelope) -> ShareProposalChange {
+    ShareProposalChange {
+        based_on_path: string_field(&op.payload, "payloadBeforePath").map(str::to_owned),
+        based_on_blob_sha256: string_field(&op.payload, "payloadBeforeBlobSha256")
+            .filter(|sha256| valid_sha256(sha256))
+            .map(str::to_owned),
+        operation: if string_field(&op.payload, "operation") == Some("delete") {
+            "delete".to_owned()
+        } else {
+            "write".to_owned()
+        },
+        after_path: string_field(&op.payload, "payloadAfterPath").map(str::to_owned),
+        after_blob_sha256: string_field(&op.payload, "payloadAfterBlobSha256")
+            .filter(|sha256| valid_sha256(sha256))
+            .map(str::to_owned),
+        // The relay accepts exactly two content kinds, so state one of them. A
+        // moment carrying neither is text, the same reading
+        // `ContentKind::from_wire` applies on apply.
+        after_content_kind: Some(
+            if string_field(&op.payload, "payloadAfterContentKind") == Some("binary") {
+                "binary".to_owned()
+            } else {
+                "text".to_owned()
+            },
+        ),
+        after_byte_length: op
+            .payload
+            .get("payloadAfterByteLength")
+            .and_then(serde_json::Value::as_i64)
+            .filter(|byte_length| *byte_length >= 0),
+        recorded_at_ms: op.recorded_at_ms,
+    }
+}
+
 /// This replica's local moments between `scanned_seq` and `submit_through`,
 /// consolidated into ONE net change per file.
 ///
@@ -3421,6 +3479,12 @@ fn proposal_paths_within_grant(payload: &serde_json::Value, granted: &crate::Sha
 /// the base from the FIRST and the destination from the LAST, and a write
 /// followed by a rename leaves as one change from the original path to the new
 /// one.
+///
+/// The scan holds at most `MAX_PUSH_OPS_PER_BATCH` files, which is what one
+/// submit carries. It stops at the op that would admit one file too many, and
+/// reports the position it stopped at, so the next submit resumes from exactly
+/// there. Folding more ops into files it already holds is not what the bound
+/// counts, so no file is ever offered half consolidated.
 fn collect_share_proposal_changes(
     store: &EngineStore,
     workspace_id: &str,
@@ -3428,9 +3492,12 @@ fn collect_share_proposal_changes(
     origin_id: &str,
     scanned_seq: i64,
     submit_through: i64,
-) -> Result<Vec<ShareProposalChange>, RelayError> {
+) -> Result<ShareProposalScan, RelayError> {
     let mut order: Vec<String> = Vec::new();
     let mut by_object: BTreeMap<String, ShareProposalChange> = BTreeMap::new();
+    let mut outside_share: BTreeSet<String> = BTreeSet::new();
+    let mut scanned_through = scanned_seq;
+    let mut more_pending = false;
     let mut after = scanned_seq;
     'pages: while after < submit_through {
         let page = list_replication_ops(store, workspace_id, origin_id, after, crate::MAX_PULL_OPS)
@@ -3444,72 +3511,48 @@ fn collect_share_proposal_changes(
             if op.origin_seq > submit_through {
                 break 'pages;
             }
-            if op.op_kind != "moment.append" {
-                continue;
-            }
-            if !proposal_paths_within_grant(&op.payload, granted) {
-                continue;
-            }
-            let Some(object_id) = string_field(&op.payload, "objectId") else {
-                continue;
-            };
-            let change = by_object.entry(object_id.to_owned()).or_insert_with(|| {
-                order.push(object_id.to_owned());
-                ShareProposalChange {
-                    // The base is the FIRST moment's before side: what the
-                    // recipient started from, which is what the granter has to
-                    // resolve against its own log.
-                    based_on_path: string_field(&op.payload, "payloadBeforePath")
-                        .map(str::to_owned),
-                    based_on_blob_sha256: string_field(&op.payload, "payloadBeforeBlobSha256")
-                        .filter(|sha256| valid_sha256(sha256))
-                        .map(str::to_owned),
-                    operation: String::new(),
-                    after_path: None,
-                    after_blob_sha256: None,
-                    after_content_kind: None,
-                    after_byte_length: None,
-                    recorded_at_ms: 0,
-                }
-            });
-            // The destination is the LAST moment's after side, overwritten as
-            // the scan walks forward.
-            //
-            // `rename` is a local label for a moment; a proposal states only
-            // what the granter must end up with, and the relay derives the
-            // moment's own label from the two paths at accept.
-            change.operation = if string_field(&op.payload, "operation") == Some("delete") {
-                "delete".to_owned()
-            } else {
-                "write".to_owned()
-            };
-            change.after_path = string_field(&op.payload, "payloadAfterPath")
-                .or_else(|| string_field(&op.payload, "path"))
-                .map(str::to_owned);
-            change.after_blob_sha256 = string_field(&op.payload, "payloadAfterBlobSha256")
-                .filter(|sha256| valid_sha256(sha256))
-                .map(str::to_owned);
-            // The relay accepts exactly two content kinds, so state one of
-            // them. A moment carrying neither is text, the same reading
-            // `ContentKind::from_wire` applies on apply.
-            change.after_content_kind = Some(
-                if string_field(&op.payload, "payloadAfterContentKind") == Some("binary") {
-                    "binary".to_owned()
+            if op.op_kind == "moment.append"
+                && let Some(object_id) = string_field(&op.payload, "objectId").map(str::to_owned)
+                && !outside_share.contains(&object_id)
+            {
+                if !proposal_paths_within_grant(&op.payload, granted) {
+                    // ONE op outside the grant takes the whole file out of
+                    // this share's reach. A rename out of the grant must not
+                    // leave the file's pre-rename state proposed, so what the
+                    // scan already collected for it is dropped too.
+                    by_object.remove(&object_id);
+                    outside_share.insert(object_id);
                 } else {
-                    "text".to_owned()
-                },
-            );
-            change.after_byte_length = op
-                .payload
-                .get("payloadAfterByteLength")
-                .and_then(serde_json::Value::as_i64)
-                .filter(|byte_length| *byte_length >= 0);
-            change.recorded_at_ms = op.recorded_at_ms;
+                    if !by_object.contains_key(&object_id)
+                        && by_object.len() >= crate::MAX_PUSH_OPS_PER_BATCH
+                    {
+                        more_pending = true;
+                        break 'pages;
+                    }
+                    let mut change = proposed_change(&op);
+                    match by_object.get(&object_id) {
+                        // The base stays the FIRST moment's before side: what
+                        // the recipient started from, which is what the
+                        // granter has to resolve against its own log.
+                        Some(held) => {
+                            change.based_on_path.clone_from(&held.based_on_path);
+                            change
+                                .based_on_blob_sha256
+                                .clone_from(&held.based_on_blob_sha256);
+                        }
+                        None => order.push(object_id.clone()),
+                    }
+                    by_object.insert(object_id, change);
+                }
+            }
+            scanned_through = op.origin_seq;
         }
         after = page_last;
     }
     let mut changes = Vec::with_capacity(order.len());
     for object_id in order {
+        // A file collected and then taken out of the grant by a later op is
+        // gone from `by_object` but still named here.
         let Some(mut change) = by_object.remove(&object_id) else {
             continue;
         };
@@ -3538,7 +3581,12 @@ fn collect_share_proposal_changes(
         }
         changes.push(change);
     }
-    Ok(changes)
+    Ok(ShareProposalScan {
+        changes,
+        scanned_through,
+        more_pending,
+        skipped_outside_share: outside_share.len(),
+    })
 }
 
 /// What a push is scoped to. The two share surfaces run the SAME outbound

@@ -25,7 +25,7 @@ type LoadState =
       // Open submissions for THIS workspace, oldest first per share. Shares
       // granted from another workspace list with no count: the read is
       // workspace-scoped, and a missing count states less than a wrong one.
-      openChanges: Map<string, ShareProposalRow[]>;
+      openChanges: Map<string, { count: number; oldest: ShareProposalRow }>;
     }
   | { status: "error"; message: string };
 
@@ -67,14 +67,18 @@ export function SharedByMeList(props: { workspaceId: string }) {
           .catch(() => ({ proposals: [] as ShareProposalRow[] })),
       ]);
       if (token !== loadToken.current) return;
-      const openChanges = new Map<string, ShareProposalRow[]>();
-      for (const proposal of [...proposals.proposals].sort(
-        (a, b) => a.createdAtMs - b.createdAtMs,
-      )) {
-        openChanges.set(proposal.shareId, [
-          ...(openChanges.get(proposal.shareId) ?? []),
-          proposal,
-        ]);
+      // What the row shows: how many are waiting, and which one the Review
+      // button opens — the OLDEST, because that is the one waiting longest.
+      const openChanges = new Map<string, { count: number; oldest: ShareProposalRow }>();
+      for (const proposal of proposals.proposals) {
+        const seen = openChanges.get(proposal.shareId);
+        openChanges.set(proposal.shareId, {
+          count: (seen?.count ?? 0) + 1,
+          oldest:
+            seen && seen.oldest.createdAtMs <= proposal.createdAtMs
+              ? seen.oldest
+              : proposal,
+        });
       }
       setLoad({ status: "ready", shares: shares.granted, openChanges });
     } catch (cause) {
@@ -135,7 +139,7 @@ export function SharedByMeList(props: { workspaceId: string }) {
       data-testid="shared-by-me-list"
     >
       {load.shares.map((share) => {
-        const waiting = load.openChanges.get(share.shareId) ?? [];
+        const waiting = load.openChanges.get(share.shareId) ?? null;
         return (
         <li
           key={share.shareId}
@@ -160,19 +164,18 @@ export function SharedByMeList(props: { workspaceId: string }) {
               {share.selector ? "" : " — dohc can't read what this share grants"}
             </div>
           </div>
-          {/* Waiting submissions stay reviewable after the share ends: the
-              granter deciding about their OWN files is not a recipient
-              write, and the changes are already here. */}
-          {waiting.length > 0 ? (
+          {/* Ending a share settles what it was carrying, so a row only
+              offers a review while something is genuinely waiting. */}
+          {waiting ? (
             <button
               type="button"
               data-testid="shared-by-me-review"
-              data-open-changes={waiting.length}
-              onClick={() => setReviewProposalId(waiting[0]!.proposalId)}
+              data-open-changes={waiting.count}
+              onClick={() => setReviewProposalId(waiting.oldest.proposalId)}
               className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink"
             >
-              {waiting.length > 1
-                ? `Review changes (${waiting.length})`
+              {waiting.count > 1
+                ? `Review changes (${waiting.count})`
                 : "Review changes"}
             </button>
           ) : null}

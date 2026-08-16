@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -6342,7 +6342,6 @@ impl RelayTransport for PagedShareRelay {
         Ok(ShareProposalSubmitResponse {
             proposal_id: "proposal-1".to_owned(),
             ops,
-            created: true,
         })
     }
 }
@@ -23496,33 +23495,39 @@ fn share_proposal_submit_offers_no_delete_of_a_file_the_granter_never_had() {
     );
 }
 
+/// A local write to file `index`, inside the grant.
+fn journal_numbered_write(engine: &mut EngineStore, index: usize, at_ms: i64) {
+    let text = format!("v{index}");
+    seed_blob(engine, &text);
+    journal_local_moment(
+        engine,
+        &local_moment_payload(
+            &format!("m-{index}-{at_ms}"),
+            &format!("object-{index}"),
+            "write",
+            None,
+            &format!("shared/docs/{index}.md"),
+            &text,
+        ),
+        at_ms,
+    );
+}
+
 /// One submit is one batch and one relay transaction, so it carries at most
-/// the batch the relay accepts. The refusal names the constraint, the limit,
-/// and the observed count, because an agent reads the error rather than this
-/// code.
+/// the batch the relay accepts. The BOUND stops the scan; it must never refuse
+/// the submit, because the changes are net-per-file and accumulate — a refusal
+/// re-collects the same over-limit set on every later press, and there is
+/// nothing the recipient can do to make it smaller.
 #[test]
-fn share_proposal_submit_refuses_more_changes_than_one_batch_carries() {
+fn share_proposal_submit_sends_a_bounded_batch_and_then_the_rest() {
     let (_scratch, _path, mut engine) = proposal_fixture(&[]);
-    let over_limit = crate::MAX_PUSH_OPS_PER_BATCH + 1;
+    let over_limit = crate::MAX_PUSH_OPS_PER_BATCH + 2;
     for index in 0..over_limit {
-        let text = format!("v{index}");
-        seed_blob(&mut engine, &text);
-        journal_local_moment(
-            &mut engine,
-            &local_moment_payload(
-                &format!("m-{index}"),
-                &format!("object-{index}"),
-                "write",
-                None,
-                &format!("shared/docs/{index}.md"),
-                &text,
-            ),
-            1_001 + index as i64,
-        );
+        journal_numbered_write(&mut engine, index, 1_001 + index as i64);
     }
 
     let client = RelaySyncClient::new(PagedShareRelay::new([], []));
-    let error = client
+    let first = client
         .submit_share_proposal(
             &mut engine,
             "ws",
@@ -23531,32 +23536,253 @@ fn share_proposal_submit_refuses_more_changes_than_one_batch_carries() {
             "submit-1",
             &NoFaults,
         )
-        .expect_err("a submit over the batch limit is refused");
-    let message = error.to_string();
-    assert!(
-        message.contains("changes per submit")
-            && message.contains(&format!("limit {}", crate::MAX_PUSH_OPS_PER_BATCH))
-            && message.contains(&format!("observed {over_limit}")),
-        "MUTATION: the refusal must name the constraint, the limit, and the observed count: {message}",
+        .expect("MUTATION: an over-limit recipient must still be able to send");
+    assert_eq!(
+        first.submitted,
+        crate::MAX_PUSH_OPS_PER_BATCH,
+        "MUTATION: one submit carries at most the batch the relay accepts",
     );
     assert!(
-        client
-            .transport()
-            .proposal_calls
-            .lock()
-            .expect("calls")
-            .is_empty(),
-        "MUTATION: a refused submit must upload nothing and post nothing",
+        first.more_pending,
+        "MUTATION: a submit that left changes behind must say so, or the recipient \
+         has no reason to press again",
+    );
+
+    let second = client
+        .submit_share_proposal(
+            &mut engine,
+            "ws",
+            "share-over-limit",
+            &proposal_grant(crate::ShareAccess::Edit),
+            "submit-2",
+            &NoFaults,
+        )
+        .expect("second submit");
+    assert_eq!(
+        second.submitted,
+        over_limit - crate::MAX_PUSH_OPS_PER_BATCH,
+        "MUTATION: the changes the bound held back must travel in the NEXT submit",
+    );
+    assert!(
+        !second.more_pending,
+        "MUTATION: a submit that emptied the window must not ask for another",
+    );
+
+    let submits = client.transport().proposal_submits.lock().expect("submits");
+    let offered = submits
+        .iter()
+        .flat_map(|submit| submit.ops.iter())
+        .filter_map(|op| op.after_path.clone())
+        .collect::<Vec<_>>();
+    let distinct = offered.iter().cloned().collect::<BTreeSet<_>>();
+    assert_eq!(
+        (offered.len(), distinct.len()),
+        (over_limit, over_limit),
+        "MUTATION: across the two submits every file must reach the granter exactly once",
+    );
+}
+
+/// The bound counts FILES, and it stops at the op that would admit one file
+/// too many. An op folding into a file the scan already holds is not that op,
+/// so no file is ever offered half consolidated and then offered again.
+#[test]
+fn share_proposal_submit_never_splits_one_file_across_two_submits() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&[]);
+    // Exactly the batch, so the scan is full but has stopped at nothing.
+    for index in 0..crate::MAX_PUSH_OPS_PER_BATCH {
+        journal_numbered_write(&mut engine, index, 1_001 + index as i64);
+    }
+    // A LATER edit to a file already held. It must fold into this submit.
+    seed_blob(&mut engine, "0-final");
+    journal_local_moment(
+        &mut engine,
+        &local_moment_payload(
+            "m-0-final",
+            "object-0",
+            "write",
+            Some(("shared/docs/0.md", "v0")),
+            "shared/docs/0.md",
+            "0-final",
+        ),
+        9_001,
+    );
+    // The NEW file that stops the scan.
+    journal_numbered_write(&mut engine, crate::MAX_PUSH_OPS_PER_BATCH, 9_002);
+
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    let grant = proposal_grant(crate::ShareAccess::Edit);
+    let first = client
+        .submit_share_proposal(
+            &mut engine,
+            "ws",
+            "share-split",
+            &grant,
+            "submit-1",
+            &NoFaults,
+        )
+        .expect("first submit");
+    assert_eq!(first.submitted, crate::MAX_PUSH_OPS_PER_BATCH);
+    assert!(first.more_pending);
+    let second = client
+        .submit_share_proposal(
+            &mut engine,
+            "ws",
+            "share-split",
+            &grant,
+            "submit-2",
+            &NoFaults,
+        )
+        .expect("second submit");
+
+    let submits = client.transport().proposal_submits.lock().expect("submits");
+    let for_file_zero = submits
+        .iter()
+        .flat_map(|submit| submit.ops.iter())
+        .filter(|op| op.after_path.as_deref() == Some("shared/docs/0.md"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        for_file_zero.len(),
+        1,
+        "MUTATION: a file the scan already holds must not be offered once per submit",
     );
     assert_eq!(
-        proposal_scan_position(&engine, "share-over-limit"),
-        None,
-        "MUTATION: a refused submit must not advance the scan position past what it never sent",
+        for_file_zero[0].after_blob_sha256.as_deref(),
+        Some(dohc_engine_storage::hex_sha256(b"0-final").as_str()),
+        "MUTATION: the offered change must be the file's LAST state, not the state \
+         it had when the bound filled up",
+    );
+    assert_eq!(
+        submits
+            .last()
+            .expect("second submit")
+            .ops
+            .iter()
+            .filter_map(|op| op.after_path.as_deref())
+            .collect::<Vec<_>>(),
+        vec![format!("shared/docs/{}.md", crate::MAX_PUSH_OPS_PER_BATCH)],
+        "MUTATION: the second submit carries the file the bound refused, and only it",
+    );
+    assert_eq!(second.submitted, 1);
+}
+
+/// A file the recipient edited OUT of the shared paths is not this share's to
+/// offer at all — not even the state it held before it left. It is dropped
+/// whole and COUNTED, because a silent drop leaves the recipient believing it
+/// sent work it never sent.
+#[test]
+fn share_proposal_submit_counts_a_file_edited_out_of_the_share() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&["v1", "v2", "kept"]);
+    journal_local_moment(
+        &mut engine,
+        &local_moment_payload("m-1", "object-a", "write", None, "shared/docs/a.md", "v1"),
+        1_001,
+    );
+    // The same file, moved out of the grant.
+    journal_local_moment(
+        &mut engine,
+        &local_moment_payload(
+            "m-2",
+            "object-a",
+            "write",
+            Some(("shared/docs/a.md", "v1")),
+            "other/a.md",
+            "v2",
+        ),
+        1_002,
+    );
+    // A file that never leaves, so the submit is not empty for another reason.
+    journal_local_moment(
+        &mut engine,
+        &local_moment_payload("m-3", "object-b", "write", None, "shared/docs/b.md", "kept"),
+        1_003,
+    );
+
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    let outcome = client
+        .submit_share_proposal(
+            &mut engine,
+            "ws",
+            "share-outside",
+            &proposal_grant(crate::ShareAccess::Edit),
+            "submit-1",
+            &NoFaults,
+        )
+        .expect("submit");
+    assert_eq!(
+        outcome.skipped_outside_share, 1,
+        "MUTATION: a file dropped for leaving the share must be counted to the recipient",
+    );
+    assert_eq!(outcome.submitted, 1);
+    let submits = client.transport().proposal_submits.lock().expect("submits");
+    let ops = &submits.first().expect("one submit").ops;
+    assert_eq!(
+        ops.iter()
+            .filter_map(|op| op.after_path.as_deref())
+            .collect::<Vec<_>>(),
+        vec!["shared/docs/b.md"],
+        "MUTATION: the pre-move state of a file that left the share must not be offered",
+    );
+    let calls = client.transport().proposal_calls.lock().expect("calls");
+    for text in [&b"v1"[..], &b"v2"[..]] {
+        assert!(
+            !calls.contains(&format!("blob:{}", dohc_engine_storage::hex_sha256(text))),
+            "MUTATION: the content of a file outside the share must reach the granter by no route",
+        );
+    }
+}
+
+/// The count travels even when the submit offers nothing. A recipient whose
+/// every edit landed outside the share is exactly the one that needs telling.
+#[test]
+fn share_proposal_submit_counts_dropped_files_when_it_offers_nothing() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&["one", "two"]);
+    for (index, (moment_id, object_id, path, text)) in [
+        ("m-1", "object-a", "other/a.md", "one"),
+        ("m-2", "object-b", "elsewhere/b.md", "two"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        journal_local_moment(
+            &mut engine,
+            &local_moment_payload(moment_id, object_id, "write", None, path, text),
+            1_001 + index as i64,
+        );
+    }
+
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    let outcome = client
+        .submit_share_proposal(
+            &mut engine,
+            "ws",
+            "share-all-outside",
+            &proposal_grant(crate::ShareAccess::Edit),
+            "submit-1",
+            &NoFaults,
+        )
+        .expect("submit");
+    assert_eq!(
+        (outcome.submitted, outcome.skipped_outside_share),
+        (0, 2),
+        "MUTATION: a submit that offered nothing must still say what it dropped",
+    );
+    assert!(
+        outcome.proposal_id.is_none(),
+        "a submit with nothing to offer names no proposal",
     );
 }
 
 /// The granter's two moments for one file: `granter-m0` produced `v0`, and
 /// `granter-m1` produced `v1` and is the head.
+fn granter_fixture() -> (ScratchDir, std::path::PathBuf, EngineStore) {
+    let (scratch, path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    seed_granter_lineage(&mut engine);
+    (scratch, path, engine)
+}
+
 fn seed_granter_lineage(engine: &mut EngineStore) {
     seed_blob(engine, "v0");
     seed_blob(engine, "v1");
@@ -23661,11 +23887,7 @@ fn apply_accepted_change(
 /// accept is a clean apply — this is what makes the base rewrite worth doing.
 #[test]
 fn an_accepted_change_on_the_granters_head_applies_without_a_conflict() {
-    let (_scratch, _path, mut engine) = store();
-    VersionedTextStore::new(&mut engine)
-        .ensure_main_version("ws", "main", 1_000, &NoFaults)
-        .expect("main version");
-    seed_granter_lineage(&mut engine);
+    let (_scratch, _path, mut engine) = granter_fixture();
 
     let result = apply_accepted_change(
         &mut engine,
@@ -23701,11 +23923,7 @@ fn an_accepted_change_on_the_granters_head_applies_without_a_conflict() {
 /// never a silent overwrite.
 #[test]
 fn an_accepted_change_on_a_stale_base_opens_one_conflict_against_that_base() {
-    let (_scratch, _path, mut engine) = store();
-    VersionedTextStore::new(&mut engine)
-        .ensure_main_version("ws", "main", 1_000, &NoFaults)
-        .expect("main version");
-    seed_granter_lineage(&mut engine);
+    let (_scratch, _path, mut engine) = granter_fixture();
 
     let result = apply_accepted_change(
         &mut engine,

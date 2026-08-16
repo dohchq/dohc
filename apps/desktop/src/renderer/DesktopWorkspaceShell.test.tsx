@@ -35,7 +35,7 @@ import type {
   ListMyShareChangesResult,
   ListShareProposalsResult,
   ListWorkspaceVersionsResult,
-  ReadShareProposalDiffResult,
+  ReadShareProposalChangesResult,
   SettleShareProposalPayload,
   SettleShareProposalResult,
   SubmitShareChangesResult,
@@ -457,13 +457,19 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     listShareProposals: vi.fn(
       async (): Promise<ListShareProposalsResult> => ({ proposals: [] }),
     ),
-    readShareProposalDiff: vi.fn(
-      async (): Promise<ReadShareProposalDiffResult> => ({
-        path: "docs/plan.md",
-        drifted: false,
-        operation: "write",
-        currentText: "one\n",
-        incomingText: "two\n",
+    readShareProposalChanges: vi.fn(
+      async (): Promise<ReadShareProposalChangesResult> => ({
+        proposedByEmail: "friend@dohc.test",
+        files: [
+          {
+            opIndex: 0,
+            path: "docs/plan.md",
+            operation: "write",
+            drifted: false,
+            currentText: "one\n",
+            incomingText: "two\n",
+          },
+        ],
       }),
     ),
     settleShareProposal: vi.fn(
@@ -477,7 +483,8 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     submitShareChanges: vi.fn(
       async (): Promise<SubmitShareChangesResult> => ({
         submitted: 2,
-        proposalId: "proposal-1",
+        skippedOutsideShare: 0,
+        morePending: false,
       }),
     ),
     withdrawShareChanges: vi.fn(
@@ -5777,9 +5784,94 @@ describe("shared view send changes", () => {
         screen.queryByTestId("share-changes-send"),
         "MUTATION: offering a send control the grant does not carry",
       ).toBeNull();
-      expect(bridge.listMyShareChanges).not.toHaveBeenCalled();
     });
   }
+
+  // The reverse path outlives the right that created it. A granter can narrow
+  // a share while changes wait, and a withdraw the downgrade took away would
+  // strand them in front of someone who may never answer.
+  it("still shows and withdraws changes already sent after a downgrade", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.listMyShareChanges.mockResolvedValue({
+      proposals: [
+        { proposalId: "proposal-1", state: "open", createdAtMs: 10, files: 2 },
+      ],
+    });
+    renderShell(bridge, {
+      ...SHARE_VIEW,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "sam@dohc.test",
+        // Narrowed after the changes were sent.
+        access: "comment",
+      },
+    });
+
+    const state = await screen.findByTestId("share-changes-state");
+    expect(
+      state.dataset.state,
+      "MUTATION: gating the sent state on the level hides changes the recipient can still take back",
+    ).toBe("open");
+    expect(screen.queryByTestId("share-changes-send")).toBeNull();
+
+    await user.click(screen.getByTestId("share-changes-withdraw"));
+    await waitFor(() =>
+      expect(bridge.withdrawShareChanges).toHaveBeenCalledWith({
+        workspaceId: SHARE_VIEW.workspaceId,
+        proposalId: "proposal-1",
+      }),
+    );
+  });
+
+  // What a submit did NOT take. Both are things the recipient would otherwise
+  // discover by their work simply not arriving.
+  it("states the files a submit left outside the share", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.submitShareChanges.mockResolvedValue({
+      submitted: 1,
+      skippedOutsideShare: 2,
+      morePending: false,
+    });
+    renderShell(bridge, EDIT_SHARE);
+
+    await user.click(await screen.findByTestId("share-changes-send"));
+    const line = await screen.findByTestId("share-changes-skipped");
+    expect(
+      line.textContent,
+      "MUTATION: a silent drop is work the recipient believes they sent",
+    ).toBe("2 files weren't sent — they're outside what this share covers.");
+  });
+
+  it("says more changes are waiting when the bound held some back", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.submitShareChanges.mockResolvedValue({
+      submitted: 500,
+      skippedOutsideShare: 0,
+      morePending: true,
+    });
+    renderShell(bridge, EDIT_SHARE);
+
+    await user.click(await screen.findByTestId("share-changes-send"));
+    expect((await screen.findByTestId("share-changes-skipped")).textContent).toBe(
+      "More changes are waiting. Send again to send the rest.",
+    );
+  });
+
+  it("states nothing extra when a submit took everything", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    renderShell(bridge, EDIT_SHARE);
+
+    await user.click(await screen.findByTestId("share-changes-send"));
+    await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalled());
+    expect(
+      screen.queryByTestId("share-changes-skipped"),
+      "MUTATION: a warning on every ordinary submit is a warning nobody reads",
+    ).toBeNull();
+  });
 
   it("sends the pending changes and states where they went", async () => {
     const user = userEvent.setup();
@@ -5808,7 +5900,11 @@ describe("shared view send changes", () => {
   it("says so when there was nothing to send", async () => {
     const user = userEvent.setup();
     const bridge = makeShareBridge();
-    bridge.submitShareChanges.mockResolvedValue({ submitted: 0, proposalId: null });
+    bridge.submitShareChanges.mockResolvedValue({
+      submitted: 0,
+      skippedOutsideShare: 0,
+      morePending: false,
+    });
     renderShell(bridge, EDIT_SHARE);
 
     await user.click(await screen.findByTestId("share-changes-send"));
@@ -5920,16 +6016,10 @@ describe("share changes review", () => {
     expect(notice.textContent).toContain("friend@dohc.test sent you changes");
     expect(notice.textContent).toContain("Review them to choose what to keep.");
 
+    // The notice OPENS the review. What the review then decides is driven in
+    // ProposalReviewDialog.test.tsx, against the same dialog.
     await user.click(within(notice).getByRole("button", { name: "Review" }));
     await screen.findByTestId("proposal-review-dialog");
-    await user.click(screen.getByTestId("proposal-review-accept"));
-    await waitFor(() =>
-      expect(bridge.settleShareProposal).toHaveBeenCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        proposalId: "proposal-1",
-        decision: "accept",
-      }),
-    );
   });
 
   it("raises no notice when nothing is waiting", async () => {

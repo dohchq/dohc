@@ -89,8 +89,7 @@ import {
   ListShareProposalsResult,
   ListMyShareChangesPayload,
   ListMyShareChangesResult,
-  ReadShareProposalDiffPayload,
-  ReadShareProposalDiffResult,
+  ReadShareProposalChangesResult,
   SettleShareProposalPayload,
   SubmitShareChangesPayload,
   SubmitShareChangesResult,
@@ -2244,49 +2243,65 @@ describe("share changes IPC contract (#646 PR3a)", () => {
   });
 
   it("refuses an op index outside one submit's own bound", () => {
-    expect(() =>
-      ReadShareProposalDiffPayload.parse({
-        workspaceId: "ws-1",
-        proposalId: "p",
-        opIndex: MAX_SHARE_PROPOSAL_FILES + 1,
-      }),
-    ).toThrow();
-    expect(() =>
-      ReadShareProposalDiffPayload.parse({
-        workspaceId: "ws-1",
-        proposalId: "p",
-        opIndex: -1,
-      }),
-    ).toThrow();
-    expect(() =>
-      ReadShareProposalDiffPayload.parse({
-        workspaceId: "ws-1",
-        proposalId: "p",
-        opIndex: 1.5,
-      }),
-    ).toThrow();
+    const files = (opIndex: number) => ({
+      opIndex,
+      path: "docs/a.md",
+      operation: "write" as const,
+      drifted: false,
+      currentText: null,
+      incomingText: "after\n",
+    });
+    for (const [label, opIndex] of [
+      // Dense from 0, so the last valid index is one below the file bound.
+      ["the bound itself", MAX_SHARE_PROPOSAL_FILES],
+      ["negative", -1],
+      ["fractional", 1.5],
+    ] as const) {
+      expect(
+        () =>
+          ReadShareProposalChangesResult.parse({
+            proposedByEmail: null,
+            files: [files(opIndex)],
+          }),
+        label,
+      ).toThrow();
+    }
+    expect(
+      ReadShareProposalChangesResult.parse({
+        proposedByEmail: null,
+        files: [files(MAX_SHARE_PROPOSAL_FILES - 1)],
+      }).files,
+    ).toHaveLength(1);
   });
 
-  // Either side of the diff may genuinely be absent: a file the granter does
-  // not have, and a delete that carries no incoming content.
-  it("carries either side of the diff as null", () => {
-    const parsed = ReadShareProposalDiffResult.parse({
-      path: "docs/a.md",
-      drifted: true,
-      operation: "delete",
-      currentText: "before\n",
-      incomingText: null,
+  // Either side of the review may genuinely be absent: a file the granter
+  // does not have, a delete that carries no incoming content, and content
+  // this surface cannot preview — which must still be reviewable, because a
+  // granter has to be able to decline what they cannot read.
+  it("carries either side of a change as null", () => {
+    const parsed = ReadShareProposalChangesResult.parse({
+      proposedByEmail: "recipient@example.com",
+      files: [
+        {
+          opIndex: 0,
+          path: "docs/a.md",
+          operation: "delete",
+          drifted: true,
+          currentText: "before\n",
+          incomingText: null,
+        },
+        {
+          opIndex: 1,
+          path: "docs/new.md",
+          operation: "write",
+          drifted: false,
+          currentText: null,
+          incomingText: "after\n",
+        },
+      ],
     });
-    expect(parsed.incomingText).toBeNull();
-    expect(
-      ReadShareProposalDiffResult.parse({
-        path: "docs/new.md",
-        drifted: false,
-        operation: "write",
-        currentText: null,
-        incomingText: "after\n",
-      }).currentText,
-    ).toBeNull();
+    expect(parsed.files[0]?.incomingText).toBeNull();
+    expect(parsed.files[1]?.currentText).toBeNull();
   });
 
   // The recipient names a workspace and nothing else. A share id on the wire
@@ -2306,14 +2321,29 @@ describe("share changes IPC contract (#646 PR3a)", () => {
     ).toEqual(["proposalId", "workspaceId"]);
   });
 
-  // `submitted` and `proposalId` state ONE fact between them. null is the
-  // honest answer for "nothing was pending", not an error.
-  it("carries an empty submit without inventing a proposal", () => {
-    expect(
-      SubmitShareChangesResult.parse({ submitted: 0, proposalId: null }).proposalId,
-    ).toBeNull();
+  // Zero is the honest answer for "nothing was pending", not an error.
+  it("carries an empty submit", () => {
+    const empty = { submitted: 0, skippedOutsideShare: 0, morePending: false };
+    expect(SubmitShareChangesResult.parse(empty).submitted).toBe(0);
     expect(() =>
-      SubmitShareChangesResult.parse({ submitted: -1, proposalId: null }),
+      SubmitShareChangesResult.parse({ ...empty, submitted: -1 }),
+    ).toThrow();
+  });
+
+  // What a submit LEFT BEHIND is not optional. Softened to a default, a
+  // recipient is told everything went when some of it did not.
+  it("refuses a submit result that does not say what it left behind", () => {
+    expect(() =>
+      SubmitShareChangesResult.parse({
+        submitted: 1,
+        morePending: false,
+      }),
+    ).toThrow();
+    expect(() =>
+      SubmitShareChangesResult.parse({
+        submitted: 1,
+        skippedOutsideShare: 0,
+      }),
     ).toThrow();
   });
 

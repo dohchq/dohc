@@ -1,4 +1,5 @@
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
+import { shareViewGranterEmail, shareViewIsPresent } from "./shareViewMarker";
 
 // The LOCAL-WRITE gate for a share view (#646 PR3), as one rule in one place.
 //
@@ -40,4 +41,36 @@ export interface ShareViewWriteScope {
 export function shareViewTakesLocalWrites(scope: ShareViewWriteScope): boolean {
   if (scope.ended) return false;
   return scope.access === "edit";
+}
+
+/**
+ * Why an ordinary workspace write handler must refuse, or null when it may
+ * run. `main`'s `assertWritableWorkspace` is one line over this.
+ *
+ * PRESENCE, at EVERY level. The handlers this guards write the workspace
+ * FOLDER — create, rename, move, delete, import, assets, database edits, the
+ * plugin pipeline — and a share view's folder is a projection of its engine
+ * store. A raw-disk write there would leave the projection describing content
+ * no moment states, so nothing the recipient could ever send, and the next
+ * pull would overwrite it.
+ *
+ * The ONE write a share view admits is the recipient's text edit, and it does
+ * not come through here. It is routed to the engine at
+ * `routeWorkspaceTextWrite`, which asks `shareViewTakesLocalWrites` at the
+ * seam that would otherwise write. Widening THIS rule to the same level would
+ * have opened every handler above with it.
+ *
+ * The input is the registry marker, and it is read for presence alone. The
+ * level is deliberately not consulted: a rule that cannot see the level
+ * cannot be widened by one.
+ */
+export function workspaceWriteRefusal(shareView: unknown): string | null {
+  // PRESENCE, not truthiness. A stored `shareView: null` is a share view
+  // whose marker lost its value, not a workspace that never had one, and
+  // `?? null` read the two as the same thing — which made someone else's
+  // files writable here (#646). Only an ABSENT field is an ordinary
+  // workspace; anything else stays refused, readable marker or not.
+  if (!shareViewIsPresent(shareView)) return null;
+  const granter = shareViewGranterEmail(shareView) ?? "the person who shared it";
+  return `This is a shared view — ask ${granter} for changes.`;
 }

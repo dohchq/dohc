@@ -36,20 +36,25 @@ export interface ShareViewProposalScope {
 }
 
 /**
- * Resolve the recipient lane for a workspace, or refuse.
+ * The share this workspace is a view of, at whatever level it grants.
  *
- * Four separate reasons, in the order that makes each answer true:
+ * Three separate reasons, in the order that makes each answer true:
  *
  * 1. PRESENCE — the same question `sharedViewOf` asks before a write. A
- *    workspace with no share marker has no share to send changes through.
+ *    workspace with no share marker has no share at all.
  * 2. The pinned grant must READ BACK completely, through the same function
  *    the pull uses, so this gate and the pull cannot disagree about what the
  *    share grants.
- * 3. The level must positively be `edit`, and the share must not have ended.
- * 4. The marker must name the share. A marker that lost its share id cannot
+ * 3. The marker must name the share. A marker that lost its share id cannot
  *    address a route, and guessing one is not available.
+ *
+ * This is what LISTING and WITHDRAWING already-sent changes need, and
+ * deliberately all they need. Submitting is a reversible state change, and a
+ * reverse path a downgrade removes is not a reverse path — it would strand
+ * work in front of a granter who may never answer it. The relay draws the
+ * same line: its withdraw route asks for membership, not for edit.
  */
-export function requireShareViewProposalScope(
+export function requireShareViewMembership(
   shareView: unknown,
 ): ShareViewProposalScope {
   if (!shareViewIsPresent(shareView)) {
@@ -58,17 +63,29 @@ export function requireShareViewProposalScope(
   const marker = isRecord(shareView) ? shareView : {};
   const grant = recordedShareSelector(marker.grantedSelector);
   if (!grant) throw new SharedFileReadOnlyError();
+  const shareId = typeof marker.shareId === "string" ? marker.shareId : "";
+  if (!shareId) throw new SharedFileReadOnlyError();
+  return { shareId, grant };
+}
+
+/**
+ * The same scope, for SENDING: the level must positively be `edit`, and the
+ * share must not have ended.
+ */
+export function requireShareViewProposalScope(
+  shareView: unknown,
+): ShareViewProposalScope {
+  const scope = requireShareViewMembership(shareView);
+  const marker = isRecord(shareView) ? shareView : {};
   if (
     !shareViewTakesLocalWrites({
-      access: grant.access,
+      access: scope.grant.access,
       ended: marker.ended === true,
     })
   ) {
     throw new SharedFileReadOnlyError();
   }
-  const shareId = typeof marker.shareId === "string" ? marker.shareId : "";
-  if (!shareId) throw new SharedFileReadOnlyError();
-  return { shareId, grant };
+  return scope;
 }
 
 /**

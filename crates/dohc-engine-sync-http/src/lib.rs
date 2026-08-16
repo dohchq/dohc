@@ -622,8 +622,7 @@ impl RelayTransport for HttpRelayTransport {
     ) -> Result<ShareProposalSubmitResponse, RelayError> {
         let body = WireShareProposalSubmitRequest {
             submit_id: &req.submit_id,
-            origin_id: &req.origin_id,
-            ops: req.ops.iter().map(WireShareProposalChange::from).collect(),
+            ops: &req.ops,
         };
         let url = self.share_url(&req.share_id, "/proposals", &[]);
         let wire: WireShareProposalSubmitResponse = self.json(
@@ -636,7 +635,6 @@ impl RelayTransport for HttpRelayTransport {
         Ok(ShareProposalSubmitResponse {
             proposal_id: wire.proposal_id,
             ops: wire.ops,
-            created: wire.created,
         })
     }
 }
@@ -951,40 +949,9 @@ impl<'a> From<&'a ShareReplicationEnvelope> for WireShareLogInput<'a> {
 #[serde(rename_all = "camelCase")]
 struct WireShareProposalSubmitRequest<'a> {
     submit_id: &'a str,
-    origin_id: &'a str,
-    ops: Vec<WireShareProposalChange<'a>>,
-}
-
-/// Every optional field serializes as an explicit `null` rather than being
-/// skipped. The relay reads the base pair as a stated fact — both halves or
-/// neither — so an absent field and a null field must not look the same on the
-/// wire.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WireShareProposalChange<'a> {
-    based_on_path: Option<&'a str>,
-    based_on_blob_sha256: Option<&'a str>,
-    operation: &'a str,
-    after_path: Option<&'a str>,
-    after_blob_sha256: Option<&'a str>,
-    after_content_kind: Option<&'a str>,
-    after_byte_length: Option<i64>,
-    recorded_at_ms: i64,
-}
-
-impl<'a> From<&'a ShareProposalChange> for WireShareProposalChange<'a> {
-    fn from(value: &'a ShareProposalChange) -> Self {
-        Self {
-            based_on_path: value.based_on_path.as_deref(),
-            based_on_blob_sha256: value.based_on_blob_sha256.as_deref(),
-            operation: &value.operation,
-            after_path: value.after_path.as_deref(),
-            after_blob_sha256: value.after_blob_sha256.as_deref(),
-            after_content_kind: value.after_content_kind.as_deref(),
-            after_byte_length: value.after_byte_length,
-            recorded_at_ms: value.recorded_at_ms,
-        }
-    }
+    /// Serialized straight from the contract type: the relay's field names ARE
+    /// its camelCase names, so a mirror here would only be a copy that drifts.
+    ops: &'a [ShareProposalChange],
 }
 
 #[derive(Deserialize)]
@@ -992,7 +959,6 @@ impl<'a> From<&'a ShareProposalChange> for WireShareProposalChange<'a> {
 struct WireShareProposalSubmitResponse {
     proposal_id: String,
     ops: usize,
-    created: bool,
 }
 
 #[derive(Deserialize)]
@@ -1112,7 +1078,7 @@ mod tests {
             after_byte_length: None,
             recorded_at_ms: 7,
         };
-        let wire = serde_json::to_value(WireShareProposalChange::from(&change)).expect("serialize");
+        let wire = serde_json::to_value(&change).expect("serialize");
         let record = wire.as_object().expect("a change is a JSON object");
         for field in [
             "basedOnPath",

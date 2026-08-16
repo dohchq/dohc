@@ -5,8 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProposalReviewDialog } from "./ProposalReviewDialog";
 
 const bridgeMock = {
-  listShareProposals: vi.fn(),
-  readShareProposalDiff: vi.fn(),
+  readShareProposalChanges: vi.fn(),
   settleShareProposal: vi.fn(),
 };
 
@@ -14,14 +13,18 @@ vi.mock("../bridge", () => ({
   bridge: () => bridgeMock,
 }));
 
-function proposal(overrides: Record<string, unknown> = {}) {
+function changes(overrides: Record<string, unknown> = {}) {
   return {
-    proposalId: "proposal-1",
-    shareId: "share-1",
     proposedByEmail: "friend@dohc.test",
-    createdAtMs: 1000,
     files: [
-      { opIndex: 0, path: "docs/plan.md", operation: "write", drifted: false },
+      {
+        opIndex: 0,
+        path: "docs/plan.md",
+        operation: "write",
+        drifted: false,
+        currentText: "one\ntwo\n",
+        incomingText: "one\nthree\n",
+      },
     ],
     ...overrides,
   };
@@ -29,14 +32,7 @@ function proposal(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.resetAllMocks();
-  bridgeMock.listShareProposals.mockResolvedValue({ proposals: [proposal()] });
-  bridgeMock.readShareProposalDiff.mockResolvedValue({
-    path: "docs/plan.md",
-    drifted: false,
-    operation: "write",
-    currentText: "one\ntwo\n",
-    incomingText: "one\nthree\n",
-  });
+  bridgeMock.readShareProposalChanges.mockResolvedValue(changes());
   bridgeMock.settleShareProposal.mockResolvedValue({ state: "accepted" });
 });
 
@@ -73,12 +69,40 @@ describe("ProposalReviewDialog", () => {
     );
   });
 
+  // The whole review is ONE read. It used to be a listing plus one read per
+  // file, and each of those re-read the entire listing from the relay.
+  it("reads the whole review once, however many files it holds", async () => {
+    bridgeMock.readShareProposalChanges.mockResolvedValue(
+      changes({
+        files: [0, 1, 2, 3, 4].map((opIndex) => ({
+          opIndex,
+          path: `docs/f-${opIndex}.md`,
+          operation: "write",
+          drifted: false,
+          currentText: "before\n",
+          incomingText: "after\n",
+        })),
+      }),
+    );
+    renderDialog();
+
+    expect(await screen.findAllByTestId("proposal-review-file")).toHaveLength(5);
+    expect(
+      bridgeMock.readShareProposalChanges.mock.calls,
+      "MUTATION: a read per file makes a five-file review six round trips",
+    ).toHaveLength(1);
+    expect(bridgeMock.readShareProposalChanges).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      proposalId: "proposal-1",
+    });
+  });
+
   // The relay could not state who sent them. The review still works, and the
   // dialog names an unknown account the way the share banner does.
   it("names an unknown sender the way the share surfaces already do", async () => {
-    bridgeMock.listShareProposals.mockResolvedValue({
-      proposals: [proposal({ proposedByEmail: null })],
-    });
+    bridgeMock.readShareProposalChanges.mockResolvedValue(
+      changes({ proposedByEmail: null }),
+    );
     renderDialog();
     expect((await screen.findByRole("dialog")).textContent).toContain(
       "Changes from another dohc user",
@@ -88,16 +112,28 @@ describe("ProposalReviewDialog", () => {
   // Drift is the one thing review has to say that a diff cannot: the
   // granter's copy moved after the recipient sent this.
   it("states drift on the file that drifted, and only on that file", async () => {
-    bridgeMock.listShareProposals.mockResolvedValue({
-      proposals: [
-        proposal({
-          files: [
-            { opIndex: 0, path: "docs/plan.md", operation: "write", drifted: true },
-            { opIndex: 1, path: "docs/notes.md", operation: "delete", drifted: false },
-          ],
-        }),
-      ],
-    });
+    bridgeMock.readShareProposalChanges.mockResolvedValue(
+      changes({
+        files: [
+          {
+            opIndex: 0,
+            path: "docs/plan.md",
+            operation: "write",
+            drifted: true,
+            currentText: "one\n",
+            incomingText: "two\n",
+          },
+          {
+            opIndex: 1,
+            path: "docs/notes.md",
+            operation: "delete",
+            drifted: false,
+            currentText: "gone\n",
+            incomingText: null,
+          },
+        ],
+      }),
+    );
     renderDialog();
 
     const files = await screen.findAllByTestId("proposal-review-file");
@@ -110,6 +146,37 @@ describe("ProposalReviewDialog", () => {
     expect(files[0]!.dataset.drifted).toBe("true");
     expect(files[1]!.dataset.drifted).toBeUndefined();
     expect(files[1]!.textContent).toContain("Removed");
+  });
+
+  // A change this surface cannot PREVIEW is still a change the granter has to
+  // answer. Binary content, content over the text bound, and a blob the relay
+  // would not serve all arrive as no incoming side — and the granter must
+  // still be able to say no.
+  it("keeps both decisions available for a change it cannot preview", async () => {
+    bridgeMock.readShareProposalChanges.mockResolvedValue(
+      changes({
+        files: [
+          {
+            opIndex: 0,
+            path: "docs/diagram.png",
+            operation: "write",
+            drifted: false,
+            currentText: null,
+            incomingText: null,
+          },
+        ],
+      }),
+    );
+    renderDialog();
+
+    await screen.findByTestId("proposal-review-file");
+    expect(
+      screen.getByTestId("proposal-review-decline").hasAttribute("disabled"),
+      "MUTATION: failing the read on unpreviewable content leaves the granter unable to decline it",
+    ).toBe(false);
+    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
+      false,
+    );
   });
 
   it("accepts the whole submission", async () => {
@@ -162,10 +229,15 @@ describe("ProposalReviewDialog", () => {
 
   it("says so when the submission is already settled, and still lets go", async () => {
     const user = userEvent.setup();
-    bridgeMock.listShareProposals.mockResolvedValue({ proposals: [] });
+    bridgeMock.readShareProposalChanges.mockRejectedValue(
+      new Error(
+        "Error invoking remote method 'desktop:read-share-proposal-changes': " +
+          "Error: dohc could not find those changes. Refresh, then try again.",
+      ),
+    );
     const { onClose } = renderDialog();
     expect((await screen.findByRole("alert")).textContent).toBe(
-      "These changes are no longer waiting for you.",
+      "dohc could not find those changes. Refresh, then try again.",
     );
     expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
       true,
@@ -178,22 +250,15 @@ describe("ProposalReviewDialog", () => {
   // never repaint the window that replaced it.
   it("drops an answer that belongs to a replaced window", async () => {
     let releaseFirst: (() => void) | null = null;
-    bridgeMock.listShareProposals.mockImplementation(
+    bridgeMock.readShareProposalChanges.mockImplementation(
       async () =>
         await new Promise((resolve) => {
           if (releaseFirst === null) {
             releaseFirst = () =>
-              resolve({ proposals: [proposal({ proposedByEmail: "stale@dohc.test" })] });
+              resolve(changes({ proposedByEmail: "stale@dohc.test" }));
             return;
           }
-          resolve({
-            proposals: [
-              proposal({
-                proposalId: "proposal-2",
-                proposedByEmail: "current@dohc.test",
-              }),
-            ],
-          });
+          resolve(changes({ proposedByEmail: "current@dohc.test" }));
         }),
     );
 
@@ -211,8 +276,8 @@ describe("ProposalReviewDialog", () => {
       "Changes from current@dohc.test",
     );
 
-    // Let the retired answer settle all the way through its diff reads, so
-    // the assertion below sees what it WOULD have painted.
+    // Let the retired answer settle all the way through, so the assertion
+    // below sees what it WOULD have painted.
     releaseFirst!();
     for (let flush = 0; flush < 4; flush += 1) {
       await act(async () => {});

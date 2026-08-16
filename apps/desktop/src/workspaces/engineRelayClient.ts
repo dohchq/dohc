@@ -45,21 +45,6 @@ import {
   type EngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
 
-// #646 PR3a. Reviewing, settling, listing and withdrawing a proposal touch
-// ONLY relay state, so they are plain authenticated relay calls and live in
-// their own module beside `shareViewInfo.ts`. They are re-exported here
-// because main reaches the whole proposal relay surface through one import.
-// Submitting is not among them: it reads this replica's own journal, so it
-// has to be the engine, and it is a method on the bound workspace client
-// below.
-export {
-  ShareProposalInvalidError,
-  listMyShareProposals,
-  listShareProposals,
-  settleShareProposal,
-  withdrawShareProposal,
-} from "./shareProposalRelay";
-
 export type RelayTransportMode = "typescript" | "daemon";
 
 export class MixedRelayTransportError extends Error {
@@ -1110,7 +1095,16 @@ export class EngineRelayClient {
               "whether it opened a proposal.",
           );
         }
-        return { submitted, proposalId };
+        return {
+          submitted,
+          proposalId,
+          skippedOutsideShare: numberField(
+            result,
+            "skippedOutsideShare",
+            "share.proposal.submit",
+          ),
+          morePending: booleanField(result, "morePending", "share.proposal.submit"),
+        };
       },
       pullShareView: async ({ shareId, grantedSelector, recordRefusals }) => {
         let fetched = 0;

@@ -238,32 +238,12 @@ describe("share-view text writes through the real store", () => {
     60_000,
   );
 
-  it.skipIf(engine.missing)(
-    "refuses a comment recipient's save, so the level gate still holds at the write",
-    async () => {
-      const view = await harness("dohc-share-comment-write-", "comment");
-      const path = "docs/note.md";
-      const seeded = await seedSharedFile(view, path, "granter\n");
-
-      await expect(
-        routeWorkspaceTextWrite({
-          workspaceId: view.workspaceId,
-          rootPath: view.rootPath,
-          relativePath: path,
-          text: "recipient\n",
-          expectedContentHash: seeded.contentHash,
-          shareView: { access: "comment", ended: false },
-          shareViewStore: () => view.store,
-        }),
-        "MUTATION: a comment recipient writing locally sends changes through a share that grants none",
-      ).rejects.toBeInstanceOf(SharedFileReadOnlyError);
-      expect(await momentIdsFor(view, path)).toEqual([seeded.momentId]);
-      await expect(readFile(join(view.rootPath, "docs", "note.md"), "utf8")).resolves.toBe(
-        "granter\n",
-      );
-    },
-    60_000,
-  );
+  // A comment recipient's save is refused, and this suite deliberately does
+  // NOT spend a real daemon proving it: `routeWorkspaceTextWrite` throws
+  // before it resolves a store at all, so the daemon would witness nothing and
+  // the follow-up assertions would be true by construction. The rule itself is
+  // executed in `shareWriteGate.test.ts`, and the refusal at this seam in
+  // `workspaceTextWrite.test.ts`.
 
   it.skipIf(engine.missing)(
     "leaves an ordinary workspace's save to disk, where the watcher records it",

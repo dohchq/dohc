@@ -1,5 +1,5 @@
+import { relayRequest } from "./relayRequest";
 import {
-  RelayUnauthorizedError,
   ShareUnavailableError,
   type SentShareProposal,
   type ShareProposal,
@@ -17,22 +17,13 @@ import {
 // withdrawing read and write ONLY relay state, so they are plain authenticated
 // relay calls, in the same shape and with the same auth as `shareViewInfo.ts`.
 
-/**
- * The relay answered with something that is not a proposal this client can
- * show or settle. It is refused rather than softened: a review row built from
- * a half-read response tells the granter it is accepting one thing while the
- * relay holds another, and accepting is what writes to the granter's own
- * workspace.
- */
-export class ShareProposalInvalidError extends Error {
-  constructor(readonly detail: string) {
-    super(`The relay did not describe a proposal in a readable way: ${detail}`);
-    this.name = "ShareProposalInvalidError";
-  }
-}
-
-function relayUrl(relay: SyncRelayConnection, path: string): string {
-  return `${relay.baseUrl.replace(/\/+$/u, "")}${path}`;
+// The relay answered with something that is not a proposal this client can
+// show or settle. Refused rather than softened: a review row built from a
+// half-read response tells the granter it is accepting one thing while the
+// relay holds another, and accepting is what writes to the granter's own
+// workspace.
+function unreadable(detail: string): Error {
+  return new Error(`The relay did not describe a proposal in a readable way: ${detail}`);
 }
 
 async function relayFetch(
@@ -40,26 +31,22 @@ async function relayFetch(
   path: string,
   init: RequestInit = {},
 ): Promise<unknown> {
-  const headers = new Headers(init.headers);
-  headers.set("authorization", `Bearer ${relay.token}`);
-  const response = await (relay.fetch ?? fetch)(relayUrl(relay, path), {
-    ...init,
-    headers,
+  const response = await relayRequest({
+    relay,
+    path,
+    init,
+    // The relay answers one generic 404 for every lookup failure — a share
+    // that ended, a proposal that never existed, and a workspace this account
+    // does not own all read the same, so none of them can be told apart here.
+    errors: { 404: () => new ShareUnavailableError() },
+    label: "Proposal request",
   });
-  if (response.status === 401) throw new RelayUnauthorizedError();
-  // The relay answers one generic 404 for every lookup failure — a share that
-  // ended, a proposal that never existed, and a workspace this account does
-  // not own all read the same, so none of them can be told apart from here.
-  if (response.status === 404) throw new ShareUnavailableError();
-  if (!response.ok) {
-    throw new Error(`Proposal request failed (${response.status})`);
-  }
   return (await response.json()) as unknown;
 }
 
 function record(value: unknown, at: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new ShareProposalInvalidError(`${at} is not an object`);
+    throw unreadable(`${at} is not an object`);
   }
   return value as Record<string, unknown>;
 }
@@ -67,7 +54,7 @@ function record(value: unknown, at: string): Record<string, unknown> {
 function text(value: Record<string, unknown>, key: string, at: string): string {
   const field = value[key];
   if (typeof field !== "string" || field.length === 0) {
-    throw new ShareProposalInvalidError(`${at}.${key} is not a string`);
+    throw unreadable(`${at}.${key} is not a string`);
   }
   return field;
 }
@@ -80,7 +67,7 @@ function nullableText(
   const field = value[key];
   if (field === null) return null;
   if (typeof field !== "string" || field.length === 0) {
-    throw new ShareProposalInvalidError(`${at}.${key} is not a string or null`);
+    throw unreadable(`${at}.${key} is not a string or null`);
   }
   return field;
 }
@@ -88,7 +75,7 @@ function nullableText(
 function count(value: Record<string, unknown>, key: string, at: string): number {
   const field = value[key];
   if (typeof field !== "number" || !Number.isSafeInteger(field) || field < 0) {
-    throw new ShareProposalInvalidError(
+    throw unreadable(
       `${at}.${key} is not a non-negative integer`,
     );
   }
@@ -107,7 +94,7 @@ function nullableCount(
 function flag(value: Record<string, unknown>, key: string, at: string): boolean {
   const field = value[key];
   if (typeof field !== "boolean") {
-    throw new ShareProposalInvalidError(`${at}.${key} is not a boolean`);
+    throw unreadable(`${at}.${key} is not a boolean`);
   }
   return field;
 }
@@ -130,7 +117,7 @@ function proposalState(
   const field = value.state;
   const known = PROPOSAL_STATES.find((state) => state === field);
   if (known === undefined) {
-    throw new ShareProposalInvalidError(`${at}.state is not a proposal state`);
+    throw unreadable(`${at}.state is not a proposal state`);
   }
   return known;
 }
@@ -141,7 +128,7 @@ function operation(
 ): "write" | "delete" {
   const field = value.operation;
   if (field !== "write" && field !== "delete") {
-    throw new ShareProposalInvalidError(`${at}.operation is not an operation`);
+    throw unreadable(`${at}.operation is not an operation`);
   }
   return field;
 }
@@ -153,7 +140,7 @@ function nullableContentKind(
   const field = value.afterContentKind;
   if (field === null) return null;
   if (field !== "text" && field !== "binary") {
-    throw new ShareProposalInvalidError(
+    throw unreadable(
       `${at}.afterContentKind is not a content kind`,
     );
   }
@@ -162,7 +149,7 @@ function nullableContentKind(
 
 function array(value: unknown, at: string): unknown[] {
   if (!Array.isArray(value)) {
-    throw new ShareProposalInvalidError(`${at} is not an array`);
+    throw unreadable(`${at} is not an array`);
   }
   return value;
 }
@@ -174,33 +161,33 @@ function parseOp(value: unknown, at: string): ShareProposalOp {
   // A write with nowhere to write is not a change this client can show, and
   // a delete that names an after side is two changes wearing one label.
   if ((kind === "write") !== (after !== null)) {
-    throw new ShareProposalInvalidError(
+    throw unreadable(
       `${at} states ${kind} with an after path of ${after === null ? "null" : "a path"}`,
     );
   }
   return {
     opIndex: count(op, "opIndex", at),
     basedOnPath: nullableText(op, "basedOnPath", at),
-    basedOnBlobSha256: nullableText(op, "basedOnBlobSha256", at),
     operation: kind,
     afterPath: after,
     afterBlobSha256: nullableText(op, "afterBlobSha256", at),
     afterContentKind: nullableContentKind(op, at),
     currentPath: nullableText(op, "currentPath", at),
-    currentBlobSha256: nullableText(op, "currentBlobSha256", at),
     drifted: flag(op, "drifted", at),
   };
 }
 
+// This route serves what the granter still has to ANSWER, so every proposal
+// on it is open. It states no state and no settled time, and this parser asks
+// for neither: a validator for a field that is always the same value refuses
+// responses over a constant it never reads.
 function parseProposal(value: unknown, at: string): ShareProposal {
   const proposal = record(value, at);
   return {
     proposalId: text(proposal, "proposalId", at),
     shareId: text(proposal, "shareId", at),
-    proposedByUserId: text(proposal, "proposedByUserId", at),
-    state: proposalState(proposal, at),
+    proposedByEmail: nullableText(proposal, "proposedByEmail", at),
     createdAtMs: count(proposal, "createdAtMs", at),
-    settledAtMs: nullableCount(proposal, "settledAtMs", at),
     ops: array(proposal.ops, `${at}.ops`).map((op, index) =>
       parseOp(op, `${at}.ops[${index}]`),
     ),
@@ -228,7 +215,7 @@ function parseSettlement(
   // The relay answering about another proposal is not a settlement this
   // client can report — it would mark the wrong row settled.
   if (answered !== proposalId) {
-    throw new ShareProposalInvalidError(
+    throw unreadable(
       `${at}.proposalId answered ${answered} for ${proposalId}`,
     );
   }

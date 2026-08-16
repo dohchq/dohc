@@ -54,16 +54,48 @@ export type ProposalMomentResult =
   | { ok: true; payload: Record<string, unknown>; blobSha256: string }
   | { ok: false; reason: string };
 
+// Whether the recipient MOVED the file, as opposed to editing it where it
+// found it. Stating the same path on both sides is stating no opinion about
+// where the file lives.
+function recipientMoved(op: ShareProposalOpRow): boolean {
+  return (
+    op.basedOnPath !== null && op.afterPath !== null && op.basedOnPath !== op.afterPath
+  );
+}
+
+// WHERE the change lands.
+//
+// Decided by what the recipient EXPRESSED, never by the path it happened to
+// read. A recipient that edited a file in place said nothing about its
+// location, so if the granter moved the file since, the content belongs at
+// the granter's CURRENT path: a deliberate rename must survive an accepted
+// content edit, and naming the recipient's stale path would silently undo it.
+//
+// A recipient that moved the file said exactly that, and it applies. If the
+// granter moved it somewhere else meanwhile, the review already shows the
+// drift and the granter accepts knowing it.
+//
+// A delete lands where the granter has the file now, for the same reason.
+function destinationPath(
+  op: ShareProposalOpRow,
+  context: ProposalMomentContext,
+): string | null {
+  if (op.operation === "delete") return context.currentPath ?? context.base?.path ?? null;
+  if (recipientMoved(op)) return op.afterPath;
+  return context.currentPath ?? op.afterPath;
+}
+
 // The operation a moment records, derived from where the granter has the file
 // and where the change puts it. The domain derives it the same way when it
 // builds a compensating moment (`crates/dohc-engine-domain/src/store.rs`):
 // gone is a delete, moved is a rename, and anything else is a write.
 function derivedOperation(
   op: ShareProposalOpRow,
+  destination: string | null,
   currentPath: string | null,
 ): "write" | "rename" | "delete" {
   if (op.operation === "delete") return "delete";
-  if (currentPath !== null && op.afterPath !== currentPath) return "rename";
+  if (currentPath !== null && destination !== currentPath) return "rename";
   return "write";
 }
 
@@ -80,7 +112,7 @@ export function proposalMomentPayload(
   if (isDelete && (!context.base || !context.base.blobSha256 || !context.base.path)) {
     return { ok: false, reason: "the file this change deletes is no longer in the granter's log" };
   }
-  const afterPath = isDelete ? context.base!.path! : op.afterPath;
+  const afterPath = destinationPath(op, context);
   const afterBlobSha256 = isDelete ? context.base!.blobSha256! : op.afterBlobSha256;
   if (!afterPath || !afterBlobSha256) {
     return { ok: false, reason: "the change names no destination" };
@@ -90,7 +122,7 @@ export function proposalMomentPayload(
     : (op.afterContentKind ?? "text");
   const afterByteLength = isDelete ? context.base!.byteLength : op.afterByteLength;
 
-  const operation = derivedOperation(op, context.currentPath);
+  const operation = derivedOperation(op, afterPath, context.currentPath);
   const base = context.base;
   // The change description's source side. Both halves travel together or
   // neither does — apply refuses a half-stated pair outright.

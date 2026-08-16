@@ -383,6 +383,15 @@ export function createOrderedWorkspaceTextAccess(deps: {
           deps.writeTarget(target, text, expectedContentHash),
         ),
       ),
+    // The same admission, for a save that does NOT land on disk here. A share
+    // view's save goes through its engine store and then projects the result,
+    // so it cannot call `write` — but two saves racing on one path must be
+    // ordered just the same, or the second reads the first's stale bytes and
+    // both pass their compare. Same queue, same key, same containment check.
+    ordered: <T>(rootPath: string, relativePath: string, run: () => Promise<T>) =>
+      scheduler.shared(rootPath, () =>
+        admit(rootPath, relativePath, "write", () => run()),
+      ),
   };
 }
 
@@ -459,6 +468,23 @@ const orderedWorkspaceTextAccess = createOrderedWorkspaceTextAccess({
   writeTarget: atomicTextWriter,
   scheduler: workspaceOperationScheduler,
 });
+
+/**
+ * Run an operation under the SAME per-file ordering the editor's own save
+ * takes. For a writer whose bytes do not reach disk through `writeWorkspaceText`
+ * — today, a share view's save, which writes an engine moment and then projects
+ * it.
+ *
+ * A missing target is raised as `WorkspaceTextTargetMissingError`, the same way
+ * a disk save meets it, so the caller can answer with the same conflict.
+ */
+export function withOrderedWorkspaceTextPath<T>(
+  rootPath: string,
+  relativePath: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  return orderedWorkspaceTextAccess.ordered(rootPath, relativePath, run);
+}
 
 export function withExclusiveWorkspaceOperation<T>(
   rootPath: string,

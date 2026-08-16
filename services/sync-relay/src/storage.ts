@@ -83,9 +83,8 @@ export interface ShareProposalRow {
   workspaceId: string;
   // SERVER-derived from the authenticated submitter. Never client-supplied.
   proposedByUserId: string;
-  // The recipient's own origin id, kept so accept can release the changes
-  // under the same `share:<shareId>:<originId>` the chat path already writes.
-  originId: string;
+  // The ONE version the share exposed when this was submitted.
+  versionId: string;
   state: ShareProposalState;
   createdAtMs: number;
   settledAtMs: number | null;
@@ -96,6 +95,9 @@ export interface ShareProposalRow {
 export interface ShareProposalOpRow {
   opIndex: number;
   basedOnPath: string | null;
+  // WHICH file the change is built on, resolved from `basedOnPath` at submit
+  // and followed at accept. null for a file the granter does not have.
+  basedOnObjectId: string | null;
   basedOnBlobSha256: string | null;
   operation: "write" | "delete";
   afterPath: string | null;
@@ -293,19 +295,25 @@ export interface SyncRelayStorage {
   // The object at this path RIGHT NOW, or undefined when none is. The reverse
   // of the lookup above; a thread bound by path is re-proved through it.
   objectIdAtPath(workspaceId: string, path: string): string | undefined;
-  // #646 PR3a. The granter's own moment that produced this content for this
-  // object — the correct three-way base for a change built on it. The LATEST
-  // matching moment wins: content can return to an earlier state, and the
-  // recipient started from the most recent moment that produced it. null when
-  // no moment did, which reads as an unknown base and opens a conflict.
-  objectMomentForBlob(
-    workspaceId: string,
-    objectId: string,
-    blobSha256: string,
-  ): ObjectMomentRow | null;
-  // The granter's latest moment for this object, or null when the relay has
-  // never seen it. Answers "did this file drift since they sent it?".
-  objectHeadMoment(workspaceId: string, objectId: string): ObjectMomentRow | null;
+  // #646 PR3a. The granter's own moment for this object WITHIN one version:
+  // the latest one, or the latest that produced `blobSha256` when one is
+  // named. The first answers "did this file drift since they sent it?"; the
+  // second is the correct three-way base for a change built on that content.
+  //
+  // The LATEST match wins, because content can return to an earlier state and
+  // the recipient started from the most recent moment that produced it. null
+  // when no moment did, which reads as an unknown base and opens a conflict.
+  //
+  // A share exposes exactly ONE version, and the same content can sit under
+  // the same object id in another one. An unscoped lookup would hand a main
+  // share a base from a side version — a moment the granter's main line never
+  // held — so the version is a parameter, never a default.
+  objectMoment(input: {
+    workspaceId: string;
+    objectId: string;
+    versionId: string;
+    blobSha256?: string;
+  }): ObjectMomentRow | null;
   // Store one submit. `submitId` is idempotent per share: a retried POST
   // returns `created: false` and the proposal it already made, so a lost
   // response can never become two proposals for one intent.
@@ -314,7 +322,7 @@ export interface SyncRelayStorage {
     shareId: string;
     workspaceId: string;
     proposedByUserId: string;
-    originId: string;
+    versionId: string;
     submitId: string;
     createdAtMs: number;
     ops: ShareProposalOpRow[];
@@ -347,11 +355,6 @@ export interface SyncRelayStorage {
   // proposal accept needs it because a proposal's changes carry no
   // coordinates: they were never a log, so the relay numbers them.
   maxOriginSeq(workspaceId: string, originId: string): number;
-  recordShareBlobUpload(shareId: string, sha256: string, createdAtMs: number): void;
-  // How many blobs this share has uploaded that no stored proposal op claims.
-  // Uploading without submitting is the one way a recipient can spend the
-  // granter's quota with nothing to show for it, so it is the one thing bound.
-  unclaimedShareBlobUploads(shareId: string): number;
 }
 
 // The two wire shapes a file-linked thread create carries, kept apart because
@@ -597,12 +600,16 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       -- never joins through a share the granter may have revoked.
       -- submit_id makes one submit idempotent: a retried POST returns the
       -- proposal it already made instead of a second one.
+      -- version_id is PINNED at submit from the selector the recipient read.
+      -- Accept and the review listing both resolve the granter's moments
+      -- within it, so a selector edited mid-flight cannot move a proposal to a
+      -- version its author never saw.
       CREATE TABLE IF NOT EXISTS sync_relay_share_proposals (
         proposal_id         TEXT PRIMARY KEY,
         share_id            TEXT NOT NULL,
         workspace_id        TEXT NOT NULL,
         proposed_by_user_id TEXT NOT NULL,
-        origin_id           TEXT NOT NULL,
+        version_id          TEXT NOT NULL,
         submit_id           TEXT NOT NULL,
         state               TEXT NOT NULL,
         created_at_ms       INTEGER NOT NULL,
@@ -621,10 +628,19 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       -- One NET change to one file. Not a moment, and deliberately not shaped
       -- like one: a recipient never learns a granter moment id, so it states
       -- what it read and what it wants, and the relay mints the moment.
+      --
+      -- based_on_object_id is resolved AT SUBMIT, from the path the recipient
+      -- named. The path is where the granter had the file when the recipient
+      -- read it; the object id is which file it is. Resolving at accept
+      -- instead would follow the path, so a rename between submit and accept
+      -- would find a different file and a delete would find none — and a
+      -- change whose base resolved to nothing is minted as a create, which
+      -- resurrects a file the granter deleted. The object id does not move.
       CREATE TABLE IF NOT EXISTS sync_relay_share_proposal_ops (
         proposal_id          TEXT NOT NULL,
         op_index             INTEGER NOT NULL,
         based_on_path        TEXT,
+        based_on_object_id   TEXT,
         based_on_blob_sha256 TEXT,
         operation            TEXT NOT NULL,
         after_path           TEXT,
@@ -635,19 +651,6 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         PRIMARY KEY (proposal_id, op_index),
         FOREIGN KEY (proposal_id)
           REFERENCES sync_relay_share_proposals(proposal_id) ON DELETE CASCADE
-      ) STRICT;
-
-      -- #646 PR3a: what a recipient has uploaded through the share blob route.
-      -- A recipient's blob is charged to the GRANTER's workspace quota, so the
-      -- relay must be able to say how much a given share has put there that no
-      -- proposal claims. That count is the bound the blob route enforces.
-      CREATE TABLE IF NOT EXISTS sync_relay_share_blob_uploads (
-        share_id      TEXT NOT NULL,
-        sha256        TEXT NOT NULL,
-        created_at_ms INTEGER NOT NULL,
-        PRIMARY KEY (share_id, sha256),
-        FOREIGN KEY (share_id)
-          REFERENCES sync_relay_shares(share_id) ON DELETE CASCADE
       ) STRICT;
 
       CREATE TABLE IF NOT EXISTS sync_relay_migrations (
@@ -723,7 +726,6 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   // transaction still makes it atomic — a crash part-way leaves the migration
   // unrecorded and the next open redoes it.
   seedObjectPaths(db);
-  seedObjectMoments(db);
 }
 
 // Where a `moment.append` payload says its object is AFTER the op: the
@@ -823,65 +825,6 @@ const OBJECT_MOMENT_INSERT_SQL = `
     path, blob_sha256, content_kind, byte_length, recorded_at_ms
   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(workspace_id, object_id, relay_seq) DO NOTHING`;
-
-// #646 PR3a one-time seed, and the sibling of `seedObjectPaths` below. Without
-// it every moment already in the log is invisible to the base rewrite, and
-// every first accept on a workspace shared before this deployment would open a
-// conflict it did not need to. Same double-checked claim, same own
-// transaction, same reason.
-function seedObjectMoments(db: SqliteDb): void {
-  const migrationId = "object-moments-seed-v1";
-  const seeded = db
-    .prepare("SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete")
-    .get(migrationId);
-  if (Number(seeded?.complete ?? 0) !== 0) return;
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const claimed = db
-      .prepare(
-        "SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete",
-      )
-      .get(migrationId);
-    if (Number(claimed?.complete ?? 0) !== 0) {
-      db.exec("COMMIT");
-      return;
-    }
-    const insert = db.prepare(OBJECT_MOMENT_INSERT_SQL);
-    const rows = db
-      .prepare(
-        `SELECT workspace_id, payload_json, relay_seq FROM sync_relay_log
-         WHERE op_kind = 'moment.append'
-         ORDER BY relay_seq`,
-      )
-      .all();
-    for (const row of rows) {
-      const resolved = objectMomentFromMomentPayload(String(row.payload_json));
-      if (!resolved) continue;
-      insert.run(
-        String(row.workspace_id),
-        resolved.objectId,
-        Number(row.relay_seq),
-        resolved.momentId,
-        resolved.versionId,
-        resolved.path,
-        resolved.blobSha256,
-        resolved.contentKind,
-        resolved.byteLength,
-        resolved.recordedAtMs,
-      );
-    }
-    db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(
-      migrationId,
-      Date.now(),
-    );
-    db.exec("COMMIT");
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {}
-    throw error;
-  }
-}
 
 // #646 PR2 one-time seed. `sync_relay_object_paths` is maintained at insert
 // time, so without this every moment.append already in the log would resolve
@@ -1968,28 +1911,31 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   revokeShare(shareId: string, revokedAtMs: number): boolean {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return this.tx(() => {
       const existing = this.db
         .prepare("SELECT revoked_at_ms FROM sync_relay_shares WHERE share_id = ?")
         .get(shareId);
-      if (existing === undefined) {
-        this.db.exec("COMMIT");
-        return false;
-      }
+      if (existing === undefined) return false;
       if (existing.revoked_at_ms === null || existing.revoked_at_ms === undefined) {
         this.db
           .prepare("UPDATE sync_relay_shares SET revoked_at_ms = ? WHERE share_id = ?")
           .run(Math.trunc(revokedAtMs), shareId);
+        // #646 PR3a: ending a share settles what it was still carrying. An
+        // open proposal outlives the grant it came through — the recipient
+        // can no longer withdraw it, and its content stays pinned out of the
+        // blob sweep for as long as it stays open. Declining is the honest
+        // state: the granter ended the share instead of answering, and the
+        // recipient's own copy still has the changes.
+        this.db
+          .prepare(
+            `UPDATE sync_relay_share_proposals
+             SET state = 'declined', settled_at_ms = ?
+             WHERE share_id = ? AND state = 'open'`,
+          )
+          .run(Math.trunc(revokedAtMs), shareId);
       }
-      this.db.exec("COMMIT");
       return true;
-    } catch (error) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    });
   }
 
   listLogRowsReferencing(workspaceId: string, sha256: string): SyncRelayLogRow[] {
@@ -2136,33 +2082,25 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return typeof row.path === "string" && row.path.length > 0 ? row.path : null;
   }
 
-  objectMomentForBlob(
-    workspaceId: string,
-    objectId: string,
-    blobSha256: string,
-  ): ObjectMomentRow | null {
-    if (!objectId || !blobSha256) return null;
+  objectMoment(input: {
+    workspaceId: string;
+    objectId: string;
+    versionId: string;
+    blobSha256?: string;
+  }): ObjectMomentRow | null {
+    if (!input.objectId || !input.versionId) return null;
+    if (input.blobSha256 !== undefined && !input.blobSha256) return null;
+    const params: unknown[] = [input.workspaceId, input.objectId, input.versionId];
+    if (input.blobSha256 !== undefined) params.push(input.blobSha256);
     const row = this.db
       .prepare(
         `SELECT moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms
          FROM sync_relay_object_moments
-         WHERE workspace_id = ? AND object_id = ? AND blob_sha256 = ?
+         WHERE workspace_id = ? AND object_id = ? AND version_id = ?
+           ${input.blobSha256 === undefined ? "" : "AND blob_sha256 = ?"}
          ORDER BY relay_seq DESC LIMIT 1`,
       )
-      .get(workspaceId, objectId, blobSha256);
-    return row ? rowToObjectMomentRow(row) : null;
-  }
-
-  objectHeadMoment(workspaceId: string, objectId: string): ObjectMomentRow | null {
-    if (!objectId) return null;
-    const row = this.db
-      .prepare(
-        `SELECT moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms
-         FROM sync_relay_object_moments
-         WHERE workspace_id = ? AND object_id = ?
-         ORDER BY relay_seq DESC LIMIT 1`,
-      )
-      .get(workspaceId, objectId);
+      .get(...params);
     return row ? rowToObjectMomentRow(row) : null;
   }
 
@@ -2171,14 +2109,13 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     shareId: string;
     workspaceId: string;
     proposedByUserId: string;
-    originId: string;
+    versionId: string;
     submitId: string;
     createdAtMs: number;
     ops: ShareProposalOpRow[];
     guard?: () => void;
   }): { proposalId: string; created: boolean } {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return this.tx(() => {
       // The same posture appendLogBatch takes: the caller's authorization is
       // re-run under the write lock, so a revoke or a level narrowed
       // mid-flight loses the race rather than slipping a submit through.
@@ -2189,13 +2126,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         )
         .get(input.shareId, input.submitId);
       if (existing) {
-        this.db.exec("COMMIT");
         return { proposalId: String(existing.proposal_id), created: false };
       }
       this.db
         .prepare(
           `INSERT INTO sync_relay_share_proposals (
-            proposal_id, share_id, workspace_id, proposed_by_user_id, origin_id,
+            proposal_id, share_id, workspace_id, proposed_by_user_id, version_id,
             submit_id, state, created_at_ms, settled_at_ms
           ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, NULL)`,
         )
@@ -2204,21 +2140,23 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           input.shareId,
           input.workspaceId,
           input.proposedByUserId,
-          input.originId,
+          input.versionId,
           input.submitId,
           Math.trunc(input.createdAtMs),
         );
       const insertOp = this.db.prepare(
         `INSERT INTO sync_relay_share_proposal_ops (
-          proposal_id, op_index, based_on_path, based_on_blob_sha256, operation,
-          after_path, after_blob_sha256, after_content_kind, after_byte_length, recorded_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          proposal_id, op_index, based_on_path, based_on_object_id, based_on_blob_sha256,
+          operation, after_path, after_blob_sha256, after_content_kind, after_byte_length,
+          recorded_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const op of input.ops) {
         insertOp.run(
           input.proposalId,
           op.opIndex,
           op.basedOnPath,
+          op.basedOnObjectId,
           op.basedOnBlobSha256,
           op.operation,
           op.afterPath,
@@ -2228,14 +2166,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           Math.trunc(op.recordedAtMs),
         );
       }
-      this.db.exec("COMMIT");
       return { proposalId: input.proposalId, created: true };
-    } catch (error) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    });
   }
 
   getShareProposal(
@@ -2243,7 +2175,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   ): (ShareProposalRow & { ops: ShareProposalOpRow[] }) | null {
     const row = this.db
       .prepare(
-        `SELECT proposal_id, share_id, workspace_id, proposed_by_user_id, origin_id,
+        `SELECT proposal_id, share_id, workspace_id, proposed_by_user_id, version_id,
                 state, created_at_ms, settled_at_ms
          FROM sync_relay_share_proposals WHERE proposal_id = ?`,
       )
@@ -2255,7 +2187,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listShareProposalsForShare(shareId: string): Array<ShareProposalRow & { opCount: number }> {
     return this.db
       .prepare(
-        `SELECT p.proposal_id, p.share_id, p.workspace_id, p.proposed_by_user_id, p.origin_id,
+        `SELECT p.proposal_id, p.share_id, p.workspace_id, p.proposed_by_user_id, p.version_id,
                 p.state, p.created_at_ms, p.settled_at_ms,
                 (SELECT COUNT(*) FROM sync_relay_share_proposal_ops o
                   WHERE o.proposal_id = p.proposal_id) AS op_count
@@ -2272,7 +2204,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   ): Array<ShareProposalRow & { ops: ShareProposalOpRow[] }> {
     return this.db
       .prepare(
-        `SELECT proposal_id, share_id, workspace_id, proposed_by_user_id, origin_id,
+        `SELECT proposal_id, share_id, workspace_id, proposed_by_user_id, version_id,
                 state, created_at_ms, settled_at_ms
          FROM sync_relay_share_proposals
          WHERE workspace_id = ? AND state = 'open'
@@ -2290,11 +2222,19 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     to: Exclude<ShareProposalState, "open">,
     settledAtMs: number,
   ): boolean {
+    return this.tx(() =>
+      this.settleShareProposalInTransaction(proposalId, to, settledAtMs),
+    );
+  }
+
+  // One write transaction, so a caller states what it writes rather than the
+  // BEGIN/COMMIT/ROLLBACK frame around it.
+  private tx<T>(run: () => T): T {
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const moved = this.settleShareProposalInTransaction(proposalId, to, settledAtMs);
+      const result = run();
       this.db.exec("COMMIT");
-      return moved;
+      return result;
     } catch (error) {
       try {
         this.db.exec("ROLLBACK");
@@ -2330,37 +2270,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return Number(row?.max_seq ?? -1);
   }
 
-  recordShareBlobUpload(shareId: string, sha256: string, createdAtMs: number): void {
-    this.db
-      .prepare(
-        `INSERT INTO sync_relay_share_blob_uploads (share_id, sha256, created_at_ms)
-         VALUES (?, ?, ?)
-         ON CONFLICT(share_id, sha256) DO NOTHING`,
-      )
-      .run(shareId, sha256, Math.trunc(createdAtMs));
-  }
-
-  unclaimedShareBlobUploads(shareId: string): number {
-    const row = this.db
-      .prepare(
-        `SELECT COUNT(*) AS unclaimed
-         FROM sync_relay_share_blob_uploads u
-         WHERE u.share_id = ?
-           AND NOT EXISTS (
-             SELECT 1
-             FROM sync_relay_share_proposal_ops o
-             JOIN sync_relay_share_proposals p ON p.proposal_id = o.proposal_id
-             WHERE p.share_id = u.share_id AND o.after_blob_sha256 = u.sha256
-           )`,
-      )
-      .get(shareId);
-    return Number(row?.unclaimed ?? 0);
-  }
-
   private proposalOps(proposalId: string): ShareProposalOpRow[] {
     return this.db
       .prepare(
-        `SELECT op_index, based_on_path, based_on_blob_sha256, operation,
+        `SELECT op_index, based_on_path, based_on_object_id, based_on_blob_sha256, operation,
                 after_path, after_blob_sha256, after_content_kind, after_byte_length,
                 recorded_at_ms
          FROM sync_relay_share_proposal_ops
@@ -2559,7 +2472,7 @@ function rowToProposalRow(row: Record<string, unknown>): ShareProposalRow {
     shareId: String(row.share_id),
     workspaceId: String(row.workspace_id),
     proposedByUserId: String(row.proposed_by_user_id),
-    originId: String(row.origin_id),
+    versionId: String(row.version_id),
     state: String(row.state) as ShareProposalState,
     createdAtMs: Number(row.created_at_ms),
     settledAtMs: nullableInt(row.settled_at_ms),
@@ -2570,6 +2483,7 @@ function rowToProposalOpRow(row: Record<string, unknown>): ShareProposalOpRow {
   return {
     opIndex: Number(row.op_index),
     basedOnPath: nullableText(row.based_on_path),
+    basedOnObjectId: nullableText(row.based_on_object_id),
     basedOnBlobSha256: nullableText(row.based_on_blob_sha256),
     operation: String(row.operation) === "delete" ? "delete" : "write",
     afterPath: nullableText(row.after_path),

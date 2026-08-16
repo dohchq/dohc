@@ -2809,7 +2809,7 @@ export const MAX_SHARE_PROPOSAL_FILES = 500;
 // chat-share lanes' own cap (MAX_CHAT_CHANNEL_SHARE_ROWS, declared below):
 // relay-supplied rows this surface renders. Nothing here measured a smaller
 // healthy range, so nothing here may state one.
-export const MAX_SHARE_PROPOSAL_ROWS = 4096;
+const MAX_SHARE_PROPOSAL_ROWS = 4096;
 
 export const ShareProposalState = z.enum([
   "open",
@@ -2830,9 +2830,9 @@ export const ListShareProposalsPayload = z.object({
 export type ListShareProposalsPayload = z.infer<typeof ListShareProposalsPayload>;
 
 export const ShareProposalFileRow = z.object({
-  // Position in the submit, dense from 0. It addresses the file for the diff
-  // read, so a path is never the key: two ops can name the same path.
-  opIndex: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_FILES),
+  // Position in the submit, dense from 0, so the last valid index is one
+  // below the number of files a submit may carry.
+  opIndex: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_FILES - 1),
   path: PATH_STRING,
   operation: ShareProposalOperation,
   // The granter's copy changed since the recipient sent this. Accepting still
@@ -2858,27 +2858,36 @@ export const ListShareProposalsResult = z.object({
 });
 export type ListShareProposalsResult = z.infer<typeof ListShareProposalsResult>;
 
-export const ReadShareProposalDiffPayload = z.object({
+// ONE read for the whole review. The dialog used to ask for the listing and
+// then ask again per file, and each of those asks re-read the entire proposal
+// list from the relay: a five-file review cost six listings. The relay states
+// every file of a proposal in one answer, so the review reads it once.
+export const ReadShareProposalChangesPayload = z.object({
   workspaceId: WORKSPACE_ID,
   proposalId: SHARE_PROPOSAL_ID,
-  opIndex: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_FILES),
 });
-export type ReadShareProposalDiffPayload = z.infer<
-  typeof ReadShareProposalDiffPayload
+export type ReadShareProposalChangesPayload = z.infer<
+  typeof ReadShareProposalChangesPayload
 >;
 
-export const ReadShareProposalDiffResult = z.object({
-  path: PATH_STRING,
-  drifted: z.boolean(),
-  operation: ShareProposalOperation,
+export const ShareProposalChangeRow = ShareProposalFileRow.extend({
   // The GRANTER's content now. null when the granter does not have the file,
-  // or when it is not text this surface can diff.
+  // or when it is not text this surface can show.
   currentText: WORKSPACE_EDITOR_TEXT.nullable(),
-  // The proposal's after content. null for a delete.
+  // The proposal's after content. null for a delete, for binary content, for
+  // content over the editor's text bound, and for content the relay would not
+  // serve — every one of which the review states as "no preview" rather than
+  // failing, because the granter can still decline what it cannot read.
   incomingText: WORKSPACE_EDITOR_TEXT.nullable(),
 });
-export type ReadShareProposalDiffResult = z.infer<
-  typeof ReadShareProposalDiffResult
+export type ShareProposalChangeRow = z.infer<typeof ShareProposalChangeRow>;
+
+export const ReadShareProposalChangesResult = z.object({
+  proposedByEmail: EMAIL_STRING.nullable(),
+  files: z.array(ShareProposalChangeRow).max(MAX_SHARE_PROPOSAL_FILES),
+});
+export type ReadShareProposalChangesResult = z.infer<
+  typeof ReadShareProposalChangesResult
 >;
 
 export const SettleShareProposalPayload = z.object({
@@ -2902,10 +2911,20 @@ export const SubmitShareChangesPayload = z.object({
 });
 export type SubmitShareChangesPayload = z.infer<typeof SubmitShareChangesPayload>;
 
+// What a submit did, in the three facts the recipient's surface states. The
+// new proposal's id is NOT among them: the surface re-reads its own sent
+// changes right after, and an id that arrived by two routes would be two
+// answers to one question.
 export const SubmitShareChangesResult = z.object({
   submitted: z.number().int().nonnegative(),
-  // null when there was nothing pending to send.
-  proposalId: SHARE_PROPOSAL_ID.nullable(),
+  // Files this submit did NOT offer because an edit moved them outside what
+  // the share covers. Silently dropping them is the failure this states: the
+  // recipient presses send, some of their work is not sent, and nothing says
+  // so.
+  skippedOutsideShare: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_FILES),
+  // More changes are waiting than one submit carries. A flag rather than a
+  // count: the scan stops AT the bound, so it never measures the remainder.
+  morePending: z.boolean(),
 });
 export type SubmitShareChangesResult = z.infer<typeof SubmitShareChangesResult>;
 
@@ -4063,9 +4082,9 @@ export interface DohcDesktopBridge {
   listShareProposals(
     payload: ListShareProposalsPayload,
   ): Promise<ListShareProposalsResult>;
-  readShareProposalDiff(
-    payload: ReadShareProposalDiffPayload,
-  ): Promise<ReadShareProposalDiffResult>;
+  readShareProposalChanges(
+    payload: ReadShareProposalChangesPayload,
+  ): Promise<ReadShareProposalChangesResult>;
   settleShareProposal(
     payload: SettleShareProposalPayload,
   ): Promise<SettleShareProposalResult>;
