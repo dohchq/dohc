@@ -2,23 +2,32 @@ import { randomUUID } from "node:crypto";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
 import {
   mutatePluginRecord,
+  pluginDataDir,
   readPluginLocalState,
 } from "./pluginLocalState";
+import { pluginStateRoot } from "./pluginSourceSnapshot";
 import {
   PLUGIN_ACTIVATION_TIMEOUT_MS,
   PLUGIN_CRASH_LOOP_THRESHOLD,
   PLUGIN_FAST_FAILURE_WINDOW_MS,
   PLUGIN_HOST_METHODS,
   PLUGIN_PROCESS_LOG_LIMIT,
+  PLUGIN_WEB_APP_START_TIMEOUT_MS,
+  PLUGIN_WEB_APP_STOP_TIMEOUT_MS,
   type PluginActivateParams,
+  type PluginSettingsChangedParams,
   type PluginActivateResult,
   type PluginInvokeCommandParams,
   type PluginLogParams,
   type PluginRuntimeStatus,
+  type PluginStartWebAppParams,
+  type PluginStartWebAppResult,
+  type PluginStopWebAppParams,
   type SdkEventParams,
   type PluginTransport,
   type SdkRequestParams,
 } from "./pluginHostProtocol";
+import type { PluginSettingValue } from "./pluginManifestSchema";
 
 const DEACTIVATION_TIMEOUT_MS = 5_000;
 
@@ -49,6 +58,10 @@ export interface PluginHostOptions {
     signal: AbortSignal,
     emitEvent: (subscriptionId: string, event: string, data: unknown) => void,
   ) => Promise<unknown>;
+  /** This plugin's settings, resolved against its manifest, for activation. */
+  readPluginSettings?: (
+    pluginId: string,
+  ) => Promise<Record<string, PluginSettingValue>>;
   /** Releases resources that the SDK router owns for one spawn. */
   onSpawnEnd?: (pluginId: string, spawnId: string) => Promise<void>;
   /** Releases router resources that are not attached to a live host record. */
@@ -56,6 +69,7 @@ export interface PluginHostOptions {
   onStatusChange?: (pluginId: string, status: PluginRuntimeStatus) => void;
   now?: () => number;
   activationTimeoutMs?: number;
+  webAppStartTimeoutMs?: number;
 }
 
 interface PluginSpawn {
@@ -250,6 +264,90 @@ export class PluginHost {
     } satisfies PluginInvokeCommandParams);
   }
 
+  /**
+   * Asks the running plugin to start (or reuse) a manifest-declared web app
+   * and returns the loopback URL its guest view must load. The URL may carry
+   * a one-time credential in its fragment: callers keep it in memory and
+   * never log it.
+   */
+  async startWebApp(
+    pluginId: string,
+    webAppId: string,
+  ): Promise<PluginStartWebAppResult> {
+    const record = this.plugins.get(pluginId);
+    const spawn = record?.current;
+    if (!record || !spawn?.transport) {
+      throw new Error(`Plugin "${pluginId}" is not running.`);
+    }
+    if (spawn.stopping) {
+      throw new Error(`Plugin "${pluginId}" is stopping.`);
+    }
+    if (record.status === "starting") {
+      throw new Error(`Plugin "${pluginId}" is still starting.`);
+    }
+    if (!record.manifest.webApps?.some((webApp) => webApp.id === webAppId)) {
+      throw new Error(
+        `Plugin "${pluginId}" does not declare web app "${webAppId}".`,
+      );
+    }
+    const timeoutMs =
+      this.options.webAppStartTimeoutMs ?? PLUGIN_WEB_APP_START_TIMEOUT_MS;
+    const result = await raceWithTimeout(
+      spawn.transport.request(PLUGIN_HOST_METHODS.startWebApp, {
+        webAppId,
+      } satisfies PluginStartWebAppParams),
+      timeoutMs,
+      `Plugin "${pluginId}" web app "${webAppId}" did not start within ${timeoutMs} ms.`,
+    );
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("url" in result) ||
+      typeof result.url !== "string" ||
+      result.url.length === 0
+    ) {
+      throw new Error(
+        `Plugin "${pluginId}" web app "${webAppId}" returned an invalid start result: "url" must be a non-empty string.`,
+      );
+    }
+    return { url: result.url };
+  }
+
+  /**
+   * Tells the running plugin the guest it started this web app for is gone,
+   * so it ends the session that start paired. The host calls this on the
+   * recovery path only: a normal tab close leaves the app paired, because the
+   * guest's session cookie already landed and the next open reuses it.
+   *
+   * A plugin with no live spawn has nothing to unpair — the broker takes a
+   * wrapper's whole process tree down with the spawn, so its server and the
+   * session are already gone.
+   */
+  async stopWebApp(pluginId: string, webAppId: string): Promise<void> {
+    const record = this.plugins.get(pluginId);
+    const spawn = record?.current;
+    if (!record || !spawn?.transport || spawn.stopping) return;
+    if (!record.manifest.webApps?.some((webApp) => webApp.id === webAppId)) {
+      throw new Error(
+        `Plugin "${pluginId}" does not declare web app "${webAppId}".`,
+      );
+    }
+    await raceWithTimeout(
+      spawn.transport.request(PLUGIN_HOST_METHODS.stopWebApp, {
+        webAppId,
+      } satisfies PluginStopWebAppParams),
+      PLUGIN_WEB_APP_STOP_TIMEOUT_MS,
+      `Plugin "${pluginId}" web app "${webAppId}" did not stop within ${PLUGIN_WEB_APP_STOP_TIMEOUT_MS} ms.`,
+    );
+  }
+
+  private pluginStateRoot(pluginId: string): string {
+    return pluginStateRoot(
+      pluginDataDir(this.options.stateDir, this.options.workspaceRoot),
+      pluginId,
+    );
+  }
+
   private async shutdown(
     record: PluginRecord,
     spawn: PluginSpawn,
@@ -286,6 +384,26 @@ export class PluginHost {
 
   getStderrLog(pluginId: string): string[] {
     return [...(this.plugins.get(pluginId)?.stderr ?? [])];
+  }
+
+  /**
+   * Tells a running plugin its settings changed. A plugin that is not running
+   * needs no telling — it reads the new values from its next activation. The
+   * caller does not wait on this: a slow plugin must never hold up the save
+   * the user already made.
+   */
+  async notifySettingsChanged(
+    pluginId: string,
+    values: Record<string, PluginSettingValue>,
+  ): Promise<void> {
+    const record = this.plugins.get(pluginId);
+    const spawn = record?.current;
+    if (!record || !spawn || !spawn.transport || !this.isLive(record, spawn)) {
+      return;
+    }
+    await spawn.transport.request(PLUGIN_HOST_METHODS.settingsChanged, {
+      values,
+    } satisfies PluginSettingsChangedParams);
   }
 
   getRegisteredCommands(pluginId: string): string[] | undefined {
@@ -345,15 +463,23 @@ export class PluginHost {
         onExit: () => this.handleExit(record, spawn),
       });
 
-      const activation = spawn.transport.request<unknown>(
-        PLUGIN_HOST_METHODS.activate,
-        {
-          pluginId: record.pluginId,
-          pluginRoot: record.pluginRoot,
-          workspaceRoot: this.options.workspaceRoot,
-          manifest: record.manifest,
-        } satisfies PluginActivateParams,
-      );
+      // The settings read is folded into the activation promise rather than
+      // awaited before the spawn, so it is covered by the activation deadline
+      // like every other part of starting a plugin.
+      const activation = (async () => {
+        const settings = await this.options.readPluginSettings?.(record.pluginId) ?? {};
+        return spawn.transport!.request<unknown>(
+          PLUGIN_HOST_METHODS.activate,
+          {
+            pluginId: record.pluginId,
+            pluginRoot: record.pluginRoot,
+            workspaceRoot: this.options.workspaceRoot,
+            stateRoot: this.pluginStateRoot(record.pluginId),
+            manifest: record.manifest,
+            settings,
+          } satisfies PluginActivateParams,
+        );
+      })();
       void raceWithTimeout(
         activation,
         this.activationTimeoutMs,

@@ -55,6 +55,7 @@ import {
   rendererMarks,
 } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
+import { PLUGIN_WEB_APP_OPEN_ERROR } from "./pluginWebAppCopy";
 import { useSnapshotLane } from "./snapshotLane";
 import { momentDiffSides } from "./workbench/momentDiffSides";
 import { CloudLogin } from "./CloudLogin";
@@ -74,6 +75,7 @@ import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { NewFileDialog } from "./NewFileDialog";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
+import { useGuestBlockingUi } from "./guestBlockingUi";
 import { DesktopSettings } from "./settings/DesktopSettings";
 import {
   DEFAULT_SETTINGS_SECTION,
@@ -98,6 +100,7 @@ import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 // chunk resolved, and every character typed in that gap went to whatever the
 // user clicked to open the panel — queries arrived with their first letters
 // missing. The view carries no dependency the shell does not already load.
+import { PluginsView } from "./workbench/PluginsView";
 import { SearchView } from "./workbench/SearchView";
 import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
@@ -159,7 +162,9 @@ import {
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isPluginDetailsTabPath,
   isPluginPanelTabPath,
+  isPluginWebAppTabPath,
   isSingletonEditorTabPath,
   isSiteTabPath,
   isVirtualTabPath,
@@ -170,8 +175,12 @@ import {
   resizeEditorGroups,
   moveTabToNewGroup,
   parseHistoryDiffTabPath,
+  parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
+  parsePluginWebAppTabPath,
+  pluginDetailsTabPath,
   pluginPanelTabPath,
+  pluginWebAppTabPath,
   parseSiteTabPath,
   parseUiState,
   pruneMissingRestoredTabs,
@@ -671,6 +680,16 @@ const LazySitePreviewPage = lazy(() =>
 );
 const LazyPluginPanelPage = lazy(() =>
   import("./PluginPanelPage").then((mod) => ({ default: mod.PluginPanelPage })),
+);
+const EMPTY_TAB_LABELS: ReadonlyMap<string, string> = new Map();
+
+const LazyPluginWebAppPage = lazy(() =>
+  import("./PluginWebAppPage").then((mod) => ({ default: mod.PluginWebAppPage })),
+);
+const LazyPluginDetailsPage = lazy(() =>
+  import("./PluginDetailsPage").then((mod) => ({
+    default: mod.PluginDetailsPage,
+  })),
 );
 const LazyLinkedChatsPanel = lazy(() =>
   import("./workbench/LinkedChats").then((mod) => ({
@@ -1819,6 +1838,9 @@ export function DesktopWorkspaceShell(props: {
   );
   const focusedGroup = activeGroup(wb);
   const focusedTabPath = activeTabPath(wb);
+  // The plugins list marks the row whose details tab the user is looking at,
+  // the way the explorer marks the open file.
+  const activePluginDetailsId = parsePluginDetailsTabPath(focusedTabPath);
   const openTabs = useMemo(() => allTabs(wb), [wb.editorGroups]);
   const dirtyPaths = useMemo(
     () =>
@@ -1829,6 +1851,43 @@ export function DesktopWorkspaceShell(props: {
       ),
     [dirtyRevision, openTabs],
   );
+  // A plugin tab is labelled with the name its manifest declares — the plugin's
+  // own display name on its details tab, a web app's title on its app tab. The
+  // tab path carries only ids and the manifests live in main, but each page
+  // already holds the name it heads itself with, so the label costs no extra
+  // call. Reading the manifests from here instead failed the desktop e2e in 4
+  // of 6 runs: that request lands while the plugin host is still starting on
+  // demand, and the web app's own start then loses the race.
+  const [pluginTabTitles, setPluginTabTitles] = useState<{
+    workspaceId: string;
+    titles: ReadonlyMap<string, string>;
+  }>({ workspaceId: "", titles: EMPTY_TAB_LABELS });
+  const rememberPluginTabTitle = useCallback(
+    (tabPath: string, title: string) => {
+      setPluginTabTitles((previous) => {
+        // A title learned for another workspace never labels this one's tabs.
+        const known =
+          previous.workspaceId === workspaceId ? previous.titles : EMPTY_TAB_LABELS;
+        if (known.get(tabPath) === title) return previous;
+        return { workspaceId, titles: new Map(known).set(tabPath, title) };
+      });
+    },
+    [workspaceId],
+  );
+  const rememberWebAppTitle = useCallback(
+    (pluginId: string, webAppId: string, title: string) =>
+      rememberPluginTabTitle(pluginWebAppTabPath(pluginId, webAppId), title),
+    [rememberPluginTabTitle],
+  );
+  const rememberPluginDetailsTitle = useCallback(
+    (pluginId: string, title: string) =>
+      rememberPluginTabTitle(pluginDetailsTabPath(pluginId), title),
+    [rememberPluginTabTitle],
+  );
+  const tabLabels =
+    pluginTabTitles.workspaceId === workspaceId
+      ? pluginTabTitles.titles
+      : EMPTY_TAB_LABELS;
   const anyTabDirty = dirtyPaths.size > 0;
   const activeDocumentPath = isVirtualTabPath(focusedTabPath)
     ? null
@@ -2734,6 +2793,12 @@ export function DesktopWorkspaceShell(props: {
   // Lists every open conflict — two machines editing apart, or a merge left
   // with "Finish later" — with the same side-by-side cards as the merge flow.
   const [conflictReviewOpen, setConflictReviewOpen] = useState(false);
+  // A plugin web app's guest is a main-process view layered over this shell,
+  // so it composites above everything this component paints. While UI that
+  // needs its clicks is up, the guest must be hidden or it keeps them. Every
+  // overlay registers itself — including the ones this shell cannot see,
+  // which is why this is not a list of the shell's own flags.
+  const overlayOpen = useGuestBlockingUi();
   const onVersionWorkspaceStateChanged = useCallback(
     (activeVersionId?: string) => {
       setVersionEpoch((epoch) => epoch + 1);
@@ -3019,9 +3084,28 @@ export function DesktopWorkspaceShell(props: {
       showTabLimitError,
     ],
   );
+  // Main confirmed the plugin's Open action and asked for the tab. It takes
+  // the same path every other virtual tab takes — including the refusal at
+  // MAX_OPEN_TABS, which the user must read rather than watch nothing happen.
+  useEffect(
+    () =>
+      bridge().onPluginWebAppOpened((event) => {
+        if (event.workspaceId !== workspaceId) return;
+        openVirtualTab(pluginWebAppTabPath(event.pluginId, event.webAppId));
+      }),
+    [openVirtualTab, workspaceId],
+  );
   const openVersionCompareTab = useCallback(
     (versionId: string) => {
       openVirtualTab(versionCompareTabPath(versionId));
+    },
+    [openVirtualTab],
+  );
+  // A plugin row opens its details tab the same way every other virtual tab
+  // opens, so the tab limit refuses it out loud rather than doing nothing.
+  const openPluginDetailsTab = useCallback(
+    (pluginId: string) => {
+      openVirtualTab(pluginDetailsTabPath(pluginId));
     },
     [openVirtualTab],
   );
@@ -5124,6 +5208,12 @@ export function DesktopWorkspaceShell(props: {
               </Suspense>
             ) : wb.activeView === "history" ? (
               historyTimeline
+            ) : wb.activeView === "plugins" ? (
+              <PluginsView
+                workspaceId={workspaceId}
+                activePluginId={activePluginDetailsId}
+                onOpenDetails={openPluginDetailsTab}
+              />
             ) : null}
             </ErrorBoundary>
           </SidePanel>
@@ -5186,6 +5276,8 @@ export function DesktopWorkspaceShell(props: {
               const groupDocumentPath = isVirtualTabPath(tabPath) ? null : tabPath;
               const groupSiteRoot = parseSiteTabPath(tabPath);
               const groupPluginPanel = parsePluginPanelTabPath(tabPath);
+              const groupPluginWebApp = parsePluginWebAppTabPath(tabPath);
+              const groupPluginDetailsId = parsePluginDetailsTabPath(tabPath);
               const groupScrollTarget =
                 searchScrollTarget?.groupId === editorGroup.id &&
                 searchScrollTarget.path === tabPath
@@ -5201,6 +5293,7 @@ export function DesktopWorkspaceShell(props: {
                       tabs={editorGroup.tabs}
                       activeTab={tabPath}
                       activeTabDirty={!!tabPath && dirtyPaths.has(tabPath)}
+                      tabLabels={tabLabels}
                       recoveryPaths={recoveryPaths}
                       groupNumber={groupIndex + 1}
                       onActivate={(path) => activateEditorTab(editorGroup.id, path)}
@@ -5418,6 +5511,58 @@ export function DesktopWorkspaceShell(props: {
               ) : (
                 <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
                   <span className="text-sm text-ink">Could not open plugin panel</span>
+                  <button
+                    type="button"
+                    className="text-xs text-accent hover:underline"
+                    onClick={() => {
+                      if (tabPath) closeFileTab(editorGroup.id, tabPath);
+                    }}
+                  >
+                    Close tab
+                  </button>
+                </div>
+              )
+            ) : isPluginWebAppTabPath(tabPath) ? (
+              groupPluginWebApp ? (
+                <Suspense fallback={<PanelLoading label="plugin app" />}>
+                  <LazyPluginWebAppPage
+                    workspaceId={workspaceId}
+                    pluginId={groupPluginWebApp.pluginId}
+                    webAppId={groupPluginWebApp.webAppId}
+                    hiddenByOverlay={overlayOpen}
+                    onTitle={rememberWebAppTitle}
+                  />
+                </Suspense>
+              ) : (
+                <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+                  <span className="text-sm text-ink">
+                    {PLUGIN_WEB_APP_OPEN_ERROR}
+                  </span>
+                  <button
+                    type="button"
+                    className="text-xs text-accent hover:underline"
+                    onClick={() => {
+                      if (tabPath) closeFileTab(editorGroup.id, tabPath);
+                    }}
+                  >
+                    Close tab
+                  </button>
+                </div>
+              )
+            ) : isPluginDetailsTabPath(tabPath) ? (
+              groupPluginDetailsId ? (
+                <Suspense fallback={<PanelLoading label="plugin details" />}>
+                  <LazyPluginDetailsPage
+                    workspaceId={workspaceId}
+                    pluginId={groupPluginDetailsId}
+                    onTitle={rememberPluginDetailsTitle}
+                  />
+                </Suspense>
+              ) : (
+                <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+                  <span className="text-sm text-ink">
+                    dohc could not open the plugin page
+                  </span>
                   <button
                     type="button"
                     className="text-xs text-accent hover:underline"

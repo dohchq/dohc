@@ -47,6 +47,21 @@ import {
   type EngineYDocSaveStateEvent,
   type SearchResultsEvent,
 } from "./channels";
+// The manifest schema is plain zod, which the sandboxed preload already
+// bundles, so the contract shares the settings declaration rather than keeping
+// a second copy of it. A copy that drifts would fail the whole plugin list's
+// parse over a value the manifest itself allows.
+import {
+  isHttpsUrl,
+  MAX_PLUGIN_DESCRIPTION_CHARS,
+  MAX_PLUGIN_LICENSE_CHARS,
+  MAX_PLUGIN_PUBLISHER_CHARS,
+  MAX_PLUGIN_URL_CHARS,
+  MAX_PLUGIN_VERSION_CHARS,
+  MAX_PLUGIN_SETTINGS,
+  PluginSettingDeclarationSchema,
+  PluginSettingValueSchema,
+} from "../plugins/pluginManifestSchema";
 import { isLoopbackHostname } from "../security/loopback";
 import {
   DesktopUserSettings as DesktopUserSettingsSchema,
@@ -2311,6 +2326,90 @@ export type StopPluginPanelPayload = z.infer<typeof StopPluginPanelPayload>;
 export const StopPluginPanelResult = z.void();
 export type StopPluginPanelResult = z.infer<typeof StopPluginPanelResult>;
 
+// Wrapper-plugin web apps (PR3): the guest is a main-process WebContentsView,
+// so the renderer never receives the guest URL — the pairing credential in
+// its fragment stays between the plugin process and main. The renderer gets
+// the title and the credential-free origin, and reports placeholder bounds.
+const PLUGIN_WEB_APP_ID = z.string().min(1).max(120).refine(
+  (value) => !value.includes("\0"),
+  "plugin web app id must not contain NUL bytes",
+);
+
+export const OpenPluginWebAppPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginRoot: PLUGIN_ROOT,
+  pluginId: PLUGIN_ID,
+  webAppId: PLUGIN_WEB_APP_ID,
+}).strict();
+export type OpenPluginWebAppPayload = z.infer<typeof OpenPluginWebAppPayload>;
+
+export const OpenPluginWebAppResult = z.object({
+  pluginId: PLUGIN_ID,
+  webAppId: PLUGIN_WEB_APP_ID,
+}).strict();
+export type OpenPluginWebAppResult = z.infer<typeof OpenPluginWebAppResult>;
+
+export const PluginWebAppOpenedEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  webAppId: PLUGIN_WEB_APP_ID,
+}).strict();
+export type PluginWebAppOpenedEvent = z.infer<typeof PluginWebAppOpenedEvent>;
+
+export const StartPluginWebAppPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  webAppId: PLUGIN_WEB_APP_ID,
+}).strict();
+export type StartPluginWebAppPayload = z.infer<typeof StartPluginWebAppPayload>;
+
+export const StartPluginWebAppResult = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("ok"),
+    title: z.string().min(1).max(120),
+    origin: LoopbackPreviewUrl,
+  }).strict(),
+  z.object({ status: z.literal("not-registered") }).strict(),
+]);
+export type StartPluginWebAppResult = z.infer<typeof StartPluginWebAppResult>;
+
+const GUEST_BOUNDS_LIMIT = 1_000_000;
+export const SetPluginWebAppBoundsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  webAppId: PLUGIN_WEB_APP_ID,
+  bounds: z.object({
+    x: z.number().int().min(-GUEST_BOUNDS_LIMIT).max(GUEST_BOUNDS_LIMIT),
+    y: z.number().int().min(-GUEST_BOUNDS_LIMIT).max(GUEST_BOUNDS_LIMIT),
+    width: z.number().int().min(0).max(GUEST_BOUNDS_LIMIT),
+    height: z.number().int().min(0).max(GUEST_BOUNDS_LIMIT),
+  }).strict(),
+  visible: z.boolean(),
+}).strict();
+export type SetPluginWebAppBoundsPayload = z.infer<
+  typeof SetPluginWebAppBoundsPayload
+>;
+
+export const StopPluginWebAppPayload = StartPluginWebAppPayload;
+export type StopPluginWebAppPayload = z.infer<typeof StopPluginWebAppPayload>;
+
+/** Main tells the page its guest died after the start had already answered
+ * "ok". It carries no failure text: the load error can embed the start URL,
+ * credential fragment included, so the page owns the words. */
+export const PluginWebAppFailedEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  webAppId: PLUGIN_WEB_APP_ID,
+}).strict();
+export type PluginWebAppFailedEvent = z.infer<typeof PluginWebAppFailedEvent>;
+
+export function parsePluginWebAppFailedEventForIpc(
+  value: unknown,
+): PluginWebAppFailedEvent | null {
+  const parsed = PluginWebAppFailedEvent.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 // Workspace plugin management (PR2). Main owns one pipeline for the active
 // workspace. Every action returns a discriminated result, so expected plugin
 // failures cross as bounded data instead of opaque Electron exceptions.
@@ -2318,6 +2417,11 @@ export type StopPluginPanelResult = z.infer<typeof StopPluginPanelResult>;
 // plugin-id validator for the same field.
 const PLUGIN_SOURCE_HASH = z.string().regex(/^[0-9a-f]{64}$/);
 const PLUGIN_DIAGNOSTIC = z.string().min(1).max(10_000);
+
+// The same rule the manifest applies, restated on the wire so a link the
+// details rail is about to hand the OS browser cannot arrive over http.
+const HTTPS_URL = z.string().min(1).max(MAX_PLUGIN_URL_CHARS)
+  .refine(isHttpsUrl, "must be an https:// URL");
 
 export const PluginPipelineError = z.object({
   stage: z.enum(PLUGIN_PIPELINE_ERROR_STAGES),
@@ -2339,6 +2443,31 @@ export const PluginStatusRecord = z.object({
   sourceHash: PLUGIN_SOURCE_HASH.nullable(),
   approvedHash: PLUGIN_SOURCE_HASH.nullable(),
   installedBaselineHash: PLUGIN_SOURCE_HASH.nullable(),
+  // Manifest metadata, bounded by the manifest schema's own limits so the two
+  // cannot drift: a value the manifest allows must never fail this parse and
+  // take the whole plugin list down with it.
+  displayName: z.string().min(1).max(120).nullable(),
+  description: z.string().min(1).max(MAX_PLUGIN_DESCRIPTION_CHARS).nullable(),
+  publisher: z.string().min(1).max(MAX_PLUGIN_PUBLISHER_CHARS).nullable(),
+  icon: z.string().min(1).max(1024).nullable(),
+  // What the plugin declares about itself that dohc cannot derive: the
+  // version string it calls this build, and where its source, its issues, and
+  // its licence are. The URLs are re-checked as https here rather than
+  // trusted from main, because this contract is also what a test fixture and
+  // the demo bridge have to satisfy.
+  pluginVersion: z.string().min(1).max(MAX_PLUGIN_VERSION_CHARS).nullable(),
+  repository: HTTPS_URL.nullable(),
+  issues: HTTPS_URL.nullable(),
+  license: z.string().min(1).max(MAX_PLUGIN_LICENSE_CHARS).nullable(),
+  /** What the plugin declares the user may set. Values travel separately —
+   * they are per-workspace state, not part of the plugin's identity. */
+  settings: z.array(PluginSettingDeclarationSchema).max(MAX_PLUGIN_SETTINGS),
+  webApps: z.array(
+    z.object({
+      id: z.string().min(1).max(120),
+      title: z.string().min(1).max(120),
+    }).strict(),
+  ).max(100),
   diagnostics: z.array(PLUGIN_DIAGNOSTIC),
   warnings: z.array(PLUGIN_DIAGNOSTIC),
   error: PluginPipelineError.nullable(),
@@ -2355,6 +2484,34 @@ export const ListPluginsPayload = z.object({
   workspaceId: WORKSPACE_ID,
 }).strict();
 export type ListPluginsPayload = z.infer<typeof ListPluginsPayload>;
+
+// A plugin's settings values. Bounded by the same declaration count the
+// manifest allows, because a plugin can never have more settings than it
+// declares — main resolves the stored file against the manifest before this
+// ever crosses.
+const PluginSettingsValues = z.record(
+  z.string().min(1).max(120),
+  PluginSettingValueSchema,
+).refine(
+  (values) => Object.keys(values).length <= MAX_PLUGIN_SETTINGS,
+  `settings: at most ${MAX_PLUGIN_SETTINGS} values allowed`,
+);
+
+export const SetPluginSettingsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  values: PluginSettingsValues,
+}).strict();
+export type SetPluginSettingsPayload = z.infer<typeof SetPluginSettingsPayload>;
+
+export const PluginSettingsResult = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), values: PluginSettingsValues }).strict(),
+  z.object({
+    ok: z.literal(false),
+    message: z.string().min(1).max(10_000),
+  }).strict(),
+]);
+export type PluginSettingsResult = z.infer<typeof PluginSettingsResult>;
 
 export const ListPluginsResult = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), plugins: z.array(PluginStatusRecord) }).strict(),
@@ -2385,7 +2542,7 @@ const PluginUninstallCounts = z.object({
 // inventory stays in main. counts.notRecoverableFromHistory is the real
 // total, which is what the dialog counts "and N more" from.
 const PluginUninstallWarning = z.object({
-  kind: z.enum(["local-modifications", "cannot-verify-baseline"]),
+  kind: z.enum(["local-modifications", "cannot-verify-baseline", "plugin-state"]),
   summary: z.string().min(1).max(10_000),
   details: z.array(PLUGIN_DIAGNOSTIC),
   counts: PluginUninstallCounts,
@@ -2401,6 +2558,11 @@ export const PluginUninstallPreflightRecord = z.object({
   baselineManifestPath: PATH_STRING,
   summary: z.string().min(1).max(10_000),
   counts: PluginUninstallCounts,
+  stateData: z.object({
+    path: PATH_STRING,
+    fileCount: z.number().int().nonnegative(),
+    totalBytes: z.number().int().nonnegative(),
+  }).strict().nullable(),
   warning: PluginUninstallWarning.nullable(),
 }).strict();
 export type PluginUninstallPreflightRecord = z.infer<
@@ -2418,6 +2580,21 @@ export const PluginUninstallPreflightResult = z.discriminatedUnion("ok", [
 export type PluginUninstallPreflightResult = z.infer<
   typeof PluginUninstallPreflightResult
 >;
+
+// What this plugin takes up on this machine. Measured on request rather than
+// carried on PluginStatusRecord: the walk reads every file in the installed
+// tree, and the list surface shows many plugins at once and needs none of it.
+export const PluginSizesRecord = z.object({
+  installedBytes: z.number().int().nonnegative().nullable(),
+  dataBytes: z.number().int().nonnegative().nullable(),
+}).strict();
+export type PluginSizesRecord = z.infer<typeof PluginSizesRecord>;
+
+export const PluginSizesResult = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), sizes: PluginSizesRecord }).strict(),
+  z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
+]);
+export type PluginSizesResult = z.infer<typeof PluginSizesResult>;
 
 export const UninstallPluginPayload = PluginActionPayload.extend({
   confirmationToken: z.uuid(),
@@ -4080,6 +4257,18 @@ export interface DohcDesktopBridge {
   invokePluginPanelSdk(
     payload: InvokePluginPanelSdkPayload,
   ): Promise<InvokePluginPanelSdkResult>;
+  openPluginWebApp(payload: OpenPluginWebAppPayload): Promise<OpenPluginWebAppResult>;
+  onPluginWebAppOpened(
+    listener: (event: PluginWebAppOpenedEvent) => void,
+  ): () => void;
+  startPluginWebApp(
+    payload: StartPluginWebAppPayload,
+  ): Promise<StartPluginWebAppResult>;
+  setPluginWebAppBounds(payload: SetPluginWebAppBoundsPayload): Promise<void>;
+  stopPluginWebApp(payload: StopPluginWebAppPayload): Promise<void>;
+  onPluginWebAppFailed(
+    listener: (event: PluginWebAppFailedEvent) => void,
+  ): () => void;
   listPlugins(payload: ListPluginsPayload): Promise<ListPluginsResult>;
   installPlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   disablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
@@ -4088,7 +4277,10 @@ export interface DohcDesktopBridge {
   pluginUninstallPreflight(
     payload: PluginActionPayload,
   ): Promise<PluginUninstallPreflightResult>;
+  pluginSizes(payload: PluginActionPayload): Promise<PluginSizesResult>;
   uninstallPlugin(payload: UninstallPluginPayload): Promise<PluginActionResult>;
+  getPluginSettings(payload: PluginActionPayload): Promise<PluginSettingsResult>;
+  setPluginSettings(payload: SetPluginSettingsPayload): Promise<PluginSettingsResult>;
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;
   cloudLoginPoll(): Promise<CloudLoginPollResult>;

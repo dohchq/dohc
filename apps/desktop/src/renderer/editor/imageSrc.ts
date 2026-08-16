@@ -82,7 +82,7 @@ export function escapesWorkspaceRoot(workspacePath: string): boolean {
 // Builds the privileged URL the dohc-file protocol serves bytes from (mirrors
 // FileInspector.assetUrl). The main process re-validates containment against
 // the real workspace root, so this URL can never escape the workspace.
-function assetUrl(workspaceId: string, workspacePath: string): string {
+export function assetUrl(workspaceId: string, workspacePath: string): string {
   const encoded = workspacePath.split("/").map(encodeURIComponent).join("/");
   return `dohc-file://${workspaceId}/${encoded}`;
 }

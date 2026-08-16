@@ -1,4 +1,3 @@
-import { AlertTriangle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type {
   PluginPipelineError,
@@ -7,14 +6,18 @@ import type {
   PluginUninstallPreflightRecord,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import { Overlay } from "../Overlay";
 
-type LoadState =
-  | { status: "loading" }
-  | { status: "ready"; plugins: PluginStatusRecord[] }
-  | { status: "error"; message: string };
+// The plugin data layer, shared by the two surfaces that show a plugin: the
+// side-panel list (PluginsView) and the details tab (PluginDetailsPage). The
+// list decides which plugins to show and the page decides what one plugin can
+// do, but the statuses, the busy bookkeeping, the action calls and the
+// status-event merge are the same work — so they live here once.
+//
+// Each mount runs its own guarded list and its own scoped status listener.
+// That is deliberate: a details tab restored on launch must load without the
+// panel ever being opened.
 
-type PluginAction =
+export type PluginAction =
   | "install"
   | "disable"
   | "enable"
@@ -22,7 +25,12 @@ type PluginAction =
   | "preflight"
   | "uninstall";
 
-type Confirmation = {
+export type PluginLoadState =
+  | { status: "loading" }
+  | { status: "ready"; plugins: PluginStatusRecord[] }
+  | { status: "error"; message: string };
+
+export type PluginUninstallConfirmation = {
   plugin: PluginStatusRecord;
   confirmationToken: string;
   preflight: PluginUninstallPreflightRecord;
@@ -32,11 +40,6 @@ type PendingStatusEvent = {
   revision: number;
   event: PluginStatusChangedEvent;
 };
-
-const secondaryButton =
-  "rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:opacity-50";
-const dangerButton =
-  "rounded-md border border-danger/40 bg-bg px-2 py-1 text-[11px] text-danger transition-colors hover:bg-danger/10 disabled:opacity-50";
 
 function upsertPlugin(
   plugins: readonly PluginStatusRecord[],
@@ -64,13 +67,7 @@ function applyStatusEvents(
   }, [...plugins]);
 }
 
-function statusText(plugin: PluginStatusRecord): string {
-  if (plugin.status === "disabled-pending-approval") {
-    return "Disabled — approval required";
-  }
-  if (plugin.status === "disabled-pending-repair") {
-    return "Disabled — repair required";
-  }
+export function statusText(plugin: PluginStatusRecord): string {
   if (plugin.status === "disabled") {
     return plugin.disabledReason === "crash-loop"
       ? "Disabled after repeated crashes"
@@ -96,7 +93,15 @@ function statusText(plugin: PluginStatusRecord): string {
   return labels[plugin.status];
 }
 
-function actionLabel(action: PluginAction, busy: boolean): string {
+// One label per plugin, colored by what the state costs the user: a broken
+// plugin reads danger, a switched-off one warning, everything else quiet.
+export function statusTone(plugin: PluginStatusRecord): string {
+  if (["failed", "crashed", "invalid"].includes(plugin.status)) return "text-danger";
+  if (plugin.status.startsWith("disabled")) return "text-warning";
+  return "text-subtle";
+}
+
+export function actionLabel(action: PluginAction, busy: boolean): string {
   if (!busy) {
     const labels: Record<PluginAction, string> = {
       install: "Install",
@@ -133,7 +138,7 @@ function actionError(
   return `dohc could not ${verbs[action]} ${pluginId}. ${error.message}`;
 }
 
-function isPipelineBusy(plugin: PluginStatusRecord): boolean {
+export function isPipelineBusy(plugin: PluginStatusRecord): boolean {
   return [
     "queued",
     "snapshotting",
@@ -145,16 +150,20 @@ function isPipelineBusy(plugin: PluginStatusRecord): boolean {
   ].includes(plugin.status);
 }
 
-function canInstall(plugin: PluginStatusRecord): boolean {
+export function isInstalled(plugin: PluginStatusRecord): boolean {
+  return plugin.approvedHash !== null;
+}
+
+export function canInstall(plugin: PluginStatusRecord): boolean {
   return plugin.valid && plugin.status === "discovered" && plugin.approvedHash === null;
 }
 
 // A fresh install that never succeeded lands here with no approvedHash —
 // none of the other action predicates match that combination, so without
-// this the row has no control at all (CodeRabbit #779 R30). Retrying is the
+// this the plugin has no control at all (CodeRabbit #779 R30). Retrying is the
 // same installPlugin call as a first install; PluginPipeline's install()
 // always runs a full fresh build regardless of prior state.
-function canRetryInstall(plugin: PluginStatusRecord): boolean {
+export function canRetryInstall(plugin: PluginStatusRecord): boolean {
   return (
     plugin.valid &&
     plugin.status === "disabled-pending-repair" &&
@@ -162,7 +171,7 @@ function canRetryInstall(plugin: PluginStatusRecord): boolean {
   );
 }
 
-function canEnable(plugin: PluginStatusRecord): boolean {
+export function canEnable(plugin: PluginStatusRecord): boolean {
   return (
     plugin.status === "disabled" &&
     (plugin.disabledReason === "user" || plugin.disabledReason === "crash-loop")
@@ -172,10 +181,10 @@ function canEnable(plugin: PluginStatusRecord): boolean {
 // Deliberately does not require disabledReason === "approval". An out-of-band
 // edit to a plugin the user had already disabled holds for approval carrying
 // the prior "user" reason, and that combination matched no other predicate —
-// the row offered no action at all and the user could only recover by
+// the plugin offered no action at all and the user could only recover by
 // restoring the old bytes. Approving from here keeps the disabled bit:
 // PluginPipeline.approve reads the same reason and rebuilds without starting.
-function canApprove(plugin: PluginStatusRecord): boolean {
+export function canApprove(plugin: PluginStatusRecord): boolean {
   return (
     plugin.status === "disabled-pending-approval" &&
     plugin.approvedHash !== null &&
@@ -184,10 +193,23 @@ function canApprove(plugin: PluginStatusRecord): boolean {
   );
 }
 
+// An installed, non-disabled plugin can open its web apps. openPluginWebApp
+// re-reads and re-verifies the manifest in main, so this predicate only
+// decides whether the control is worth showing.
+export function canOpenWebApps(plugin: PluginStatusRecord): boolean {
+  return (
+    plugin.valid &&
+    plugin.approvedHash !== null &&
+    plugin.webApps.length > 0 &&
+    !plugin.status.startsWith("disabled") &&
+    plugin.status !== "uninstalling"
+  );
+}
+
 // Uninstall is the one action an installed plugin keeps once its manifest
 // breaks: every other one needs the manifest the pipeline can no longer read,
 // so it would fail on click (#779 round 8 D2).
-function canDisable(plugin: PluginStatusRecord): boolean {
+export function canDisable(plugin: PluginStatusRecord): boolean {
   return (
     plugin.valid &&
     plugin.approvedHash !== null &&
@@ -198,11 +220,58 @@ function canDisable(plugin: PluginStatusRecord): boolean {
   );
 }
 
-export function PluginSettings(props: { workspaceId: string }) {
-  const [load, setLoad] = useState<LoadState>({ status: "loading" });
+/**
+ * What to call a plugin on screen. A manifest may name the plugin for people;
+ * where it does not, the id is the name, which is what every plugin surface
+ * showed before manifests carried a display name.
+ */
+export function pluginTitle(plugin: PluginStatusRecord): string {
+  return plugin.displayName ?? plugin.id;
+}
+
+// Every name a plugin answers to, plus what it says it does. A reader
+// searching "agent" should find the plugin whose description says so, not
+// only the one whose folder happens to spell it.
+export function matchesFilter(plugin: PluginStatusRecord, filter: string): boolean {
+  const needle = filter.trim().toLowerCase();
+  if (needle.length === 0) return true;
+  return [
+    plugin.id,
+    plugin.directoryName,
+    plugin.displayName,
+    plugin.description,
+    plugin.publisher,
+  ].some((field) => field !== null && field.toLowerCase().includes(needle));
+}
+
+export interface PluginCatalog {
+  load: PluginLoadState;
+  busy: Record<string, PluginAction | undefined>;
+  openingWebApp: string | null;
+  errors: Record<string, string | undefined>;
+  confirmation: PluginUninstallConfirmation | null;
+  reload: () => void;
+  runAction: (
+    plugin: PluginStatusRecord,
+    action: Exclude<PluginAction, "preflight" | "uninstall">,
+  ) => void;
+  openWebApp: (plugin: PluginStatusRecord, webAppId: string) => void;
+  prepareUninstall: (plugin: PluginStatusRecord) => void;
+  confirmUninstall: () => void;
+  cancelUninstall: () => void;
+}
+
+export function webAppKey(pluginId: string, webAppId: string): string {
+  return `${pluginId}\0${webAppId}`;
+}
+
+export function usePluginCatalog(workspaceId: string): PluginCatalog {
+  const [load, setLoad] = useState<PluginLoadState>({ status: "loading" });
   const [busy, setBusy] = useState<Record<string, PluginAction | undefined>>({});
+  const [openingWebApp, setOpeningWebApp] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string | undefined>>({});
-  const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const [confirmation, setConfirmation] =
+    useState<PluginUninstallConfirmation | null>(null);
   // The request token orders list responses. The workspace epoch invalidates
   // list and action responses after unmount or a workspace switch.
   const listRequestToken = useRef(0);
@@ -218,7 +287,7 @@ export function PluginSettings(props: { workspaceId: string }) {
     const revisionAtStart = statusRevision.current;
     setLoad({ status: "loading" });
     try {
-      const result = await bridge().listPlugins({ workspaceId: props.workspaceId });
+      const result = await bridge().listPlugins({ workspaceId });
       if (
         requestToken !== listRequestToken.current ||
         epoch !== workspaceEpoch.current
@@ -259,14 +328,15 @@ export function PluginSettings(props: { workspaceId: string }) {
     setBusy({});
     setErrors({});
     setConfirmation(null);
+    // An open still in flight for the workspace being left skips its own
+    // cleanup on the epoch guard, so this workspace clears it. Without this
+    // every Open control here stays disabled for the rest of the session.
+    setOpeningWebApp(null);
     pendingStatusEvents.current.clear();
     statusRevision.current = 0;
     void loadPlugins();
     const unsubscribe = bridge().onPluginStatusChanged((event) => {
-      if (
-        epoch !== workspaceEpoch.current ||
-        event.workspaceId !== props.workspaceId
-      ) {
+      if (epoch !== workspaceEpoch.current || event.workspaceId !== workspaceId) {
         return;
       }
       const pending = {
@@ -292,7 +362,7 @@ export function PluginSettings(props: { workspaceId: string }) {
     };
     // Each workspace gets one guarded list and one scoped status listener.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.workspaceId]);
+  }, [workspaceId]);
 
   function replacePlugin(plugin: PluginStatusRecord) {
     setLoad((current) =>
@@ -327,7 +397,7 @@ export function PluginSettings(props: { workspaceId: string }) {
     setBusy((current) => ({ ...current, [plugin.id]: action }));
     setErrors((current) => ({ ...current, [plugin.id]: undefined }));
     try {
-      const payload = { workspaceId: props.workspaceId, pluginId: plugin.id };
+      const payload = { workspaceId, pluginId: plugin.id };
       const result =
         action === "install"
           ? await bridge().installPlugin(payload)
@@ -359,13 +429,40 @@ export function PluginSettings(props: { workspaceId: string }) {
     }
   }
 
+  // The tab opens from main and takes focus there.
+  async function openWebApp(plugin: PluginStatusRecord, webAppId: string) {
+    const epoch = workspaceEpoch.current;
+    const key = webAppKey(plugin.id, webAppId);
+    setOpeningWebApp(key);
+    setErrors((current) => ({ ...current, [plugin.id]: undefined }));
+    try {
+      await bridge().openPluginWebApp({
+        workspaceId,
+        pluginRoot: plugin.rootPath,
+        pluginId: plugin.id,
+        webAppId,
+      });
+    } catch (error) {
+      if (epoch !== workspaceEpoch.current) return;
+      const reason = error instanceof Error ? error.message : "Try again.";
+      setErrors((current) => ({
+        ...current,
+        [plugin.id]: `dohc could not open the app from ${plugin.id}. ${reason}`,
+      }));
+    } finally {
+      if (epoch === workspaceEpoch.current) {
+        setOpeningWebApp((current) => (current === key ? null : current));
+      }
+    }
+  }
+
   async function prepareUninstall(plugin: PluginStatusRecord) {
     const epoch = workspaceEpoch.current;
     setBusy((current) => ({ ...current, [plugin.id]: "preflight" }));
     setErrors((current) => ({ ...current, [plugin.id]: undefined }));
     try {
       const result = await bridge().pluginUninstallPreflight({
-        workspaceId: props.workspaceId,
+        workspaceId,
         pluginId: plugin.id,
       });
       if (epoch !== workspaceEpoch.current) return;
@@ -403,7 +500,7 @@ export function PluginSettings(props: { workspaceId: string }) {
     setBusy((current) => ({ ...current, [pluginId]: "uninstall" }));
     try {
       const result = await bridge().uninstallPlugin({
-        workspaceId: props.workspaceId,
+        workspaceId,
         pluginId,
         confirmationToken: currentConfirmation.confirmationToken,
       });
@@ -439,262 +536,17 @@ export function PluginSettings(props: { workspaceId: string }) {
     }
   }
 
-  if (load.status === "loading") {
-    return <p className="m-0 text-[11px] text-subtle">Loading plugins…</p>;
-  }
-  if (load.status === "error") {
-    return (
-      <div className="flex items-center gap-2 text-[11px]">
-        <p data-testid="plugins-load-error" role="alert" className="m-0 text-danger">
-          {load.message}
-        </p>
-        <button
-          type="button"
-          onClick={() => void loadPlugins()}
-          className={secondaryButton}
-        >
-          Retry
-        </button>
-      </div>
-    );
-  }
-  if (load.plugins.length === 0) {
-    return (
-      <p data-testid="plugins-empty" className="m-0 text-[11px] text-subtle">
-        No plugins found in this workspace.
-      </p>
-    );
-  }
-
-  return (
-    <>
-      <ul
-        data-testid="plugins-list"
-        className="m-0 list-none divide-y divide-line overflow-hidden rounded-lg border border-line p-0"
-      >
-        {load.plugins.map((plugin) => {
-          const busyAction = busy[plugin.id];
-          const disabled = busyAction !== undefined || isPipelineBusy(plugin);
-          const installed = plugin.approvedHash !== null;
-          return (
-            <li
-              key={plugin.id}
-              data-testid="plugin-row"
-              data-plugin-id={plugin.id}
-              className="bg-panel px-3 py-2.5"
-            >
-              <div className="flex items-start gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="truncate font-mono text-[12px] text-ink">
-                    {plugin.id}
-                  </div>
-                  <div
-                    data-testid="plugin-status"
-                    data-status={plugin.status}
-                    className="mt-0.5 text-[11px] text-subtle"
-                  >
-                    {statusText(plugin)}
-                  </div>
-                </div>
-                <div className="flex flex-wrap justify-end gap-1.5">
-                  {canInstall(plugin) ? (
-                    <button
-                      type="button"
-                      data-testid="plugin-install"
-                      disabled={disabled}
-                      onClick={() => void runAction(plugin, "install")}
-                      className={secondaryButton}
-                    >
-                      {actionLabel("install", busyAction === "install")}
-                    </button>
-                  ) : null}
-                  {canRetryInstall(plugin) ? (
-                    <button
-                      type="button"
-                      data-testid="plugin-retry-install"
-                      disabled={disabled}
-                      onClick={() => void runAction(plugin, "install")}
-                      className={secondaryButton}
-                    >
-                      {busyAction === "install" ? "Retrying install" : "Retry install"}
-                    </button>
-                  ) : null}
-                  {canDisable(plugin) ? (
-                    <button
-                      type="button"
-                      data-testid="plugin-disable"
-                      disabled={disabled}
-                      onClick={() => void runAction(plugin, "disable")}
-                      className={secondaryButton}
-                    >
-                      {actionLabel("disable", busyAction === "disable")}
-                    </button>
-                  ) : null}
-                  {canEnable(plugin) ? (
-                    <button
-                      type="button"
-                      data-testid="plugin-enable"
-                      disabled={disabled}
-                      onClick={() => void runAction(plugin, "enable")}
-                      className={secondaryButton}
-                    >
-                      {actionLabel("enable", busyAction === "enable")}
-                    </button>
-                  ) : null}
-                  {canApprove(plugin) ? (
-                    <button
-                      type="button"
-                      data-testid="plugin-approve"
-                      disabled={disabled}
-                      onClick={() => void runAction(plugin, "approve")}
-                      className={secondaryButton}
-                    >
-                      {actionLabel("approve", busyAction === "approve")}
-                    </button>
-                  ) : null}
-                  {installed ? (
-                    <button
-                      type="button"
-                      data-testid="plugin-uninstall"
-                      disabled={disabled}
-                      onClick={() => void prepareUninstall(plugin)}
-                      className={dangerButton}
-                    >
-                      {actionLabel("preflight", busyAction === "preflight")}
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-              {plugin.error ? (
-                <p className="m-0 mt-2 text-[11px] text-danger">
-                  {plugin.error.message}
-                </p>
-              ) : null}
-              {errors[plugin.id] ? (
-                <p
-                  data-testid="plugin-action-error"
-                  role="alert"
-                  className="m-0 mt-2 text-[11px] text-danger"
-                >
-                  {errors[plugin.id]}
-                </p>
-              ) : null}
-              {plugin.warnings.map((warning) => (
-                <p key={warning} className="m-0 mt-2 text-[11px] text-warning">
-                  {warning}
-                </p>
-              ))}
-            </li>
-          );
-        })}
-      </ul>
-
-      {confirmation ? (
-        <Overlay
-          onClose={() => {
-            if (busy[confirmation.plugin.id] !== "uninstall") {
-              setConfirmation(null);
-            }
-          }}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="plugin-uninstall-title"
-            data-testid="plugin-uninstall-dialog"
-            className="dohc-elevated flex max-h-[calc(100vh-32px)] w-[min(520px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-panel"
-          >
-            <div className="min-h-0 overflow-auto p-5">
-              <h2
-                id="plugin-uninstall-title"
-                className="m-0 text-sm font-semibold text-ink"
-              >
-                {`Uninstall ${confirmation.plugin.id}?`}
-              </h2>
-              <p className="m-0 mt-2 text-xs text-muted">
-                This removes the plugin source and build files from this workspace.
-              </p>
-              {confirmation.preflight.warning ? (
-                <div
-                  data-testid="plugin-uninstall-warning"
-                  className="mt-4 rounded-lg border border-warning/40 bg-warning/10 p-3"
-                >
-                  <div className="flex items-start gap-2 text-xs text-warning">
-                    <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0" />
-                    <p className="m-0">{confirmation.preflight.warning.summary}</p>
-                  </div>
-                  <ul className="mb-0 mt-2 space-y-1 pl-5 text-[11px] text-muted">
-                    {confirmation.preflight.warning.details.map((detail) => (
-                      <li key={detail}>{detail}</li>
-                    ))}
-                  </ul>
-                  {confirmation.preflight.warning.notRecoverablePathSample.length > 0 ? (
-                    <div className="mt-3">
-                      <p className="m-0 text-[11px] font-medium text-danger">
-                        dohc cannot confirm history holds these files:
-                      </p>
-                      <ul
-                        data-testid="plugin-uninstall-not-recoverable"
-                        className="mb-0 mt-1 list-none space-y-1 p-0"
-                      >
-                        {confirmation.preflight.warning.notRecoverablePathSample.map(
-                          (path) => (
-                            <li
-                              key={path}
-                              className="break-all rounded border border-danger/30 bg-bg px-2 py-1 font-mono text-[11px] text-danger"
-                            >
-                              {path}
-                            </li>
-                          ),
-                        )}
-                      </ul>
-                      {confirmation.preflight.warning.counts.notRecoverableFromHistory >
-                          confirmation.preflight.warning.notRecoverablePathSample.length
-                        ? (
-                          <p
-                            data-testid="plugin-uninstall-not-recoverable-more"
-                            className="m-0 mt-1 text-[11px] text-danger"
-                          >
-                            {`and ${
-                              confirmation.preflight.warning.counts
-                                .notRecoverableFromHistory -
-                              confirmation.preflight.warning.notRecoverablePathSample
-                                .length
-                            } more`}
-                          </p>
-                        )
-                        : null}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-            <div className="flex shrink-0 justify-end gap-2 border-t border-line p-3">
-              <button
-                type="button"
-                autoFocus
-                disabled={busy[confirmation.plugin.id] === "uninstall"}
-                onClick={() => setConfirmation(null)}
-                className={secondaryButton}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                data-testid="plugin-uninstall-confirm"
-                disabled={busy[confirmation.plugin.id] === "uninstall"}
-                onClick={() => void confirmUninstall()}
-                className="rounded-md bg-danger px-3 py-1.5 text-[11px] font-medium text-white disabled:opacity-50"
-              >
-                {actionLabel(
-                  "uninstall",
-                  busy[confirmation.plugin.id] === "uninstall",
-                )}
-              </button>
-            </div>
-          </div>
-        </Overlay>
-      ) : null}
-    </>
-  );
+  return {
+    load,
+    busy,
+    openingWebApp,
+    errors,
+    confirmation,
+    reload: () => void loadPlugins(),
+    runAction: (plugin, action) => void runAction(plugin, action),
+    openWebApp: (plugin, webAppId) => void openWebApp(plugin, webAppId),
+    prepareUninstall: (plugin) => void prepareUninstall(plugin),
+    confirmUninstall: () => void confirmUninstall(),
+    cancelUninstall: () => setConfirmation(null),
+  };
 }

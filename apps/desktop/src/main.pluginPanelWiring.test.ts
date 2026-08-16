@@ -9,6 +9,21 @@ function handler(channel: string): string {
   return mainSource.slice(start, mainSource.indexOf("\n  });", start));
 }
 
+function functionSource(signature: string): string {
+  const start = mainSource.indexOf(signature);
+  expect(start).toBeGreaterThan(-1);
+  const end = mainSource.indexOf("\n}\n", start);
+  expect(end).toBeGreaterThan(start);
+  return mainSource.slice(start, end);
+}
+
+const stopPluginPanelSource = () =>
+  functionSource("async function stopPluginPanel(");
+// The claim accounting both close paths share (panel close and web app tab
+// close). Its callers are pinned here and in main.pluginWebAppWiring.test.ts.
+const stopPluginHostIfUnclaimedSource = () =>
+  functionSource("async function stopPluginHostIfUnclaimed(");
+
 describe("plugin panel main-process wiring", () => {
   it("validates a contained plugin registration before starting its host", () => {
     const open = handler("openPluginPanel");
@@ -48,18 +63,14 @@ describe("plugin panel main-process wiring", () => {
     expect(start).toContain("() => ensurePluginStarted(workspace, plugin)");
     expect(start).toContain("await stopRunningPluginPanelPreview(previous);");
 
-    const stopStart = mainSource.indexOf("async function stopPluginPanel(");
-    const stopEnd = mainSource.indexOf(
-      "\n}\n\nasync function stopPluginPanelsForWorkspace",
-      stopStart,
-    );
-    expect(stopEnd).toBeGreaterThan(-1);
-    const stop = mainSource.slice(stopStart, stopEnd);
+    const stop = stopPluginPanelSource();
     expect(stop).toContain("stopPluginPanelWithLock(");
     expect(stop).toContain("withPluginHostLifecycleLock,");
     expect(stop).toContain("await stopRunningPluginPanelPreview(panel);");
+    // The host itself is released through the shared claim accounting, whose
+    // body this file pins below.
     expect(stop).toContain(
-      "await pluginPipelines.get(workspaceId)?.host.stop(pluginId);",
+      "await stopPluginHostIfUnclaimed(workspaceId, pluginId);",
     );
   });
 
@@ -198,15 +209,17 @@ describe("plugin panel main-process wiring", () => {
     // behavior in pluginPanelRegistration.test.ts. Source-text assertions
     // about it survived a mutation that claimed the host unconditionally
     // (CERT779J S1), so they are gone.
-    const stopPanel = mainSource.slice(
-      mainSource.indexOf("async function stopPluginPanel("),
-      mainSource.indexOf("\n}\n\nasync function stopPluginPanelsForWorkspace"),
+    // The panel close reaches the host only through the shared claim
+    // accounting, so the guard lives in that helper's body.
+    expect(stopPluginPanelSource()).toContain(
+      "await stopPluginHostIfUnclaimed(workspaceId, pluginId);",
     );
-    const hasAnotherAt = stopPanel.indexOf("hasAnotherPanel");
-    const deleteAt = stopPanel.indexOf(
+    const unclaimed = stopPluginHostIfUnclaimedSource();
+    const hasAnotherAt = unclaimed.indexOf("hasAnotherPanel");
+    const deleteAt = unclaimed.indexOf(
       "panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))",
     );
-    const stopHostAt = stopPanel.indexOf(
+    const stopHostAt = unclaimed.indexOf(
       "await pluginPipelines.get(workspaceId)?.host.stop(pluginId);",
     );
     // MUTATION (ownership): dropping the panelStartedHosts.delete() guard

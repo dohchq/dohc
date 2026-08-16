@@ -17,6 +17,125 @@ required. Do not frame plugins as "for the human" plus "for the agents";
 Ice rejected that framing. Agent tools are one optional contribution among
 many.
 
+## The manifest
+
+`dohc-plugin.json` is the whole declaration. Every field except `version`,
+`name`, and `entry` is optional, and every surface falls back on its own when
+one is absent — a plugin that declares nothing still installs, runs, and gets
+a row.
+
+| Field | Shape | Bound |
+| --- | --- | --- |
+| `version` | `1` | The only accepted value |
+| `name` | npm package name | 214 chars |
+| `displayName` | What to call the plugin on screen | 120 chars |
+| `description` | One line: what the plugin does | 280 chars |
+| `publisher` | Who publishes it | 120 chars |
+| `pluginVersion` | What the plugin calls this build | 40 chars |
+| `repository` | Where the source lives, `https://` only | 2,048 chars |
+| `issues` | Where to report a problem, `https://` only | 2,048 chars |
+| `license` | Licence name, SPDX id, or `https://` URL | 120 chars |
+| `icon` | Plugin-root-relative `.png` or `.svg` | 1,024-char path |
+| `entry` | Plugin-root-relative module | 1,024-char path |
+| `panels` | `{ id, title, entry }` | 100 entries |
+| `commands` | `{ id, title }` | 200 entries |
+| `webApps` | `{ id, title }` | 100 entries |
+| `settings` | `{ key, type, label, description?, default, options? }` | 20 entries |
+| `allowSkippedScripts` | `true`, or npm package names | 300 names |
+
+Two rules the bounds follow. Ids and titles are unique within their array.
+Every path is refused if it is absolute, carries a `..` segment, or holds a
+NUL byte — the manifest cannot name a file outside the plugin's own folder.
+
+These per-field bounds do not sum to the reader's 256 KiB file cap, and are
+not meant to. `readPluginManifestFile` checks the file's size before it parses
+anything, so a manifest at every bound at once is refused by size with the cap
+named. Each bound only has to be right for its own field.
+
+### What the details page shows
+
+The plugin's page carries a right rail of what dohc knows about the plugin as
+an installation: its identifier, the version it calls this build, the content
+hash of the source the user approved, what it takes up on disk, and links to
+its source, its issues, and its licence.
+
+Every row appears only where its fact exists, and a section with no rows
+prints no heading. This is the whole rule, and it is what keeps the rail
+honest: dohc has no marketplace, so it has no publish date, no update date, no
+rating, no install count, and no category to put a plugin in. VS Code's rail
+shows all of those. Inventing any of them would be the one thing a reference
+surface must never do.
+
+Two of these rows are dohc's own, and a marketplace could not print them.
+**Approved source** is the content hash the user approved, which is dohc's
+version-of-record for what actually runs — `pluginVersion` is a string the
+author chose and dohc never compares it to anything. **Installed size** and
+**Stored data** are measured on request rather than recorded, by the same walk
+the uninstall preflight uses, so the rail and the uninstall dialog can never
+report different bytes for the same directory.
+
+There are no install or approval timestamps, because the pipeline records
+none. `PluginRecord` holds five fields and not one of them is a time. A "last
+updated" row would have to be invented, so there is not one.
+
+`pluginVersion`, `repository`, `issues`, and `license` are display only.
+`repository` and `issues` are `https://` only and capped at exactly the length
+the audited external-open path accepts, so a manifest can never declare a link
+that every click refuses.
+
+### Settings
+
+A plugin declares what the user may set, and dohc renders it. `type` is
+`string`, `boolean`, `number`, or `select`; a `select` carries 1–8 `options`
+and its `default` must be one of them. Keys are unique, a `default` is
+required, and its type has to match the setting it belongs to — the schema is
+a union on `type`, so nothing downstream checks that a boolean setting shipped
+a string default.
+
+Answers live in the workspace as text, one file for every plugin, keyed by
+plugin id:
+
+```
+.dohc/plugin-settings.local.json
+{ "t3-code": { "port": 4317 } }
+```
+
+One file rather than one per plugin, because that is what a reader wants open
+when they ask what this workspace has been told. This is data the user typed,
+which is why it lives in the workspace at all — plugin **code** and its build
+output stay outside it (see the device-approval constraint above), and nothing
+here executes.
+
+The manifest is what gives a stored value meaning, and it is checked on both
+sides of the file. A value is refused on write unless the plugin declares that
+key at that type. On read, a value that no longer fits its declaration — a
+manifest changed under a file written for an older one — falls back to the
+declared default instead of reaching the plugin, and a key no plugin declares
+is dropped. So a settings file edited by hand, or arriving over sync, can only
+ever set a setting some plugin actually asked for.
+
+The plugin sees only its own entry. Every settings call names a plugin, and
+only a plugin this workspace discovered has declarations to answer with.
+
+The SDK surface is two members, `ctx.settings.get()` and
+`ctx.settings.onChange(listener)`. The host sends the resolved values with
+`plugin.activate`, so a plugin never starts without its settings and never has
+to ask; on every change it sends `plugin.settingsChanged`. That is a request
+like every other host-to-plugin message rather than a new notification path —
+the reply tells the host the plugin took the change, and the host does not
+wait on it, because a slow plugin must never hold up a save the user already
+made. A plugin that is not running needs no telling: it reads the new values
+from its next activation.
+
+The icon is checked twice, because the schema can only read the path. The
+manifest must name a `.png` or `.svg` inside the plugin root; discovery then
+confirms the file is really there, is a real file rather than a link or a
+directory, and is 512 KiB or smaller — an order of magnitude above the largest
+icon measured (t3's own logo is 1 KiB). An icon that fails any of those checks
+is reported as a diagnostic and simply not advertised. The plugin stays valid
+and its row falls back to the glyph tile, because an icon is decoration and
+decoration must never cost a reader a row.
+
 ## Design rules
 
 1. **Plugins are code, not prompts.** TypeScript against one SDK. Skills and

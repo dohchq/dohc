@@ -10,7 +10,7 @@ import {
 } from "@testing-library/react";
 import { configure } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 
@@ -43,8 +43,11 @@ import type {
   WithdrawShareChangesResult,
   McpConfigResult,
   PluginPanelOpenedEvent,
+  PluginStatusRecord,
+  PluginWebAppOpenedEvent,
   ReadWorkspaceTextPayload,
   ReadEngineMomentResult,
+  SetPluginWebAppBoundsPayload,
   RefreshSharedViewResult,
   StartAgentRunResult,
   SwitchWorkspaceVersionResult,
@@ -94,7 +97,9 @@ import {
   OPEN_EDITORS_DEFAULT_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
   momentDiffTabPath,
+  pluginDetailsTabPath,
   pluginPanelTabPath,
+  pluginWebAppTabPath,
   versionCompareTabPath,
 } from "./workbench/workbenchState";
 import {
@@ -286,11 +291,16 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
   let pluginPanelOpenedCallback:
     | ((event: PluginPanelOpenedEvent) => void)
     | null = null;
+  let pluginWebAppOpenedCallback:
+    | ((event: PluginWebAppOpenedEvent) => void)
+    | null = null;
   return {
     emitWorkspaceActivity: () => activityCallback?.(),
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
     emitPluginPanelOpened: (event: PluginPanelOpenedEvent) =>
       pluginPanelOpenedCallback?.(event),
+    emitPluginWebAppOpened: (event: PluginWebAppOpenedEvent) =>
+      pluginWebAppOpenedCallback?.(event),
     getWorkspaceUiState: vi.fn(() => uiStatePromise),
     // The shell re-reads the registry to pick up a share's durable skip
     // record. Default: a workspace with nothing skipped.
@@ -533,6 +543,36 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
         };
       },
     ),
+    onPluginWebAppOpened: vi.fn(
+      (callback: (event: PluginWebAppOpenedEvent) => void) => {
+        pluginWebAppOpenedCallback = callback;
+        return () => {
+          pluginWebAppOpenedCallback = null;
+        };
+      },
+    ),
+    listPlugins: vi.fn(async () => ({
+      ok: true as const,
+      plugins: [] as PluginStatusRecord[],
+    })),
+    // The details rail measures on mount. Without this the page crashes into
+    // the editor's error boundary a tick after it paints, so anything the
+    // page does later is a race the test can only lose.
+    pluginSizes: vi.fn(async () => ({
+      ok: true as const,
+      sizes: { installedBytes: null, dataBytes: null },
+    })),
+    onPluginStatusChanged: vi.fn(() => () => undefined),
+    startPluginWebApp: vi.fn(async () => ({
+      status: "ok" as const,
+      title: "T3 Code",
+      origin: "http://127.0.0.1:49161",
+    })),
+    setPluginWebAppBounds: vi.fn(
+      async (_payload: SetPluginWebAppBoundsPayload) => undefined,
+    ),
+    stopPluginWebApp: vi.fn(async () => undefined),
+    onPluginWebAppFailed: vi.fn(() => () => undefined),
     emitMenuCommand: (command: MenuCommandId) => menuCallback?.(command),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.
@@ -869,6 +909,293 @@ describe("plugin panel tabs", () => {
         panelId: "main",
       }),
     );
+  });
+});
+
+describe("plugin web app tabs", () => {
+  const path = pluginWebAppTabPath("t3-code", "app");
+  const GUEST_RECT = {
+    x: 10,
+    y: 20,
+    width: 640,
+    height: 480,
+    top: 20,
+    left: 10,
+    right: 650,
+    bottom: 500,
+    toJSON: () => ({}),
+  } as DOMRect;
+  let rectSpy: { mockRestore: () => void } | null = null;
+
+  beforeEach(() => {
+    // The file's module-level stub is removed by the global afterEach's
+    // unstubAllGlobals, so every test after the first must stub it again.
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+  });
+
+  afterEach(() => {
+    rectSpy?.mockRestore();
+    rectSpy = null;
+  });
+
+  function lastReportedVisibility(
+    bridge: ReturnType<typeof makeBridge>,
+  ): boolean | undefined {
+    const calls = bridge.setPluginWebAppBounds.mock.calls;
+    return calls.at(-1)?.[0]?.visible;
+  }
+
+  it("explains the 100 open-tab limit when the plugin's app cannot open", async () => {
+    const editorGroups = Array.from({ length: 100 }, (_, index) => ({
+      id: `group-${index}`,
+      tabs: [`file-${index}.md`],
+      activeTab: `file-${index}.md`,
+      size: 0.01,
+    }));
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups,
+        activeEditorGroup: "group-0",
+      }),
+    );
+    renderShell(bridge);
+    await screen.findByTestId("tab-file-0.md");
+
+    act(() => {
+      bridge.emitPluginWebAppOpened({
+        workspaceId: WORKSPACE.workspaceId,
+        pluginId: "t3-code",
+        webAppId: "app",
+      });
+    });
+
+    // MUTATION (open the tab without reading the refusal): the user clicks
+    // Open in plugin settings, the dialog closes, and nothing appears — with
+    // nothing on screen naming the limit that refused it.
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain(
+      "This workspace has 100 open tabs; the limit is 100. Close a tab to open another tab.",
+    );
+    expect(screen.queryByTestId(`tab-${path}`)).toBeNull();
+  });
+
+  it("labels the tab with the title the plugin's manifest declares", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs([path], path)),
+    );
+    renderShell(bridge);
+
+    const tab = await screen.findByTestId(`tab-${path}`);
+    // MUTATION (label from the tab path): the tab reads "app", the id, and
+    // the name the user installed never appears. The title arrives with the
+    // app's own start — no second trip to main, which racing the plugin's
+    // on-demand host start proved to break it (e2e, 4 of 6 runs).
+    await waitFor(() => expect(tab.textContent).toContain("T3 Code"));
+    await waitFor(() => expect(tab.title).toBe("t3-code — T3 Code"));
+  });
+
+  it("never carries one workspace's title onto another workspace's tab", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs([path], path)),
+    );
+    const view = renderShell(bridge);
+    const tab = await screen.findByTestId(`tab-${path}`);
+    await waitFor(() => expect(tab.textContent).toContain("T3 Code"));
+
+    // The same plugin id can be installed at another title in another
+    // workspace, so the learned title is scoped to the workspace that
+    // answered — and the next workspace's own start is what relabels it.
+    const pending = deferred<{ status: "ok"; title: string; origin: string }>();
+    bridge.startPluginWebApp.mockReturnValueOnce(pending.promise);
+    const otherWorkspace: Workspace = {
+      ...WORKSPACE,
+      workspaceId: "ws-other",
+      rootPath: "/home/ice/dohc/other",
+    };
+    view.rerender(
+      <DesktopWorkspaceShell
+        workspace={otherWorkspace}
+        workspaces={[otherWorkspace]}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+
+    // MUTATION (drop the workspace scope): the tab keeps showing the first
+    // workspace's title for an app that has not started here.
+    await waitFor(() =>
+      expect(screen.getByTestId(`tab-${path}`).textContent).not.toContain(
+        "T3 Code",
+      ),
+    );
+
+    await act(async () => {
+      pending.resolve({
+        status: "ok",
+        title: "T3 Code (other)",
+        origin: "http://127.0.0.1:49162",
+      });
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId(`tab-${path}`).textContent).toContain(
+        "T3 Code (other)",
+      ),
+    );
+  });
+
+  // A WebContentsView guest composites above the whole renderer. Nothing the
+  // shell paints can cover it, so an overlay that overlaps the editor area
+  // would take clicks meant for the dialog under the pointer.
+  it("hides the guest while the command palette is open", async () => {
+    rectSpy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockReturnValue(GUEST_RECT);
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs([path], path)),
+    );
+    renderShell(bridge);
+    await screen.findByTestId("plugin-web-app-frame");
+    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(true));
+
+    fireEvent(
+      window,
+      new KeyboardEvent("keydown", {
+        key: "K",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await screen.findByTestId("command-palette");
+
+    // MUTATION (drop the overlay signal): the guest keeps painting over the
+    // palette and keeps its clicks.
+    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(false));
+  });
+
+  it("hides the guest while the settings dialog is open, and restores it after", async () => {
+    rectSpy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockReturnValue(GUEST_RECT);
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs([path], path)),
+    );
+    renderShell(bridge);
+    await screen.findByTestId("plugin-web-app-frame");
+    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(true));
+
+    act(() => bridge.emitMenuCommand("settings"));
+    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(false));
+
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(true));
+  });
+});
+
+describe("plugin details tabs", () => {
+  const detailsPath = pluginDetailsTabPath("t3-code");
+
+  function withPlugins(
+    bridge: ReturnType<typeof makeBridge>,
+    displayName: string | null = null,
+  ) {
+    bridge.listPlugins = vi.fn(async () => ({
+      ok: true as const,
+      plugins: [
+        {
+          id: "t3-code",
+          directoryName: "t3-code",
+          rootPath: "/workspace/plugins/t3-code",
+          valid: true,
+          status: "ready",
+          disabledReason: null,
+          runtimeStatus: "ready",
+          sourceHash: "a".repeat(64),
+          approvedHash: "a".repeat(64),
+          installedBaselineHash: "a".repeat(64),
+          displayName,
+          description: null,
+          publisher: null,
+          pluginVersion: null,
+          repository: null,
+          issues: null,
+          license: null,
+          icon: null,
+          settings: [],
+          webApps: [],
+          diagnostics: [],
+          warnings: [],
+          error: null,
+        },
+      ] as PluginStatusRecord[],
+    }));
+    return bridge;
+  }
+
+  it("opens a plugin's details tab from its row in the plugins list", async () => {
+    const bridge = withPlugins(makeBridge(Promise.resolve(STORED_STATE)));
+    renderShell(bridge);
+
+    await userEvent.click(await screen.findByTestId("activity-plugins"));
+    await userEvent.click(await screen.findByTestId("plugin-open-details"));
+
+    const tab = await screen.findByTestId(`tab-${detailsPath}`);
+    // This plugin declares no name of its own, so the id is its name. The
+    // tooltip is what says which of a plugin's tabs this one is.
+    expect(tab.textContent).toContain("t3-code");
+    expect(tab.title).toBe("Plugin details: t3-code");
+    // The row now reads as the selected one, like the explorer's open file.
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("plugin-row").getAttribute("data-selected"),
+      ).toBe("true"),
+    );
+  });
+
+  it("restores a plugin's details tab and mounts its page", async () => {
+    const bridge = withPlugins(
+      makeBridge(Promise.resolve(storedStateWithTabs([detailsPath], detailsPath))),
+    );
+    renderShell(bridge);
+
+    const tab = await screen.findByTestId(`tab-${detailsPath}`);
+    expect(tab.title).toBe("Plugin details: t3-code");
+    const page = await screen.findByTestId("plugin-details-page");
+    expect(page.getAttribute("data-plugin-id")).toBe("t3-code");
+  });
+
+  // The row, the page header, and the tab are three views of one plugin. Once
+  // the page has read the manifest, all three say the name the user installed.
+  it("relabels the details tab with the plugin's name once its page reads it", async () => {
+    const bridge = withPlugins(
+      makeBridge(Promise.resolve(storedStateWithTabs([detailsPath], detailsPath))),
+      "T3 Code",
+    );
+    renderShell(bridge);
+
+    const tab = await screen.findByTestId(`tab-${detailsPath}`);
+    // MUTATION (drop the label from the details branch): the tab keeps
+    // reading "t3-code" while the page header reads "T3 Code".
+    await waitFor(() => expect(tab.textContent).toContain("T3 Code"));
+    expect(
+      within(await screen.findByTestId("plugin-details-page")).getByRole(
+        "heading",
+        { name: "T3 Code" },
+      ),
+    ).toBeTruthy();
+    // The id still separates this tab from the plugin's app tab.
+    expect(tab.title).toBe("Plugin details: t3-code");
   });
 });
 
@@ -6320,6 +6647,24 @@ describe("content search", () => {
     const reopenedInclude = await screen.findByTestId("search-include");
     expect((reopenedInclude as HTMLInputElement).value).toBe("*.md");
     expect(screen.getByTestId("search-exclude")).toBeTruthy();
+  });
+
+  // Plugins moved out of the settings dialog and onto the rail (#791 round 9).
+  it("opens the plugin browser from the Plugins rail item", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("activity-bar");
+    expect(screen.queryByTestId("plugins-view")).toBeNull();
+
+    await user.click(screen.getByTestId("activity-plugins"));
+
+    expect(await screen.findByTestId("plugins-view")).toBeTruthy();
+    expect(screen.getByTestId("plugins-filter")).toBeTruthy();
+    await waitFor(() => expect(bridge.listPlugins).toHaveBeenCalled());
+    // The panel header names the view the rail selected.
+    expect(screen.getByTestId("side-panel").textContent).toContain("Plugins");
   });
 });
 

@@ -2,6 +2,7 @@ import { Check, ShieldAlert, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentPermissionDecision } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { useGuestBlockingUiWhile } from "../guestBlockingUi";
 import type { AgentPermissionRequest } from "./useAgentNotifications";
 
 // Floating permission cards (update-toast position, bottom-right): THE place
@@ -60,6 +61,11 @@ export function AgentPermissionRequests(props: {
   }, [requests, keyOf]);
 
   const visible = requests.filter((request) => !answered.has(keyOf(request.requestId)));
+  // These cards float over the editor area, where an open plugin web app's
+  // guest composites above them and would take the clicks that answer the
+  // ask — leaving the run blocked with no way to unblock it. The guest hides
+  // while a card is up; it comes back the moment the user answers.
+  useGuestBlockingUiWhile(visible.length > 0);
   if (visible.length === 0) return null;
 
   async function answer(requestId: string, decision: AgentPermissionDecision) {

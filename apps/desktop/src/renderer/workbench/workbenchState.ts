@@ -12,6 +12,7 @@ export const VIEW_IDS = [
   "graph",
   "sites",
   "history",
+  "plugins",
 ] as const;
 export type ViewId = (typeof VIEW_IDS)[number];
 export const GRAPH_TAB_PATH = "dohc://graph";
@@ -21,6 +22,11 @@ export const CHATS_TAB_PATH = "dohc://chats";
 export const HISTORY_DIFF_TAB_PREFIX = "dohc://history-diff/";
 export const SITE_TAB_PREFIX = "dohc://site/";
 export const PLUGIN_PANEL_TAB_PREFIX = "dohc://plugin-panel/";
+export const PLUGIN_WEB_APP_TAB_PREFIX = "dohc://plugin-web/";
+// One details page per plugin, keyed by the plugin id (version-compare
+// precedent). Deliberately NOT a singleton: singletons own a process and
+// refuse to split, and this page only reads.
+export const PLUGIN_DETAILS_TAB_PREFIX = "dohc://plugin-details/";
 export const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
 // Engine moment diff (PR 0M-5): flagged workspaces open history diffs by
 // MOMENT id, not legacy change-set id.
@@ -58,6 +64,28 @@ export function pluginPanelTabPath(pluginId: string, panelId: string): string {
   return `${PLUGIN_PANEL_TAB_PREFIX}${encodeURIComponent(pluginId)}/${encodeURIComponent(panelId)}`;
 }
 
+export function pluginWebAppTabPath(pluginId: string, webAppId: string): string {
+  return `${PLUGIN_WEB_APP_TAB_PREFIX}${encodeURIComponent(pluginId)}/${encodeURIComponent(webAppId)}`;
+}
+
+export function pluginDetailsTabPath(pluginId: string): string {
+  return `${PLUGIN_DETAILS_TAB_PREFIX}${encodeURIComponent(pluginId)}`;
+}
+
+export function isPluginDetailsTabPath(path: string | null): boolean {
+  return typeof path === "string" && path.startsWith(PLUGIN_DETAILS_TAB_PREFIX);
+}
+
+export function parsePluginDetailsTabPath(path: string | null): string | null {
+  if (typeof path !== "string" || !isPluginDetailsTabPath(path)) return null;
+  try {
+    const pluginId = decodeURIComponent(path.slice(PLUGIN_DETAILS_TAB_PREFIX.length));
+    return pluginId.length > 0 ? pluginId : null;
+  } catch {
+    return null;
+  }
+}
+
 export function isGraphTabPath(path: string | null): boolean {
   return path === GRAPH_TAB_PATH;
 }
@@ -82,9 +110,16 @@ export function isPluginPanelTabPath(path: string | null): boolean {
   return typeof path === "string" && path.startsWith(PLUGIN_PANEL_TAB_PREFIX);
 }
 
+export function isPluginWebAppTabPath(path: string | null): boolean {
+  return typeof path === "string" && path.startsWith(PLUGIN_WEB_APP_TAB_PREFIX);
+}
+
 export function isSingletonEditorTabPath(path: string | null): boolean {
   return (
-    isChatsTabPath(path) || isSiteTabPath(path) || isPluginPanelTabPath(path)
+    isChatsTabPath(path) ||
+    isSiteTabPath(path) ||
+    isPluginPanelTabPath(path) ||
+    isPluginWebAppTabPath(path)
   );
 }
 
@@ -93,7 +128,11 @@ export function canonicalSingletonEditorTabPath(path: string | null): string | n
   const siteRoot = parseSiteTabPath(path);
   if (siteRoot !== null) return siteTabPath(siteRoot);
   const panel = parsePluginPanelTabPath(path);
-  return panel === null ? null : pluginPanelTabPath(panel.pluginId, panel.panelId);
+  if (panel !== null) return pluginPanelTabPath(panel.pluginId, panel.panelId);
+  const webApp = parsePluginWebAppTabPath(path);
+  return webApp === null
+    ? null
+    : pluginWebAppTabPath(webApp.pluginId, webApp.webAppId);
 }
 
 export function parseSiteTabPath(path: string | null): string | null {
@@ -117,6 +156,23 @@ export function parsePluginPanelTabPath(
     const panelId = decodeURIComponent(parts[1]!);
     return pluginId.length > 0 && panelId.length > 0
       ? { pluginId, panelId }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function parsePluginWebAppTabPath(
+  path: string | null,
+): { pluginId: string; webAppId: string } | null {
+  if (typeof path !== "string" || !isPluginWebAppTabPath(path)) return null;
+  const parts = path.slice(PLUGIN_WEB_APP_TAB_PREFIX.length).split("/");
+  if (parts.length !== 2 || parts.some((part) => part.length === 0)) return null;
+  try {
+    const pluginId = decodeURIComponent(parts[0]!);
+    const webAppId = decodeURIComponent(parts[1]!);
+    return pluginId.length > 0 && webAppId.length > 0
+      ? { pluginId, webAppId }
       : null;
   } catch {
     return null;
@@ -172,7 +228,9 @@ export function isVirtualTabPath(path: string | null): boolean {
     isMomentDiffTabPath(path) ||
     isVersionCompareTabPath(path) ||
     isSiteTabPath(path) ||
-    isPluginPanelTabPath(path)
+    isPluginPanelTabPath(path) ||
+    isPluginWebAppTabPath(path) ||
+    isPluginDetailsTabPath(path)
   );
 }
 

@@ -43,7 +43,7 @@ import {
   readPluginLocalState,
   workspaceStateKey,
 } from "./pluginLocalState";
-import { snapshotPluginSource } from "./pluginSourceSnapshot";
+import { pluginStateRoot, snapshotPluginSource } from "./pluginSourceSnapshot";
 import {
   pluginBaselineManifestPath,
   pluginUninstallPreflight,
@@ -57,6 +57,9 @@ interface Deferred {
 const roots: string[] = [];
 let resourcesParent: string;
 let resourcesBasePath: string;
+// The production install forks this file, and so does every install here:
+// Node runs its TypeScript source directly.
+const pnpmRunnerEntry = join(import.meta.dirname, "pluginPnpmRunnerProcess.ts");
 
 function deferred(): Deferred {
   let resolvePromise: (() => void) | undefined;
@@ -361,6 +364,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: async (input) => {
           installCalls += 1;
@@ -512,15 +516,29 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         "Renamed identity did not reach ready after its own fresh install.",
       );
 
+      // Durable plugin state (what a wrapper like t3 stores): the preflight
+      // must name it as permanently deleted, and uninstall must delete it.
+      const stateRoot = pluginStateRoot(
+        pluginDataDir(fixture.stateDir, fixture.workspaceRoot),
+        "renamed-plugin",
+      );
+      await mkdir(join(stateRoot, "t3"), { recursive: true });
+      await writeFile(join(stateRoot, "t3", "state.sqlite"), "session-bytes");
+
       const preflight = await pipeline.uninstallPreflight("renamed-plugin");
       if (!preflight.ok) throw new Error(preflight.error.message);
-      expect(preflight.preflight.warning).toBeNull();
+      expect(preflight.preflight.warning?.kind).toBe("plugin-state");
+      expect(preflight.preflight.stateData).toMatchObject({
+        path: stateRoot,
+        fileCount: 1,
+      });
       const uninstalled = await pipeline.uninstall(
         "renamed-plugin",
         preflight.confirmationToken,
       );
       expect(uninstalled.ok).toBe(true);
       await expect(lstat(fixture.pluginRoot)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(lstat(stateRoot)).rejects.toMatchObject({ code: "ENOENT" });
       expect(pipeline.list()).toEqual([]);
       expect(spawnTransport).toHaveBeenCalledTimes(6);
     } finally {
@@ -547,6 +565,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -614,6 +633,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -702,6 +722,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         // Real discovery once (to seed a real, valid status), then empty —
         // simulating the plugin's directory disappearing while its own
@@ -759,6 +780,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -818,6 +840,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -917,6 +940,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -965,6 +989,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1042,6 +1067,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1137,6 +1163,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1219,6 +1246,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: async (input) => {
           installCalls += 1;
@@ -1312,6 +1340,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1391,6 +1420,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1460,6 +1490,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1533,6 +1564,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         stateDir: fixture.stateDir,
         pluginHost: host,
         resourcesBasePath,
+        pnpmRunnerEntry,
         operations: {
           install: (input) =>
             installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1620,6 +1652,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1722,6 +1755,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: () => Promise.reject(new Error("synthetic install failure")),
       },
@@ -1774,6 +1808,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1849,6 +1884,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1929,6 +1965,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2006,6 +2043,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         stateDir: fixture.stateDir,
         pluginHost: host,
         resourcesBasePath,
+        pnpmRunnerEntry,
         operations: {
           install: (input) =>
             installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2091,6 +2129,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         stateDir: fixture.stateDir,
         pluginHost: host,
         resourcesBasePath,
+        pnpmRunnerEntry,
         operations: {
           install: (input) =>
             installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2197,6 +2236,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         stateDir: fixture.stateDir,
         pluginHost: host,
         resourcesBasePath,
+        pnpmRunnerEntry,
         operations: {
           install: (input) =>
             installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2267,6 +2307,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2335,6 +2376,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2416,6 +2458,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2497,6 +2540,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2551,6 +2595,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2649,6 +2694,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2773,6 +2819,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: newHost(),
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2806,6 +2853,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: newHost(),
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2861,6 +2909,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2935,6 +2984,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       directoryName: "noisy-plugin",
       rootPath: join(fixture.workspaceRoot, "plugins", "noisy-plugin"),
       manifest: null,
+      iconPath: null,
       valid: false,
       diagnostics: Array.from(
         { length: 400 },
@@ -2970,6 +3020,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       onStatusChange: (event) => events.push(event),
       operations: {
         discover: async () => [noisy],
@@ -3023,6 +3074,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: async (input) => {
           installCalls += 1;
@@ -3103,6 +3155,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: async (input) => {
           installCalls += 1;
@@ -3192,6 +3245,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -3264,6 +3318,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -3400,6 +3455,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: async (input) => {
           installCalls += 1;
@@ -3493,6 +3549,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -3554,6 +3611,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -3623,6 +3681,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -3701,6 +3760,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -3810,6 +3870,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) => {
           installCalls += 1;
@@ -3925,6 +3986,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       onStatusChange: (event) => events.push(event),
     });
 
@@ -3996,6 +4058,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       onStatusChange: (event) => events.push(event),
       operations: {
         install: (input) =>
@@ -4052,6 +4115,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       stateDir: fixture.stateDir,
       pluginHost: host,
       resourcesBasePath,
+      pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -4125,4 +4189,173 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.dispose();
     }
   }, 240_000);
+
+  it("carries the manifest's metadata through the pipeline into the IPC contract", async () => {
+    const fixture = await createPluginWorkspace();
+    await writeFile(
+      join(fixture.pluginRoot, "dohc-plugin.json"),
+      `${JSON.stringify({
+        version: 1,
+        name: "example-plugin",
+        displayName: "Example plugin",
+        description: "Does one example thing on this workspace.",
+        publisher: "dohc",
+        pluginVersion: "0.0.33",
+        repository: "https://github.com/pingdotgg/t3code",
+        issues: "https://github.com/pingdotgg/t3code/issues",
+        license: "MIT",
+        icon: "icon.svg",
+        entry: "src/index.ts",
+      }, null, 2)}\n`,
+    );
+    await writeFile(join(fixture.pluginRoot, "icon.svg"), "<svg/>");
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      const listed = pipeline.list();
+
+      expect(listed[0]).toMatchObject({
+        id: "example-plugin",
+        displayName: "Example plugin",
+        description: "Does one example thing on this workspace.",
+        publisher: "dohc",
+        pluginVersion: "0.0.33",
+        repository: "https://github.com/pingdotgg/t3code",
+        issues: "https://github.com/pingdotgg/t3code/issues",
+        license: "MIT",
+        icon: "icon.svg",
+      });
+      // The renderer only ever sees what survives this parse, so the
+      // contract's bounds are part of the plumbing, not a separate check.
+      const parsed = ListPluginsResult.safeParse({ ok: true, plugins: listed });
+      if (!parsed.success) throw new Error(parsed.error.message);
+      expect(parsed.data.ok && parsed.data.plugins[0]?.publisher).toBe("dohc");
+      expect(parsed.data.ok && parsed.data.plugins[0]?.pluginVersion)
+        .toBe("0.0.33");
+      expect(parsed.data.ok && parsed.data.plugins[0]?.repository)
+        .toBe("https://github.com/pingdotgg/t3code");
+      expect(parsed.data.ok && parsed.data.plugins[0]?.license).toBe("MIT");
+    } finally {
+      await pipeline.dispose();
+    }
+  });
+
+  it("saves a setting and tells the plugin's host what its settings became", async () => {
+    const fixture = await createPluginWorkspace();
+    await writeFile(
+      join(fixture.pluginRoot, "dohc-plugin.json"),
+      `${JSON.stringify({
+        version: 1,
+        name: "example-plugin",
+        entry: "src/index.ts",
+        settings: [
+          {
+            key: "greeting",
+            type: "string",
+            label: "Greeting",
+            default: "Hello",
+          },
+          { key: "shout", type: "boolean", label: "Shout", default: false },
+        ],
+      }, null, 2)}\n`,
+    );
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    const told = vi.spyOn(host, "notifySettingsChanged");
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+
+      const values = await pipeline.setPluginSettings("example-plugin", {
+        greeting: "Hei",
+      });
+
+      // Every declared setting under the one answer the user changed: a
+      // plugin hears what its settings ARE, never the patch.
+      expect(values).toEqual({ greeting: "Hei", shout: false });
+      expect(told).toHaveBeenCalledWith("example-plugin", values);
+      // Saved, not only announced.
+      expect(await pipeline.getPluginSettings("example-plugin")).toEqual(values);
+    } finally {
+      await pipeline.dispose();
+    }
+  });
+
+  it("advertises no icon, and says why, when the declared file is missing", async () => {
+    const fixture = await createPluginWorkspace();
+    await writeFile(
+      join(fixture.pluginRoot, "dohc-plugin.json"),
+      `${JSON.stringify({
+        version: 1,
+        name: "example-plugin",
+        icon: "icon.svg",
+        entry: "src/index.ts",
+      }, null, 2)}\n`,
+    );
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      const listed = pipeline.list();
+
+      expect(listed[0]?.icon).toBeNull();
+      expect(listed[0]?.diagnostics.join(" ")).toContain("could not be read");
+      // A broken icon is not a broken plugin.
+      expect(listed[0]?.valid).toBe(true);
+      expect(listed[0]?.status).toBe("discovered");
+    } finally {
+      await pipeline.dispose();
+    }
+  });
 });

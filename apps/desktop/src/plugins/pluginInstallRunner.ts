@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, realpath } from "node:fs/promises";
+import { access, readFile, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { killProcessTreePosix } from "../process/posixSpawn";
 import { killProcessTreeWin32 } from "../process/windowsSpawn";
@@ -161,6 +161,7 @@ export type PluginInstallFailureCode =
   | "unreadable-lockfile"
   | "lockfile-mismatch"
   | "escaped-snapshot"
+  | "install-not-materialized"
   | "pnpm-exit"
   | "timeout"
   | "aborted"
@@ -192,16 +193,14 @@ export interface InstallPluginDependenciesInput {
   pnpmPaths: PluginPnpmPaths;
   resourcesBasePath?: string;
   /**
-   * Built path to pluginPnpmRunnerProcess's own output (dist/main/pnpm-runner.js
-   * in this repo's build). Required for the real Electron fork path — see
-   * that module's header comment: Electron's utilityProcess does not exit on
-   * its own when a forked script's work is done (electron/electron#47228),
-   * so pnpm's own bin/pnpm.mjs, which never calls process.exit() on success,
-   * hangs forever if forked directly. The wrapper imports pnpm in-process and
-   * calls process.exit() itself once that import settles. Not required when
-   * a test supplies its own `forkProcess` (bypassing the default entirely).
+   * Path to pluginPnpmRunnerProcess — the app's built dist/main/pnpm-runner.js,
+   * or that module's own source, which Node runs directly. This is always the
+   * forked entry, including when a test supplies its own `forkProcess`: pnpm's
+   * bin cannot be forked on its own here (see that module's header), and a
+   * test seam that forks something else than production does proves nothing
+   * about production.
    */
-  pnpmRunnerEntry?: string;
+  pnpmRunnerEntry: string;
   signal?: AbortSignal;
   timeoutMs?: number;
   forkProcess?: PluginInstallFork;
@@ -377,41 +376,99 @@ async function inspectLockfile(
   }
 }
 
+const DEPENDENCY_FIELDS = [
+  "dependencies",
+  "devDependencies",
+  "optionalDependencies",
+] as const;
+
 /**
- * The backstop for the pinned output paths above: pnpm reported success, so
- * confirm the tree it produced is really inside the snapshot. A redirected
- * install leaves the snapshot with no node_modules at all, which the
- * lifecycle scan cannot tell apart from a healthy zero-dependency install —
- * so this check, not that one, is what makes the redirect visible
- * (#779 round 8 D1).
+ * How many dependencies the snapshot's package.json declares. The snapshot
+ * gate already read and validated that file
+ * (pluginSourceSnapshot's readAndValidatePackageJson), so an unreadable one
+ * here means there was nothing to install, not a new error to report.
  */
-async function verifyContainedInstall(
+async function declaredDependencyCount(snapshotRoot: string): Promise<number> {
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(await readFile(join(snapshotRoot, "package.json"), "utf8"));
+  } catch {
+    return 0;
+  }
+  if (typeof manifest !== "object" || manifest === null) return 0;
+  let declared = 0;
+  for (const field of DEPENDENCY_FIELDS) {
+    const value = (manifest as Record<string, unknown>)[field];
+    if (typeof value === "object" && value !== null) {
+      declared += Object.keys(value).length;
+    }
+  }
+  return declared;
+}
+
+/**
+ * The backstop for a success pnpm reported: confirm the tree is really inside
+ * the snapshot, and that it exists at all.
+ *
+ * A redirected install leaves the snapshot with no node_modules, which the
+ * lifecycle scan cannot tell apart from a healthy zero-dependency install —
+ * so this check, not that one, makes the redirect visible (#779 round 8 D1).
+ * A truncated install leaves the same absence, and pnpm writes
+ * node_modules/.modules.yaml only once an install completes — so a snapshot
+ * that declares dependencies and has no .modules.yaml did not install, no
+ * matter what exit code arrived.
+ */
+async function verifyInstallOutput(
   input: InstallPluginDependenciesInput,
   timeoutMs: number,
   logs: PluginInstallLogEntry[],
 ): Promise<PluginInstallResult | null> {
   const snapshotRoot = resolve(input.snapshotRoot);
   const modulesPath = join(snapshotRoot, "node_modules");
-  let realModulesPath: string;
+  let realModulesPath: string | null = null;
   try {
     realModulesPath = await realpath(modulesPath);
   } catch (error) {
-    // A frozen install with no dependencies writes no node_modules at all —
-    // the same measured pnpm@11.20.0 behavior pluginLifecycleScan documents.
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  const realSnapshotRoot = await realpath(snapshotRoot);
-  if (isInside(realSnapshotRoot, realModulesPath)) return null;
+  if (realModulesPath !== null) {
+    const realSnapshotRoot = await realpath(snapshotRoot);
+    if (!isInside(realSnapshotRoot, realModulesPath)) {
+      return failure(
+        "escaped-snapshot",
+        `Plugin "${input.pluginId}" dependency install must keep node_modules ` +
+          `inside the snapshot at ${snapshotRoot}; ${modulesPath} resolves to ` +
+          `${realModulesPath}.`,
+        timeoutMs,
+        logs,
+        0,
+      );
+    }
+  }
+  const declared = await declaredDependencyCount(snapshotRoot);
+  if (declared === 0) return null;
+  if (realModulesPath !== null && await pathExists(join(modulesPath, ".modules.yaml"))) {
+    return null;
+  }
   return failure(
-    "escaped-snapshot",
-    `Plugin "${input.pluginId}" dependency install must keep node_modules ` +
-      `inside the snapshot at ${snapshotRoot}; ${modulesPath} resolves to ` +
-      `${realModulesPath}.`,
+    "install-not-materialized",
+    `Plugin "${input.pluginId}" dependency install reported success but wrote ` +
+      `no ${join("node_modules", ".modules.yaml")} in ${snapshotRoot}. pnpm ` +
+      `writes that file when an install completes; declared dependencies: ` +
+      `${declared}. Retry the install.`,
     timeoutMs,
     logs,
     0,
   );
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path, constants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function abortedBeforeSpawn(
@@ -444,20 +501,14 @@ async function runInstallJob(
     ((pid: number) => killProcessTreeWin32(pid, () => false));
   const pnpmEntry = resolvePluginPnpmEntry(input.resourcesBasePath);
   const env = buildPluginInstallEnv(input.pnpmPaths);
-  // A supplied forkProcess (tests) runs pnpm directly — a plain Node
-  // child process exits normally on its own. The default Electron path goes
-  // through the wrapper instead; see InstallPluginDependenciesInput.pnpmRunnerEntry.
-  const usingDefaultFork = input.forkProcess === undefined;
+  // Every caller forks the same entry: the runner wrapper, with pnpm's own
+  // entry as its first argument. A test seam chooses how the child is
+  // spawned, never what runs inside it.
   const forkProcess = input.forkProcess ?? forkElectronUtilityProcess;
-  const modulePath = usingDefaultFork
-    ? requirePnpmRunnerEntry(input.pnpmRunnerEntry)
-    : pnpmEntry;
-  const forkArgs = usingDefaultFork
-    ? [pnpmEntry, ...PLUGIN_INSTALL_ARGS]
-    : [...PLUGIN_INSTALL_ARGS];
+  const modulePath = input.pnpmRunnerEntry;
   let child: PluginInstallProcessHandle;
   try {
-    child = await forkProcess(modulePath, forkArgs, {
+    child = await forkProcess(modulePath, [pnpmEntry, ...PLUGIN_INSTALL_ARGS], {
       cwd: input.snapshotRoot,
       env,
       serviceName: PLUGIN_INSTALL_SERVICE_NAME,
@@ -600,7 +651,7 @@ async function runInstallJob(
         return;
       }
       if (exitCode === 0) {
-        void verifyContainedInstall(input, timeoutMs, logs).then(
+        void verifyInstallOutput(input, timeoutMs, logs).then(
           (escaped) =>
             resolveResult(escaped ?? { ok: true, exitCode: 0, logs: [...logs] }),
           (error: unknown) =>
@@ -648,17 +699,6 @@ export function resolvePluginPnpmEntry(
   resourcesBasePath = process.resourcesPath,
 ): string {
   return join(resolve(resourcesBasePath), "plugin-tools", "pnpm", "bin", "pnpm.mjs");
-}
-
-function requirePnpmRunnerEntry(pnpmRunnerEntry: string | undefined): string {
-  if (!pnpmRunnerEntry) {
-    throw new Error(
-      "installPluginDependencies needs pnpmRunnerEntry to fork pnpm through " +
-        "the real Electron utility-process path (no forkProcess override " +
-        "was supplied).",
-    );
-  }
-  return pnpmRunnerEntry;
 }
 
 export function installPluginDependencies(

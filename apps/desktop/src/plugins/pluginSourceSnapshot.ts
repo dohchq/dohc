@@ -1116,6 +1116,18 @@ export function pluginIdToSafePath(pluginId: string): string {
 }
 
 /**
+ * The plugin's durable per-workspace data directory
+ * (PluginActivateContext.stateRoot): under dohcDir beside the built plugin,
+ * so it survives rebuilds — a rebuild swaps only `plugins/<safeId>` — and is
+ * deleted with the plugin's data on uninstall. One computation, used by both
+ * the activate params and the uninstall path, so the directory the plugin
+ * writes and the directory uninstall deletes can never drift apart.
+ */
+export function pluginStateRoot(dohcDir: string, pluginId: string): string {
+  return join(resolve(dohcDir), "state", pluginIdToSafePath(pluginId));
+}
+
+/**
  * Whether the snapshot already on disk is readable and hashes to the expected
  * source hash. Any failure (missing directory, IO error, mismatch) answers
  * false so the caller rebuilds instead of trusting it.

@@ -5,6 +5,40 @@ import { ActivityBar } from "./ActivityBar";
 
 afterEach(cleanup);
 
+describe("ActivityBar views", () => {
+  it("offers Plugins as a rail item that selects the plugins view", () => {
+    const onSelectView = vi.fn();
+    render(
+      <ActivityBar
+        activeView="explorer"
+        sidebarVisible
+        hasConflict={false}
+        onSelectView={onSelectView}
+      />,
+    );
+
+    const plugins = screen.getByRole("button", { name: "Plugins" });
+    expect(plugins.getAttribute("aria-current")).toBeNull();
+    fireEvent.click(plugins);
+    expect(onSelectView).toHaveBeenCalledWith("plugins");
+  });
+
+  it("marks the Plugins rail item current while its panel shows", () => {
+    render(
+      <ActivityBar
+        activeView="plugins"
+        sidebarVisible
+        hasConflict={false}
+        onSelectView={() => undefined}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("activity-plugins").getAttribute("aria-current"),
+    ).toBe("page");
+  });
+});
+
 describe("ActivityBar optional utility actions", () => {
   it("renders Cloud and Settings as inert icons when the host omits actions", () => {
     render(
