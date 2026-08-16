@@ -233,7 +233,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
 
     // Writes are refused with the honest copy — at the IPC boundary, not
     // just in the UI.
-    const writeAttempt = await page.evaluate(async () => {
+    const writeAttempt = await page.evaluate(async (unusedContentHash) => {
       const api = (window as unknown as {
         dohcDesktop: Pick<
           DohcDesktopBridge,
@@ -246,13 +246,13 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
           workspaceId: registry.workspaces[0]!.workspaceId,
           relativePath: "docs/shared.md",
           text: "defaced",
-          expectedContentHash: UNUSED_CONTENT_HASH,
+          expectedContentHash: unusedContentHash,
         });
         return "wrote";
       } catch (error) {
         return error instanceof Error ? error.message : String(error);
       }
-    });
+    }, UNUSED_CONTENT_HASH);
     expect(writeAttempt).toContain("This is a shared view — ask e2e-granter@dohc.test for changes.");
 
     // The other three mutation side-doors are refused at the IPC boundary too:
@@ -282,6 +282,10 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
           applyEngineYDocUpdate(payload: {
             sessionId: string;
             update: Uint8Array;
+            // REQUIRED by the real contract. The hand-written shape here had
+            // drifted from `bridgeContract.ts`, so the call was rejected at
+            // the schema and never reached the refusal this asserts.
+            lineageGeneration: number;
           }): Promise<void>;
         };
       }).dohcDesktop;
@@ -309,7 +313,11 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
         path: "docs/shared.md",
       });
       const engineYDocApply = await capture(() =>
-        api.applyEngineYDocUpdate({ sessionId: "shared-view-bypass", update: new Uint8Array([1, 2, 3]) }),
+        api.applyEngineYDocUpdate({
+          sessionId: "shared-view-bypass",
+          update: new Uint8Array([1, 2, 3]),
+          lineageGeneration: 1,
+        }),
       );
       return {
         agent,
@@ -450,7 +458,7 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
 
     // Writes are refused at the IPC boundary (reserved projection), and
     // re-sharing mounted content is refused with the honest copy.
-    const boundaryChecks = await page.evaluate(async () => {
+    const boundaryChecks = await page.evaluate(async (unusedContentHash) => {
       const api = (window as unknown as {
         dohcDesktop: Pick<
           DohcDesktopBridge,
@@ -472,7 +480,7 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
             workspaceId,
             relativePath: "shared-with-me/e2e-granter/docs/brief.md",
             text: "defaced",
-            expectedContentHash: UNUSED_CONTENT_HASH,
+            expectedContentHash: unusedContentHash,
           }),
         ),
         reshare: await capture(() =>
@@ -484,7 +492,7 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
           }),
         ),
       };
-    });
+    }, UNUSED_CONTENT_HASH);
     expect(boundaryChecks.write).toContain("reserved");
     expect(boundaryChecks.reshare).toContain(
       "copy it into your own files to share it onward",
@@ -707,8 +715,12 @@ test("comment side: a recipient chats about a shared file and the message reache
           const message = ops.find((op) => op.opKind === "chat.message.append");
           if (!create || !message) return `kinds: ${ops.map((op) => op.opKind).join(",")}`;
           return {
-            linkedPath: create.payload.linkedPath,
-            linkedObjectId: create.payload.linkedObjectId ?? null,
+            // The relay's accept door CONVERTS the binding before it stores
+            // it, so the stored op names the granter's object and no path.
+            // The exact object id is the granter's to mint, so its shape is
+            // what this asserts.
+            carriesPath: create.payload.linkedPath !== undefined,
+            boundToGranterObject: typeof create.payload.linkedObjectId === "string",
             body: message.payload.body,
             authorUserId: message.payload.authorUserId,
           };
@@ -716,10 +728,14 @@ test("comment side: a recipient chats about a shared file and the message reache
         { timeout: 60_000, intervals: [1_000] },
       )
       .toEqual({
-        linkedPath: "docs/shared.md",
-        // The granter mints its own object ids, so the recipient's never
-        // crosses — and the relay refuses a create that carries both.
-        linkedObjectId: null,
+        // A recipient names its file by PATH on the wire, because its own
+        // object ids mean nothing in the granter's workspace. The relay then
+        // resolves that path to the granter's object and persists THAT —
+        // which is what makes the thread follow the file through a rename
+        // inside the share. `services/sync-relay/src/fileChatShares.test.ts`
+        // pins the conversion; this is the same fact end to end.
+        carriesPath: false,
+        boundToGranterObject: true,
         body: "Which comet is this?",
         authorUserId: "e2e-recipient",
       });
