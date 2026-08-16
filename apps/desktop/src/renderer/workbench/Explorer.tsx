@@ -103,8 +103,8 @@ export interface ExplorerProps {
   // A share view's delete removes the projection of a moment, not a file the
   // workspace owns, so the confirmation must not promise a trash it has no
   // path to. The granter's copy is what the change can still be taken back
-  // from.
-  isShareView: boolean;
+  // from, which is why the granter is named here rather than described.
+  shareView: { granterEmail: string | null } | null;
   onRefreshShareMounts: () => void;
   onUnmountShare: (path: string) => void;
   // "Share…" (PR 18): offered by the main-owned context menu on synced,
@@ -1597,9 +1597,11 @@ export function Explorer(props: ExplorerProps) {
                 ?
               </p>
               <p className="mb-0 mt-2 text-xs text-muted">
-                {props.isShareView
-                  ? "It goes from your copy now. The person who shared it still has the file until they accept the change you send."
-                  : "It moves to the system trash — or to this workspace's .dohc/trash folder on drives without one — and can be restored from there."}
+                {props.shareView
+                  ? `${confirmDelete.length === 1 ? "It goes" : "They go"} from your copy now. ${
+                      props.shareView.granterEmail ?? "The person who shared it"
+                    } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`
+                  : `${confirmDelete.length === 1 ? "It moves" : "They move"} to the system trash, or to this workspace's .dohc/trash folder whenever the system trash refuses, and can be restored from there.`}
               </p>
               {confirmDelete.length > 1 ? (
                 <ul className="m-0 mt-3 max-h-36 list-none overflow-auto rounded border border-line bg-bg p-0">

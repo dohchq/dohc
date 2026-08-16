@@ -146,7 +146,7 @@ function scope(harnessed: Harness, access: "edit" = "edit") {
 function storeFailingAt(
   store: CaptureVersionedTextStore,
   method: "renameTextFile" | "deleteTextFile",
-  call: number,
+  ...calls: number[]
 ): CaptureVersionedTextStore {
   let seen = 0;
   return new Proxy(store, {
@@ -155,8 +155,8 @@ function storeFailingAt(
       if (property !== method || typeof value !== "function") return value;
       return (...args: unknown[]) => {
         seen += 1;
-        if (seen === call) {
-          return Promise.reject(new Error(`engine refused ${method} call ${call}`));
+        if (calls.includes(seen)) {
+          return Promise.reject(new Error(`engine refused ${method} call ${seen}`));
         }
         return (value as (...inner: unknown[]) => unknown).apply(target, args);
       };
@@ -380,6 +380,111 @@ describe("share-view file operations through the real store", () => {
     60_000,
   );
 
+  // CASE IDENTITY IS THE FILESYSTEM'S ANSWER, NEVER A STRING'S (delta pass of
+  // #806, findings 1, 2 and 9).
+  //
+  // On a case-insensitive filesystem `docs/Plans` and `docs/plans` are ONE
+  // directory, and `Note.md` and `note.md` are ONE file. Every place this
+  // module asked "same entry?" or "name taken?" with a string comparison got
+  // the wrong answer there, and two of them answered by destroying data. The
+  // three below are the shapes that were measured; they run on every platform
+  // and assert what is true on all of them.
+
+  it.skipIf(engine.missing)(
+    "renames a folder whose name differs only in case, keeping the files in it",
+    async () => {
+      const view = await harness("dohc-share-dir-case-", "edit");
+      await seedSharedFiles(view, [
+        { path: "docs/Plans/one.md", text: "one\n" },
+        { path: "docs/Plans/two.md", text: "two\n" },
+      ]);
+
+      await routeWorkspacePathMove({
+        ...scope(view),
+        fromPath: "docs/Plans",
+        toPath: "docs/plans",
+      });
+
+      expect(await storePaths(view)).toEqual([
+        "docs/plans/one.md",
+        "docs/plans/two.md",
+      ]);
+      // The cleanup that removes an emptied source folder must not run when
+      // the source and the destination are the SAME folder: it would remove
+      // the files this rename just put there.
+      await expect(
+        readFile(join(view.rootPath, "docs", "plans", "one.md"), "utf8"),
+        "MUTATION: a case-only folder rename deletes everything it just moved",
+      ).resolves.toBe("one\n");
+      await expect(
+        readFile(join(view.rootPath, "docs", "plans", "two.md"), "utf8"),
+      ).resolves.toBe("two\n");
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "imports beside a file whose name differs only in case, never over it",
+    async () => {
+      const view = await harness("dohc-share-import-case-", "edit");
+      await seedSharedFiles(view, [{ path: "docs/Note.md", text: "granter\n" }]);
+      const sourceDir = await createTestScratch("dohc-share-import-case-src-");
+      roots.push(sourceDir);
+      await writeFile(join(sourceDir, "note.md"), "imported\n", "utf8");
+
+      const outcome = await routeWorkspaceFileImport({
+        ...scope(view),
+        absolutePaths: [join(sourceDir, "note.md")],
+        screenAgainstRoots: null,
+        targetDir: "docs",
+      });
+
+      // The ordinary import is safe here because `copyFile` runs with
+      // COPYFILE_EXCL, which the filesystem answers; the share path has to be
+      // as safe, and a name set built from `readdir` strings is not.
+      await expect(
+        readFile(join(view.rootPath, "docs", "Note.md"), "utf8"),
+        "MUTATION: an import that compares names as strings overwrites a file whose name differs only in case",
+      ).resolves.toBe("granter\n");
+      // WHERE the import landed differs by platform — `note (2).md` where the
+      // filesystem folds case, `note.md` where it does not — so this asserts
+      // the invariant both share: one file landed, and it holds the imported
+      // bytes.
+      expect(outcome.imported).toHaveLength(1);
+      expect(outcome.skipped).toBe(0);
+      await expect(
+        readFile(join(view.rootPath, outcome.imported[0]!), "utf8"),
+      ).resolves.toBe("imported\n");
+      expect(await storePaths(view)).toContain("docs/Note.md");
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "refuses to move a folder onto one that holds files no moment describes",
+    async () => {
+      const view = await harness("dohc-share-move-into-", "edit");
+      await seedSharedFiles(view, [{ path: "docs/plans/one.md", text: "one\n" }]);
+      await mkdir(join(view.rootPath, "docs", "roadmap"), { recursive: true });
+      await writeFile(join(view.rootPath, "docs", "roadmap", "mine.md"), "mine\n", "utf8");
+
+      await expect(
+        routeWorkspacePathMove({
+          ...scope(view),
+          fromPath: "docs/plans",
+          toPath: "docs/roadmap",
+        }),
+        "MUTATION: a move screens only the folder it leaves, and merges into one holding files the store never had",
+      ).rejects.toThrow(/not part of this shared view/);
+
+      await expect(
+        readFile(join(view.rootPath, "docs", "roadmap", "mine.md"), "utf8"),
+      ).resolves.toBe("mine\n");
+      expect(await storePaths(view)).toEqual(["docs/plans/one.md"]);
+    },
+    60_000,
+  );
+
   it.skipIf(engine.missing)(
     "refuses to move a folder that holds files no moment describes",
     async () => {
@@ -390,6 +495,10 @@ describe("share-view file operations through the real store", () => {
       ]);
       await writeFile(join(view.rootPath, "docs", "plans", "mine.md"), "mine\n", "utf8");
 
+      // The EXACT sentence, not a fragment every refusal in this module
+      // shares: a scan that returned nothing would raise the "nothing to move"
+      // refusal, which also contains that fragment, and this test could not
+      // tell the two apart.
       await expect(
         routeWorkspacePathMove({
           ...scope(view),
@@ -397,7 +506,9 @@ describe("share-view file operations through the real store", () => {
           toPath: "docs/roadmap",
         }),
         "MUTATION: moving a folder removes it whole, destroying the files under it the store never held",
-      ).rejects.toThrow(/not part of this shared view/);
+      ).rejects.toThrow(
+        "docs/plans holds 1 file that is not part of this shared view: docs/plans/mine.md. Move it out of the folder first.",
+      );
 
       await expect(
         readFile(join(view.rootPath, "docs", "plans", "mine.md"), "utf8"),
@@ -425,10 +536,14 @@ describe("share-view file operations through the real store", () => {
         routeWorkspacePathDelete({
           ...scope(view),
           relativePath: "docs/plans",
-          trashItem: async () => undefined,
+          trashItem: async () => {
+            throw new Error("a share view's delete must not reach the ordinary trash path");
+          },
         }),
         "MUTATION: deleting a folder removes it whole, destroying the files under it the store never held",
-      ).rejects.toThrow(/not part of this shared view/);
+      ).rejects.toThrow(
+        "docs/plans holds 1 file that is not part of this shared view: docs/plans/mine.md. Move it out of the folder first.",
+      );
 
       await expect(
         readFile(join(view.rootPath, "docs", "plans", "mine.md"), "utf8"),
@@ -437,6 +552,31 @@ describe("share-view file operations through the real store", () => {
         "docs/plans/one.md",
         "docs/plans/two.md",
       ]);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "names the first three files it will not move, and counts the rest",
+    async () => {
+      const view = await harness("dohc-share-untracked-many-", "edit");
+      await seedSharedFiles(view, [{ path: "docs/plans/one.md", text: "one\n" }]);
+      for (const name of ["a.md", "b.md", "c.md", "d.md", "e.md"]) {
+        await writeFile(join(view.rootPath, "docs", "plans", name), "mine\n", "utf8");
+      }
+
+      await expect(
+        routeWorkspacePathDelete({
+          ...scope(view),
+          relativePath: "docs/plans",
+          trashItem: async () => {
+            throw new Error("a share view's delete must not reach the ordinary trash path");
+          },
+        }),
+        "MUTATION: a refusal that lists every file is unreadable at the size a real folder reaches",
+      ).rejects.toThrow(
+        "docs/plans holds 5 files that are not part of this shared view: docs/plans/a.md, docs/plans/b.md, docs/plans/c.md, and 2 more. Move them out of the folder first.",
+      );
     },
     60_000,
   );
@@ -525,6 +665,42 @@ describe("share-view file operations through the real store", () => {
   );
 
   it.skipIf(engine.missing)(
+    "keeps putting files back after one put-back fails, and names what is left out of place",
+    async () => {
+      const view = await harness("dohc-share-putback-midfail-", "edit");
+      await seedSharedFiles(view, [
+        { path: "docs/plans/one.md", text: "one\n" },
+        { path: "docs/plans/three.md", text: "three\n" },
+        { path: "docs/plans/two.md", text: "two\n" },
+        { path: "docs/plans/four.md", text: "four\n" },
+      ]);
+      // Paths move in sorted order — four, one, three, two — so calls 1-3 are
+      // the forward renames that land, call 4 is the one that fails, and calls
+      // 5-7 are the put-backs in reverse. Failing call 6 strands the MIDDLE
+      // put-back: the two around it must still run.
+      await expect(
+        routeWorkspacePathMove({
+          ...scope(view),
+          fromPath: "docs/plans",
+          toPath: "docs/roadmap",
+          shareViewStore: () => storeFailingAt(view.store, "renameTextFile", 4, 6),
+        }),
+        "MUTATION: a put-back that abandons the list at the first failure strands every file after it too",
+      ).rejects.toThrow("docs/roadmap/one.md is not at docs/plans/one.md");
+
+      // Exactly one file is stranded; the put-backs on either side of the
+      // failure ran, so their files are back where they started.
+      expect(await storePaths(view)).toEqual([
+        "docs/plans/four.md",
+        "docs/plans/three.md",
+        "docs/plans/two.md",
+        "docs/roadmap/one.md",
+      ]);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
     "shows every delete that landed when the engine refuses one of them",
     async () => {
       const view = await harness("dohc-share-delete-midfail-", "edit");
@@ -601,7 +777,9 @@ describe("share-view file operations through the real store", () => {
       const result = await routeWorkspacePathDelete({
         ...scope(view),
         relativePath: "docs/note.md",
-        trashItem: async () => undefined,
+        trashItem: async () => {
+          throw new Error("a share view's delete must not reach the ordinary trash path");
+        },
       });
 
       expect(result).toEqual({ trashed: false });
@@ -662,7 +840,9 @@ describe("share-view file operations through the real store", () => {
       await routeWorkspacePathDelete({
         ...scope(view),
         relativePath: "docs/plans",
-        trashItem: async () => undefined,
+        trashItem: async () => {
+          throw new Error("a share view's delete must not reach the ordinary trash path");
+        },
       });
 
       expect(

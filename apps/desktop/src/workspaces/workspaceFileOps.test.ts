@@ -157,13 +157,7 @@ describe("share-view file operations, at every level that takes no local writes"
       access: ShareAccess | null;
       ended: boolean;
       granterEmail: string | null;
-    }) => ({
-      workspaceId: "ws-1",
-      rootPath,
-      relativePath: "plans",
-      shareView,
-      shareViewStore: forbiddenStore(),
-    });
+    }) => ({ rootPath, relativePath: "plans", shareView });
 
     for (const [label, shareView] of refusedLevels) {
       await expect(
@@ -185,13 +179,7 @@ describe("share-view file operations, at every level that takes no local writes"
   it("makes a folder in an ordinary workspace", async () => {
     const rootPath = await scratch();
     await expect(
-      routeWorkspaceFolderCreate({
-        workspaceId: "ws-1",
-        rootPath,
-        relativePath: "plans",
-        shareView: null,
-        shareViewStore: forbiddenStore(),
-      }),
+      routeWorkspaceFolderCreate({ rootPath, relativePath: "plans", shareView: null }),
     ).resolves.toBe("plans");
     expect(await readdir(rootPath)).toEqual(["plans"]);
   });

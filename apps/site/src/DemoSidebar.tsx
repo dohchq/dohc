@@ -139,7 +139,7 @@ export function DemoSidebar(props: {
       {props.activePanel === "explorer" ? (
         <Explorer
           workspaceId="marketing-demo"
-          isShareView={false}
+          shareView={null}
           files={files}
           folders={folders}
           editorGroups={[

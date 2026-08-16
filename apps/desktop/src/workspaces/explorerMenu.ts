@@ -82,7 +82,10 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
   }
 
   return [
-    ...(scope.canShare ? [item("Share…", "share"), separator] : []),
+    // Sharing onward is refused in a share view HERE, not only wherever
+    // `canShare` is computed: someone else's files are not this account's to
+    // grant, and a defense a comment claims but no code performs is not one.
+    ...(scope.canShare && !isSharedView ? [item("Share…", "share"), separator] : []),
     ...(canWrite && scope.kind === "folder"
       ? [
           item("New File", "new-file"),

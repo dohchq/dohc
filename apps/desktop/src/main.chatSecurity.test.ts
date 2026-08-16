@@ -1017,7 +1017,13 @@ describe("main-process chat authorization", () => {
       "utf8",
     );
     const folderAt = fileOps.indexOf("export async function routeWorkspaceFolderCreate(");
-    const folder = fileOps.slice(folderAt, fileOps.indexOf("\n}", folderAt));
+    // To the NEXT top-level declaration, not to the first `\n}`: the signature
+    // is a multi-line object type, and its own closing brace would end the
+    // slice before the body this pin is about.
+    const folder = fileOps.slice(
+      folderAt,
+      fileOps.indexOf("\nexport ", folderAt + 1),
+    );
     expect(folderAt).toBeGreaterThan(-1);
     expect(
       folder,

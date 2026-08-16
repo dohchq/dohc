@@ -117,13 +117,20 @@ describe("a share view", () => {
     });
   }
 
-  it("never offers Share…, whatever the workspace looks like", () => {
-    // Someone else's files are not this account's to grant. `canShare` is
-    // computed in main from the same fact, but the menu must not offer it even
-    // if that computation is ever wrong.
-    expect(commands({ kind: "file", shareView: shareView("edit"), canShare: false })).not.toContain(
-      "share",
-    );
+  it("never offers Share…, even when told it could", () => {
+    // Someone else's files are not this account's to grant. main computes
+    // `canShare` from the same fact, but a defense that only exists in main is
+    // not one the menu performs — so this asks with canShare TRUE, which is
+    // the only way the assertion can fail when the guard is absent.
+    for (const access of ["edit", "comment", "view"] as const) {
+      expect(
+        commands({ kind: "file", shareView: shareView(access), canShare: true }),
+        "MUTATION: a share view offers Share… for files this account cannot grant",
+      ).not.toContain("share");
+    }
+    // And an ordinary workspace still gets it, so the guard above is not
+    // simply switching the item off everywhere.
+    expect(commands({ kind: "file", shareView: null, canShare: true })).toContain("share");
   });
 });
 

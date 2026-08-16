@@ -329,27 +329,31 @@ function collisionVariants(
 }
 
 /**
- * The same naming rule, for a caller whose collisions are answered by a SET
- * rather than by the filesystem.
+ * The same naming rule, for a caller that has to ASK whether a name is taken
+ * rather than have `copyFile` refuse it.
  *
  * A share view's import writes its engine store, so it cannot discover a
- * collision by having `copyFile` refuse one. It asks here instead, and gets
- * the ladder the disk copy walks: the name itself, then `name (2).ext`, and
+ * collision through COPYFILE_EXCL. It asks `taken` instead, and gets the
+ * ladder the disk copy walks: the name itself, then `name (2).ext`, and
  * shorter spellings only where a composed-path limit applies. Returns null
  * when the collision budget runs out — the same answer that counts a source
  * as skipped in `copyWithoutOverwrite`.
+ *
+ * `taken` is asynchronous because the honest answer comes from the
+ * filesystem: where the filesystem folds case, `Note.md` and `note.md` are one
+ * file, and only the filesystem knows that.
  */
-export function importNameFor(
+export async function importNameFor(
   name: string,
   absDir: string,
-  taken: (candidate: string) => boolean,
-): string | null {
+  taken: (candidate: string) => Promise<boolean>,
+): Promise<string | null> {
   const maxEntryChars = entryCharBudget(absDir, process.platform);
   for (let attempt = 1; attempt <= MAX_COLLISION_RENAMES + 1; attempt += 1) {
     const candidates =
       attempt === 1 ? [name] : collisionVariants(name, attempt, maxEntryChars);
     for (const candidate of candidates) {
-      if (!taken(candidate)) return candidate;
+      if (!(await taken(candidate))) return candidate;
     }
   }
   return null;

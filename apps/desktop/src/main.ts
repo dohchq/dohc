@@ -4155,11 +4155,9 @@ function registerIpcHandlers(
     if (shareView === null) assertWritableWorkspace(workspace);
     return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async () => {
       const path = await routeWorkspaceFolderCreate({
-        workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
         relativePath: input.relativePath,
         shareView,
-        shareViewStore: () => sharedViewStoreFor(workspace),
       });
       return CreateWorkspaceFileResult.parse({ path });
     });

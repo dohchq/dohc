@@ -105,7 +105,8 @@ function notInThisShareView(path: string, action: "Rename" | "Delete"): string {
 function untrackedUnderRefusal(folder: string, untracked: readonly string[]): string {
   const named = untracked.slice(0, 3).join(", ");
   const rest = untracked.length > 3 ? `, and ${untracked.length - 3} more` : "";
-  return `${folder} holds ${untracked.length} file${untracked.length === 1 ? "" : "s"} that are not part of this shared view: ${named}${rest}. Move them out of the folder first.`;
+  const one = untracked.length === 1;
+  return `${folder} holds ${untracked.length} ${one ? "file that is" : "files that are"} not part of this shared view: ${named}${rest}. Move ${one ? "it" : "them"} out of the folder first.`;
 }
 
 function refuseUnlessWritable(shareView: ShareViewFileOpTarget): void {
@@ -131,9 +132,13 @@ export async function routeWorkspaceFileCreate(
  * the share view branch is decided on PRESENCE, never on the grant. The level
  * chooses the sentence and nothing else, so there is no rule here to widen.
  */
-export async function routeWorkspaceFolderCreate(
-  input: ShareViewFileOpScope & { relativePath: string },
-): Promise<string> {
+export async function routeWorkspaceFolderCreate(input: {
+  rootPath: string;
+  relativePath: string;
+  // No store resolver: this refuses every share view, so no branch below it
+  // could ever open one.
+  shareView: ShareViewFileOpTarget | null;
+}): Promise<string> {
   if (input.shareView) {
     throw new SharedFileReadOnlyError(
       shareViewTakesLocalWrites(input.shareView)
@@ -293,6 +298,13 @@ async function shareViewMove(
     throw new Error(notInThisShareView(from, "Rename"));
   }
   await refuseUntrackedUnder(input.rootPath, from, held);
+  // The DESTINATION is screened too. A folder move merges into whatever is
+  // already there, and the ordinary `movePath` refuses that outright; the files
+  // the store holds are checked one by one below, so what is left to ask is
+  // whether the destination holds anything the store does not. Skipped when the
+  // two are the same entry, which is what a case-only rename is.
+  const renamesInPlace = await sameProjectionEntry(input.rootPath, from, to);
+  if (!renamesInPlace) await refuseUntrackedUnder(input.rootPath, to, held);
   const moves = sources.map((path) => ({
     from: path,
     to: path === from ? to : `${to}/${path.slice(from.length + 1)}`,
@@ -334,7 +346,11 @@ async function shareViewMove(
   // A FOLDER source has no file of its own to remove, so its entry goes last:
   // with every file under it gone, what is left is the empty directory the
   // projection made for them.
-  if (!held.has(from)) {
+  //
+  // Unless the source and the destination are the SAME folder, which is what a
+  // case-only folder rename is. Removing it there removes the files this rename
+  // just wrote into it.
+  if (!held.has(from) && !renamesInPlace) {
     changed.push({ path: from, operation: "delete", contentKind: "text" });
   }
   await materializeSharedViewPaths(input.rootPath, input.workspaceId, changed, store);
@@ -356,6 +372,8 @@ async function putBackMoves(
   versionId: string,
   applied: readonly { from: string; to: string }[],
 ): Promise<void> {
+  const stranded: { from: string; to: string }[] = [];
+  let firstFailure: unknown = null;
   for (const move of [...applied].reverse()) {
     try {
       await store.renameTextFile({
@@ -366,11 +384,20 @@ async function putBackMoves(
         metadata: { origin: "local-file" },
       });
     } catch (cause) {
-      throw new Error(
-        `dohc moved some of these files and could not put them back. ${move.to} is still not at ${move.from}. Check the folder before you send changes.`,
-        { cause },
-      );
+      // EVERY reversal is attempted. Abandoning the list at the first failure
+      // strands the files after it too, and those are files this same call
+      // moved and could still have put back.
+      stranded.push(move);
+      firstFailure ??= cause;
     }
+  }
+  if (stranded.length > 0) {
+    throw new Error(
+      `dohc moved these files and could not put them back: ${stranded
+        .map((move) => `${move.to} is not at ${move.from}`)
+        .join("; ")}. Check the folder before you send changes.`,
+      { cause: firstFailure },
+    );
   }
 }
 
@@ -472,12 +499,28 @@ async function shareViewImport(
   // Names already occupied, on BOTH sides. The store is what a change is made
   // of; the projection can also hold a file the recipient put there by hand,
   // and the disk copy this replaces would never have overwritten it.
-  const taken = new Set<string>([
-    ...[...held.keys()]
+  //
+  // The projection half is a FILESYSTEM probe, not a set of `readdir` strings:
+  // where the filesystem folds case, `Note.md` and `note.md` are one file, and
+  // a string set says the name is free right before the write destroys it. The
+  // ordinary import is safe here because COPYFILE_EXCL asks the filesystem the
+  // same question; this asks it too.
+  const heldInDir = new Set<string>(
+    [...held.keys()]
       .filter((path) => (relDir === "" ? !path.includes("/") : path.startsWith(`${relDir}/`)))
       .map((path) => (relDir === "" ? path : path.slice(relDir.length + 1))),
-    ...(await readdir(absDir)),
-  ]);
+  );
+  // Names claimed EARLIER IN THIS RUN have nothing on disk to probe yet, so
+  // they are compared case-folded: the conservative direction, and the only one
+  // available before the projection is written.
+  const claimed = new Set<string>();
+  const nameTaken = async (candidate: string): Promise<boolean> =>
+    heldInDir.has(candidate) ||
+    claimed.has(candidate.toLowerCase()) ||
+    (await projectionHolds(
+      input.rootPath,
+      relDir === "" ? candidate : `${relDir}/${candidate}`,
+    ));
 
   const imported: string[] = [];
   const changed: ShareViewChangedPath[] = [];
@@ -496,14 +539,12 @@ async function shareViewImport(
         skipped += 1;
         continue;
       }
-      const name = importNameFor(validated.normalized, absDir, (candidate) =>
-        taken.has(candidate),
-      );
+      const name = await importNameFor(validated.normalized, absDir, nameTaken);
       if (name === null) {
         skipped += 1;
         continue;
       }
-      taken.add(name);
+      claimed.add(name.toLowerCase());
       const path = relDir === "" ? name : `${relDir}/${name}`;
       if (content.kind === "text") {
         await store.writeTextFile({
@@ -610,24 +651,43 @@ async function projectionHolds(rootPath: string, path: string): Promise<boolean>
 }
 
 /**
+ * CASE IDENTITY IS THE FILESYSTEM'S ANSWER, NEVER A STRING'S.
+ *
+ * On a case-insensitive filesystem `docs/Plans` and `docs/plans` are one
+ * directory, and `Note.md` and `note.md` are one file. Every seam here that
+ * asks "is this the same entry?" or "is this name taken?" asks through this one
+ * probe, because a string comparison answers those questions wrongly on exactly
+ * the platform dohc ships on first — and two of the places that asked with
+ * strings answered by destroying data.
+ *
+ * Both ends must resolve for them to BE the same entry: a path that resolves to
+ * nothing is not the same as anything, which keeps every caller failing closed.
+ */
+async function sameProjectionEntry(
+  rootPath: string,
+  left: string,
+  right: string,
+): Promise<boolean> {
+  const [leftReal, rightReal] = await Promise.all([
+    realpath(join(rootPath, left)).catch(() => null),
+    realpath(join(rootPath, right)).catch(() => null),
+  ]);
+  return leftReal !== null && rightReal !== null && leftReal === rightReal;
+}
+
+/**
  * Would this move land on something the projection already holds?
  *
- * The case-only carve-out `movePath` makes, for the same reason: on a
- * case-insensitive filesystem the destination "exists" because it IS the
- * source, and refusing there would block a rename the user plainly meant. REAL
- * paths are compared, never spellings, so a genuinely different file that
- * case-collides still refuses.
+ * The case-only carve-out `movePath` makes, for the same reason: the
+ * destination "exists" because it IS the source, and refusing there would block
+ * a rename the user plainly meant.
  */
 async function projectionOccupies(
   rootPath: string,
   move: { from: string; to: string },
 ): Promise<boolean> {
   if (!(await projectionHolds(rootPath, move.to))) return false;
-  const [fromReal, toReal] = await Promise.all([
-    realpath(join(rootPath, move.from)).catch(() => null),
-    realpath(join(rootPath, move.to)).catch(() => null),
-  ]);
-  return fromReal === null || toReal === null || fromReal !== toReal;
+  return !(await sameProjectionEntry(rootPath, move.from, move.to));
 }
 
 /** Every path the share view's store holds, with the kind its projection needs. */
