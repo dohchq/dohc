@@ -59,6 +59,38 @@ afterEach(async () => {
   resetSharedLocalDocumentsForTests();
 });
 
+// Unmounting a dirty editor STARTS a write — that is the unmount flush, and it
+// is meant to outlive the component. Its promise chain therefore settles a turn
+// or more after `cleanup()` returns, so a teardown that clears the mocks right
+// away hands that write to the NEXT test, whose beforeEach has already
+// re-stubbed the same bridge object. The next test then sees a call it never
+// made and fails on a count or an argument that has nothing to do with it.
+//
+// Turning the event loop until the bridge goes quiet keeps every call inside
+// the test that caused it. Quiescence is the condition, not a fixed number of
+// turns: a test that deliberately holds a write unresolved makes no further
+// calls, so the loop still ends on the next turn (#797).
+async function settleBridgeAfterUnmount(): Promise<void> {
+  const countCalls = () => {
+    const stubbed = window.dohcDesktop as unknown as
+      | Record<string, unknown>
+      | undefined;
+    if (!stubbed) return 0;
+    return Object.values(stubbed).reduce(
+      (total: number, value) =>
+        total + (vi.isMockFunction(value) ? value.mock.calls.length : 0),
+      0,
+    );
+  };
+  await act(async () => {
+    let previous = -1;
+    while (previous !== countCalls()) {
+      previous = countCalls();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  });
+}
+
 // Build legacy app-model path markers through interpolation so this test does
 // not contain the raw deprecated folder or manifest filenames that the
 // no-legacy scanner is meant to catch.
@@ -628,8 +660,9 @@ describe("markdown editor unmount flush", () => {
     vi.stubGlobal("dohcDesktop", bridgeMock);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     cleanup();
+    await settleBridgeAfterUnmount();
     resetOrphanedDrafts();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
@@ -6202,8 +6235,9 @@ describe("engine markdown source view", () => {
     resetOrphanedDrafts();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     cleanup();
+    await settleBridgeAfterUnmount();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
     resetOrphanedDrafts();
@@ -9510,8 +9544,9 @@ describe("markdown document opening state", () => {
     resetOrphanedDrafts();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     cleanup();
+    await settleBridgeAfterUnmount();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
     resetOrphanedDrafts();
