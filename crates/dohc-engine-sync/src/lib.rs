@@ -60,7 +60,7 @@ pub use journal::{
 };
 pub use model::{
     MAX_BLOB_HAVE_BATCH, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, MAX_PUSH_OPS_PER_BATCH,
-    MAX_WIRE_INTEGER, ReplicationEnvelope,
+    MAX_SHARE_PROPOSAL_OPS, MAX_WIRE_INTEGER, ReplicationEnvelope,
 };
 pub use moment_apply::{
     MomentApplyResult, MomentMaterializationChange, apply_moment_envelope,

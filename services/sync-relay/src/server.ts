@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { stableJsonStringify } from "./canonicalJson";
 import {
@@ -90,6 +91,19 @@ type SyncRelayRoute =
   | { route: "share-proposals"; shareId: string }
   | { route: "share-proposal-withdraw"; shareId: string; proposalId: string }
   | { route: "workspace-proposals"; workspaceId: string }
+  // ONE proposal, with its file rows. The listing above carries counts only,
+  // so opening a review reads the proposal the granter opened rather than
+  // every open proposal in the workspace.
+  | { route: "workspace-proposal"; workspaceId: string; proposalId: string }
+  // ONE op of one proposal. The review lists metadata and loads a file's
+  // content only when the granter opens that file, so this route answers the
+  // opening — without re-serving every op of every open proposal to do it.
+  | {
+      route: "workspace-proposal-op";
+      workspaceId: string;
+      proposalId: string;
+      opIndex: number;
+    }
   | {
       route: "workspace-proposal-settle";
       workspaceId: string;
@@ -114,6 +128,11 @@ type SyncRelayRoute =
 // if the two drift.
 export const MAX_BLOB_BYTES = 20 * 1024 * 1024;
 export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
+// One PAGE of the continuous replication lane, for the two log routes. It is
+// not the submit bound: a submit is one user act carrying one intent, and it
+// is bounded by what a person changes (MAX_SHARE_PROPOSAL_OPS), not by what a
+// page should hold. Raising this one would only lengthen each replication
+// stall.
 export const MAX_OPS_PER_REQUEST = 500;
 export const DEFAULT_LOG_PAGE_SIZE = 100;
 export const MAX_LOG_PAGE_SIZE = 500;
@@ -280,6 +299,42 @@ export function createSyncRelayHandler({
               versionId,
               blobSha256: op.basedOnBlobSha256,
             }),
+    };
+  };
+
+  // ONE op as the granter's review reads it. Shared by the listing and by the
+  // single-op route, so a row and the file it opens can never disagree about
+  // where a change lands or whether it drifted.
+  //
+  // It states no content, only where the content is: the review lists
+  // thousands of these and loads a file's text only when the granter opens
+  // that file.
+  const reviewOpRow = (workspaceId: string, versionId: string, op: ShareProposalOpRow) => {
+    const resolved = proposalBase(workspaceId, versionId, op);
+    return {
+      opIndex: op.opIndex,
+      basedOnPath: op.basedOnPath,
+      operation: op.operation,
+      // WHERE accepting will put it, resolved by the SAME rule the accept
+      // door uses. The review must name the path the write will use: a
+      // content-only change lands at the granter's current path, so showing
+      // the recipient's path would tell the granter one thing and do another.
+      afterPath: destinationPath(op, {
+        currentPath: resolved.head?.path ?? null,
+        base: resolved.base,
+      }),
+      afterBlobSha256: op.afterBlobSha256,
+      afterContentKind: op.afterContentKind,
+      // How big the incoming side is, so a row can say so before anyone pays
+      // to fetch it.
+      afterByteLength: op.afterByteLength,
+      currentPath: resolved.head?.path ?? null,
+      // What the review surface says out loud: this file changed since they
+      // sent it. Read from the granter's own head IN THE VERSION this share
+      // exposes, never from anything the recipient claimed.
+      drifted:
+        op.basedOnBlobSha256 !== null &&
+        (resolved.head?.blobSha256 ?? null) !== op.basedOnBlobSha256,
     };
   };
 
@@ -786,10 +841,10 @@ export function createSyncRelayHandler({
         const submitId = parseString(input.submitId, "submitId", MAX_SUBMIT_ID_CHARS);
         if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
         if (input.ops.length === 0) throw badRequest("ops must not be empty");
-        if (input.ops.length > MAX_OPS_PER_REQUEST) {
+        if (input.ops.length > MAX_SHARE_PROPOSAL_OPS) {
           throw badRequest(
             `this submit carries ${input.ops.length} changes; the limit is ` +
-              `${MAX_OPS_PER_REQUEST} changes per submit. Send the rest in the next submit`,
+              `${MAX_SHARE_PROPOSAL_OPS} changes per submit. Send the rest in the next submit`,
           );
         }
         const ops: ShareProposalOpRow[] = [];
@@ -988,11 +1043,16 @@ export function createSyncRelayHandler({
       // serves OPEN proposals only, so it states no `state` and no
       // `settledAtMs` — both would be constants. A settled proposal is
       // history, and this surface asks one question.
+      // A SUMMARY, because this is what a timer polls. The review surface
+      // renders a sender and a count from it; it does not draw files until a
+      // granter opens one. Serving every op of every open proposal here
+      // resolved a base per op on every tick to build rows nobody read.
+      //
+      // WHO sent them is resolved here from the server-derived user id on the
+      // proposal row. The granter's client used to rebuild this by fetching
+      // its whole share list and matching share ids — a second request per
+      // review, and wrong the moment a share has more than one recipient.
       if (route.route === "workspace-proposals" && request.method === "GET") {
-        // WHO sent them, resolved here from the server-derived user id on the
-        // proposal row. The granter's client used to rebuild this by fetching
-        // its whole share list and matching share ids — a second request per
-        // review, and wrong the moment a share has more than one recipient.
         const rows = await Promise.all(
           storage.listShareProposalsForWorkspace(route.workspaceId).map(async (proposal) => ({
             proposalId: proposal.proposalId,
@@ -1001,38 +1061,54 @@ export function createSyncRelayHandler({
               ? await lookupUserEmail(proposal.proposedByUserId)
               : null,
             createdAtMs: proposal.createdAtMs,
-            ops: proposal.ops.map((op) => {
-              const resolved = proposalBase(route.workspaceId, proposal.versionId, op);
-              return {
-                opIndex: op.opIndex,
-                basedOnPath: op.basedOnPath,
-                operation: op.operation,
-                // WHERE accepting will put it, resolved by the SAME rule the
-                // accept door uses. The review must name the path the write
-                // will use: a content-only change lands at the granter's
-                // current path, so showing the recipient's path would tell
-                // the granter one thing and do another.
-                afterPath: destinationPath(op, {
-                  currentPath: resolved.head?.path ?? null,
-                  base: resolved.base,
-                }),
-                afterBlobSha256: op.afterBlobSha256,
-                afterContentKind: op.afterContentKind,
-                currentPath: resolved.head?.path ?? null,
-                // What the review surface says out loud: this file changed
-                // since they sent it. Read from the granter's own head IN THE
-                // VERSION this share exposes, never from anything the
-                // recipient claimed.
-                drifted:
-                  op.basedOnBlobSha256 !== null &&
-                  (resolved.head?.blobSha256 ?? null) !== op.basedOnBlobSha256,
-              };
-            }),
+            ops: proposal.opCount,
           })),
         );
         return jsonResponse({ ok: true, proposals: rows });
       }
       if (route.route === "workspace-proposals") throw methodNotAllowed();
+
+      // ONE proposal's file rows, for the review a granter opened. Still no
+      // content: the rows say where each change lands and whether it drifted,
+      // and a file's text arrives through the op route below.
+      if (route.route === "workspace-proposal" && request.method === "GET") {
+        const proposal = storage.getShareProposal(route.proposalId);
+        if (!proposal || proposal.workspaceId !== route.workspaceId) throw notFound();
+        if (proposal.state !== "open") throw notFound();
+        return jsonResponse({
+          ok: true,
+          proposal: {
+            proposalId: proposal.proposalId,
+            shareId: proposal.shareId,
+            proposedByEmail: lookupUserEmail
+              ? await lookupUserEmail(proposal.proposedByUserId)
+              : null,
+            createdAtMs: proposal.createdAtMs,
+            ops: proposal.ops.map((op) =>
+              reviewOpRow(route.workspaceId, proposal.versionId, op),
+            ),
+          },
+        });
+      }
+      if (route.route === "workspace-proposal") throw methodNotAllowed();
+
+      // ONE op, for the review that opened one file. Same resolution as the
+      // listing above, so the row a granter expands states exactly what the
+      // row it clicked stated.
+      if (route.route === "workspace-proposal-op" && request.method === "GET") {
+        const proposal = storage.getShareProposal(route.proposalId);
+        if (!proposal || proposal.workspaceId !== route.workspaceId) throw notFound();
+        // Settled proposals are history. The review answers one question, and
+        // that question closes when the proposal leaves `open`.
+        if (proposal.state !== "open") throw notFound();
+        const op = proposal.ops.find((candidate) => candidate.opIndex === route.opIndex);
+        if (!op) throw notFound();
+        return jsonResponse({
+          ok: true,
+          op: reviewOpRow(route.workspaceId, proposal.versionId, op),
+        });
+      }
+      if (route.route === "workspace-proposal-op") throw methodNotAllowed();
 
       if (route.route === "workspace-proposal-settle" && request.method === "POST") {
         const proposal = storage.getShareProposal(route.proposalId);
@@ -1579,6 +1655,21 @@ function parseRoute(request: Request): SyncRelayRoute {
   if (parts.length === 3 && parts[2] === "proposals") {
     return { route: "workspace-proposals", workspaceId };
   }
+  if (parts.length === 4 && parts[2] === "proposals") {
+    return {
+      route: "workspace-proposal",
+      workspaceId,
+      proposalId: parseShareId(parts[3]),
+    };
+  }
+  if (parts.length === 6 && parts[2] === "proposals" && parts[4] === "ops") {
+    return {
+      route: "workspace-proposal-op",
+      workspaceId,
+      proposalId: parseShareId(parts[3]),
+      opIndex: parseOpIndex(parts[5]),
+    };
+  }
   if (
     parts.length === 5 &&
     parts[2] === "proposals" &&
@@ -1592,6 +1683,18 @@ function parseRoute(request: Request): SyncRelayRoute {
     };
   }
   throw notFound();
+}
+
+// A path segment naming an op's position in its proposal. Anything that is not
+// a plain in-range index addresses no op, so it is the same generic 404 every
+// other unresolvable lookup gives.
+function parseOpIndex(value: string | undefined): number {
+  if (typeof value !== "string" || !/^(0|[1-9][0-9]{0,6})$/.test(value)) {
+    throw notFound();
+  }
+  const index = Number(value);
+  if (index >= MAX_SHARE_PROPOSAL_OPS) throw notFound();
+  return index;
 }
 
 function parseShareId(value: string | undefined): string {

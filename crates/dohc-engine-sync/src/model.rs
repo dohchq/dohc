@@ -3,8 +3,23 @@ use serde::{Deserialize, Serialize};
 /// JavaScript's largest exactly representable integer. Every sequence crossing
 /// the relay trait boundary is validated against this value.
 pub const MAX_WIRE_INTEGER: i64 = (1_i64 << 53) - 1;
+/// One PAGE of the continuous replication lane. Not the submit bound.
 pub const MAX_PUSH_OPS_PER_BATCH: usize = 500;
 pub const MAX_PULL_OPS: usize = 500;
+/// How many net-changed files ONE share submit carries.
+///
+/// Measured, not guessed (`AGENTS.md`, "Measure limits that reject work"):
+/// healthy work reaches 1,434 changed files (one share of a repository-sized
+/// folder), a week of ordinary work nets 519, and the relay stays linear past
+/// 5,000. 2,500 is 1.7x above the measured healthy maximum with 4x margin
+/// below where the relay starts to cost real time. The evidence is in
+/// `docs/superpowers/plans/2026-08-17-share-submit-bound.md`.
+///
+/// Must equal `MAX_SHARE_PROPOSAL_OPS` in
+/// `packages/security-contract/src/shareProposalBound.ts`, which is what the
+/// relay route enforces. `the_submit_bound_matches_the_relay_contract`
+/// (`tests.rs`) reads that file and fails if the two drift.
+pub const MAX_SHARE_PROPOSAL_OPS: usize = 2_500;
 pub const MAX_BLOB_HAVE_BATCH: usize = 2_000;
 /// Matches `services/sync-relay`'s per-operation canonical JSON limit.
 pub const MAX_PAYLOAD_JSON_BYTES: usize = 256 * 1024;

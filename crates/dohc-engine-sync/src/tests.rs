@@ -23521,7 +23521,7 @@ fn journal_numbered_write(engine: &mut EngineStore, index: usize, at_ms: i64) {
 #[test]
 fn share_proposal_submit_sends_a_bounded_batch_and_then_the_rest() {
     let (_scratch, _path, mut engine) = proposal_fixture(&[]);
-    let over_limit = crate::MAX_PUSH_OPS_PER_BATCH + 2;
+    let over_limit = crate::MAX_SHARE_PROPOSAL_OPS + 2;
     for index in 0..over_limit {
         journal_numbered_write(&mut engine, index, 1_001 + index as i64);
     }
@@ -23539,7 +23539,7 @@ fn share_proposal_submit_sends_a_bounded_batch_and_then_the_rest() {
         .expect("MUTATION: an over-limit recipient must still be able to send");
     assert_eq!(
         first.submitted,
-        crate::MAX_PUSH_OPS_PER_BATCH,
+        crate::MAX_SHARE_PROPOSAL_OPS,
         "MUTATION: one submit carries at most the batch the relay accepts",
     );
     assert!(
@@ -23560,7 +23560,7 @@ fn share_proposal_submit_sends_a_bounded_batch_and_then_the_rest() {
         .expect("second submit");
     assert_eq!(
         second.submitted,
-        over_limit - crate::MAX_PUSH_OPS_PER_BATCH,
+        over_limit - crate::MAX_SHARE_PROPOSAL_OPS,
         "MUTATION: the changes the bound held back must travel in the NEXT submit",
     );
     assert!(
@@ -23582,6 +23582,51 @@ fn share_proposal_submit_sends_a_bounded_batch_and_then_the_rest() {
     );
 }
 
+/// The submit bound is one number enforced in two places: this scan stops at
+/// it, and the relay route refuses past it. Two copies that drift give a
+/// recipient a scan that collects more than the relay will take, and every
+/// submit then fails on a number nobody can see from here.
+#[test]
+fn the_submit_bound_matches_the_relay_contract() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/security-contract/src/shareProposalBound.ts"),
+    )
+    .expect("the relay's own copy of the submit bound");
+    let declared = source
+        .split("export const MAX_SHARE_PROPOSAL_OPS =")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .map(str::trim)
+        .and_then(|value| value.replace('_', "").parse::<usize>().ok())
+        .expect("MAX_SHARE_PROPOSAL_OPS is declared as a plain integer");
+    assert_eq!(
+        declared,
+        crate::MAX_SHARE_PROPOSAL_OPS,
+        "MUTATION: a scan bound above the relay's own bound makes every large submit fail",
+    );
+}
+
+/// The submit bound and the replication page size are different numbers for
+/// different things. Collapsing them re-couples one user act to a paging size,
+/// which is how the bound came to sit inside measured healthy work.
+/// Checked when this crate's TEST TARGET compiles — this module is
+/// `cfg(test)`, so the assertion is evaluated by `cargo test`/`nextest`
+/// builds rather than by a plain `cargo build`. The gate compiles the tests,
+/// so a violation fails the gate before any test runs. It is a const
+/// assertion because the relationship between two constants is a fact about
+/// the constants, not about any run.
+const _: () = assert!(
+    crate::MAX_SHARE_PROPOSAL_OPS > crate::MAX_PUSH_OPS_PER_BATCH,
+    "MUTATION: a submit bounded by the page size rejects a week of ordinary work",
+);
+
+#[test]
+fn the_submit_bound_is_not_the_replication_page_size() {
+    assert_eq!(crate::MAX_PUSH_OPS_PER_BATCH, 500);
+    assert_eq!(crate::MAX_SHARE_PROPOSAL_OPS, 2_500);
+}
+
 /// The bound counts FILES, and it stops at the op that would admit one file
 /// too many. An op folding into a file the scan already holds is not that op,
 /// so no file is ever offered half consolidated and then offered again.
@@ -23589,7 +23634,7 @@ fn share_proposal_submit_sends_a_bounded_batch_and_then_the_rest() {
 fn share_proposal_submit_never_splits_one_file_across_two_submits() {
     let (_scratch, _path, mut engine) = proposal_fixture(&[]);
     // Exactly the batch, so the scan is full but has stopped at nothing.
-    for index in 0..crate::MAX_PUSH_OPS_PER_BATCH {
+    for index in 0..crate::MAX_SHARE_PROPOSAL_OPS {
         journal_numbered_write(&mut engine, index, 1_001 + index as i64);
     }
     // A LATER edit to a file already held. It must fold into this submit.
@@ -23607,7 +23652,7 @@ fn share_proposal_submit_never_splits_one_file_across_two_submits() {
         9_001,
     );
     // The NEW file that stops the scan.
-    journal_numbered_write(&mut engine, crate::MAX_PUSH_OPS_PER_BATCH, 9_002);
+    journal_numbered_write(&mut engine, crate::MAX_SHARE_PROPOSAL_OPS, 9_002);
 
     let client = RelaySyncClient::new(PagedShareRelay::new([], []));
     let grant = proposal_grant(crate::ShareAccess::Edit);
@@ -23621,7 +23666,7 @@ fn share_proposal_submit_never_splits_one_file_across_two_submits() {
             &NoFaults,
         )
         .expect("first submit");
-    assert_eq!(first.submitted, crate::MAX_PUSH_OPS_PER_BATCH);
+    assert_eq!(first.submitted, crate::MAX_SHARE_PROPOSAL_OPS);
     assert!(first.more_pending);
     let second = client
         .submit_share_proposal(
@@ -23659,7 +23704,7 @@ fn share_proposal_submit_never_splits_one_file_across_two_submits() {
             .iter()
             .filter_map(|op| op.after_path.as_deref())
             .collect::<Vec<_>>(),
-        vec![format!("shared/docs/{}.md", crate::MAX_PUSH_OPS_PER_BATCH)],
+        vec![format!("shared/docs/{}.md", crate::MAX_SHARE_PROPOSAL_OPS)],
         "MUTATION: the second submit carries the file the bound refused, and only it",
     );
     assert_eq!(second.submitted, 1);
@@ -23805,7 +23850,7 @@ fn journal_numbered_outside_write(engine: &mut EngineStore, index: usize, at_ms:
 #[test]
 fn share_proposal_submit_saturates_the_skipped_count_at_the_bound() {
     let (_scratch, _path, mut engine) = proposal_fixture(&["kept"]);
-    let outside = crate::MAX_PUSH_OPS_PER_BATCH + 1;
+    let outside = crate::MAX_SHARE_PROPOSAL_OPS + 1;
     for index in 0..outside {
         journal_numbered_outside_write(&mut engine, index, 1_001 + index as i64);
     }
@@ -23836,7 +23881,7 @@ fn share_proposal_submit_saturates_the_skipped_count_at_the_bound() {
         .expect("MUTATION: dropping more files than the bound must not fail the submit");
     assert_eq!(
         outcome.skipped_outside_share,
-        crate::MAX_PUSH_OPS_PER_BATCH,
+        crate::MAX_SHARE_PROPOSAL_OPS,
         "MUTATION: the reported count must saturate at the bound the contract accepts",
     );
     assert_eq!(
@@ -23852,7 +23897,7 @@ fn share_proposal_submit_saturates_the_skipped_count_at_the_bound() {
 #[test]
 fn share_proposal_submit_at_exactly_the_bound_asks_for_no_second_press() {
     let (_scratch, _path, mut engine) = proposal_fixture(&[]);
-    for index in 0..crate::MAX_PUSH_OPS_PER_BATCH {
+    for index in 0..crate::MAX_SHARE_PROPOSAL_OPS {
         journal_numbered_write(&mut engine, index, 1_001 + index as i64);
     }
 
@@ -23869,7 +23914,7 @@ fn share_proposal_submit_at_exactly_the_bound_asks_for_no_second_press() {
         .expect("submit");
     assert_eq!(
         outcome.submitted,
-        crate::MAX_PUSH_OPS_PER_BATCH,
+        crate::MAX_SHARE_PROPOSAL_OPS,
         "MUTATION: a scan that fits exactly must carry every file it holds",
     );
     assert!(

@@ -1,3 +1,4 @@
+import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { describe, expect, it } from "vitest";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "./channels";
 import {
@@ -84,7 +85,8 @@ import {
   parseInvokeSiteSdkPayloadForIpc,
   parseInvokePluginPanelSdkPayloadForIpc,
   CloudJoinWorkspacePayload,
-  MAX_SHARE_PROPOSAL_FILES,
+  ReadShareProposalFileContentPayload,
+  ReadShareProposalFileContentResult,
   ListShareProposalsPayload,
   ListShareProposalsResult,
   ListMyShareChangesPayload,
@@ -2183,17 +2185,19 @@ describe("share changes IPC contract (#646 PR3a)", () => {
     shareId: "share-1",
     proposedByEmail: "recipient@example.com",
     createdAtMs: 1,
-    files: [
-      { opIndex: 0, path: "docs/a.md", operation: "write", drifted: false },
-      { opIndex: 1, path: "docs/b.md", operation: "delete", drifted: true },
-    ],
+    ops: 2,
   });
 
-  it("carries a granter's review listing whole", () => {
+  // The listing a timer polls. It says WHO and HOW MANY; the file rows come
+  // from the one proposal a granter opens.
+  it("carries a granter's review listing as counts, with no file rows", () => {
     const parsed = ListShareProposalsResult.parse({ proposals: [proposal()] });
-    expect(parsed.proposals[0]?.files).toHaveLength(2);
-    expect(parsed.proposals[0]?.files[1]?.operation).toBe("delete");
-    expect(parsed.proposals[0]?.files[1]?.drifted).toBe(true);
+    expect(parsed.proposals[0]?.ops).toBe(2);
+    expect(
+      Object.keys(parsed.proposals[0] ?? {}).sort(),
+      "MUTATION: carrying file rows on the polled listing costs a base resolution " +
+        "per file of every open proposal on every tick",
+    ).toEqual(["createdAtMs", "ops", "proposalId", "proposedByEmail", "shareId"]);
   });
 
   it("states a sender it could not name, rather than inventing one", () => {
@@ -2208,11 +2212,9 @@ describe("share changes IPC contract (#646 PR3a)", () => {
     expect(
       () =>
         ListShareProposalsResult.parse({
-          proposals: [
-            { ...proposal(), files: [{ opIndex: 0, path: "a.md", operation: "rename", drifted: false }] },
-          ],
+          proposals: [{ ...proposal(), ops: -1 }],
         }),
-      "MUTATION: an unknown operation renders as a change nobody described",
+      "MUTATION: a negative count renders a review nobody can have",
     ).toThrow();
     expect(() =>
       ListMyShareChangesResult.parse({
@@ -2230,13 +2232,14 @@ describe("share changes IPC contract (#646 PR3a)", () => {
 
   // `drifted` decides whether the review warns that the granter's copy moved.
   // A missing flag read as false would hide the warning on every drifted file.
+  // Drift is the one thing a review row says that a diff cannot, and it lives
+  // on the review read now that the polled listing carries counts.
   it("refuses a file row with no drift answer", () => {
     expect(
       () =>
-        ListShareProposalsResult.parse({
-          proposals: [
-            { ...proposal(), files: [{ opIndex: 0, path: "a.md", operation: "write" }] },
-          ],
+        ReadShareProposalChangesResult.parse({
+          proposedByEmail: null,
+          files: [{ opIndex: 0, path: "a.md", operation: "write", afterByteLength: 1 }],
         }),
       "MUTATION: an absent drift flag reads as `not drifted` and hides the warning",
     ).toThrow();
@@ -2248,12 +2251,11 @@ describe("share changes IPC contract (#646 PR3a)", () => {
       path: "docs/a.md",
       operation: "write" as const,
       drifted: false,
-      currentText: null,
-      incomingText: "after\n",
+      afterByteLength: 7,
     });
     for (const [label, opIndex] of [
       // Dense from 0, so the last valid index is one below the file bound.
-      ["the bound itself", MAX_SHARE_PROPOSAL_FILES],
+      ["the bound itself", MAX_SHARE_PROPOSAL_OPS],
       ["negative", -1],
       ["fractional", 1.5],
     ] as const) {
@@ -2269,7 +2271,7 @@ describe("share changes IPC contract (#646 PR3a)", () => {
     expect(
       ReadShareProposalChangesResult.parse({
         proposedByEmail: null,
-        files: [files(MAX_SHARE_PROPOSAL_FILES - 1)],
+        files: [files(MAX_SHARE_PROPOSAL_OPS - 1)],
       }).files,
     ).toHaveLength(1);
   });
@@ -2279,6 +2281,24 @@ describe("share changes IPC contract (#646 PR3a)", () => {
   // this surface cannot preview — which must still be reviewable, because a
   // granter has to be able to decline what they cannot read.
   it("carries either side of a change as null", () => {
+    expect(
+      ReadShareProposalFileContentResult.parse({
+        currentText: "before\n",
+        incomingText: null,
+      }).incomingText,
+    ).toBeNull();
+    expect(
+      ReadShareProposalFileContentResult.parse({
+        currentText: null,
+        incomingText: "after\n",
+      }).currentText,
+    ).toBeNull();
+  });
+
+  // The review row describes a file WITHOUT its content, which is what lets
+  // one review carry a repository-sized folder. A row that carried text again
+  // would put every file's two sides back into the opening read.
+  it("states no content on a review row", () => {
     const parsed = ReadShareProposalChangesResult.parse({
       proposedByEmail: "recipient@example.com",
       files: [
@@ -2287,21 +2307,16 @@ describe("share changes IPC contract (#646 PR3a)", () => {
           path: "docs/a.md",
           operation: "delete",
           drifted: true,
+          afterByteLength: null,
           currentText: "before\n",
-          incomingText: null,
-        },
-        {
-          opIndex: 1,
-          path: "docs/new.md",
-          operation: "write",
-          drifted: false,
-          currentText: null,
           incomingText: "after\n",
         },
       ],
     });
-    expect(parsed.files[0]?.incomingText).toBeNull();
-    expect(parsed.files[1]?.currentText).toBeNull();
+    expect(
+      Object.keys(parsed.files[0] ?? {}).sort(),
+      "MUTATION: carrying text on the row restores the eager read this bound depends on",
+    ).toEqual(["afterByteLength", "drifted", "opIndex", "operation", "path"]);
   });
 
   // The recipient names a workspace and nothing else. A share id on the wire
@@ -2337,31 +2352,29 @@ describe("share changes IPC contract (#646 PR3a)", () => {
   // review down with it.
   it("refuses an incoming side over the editor's text bound, and admits one at it", () => {
     const row = (incomingText: string) => ({
-      proposedByEmail: null,
-      files: [
-        {
-          opIndex: 0,
-          path: "docs/a.md",
-          operation: "write" as const,
-          drifted: false,
-          currentText: null,
-          incomingText,
-        },
-      ],
+      currentText: null,
+      incomingText,
     });
     expect(
-      () => ReadShareProposalChangesResult.parse(row("x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES + 1))),
+      () =>
+        ReadShareProposalFileContentResult.parse(
+          row("x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES + 1)),
+        ),
       "MUTATION: guarding at a LARGER bound sends a body this schema refuses",
     ).toThrow();
     expect(
-      ReadShareProposalChangesResult.parse(row("x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES)))
-        .files[0]?.incomingText?.length,
+      ReadShareProposalFileContentResult.parse(
+        row("x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES)),
+      ).incomingText?.length,
     ).toBe(WORKSPACE_TEXT_EDITOR_MAX_BYTES);
     // BYTES, not characters. One "é" is two bytes in UTF-8, so a string of
     // exactly the bound in CHARACTERS is twice the bound in bytes — and a
     // guard that counted characters would admit a body the relay then refuses.
     expect(
-      () => ReadShareProposalChangesResult.parse(row("é".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES))),
+      () =>
+        ReadShareProposalFileContentResult.parse(
+          row("é".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES)),
+        ),
       "MUTATION: counting characters instead of bytes doubles the real bound",
     ).toThrow();
   });

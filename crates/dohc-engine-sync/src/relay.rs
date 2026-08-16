@@ -295,7 +295,7 @@ pub struct ShareProposalSubmitOutcome {
     /// out of them count the same, because they state the same fact — the file
     /// is not part of this share, and it was not sent.
     ///
-    /// Saturates at `MAX_PUSH_OPS_PER_BATCH`, the bound the contract carrying
+    /// Saturates at `MAX_SHARE_PROPOSAL_OPS`, the bound the contract carrying
     /// this count accepts.
     pub skipped_outside_share: usize,
     /// Whether the per-submit change bound stopped this scan before the
@@ -1912,7 +1912,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// `scanned_seq` advances only after the relay has accepted the submit, so
     /// a failed submit re-offers the same changes rather than losing them.
     ///
-    /// One submit carries at most `MAX_PUSH_OPS_PER_BATCH` changes. The scan
+    /// One submit carries at most `MAX_SHARE_PROPOSAL_OPS` changes. The scan
     /// STOPS at that bound instead of failing after it, and records the
     /// journal position it stopped at, so the rest travels in the next submit.
     /// `more_pending` on the outcome says a further submit has more to offer.
@@ -3485,7 +3485,7 @@ fn proposed_change(op: &ReplicationEnvelope) -> ShareProposalChange {
 /// followed by a rename leaves as one change from the original path to the new
 /// one.
 ///
-/// The scan holds at most `MAX_PUSH_OPS_PER_BATCH` files, which is what one
+/// The scan holds at most `MAX_SHARE_PROPOSAL_OPS` files, which is what one
 /// submit carries. It stops at the op that would admit one file too many, and
 /// reports the position it stopped at, so the next submit resumes from exactly
 /// there. Folding more ops into files it already holds is not what the bound
@@ -3529,7 +3529,7 @@ fn collect_share_proposal_changes(
                     outside_share.insert(object_id);
                 } else {
                     if !by_object.contains_key(&object_id)
-                        && by_object.len() >= crate::MAX_PUSH_OPS_PER_BATCH
+                        && by_object.len() >= crate::MAX_SHARE_PROPOSAL_OPS
                     {
                         more_pending = true;
                         break 'pages;
@@ -3594,7 +3594,7 @@ fn collect_share_proposal_changes(
         // count crosses accepts. A larger number is parsed after the submit
         // already succeeded and the scan position already moved on, so it would
         // report a working submit as a failure whose retry offers nothing.
-        skipped_outside_share: outside_share.len().min(crate::MAX_PUSH_OPS_PER_BATCH),
+        skipped_outside_share: outside_share.len().min(crate::MAX_SHARE_PROPOSAL_OPS),
     })
 }
 

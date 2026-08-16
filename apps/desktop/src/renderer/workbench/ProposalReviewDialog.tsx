@@ -52,6 +52,136 @@ function ProposalFileDiff(props: {
   return <UnifiedDiffLines lines={lines} testId="proposal-review-diff-lines" />;
 }
 
+// What one row says before anyone pays to open it.
+function sizeLabel(bytes: number | null): string | null {
+  if (bytes === null) return null;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+type ContentState =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ready"; currentText: string | null; incomingText: string | null };
+
+// ONE file of the review, closed until the granter opens it.
+//
+// Opening is what fetches the content. A review of a repository-sized folder
+// lists thousands of these, and fetching every file's two sides to show that
+// list is what made such a review impossible to open at all.
+function ProposalFileSection(props: {
+  workspaceId: string;
+  proposalId: string;
+  file: ReadShareProposalChangesResult["files"][number];
+}) {
+  const { workspaceId, proposalId, file } = props;
+  const [open, setOpen] = useState(false);
+  const [content, setContent] = useState<ContentState | null>(null);
+  // The renderer async-state invariant, at row scope: an answer may only
+  // repaint the row that asked for it.
+  const liveToken = useRef(0);
+  useEffect(
+    () => () => {
+      liveToken.current += 1;
+    },
+    [],
+  );
+
+  const toggle = useCallback(() => {
+    const nowOpen = !open;
+    setOpen(nowOpen);
+    // Fetched once per row. Closing and reopening shows what was already read
+    // rather than asking again.
+    // Read once per row. A row that FAILED is read again, so a granter can
+    // retry a file the relay could not serve without reopening the review.
+    if (!nowOpen || (content !== null && content.status !== "error")) return;
+    const token = ++liveToken.current;
+    setContent({ status: "loading" });
+    void (async () => {
+      try {
+        const read = await bridge().readShareProposalFileContent({
+          workspaceId,
+          proposalId,
+          opIndex: file.opIndex,
+        });
+        if (token !== liveToken.current) return;
+        setContent({ status: "ready", ...read });
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        setContent({
+          status: "error",
+          message: ipcErrorMessage(error, "Couldn't load this file."),
+        });
+      }
+    })();
+  }, [open, content, workspaceId, proposalId, file.opIndex]);
+
+  const size = sizeLabel(file.afterByteLength);
+  return (
+    <section
+      data-testid="proposal-review-file"
+      data-proposal-path={file.path}
+      data-drifted={file.drifted || undefined}
+      data-open={open || undefined}
+      // A review at the bound draws 2,500 of these. `content-visibility` is
+      // the browser's own answer to that: it skips layout and paint for rows
+      // outside the viewport, and it does so for rows whose height nobody can
+      // predict — which an expandable row's is. A scroll-math virtualizer
+      // would have to measure every open row to do the same job worse.
+      // `contain-intrinsic-size` keeps the scrollbar honest before a row has
+      // ever been drawn.
+      className="overflow-hidden rounded-lg border border-line bg-bg [contain-intrinsic-size:auto_44px] [content-visibility:auto]"
+    >
+      <button
+        type="button"
+        data-testid="proposal-review-file-toggle"
+        aria-expanded={open}
+        onClick={toggle}
+        className="flex min-h-9 w-full cursor-pointer items-center gap-2 border-b border-line bg-panel-2 px-3 py-2 text-left hover:bg-line/40"
+      >
+        <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
+          {file.path}
+        </span>
+        {size ? (
+          <span className="shrink-0 text-[11px] text-subtle">{size}</span>
+        ) : null}
+        <span className="shrink-0 text-[11px] text-subtle">
+          {operationLabel(file.operation)}
+        </span>
+      </button>
+      {file.drifted ? (
+        <p
+          data-testid="proposal-review-drift"
+          className="m-0 border-b border-line bg-warning/10 px-3 py-1.5 text-[11px] leading-4 text-warning"
+        >
+          This file changed since they sent it.
+        </p>
+      ) : null}
+      {open && content?.status === "loading" ? (
+        <p className="m-0 px-3 py-2 text-xs leading-5 text-muted" role="status">
+          Loading this file…
+        </p>
+      ) : null}
+      {open && content?.status === "error" ? (
+        <p
+          data-testid="proposal-review-file-error"
+          className="m-0 px-3 py-2 text-xs leading-5 text-danger"
+          role="alert"
+        >
+          {content.message}
+        </p>
+      ) : null}
+      {open && content?.status === "ready" ? (
+        <ProposalFileDiff
+          currentText={content.currentText}
+          incomingText={content.incomingText}
+        />
+      ) : null}
+    </section>
+  );
+}
+
 type LoadState =
   | { status: "loading" }
   | { status: "error"; message: string }
@@ -86,7 +216,8 @@ export function ProposalReviewDialog(props: {
     setSettleError(null);
     void (async () => {
       try {
-        // ONE read: the files, their drift, and both sides of each diff.
+        // ONE read, and NO content: the files, their paths, sizes and drift.
+        // A file's two sides are read when its row is opened.
         const changes = await bridge().readShareProposalChanges({
           workspaceId,
           proposalId,
@@ -156,34 +287,12 @@ export function ProposalReviewDialog(props: {
           {load.status === "ready" ? (
             <div className="flex flex-col gap-4">
               {files.map((file) => (
-                <section
+                <ProposalFileSection
                   key={file.opIndex}
-                  data-testid="proposal-review-file"
-                  data-proposal-path={file.path}
-                  data-drifted={file.drifted || undefined}
-                  className="overflow-hidden rounded-lg border border-line bg-bg"
-                >
-                  <div className="flex min-h-9 items-center gap-2 border-b border-line bg-panel-2 px-3 py-2">
-                    <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
-                      {file.path}
-                    </span>
-                    <span className="shrink-0 text-[11px] text-subtle">
-                      {operationLabel(file.operation)}
-                    </span>
-                  </div>
-                  {file.drifted ? (
-                    <p
-                      data-testid="proposal-review-drift"
-                      className="m-0 border-b border-line bg-warning/10 px-3 py-1.5 text-[11px] leading-4 text-warning"
-                    >
-                      This file changed since they sent it.
-                    </p>
-                  ) : null}
-                  <ProposalFileDiff
-                    currentText={file.currentText}
-                    incomingText={file.incomingText}
-                  />
-                </section>
+                  workspaceId={workspaceId}
+                  proposalId={proposalId}
+                  file={file}
+                />
               ))}
             </div>
           ) : null}

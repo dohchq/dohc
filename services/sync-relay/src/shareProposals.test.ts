@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { MAX_BLOB_BYTES, MAX_OPS_PER_REQUEST, createSyncRelayHandler, type SyncRelayHandler } from "./server";
 // The CONTRACT's shape, not a copy of it. A local re-declaration drifts, and a
 // test that proves the copy proves nothing about the route.
@@ -315,6 +316,25 @@ async function reviewRows(h: SyncRelayHandler): Promise<Array<Record<string, unk
   return (await json(response)).proposals as Array<Record<string, unknown>>;
 }
 
+// ONE proposal, with its file rows. The listing above states counts, so a test
+// that asserts on what a review SHOWS opens the proposal the way the granter's
+// client does.
+async function reviewProposal(
+  h: SyncRelayHandler,
+  proposalId: string,
+): Promise<Record<string, unknown>> {
+  const response = await h(request(GRANTER, `/sync/${WORKSPACE}/proposals/${proposalId}`));
+  expect(response.status, await response.clone().text()).toBe(200);
+  return (await json(response)).proposal as Record<string, unknown>;
+}
+
+// The only open proposal, opened. Every caller here submits exactly one.
+async function onlyReview(h: SyncRelayHandler): Promise<Record<string, unknown>> {
+  const rows = await reviewRows(h);
+  expect(rows.length, "one open proposal").toBe(1);
+  return await reviewProposal(h, String(rows[0]!.proposalId));
+}
+
 // The whole response, byte for byte. Anti-fingerprinting is a claim about
 // BYTES, so comparing status codes alone would not test it.
 async function denialBytes(response: Response): Promise<string> {
@@ -591,9 +611,9 @@ describe("the base rewrite", () => {
     expect(submitted.status).toBe(200);
     const proposalId = (await json(submitted)).proposalId as string;
 
-    const rows = await reviewRows(h);
+    const opened = await onlyReview(h);
     expect(
-      (rows[0]!.ops as Array<Record<string, unknown>>)[0]!.drifted,
+      (opened.ops as Array<Record<string, unknown>>)[0]!.drifted,
       "MUTATION: the review surface must say this file changed since they sent it",
     ).toBe(true);
 
@@ -845,7 +865,7 @@ describe("what the granter does under an open proposal", () => {
     // The REVIEW names the destination the accept will use — the granter's
     // current path, not the one the recipient read. A pure rename leaves
     // `drifted: false`, so there is no drift line to warn them either.
-    const reviewed = (await reviewRows(h))[0]!;
+    const reviewed = await onlyReview(h);
     const reviewedOp = (reviewed.ops as Array<Record<string, unknown>>)[0]!;
     expect(
       reviewedOp.afterPath,
@@ -899,7 +919,7 @@ describe("what the granter does under an open proposal", () => {
     });
 
     // The REVIEW names the same destination the accept will use.
-    const reviewed = (await reviewRows(h))[0]!;
+    const reviewed = await onlyReview(h);
     expect(
       (reviewed.ops as Array<Record<string, unknown>>)[0]!.afterPath,
       "MUTATION: the review must name the path the write will use",
@@ -1092,7 +1112,7 @@ describe("the version a share exposes", () => {
     const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: main.blobSha256 })]);
     const proposalId = (await json(submitted)).proposalId as string;
 
-    const row = (await reviewRows(h))[0]!;
+    const row = await onlyReview(h);
     expect(
       (row.ops as Array<Record<string, unknown>>)[0]!.drifted,
       "MUTATION: drift read across versions calls a current file drifted",
@@ -1604,19 +1624,221 @@ describe("the recipient's blob route", () => {
     ).toContain(sha256("never submitted"));
   });
 
-  it("refuses more changes than one submit carries, and names the limit and the count", async () => {
+  // The route the lazy review opens a file through. It exists so that opening
+  // one file of a 2,500-file review does not re-serve every op of every open
+  // proposal to reach it.
+  it("serves one op of one proposal, and refuses one that addresses nothing", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const granter = new Granter(h);
+    await granter.write("object-in", "docs/in.md", "granter one");
+    const shareId = await createShare(h, "edit");
+    expect((await uploadShareBlob(h, shareId, "recipient two")).status).toBe(200);
+    const sent = await submit(h, shareId, [change()]);
+    expect(sent.status, await sent.clone().text()).toBe(200);
+    const proposalId = (await json(sent)).proposalId as string;
+
+    const one = await h(
+      request(GRANTER, `/sync/${WORKSPACE}/proposals/${proposalId}/ops/0`),
+    );
+    expect(one.status, await one.clone().text()).toBe(200);
+    const op = (await json(one)).op as Record<string, unknown>;
+    expect(op.opIndex).toBe(0);
+    expect(op.afterPath).toBe("docs/in.md");
+    expect(op.afterBlobSha256).toBe(sha256("recipient two"));
+    expect(op, "the row states no content, only where it is").not.toHaveProperty(
+      "incomingText",
+    );
+
+  });
+
+  // The per-proposal route is a NEW surface too, and it owes the listing's gate
+  // and the listing's exact denial bytes. A route that denies differently can
+  // be compared against the other to learn what a workspace holds.
+  it("gates the single-proposal route exactly as the listing is gated", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const granter = new Granter(h);
+    await granter.write("object-in", "docs/in.md", "granter one");
+    const shareId = await createShare(h, "edit");
+    expect((await uploadShareBlob(h, shareId, "recipient two")).status).toBe(200);
+    const sent = await submit(h, shareId, [change()]);
+    const proposalId = (await json(sent)).proposalId as string;
+    const one = (id: string, as: string) =>
+      h(request(as, `/sync/${WORKSPACE}/proposals/${id}`));
+
+    // The owner reads it, and it carries the file rows the listing does not.
+    const mine = await one(proposalId, GRANTER);
+    expect(mine.status, await mine.clone().text()).toBe(200);
+    const proposal = (await json(mine)).proposal as Record<string, unknown>;
+    expect((proposal.ops as unknown[]).length).toBe(1);
+    expect(proposal.proposalId).toBe(proposalId);
+
+    const denied = await Promise.all([
+      one(proposalId, RECIPIENT),
+      one(proposalId, OTHER),
+      one("proposal-absent", GRANTER),
+    ]).then((responses) => Promise.all(responses.map(denialBytes)));
+    expect(
+      new Set(denied).size,
+      "MUTATION: a per-failure answer turns this route into a probe for what a workspace holds",
+    ).toBe(1);
+    expect(
+      await denialBytes(await h(request(OTHER, `/sync/${WORKSPACE}/proposals`))),
+      "MUTATION: a per-proposal route denying differently from the listing leaks which proposals exist",
+    ).toBe(denied[0]);
+
+    // Settled is history on this route, exactly as on the op route.
+    expect((await settle(h, proposalId, "decline")).status).toBe(200);
+    expect(
+      await denialBytes(await one(proposalId, GRANTER)),
+      "MUTATION: serving a settled proposal keeps a closed review readable",
+    ).toBe(denied[0]);
+  });
+
+  // The polled listing must state counts and nothing more. Carrying op rows
+  // here is what made every tick resolve a base per file of every open
+  // proposal.
+  it("states counts on the listing, never file rows", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const granter = new Granter(h);
+    await granter.write("object-in", "docs/in.md", "granter one");
+    const shareId = await createShare(h, "edit");
+    expect((await uploadShareBlob(h, shareId, "recipient two")).status).toBe(200);
+    expect((await submit(h, shareId, [change()])).status).toBe(200);
+
+    const rows = await reviewRows(h);
+    expect(rows.length).toBe(1);
+    expect(
+      rows[0]!.ops,
+      "MUTATION: an ops ARRAY here restores the per-tick work this listing exists to avoid",
+    ).toBe(1);
+    expect(Object.keys(rows[0]!).sort()).toEqual([
+      "createdAtMs",
+      "ops",
+      "proposalId",
+      "proposedByEmail",
+      "shareId",
+    ]);
+  });
+
+  // A per-op route is a NEW surface on the granter's workspace, so it owes the
+  // same gate the listing owes and the same generic 404 — one answer for every
+  // way a lookup can fail, so nothing on it can be used to probe what exists.
+  it("gates the single-op route exactly as the listing is gated", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const granter = new Granter(h);
+    await granter.write("object-in", "docs/in.md", "granter one");
+    const shareId = await createShare(h, "edit");
+    expect((await uploadShareBlob(h, shareId, "recipient two")).status).toBe(200);
+    const sent = await submit(h, shareId, [change()]);
+    const proposalId = (await json(sent)).proposalId as string;
+    const op = (id: string, as: string, index = 0) =>
+      h(request(as, `/sync/${WORKSPACE}/proposals/${id}/ops/${index}`));
+
+    // The owner reads it.
+    expect((await op(proposalId, GRANTER)).status).toBe(200);
+
+    // Every other way in is the SAME bytes, so none of them tells the caller
+    // whether the thing they asked about exists.
+    const denied = await Promise.all([
+      // The share's own recipient, who owns none of this workspace.
+      op(proposalId, RECIPIENT),
+      // An account with no relationship to the share at all.
+      op(proposalId, OTHER),
+      // A proposal id that never existed.
+      op("proposal-absent", GRANTER),
+      // An op index this proposal does not have.
+      op(proposalId, GRANTER, 1),
+    ]).then((responses) => Promise.all(responses.map(denialBytes)));
+    expect(
+      new Set(denied).size,
+      "MUTATION: a per-failure answer turns this route into a probe for what a workspace holds",
+    ).toBe(1);
+    expect(denied[0]).toContain("404");
+
+    // The listing answers a non-owner with those same bytes. The two routes
+    // must not drift: one that denies differently is one that can be compared
+    // against the other.
+    expect(
+      await denialBytes(await h(request(OTHER, `/sync/${WORKSPACE}/proposals`))),
+      "MUTATION: a per-op route denying differently from the listing leaks which proposals exist",
+    ).toBe(denied[0]);
+
+    // A settled proposal is history. The review asks one question, and it
+    // closes when the proposal leaves `open`.
+    expect((await settle(h, proposalId, "decline")).status).toBe(200);
+    expect(
+      await denialBytes(await op(proposalId, GRANTER)),
+      "MUTATION: serving a settled proposal's ops keeps a closed review readable",
+    ).toBe(denied[0]);
+  });
+
+  // The measured bound, at its exact edge on both sides
+  // (`docs/superpowers/plans/2026-08-17-share-submit-bound.md`). Driven at the
+  // real number rather than a small stand-in, because a bound tested only near
+  // zero proves nothing about the number that ships.
+  it("carries a submit of exactly the bound", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
     const shareId = await createShare(h, "edit");
-    const tooMany = Array.from({ length: MAX_OPS_PER_REQUEST + 1 }, (_ignored, index) =>
-      change({ basedOnPath: null, basedOnBlobSha256: null, afterPath: `docs/f-${index}.md` }),
+    // Real content, because the submit door refuses a change naming a blob the
+    // relay does not hold. One body for all of them: blobs are addressed by
+    // content, so one upload covers every change that carries it.
+    const body = "recipient content";
+    expect((await uploadShareBlob(h, shareId, body)).status).toBe(200);
+    const atBound = Array.from({ length: MAX_SHARE_PROPOSAL_OPS }, (_ignored, index) =>
+      change({
+        basedOnPath: null,
+        basedOnBlobSha256: null,
+        afterPath: `docs/f-${index}.md`,
+        afterBlobSha256: sha256(body),
+        afterByteLength: body.length,
+      }),
+    );
+
+    const accepted = await submit(h, shareId, atBound);
+    expect(accepted.status, await accepted.clone().text()).toBe(200);
+    expect(
+      (await json(accepted)).ops,
+      "MUTATION: a bound one below the stated number refuses a submit it must carry",
+    ).toBe(MAX_SHARE_PROPOSAL_OPS);
+  });
+
+  it("refuses one change past the bound, and names the limit and the count", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const shareId = await createShare(h, "edit");
+    const tooMany = Array.from(
+      { length: MAX_SHARE_PROPOSAL_OPS + 1 },
+      (_ignored, index) =>
+        change({ basedOnPath: null, basedOnBlobSha256: null, afterPath: `docs/f-${index}.md` }),
     );
 
     const refused = await submit(h, shareId, tooMany);
     expect(refused.status).toBe(400);
     const body = await refused.text();
-    expect(body, "the refusal names the limit").toContain(String(MAX_OPS_PER_REQUEST));
-    expect(body, "and what was observed").toContain(String(MAX_OPS_PER_REQUEST + 1));
+    expect(body, "the refusal names the limit").toContain(String(MAX_SHARE_PROPOSAL_OPS));
+    expect(body, "and what was observed").toContain(String(MAX_SHARE_PROPOSAL_OPS + 1));
+  });
+
+  // The submit bound and the replication page size are two different numbers
+  // for two different things. Raising the page size to carry a submit would
+  // lengthen every replication stall; raising the submit bound to match a page
+  // would put it back inside the measured healthy range.
+  it("keeps the replication page size where it was", () => {
+    expect(MAX_OPS_PER_REQUEST).toBe(500);
+    expect(
+      MAX_SHARE_PROPOSAL_OPS,
+      "MUTATION: collapsing the two bounds into one re-couples a user act to a paging size",
+    ).not.toBe(MAX_OPS_PER_REQUEST);
   });
 });

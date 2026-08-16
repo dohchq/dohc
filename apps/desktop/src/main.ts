@@ -87,6 +87,8 @@ import {
   ListShareProposalsResult,
   ReadShareProposalChangesPayload,
   ReadShareProposalChangesResult,
+  ReadShareProposalFileContentPayload,
+  ReadShareProposalFileContentResult,
   SettleShareProposalPayload,
   SettleShareProposalResult,
   SubmitShareChangesPayload,
@@ -509,6 +511,7 @@ import {
   SharedFileReadOnlyError,
   type RelayWorkspaceBootstrapResult,
   type ShareProposal,
+  type ShareProposalSummary,
   type ShareProposalOp,
   type ShareViewRefusal,
   type SyncRelayConnection,
@@ -576,6 +579,8 @@ import {
 import {
   listMyShareProposals,
   listShareProposals,
+  readShareProposal,
+  readShareProposalOp,
   settleShareProposal,
   withdrawShareProposal,
 } from "./workspaces/shareProposalRelay";
@@ -5859,12 +5864,12 @@ function registerIpcHandlers(
     }
   }
 
-  // The proposals waiting on this granter. One relay call; the review reads
-  // the same answer rather than asking again per file.
+  // The proposals waiting on this granter, as SUMMARIES. Opening one review
+  // reads that proposal by id rather than this whole set.
   async function openShareProposals(workspaceId: string): Promise<{
     workspace: RegistryEntry;
     target: { relay: SyncRelayConnection; remoteWorkspaceId: string };
-    proposals: ShareProposal[];
+    proposals: ShareProposalSummary[];
   }> {
     const workspace = requireWorkspace(workspaceId);
     const target = await requireShareProposalGranter(workspaceId);
@@ -5878,9 +5883,10 @@ function registerIpcHandlers(
     };
   }
 
-  // One proposal's file rows, from ops that name a path. An op naming none
-  // describes no file this surface can show, and is left out rather than
-  // rendered as a blank row.
+  // The opened proposal's file rows, from ops that name a path. An op naming
+  // none describes no file this surface can show, and is left out rather than
+  // rendered as a blank row. Only the review builds these; the polled listing
+  // carries counts.
   function shareProposalFileRows(
     proposal: ShareProposal,
   ): Array<{ op: ShareProposalOp; path: string }> {
@@ -5900,12 +5906,7 @@ function registerIpcHandlers(
         shareId: proposal.shareId,
         proposedByEmail: proposal.proposedByEmail,
         createdAtMs: proposal.createdAtMs,
-        files: shareProposalFileRows(proposal).map(({ op, path }) => ({
-          opIndex: op.opIndex,
-          path,
-          operation: op.operation,
-          drifted: op.drifted,
-        })),
+        ops: proposal.ops,
       })),
     });
   });
@@ -5913,42 +5914,60 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.readShareProposalChanges, async (event, payload) => {
     assertTrustedSender(event);
     const input = ReadShareProposalChangesPayload.parse(payload);
-    const { workspace, target, proposals } = await openShareProposals(input.workspaceId);
-    const proposal = proposals.find(
-      (candidate) => candidate.proposalId === input.proposalId,
-    );
-    if (!proposal) {
-      throw new Error("dohc could not find those changes. Refresh, then try again.");
-    }
-    // The two sides come from two different places on purpose: the granter's
-    // own file is read locally, at the path the granter holds it NOW, and the
-    // incoming side is the proposal's after-blob, which lives at the relay and
-    // has never touched this machine's files.
-    const files = await Promise.all(
-      shareProposalFileRows(proposal).map(async ({ op, path }) => ({
+    const target = await requireShareProposalGranter(input.workspaceId);
+    // ONE proposal, named. Reading the whole open set to find it made opening
+    // a review cost every other review's file rows as well.
+    const proposal = await readShareProposal({
+      relay: target.relay,
+      workspaceId: target.remoteWorkspaceId,
+      proposalId: input.proposalId,
+    });
+    // Metadata only. Content is fetched per file, when the granter opens it.
+    return ReadShareProposalChangesResult.parse({
+      proposedByEmail: proposal.proposedByEmail,
+      files: shareProposalFileRows(proposal).map(({ op, path }) => ({
         opIndex: op.opIndex,
         path,
         operation: op.operation,
         drifted: op.drifted,
-        currentText:
-          op.currentPath === null
-            ? null
-            : await readWorkspaceText(workspace.rootPath, op.currentPath).then(
-                (read) => (read.truncated ? null : read.text),
-                // A file this surface cannot read as text is "no current
-                // side", which the review states rather than failing.
-                () => null,
-              ),
-        incomingText: await shareProposalIncomingText(
-          target.relay,
-          target.remoteWorkspaceId,
-          op,
-        ),
+        afterByteLength: op.afterByteLength,
       })),
-    );
-    return ReadShareProposalChangesResult.parse({
-      proposedByEmail: proposal.proposedByEmail,
-      files,
+    });
+  });
+
+  ipcMain.handle(CHANNELS.readShareProposalFileContent, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ReadShareProposalFileContentPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const target = await requireShareProposalGranter(input.workspaceId);
+    // ONE op, resolved by the relay from ids this process holds. The renderer
+    // states a position, never a path — the granter's own files are what the
+    // local half of this read opens.
+    const op = await readShareProposalOp({
+      relay: target.relay,
+      workspaceId: target.remoteWorkspaceId,
+      proposalId: input.proposalId,
+      opIndex: input.opIndex,
+    });
+    // The two sides come from two different places on purpose: the granter's
+    // own file is read locally, at the path the granter holds it NOW, and the
+    // incoming side is the proposal's after-blob, which lives at the relay and
+    // has never touched this machine's files.
+    return ReadShareProposalFileContentResult.parse({
+      currentText:
+        op.currentPath === null
+          ? null
+          : await readWorkspaceText(workspace.rootPath, op.currentPath).then(
+              (read) => (read.truncated ? null : read.text),
+              // A file this surface cannot read as text is "no current side",
+              // which the review states rather than failing.
+              () => null,
+            ),
+      incomingText: await shareProposalIncomingText(
+        target.relay,
+        target.remoteWorkspaceId,
+        op,
+      ),
     });
   });
 
