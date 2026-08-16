@@ -43,6 +43,10 @@ import {
   readPluginLocalState,
   workspaceStateKey,
 } from "./pluginLocalState";
+import {
+  pluginLifecycleKey,
+  startPluginForPanel,
+} from "./pluginPanelRegistration";
 import { pluginStateRoot, snapshotPluginSource } from "./pluginSourceSnapshot";
 import {
   pluginBaselineManifestPath,
@@ -2539,6 +2543,110 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         "utf8",
       )).toContain('marker = "one"');
     } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("opens a surface only once the host finished activating (#798)", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    let activationGate = deferred();
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
+        request: async <T = unknown>(method: string): Promise<T> => {
+          if (method !== "plugin.activate") return {} as T;
+          await activationGate.promise;
+          return { commands: [] } as T;
+        },
+        notify: () => undefined,
+        dispose: async () => undefined,
+      })),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    // What main.ts wires behind every panel and web-app open.
+    const panelStartedHosts = new Set<string>();
+    const open = () => {
+      let opened = false;
+      const settled = startPluginForPanel({
+        panelStartedHosts,
+        workspaceId: "workspace-1",
+        pluginId: "example-plugin",
+        hostActivation: () => host.activationOf("example-plugin"),
+        ensureStarted: () => pipeline.ensureStarted("example-plugin"),
+      }).then(() => {
+        opened = true;
+      });
+      return { settled, isOpen: () => opened };
+    };
+    const settleQueuedWork = () =>
+      new Promise((resolve) => setTimeout(resolve, 50));
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+
+      // The workspace's own install spawned the host and returned. The plugin
+      // is still activating, which is the window a cold open lands in.
+      expect(host.getStatus("example-plugin")).toBe("starting");
+
+      const rode = open();
+      await settleQueuedWork();
+      expect(rode.isOpen()).toBe(false);
+      // The call the surface makes next is refused for as long as this lasts.
+      await expect(
+        host.invokeCommand("example-plugin", "example.command"),
+      ).rejects.toThrow('Plugin "example-plugin" is still starting.');
+
+      activationGate.resolve();
+      await rode.settled;
+      expect(host.getStatus("example-plugin")).toBe("ready");
+      await host.invokeCommand("example-plugin", "example.command");
+      // It rode along on a host the install started, so it does not own it.
+      expect(panelStartedHosts.size).toBe(0);
+
+      // The cold path: this open starts the host itself and must wait the
+      // same way.
+      await host.stop("example-plugin");
+      activationGate = deferred();
+      const cold = open();
+      await waitFor(
+        () => host.getStatus("example-plugin") === "starting",
+        "The open did not start the host.",
+      );
+      await settleQueuedWork();
+      expect(cold.isOpen()).toBe(false);
+
+      activationGate.resolve();
+      await cold.settled;
+      expect(host.getStatus("example-plugin")).toBe("ready");
+      await host.invokeCommand("example-plugin", "example.command");
+      expect([...panelStartedHosts]).toEqual([
+        pluginLifecycleKey("workspace-1", "example-plugin"),
+      ]);
+    } finally {
+      activationGate.resolve();
       await pipeline.dispose();
     }
   }, 60_000);
