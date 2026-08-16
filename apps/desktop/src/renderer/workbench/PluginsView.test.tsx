@@ -7,7 +7,7 @@ import type {
   PluginStatusRecord,
   PluginUninstallPreflightRecord,
 } from "../../ipc/bridgeContract";
-import { PluginSettings } from "./PluginSettings";
+import { PluginsView } from "./PluginsView";
 
 let statusListener: ((event: PluginStatusChangedEvent) => void) | null = null;
 
@@ -107,7 +107,7 @@ afterEach(() => {
   cleanup();
 });
 
-describe("PluginSettings", () => {
+describe("PluginsView", () => {
   it("drops a stale plugin list after switching workspaces", async () => {
     const oldList = deferred<{
       ok: true;
@@ -122,10 +122,10 @@ describe("PluginSettings", () => {
         workspaceId === "ws-old" ? oldList.promise : newList.promise,
     );
 
-    const view = render(<PluginSettings workspaceId="ws-old" />);
+    const view = render(<PluginsView workspaceId="ws-old" />);
     expect(bridgeMock.listPlugins).toHaveBeenCalledWith({ workspaceId: "ws-old" });
 
-    view.rerender(<PluginSettings workspaceId="ws-new" />);
+    view.rerender(<PluginsView workspaceId="ws-new" />);
     expect(bridgeMock.listPlugins).toHaveBeenCalledWith({ workspaceId: "ws-new" });
 
     await act(async () => {
@@ -151,7 +151,7 @@ describe("PluginSettings", () => {
     expect(screen.queryByText("old-status-plugin")).toBeNull();
   });
 
-  it("offers Open for an installed plugin's web app and closes the dialog on success", async () => {
+  it("offers Open for an installed plugin's web app and frees the control on success", async () => {
     const installed = plugin("t3-code", {
       webApps: [{ id: "app", title: "T3 Code" }],
     });
@@ -160,11 +160,8 @@ describe("PluginSettings", () => {
       pluginId: "t3-code",
       webAppId: "app",
     });
-    const onOpenedWebApp = vi.fn();
 
-    render(
-      <PluginSettings workspaceId="ws-1" onOpenedWebApp={onOpenedWebApp} />,
-    );
+    render(<PluginsView workspaceId="ws-1" />);
     const open = await screen.findByTestId("plugin-open-web-app");
     expect(open.textContent).toBe("Open T3 Code");
 
@@ -179,7 +176,10 @@ describe("PluginSettings", () => {
       pluginId: "t3-code",
       webAppId: "app",
     });
-    expect(onOpenedWebApp).toHaveBeenCalledTimes(1);
+    // The panel sits beside the editor and stays open. The only thing the
+    // success path owes the row is its control back.
+    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
+    expect(open.textContent).toBe("Open T3 Code");
   });
 
   it("can open a web app after leaving a workspace whose open never answered", async () => {
@@ -189,11 +189,8 @@ describe("PluginSettings", () => {
     bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [installed] });
     const stuck = deferred<{ pluginId: string; webAppId: string }>();
     bridgeMock.openPluginWebApp.mockReturnValueOnce(stuck.promise);
-    const onOpenedWebApp = vi.fn();
 
-    const view = render(
-      <PluginSettings workspaceId="ws-old" onOpenedWebApp={onOpenedWebApp} />,
-    );
+    const view = render(<PluginsView workspaceId="ws-old" />);
     const stuckOpen = await screen.findByTestId("plugin-open-web-app");
     await act(async () => {
       fireEvent.click(stuckOpen);
@@ -208,9 +205,7 @@ describe("PluginSettings", () => {
       pluginId: "t3-code",
       webAppId: "app",
     });
-    view.rerender(
-      <PluginSettings workspaceId="ws-new" onOpenedWebApp={onOpenedWebApp} />,
-    );
+    view.rerender(<PluginsView workspaceId="ws-new" />);
 
     // MUTATION (leave openingWebApp alone across the switch): the stale
     // request never clears it — its own cleanup is skipped by the epoch
@@ -227,10 +222,9 @@ describe("PluginSettings", () => {
       pluginId: "t3-code",
       webAppId: "app",
     });
-    expect(onOpenedWebApp).toHaveBeenCalledTimes(1);
   });
 
-  it("shows the open failure and keeps the dialog when the app cannot start", async () => {
+  it("shows the open failure on the row when the app cannot start", async () => {
     const installed = plugin("t3-code", {
       webApps: [{ id: "app", title: "T3 Code" }],
     });
@@ -238,11 +232,8 @@ describe("PluginSettings", () => {
     bridgeMock.openPluginWebApp.mockRejectedValue(
       new Error("The t3 server exited before becoming ready in 3 attempts."),
     );
-    const onOpenedWebApp = vi.fn();
 
-    render(
-      <PluginSettings workspaceId="ws-1" onOpenedWebApp={onOpenedWebApp} />,
-    );
+    render(<PluginsView workspaceId="ws-1" />);
     const open = await screen.findByTestId("plugin-open-web-app");
     await act(async () => {
       fireEvent.click(open);
@@ -251,7 +242,6 @@ describe("PluginSettings", () => {
 
     const error = await screen.findByTestId("plugin-action-error");
     expect(error.textContent).toContain("3 attempts");
-    expect(onOpenedWebApp).not.toHaveBeenCalled();
   });
 
   it("hides the web app control for disabled and uninstalled plugins", async () => {
@@ -271,7 +261,7 @@ describe("PluginSettings", () => {
       ],
     });
 
-    render(<PluginSettings workspaceId="ws-1" />);
+    render(<PluginsView workspaceId="ws-1" />);
     await screen.findByText("disabled-plugin");
     expect(screen.queryByTestId("plugin-open-web-app")).toBeNull();
   });
@@ -330,7 +320,7 @@ describe("PluginSettings", () => {
       }),
     });
 
-    render(<PluginSettings workspaceId="ws-1" />);
+    render(<PluginsView workspaceId="ws-1" />);
 
     const rows = await screen.findAllByTestId("plugin-row");
     const row = (id: string) =>
@@ -369,6 +359,87 @@ describe("PluginSettings", () => {
     });
   });
 
+  it("splits installed plugins from what the workspace only offers", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [
+        plugin("installed-plugin"),
+        plugin("candidate-plugin", {
+          status: "discovered",
+          runtimeStatus: null,
+          sourceHash: null,
+          approvedHash: null,
+          installedBaselineHash: null,
+        }),
+      ],
+    });
+
+    render(<PluginsView workspaceId="ws-1" />);
+
+    const installed = await screen.findByTestId("plugins-section-installed");
+    const available = screen.getByTestId("plugins-section-available");
+    expect(within(installed).getByTestId("plugin-row").getAttribute("data-plugin-id"))
+      .toBe("installed-plugin");
+    expect(within(available).getByTestId("plugin-row").getAttribute("data-plugin-id"))
+      .toBe("candidate-plugin");
+    // Installed reads first — a workspace's own installed plugins are the
+    // list the user came for.
+    expect(installed.compareDocumentPosition(available)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    // The candidate is the only row that offers Install.
+    expect(within(available).getByTestId("plugin-install")).toBeTruthy();
+    expect(within(installed).queryByTestId("plugin-install")).toBeNull();
+  });
+
+  it("narrows the list to the plugins matching what the user typed", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [
+        plugin("t3-code"),
+        plugin("notes-widget", { directoryName: "notes-widget-src" }),
+      ],
+    });
+
+    render(<PluginsView workspaceId="ws-1" />);
+    await screen.findByText("t3-code");
+
+    const filter = screen.getByTestId("plugins-filter");
+    await userEvent.type(filter, "notes");
+    expect(screen.getAllByTestId("plugin-row")).toHaveLength(1);
+    expect(screen.getByTestId("plugin-row").getAttribute("data-plugin-id")).toBe(
+      "notes-widget",
+    );
+
+    // The folder is the plugin's other name, so it filters too.
+    await userEvent.clear(filter);
+    await userEvent.type(filter, "widget-src");
+    expect(screen.getByTestId("plugin-row").getAttribute("data-plugin-id")).toBe(
+      "notes-widget",
+    );
+
+    await userEvent.clear(filter);
+    await userEvent.type(filter, "nothing-here");
+    expect(screen.queryAllByTestId("plugin-row")).toHaveLength(0);
+    expect(screen.getByTestId("plugins-filter-empty").textContent).toContain(
+      'No plugins match "nothing-here"',
+    );
+
+    await userEvent.clear(filter);
+    expect(screen.getAllByTestId("plugin-row")).toHaveLength(2);
+  });
+
+  it("tells the user where plugins come from when the workspace has none", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [] });
+
+    render(<PluginsView workspaceId="ws-1" />);
+
+    const empty = await screen.findByTestId("plugins-empty");
+    expect(empty.textContent).toContain("No plugins yet");
+    expect(empty.textContent).toContain("plugins/");
+    expect(screen.queryByTestId("plugins-filter-empty")).toBeNull();
+  });
+
   it("distinguishes a crash-loop disable from approval-required source", async () => {
     bridgeMock.listPlugins.mockResolvedValue({
       ok: true,
@@ -387,7 +458,7 @@ describe("PluginSettings", () => {
       ],
     });
 
-    render(<PluginSettings workspaceId="ws-1" />);
+    render(<PluginsView workspaceId="ws-1" />);
 
     expect(await screen.findByText("Disabled after repeated crashes")).toBeTruthy();
     expect(screen.getByText("Disabled — approval required")).toBeTruthy();
@@ -411,7 +482,7 @@ describe("PluginSettings", () => {
       ],
     });
 
-    render(<PluginSettings workspaceId="ws-1" />);
+    render(<PluginsView workspaceId="ws-1" />);
 
     expect((await screen.findByTestId("plugin-approve")).textContent).toBe(
       "Approve",
@@ -451,7 +522,7 @@ describe("PluginSettings", () => {
       },
     });
 
-    render(<PluginSettings workspaceId="ws-1" />);
+    render(<PluginsView workspaceId="ws-1" />);
     await userEvent.click(await screen.findByTestId("plugin-uninstall"));
 
     expect(await screen.findByTestId("plugin-uninstall-dialog")).toBeTruthy();
@@ -496,7 +567,7 @@ describe("PluginSettings", () => {
       },
     });
 
-    render(<PluginSettings workspaceId="ws-1" />);
+    render(<PluginsView workspaceId="ws-1" />);
     await userEvent.click(await screen.findByTestId("plugin-uninstall"));
 
     expect(await screen.findByTestId("plugin-uninstall-dialog")).toBeTruthy();
@@ -524,7 +595,7 @@ describe("PluginSettings", () => {
     });
     bridgeMock.disablePlugin.mockReturnValue(disableResult.promise);
 
-    render(<PluginSettings workspaceId="ws-1" />);
+    render(<PluginsView workspaceId="ws-1" />);
     const disableButton = await screen.findByTestId("plugin-disable");
     await userEvent.click(disableButton);
 
@@ -568,7 +639,7 @@ describe("PluginSettings", () => {
       plugin: plugin("stuck-plugin"),
     });
 
-    render(<PluginSettings workspaceId="ws-1" />);
+    render(<PluginsView workspaceId="ws-1" />);
 
     // None of the other actions render for this exact combination — a
     // retry affordance is the row's only control.
@@ -607,7 +678,7 @@ describe("PluginSettings", () => {
       preflight: cleanPreflight,
     });
 
-    render(<PluginSettings workspaceId="ws-1" />);
+    render(<PluginsView workspaceId="ws-1" />);
 
     // Uninstall is the reverse path this row must keep. Every other action
     // needs a manifest this plugin no longer has, so offering one would only
@@ -638,7 +709,7 @@ describe("PluginSettings", () => {
       },
     });
 
-    render(<PluginSettings workspaceId="ws-1" />);
+    render(<PluginsView workspaceId="ws-1" />);
 
     const alert = await screen.findByTestId("plugins-load-error");
     expect(alert.textContent).toContain("The plugin pipeline could not start.");
@@ -660,7 +731,7 @@ describe("PluginSettings", () => {
     const list = deferred<{ ok: true; plugins: PluginStatusRecord[] }>();
     bridgeMock.listPlugins.mockReturnValue(list.promise);
 
-    render(<PluginSettings workspaceId="ws-1" />);
+    render(<PluginsView workspaceId="ws-1" />);
     await waitFor(() => expect(statusListener).not.toBeNull());
 
     // A status event for a plugin the about-to-resolve list also contains
@@ -699,7 +770,7 @@ describe("PluginSettings", () => {
     const install = deferred<{ ok: true; plugin: PluginStatusRecord }>();
     bridgeMock.installPlugin.mockReturnValue(install.promise);
 
-    render(<PluginSettings workspaceId="ws-1" />);
+    render(<PluginsView workspaceId="ws-1" />);
     await userEvent.click(await screen.findByTestId("plugin-install"));
     await waitFor(() => expect(statusListener).not.toBeNull());
 

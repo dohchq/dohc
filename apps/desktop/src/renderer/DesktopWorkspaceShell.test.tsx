@@ -34,6 +34,7 @@ import type {
   ListWorkspaceVersionsResult,
   McpConfigResult,
   PluginPanelOpenedEvent,
+  PluginStatusRecord,
   PluginWebAppOpenedEvent,
   ReadWorkspaceTextPayload,
   ReadEngineMomentResult,
@@ -497,6 +498,11 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
         };
       },
     ),
+    listPlugins: vi.fn(async () => ({
+      ok: true as const,
+      plugins: [] as PluginStatusRecord[],
+    })),
+    onPluginStatusChanged: vi.fn(() => () => undefined),
     startPluginWebApp: vi.fn(async () => ({
       status: "ok" as const,
       title: "T3 Code",
@@ -5947,6 +5953,24 @@ describe("content search", () => {
     const reopenedInclude = await screen.findByTestId("search-include");
     expect((reopenedInclude as HTMLInputElement).value).toBe("*.md");
     expect(screen.getByTestId("search-exclude")).toBeTruthy();
+  });
+
+  // Plugins moved out of the settings dialog and onto the rail (#791 round 9).
+  it("opens the plugin browser from the Plugins rail item", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("activity-bar");
+    expect(screen.queryByTestId("plugins-view")).toBeNull();
+
+    await user.click(screen.getByTestId("activity-plugins"));
+
+    expect(await screen.findByTestId("plugins-view")).toBeTruthy();
+    expect(screen.getByTestId("plugins-filter")).toBeTruthy();
+    await waitFor(() => expect(bridge.listPlugins).toHaveBeenCalled());
+    // The panel header names the view the rail selected.
+    expect(screen.getByTestId("side-panel").textContent).toContain("Plugins");
   });
 });
 

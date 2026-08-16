@@ -1,5 +1,5 @@
-import { AlertTriangle } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { AlertTriangle, Blocks, Search } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   PluginPipelineError,
   PluginStatusChangedEvent,
@@ -8,6 +8,14 @@ import type {
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
+import { EmptyState, SectionLabel } from "../ui/controls";
+
+// The plugin browser, in the side panel behind the activity bar's Plugins
+// item. VS Code's Extensions view is the model: a filter box pinned at the
+// top, then Installed above what the workspace merely offers, each plugin a
+// compact row with one status label and its actions. dohc has no marketplace
+// and manifests carry no version, description, or icon, so a row shows only
+// what the pipeline actually knows.
 
 type LoadState =
   | { status: "loading" }
@@ -33,6 +41,8 @@ type PendingStatusEvent = {
   event: PluginStatusChangedEvent;
 };
 
+const primaryButton =
+  "rounded-md bg-accent px-2 py-1 text-[11px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50";
 const secondaryButton =
   "rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:opacity-50";
 const dangerButton =
@@ -94,6 +104,14 @@ function statusText(plugin: PluginStatusRecord): string {
     uninstalling: "Uninstalling",
   };
   return labels[plugin.status];
+}
+
+// One label per row, colored by what the state costs the user: a broken
+// plugin reads danger, a switched-off one warning, everything else quiet.
+function statusTone(plugin: PluginStatusRecord): string {
+  if (["failed", "crashed", "invalid"].includes(plugin.status)) return "text-danger";
+  if (plugin.status.startsWith("disabled")) return "text-warning";
+  return "text-subtle";
 }
 
 function actionLabel(action: PluginAction, busy: boolean): string {
@@ -211,13 +229,19 @@ function canDisable(plugin: PluginStatusRecord): boolean {
   );
 }
 
-export function PluginSettings(props: {
-  workspaceId: string;
-  /** Called after a web app opened as a tab, so the settings dialog can get
-   * out of the way of the tab it just opened. */
-  onOpenedWebApp?: () => void;
-}) {
+// The id and the folder are the only names a plugin has here.
+function matchesFilter(plugin: PluginStatusRecord, filter: string): boolean {
+  const needle = filter.trim().toLowerCase();
+  if (needle.length === 0) return true;
+  return (
+    plugin.id.toLowerCase().includes(needle) ||
+    plugin.directoryName.toLowerCase().includes(needle)
+  );
+}
+
+export function PluginsView(props: { workspaceId: string }) {
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
+  const [filter, setFilter] = useState("");
   const [busy, setBusy] = useState<Record<string, PluginAction | undefined>>({});
   const [openingWebApp, setOpeningWebApp] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string | undefined>>({});
@@ -382,6 +406,8 @@ export function PluginSettings(props: {
     }
   }
 
+  // The tab opens from main and takes focus there. The panel sits beside the
+  // editor rather than over it, so nothing has to get out of the way.
   async function openWebApp(plugin: PluginStatusRecord, webAppId: string) {
     const epoch = workspaceEpoch.current;
     const key = `${plugin.id}\0${webAppId}`;
@@ -394,8 +420,6 @@ export function PluginSettings(props: {
         pluginId: plugin.id,
         webAppId,
       });
-      if (epoch !== workspaceEpoch.current) return;
-      props.onOpenedWebApp?.();
     } catch (error) {
       if (epoch !== workspaceEpoch.current) return;
       const reason = error instanceof Error ? error.message : "Try again.";
@@ -490,175 +514,233 @@ export function PluginSettings(props: {
     }
   }
 
-  if (load.status === "loading") {
-    return <p className="m-0 text-[11px] text-subtle">Loading plugins…</p>;
-  }
-  if (load.status === "error") {
+  const plugins = load.status === "ready" ? load.plugins : [];
+  const matched = useMemo(
+    () => plugins.filter((plugin) => matchesFilter(plugin, filter)),
+    [plugins, filter],
+  );
+  const installedPlugins = matched.filter((plugin) => plugin.approvedHash !== null);
+  const candidatePlugins = matched.filter((plugin) => plugin.approvedHash === null);
+
+  function renderRow(plugin: PluginStatusRecord) {
+    const busyAction = busy[plugin.id];
+    const disabled = busyAction !== undefined || isPipelineBusy(plugin);
+    const installed = plugin.approvedHash !== null;
     return (
-      <div className="flex items-center gap-2 text-[11px]">
-        <p data-testid="plugins-load-error" role="alert" className="m-0 text-danger">
-          {load.message}
-        </p>
-        <button
-          type="button"
-          onClick={() => void loadPlugins()}
-          className={secondaryButton}
-        >
-          Retry
-        </button>
-      </div>
-    );
-  }
-  if (load.plugins.length === 0) {
-    return (
-      <p data-testid="plugins-empty" className="m-0 text-[11px] text-subtle">
-        No plugins found in this workspace.
-      </p>
+      <li
+        key={plugin.id}
+        data-testid="plugin-row"
+        data-plugin-id={plugin.id}
+        className="rounded-lg border border-line bg-panel p-2"
+      >
+        <div className="flex items-start gap-2.5">
+          <span className="grid size-8 shrink-0 place-items-center rounded-md border border-line bg-bg text-subtle">
+            <Blocks size={15} aria-hidden />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[13px] font-medium text-ink" title={plugin.id}>
+              {plugin.id}
+            </div>
+            <div
+              data-testid="plugin-status"
+              data-status={plugin.status}
+              className={`mt-0.5 truncate text-[11px] ${statusTone(plugin)}`}
+            >
+              {statusText(plugin)}
+            </div>
+            {plugin.directoryName === plugin.id ? null : (
+              <div className="mt-0.5 truncate font-mono text-[11px] text-subtle">
+                {`plugins/${plugin.directoryName}`}
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="mt-2 flex flex-wrap justify-end gap-1.5 empty:mt-0">
+          {canOpenWebApps(plugin)
+            ? plugin.webApps.map((webApp) => {
+                const key = `${plugin.id}\0${webApp.id}`;
+                return (
+                  <button
+                    key={webApp.id}
+                    type="button"
+                    data-testid="plugin-open-web-app"
+                    data-web-app-id={webApp.id}
+                    disabled={disabled || openingWebApp !== null}
+                    onClick={() => void openWebApp(plugin, webApp.id)}
+                    className={secondaryButton}
+                  >
+                    {openingWebApp === key
+                      ? `Opening ${webApp.title}`
+                      : `Open ${webApp.title}`}
+                  </button>
+                );
+              })
+            : null}
+          {canInstall(plugin) ? (
+            <button
+              type="button"
+              data-testid="plugin-install"
+              disabled={disabled}
+              onClick={() => void runAction(plugin, "install")}
+              className={primaryButton}
+            >
+              {actionLabel("install", busyAction === "install")}
+            </button>
+          ) : null}
+          {canRetryInstall(plugin) ? (
+            <button
+              type="button"
+              data-testid="plugin-retry-install"
+              disabled={disabled}
+              onClick={() => void runAction(plugin, "install")}
+              className={primaryButton}
+            >
+              {busyAction === "install" ? "Retrying install" : "Retry install"}
+            </button>
+          ) : null}
+          {canDisable(plugin) ? (
+            <button
+              type="button"
+              data-testid="plugin-disable"
+              disabled={disabled}
+              onClick={() => void runAction(plugin, "disable")}
+              className={secondaryButton}
+            >
+              {actionLabel("disable", busyAction === "disable")}
+            </button>
+          ) : null}
+          {canEnable(plugin) ? (
+            <button
+              type="button"
+              data-testid="plugin-enable"
+              disabled={disabled}
+              onClick={() => void runAction(plugin, "enable")}
+              className={secondaryButton}
+            >
+              {actionLabel("enable", busyAction === "enable")}
+            </button>
+          ) : null}
+          {canApprove(plugin) ? (
+            <button
+              type="button"
+              data-testid="plugin-approve"
+              disabled={disabled}
+              onClick={() => void runAction(plugin, "approve")}
+              className={secondaryButton}
+            >
+              {actionLabel("approve", busyAction === "approve")}
+            </button>
+          ) : null}
+          {installed ? (
+            <button
+              type="button"
+              data-testid="plugin-uninstall"
+              disabled={disabled}
+              onClick={() => void prepareUninstall(plugin)}
+              className={dangerButton}
+            >
+              {actionLabel("preflight", busyAction === "preflight")}
+            </button>
+          ) : null}
+        </div>
+        {plugin.error ? (
+          <p className="m-0 mt-2 text-[11px] text-danger">{plugin.error.message}</p>
+        ) : null}
+        {errors[plugin.id] ? (
+          <p
+            data-testid="plugin-action-error"
+            role="alert"
+            className="m-0 mt-2 text-[11px] text-danger"
+          >
+            {errors[plugin.id]}
+          </p>
+        ) : null}
+        {plugin.warnings.map((warning) => (
+          <p key={warning} className="m-0 mt-2 text-[11px] text-warning">
+            {warning}
+          </p>
+        ))}
+      </li>
     );
   }
 
   return (
-    <>
-      <ul
-        data-testid="plugins-list"
-        className="m-0 list-none divide-y divide-line overflow-hidden rounded-lg border border-line p-0"
-      >
-        {load.plugins.map((plugin) => {
-          const busyAction = busy[plugin.id];
-          const disabled = busyAction !== undefined || isPipelineBusy(plugin);
-          const installed = plugin.approvedHash !== null;
-          return (
-            <li
-              key={plugin.id}
-              data-testid="plugin-row"
-              data-plugin-id={plugin.id}
-              className="bg-panel px-3 py-2.5"
+    <div data-testid="plugins-view" className="flex min-h-0 flex-1 flex-col">
+      <div className="shrink-0 border-b border-line px-2 py-2">
+        <div className="flex items-center gap-1.5 rounded-md border border-line bg-bg px-1.5 py-1 transition-colors focus-within:border-ink">
+          <Search size={12} aria-hidden className="shrink-0 text-subtle" />
+          <input
+            type="text"
+            data-testid="plugins-filter"
+            aria-label="Search plugins"
+            placeholder="Search plugins"
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+            spellCheck={false}
+            className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-subtle"
+          />
+        </div>
+      </div>
+
+      {load.status === "loading" ? (
+        <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
+          Loading plugins…
+        </div>
+      ) : load.status === "error" ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
+          <AlertTriangle size={18} aria-hidden className="text-warning" />
+          <p data-testid="plugins-load-error" role="alert" className="m-0 text-[11px] text-danger">
+            {load.message}
+          </p>
+          <button
+            type="button"
+            onClick={() => void loadPlugins()}
+            className={secondaryButton}
+          >
+            Retry
+          </button>
+        </div>
+      ) : plugins.length === 0 ? (
+        <div data-testid="plugins-empty" className="flex min-h-0 flex-1 flex-col">
+          <EmptyState
+            icon={<Blocks size={22} aria-hidden className="text-line" />}
+            title="No plugins yet"
+            hint="Ask your agent to add a plugin folder under plugins/."
+          />
+        </div>
+      ) : matched.length === 0 ? (
+        <div data-testid="plugins-filter-empty" className="flex min-h-0 flex-1 flex-col">
+          <EmptyState
+            icon={<Blocks size={22} aria-hidden className="text-line" />}
+            title={`No plugins match "${filter.trim()}"`}
+            hint="Try a shorter search."
+          />
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto p-2">
+          {installedPlugins.length > 0 ? (
+            <section data-testid="plugins-section-installed">
+              <SectionLabel className="block px-1 pb-1.5">Installed</SectionLabel>
+              <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+                {installedPlugins.map(renderRow)}
+              </ul>
+            </section>
+          ) : null}
+          {candidatePlugins.length > 0 ? (
+            <section
+              data-testid="plugins-section-available"
+              className={installedPlugins.length > 0 ? "mt-4" : undefined}
             >
-              <div className="flex items-start gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="truncate font-mono text-[12px] text-ink">
-                    {plugin.id}
-                  </div>
-                  <div
-                    data-testid="plugin-status"
-                    data-status={plugin.status}
-                    className="mt-0.5 text-[11px] text-subtle"
-                  >
-                    {statusText(plugin)}
-                  </div>
-                </div>
-                <div className="flex flex-wrap justify-end gap-1.5">
-                  {canOpenWebApps(plugin)
-                    ? plugin.webApps.map((webApp) => {
-                        const key = `${plugin.id}\0${webApp.id}`;
-                        return (
-                          <button
-                            key={webApp.id}
-                            type="button"
-                            data-testid="plugin-open-web-app"
-                            data-web-app-id={webApp.id}
-                            disabled={disabled || openingWebApp !== null}
-                            onClick={() => void openWebApp(plugin, webApp.id)}
-                            className={secondaryButton}
-                          >
-                            {openingWebApp === key
-                              ? `Opening ${webApp.title}`
-                              : `Open ${webApp.title}`}
-                          </button>
-                        );
-                      })
-                    : null}
-                  {canInstall(plugin) ? (
-                    <button
-                      type="button"
-                      data-testid="plugin-install"
-                      disabled={disabled}
-                      onClick={() => void runAction(plugin, "install")}
-                      className={secondaryButton}
-                    >
-                      {actionLabel("install", busyAction === "install")}
-                    </button>
-                  ) : null}
-                  {canRetryInstall(plugin) ? (
-                    <button
-                      type="button"
-                      data-testid="plugin-retry-install"
-                      disabled={disabled}
-                      onClick={() => void runAction(plugin, "install")}
-                      className={secondaryButton}
-                    >
-                      {busyAction === "install" ? "Retrying install" : "Retry install"}
-                    </button>
-                  ) : null}
-                  {canDisable(plugin) ? (
-                    <button
-                      type="button"
-                      data-testid="plugin-disable"
-                      disabled={disabled}
-                      onClick={() => void runAction(plugin, "disable")}
-                      className={secondaryButton}
-                    >
-                      {actionLabel("disable", busyAction === "disable")}
-                    </button>
-                  ) : null}
-                  {canEnable(plugin) ? (
-                    <button
-                      type="button"
-                      data-testid="plugin-enable"
-                      disabled={disabled}
-                      onClick={() => void runAction(plugin, "enable")}
-                      className={secondaryButton}
-                    >
-                      {actionLabel("enable", busyAction === "enable")}
-                    </button>
-                  ) : null}
-                  {canApprove(plugin) ? (
-                    <button
-                      type="button"
-                      data-testid="plugin-approve"
-                      disabled={disabled}
-                      onClick={() => void runAction(plugin, "approve")}
-                      className={secondaryButton}
-                    >
-                      {actionLabel("approve", busyAction === "approve")}
-                    </button>
-                  ) : null}
-                  {installed ? (
-                    <button
-                      type="button"
-                      data-testid="plugin-uninstall"
-                      disabled={disabled}
-                      onClick={() => void prepareUninstall(plugin)}
-                      className={dangerButton}
-                    >
-                      {actionLabel("preflight", busyAction === "preflight")}
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-              {plugin.error ? (
-                <p className="m-0 mt-2 text-[11px] text-danger">
-                  {plugin.error.message}
-                </p>
-              ) : null}
-              {errors[plugin.id] ? (
-                <p
-                  data-testid="plugin-action-error"
-                  role="alert"
-                  className="m-0 mt-2 text-[11px] text-danger"
-                >
-                  {errors[plugin.id]}
-                </p>
-              ) : null}
-              {plugin.warnings.map((warning) => (
-                <p key={warning} className="m-0 mt-2 text-[11px] text-warning">
-                  {warning}
-                </p>
-              ))}
-            </li>
-          );
-        })}
-      </ul>
+              <SectionLabel className="block px-1 pb-1.5">
+                Available in this workspace
+              </SectionLabel>
+              <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+                {candidatePlugins.map(renderRow)}
+              </ul>
+            </section>
+          ) : null}
+        </div>
+      )}
 
       {confirmation ? (
         <Overlay
@@ -766,6 +848,6 @@ export function PluginSettings(props: {
           </div>
         </Overlay>
       ) : null}
-    </>
+    </div>
   );
 }

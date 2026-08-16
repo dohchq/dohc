@@ -12,6 +12,7 @@ export const VIEW_IDS = [
   "graph",
   "sites",
   "history",
+  "plugins",
 ] as const;
 export type ViewId = (typeof VIEW_IDS)[number];
 export const GRAPH_TAB_PATH = "dohc://graph";

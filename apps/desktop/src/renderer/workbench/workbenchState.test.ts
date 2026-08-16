@@ -794,6 +794,17 @@ describe("ui-state persistence round-trip", () => {
     expect(parseUiState(serializeUiState(state))).toEqual(state);
   });
 
+  it("round-trips the plugins view, and states written before it still parse", () => {
+    const state = setView(defaultWorkbenchState(), "plugins");
+    expect(serializeUiState(state).activeView).toBe("plugins");
+    expect(parseUiState(serializeUiState(state)).activeView).toBe("plugins");
+    // A ui-state file written before the plugins rail item existed carries a
+    // view this build still knows, and must reopen on it.
+    expect(
+      parseUiState({ ...serializeUiState(state), activeView: "history" }).activeView,
+    ).toBe("history");
+  });
+
   it("does not migrate or alias the version-1 flat-tab contract", () => {
     expect(
       parseUiState({ version: 1, tabs: ["a.md"], activeTab: "a.md" }),

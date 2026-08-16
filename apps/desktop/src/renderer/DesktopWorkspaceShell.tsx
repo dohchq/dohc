@@ -97,6 +97,7 @@ import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 // chunk resolved, and every character typed in that gap went to whatever the
 // user clicked to open the panel — queries arrived with their first letters
 // missing. The view carries no dependency the shell does not already load.
+import { PluginsView } from "./workbench/PluginsView";
 import { SearchView } from "./workbench/SearchView";
 import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
@@ -4882,6 +4883,8 @@ export function DesktopWorkspaceShell(props: {
               </Suspense>
             ) : wb.activeView === "history" ? (
               historyTimeline
+            ) : wb.activeView === "plugins" ? (
+              <PluginsView workspaceId={workspaceId} />
             ) : null}
             </ErrorBoundary>
           </SidePanel>
