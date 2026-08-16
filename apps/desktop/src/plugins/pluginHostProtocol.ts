@@ -8,6 +8,7 @@ export const PLUGIN_HOST_METHODS = {
   deactivate: "plugin.deactivate",
   invokeCommand: "plugin.invokeCommand",
   startWebApp: "plugin.startWebApp",
+  stopWebApp: "plugin.stopWebApp",
   sdkRequest: "sdk.request",
   sdkEvent: "sdk.event",
   log: "plugin.log",
@@ -39,6 +40,14 @@ export interface PluginStartWebAppParams {
  * on this path logs it. */
 export interface PluginStartWebAppResult {
   url: string;
+}
+
+/** The reverse of a start. A start can hand the guest a one-time credential,
+ * and the plugin has no way to learn that the guest never arrived — the host
+ * says so with this. The plugin ends the session the start paired, so the
+ * next start pairs again. */
+export interface PluginStopWebAppParams {
+  webAppId: string;
 }
 
 export interface SdkRequestParams {
@@ -73,6 +82,11 @@ export const PLUGIN_ACTIVATION_TIMEOUT_MS = 30_000;
 // range is 2.8–7.4 seconds); this bound sits above that whole deadline plus
 // spawn overhead, so it only fires when the plugin's own deadline failed to.
 export const PLUGIN_WEB_APP_START_TIMEOUT_MS = 90_000;
+
+// A web app stop terminates the wrapper's server and clears its ownership
+// record. The t3 bridge's terminate is a SIGTERM with a 2-second grace before
+// SIGKILL; this sits above that grace plus the record's own file write.
+export const PLUGIN_WEB_APP_STOP_TIMEOUT_MS = 10_000;
 
 // Disable a plugin after this many consecutive fast failures or crashes.
 // Each failure must occur within this window after its own spawn.

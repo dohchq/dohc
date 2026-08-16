@@ -61,6 +61,33 @@ describe("plugin web app main-process wiring", () => {
     expect(start).toContain("if (displaced) destroyPluginWebAppViews([displaced]);");
   });
 
+  it("recovers a consumed credential by unpairing the plugin itself", () => {
+    const start = handler("startPluginWebApp");
+    // What the recovery does with these, and in what order, is pinned by
+    // behavior in pluginWebAppRecovery.test.ts; that the start hands it the
+    // PLUGIN's unpair — not just the view stop — is this handler's own claim.
+    expect(start).toContain("recoverConsumedWebAppCredential({");
+    expect(start).toContain(
+      "unpair: () => host.stopWebApp(input.pluginId, input.webAppId),",
+    );
+    expect(start).toContain("notifyFailed: () =>");
+    expect(start).toContain("onLoadFailure: () => {");
+    expect(start).toContain("recoverConsumedCredential();");
+  });
+
+  it("leaves a normal tab close paired", () => {
+    const stopWebApp = mainSource.slice(
+      mainSource.indexOf("async function stopPluginWebApp("),
+      mainSource.indexOf("\n}\n", mainSource.indexOf("async function stopPluginWebApp(")),
+    );
+    // MUTATION (unpair on every close): an enabled plugin's server would then
+    // be torn down and respawned on every tab close, and the guest's session
+    // cookie — which already landed, and which the next open reuses — would
+    // be worthless. Only the recovery path unpairs.
+    expect(stopWebApp).not.toContain("stopWebApp(pluginId");
+    expect(stopWebApp).not.toContain("recoverConsumedWebAppCredential");
+  });
+
   it("applies bounds only through the registry's sender-and-generation guard", () => {
     const bounds = handler("setPluginWebAppBounds");
     const authorizeAt = bounds.indexOf("pluginWebAppViews.authorizeBounds({");

@@ -85,6 +85,26 @@ export function PluginWebAppPage(props: {
     };
   }, [props.pluginId, props.webAppId, props.workspaceId, context]);
 
+  // The guest can die after the start already answered "ok" — a rejected
+  // navigation, a window that closed under it. Main destroys the view and
+  // says so here; without this the page keeps its ready state over an empty
+  // frame and the tab goes silently blank.
+  useEffect(() => {
+    return bridge().onPluginWebAppFailed((event) => {
+      if (
+        event.workspaceId !== props.workspaceId ||
+        event.pluginId !== props.pluginId ||
+        event.webAppId !== props.webAppId
+      ) {
+        return;
+      }
+      setLoad({
+        status: "error",
+        message: "The app stopped before it finished opening.",
+      });
+    });
+  }, [props.pluginId, props.webAppId, props.workspaceId]);
+
   // While ready, keep main told where the placeholder sits. The container
   // resizes with every layout change that moves it (sidebar, group splits),
   // so a ResizeObserver plus window resize covers repositioning.

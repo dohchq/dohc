@@ -13,6 +13,7 @@ import {
   type PluginInvokeCommandParams,
   type PluginStartWebAppParams,
   type PluginStartWebAppResult,
+  type PluginStopWebAppParams,
 } from "./pluginHostProtocol.ts";
 const transport = createProcessTransport();
 const client = createDohcClient({ transport });
@@ -95,6 +96,17 @@ transport.onRequest(PLUGIN_HOST_METHODS.startWebApp, async (rawParams) => {
     );
   }
   return { url: started.url } satisfies PluginStartWebAppResult;
+});
+
+transport.onRequest(PLUGIN_HOST_METHODS.stopWebApp, async (rawParams) => {
+  const params = rawParams as PluginStopWebAppParams;
+  if (!activeHandler?.stopWebApp) {
+    throw new Error(
+      "This plugin implements startWebApp but its handler does not implement stopWebApp(webAppId).",
+    );
+  }
+  await activeHandler.stopWebApp(params.webAppId);
+  return {};
 });
 
 transport.onRequest(PLUGIN_HOST_METHODS.invokeCommand, async (rawParams) => {

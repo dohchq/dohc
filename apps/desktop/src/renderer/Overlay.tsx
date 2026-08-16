@@ -1,16 +1,8 @@
 import { useEffect, useRef, type ReactNode } from "react";
+import { isTopOverlay, pushOverlay, removeOverlay } from "./guestBlockingUi";
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-// Every mounted Overlay's own listener checks this before acting on a key,
-// so only the topmost one responds. Nested overlays (e.g. a confirmation
-// dialog opened from within another dialog) each register their own
-// document-level keydown listener, and listeners on the same node all run
-// for the same event regardless of stopPropagation — without this stack, one
-// Escape press closed every open overlay at once instead of just the one on
-// top (#779 round 4 finding 4).
-const overlayStack: symbol[] = [];
 
 // Shared modal scaffold: dimmed backdrop that closes on click, with an inner
 // panel that swallows clicks. Used by the command palette, quick-open, new
@@ -27,11 +19,8 @@ export function Overlay(props: { onClose: () => void; children: ReactNode }) {
 
   useEffect(() => {
     const id = idRef.current;
-    overlayStack.push(id);
-    return () => {
-      const index = overlayStack.indexOf(id);
-      if (index !== -1) overlayStack.splice(index, 1);
-    };
+    pushOverlay(id);
+    return () => removeOverlay(id);
   }, []);
 
   useEffect(() => {
@@ -41,7 +30,7 @@ export function Overlay(props: { onClose: () => void; children: ReactNode }) {
     }
 
     function onKeyDown(event: KeyboardEvent): void {
-      if (overlayStack[overlayStack.length - 1] !== idRef.current) return;
+      if (!isTopOverlay(idRef.current)) return;
       if (event.key === "Escape") {
         event.stopPropagation();
         onCloseRef.current();

@@ -669,6 +669,7 @@ export const CHANNELS = {
   startPluginWebApp: "desktop:start-plugin-web-app",
   setPluginWebAppBounds: "desktop:set-plugin-web-app-bounds",
   stopPluginWebApp: "desktop:stop-plugin-web-app",
+  pluginWebAppFailed: "desktop:plugin-web-app-failed",
   listPlugins: "desktop:list-plugins",
   installPlugin: "desktop:install-plugin",
   disablePlugin: "desktop:disable-plugin",

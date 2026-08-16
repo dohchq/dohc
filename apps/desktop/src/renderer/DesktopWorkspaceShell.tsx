@@ -71,6 +71,7 @@ import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { NewFileDialog } from "./NewFileDialog";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
+import { useGuestBlockingUi } from "./guestBlockingUi";
 import { DesktopSettings } from "./settings/DesktopSettings";
 import {
   DEFAULT_SETTINGS_SECTION,
@@ -2762,17 +2763,11 @@ export function DesktopWorkspaceShell(props: {
   // with "Finish later" — with the same side-by-side cards as the merge flow.
   const [conflictReviewOpen, setConflictReviewOpen] = useState(false);
   // A plugin web app's guest is a main-process view layered over this shell,
-  // so it composites above every overlay this component paints. While one is
-  // open, the guest must be hidden or it keeps the clicks made over it.
-  const overlayOpen =
-    paletteOpen ||
-    quickOpenOpen ||
-    newFileOpen ||
-    cloudOpen ||
-    conflictReviewOpen ||
-    openShareOpen ||
-    settingsSection !== null ||
-    shareTarget !== null;
+  // so it composites above everything this component paints. While UI that
+  // needs its clicks is up, the guest must be hidden or it keeps them. Every
+  // overlay registers itself — including the ones this shell cannot see,
+  // which is why this is not a list of the shell's own flags.
+  const overlayOpen = useGuestBlockingUi();
   const onVersionWorkspaceStateChanged = useCallback(
     (activeVersionId?: string) => {
       setVersionEpoch((epoch) => epoch + 1);

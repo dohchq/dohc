@@ -188,7 +188,10 @@ afterEach(async () => {
   );
 });
 
-async function createFixture(bootModes: FakeBoot[] = ["ready"]): Promise<{
+async function createFixture(
+  bootModes: FakeBoot[] = ["ready"],
+  overrides: { fetchFn?: typeof fetch } = {},
+): Promise<{
   ctx: T3BridgeContext;
   spawns: FakeSpawn[];
   logs: string[];
@@ -225,7 +228,12 @@ async function createFixture(bootModes: FakeBoot[] = ["ready"]): Promise<{
   };
   const bridge = createT3Bridge(ctx, {
     log: (line) => logs.push(line),
-    readiness: { intervalMs: 5, requestTimeoutMs: 500, overallTimeoutMs: 5_000 },
+    readiness: {
+      intervalMs: 5,
+      requestTimeoutMs: 500,
+      overallTimeoutMs: 5_000,
+      ...overrides,
+    },
   });
   return { ctx, spawns, logs, bridge, stateRoot };
 }
@@ -432,5 +440,56 @@ describe("createT3Bridge", () => {
     const { spawns, bridge } = await createFixture();
     await expect(bridge.startWebApp("other")).rejects.toThrow('"other"');
     expect(spawns).toHaveLength(0);
+  });
+
+  it("arms the ownership record at spawn, before the server answers ready", async () => {
+    const armedAtReadiness: boolean[] = [];
+    let ownerPath = "";
+    const fixture = await createFixture(["ready"], {
+      fetchFn: ((url: RequestInfo | URL, init?: RequestInit) => {
+        armedAtReadiness.push(existsSync(ownerPath));
+        return fetch(url, init);
+      }) as typeof fetch,
+    });
+    ownerPath = join(fixture.stateRoot, "t3-owner.json");
+
+    await fixture.bridge.startWebApp(T3_WEB_APP_ID);
+
+    // MUTATION (write the record after readiness instead): the first probe
+    // finds no record, which is exactly the window a crash turns into a live
+    // orphan no later start may signal — it reads no owner, so it deletes the
+    // stale file and leaves the server holding the workspace's t3 refs.
+    expect(armedAtReadiness[0]).toBe(true);
+    await fixture.bridge.dispose();
+  });
+
+  it("un-pairs on stopWebApp, so the next open reaches a fresh server", async () => {
+    const { spawns, bridge, stateRoot } = await createFixture(["ready", "ready"]);
+    const ownerPath = join(stateRoot, "t3-owner.json");
+    const first = await bridge.startWebApp(T3_WEB_APP_ID);
+    expect(first.url).toContain("#token=tok-secret-0");
+    // Paired. Every later open in this session rides the guest's cookie —
+    // which is exactly the state a guest that never arrived strands.
+    expect((await bridge.startWebApp(T3_WEB_APP_ID)).url).not.toContain("#token=");
+
+    await bridge.stopWebApp(T3_WEB_APP_ID);
+    expect(spawns[0]!.child.terminated).toBe(true);
+    expect(existsSync(ownerPath)).toBe(false);
+
+    // MUTATION (the bridge ignores the stop): the reopen returns the paired
+    // origin into a cookie-less guest, and only disable/re-enable recovers.
+    const reopened = await bridge.startWebApp(T3_WEB_APP_ID);
+    expect(spawns).toHaveLength(2);
+    expect(reopened.url).toContain("#token=tok-secret-1");
+    expect(existsSync(ownerPath)).toBe(true);
+    await bridge.dispose();
+  });
+
+  it("rejects a stop for a web app id the manifest does not declare", async () => {
+    const { spawns, bridge } = await createFixture();
+    await bridge.startWebApp(T3_WEB_APP_ID);
+    await expect(bridge.stopWebApp("other")).rejects.toThrow('"other"');
+    expect(spawns[0]!.child.terminated).toBe(false);
+    await bridge.dispose();
   });
 });

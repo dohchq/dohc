@@ -155,6 +155,15 @@ export interface PluginHandler {
    * not await.
    */
   startWebApp?(webAppId: string): Promise<PluginWebAppStart> | PluginWebAppStart;
+  /**
+   * Ends the session the matching `startWebApp` began, so the next start
+   * pairs from scratch. The host calls this when the guest it started the app
+   * for never arrived: a start URL's one-time credential is spent by then, and
+   * only the plugin can retire the session it paired. A handler that
+   * implements `startWebApp` must implement this too — the host reports a
+   * handler that does not.
+   */
+  stopWebApp?(webAppId: string): Promise<void> | void;
   deactivate?(): Promise<void> | void;
 }
 

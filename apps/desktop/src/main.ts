@@ -32,6 +32,7 @@ import {
   utilityProcess,
   WebContentsView,
   type IpcMainInvokeEvent,
+  type WebContents,
 } from "electron";
 import * as Y from "yjs";
 import { existsSync, statSync } from "node:fs";
@@ -127,6 +128,7 @@ import {
   StartPluginWebAppResult,
   SetPluginWebAppBoundsPayload,
   StopPluginWebAppPayload,
+  PluginWebAppFailedEvent,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
   ListWorkspaceVersionsResult,
@@ -618,6 +620,7 @@ import {
   clearPluginWebAppPartition,
   createPluginWebAppGuest,
 } from "./plugins/pluginWebAppGuest";
+import { recoverConsumedWebAppCredential } from "./plugins/pluginWebAppRecovery";
 import {
   PluginWebAppViewRegistry,
   type PluginWebAppViewRecord,
@@ -2841,6 +2844,18 @@ function destroyPluginWebAppViews(
       console.warn("[desktop] failed to close a plugin web app view", error);
     }
   }
+}
+
+// Tells one renderer its guest died after the start already answered "ok".
+// Without it the page keeps a `ready` state over an empty frame and the user
+// sees a blank tab with nothing to act on. The event carries no failure text:
+// the load error can embed the start URL, credential fragment included.
+function notifyPluginWebAppFailed(
+  sender: WebContents,
+  event: PluginWebAppFailedEvent,
+): void {
+  if (sender.isDestroyed()) return;
+  sender.send(CHANNELS.pluginWebAppFailed, PluginWebAppFailedEvent.parse(event));
 }
 
 function stopPluginWebAppsForPlugin(workspaceId: string, pluginId: string): void {
@@ -6696,18 +6711,33 @@ function registerIpcHandlers(
         // Every path from here to a rendered guest can still fail, and the
         // start URL's one-time credential is already spent. Whatever fails,
         // the plugin's server must not stay paired to a guest that never
-        // arrived: stop the web app so the next open spawns and pairs again.
-        // The stop queues behind this handler's own start lock.
+        // arrived, so the recovery asks the PLUGIN to unpair. Stopping the
+        // view cannot do that job: it only stops the host when an on-demand
+        // open is the reason the host runs, and the default deployment is a
+        // workspace-started host, which survives — with a paired, cookieless
+        // server behind it. The view stop queues behind this handler's own
+        // start lock.
         const recoverConsumedCredential = (): void => {
-          void stopPluginWebApp(
-            workspace.workspaceId,
-            input.pluginId,
-            input.webAppId,
-          ).catch((error: unknown) => {
-            console.warn(
-              "[desktop] failed to stop a plugin web app after a failed start",
-              error,
-            );
+          void recoverConsumedWebAppCredential({
+            notifyFailed: () =>
+              notifyPluginWebAppFailed(sender, {
+                workspaceId: workspace.workspaceId,
+                pluginId: input.pluginId,
+                webAppId: input.webAppId,
+              }),
+            unpair: () => host.stopWebApp(input.pluginId, input.webAppId),
+            stopView: () =>
+              stopPluginWebApp(
+                workspace.workspaceId,
+                input.pluginId,
+                input.webAppId,
+              ),
+            onError: (stage, error) => {
+              console.warn(
+                `[desktop] failed to ${stage} a plugin web app after a failed start`,
+                error,
+              );
+            },
           });
         };
         try {

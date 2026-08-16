@@ -77,6 +77,26 @@ switch (mode) {
       },
     };
     break;
+  // A wrapper's pairing model in miniature: the first start hands out a
+  // one-time credential, later starts ride the session it paired, and
+  // stopWebApp retires that session so the next start pairs again.
+  case "web-app-pairing": {
+    let paired = false;
+    let issued = 0;
+    handler = {
+      activate() {},
+      startWebApp(webAppId) {
+        if (paired) return { url: `http://127.0.0.1:43210/?app=${webAppId}` };
+        paired = true;
+        issued += 1;
+        return { url: `http://127.0.0.1:43210/pair#token=fixture-${issued}` };
+      },
+      stopWebApp() {
+        paired = false;
+      },
+    };
+    break;
+  }
   case "web-app-hang":
     handler = {
       activate() {},

@@ -29,6 +29,11 @@ const handler: PluginHandler = {
     return bridge.startWebApp(webAppId);
   },
 
+  stopWebApp(webAppId: string): Promise<void> {
+    if (!bridge) return Promise.resolve();
+    return bridge.stopWebApp(webAppId);
+  },
+
   async deactivate(): Promise<void> {
     const current = bridge;
     bridge = null;

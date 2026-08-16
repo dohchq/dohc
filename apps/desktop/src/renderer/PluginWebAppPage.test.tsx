@@ -2,10 +2,13 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  PluginWebAppFailedEvent,
   SetPluginWebAppBoundsPayload,
   StartPluginWebAppResult,
 } from "../ipc/bridgeContract";
 import { PluginWebAppPage } from "./PluginWebAppPage";
+
+const failedListeners = new Set<(event: PluginWebAppFailedEvent) => void>();
 
 const bridgeMock = {
   startPluginWebApp: vi.fn(async (): Promise<StartPluginWebAppResult> => ({
@@ -17,7 +20,18 @@ const bridgeMock = {
     async (_payload: SetPluginWebAppBoundsPayload) => undefined,
   ),
   stopPluginWebApp: vi.fn(async () => undefined),
+  onPluginWebAppFailed: vi.fn((listener: (event: PluginWebAppFailedEvent) => void) => {
+    failedListeners.add(listener);
+    return () => failedListeners.delete(listener);
+  }),
 };
+
+async function reportFailed(event: PluginWebAppFailedEvent): Promise<void> {
+  await act(async () => {
+    for (const listener of [...failedListeners]) listener(event);
+    await Promise.resolve();
+  });
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -54,6 +68,7 @@ describe("PluginWebAppPage", () => {
 
   afterEach(() => {
     cleanup();
+    failedListeners.clear();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     vi.clearAllMocks();
@@ -265,6 +280,51 @@ describe("PluginWebAppPage", () => {
     );
     await screen.findByTestId("plugin-web-app-unavailable");
     expect(bridgeMock.setPluginWebAppBounds).not.toHaveBeenCalled();
+  });
+
+  it("leaves the ready state when main reports the guest died after it opened", async () => {
+    render(
+      <PluginWebAppPage workspaceId="ws-1" pluginId="t3-code" webAppId="app" />,
+    );
+    await screen.findByTestId("plugin-web-app-frame");
+
+    await reportFailed({
+      workspaceId: "ws-1",
+      pluginId: "t3-code",
+      webAppId: "app",
+    });
+
+    // MUTATION (drop the notification, on either side): the page keeps its
+    // ready state over a destroyed view — a blank tab with no error, no hint,
+    // and bounds reports that main silently drops.
+    const error = await screen.findByTestId("plugin-web-app-error");
+    expect(error.textContent).toContain("dohc could not open the plugin app");
+    expect(error.textContent).toContain(
+      "The app stopped before it finished opening.",
+    );
+    expect(error.textContent).toContain("Close this tab and try again.");
+    expect(screen.queryByTestId("plugin-web-app-frame")).toBeNull();
+  });
+
+  it("ignores a failure reported for another workspace or app", async () => {
+    render(
+      <PluginWebAppPage workspaceId="ws-1" pluginId="t3-code" webAppId="app" />,
+    );
+    await screen.findByTestId("plugin-web-app-frame");
+
+    await reportFailed({
+      workspaceId: "ws-2",
+      pluginId: "t3-code",
+      webAppId: "app",
+    });
+    await reportFailed({
+      workspaceId: "ws-1",
+      pluginId: "t3-code",
+      webAppId: "other",
+    });
+
+    expect(screen.getByTestId("plugin-web-app-frame")).toBeTruthy();
+    expect(screen.queryByTestId("plugin-web-app-error")).toBeNull();
   });
 
   it("shows the start error and the retry instruction", async () => {

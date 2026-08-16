@@ -2377,6 +2377,23 @@ export type SetPluginWebAppBoundsPayload = z.infer<
 export const StopPluginWebAppPayload = StartPluginWebAppPayload;
 export type StopPluginWebAppPayload = z.infer<typeof StopPluginWebAppPayload>;
 
+/** Main tells the page its guest died after the start had already answered
+ * "ok". It carries no failure text: the load error can embed the start URL,
+ * credential fragment included, so the page owns the words. */
+export const PluginWebAppFailedEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  webAppId: PLUGIN_WEB_APP_ID,
+}).strict();
+export type PluginWebAppFailedEvent = z.infer<typeof PluginWebAppFailedEvent>;
+
+export function parsePluginWebAppFailedEventForIpc(
+  value: unknown,
+): PluginWebAppFailedEvent | null {
+  const parsed = PluginWebAppFailedEvent.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 // Workspace plugin management (PR2). Main owns one pipeline for the active
 // workspace. Every action returns a discriminated result, so expected plugin
 // failures cross as bounded data instead of opaque Electron exceptions.
@@ -3960,6 +3977,9 @@ export interface DohcDesktopBridge {
   ): Promise<StartPluginWebAppResult>;
   setPluginWebAppBounds(payload: SetPluginWebAppBoundsPayload): Promise<void>;
   stopPluginWebApp(payload: StopPluginWebAppPayload): Promise<void>;
+  onPluginWebAppFailed(
+    listener: (event: PluginWebAppFailedEvent) => void,
+  ): () => void;
   listPlugins(payload: ListPluginsPayload): Promise<ListPluginsResult>;
   installPlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   disablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;

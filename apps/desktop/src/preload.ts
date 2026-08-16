@@ -8,6 +8,7 @@ import type {
   MenuCommand,
   PluginPanelOpenedEvent,
   PluginStatusChangedEvent,
+  PluginWebAppFailedEvent,
   PluginWebAppOpenedEvent,
   OpenPluginWebAppPayload,
   SetPluginWebAppBoundsPayload,
@@ -36,6 +37,7 @@ import {
   parseInvokePluginPanelSdkPayloadForIpc,
   parseInvokeSiteSdkPayloadForIpc,
   parsePluginStatusChangedEventForIpc,
+  parsePluginWebAppFailedEventForIpc,
 } from "./ipc/bridgeContract";
 import {
   CHANNELS,
@@ -214,6 +216,14 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.setPluginWebAppBounds, payload),
   stopPluginWebApp: (payload: StopPluginWebAppPayload) =>
     ipcRenderer.invoke(CHANNELS.stopPluginWebApp, payload),
+  onPluginWebAppFailed: (listener: (event: PluginWebAppFailedEvent) => void) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      const parsed = parsePluginWebAppFailedEventForIpc(raw);
+      if (parsed) listener(parsed);
+    };
+    ipcRenderer.on(CHANNELS.pluginWebAppFailed, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.pluginWebAppFailed, handler);
+  },
   listPlugins: async (payload) =>
     ListPluginsResult.parse(await ipcRenderer.invoke(CHANNELS.listPlugins, payload)),
   installPlugin: async (payload) =>

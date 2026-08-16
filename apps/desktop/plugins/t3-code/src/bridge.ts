@@ -62,6 +62,7 @@ export interface T3BridgeOptions {
 
 export interface T3Bridge {
   startWebApp(webAppId: string): Promise<PluginWebAppStart>;
+  stopWebApp(webAppId: string): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -116,6 +117,15 @@ export function createT3Bridge(
         NO_COLOR: "1",
       },
     });
+    // Armed before readiness, not after it. A crash inside the spawn-to-ready
+    // window would otherwise leave a live t3 server no later start may signal
+    // — the recovery reads no owner, so it only deletes the file and the
+    // orphan keeps the workspace's checkpoint refs. Both fields are known
+    // here: the port was allocated before the spawn, the pid comes back with
+    // the handle.
+    if (child.pid !== null) {
+      await writeOwnerRecord(ownerPath, { pid: child.pid, port });
+    }
     // Raw output exists in exactly one place and for exactly one purpose:
     // this bounded buffer, until the pairing URL is parsed out of it. Every
     // line leaves this closure redacted.
@@ -164,9 +174,6 @@ export function createT3Bridge(
           "Disable and re-enable the t3-code plugin to retry.",
       );
     }
-    if (child.pid !== null) {
-      await writeOwnerRecord(ownerPath, { pid: child.pid, port });
-    }
     const server: ReadyServer = {
       origin: `http://127.0.0.1:${port}`,
       pairingUrl: captured.pairingUrl,
@@ -180,6 +187,27 @@ export function createT3Bridge(
       () => markExited(server),
     );
     return server;
+  }
+
+  /**
+   * Ends the current server and disarms its ownership record. The record
+   * exists to authorize a signal against a leftover process; once this server
+   * is gone the record must go with it, or a routine exit arms the next start
+   * against a pid the operating system is free to hand to someone else.
+   */
+  async function shutdownServer(): Promise<void> {
+    const current = serverPromise;
+    serverPromise = null;
+    if (!current) return;
+    const server = await current.catch(() => null);
+    if (!server) return;
+    const gone = server.alive
+      ? await server.child.terminate().then(
+          () => true,
+          () => false,
+        )
+      : true;
+    if (gone) await clearOwnerRecord(server.ownerPath);
   }
 
   function markExited(server: ReadyServer): void {
@@ -256,24 +284,22 @@ export function createT3Bridge(
       return { url: `${server.origin}/` };
     },
 
+    // The guest this server paired with never arrived, and its credential is
+    // spent. t3 pairs a browser session, not a request, and only a new server
+    // mints a new credential — so end this one. The next start spawns and
+    // pairs again.
+    async stopWebApp(webAppId: string): Promise<void> {
+      if (webAppId !== T3_WEB_APP_ID) {
+        throw new Error(
+          `The t3-code plugin has no web app "${webAppId}". It provides "${T3_WEB_APP_ID}".`,
+        );
+      }
+      await shutdownServer();
+    },
+
     async dispose(): Promise<void> {
       disposed = true;
-      const current = serverPromise;
-      serverPromise = null;
-      if (!current) return;
-      const server = await current.catch(() => null);
-      if (!server) return;
-      // The owner record exists to authorize a signal against a leftover
-      // process. Once this server is gone, the record must go with it —
-      // otherwise every routine exit arms the next start against a pid the
-      // operating system is free to hand to someone else.
-      const gone = server.alive
-        ? await server.child.terminate().then(
-            () => true,
-            () => false,
-          )
-        : true;
-      if (gone) await clearOwnerRecord(server.ownerPath);
+      await shutdownServer();
     },
   };
 }

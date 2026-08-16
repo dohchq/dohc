@@ -2161,6 +2161,56 @@ describe("PluginHost web apps", () => {
     );
   });
 
+  it("carries a stop to the plugin, so the next start pairs again", async () => {
+    const host = await startWebAppHost({ mode: "web-app-pairing" });
+    const first = await host.startWebApp("hello-plugin", "main-app");
+    expect(first.url).toBe("http://127.0.0.1:43210/pair#token=fixture-1");
+    // Paired: a second start rides the session the first one established.
+    await expect(host.startWebApp("hello-plugin", "main-app")).resolves.toEqual({
+      url: "http://127.0.0.1:43210/?app=main-app",
+    });
+
+    await host.stopWebApp("hello-plugin", "main-app");
+
+    // MUTATION (drop the protocol stop dispatch, or the host method): the
+    // plugin never learns the guest is gone, so this start returns the paired
+    // URL into a guest with no session — the workspace-started host's whole
+    // failure mode.
+    await expect(host.startWebApp("hello-plugin", "main-app")).resolves.toEqual({
+      url: "http://127.0.0.1:43210/pair#token=fixture-2",
+    });
+  });
+
+  it("reports a handler that implements startWebApp without stopWebApp", async () => {
+    const host = await startWebAppHost({ mode: "web-app" });
+    await expect(host.stopWebApp("hello-plugin", "main-app")).rejects.toThrow(
+      "does not implement stopWebApp",
+    );
+  });
+
+  it("refuses to stop a web app the manifest does not declare", async () => {
+    const host = await startWebAppHost({ mode: "web-app-pairing" });
+    await expect(host.stopWebApp("hello-plugin", "other")).rejects.toThrow(
+      'does not declare web app "other"',
+    );
+  });
+
+  it("has nothing to unpair when the plugin is not running", async () => {
+    const root = await workspaceRoot();
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: createProcessHarness().spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+    // The broker takes a wrapper's whole process tree down with its spawn, so
+    // a dead plugin's server and session are already gone. The recovery must
+    // not turn that into a failure it reports.
+    await expect(
+      host.stopWebApp("hello-plugin", "main-app"),
+    ).resolves.toBeUndefined();
+  });
+
   it("hands every activation the same durable state root uninstall deletes", async () => {
     const root = await workspaceRoot();
     const localStateDir = await stateDir();

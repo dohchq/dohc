@@ -13,6 +13,7 @@ import {
   PLUGIN_HOST_METHODS,
   PLUGIN_PROCESS_LOG_LIMIT,
   PLUGIN_WEB_APP_START_TIMEOUT_MS,
+  PLUGIN_WEB_APP_STOP_TIMEOUT_MS,
   type PluginActivateParams,
   type PluginActivateResult,
   type PluginInvokeCommandParams,
@@ -20,6 +21,7 @@ import {
   type PluginRuntimeStatus,
   type PluginStartWebAppParams,
   type PluginStartWebAppResult,
+  type PluginStopWebAppParams,
   type SdkEventParams,
   type PluginTransport,
   type SdkRequestParams,
@@ -303,6 +305,34 @@ export class PluginHost {
       );
     }
     return { url: result.url };
+  }
+
+  /**
+   * Tells the running plugin the guest it started this web app for is gone,
+   * so it ends the session that start paired. The host calls this on the
+   * recovery path only: a normal tab close leaves the app paired, because the
+   * guest's session cookie already landed and the next open reuses it.
+   *
+   * A plugin with no live spawn has nothing to unpair — the broker takes a
+   * wrapper's whole process tree down with the spawn, so its server and the
+   * session are already gone.
+   */
+  async stopWebApp(pluginId: string, webAppId: string): Promise<void> {
+    const record = this.plugins.get(pluginId);
+    const spawn = record?.current;
+    if (!record || !spawn?.transport || spawn.stopping) return;
+    if (!record.manifest.webApps?.some((webApp) => webApp.id === webAppId)) {
+      throw new Error(
+        `Plugin "${pluginId}" does not declare web app "${webAppId}".`,
+      );
+    }
+    await raceWithTimeout(
+      spawn.transport.request(PLUGIN_HOST_METHODS.stopWebApp, {
+        webAppId,
+      } satisfies PluginStopWebAppParams),
+      PLUGIN_WEB_APP_STOP_TIMEOUT_MS,
+      `Plugin "${pluginId}" web app "${webAppId}" did not stop within ${PLUGIN_WEB_APP_STOP_TIMEOUT_MS} ms.`,
+    );
   }
 
   private pluginStateRoot(pluginId: string): string {
