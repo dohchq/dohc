@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { cp, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   openWorkspaceFromFirstRun,
+  seedPluginSource,
   seedWorkspaceManifest,
   seedWorkspaceSettings,
 } from "./helpers/workspace";
@@ -78,7 +79,7 @@ test("plugin panel crosses the utility process, iframe SDK, and attributed write
     await seedWorkspaceSettings(temp, {
       experimental: { workspaceEngineAlpha: true },
     });
-    await cp(fixtureRoot, join(temp.rootPath, pluginRoot), { recursive: true });
+    await seedPluginSource(temp, { fixtureRoot, pluginId: "hello-plugin" });
 
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);

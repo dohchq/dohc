@@ -1,5 +1,5 @@
 import { expect, type Page } from "@playwright/test";
-import { mkdir, writeFile } from "node:fs/promises";
+import { cp, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../../src/workspaces/workspaceSettings";
@@ -238,6 +238,33 @@ export async function writeWorkspaceFiles(
     await mkdir(dirname(absolute), { recursive: true });
     await writeFile(absolute, file.contents);
   }
+}
+
+/**
+ * Puts a plugin's source under `plugins/<pluginId>` in one move, and returns
+ * that workspace-relative root.
+ *
+ * The recursive copy runs in a staging directory beside the workspace, so the
+ * workspace only ever holds the finished tree. Copying straight into
+ * `plugins/` creates the tree file by file, and every reader of the workspace
+ * — the watcher, and any install already running — can catch it half made:
+ * an install that hashes a partial tree records an approval for bytes that
+ * are replaced moments later, and the plugin then switches itself off waiting
+ * for approval of source nobody edited (#803). The move keeps the specs
+ * correct wherever they seed, instead of resting on seeding before launch.
+ */
+export async function seedPluginSource(
+  workspace: Pick<TempWorkspace, "baseDir" | "rootPath">,
+  input: { fixtureRoot: string; pluginId: string },
+): Promise<string> {
+  const pluginRoot = `plugins/${input.pluginId}`;
+  assertSafeRelativePath(pluginRoot);
+  const staging = join(workspace.baseDir, `plugin-seed-${input.pluginId}`);
+  await rm(staging, { recursive: true, force: true });
+  await cp(input.fixtureRoot, staging, { recursive: true });
+  await mkdir(join(workspace.rootPath, "plugins"), { recursive: true });
+  await rename(staging, join(workspace.rootPath, pluginRoot));
+  return pluginRoot;
 }
 
 function cssString(value: string): string {
