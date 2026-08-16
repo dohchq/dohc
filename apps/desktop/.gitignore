@@ -8,3 +8,9 @@ release/
 resources/workspace-engine/
 resources/cli-bin/
 resources/plugin-tools/
+
+# scripts/stage-plugin-tools.mjs builds the new tree beside the live one and
+# swaps it in with a rename. A replaced tree stays until the app that holds a
+# file in it stops.
+resources/plugin-tools.staging/
+resources/plugin-tools.replaced-*/

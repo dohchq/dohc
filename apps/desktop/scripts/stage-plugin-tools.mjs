@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { cp, mkdir, readFile, readdir, realpath, rm, stat } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, realpath, rename, rm, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const PINNED_PNPM_VERSION = "11.20.0";
@@ -142,6 +142,71 @@ export async function aggregateTreeSha512(root) {
   return hash.digest("hex");
 }
 
+async function removeTree(root) {
+  return await rm(root, { recursive: true, force: true }).then(
+    () => null,
+    (error) => error,
+  );
+}
+
+// Windows refuses to delete a file that a running process executes, so a
+// replaced tree can outlive the run that replaced it.
+async function removeReplacedTrees(destinationRoot) {
+  const parent = dirname(destinationRoot);
+  const prefix = `${basename(destinationRoot)}.replaced-`;
+  const retained = [];
+  const entries = await readdir(parent, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(prefix)) continue;
+    const root = join(parent, entry.name);
+    const failure = await removeTree(root);
+    if (failure) retained.push({ root, message: errorMessage(failure) });
+  }
+  return retained;
+}
+
+async function swapStagedTree({ destinationRoot, stagingRoot, replacedRoot }) {
+  const hasLiveTree = await stat(destinationRoot).then(
+    () => true,
+    () => false,
+  );
+
+  if (hasLiveTree) {
+    try {
+      await rename(destinationRoot, replacedRoot);
+    } catch (error) {
+      throw new Error(
+        `Staged plugin tools could not move ${destinationRoot} aside: ${errorMessage(error)}. ` +
+          "A process is using this directory. Stop the app that runs from this worktree, then build " +
+          "again. The existing tree is unchanged.",
+      );
+    }
+  }
+
+  try {
+    await rename(stagingRoot, destinationRoot);
+  } catch (error) {
+    const restored = hasLiveTree
+      ? await rename(replacedRoot, destinationRoot).then(
+          () => true,
+          () => false,
+        )
+      : false;
+    throw new Error(
+      `Staged plugin tools could not move the new tree into ${destinationRoot}: ${errorMessage(error)}. ` +
+        (hasLiveTree
+          ? restored
+            ? "The existing tree is restored."
+            : `The existing tree is at ${replacedRoot}. Rename it to ${destinationRoot}.`
+          : "No tree is staged."),
+    );
+  }
+
+  if (!hasLiveTree) return null;
+  const failure = await removeTree(replacedRoot);
+  return failure ? { root: replacedRoot, message: errorMessage(failure) } : null;
+}
+
 export async function stagePluginTools(options = {}) {
   const desktopRoot = resolve(options.desktopRoot ?? fileURLToPath(new URL("..", import.meta.url)));
   const nodeModulesRoot = resolve(options.nodeModulesRoot ?? join(desktopRoot, "node_modules"));
@@ -163,33 +228,58 @@ export async function stagePluginTools(options = {}) {
   await assertSourceEntry("pnpm LICENSE", join(pnpmRoot, "LICENSE"), "file");
   await assertSourceEntry("esbuild lib/main.js", join(esbuildRoot, "lib", "main.js"), "file");
 
-  await rm(destinationRoot, { recursive: true, force: true });
-  const stagedPnpmRoot = join(destinationRoot, "pnpm");
-  const stagedEsbuildRoot = join(destinationRoot, "esbuild", platformKey);
-  const stagedNodeModules = join(stagedEsbuildRoot, "node_modules");
-  await mkdir(stagedPnpmRoot, { recursive: true });
-  await mkdir(join(stagedNodeModules, "@esbuild"), { recursive: true });
+  const retained = await removeReplacedTrees(destinationRoot);
+  const stagingRoot = `${destinationRoot}.staging`;
+  const replacedRoot = `${destinationRoot}.replaced-${process.pid}-${Date.now()}`;
+  const stagingFailure = await removeTree(stagingRoot);
+  if (stagingFailure) {
+    throw new Error(
+      `Staged plugin tools could not clear the staging directory ${stagingRoot}: ${errorMessage(stagingFailure)}. ` +
+        `Delete ${stagingRoot}, then build again. The existing tree is unchanged.`,
+    );
+  }
+
+  const stagingNodeModules = join(stagingRoot, "esbuild", platformKey, "node_modules");
+  await mkdir(join(stagingRoot, "pnpm"), { recursive: true });
+  await mkdir(join(stagingNodeModules, "@esbuild"), { recursive: true });
 
   await Promise.all([
-    cp(join(pnpmRoot, "bin", "pnpm.mjs"), join(stagedPnpmRoot, "bin", "pnpm.mjs"), {
+    cp(join(pnpmRoot, "bin", "pnpm.mjs"), join(stagingRoot, "pnpm", "bin", "pnpm.mjs"), {
       recursive: false,
     }),
-    cp(join(pnpmRoot, "dist"), join(stagedPnpmRoot, "dist"), {
+    cp(join(pnpmRoot, "dist"), join(stagingRoot, "pnpm", "dist"), {
       recursive: true,
       dereference: true,
     }),
-    cp(join(pnpmRoot, "package.json"), join(stagedPnpmRoot, "package.json")),
-    cp(join(pnpmRoot, "LICENSE"), join(stagedPnpmRoot, "LICENSE")),
-    cp(esbuildRoot, join(stagedNodeModules, "esbuild"), {
+    cp(join(pnpmRoot, "package.json"), join(stagingRoot, "pnpm", "package.json")),
+    cp(join(pnpmRoot, "LICENSE"), join(stagingRoot, "pnpm", "LICENSE")),
+    cp(esbuildRoot, join(stagingNodeModules, "esbuild"), {
       recursive: true,
       dereference: true,
     }),
-    cp(esbuildPlatformRoot, join(stagedNodeModules, "@esbuild", platformKey), {
+    cp(esbuildPlatformRoot, join(stagingNodeModules, "@esbuild", platformKey), {
       recursive: true,
       dereference: true,
     }),
   ]);
 
+  // A tree that already matches is left untouched. A dev app that runs from
+  // this worktree holds files in the live tree open, so the rebuild that
+  // changes nothing must not touch it.
+  const [candidateSha512, liveSha512] = await Promise.all([
+    aggregateTreeSha512(stagingRoot),
+    aggregateTreeSha512(destinationRoot).catch(() => null),
+  ]);
+  const swapped = candidateSha512 !== liveSha512;
+  if (swapped) {
+    const replaced = await swapStagedTree({ destinationRoot, stagingRoot, replacedRoot });
+    if (replaced) retained.push(replaced);
+  } else {
+    await removeTree(stagingRoot);
+  }
+
+  const stagedPnpmRoot = join(destinationRoot, "pnpm");
+  const stagedEsbuildRoot = join(destinationRoot, "esbuild", platformKey);
   const [pnpmSha512, esbuildSha512] = await Promise.all([
     aggregateTreeSha512(stagedPnpmRoot),
     aggregateTreeSha512(stagedEsbuildRoot),
@@ -197,6 +287,8 @@ export async function stagePluginTools(options = {}) {
   return {
     destinationRoot,
     platformPackage,
+    swapped,
+    retained,
     provenance: {
       pnpm: PNPM_TARBALL_PROVENANCE,
       esbuild: ESBUILD_TARBALL_PROVENANCE,
@@ -248,6 +340,15 @@ async function main() {
   console.log(
     "Tree digests hash each POSIX-relative file path, a NUL byte, the file bytes, and a trailing NUL byte in lexical path order.",
   );
+  if (!result.swapped) {
+    console.log(`${result.destinationRoot} already matched the source. The staged tree is unchanged.`);
+  }
+  for (const { root, message } of result.retained) {
+    console.log(
+      `Could not delete the replaced tree at ${root}: ${message}. A running app holds a file in it. ` +
+        "The next build deletes it after that app stops.",
+    );
+  }
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : null;
