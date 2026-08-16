@@ -84,6 +84,15 @@ interface PluginSpawn {
   spawnedAt: number;
   stopping: boolean;
   failureHandled: boolean;
+  /**
+   * Settles when this spawn stops being "starting": resolved once activation
+   * succeeded, rejected with the reason it never will. A spawn id exists from
+   * the moment the process is asked for, which is before the plugin can serve
+   * anything, so this is what a caller waits on (#798).
+   */
+  activated: Promise<void>;
+  resolveActivated: () => void;
+  rejectActivated: (error: Error) => void;
   abortController: AbortController;
   transport?: PluginTransport;
   shutdown?: Promise<void>;
@@ -415,6 +424,21 @@ export class PluginHost {
     return this.plugins.get(pluginId)?.current?.spawnId;
   }
 
+  /**
+   * The running spawn's activation, or undefined when the plugin has no
+   * spawn. It resolves when the plugin can answer a request, and rejects
+   * with the reason it never will. A caller that is about to ask the plugin
+   * for something waits on this instead of reading a spawn id or a status:
+   * both say "running" while the plugin is still activating, and every
+   * request in that window is refused (#798).
+   *
+   * The wait is bounded by the activation deadline this host already races
+   * every activation against.
+   */
+  activationOf(pluginId: string): Promise<void> | undefined {
+    return this.plugins.get(pluginId)?.current?.activated;
+  }
+
   bumpGeneration(): void {
     this.currentGeneration += 1;
     for (const record of this.plugins.values()) {
@@ -439,12 +463,23 @@ export class PluginHost {
   }
 
   private spawn(record: PluginRecord): void {
+    const {
+      promise: activated,
+      resolve: resolveActivated,
+      reject: rejectActivated,
+    } = Promise.withResolvers<void>();
+    // Nothing may be waiting on this spawn's activation, so its rejection must
+    // not surface as an unhandled rejection in the main process.
+    void activated.catch(() => undefined);
     const spawn: PluginSpawn = {
       spawnId: randomUUID(),
       generation: this.currentGeneration,
       spawnedAt: this.now(),
       stopping: false,
       failureHandled: false,
+      activated,
+      resolveActivated,
+      rejectActivated,
       abortController: new AbortController(),
     };
     record.current = spawn;
@@ -534,6 +569,7 @@ export class PluginHost {
     }
     record.commands = [...result.commands];
     this.setStatus(record, "ready");
+    spawn.resolveActivated();
   }
 
   private async handleActivationFailure(
@@ -541,6 +577,9 @@ export class PluginHost {
     spawn: PluginSpawn,
     error: unknown,
   ): Promise<void> {
+    spawn.rejectActivated(
+      error instanceof Error ? error : new Error(this.errorMessage(error)),
+    );
     if (!this.isLive(record, spawn)) {
       void spawn.transport?.dispose().catch(() => undefined);
       return;
@@ -671,6 +710,14 @@ export class PluginHost {
   }
 
   private endSpawn(record: PluginRecord, spawn: PluginSpawn): Promise<void> {
+    // Every teardown path runs through here — a stop, a crash, a replaced
+    // generation — so this is where a spawn that ends before it activated
+    // releases whoever waits on it. Already-settled activations ignore it.
+    spawn.rejectActivated(
+      new Error(
+        `Plugin "${record.pluginId}" stopped before it finished starting.`,
+      ),
+    );
     if (!spawn.abortController.signal.aborted) spawn.abortController.abort();
     if (!spawn.resourceDisposal) {
       spawn.resourceDisposal = this.options.onSpawnEnd?.(

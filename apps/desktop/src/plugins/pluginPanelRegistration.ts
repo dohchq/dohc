@@ -70,29 +70,41 @@ export type PluginPanelHostStartResult =
   | { ok: false; error: { message: string } };
 
 /**
- * Starts a plugin because a panel needs it, and records the panel's claim on
- * the host's lifetime.
+ * Starts a plugin because a panel or a web app needs it, and records the
+ * surface's claim on the host's lifetime. It returns when the plugin can
+ * serve the surface's own start call, and throws the reason it cannot.
+ *
+ * Returning on a spawned-but-still-activating host is what made a cold open
+ * fail: the surface's next call reached the plugin before `activate()`
+ * resolved and was refused as "still starting" (#798). So both paths end on
+ * the host's activation — the one for a host something else already started,
+ * and the one this call started itself.
  *
  * The claim is made only when this start performed the zero-to-running
  * transition, which the pipeline reports from inside its own per-plugin
  * queue: a plugin the workspace enabled keeps running with no panel open, so
  * a panel that merely rode along must not stop it on close (#779 round 4
- * finding 3, round 10 B3).
+ * finding 3, round 10 B3). A start that ran the host owns it even if that
+ * host then fails to activate — nothing else is going to stop it.
  */
 export async function startPluginForPanel(input: {
   panelStartedHosts: Set<string>;
   workspaceId: string;
   pluginId: string;
-  isHostRunning: () => boolean;
+  /** The running host's activation, or undefined when no host is running. */
+  hostActivation: () => Promise<void> | undefined;
   ensureStarted: () => Promise<PluginPanelHostStartResult>;
 }): Promise<void> {
-  if (input.isHostRunning()) return;
+  const running = input.hostActivation();
+  if (running) return running;
   const result = await input.ensureStarted();
   if (!result.ok) throw new Error(result.error.message);
-  if (!result.startedHost) return;
-  input.panelStartedHosts.add(
-    pluginLifecycleKey(input.workspaceId, input.pluginId),
-  );
+  if (result.startedHost) {
+    input.panelStartedHosts.add(
+      pluginLifecycleKey(input.workspaceId, input.pluginId),
+    );
+  }
+  await input.hostActivation();
 }
 
 /**

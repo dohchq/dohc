@@ -235,6 +235,7 @@ describe("plugin panel registration", () => {
       startedHost: boolean;
     }) => {
       const calls: string[] = [];
+      let running = result.running;
       return {
         calls,
         run: () =>
@@ -242,9 +243,10 @@ describe("plugin panel registration", () => {
             panelStartedHosts,
             workspaceId: "workspace-1",
             pluginId: "hello-plugin",
-            isHostRunning: () => result.running,
+            hostActivation: () => (running ? Promise.resolve() : undefined),
             ensureStarted: async () => {
               calls.push("ensureStarted");
+              running = true;
               return { ok: true, startedHost: result.startedHost };
             },
           }),
@@ -280,7 +282,7 @@ describe("plugin panel registration", () => {
         panelStartedHosts,
         workspaceId: "workspace-1",
         pluginId: "hello-plugin",
-        isHostRunning: () => false,
+        hostActivation: () => undefined,
         ensureStarted: async () => ({
           ok: false,
           error: { message: "Plugin source changed. Review it again." },
@@ -288,6 +290,82 @@ describe("plugin panel registration", () => {
       }),
     ).rejects.toThrow("Plugin source changed. Review it again.");
     expect(panelStartedHosts.size).toBe(0);
+  });
+
+  it("waits for a host that is spawned but still activating (#798)", async () => {
+    // Both surfaces reach this through main's ensurePluginStarted: a panel
+    // open and a web-app open share this one path, so this covers both.
+    for (const startedHere of [false, true]) {
+      const panelStartedHosts = new Set<string>();
+      let activated = false;
+      let settleActivation!: () => void;
+      const activation = new Promise<void>((resolve) => {
+        settleActivation = () => {
+          activated = true;
+          resolve();
+        };
+      });
+      let spawned = !startedHere;
+
+      let opened = false;
+      const open = startPluginForPanel({
+        panelStartedHosts,
+        workspaceId: "workspace-1",
+        pluginId: "hello-plugin",
+        hostActivation: () => (spawned ? activation : undefined),
+        ensureStarted: async () => {
+          // The pipeline reports a started host the moment it spawns one,
+          // which is before the plugin can serve anything.
+          spawned = true;
+          return { ok: true, startedHost: true };
+        },
+      }).then(() => {
+        opened = true;
+      });
+
+      // Long enough for every pending job to run: the open must still be
+      // waiting, because the plugin cannot answer yet.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(opened).toBe(false);
+
+      settleActivation();
+      await open;
+      expect(opened).toBe(true);
+      expect(activated).toBe(true);
+      expect([...panelStartedHosts]).toEqual(
+        startedHere ? [pluginLifecycleKey("workspace-1", "hello-plugin")] : [],
+      );
+    }
+  });
+
+  it("reports the activation error of a host that never became ready (#798)", async () => {
+    for (const startedHere of [false, true]) {
+      const panelStartedHosts = new Set<string>();
+      let spawned = !startedHere;
+      const activation = Promise.reject(
+        new Error('Plugin "hello-plugin" activation failed: bad entry.'),
+      );
+      activation.catch(() => undefined);
+
+      await expect(
+        startPluginForPanel({
+          panelStartedHosts,
+          workspaceId: "workspace-1",
+          pluginId: "hello-plugin",
+          hostActivation: () => (spawned ? activation : undefined),
+          ensureStarted: async () => {
+            spawned = true;
+            return { ok: true, startedHost: startedHere };
+          },
+        }),
+      ).rejects.toThrow('Plugin "hello-plugin" activation failed: bad entry.');
+
+      // A start that ran the host still owns it — the accounting follows who
+      // started the process, not whether the process then activated.
+      expect([...panelStartedHosts]).toEqual(
+        startedHere ? [pluginLifecycleKey("workspace-1", "hello-plugin")] : [],
+      );
+    }
   });
 
   it("forgets an uninstalled plugin, and only when uninstall succeeded (#779 round 10 B7)", () => {

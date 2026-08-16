@@ -3045,6 +3045,10 @@ function pluginSnapshotRoot(workspace: CreatedWorkspace, pluginId: string): stri
 // still supplies panel entry paths elsewhere, but never plugin activation).
 // The pipeline also owns per-plugin job serialization, so no separate
 // pluginStarts de-dup map is needed here.
+//
+// It returns when the plugin can serve the caller's next request — every
+// caller here makes one — which is when the host's activation settles, not
+// when its process exists (#798).
 async function ensurePluginStarted(
   workspace: CreatedWorkspace,
   plugin: RegisteredPlugin,
@@ -3054,7 +3058,7 @@ async function ensurePluginStarted(
     panelStartedHosts,
     workspaceId: workspace.workspaceId,
     pluginId: plugin.manifest.name,
-    isHostRunning: () => Boolean(pipeline.host.getSpawnId(plugin.manifest.name)),
+    hostActivation: () => pipeline.host.activationOf(plugin.manifest.name),
     ensureStarted: () => pipeline.ensureStarted(plugin.manifest.name),
   });
   return pipeline.host;

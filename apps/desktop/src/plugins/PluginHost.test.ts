@@ -416,6 +416,96 @@ describe("PluginHost", () => {
     );
   });
 
+  it("answers a request only after activationOf settles, on a real spawn (#798)", async () => {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "slow-hello" },
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+
+    // The spawn id already exists — this is what a panel or web-app open used
+    // to read as "running" — and every request in this window is refused.
+    expect(typeof host.getSpawnId("hello-plugin")).toBe("string");
+    expect(host.getStatus("hello-plugin")).toBe("starting");
+    await expect(
+      host.invokeCommand("hello-plugin", "does-not-exist"),
+    ).rejects.toThrow('Plugin "hello-plugin" is still starting.');
+
+    const activation = host.activationOf("hello-plugin");
+    expect(activation).toBeDefined();
+    await activation;
+
+    expect(host.getStatus("hello-plugin")).toBe("ready");
+    // The same call now reaches the plugin: this is the plugin's own answer,
+    // not the host refusing to carry it.
+    await expect(
+      host.invokeCommand("hello-plugin", "does-not-exist"),
+    ).rejects.toThrow('Command "does-not-exist" is not registered.');
+  });
+
+  it("rejects activationOf with the activation error a real spawn failed on (#798)", async () => {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "throws" },
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+
+    await expect(host.activationOf("hello-plugin")).rejects.toThrow(
+      "fixture activation failed",
+    );
+  });
+
+  it("reports no activation for a plugin that has no spawn (#798)", async () => {
+    const root = await workspaceRoot();
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: vi.fn<PluginHostOptions["spawnTransport"]>(),
+      routeSdkRequest: defaultRouter,
+    });
+
+    expect(host.activationOf("hello-plugin")).toBeUndefined();
+  });
+
+  it("releases activationOf when the spawn stops before it activated (#798)", async () => {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "never-resolves" },
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    const activation = host.activationOf("hello-plugin");
+    expect(activation).toBeDefined();
+
+    await host.stop("hello-plugin");
+
+    // Without this the waiter would hang to the activation deadline for a
+    // process that is already gone.
+    await expect(activation).rejects.toThrow(
+      'Plugin "hello-plugin" stopped before it finished starting.',
+    );
+  });
+
   it("rejects a second start while the first start continues", async () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness();
