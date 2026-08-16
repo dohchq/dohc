@@ -1632,13 +1632,60 @@ describe("the recipient's blob route", () => {
       "incomingText",
     );
 
-    // An index past the proposal's own ops addresses no file.
-    expect((await h(request(GRANTER, `/sync/${WORKSPACE}/proposals/${proposalId}/ops/1`))).status).toBe(404);
-    // And a recipient cannot read the granter's workspace routes at all.
+  });
+
+  // A per-op route is a NEW surface on the granter's workspace, so it owes the
+  // same gate the listing owes and the same generic 404 — one answer for every
+  // way a lookup can fail, so nothing on it can be used to probe what exists.
+  it("gates the single-op route exactly as the listing is gated", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const granter = new Granter(h);
+    await granter.write("object-in", "docs/in.md", "granter one");
+    const shareId = await createShare(h, "edit");
+    expect((await uploadShareBlob(h, shareId, "recipient two")).status).toBe(200);
+    const sent = await submit(h, shareId, [change()]);
+    const proposalId = (await json(sent)).proposalId as string;
+    const op = (id: string, as: string, index = 0) =>
+      h(request(as, `/sync/${WORKSPACE}/proposals/${id}/ops/${index}`));
+
+    // The owner reads it.
+    expect((await op(proposalId, GRANTER)).status).toBe(200);
+
+    // Every other way in is the SAME bytes, so none of them tells the caller
+    // whether the thing they asked about exists.
+    const denied = await Promise.all([
+      // The share's own recipient, who owns none of this workspace.
+      op(proposalId, RECIPIENT),
+      // An account with no relationship to the share at all.
+      op(proposalId, OTHER),
+      // A proposal id that never existed.
+      op("proposal-absent", GRANTER),
+      // An op index this proposal does not have.
+      op(proposalId, GRANTER, 1),
+    ]).then((responses) => Promise.all(responses.map(denialBytes)));
     expect(
-      (await h(request(RECIPIENT, `/sync/${WORKSPACE}/proposals/${proposalId}/ops/0`))).status,
-      "MUTATION: serving this route outside the owner gate hands a recipient the granter's own files",
-    ).toBe(404);
+      new Set(denied).size,
+      "MUTATION: a per-failure answer turns this route into a probe for what a workspace holds",
+    ).toBe(1);
+    expect(denied[0]).toContain("404");
+
+    // The listing answers a non-owner with those same bytes. The two routes
+    // must not drift: one that denies differently is one that can be compared
+    // against the other.
+    expect(
+      await denialBytes(await h(request(OTHER, `/sync/${WORKSPACE}/proposals`))),
+      "MUTATION: a per-op route denying differently from the listing leaks which proposals exist",
+    ).toBe(denied[0]);
+
+    // A settled proposal is history. The review asks one question, and it
+    // closes when the proposal leaves `open`.
+    expect((await settle(h, proposalId, "decline")).status).toBe(200);
+    expect(
+      await denialBytes(await op(proposalId, GRANTER)),
+      "MUTATION: serving a settled proposal's ops keeps a closed review readable",
+    ).toBe(denied[0]);
   });
 
   // The measured bound, at its exact edge on both sides
