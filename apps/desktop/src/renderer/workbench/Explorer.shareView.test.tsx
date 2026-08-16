@@ -12,10 +12,12 @@ afterEach(cleanup);
 // there — from the system trash, or from `.dohc/trash` whenever the system
 // trash refuses, which is any rejection and not only a drive that lacks one.
 //
-// A share view's delete removes the projection of a moment: there is no trash,
-// and what can still be taken back is the CHANGE, because the granter's copy
-// is untouched until they accept it. Each dialog has to say the one that is
-// true, or it is a durability promise dohc cannot keep.
+// A share view's delete removes the projection of a moment. There is no trash
+// on that path, so the local copy goes IRREVERSIBLY — and `AGENTS.md` requires
+// telling the user that before an irreversible change runs, not after. What
+// can still be taken back is the CHANGE, because the granter's copy is
+// untouched until they accept it. Each dialog has to say the one that is true,
+// or it is a durability promise dohc cannot keep.
 
 const GRANTER = "granter@dohc.test";
 
@@ -84,14 +86,24 @@ describe("the delete confirmation states where the file goes", () => {
     expect(text).toContain("whenever the system trash refuses");
   });
 
-  it("promises no trash in a share view, and names who still has the file", () => {
+  it("states the local delete is irreversible, and names who still has the file", () => {
     render(<Explorer {...explorerProps({ shareView: { granterEmail: GRANTER } })} />);
     const text = confirmText("one");
+    // No recovery is PROMISED — neither location the ordinary dialog names.
     expect(
       text,
       "MUTATION: a share view's delete has no trash to restore from, so promising one is a durability claim dohc cannot keep",
-    ).not.toContain("trash");
+    ).not.toContain("system trash");
+    expect(text).not.toContain(".dohc/trash");
+    expect(text).not.toContain("restored from there");
+    // And the irreversibility is STATED, before the change runs. An
+    // irreversible change the user is told about afterwards is the product
+    // invariant this dialog exists to satisfy.
     expect(text).toContain("It goes from your copy now.");
+    expect(
+      text,
+      "MUTATION: the recipient's local copy goes with no trash behind it, and nothing says so before they confirm",
+    ).toContain("There is no trash to restore it from.");
     // WHO still has it, by name rather than by description.
     expect(
       text,
@@ -109,6 +121,7 @@ describe("the delete confirmation states where the file goes", () => {
       text,
       "MUTATION: a singular sentence over a multi-file selection is wrong on the surface that decides a delete",
     ).toContain("They go from your copy now.");
+    expect(text).toContain("There is no trash to restore them from.");
     expect(text).toContain("still has them until");
   });
 

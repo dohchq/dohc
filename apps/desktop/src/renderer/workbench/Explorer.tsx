@@ -1598,7 +1598,9 @@ export function Explorer(props: ExplorerProps) {
               </p>
               <p className="mb-0 mt-2 text-xs text-muted">
                 {props.shareView
-                  ? `${confirmDelete.length === 1 ? "It goes" : "They go"} from your copy now. ${
+                  ? `${confirmDelete.length === 1 ? "It goes" : "They go"} from your copy now. There is no trash to restore ${
+                      confirmDelete.length === 1 ? "it" : "them"
+                    } from. ${
                       props.shareView.granterEmail ?? "The person who shared it"
                     } still ${confirmDelete.length === 1 ? "has it" : "has them"} until you send the change and they accept it. You can take the change back before then.`
                   : `${confirmDelete.length === 1 ? "It moves" : "They move"} to the system trash, or to this workspace's .dohc/trash folder whenever the system trash refuses, and can be restored from there.`}
