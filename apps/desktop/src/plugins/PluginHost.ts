@@ -15,6 +15,7 @@ import {
   PLUGIN_WEB_APP_START_TIMEOUT_MS,
   PLUGIN_WEB_APP_STOP_TIMEOUT_MS,
   type PluginActivateParams,
+  type PluginSettingsChangedParams,
   type PluginActivateResult,
   type PluginInvokeCommandParams,
   type PluginLogParams,
@@ -26,6 +27,7 @@ import {
   type PluginTransport,
   type SdkRequestParams,
 } from "./pluginHostProtocol";
+import type { PluginSettingValue } from "./pluginManifestSchema";
 
 const DEACTIVATION_TIMEOUT_MS = 5_000;
 
@@ -56,6 +58,10 @@ export interface PluginHostOptions {
     signal: AbortSignal,
     emitEvent: (subscriptionId: string, event: string, data: unknown) => void,
   ) => Promise<unknown>;
+  /** This plugin's settings, resolved against its manifest, for activation. */
+  readPluginSettings?: (
+    pluginId: string,
+  ) => Promise<Record<string, PluginSettingValue>>;
   /** Releases resources that the SDK router owns for one spawn. */
   onSpawnEnd?: (pluginId: string, spawnId: string) => Promise<void>;
   /** Releases router resources that are not attached to a live host record. */
@@ -380,6 +386,26 @@ export class PluginHost {
     return [...(this.plugins.get(pluginId)?.stderr ?? [])];
   }
 
+  /**
+   * Tells a running plugin its settings changed. A plugin that is not running
+   * needs no telling — it reads the new values from its next activation. The
+   * caller does not wait on this: a slow plugin must never hold up the save
+   * the user already made.
+   */
+  async notifySettingsChanged(
+    pluginId: string,
+    values: Record<string, PluginSettingValue>,
+  ): Promise<void> {
+    const record = this.plugins.get(pluginId);
+    const spawn = record?.current;
+    if (!record || !spawn || !spawn.transport || !this.isLive(record, spawn)) {
+      return;
+    }
+    await spawn.transport.request(PLUGIN_HOST_METHODS.settingsChanged, {
+      values,
+    } satisfies PluginSettingsChangedParams);
+  }
+
   getRegisteredCommands(pluginId: string): string[] | undefined {
     const commands = this.plugins.get(pluginId)?.commands;
     return commands ? [...commands] : undefined;
@@ -437,16 +463,23 @@ export class PluginHost {
         onExit: () => this.handleExit(record, spawn),
       });
 
-      const activation = spawn.transport.request<unknown>(
-        PLUGIN_HOST_METHODS.activate,
-        {
-          pluginId: record.pluginId,
-          pluginRoot: record.pluginRoot,
-          workspaceRoot: this.options.workspaceRoot,
-          stateRoot: this.pluginStateRoot(record.pluginId),
-          manifest: record.manifest,
-        } satisfies PluginActivateParams,
-      );
+      // The settings read is folded into the activation promise rather than
+      // awaited before the spawn, so it is covered by the activation deadline
+      // like every other part of starting a plugin.
+      const activation = (async () => {
+        const settings = await this.options.readPluginSettings?.(record.pluginId) ?? {};
+        return spawn.transport!.request<unknown>(
+          PLUGIN_HOST_METHODS.activate,
+          {
+            pluginId: record.pluginId,
+            pluginRoot: record.pluginRoot,
+            workspaceRoot: this.options.workspaceRoot,
+            stateRoot: this.pluginStateRoot(record.pluginId),
+            manifest: record.manifest,
+            settings,
+          } satisfies PluginActivateParams,
+        );
+      })();
       void raceWithTimeout(
         activation,
         this.activationTimeoutMs,

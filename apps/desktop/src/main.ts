@@ -102,6 +102,9 @@ import {
   InvokePluginPanelSdkPayload,
   InvokePluginPanelSdkResult,
   ListPluginsPayload,
+  PluginSettingsPayload,
+  PluginSettingsResult,
+  SetPluginSettingsPayload,
   ListPluginsResult,
   PluginActionPayload,
   PluginActionResult,
@@ -901,6 +904,10 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
         method,
         params,
       }),
+    // The plugin gets its settings with its activation, so it never starts
+    // without them and never has to ask.
+    readPluginSettings: async (pluginId) =>
+      (await pipeline?.getPluginSettings(pluginId)) ?? {},
     onSpawnEnd: (pluginId, spawnId) =>
       childProcessBroker.disposeSpawn(pluginId, spawnId),
     onDispose: () => childProcessBroker.dispose(),
@@ -6963,6 +6970,40 @@ function registerIpcHandlers(
       return PluginUninstallPreflightResult.parse({
         ok: false,
         error: pluginIpcError(error),
+      });
+    }
+  });
+
+  ipcMain.handle(CHANNELS.getPluginSettings, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = PluginSettingsPayload.parse(payload);
+    try {
+      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      return PluginSettingsResult.parse({
+        ok: true,
+        values: await pipeline.getPluginSettings(input.pluginId),
+      });
+    } catch (error) {
+      return PluginSettingsResult.parse({
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  ipcMain.handle(CHANNELS.setPluginSettings, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = SetPluginSettingsPayload.parse(payload);
+    try {
+      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      return PluginSettingsResult.parse({
+        ok: true,
+        values: await pipeline.setPluginSettings(input.pluginId, input.values),
+      });
+    } catch (error) {
+      return PluginSettingsResult.parse({
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
       });
     }
   });

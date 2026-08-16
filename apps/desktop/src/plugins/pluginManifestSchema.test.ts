@@ -4,6 +4,9 @@ import {
   DohcPluginManifest,
   MAX_PLUGIN_DESCRIPTION_CHARS,
   MAX_PLUGIN_PUBLISHER_CHARS,
+  MAX_PLUGIN_SETTINGS,
+  MAX_SETTING_OPTIONS,
+  MAX_SETTING_VALUE_CHARS,
 } from "./pluginManifestSchema";
 
 const minimalManifest = {
@@ -372,5 +375,196 @@ describe("DohcPluginManifest", () => {
     const cost = Buffer.byteLength(JSON.stringify(withMetadata), "utf8") -
       Buffer.byteLength(JSON.stringify(withoutMetadata), "utf8");
     expect(cost).toBeLessThan(MAX_PLUGIN_MANIFEST_FILE_BYTES / 100);
+  });
+
+  describe("settings", () => {
+    const stringSetting = {
+      key: "greeting",
+      type: "string",
+      label: "Greeting",
+      description: "What the note says.",
+      default: "Hello",
+    } as const;
+
+    it("parses one setting of each declared type", () => {
+      const settings = [
+        stringSetting,
+        { key: "shout", type: "boolean", label: "Shout", default: false },
+        { key: "repeat", type: "number", label: "Repeat", default: 2 },
+        {
+          key: "tone",
+          type: "select",
+          label: "Tone",
+          default: "plain",
+          options: ["plain", "warm"],
+        },
+      ];
+
+      expect(DohcPluginManifest.parse({ ...minimalManifest, settings }))
+        .toEqual({ ...minimalManifest, settings });
+    });
+
+    it("refuses a default that is the wrong type for its setting", () => {
+      for (
+        const setting of [
+          { key: "a", type: "string", label: "A", default: true },
+          { key: "a", type: "boolean", label: "A", default: "yes" },
+          { key: "a", type: "number", label: "A", default: "3" },
+        ]
+      ) {
+        expect(
+          DohcPluginManifest.safeParse({ ...minimalManifest, settings: [setting] })
+            .success,
+        ).toBe(false);
+      }
+    });
+
+    it("refuses a number default that JSON cannot hold", () => {
+      expect(DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        settings: [
+          { key: "a", type: "number", label: "A", default: Number.NaN },
+        ],
+      }).success).toBe(false);
+      expect(DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        settings: [
+          { key: "a", type: "number", label: "A", default: Number.POSITIVE_INFINITY },
+        ],
+      }).success).toBe(false);
+    });
+
+    it("refuses a select whose default is not one of its options", () => {
+      const result = DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        settings: [{
+          key: "tone",
+          type: "select",
+          label: "Tone",
+          default: "loud",
+          options: ["plain", "warm"],
+        }],
+      });
+
+      if (result.success) throw new Error("expected the select default to be rejected");
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        message: 'select default "loud" must be one of its options',
+      }));
+    });
+
+    it("refuses duplicate options and a select with none", () => {
+      expect(DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        settings: [{
+          key: "tone",
+          type: "select",
+          label: "Tone",
+          default: "plain",
+          options: ["plain", "plain"],
+        }],
+      }).success).toBe(false);
+      expect(DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        settings: [{
+          key: "tone",
+          type: "select",
+          label: "Tone",
+          default: "plain",
+          options: [],
+        }],
+      }).success).toBe(false);
+    });
+
+    it("refuses options a select cannot show, naming the limit", () => {
+      const result = DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        settings: [{
+          key: "tone",
+          type: "select",
+          label: "Tone",
+          default: "o0",
+          options: Array.from(
+            { length: MAX_SETTING_OPTIONS + 1 },
+            (_, index) => `o${index}`,
+          ),
+        }],
+      });
+
+      if (result.success) throw new Error("expected the option limit to reject the manifest");
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        message: `options: at most ${MAX_SETTING_OPTIONS} entries allowed`,
+      }));
+    });
+
+    it("refuses more settings than a panel can hold, naming the limit", () => {
+      const result = DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        settings: Array.from(
+          { length: MAX_PLUGIN_SETTINGS + 1 },
+          (_, index) => ({
+            key: `k${index}`,
+            type: "string" as const,
+            label: `L${index}`,
+            default: "",
+          }),
+        ),
+      });
+
+      if (result.success) throw new Error("expected the settings limit to reject the manifest");
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        message: `settings: at most ${MAX_PLUGIN_SETTINGS} entries allowed`,
+      }));
+    });
+
+    it("refuses two settings sharing a key", () => {
+      const result = DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        settings: [stringSetting, { ...stringSetting, label: "Again" }],
+      });
+
+      if (result.success) throw new Error("expected the duplicate key to be rejected");
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        message: 'setting key "greeting" must be unique within settings',
+      }));
+    });
+
+    it.each([
+      ["a space", "my key"],
+      ["a leading dash", "-key"],
+      ["a slash", "a/b"],
+      ["nothing at all", ""],
+    ])("refuses a key with %s", (_case, key) => {
+      expect(DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        settings: [{ ...stringSetting, key }],
+      }).success).toBe(false);
+    });
+
+    it("refuses a string default longer than a setting may hold", () => {
+      const result = DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        settings: [{
+          ...stringSetting,
+          default: "a".repeat(MAX_SETTING_VALUE_CHARS + 1),
+        }],
+      });
+
+      if (result.success) throw new Error("expected the value limit to reject the manifest");
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        message: `must be ${MAX_SETTING_VALUE_CHARS} characters or fewer`,
+      }));
+    });
+
+    it("refuses an unknown key on a setting", () => {
+      expect(DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        settings: [{ ...stringSetting, options: ["a"] }],
+      }).success).toBe(false);
+    });
+
+    it("declares no settings at all and still parses", () => {
+      const parsed = DohcPluginManifest.parse(minimalManifest);
+      expect(parsed.settings).toBeUndefined();
+    });
   });
 });

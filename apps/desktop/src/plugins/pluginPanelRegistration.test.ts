@@ -403,6 +403,7 @@ describe("plugin panel registration", () => {
           description: null,
           publisher: null,
           icon: null,
+          settings: [],
           webApps: [],
           sourceHash: null,
           approvedHash: null,

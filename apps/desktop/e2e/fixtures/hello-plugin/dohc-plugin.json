@@ -7,5 +7,33 @@
   "icon": "icon.svg",
   "entry": "plugin.mjs",
   "panels": [{ "id": "main", "title": "Hello", "entry": "panel/index.html" }],
-  "commands": [{ "id": "hello.write", "title": "Write hello note" }]
+  "commands": [{ "id": "hello.write", "title": "Write hello note" }],
+  "settings": [
+    {
+      "key": "greeting",
+      "type": "string",
+      "label": "Greeting",
+      "description": "What the hello note says.",
+      "default": "Hello"
+    },
+    {
+      "key": "shout",
+      "type": "boolean",
+      "label": "Shout",
+      "default": false
+    },
+    {
+      "key": "repeat",
+      "type": "number",
+      "label": "Repeat",
+      "default": 1
+    },
+    {
+      "key": "tone",
+      "type": "select",
+      "label": "Tone",
+      "default": "plain",
+      "options": ["plain", "warm"]
+    }
+  ]
 }

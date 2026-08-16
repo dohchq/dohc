@@ -36,6 +36,7 @@ a row.
 | `panels` | `{ id, title, entry }` | 100 entries |
 | `commands` | `{ id, title }` | 200 entries |
 | `webApps` | `{ id, title }` | 100 entries |
+| `settings` | `{ key, type, label, description?, default, options? }` | 20 entries |
 | `allowSkippedScripts` | `true`, or npm package names | 300 names |
 
 Two rules the bounds follow. Ids and titles are unique within their array.
@@ -46,6 +47,50 @@ These per-field bounds do not sum to the reader's 256 KiB file cap, and are
 not meant to. `readPluginManifestFile` checks the file's size before it parses
 anything, so a manifest at every bound at once is refused by size with the cap
 named. Each bound only has to be right for its own field.
+
+### Settings
+
+A plugin declares what the user may set, and dohc renders it. `type` is
+`string`, `boolean`, `number`, or `select`; a `select` carries 1–8 `options`
+and its `default` must be one of them. Keys are unique, a `default` is
+required, and its type has to match the setting it belongs to — the schema is
+a union on `type`, so nothing downstream checks that a boolean setting shipped
+a string default.
+
+Answers live in the workspace as text, one file for every plugin, keyed by
+plugin id:
+
+```
+.dohc/plugin-settings.local.json
+{ "t3-code": { "port": 4317 } }
+```
+
+One file rather than one per plugin, because that is what a reader wants open
+when they ask what this workspace has been told. This is data the user typed,
+which is why it lives in the workspace at all — plugin **code** and its build
+output stay outside it (see the device-approval constraint above), and nothing
+here executes.
+
+The manifest is what gives a stored value meaning, and it is checked on both
+sides of the file. A value is refused on write unless the plugin declares that
+key at that type. On read, a value that no longer fits its declaration — a
+manifest changed under a file written for an older one — falls back to the
+declared default instead of reaching the plugin, and a key no plugin declares
+is dropped. So a settings file edited by hand, or arriving over sync, can only
+ever set a setting some plugin actually asked for.
+
+The plugin sees only its own entry. Every settings call names a plugin, and
+only a plugin this workspace discovered has declarations to answer with.
+
+The SDK surface is two members, `ctx.settings.get()` and
+`ctx.settings.onChange(listener)`. The host sends the resolved values with
+`plugin.activate`, so a plugin never starts without its settings and never has
+to ask; on every change it sends `plugin.settingsChanged`. That is a request
+like every other host-to-plugin message rather than a new notification path —
+the reply tells the host the plugin took the change, and the host does not
+wait on it, because a slow plugin must never hold up a save the user already
+made. A plugin that is not running needs no telling: it reads the new values
+from its next activation.
 
 The icon is checked twice, because the schema can only read the path. The
 manifest must name a `.png` or `.svg` inside the plugin root; discovery then

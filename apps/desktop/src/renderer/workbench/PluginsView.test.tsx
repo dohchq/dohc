@@ -55,6 +55,7 @@ function plugin(
     description: null,
     publisher: null,
     icon: null,
+    settings: [],
     webApps: [],
     diagnostics: [],
     warnings: [],

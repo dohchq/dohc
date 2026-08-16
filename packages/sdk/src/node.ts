@@ -119,6 +119,31 @@ export interface CreateProcessTransportOptions {
   output?: NodeJS.WritableStream;
 }
 
+/** A setting's value. The manifest's declared type decides which of these. */
+export type PluginSettingValue = string | number | boolean;
+
+/**
+ * The plugin's own settings, as declared in its manifest and answered by the
+ * user. Two members and no more: read them now, and hear about it when they
+ * change.
+ *
+ * Every declared key is always present and always the declared type, so a
+ * plugin never checks whether a setting exists. A stored answer that no longer
+ * fits the manifest never arrives — the host resolves it back to the declared
+ * default first.
+ */
+export interface PluginSettings {
+  /** This plugin's settings as they stand now. */
+  get(): Record<string, PluginSettingValue>;
+  /**
+   * Runs the listener with the complete new settings each time the user
+   * changes one. Returns a function that stops it.
+   */
+  onChange(
+    listener: (values: Record<string, PluginSettingValue>) => void,
+  ): () => void;
+}
+
 export interface PluginActivateContext {
   pluginId: string;
   workspaceRoot: string;
@@ -133,6 +158,7 @@ export interface PluginActivateContext {
   stateRoot: string;
   client: DohcClient;
   childProcesses: PluginChildProcessClient;
+  settings: PluginSettings;
   commands: {
     register(id: string, run: (...args: unknown[]) => unknown): void;
   };

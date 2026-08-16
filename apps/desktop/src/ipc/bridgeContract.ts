@@ -46,6 +46,17 @@ import {
   type EngineYDocSaveStateEvent,
   type SearchResultsEvent,
 } from "./channels";
+// The manifest schema is plain zod, which the sandboxed preload already
+// bundles, so the contract shares the settings declaration rather than keeping
+// a second copy of it. A copy that drifts would fail the whole plugin list's
+// parse over a value the manifest itself allows.
+import {
+  MAX_PLUGIN_DESCRIPTION_CHARS,
+  MAX_PLUGIN_PUBLISHER_CHARS,
+  MAX_PLUGIN_SETTINGS,
+  PluginSettingDeclarationSchema,
+  PluginSettingValueSchema,
+} from "../plugins/pluginManifestSchema";
 import { isLoopbackHostname } from "../security/loopback";
 import {
   DesktopUserSettings as DesktopUserSettingsSchema,
@@ -2422,15 +2433,16 @@ export const PluginStatusRecord = z.object({
   sourceHash: PLUGIN_SOURCE_HASH.nullable(),
   approvedHash: PLUGIN_SOURCE_HASH.nullable(),
   installedBaselineHash: PLUGIN_SOURCE_HASH.nullable(),
-  // Manifest metadata. Bounds mirror DohcPluginManifest in
-  // plugins/pluginManifestSchema.ts — duplicated as literals rather than
-  // imported, because the sandboxed preload validates against this file and
-  // must not pull the manifest schema across with it. A value over any bound
-  // here would fail the whole list's parse, so the two must not drift.
+  // Manifest metadata, bounded by the manifest schema's own limits so the two
+  // cannot drift: a value the manifest allows must never fail this parse and
+  // take the whole plugin list down with it.
   displayName: z.string().min(1).max(120).nullable(),
-  description: z.string().min(1).max(280).nullable(),
-  publisher: z.string().min(1).max(120).nullable(),
+  description: z.string().min(1).max(MAX_PLUGIN_DESCRIPTION_CHARS).nullable(),
+  publisher: z.string().min(1).max(MAX_PLUGIN_PUBLISHER_CHARS).nullable(),
   icon: z.string().min(1).max(1024).nullable(),
+  /** What the plugin declares the user may set. Values travel separately —
+   * they are per-workspace state, not part of the plugin's identity. */
+  settings: z.array(PluginSettingDeclarationSchema).max(MAX_PLUGIN_SETTINGS),
   webApps: z.array(
     z.object({
       id: z.string().min(1).max(120),
@@ -2453,6 +2465,40 @@ export const ListPluginsPayload = z.object({
   workspaceId: WORKSPACE_ID,
 }).strict();
 export type ListPluginsPayload = z.infer<typeof ListPluginsPayload>;
+
+// A plugin's settings values. Bounded by the same declaration count the
+// manifest allows, because a plugin can never have more settings than it
+// declares — main resolves the stored file against the manifest before this
+// ever crosses.
+const PluginSettingsValues = z.record(
+  z.string().min(1).max(120),
+  PluginSettingValueSchema,
+).refine(
+  (values) => Object.keys(values).length <= MAX_PLUGIN_SETTINGS,
+  `settings: at most ${MAX_PLUGIN_SETTINGS} values allowed`,
+);
+
+export const PluginSettingsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+}).strict();
+export type PluginSettingsPayload = z.infer<typeof PluginSettingsPayload>;
+
+export const SetPluginSettingsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  values: PluginSettingsValues,
+}).strict();
+export type SetPluginSettingsPayload = z.infer<typeof SetPluginSettingsPayload>;
+
+export const PluginSettingsResult = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), values: PluginSettingsValues }).strict(),
+  z.object({
+    ok: z.literal(false),
+    message: z.string().min(1).max(10_000),
+  }).strict(),
+]);
+export type PluginSettingsResult = z.infer<typeof PluginSettingsResult>;
 
 export const ListPluginsResult = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), plugins: z.array(PluginStatusRecord) }).strict(),
@@ -3998,6 +4044,8 @@ export interface DohcDesktopBridge {
     payload: PluginActionPayload,
   ): Promise<PluginUninstallPreflightResult>;
   uninstallPlugin(payload: UninstallPluginPayload): Promise<PluginActionResult>;
+  getPluginSettings(payload: PluginSettingsPayload): Promise<PluginSettingsResult>;
+  setPluginSettings(payload: SetPluginSettingsPayload): Promise<PluginSettingsResult>;
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;
   cloudLoginPoll(): Promise<CloudLoginPollResult>;

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -21,6 +21,8 @@ const bridgeMock = {
   pluginUninstallPreflight: vi.fn(),
   uninstallPlugin: vi.fn(),
   readWorkspaceText: vi.fn(),
+  getPluginSettings: vi.fn(),
+  setPluginSettings: vi.fn(),
   onPluginStatusChanged: vi.fn(
     (listener: (event: PluginStatusChangedEvent) => void) => {
       statusListener = listener;
@@ -57,6 +59,7 @@ function plugin(
     description: null,
     publisher: null,
     icon: null,
+    settings: [],
     webApps: [],
     diagnostics: [],
     warnings: [],
@@ -120,6 +123,8 @@ beforeEach(() => {
     confirmationToken: "00000000-0000-4000-8000-000000000001",
     preflight: cleanPreflight,
   });
+  bridgeMock.getPluginSettings.mockResolvedValue({ ok: true, values: {} });
+  bridgeMock.setPluginSettings.mockResolvedValue({ ok: true, values: {} });
   bridgeMock.readWorkspaceText.mockRejectedValue(
     enoent("plugins/unknown/README.md"),
   );
@@ -1117,6 +1122,271 @@ describe("PluginDetailsPage", () => {
 
       expect(screen.queryByText("The old workspace README.")).toBeNull();
       expect(screen.getByText("The new workspace README.")).toBeTruthy();
+    });
+  });
+
+  describe("Settings", () => {
+    const declared: PluginStatusRecord["settings"] = [
+      {
+        key: "greeting",
+        type: "string",
+        label: "Greeting",
+        description: "What the note says.",
+        default: "Hello",
+      },
+      { key: "shout", type: "boolean", label: "Shout", default: false },
+      { key: "repeat", type: "number", label: "Repeat", default: 1 },
+      {
+        key: "tone",
+        type: "select",
+        label: "Tone",
+        default: "plain",
+        options: ["plain", "warm"],
+      },
+    ];
+
+    const defaults = {
+      greeting: "Hello",
+      shout: false,
+      repeat: 1,
+      tone: "plain",
+    };
+
+    function withSettings(values: Record<string, unknown> = defaults) {
+      bridgeMock.listPlugins.mockResolvedValue({
+        ok: true,
+        plugins: [plugin("hello-plugin", { settings: declared })],
+      });
+      bridgeMock.getPluginSettings.mockResolvedValue({ ok: true, values });
+    }
+
+    it("does not render a Settings section for a plugin that declares none", async () => {
+      bridgeMock.listPlugins.mockResolvedValue({
+        ok: true,
+        plugins: [plugin("t3-code")],
+      });
+
+      renderPage("t3-code");
+      await screen.findByTestId("plugin-details-page");
+
+      expect(screen.queryByTestId("plugin-settings")).toBeNull();
+      // And it never asks for values it has no controls for.
+      expect(bridgeMock.getPluginSettings).not.toHaveBeenCalled();
+    });
+
+    it("renders one control per declared setting, at its current value", async () => {
+      withSettings({
+        greeting: "Hei",
+        shout: true,
+        repeat: 3,
+        tone: "warm",
+      });
+
+      renderPage("hello-plugin");
+
+      await screen.findByTestId("plugin-setting-input-greeting");
+      expect(bridgeMock.getPluginSettings).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        pluginId: "hello-plugin",
+      });
+      expect(screen.getByText("Greeting")).toBeTruthy();
+      expect(screen.getByText("What the note says.")).toBeTruthy();
+      expect(
+        (screen.getByTestId("plugin-setting-input-greeting") as HTMLInputElement)
+          .value,
+      ).toBe("Hei");
+      expect(
+        screen.getByRole("switch", { name: "Shout" }).getAttribute("aria-checked"),
+      ).toBe("true");
+      expect(
+        (screen.getByTestId("plugin-setting-input-repeat") as HTMLInputElement)
+          .value,
+      ).toBe("3");
+      expect(
+        (screen.getByTestId("plugin-setting-input-tone") as HTMLSelectElement)
+          .value,
+      ).toBe("warm");
+    });
+
+    it("saves a switch the moment it changes and shows what was stored", async () => {
+      withSettings();
+      bridgeMock.setPluginSettings.mockResolvedValue({
+        ok: true,
+        values: { ...defaults, shout: true },
+      });
+
+      renderPage("hello-plugin");
+      await screen.findByTestId("plugin-setting-input-greeting");
+      await userEvent.click(screen.getByRole("switch", { name: "Shout" }));
+
+      expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        pluginId: "hello-plugin",
+        values: { shout: true },
+      });
+      await waitFor(() =>
+        expect(
+          screen.getByRole("switch", { name: "Shout" }).getAttribute("aria-checked"),
+        ).toBe("true")
+      );
+    });
+
+    it("saves a select the moment it changes", async () => {
+      withSettings();
+      bridgeMock.setPluginSettings.mockResolvedValue({
+        ok: true,
+        values: { ...defaults, tone: "warm" },
+      });
+
+      renderPage("hello-plugin");
+      await screen.findByTestId("plugin-setting-input-greeting");
+      await userEvent.selectOptions(
+        screen.getByTestId("plugin-setting-input-tone"),
+        "warm",
+      );
+
+      expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        pluginId: "hello-plugin",
+        values: { tone: "warm" },
+      });
+    });
+
+    it("saves typed text once, when the field is left", async () => {
+      withSettings();
+      bridgeMock.setPluginSettings.mockResolvedValue({
+        ok: true,
+        values: { ...defaults, greeting: "Hei" },
+      });
+
+      renderPage("hello-plugin");
+      await screen.findByTestId("plugin-setting-input-greeting");
+      const field = screen.getByTestId("plugin-setting-input-greeting");
+      await userEvent.clear(field);
+      await userEvent.type(field, "Hei");
+      // Still nothing saved: a plugin must not hear a user's keystrokes one
+      // at a time.
+      expect(bridgeMock.setPluginSettings).not.toHaveBeenCalled();
+
+      await userEvent.tab();
+
+      expect(bridgeMock.setPluginSettings).toHaveBeenCalledTimes(1);
+      expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        pluginId: "hello-plugin",
+        values: { greeting: "Hei" },
+      });
+    });
+
+    it("saves a number as a number, not as the text that was typed", async () => {
+      withSettings();
+      bridgeMock.setPluginSettings.mockResolvedValue({
+        ok: true,
+        values: { ...defaults, repeat: 4 },
+      });
+
+      renderPage("hello-plugin");
+      await screen.findByTestId("plugin-setting-input-greeting");
+      const field = screen.getByTestId("plugin-setting-input-repeat");
+      await userEvent.clear(field);
+      await userEvent.type(field, "4");
+      await userEvent.tab();
+
+      expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        pluginId: "hello-plugin",
+        values: { repeat: 4 },
+      });
+    });
+
+    it("saves nothing when a number field is left empty, and shows the stored value again", async () => {
+      withSettings();
+
+      renderPage("hello-plugin");
+      await screen.findByTestId("plugin-setting-input-greeting");
+      const field = screen.getByTestId("plugin-setting-input-repeat");
+      await userEvent.clear(field);
+      await userEvent.tab();
+
+      expect(bridgeMock.setPluginSettings).not.toHaveBeenCalled();
+      expect((field as HTMLInputElement).value).toBe("1");
+    });
+
+    it("offers Reset only for a setting that is not at its default", async () => {
+      withSettings({ ...defaults, greeting: "Hei" });
+      bridgeMock.setPluginSettings.mockResolvedValue({
+        ok: true,
+        values: defaults,
+      });
+
+      renderPage("hello-plugin");
+      await screen.findByTestId("plugin-setting-input-greeting");
+      const greetingRow = screen.getByTestId("plugin-setting-greeting");
+      const shoutRow = screen.getByTestId("plugin-setting-shout");
+      expect(within(shoutRow).queryByRole("button", { name: "Reset" })).toBeNull();
+
+      await userEvent.click(
+        within(greetingRow).getByRole("button", { name: "Reset" }),
+      );
+
+      expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        pluginId: "hello-plugin",
+        values: { greeting: "Hello" },
+      });
+    });
+
+    it("says so when a save is refused", async () => {
+      withSettings();
+      bridgeMock.setPluginSettings.mockResolvedValue({
+        ok: false,
+        message: 'Setting "shout" of plugin "hello-plugin" must be a boolean.',
+      });
+
+      renderPage("hello-plugin");
+      await screen.findByTestId("plugin-setting-input-greeting");
+      await userEvent.click(screen.getByRole("switch", { name: "Shout" }));
+
+      const alert = await screen.findByTestId("plugin-settings-error");
+      expect(alert.textContent).toContain("dohc could not save this setting.");
+      expect(alert.textContent).toContain("must be a boolean");
+    });
+
+    it("never paints one workspace's values onto another", async () => {
+      const slow = deferred<{ ok: true; values: Record<string, unknown> }>();
+      bridgeMock.listPlugins.mockResolvedValue({
+        ok: true,
+        plugins: [plugin("hello-plugin", { settings: declared })],
+      });
+      bridgeMock.getPluginSettings.mockImplementation(
+        ({ workspaceId }: { workspaceId: string }) =>
+          workspaceId === "ws-old"
+            ? slow.promise
+            : Promise.resolve({ ok: true, values: { ...defaults, greeting: "New" } }),
+      );
+
+      const view = render(
+        <PluginDetailsPage workspaceId="ws-old" pluginId="hello-plugin" />,
+      );
+      view.rerender(
+        <PluginDetailsPage workspaceId="ws-new" pluginId="hello-plugin" />,
+      );
+      await waitFor(() =>
+        expect(
+          (screen.getByTestId("plugin-setting-input-greeting") as HTMLInputElement)
+            .value,
+        ).toBe("New")
+      );
+
+      await act(async () => {
+        slow.resolve({ ok: true, values: { ...defaults, greeting: "Old" } });
+        await slow.promise;
+      });
+
+      expect(
+        (screen.getByTestId("plugin-setting-input-greeting") as HTMLInputElement)
+          .value,
+      ).toBe("New");
     });
   });
 });

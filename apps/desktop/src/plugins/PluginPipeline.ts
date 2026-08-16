@@ -22,7 +22,16 @@ import {
   type PluginRecordShape,
 } from "./pluginLocalState";
 import { readPluginManifestFile } from "./pluginManifest";
-import type { DohcPluginManifest } from "./pluginManifestSchema";
+import type {
+  DohcPluginManifest,
+  PluginSettingDeclaration,
+  PluginSettingValue,
+} from "./pluginManifestSchema";
+import {
+  readPluginSettingsFile,
+  resolvePluginSettings,
+  savePluginSettings,
+} from "./pluginSettingsFile";
 import type { PluginRuntimeStatus } from "./pluginHostProtocol";
 import {
   canonicalPluginSourceHash,
@@ -83,6 +92,10 @@ export interface PluginPipelinePluginStatus extends PluginMetadata {
   /** The manifest's declared web apps, so the settings surface can offer an
    * Open control without a second manifest read. */
   webApps: { id: string; title: string }[];
+  /** The manifest's declared settings, so the details page can render the
+   * controls without a second manifest read. Values live per workspace and
+   * travel separately. */
+  settings: PluginSettingDeclaration[];
   diagnostics: string[];
   warnings: string[];
   error: PluginPipelineError | null;
@@ -278,6 +291,7 @@ function cloneError(error: PluginPipelineError | null): PluginPipelineError | nu
 function cloneStatus(status: PluginPipelinePluginStatus): PluginPipelinePluginStatus {
   return {
     ...status,
+    settings: status.settings.map((setting) => ({ ...setting })),
     webApps: status.webApps.map((webApp) => ({ ...webApp })),
     diagnostics: [...status.diagnostics],
     warnings: [...status.warnings],
@@ -302,6 +316,12 @@ function manifestWebApps(
  * discovery. The icon comes from the candidate rather than the manifest —
  * discovery is what checked the file behind it.
  */
+function manifestSettings(
+  manifest: { settings?: PluginSettingDeclaration[] } | null,
+): PluginSettingDeclaration[] {
+  return (manifest?.settings ?? []).map((setting) => ({ ...setting }));
+}
+
 function manifestMetadata(candidate: InstalledPluginRecord): PluginMetadata {
   return {
     displayName: candidate.manifest?.displayName ?? null,
@@ -412,6 +432,53 @@ export class PluginPipeline {
     return this.options.pluginHost;
   }
 
+  /**
+   * What this plugin declares the user may set. Refusing an unknown plugin is
+   * what keeps one plugin's settings out of another's reach: every settings
+   * call names a plugin, and only a plugin this workspace discovered has
+   * declarations to answer with.
+   */
+  private declaredSettings(pluginId: string): PluginSettingDeclaration[] {
+    const status = this.statuses.get(pluginId);
+    if (status) return status.settings;
+    const candidate = this.discovery.find((entry) => entry.id === pluginId);
+    if (!candidate) throw new Error(`Unknown plugin: ${pluginId}`);
+    return manifestSettings(candidate.manifest);
+  }
+
+  /** This plugin's settings: its declared defaults under the stored answers. */
+  async getPluginSettings(
+    pluginId: string,
+  ): Promise<Record<string, PluginSettingValue>> {
+    const declared = this.declaredSettings(pluginId);
+    const stored = await readPluginSettingsFile(this.workspaceRoot);
+    return resolvePluginSettings(declared, stored[pluginId]);
+  }
+
+  /** Records the user's answers and tells the plugin, if it is running. */
+  async setPluginSettings(
+    pluginId: string,
+    patch: Readonly<Record<string, unknown>>,
+  ): Promise<Record<string, PluginSettingValue>> {
+    const declared = this.declaredSettings(pluginId);
+    const values = await savePluginSettings(
+      this.workspaceRoot,
+      pluginId,
+      declared,
+      patch,
+    );
+    // Not awaited: the value is already saved, and a plugin that is slow to
+    // take the change must not make the user wait for a save that landed.
+    void this.options.pluginHost.notifySettingsChanged(pluginId, values).catch(
+      (error: unknown) => {
+        console.warn(
+          `[desktop] plugin "${pluginId}" did not take a settings change: ${errorMessage(error)}`,
+        );
+      },
+    );
+    return values;
+  }
+
   start(): Promise<void> {
     if (this.startPromise) return this.startPromise;
     this.startPromise = this.startInternal();
@@ -447,6 +514,7 @@ export class PluginPipeline {
           approvedHash: null,
           installedBaselineHash: null,
           ...manifestMetadata(candidate),
+          settings: manifestSettings(candidate.manifest),
           webApps: manifestWebApps(candidate.manifest),
           diagnostics: boundedStatusLines(candidate.diagnostics),
           warnings: [],
@@ -2077,6 +2145,7 @@ export class PluginPipeline {
       approvedHash: null,
       installedBaselineHash: null,
       ...manifestMetadata(candidate),
+      settings: manifestSettings(candidate.manifest),
       webApps: manifestWebApps(candidate.manifest),
       diagnostics: boundedStatusLines(candidate.diagnostics),
       warnings: [],
@@ -2110,6 +2179,9 @@ export class PluginPipeline {
       // which has no manifest to read. The status keeps the name and icon it
       // already carried rather than losing them mid-action.
       ...(candidate.manifest ? manifestMetadata(candidate) : {}),
+      settings: candidate.manifest
+        ? manifestSettings(candidate.manifest)
+        : current.settings,
       webApps: patch.webApps ?? manifestWebApps(candidate.manifest),
       diagnostics: boundedStatusLines(patch.diagnostics ?? current.diagnostics),
       warnings: boundedStatusLines(patch.warnings ?? current.warnings),

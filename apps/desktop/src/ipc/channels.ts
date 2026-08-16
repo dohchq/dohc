@@ -677,6 +677,8 @@ export const CHANNELS = {
   approvePlugin: "desktop:approve-plugin",
   pluginUninstallPreflight: "desktop:plugin-uninstall-preflight",
   uninstallPlugin: "desktop:uninstall-plugin",
+  getPluginSettings: "desktop:get-plugin-settings",
+  setPluginSettings: "desktop:set-plugin-settings",
   pluginStatusChanged: "desktop:plugin-status-changed",
   openExternalUrl: "desktop:open-external-url",
   cloudLoginStart: "desktop:cloud-login-start",

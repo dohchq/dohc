@@ -1048,6 +1048,7 @@ describe("plugin details tabs", () => {
           description: null,
           publisher: null,
           icon: null,
+          settings: [],
           webApps: [],
           diagnostics: [],
           warnings: [],

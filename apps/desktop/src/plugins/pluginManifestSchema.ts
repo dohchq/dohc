@@ -94,6 +94,113 @@ const PluginWebApp = z.object({
   title: z.string().min(1).max(120),
 }).strict();
 
+// A plugin's own settings, declared flat so dohc can render them without the
+// plugin running. Twenty entries is a settings panel, not a preferences
+// database; a plugin that needs more has outgrown a flat list and wants a
+// panel of its own. Eight options is a select a reader can scan.
+export const MAX_PLUGIN_SETTINGS = 20;
+export const MAX_SETTING_OPTIONS = 8;
+export const MAX_SETTING_VALUE_CHARS = 200;
+export const MAX_SETTING_OPTION_CHARS = 60;
+
+const SettingKey = z.string()
+  .min(1)
+  .max(120, "must be 120 characters or fewer")
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/,
+    "must start with a letter or digit and use only letters, digits, '.', '_', or '-'",
+  );
+
+const SettingLabel = z.string().min(1).max(120, "must be 120 characters or fewer");
+const SettingDescription = z.string()
+  .min(1)
+  .max(
+    MAX_PLUGIN_DESCRIPTION_CHARS,
+    `description: must be ${MAX_PLUGIN_DESCRIPTION_CHARS} characters or fewer`,
+  )
+  .optional();
+const SettingText = z.string().max(
+  MAX_SETTING_VALUE_CHARS,
+  `must be ${MAX_SETTING_VALUE_CHARS} characters or fewer`,
+);
+
+// A discriminated union rather than one loose object: the type decides what a
+// default may be, and a select is the only type that carries options. Nothing
+// here has to check that a boolean setting did not ship a string default.
+const PluginSetting = z.discriminatedUnion("type", [
+  z.object({
+    key: SettingKey,
+    type: z.literal("string"),
+    label: SettingLabel,
+    description: SettingDescription,
+    default: SettingText,
+  }).strict(),
+  z.object({
+    key: SettingKey,
+    type: z.literal("boolean"),
+    label: SettingLabel,
+    description: SettingDescription,
+    default: z.boolean(),
+  }).strict(),
+  z.object({
+    key: SettingKey,
+    type: z.literal("number"),
+    label: SettingLabel,
+    description: SettingDescription,
+    // Finite: NaN and Infinity do not survive JSON, so a manifest that
+    // declared one would store a default the file cannot hold.
+    default: z.number().finite("must be a finite number"),
+  }).strict(),
+  z.object({
+    key: SettingKey,
+    type: z.literal("select"),
+    label: SettingLabel,
+    description: SettingDescription,
+    default: z.string().min(1).max(
+      MAX_SETTING_OPTION_CHARS,
+      `must be ${MAX_SETTING_OPTION_CHARS} characters or fewer`,
+    ),
+    options: z.array(
+      z.string().min(1).max(
+        MAX_SETTING_OPTION_CHARS,
+        `must be ${MAX_SETTING_OPTION_CHARS} characters or fewer`,
+      ),
+    )
+      .min(1, "options: at least 1 entry required")
+      .max(
+        MAX_SETTING_OPTIONS,
+        `options: at most ${MAX_SETTING_OPTIONS} entries allowed`,
+      ),
+  }).strict().superRefine((setting, ctx) => {
+    if (!setting.options.includes(setting.default)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["default"],
+        message: `select default "${setting.default}" must be one of its options`,
+      });
+    }
+    if (new Set(setting.options).size !== setting.options.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["options"],
+        message: "options must be unique",
+      });
+    }
+  }),
+]);
+
+/** Shared with the IPC contract, which carries declarations to the renderer. */
+export const PluginSettingDeclarationSchema = PluginSetting;
+export type PluginSettingDeclaration = z.infer<typeof PluginSetting>;
+export type PluginSettingValue = string | number | boolean;
+
+/** The value shape a stored answer may take, for the IPC contract. */
+export const PluginSettingValueSchema = z.union([
+  z.string().max(MAX_SETTING_VALUE_CHARS),
+  z.boolean(),
+  z.number().finite(),
+]);
+
 export const DohcPluginManifest = z.object({
   version: z.literal(1),
   name: NpmPackageName,
@@ -132,6 +239,12 @@ export const DohcPluginManifest = z.object({
     .optional(),
   webApps: z.array(PluginWebApp)
     .max(100, "webApps: at most 100 entries allowed")
+    .optional(),
+  settings: z.array(PluginSetting)
+    .max(
+      MAX_PLUGIN_SETTINGS,
+      `settings: at most ${MAX_PLUGIN_SETTINGS} entries allowed`,
+    )
     .optional(),
   allowSkippedScripts: z.union([
     z.literal(true),
@@ -175,6 +288,18 @@ export const DohcPluginManifest = z.object({
       });
     }
     webAppIds.add(webApp.id);
+  });
+
+  const settingKeys = new Set<string>();
+  manifest.settings?.forEach((setting, index) => {
+    if (settingKeys.has(setting.key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["settings", index, "key"],
+        message: `setting key "${setting.key}" must be unique within settings`,
+      });
+    }
+    settingKeys.add(setting.key);
   });
 });
 export type DohcPluginManifest = z.infer<typeof DohcPluginManifest>;

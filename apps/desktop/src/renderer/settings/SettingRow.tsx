@@ -2,7 +2,9 @@ import { useRef, type KeyboardEvent, type ReactNode } from "react";
 
 export function SettingRow(props: {
   title: string;
-  description: string;
+  /** Optional: a plugin setting may declare none, and an empty line is worse
+   * than no line. */
+  description?: string;
   children: ReactNode;
   modified?: boolean;
   onReset?: () => void;
@@ -22,9 +24,11 @@ export function SettingRow(props: {
             </span>
           ) : null}
         </div>
-        <p className="m-0 mt-1 max-w-2xl text-[11px] leading-relaxed text-muted">
-          {props.description}
-        </p>
+        {props.description ? (
+          <p className="m-0 mt-1 max-w-2xl text-[11px] leading-relaxed text-muted">
+            {props.description}
+          </p>
+        ) : null}
       </div>
       <div className="flex min-w-0 items-center justify-end gap-2 max-[720px]:justify-start">
         {props.children}

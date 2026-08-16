@@ -284,6 +284,7 @@ describe("discoverInstalledPlugins", () => {
         description: record.manifest?.description ?? null,
         publisher: record.manifest?.publisher ?? null,
         icon: record.iconPath,
+        settings: record.manifest?.settings ?? [],
         webApps: [],
         diagnostics: record.diagnostics,
         warnings: [],

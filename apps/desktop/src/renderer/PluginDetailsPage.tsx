@@ -1,6 +1,12 @@
 import { AlertTriangle, Blocks, ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { PluginStatusRecord } from "../ipc/bridgeContract";
+import {
+  MAX_SETTING_VALUE_CHARS,
+  type PluginSettingDeclaration,
+  type PluginSettingValue,
+} from "../plugins/pluginManifestSchema";
+import { SettingRow, SwitchControl } from "./settings/SettingRow";
 import { bridge } from "./bridge";
 import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
 import { MARKDOWN_COMPONENTS } from "./markdown/markdownComponents";
@@ -152,6 +158,223 @@ function PluginReadme(props: { workspaceId: string; directoryName: string }) {
   );
 }
 
+// A plugin's own settings, declared in its manifest and answered here. The
+// controls are dohc's own — the same SettingRow the app's Settings dialog
+// uses — so a plugin's settings read like part of dohc rather than a form a
+// plugin drew for itself.
+//
+// A switch or a select commits the moment it changes. Text and number commit
+// when the field is left, because every commit writes the workspace file and
+// tells the running plugin, and a plugin should not hear from a user's
+// keystrokes one at a time.
+function PluginSettingsSection(props: {
+  workspaceId: string;
+  plugin: PluginStatusRecord;
+}) {
+  const { plugin } = props;
+  const [values, setValues] = useState<Record<string, PluginSettingValue> | null>(
+    null,
+  );
+  const [failure, setFailure] = useState<string | null>(null);
+  // One token guards every response: the effect re-runs for each workspace or
+  // plugin, and its cleanup raises the token, so an answer for the plugin this
+  // page no longer shows can never repaint it.
+  const requestToken = useRef(0);
+
+  const declaredCount = plugin.settings.length;
+
+  useEffect(() => {
+    const request = ++requestToken.current;
+    setValues(null);
+    setFailure(null);
+    // A plugin with no settings has no controls to fill, so main is never
+    // asked for values this page would not show.
+    if (declaredCount === 0) return;
+    void bridge()
+      .getPluginSettings({
+        workspaceId: props.workspaceId,
+        pluginId: plugin.id,
+      })
+      .then((result) => {
+        if (request !== requestToken.current) return;
+        if (result.ok) setValues(result.values);
+        else setFailure(result.message);
+      })
+      .catch((error: unknown) => {
+        if (request !== requestToken.current) return;
+        setFailure(readableReason(error));
+      });
+    return () => {
+      requestToken.current += 1;
+    };
+  }, [props.workspaceId, plugin.id, declaredCount]);
+
+  const commit = (key: string, value: PluginSettingValue) => {
+    // Shown at once so a control never feels stuck, then replaced by whatever
+    // main actually stored.
+    setValues((current) => (current ? { ...current, [key]: value } : current));
+    const request = requestToken.current;
+    void bridge()
+      .setPluginSettings({
+        workspaceId: props.workspaceId,
+        pluginId: plugin.id,
+        values: { [key]: value },
+      })
+      .then((result) => {
+        if (request !== requestToken.current) return;
+        if (result.ok) {
+          setValues(result.values);
+          setFailure(null);
+          return;
+        }
+        setFailure(result.message);
+      })
+      .catch((error: unknown) => {
+        if (request !== requestToken.current) return;
+        setFailure(readableReason(error));
+      });
+  };
+
+  if (plugin.settings.length === 0) return null;
+
+  return (
+    <section
+      data-testid="plugin-settings"
+      className="border-t border-line px-6 py-5"
+    >
+      <h2 className="m-0 text-sm font-semibold text-ink">Settings</h2>
+      {failure ? (
+        <p
+          data-testid="plugin-settings-error"
+          role="alert"
+          className="m-0 mt-2 text-xs text-danger"
+        >
+          {`dohc could not save this setting. ${failure}`}
+        </p>
+      ) : null}
+      {values === null ? (
+        <p
+          data-testid="plugin-settings-loading"
+          className="m-0 mt-2 text-xs text-subtle"
+        >
+          Loading settings…
+        </p>
+      ) : (
+        <div className="mt-2 max-w-3xl">
+          {plugin.settings.map((setting) => (
+            <PluginSettingControl
+              key={setting.key}
+              setting={setting}
+              value={values[setting.key] ?? setting.default}
+              onCommit={(value) => commit(setting.key, value)}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PluginSettingControl(props: {
+  setting: PluginSettingDeclaration;
+  value: PluginSettingValue;
+  onCommit: (value: PluginSettingValue) => void;
+}) {
+  const { setting, value } = props;
+  return (
+    <SettingRow
+      title={setting.label}
+      description={setting.description}
+      testId={`plugin-setting-${setting.key}`}
+      modified={value !== setting.default}
+      onReset={() => props.onCommit(setting.default)}
+    >
+      {setting.type === "boolean" ? (
+        <SwitchControl
+          label={setting.label}
+          checked={value === true}
+          onChange={props.onCommit}
+        />
+      ) : setting.type === "select" ? (
+        <select
+          aria-label={setting.label}
+          data-testid={`plugin-setting-input-${setting.key}`}
+          value={String(value)}
+          onChange={(event) => props.onCommit(event.target.value)}
+          className="h-8 w-56 rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink"
+        >
+          {setting.options.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <PluginSettingTextControl
+          setting={setting}
+          value={value}
+          onCommit={props.onCommit}
+        />
+      )}
+    </SettingRow>
+  );
+}
+
+// Text and number share one control: both hold what the user is typing and
+// hand it over when they leave the field. A number that cannot be read as one
+// is not saved — the field returns to the value that is stored, so the reader
+// sees what the plugin actually has.
+function PluginSettingTextControl(props: {
+  setting: PluginSettingDeclaration & { type: "string" | "number" };
+  value: PluginSettingValue;
+  onCommit: (value: PluginSettingValue) => void;
+}) {
+  const { setting } = props;
+  const stored = String(props.value);
+  const [draft, setDraft] = useState(stored);
+  const [editing, setEditing] = useState(false);
+
+  const commit = () => {
+    setEditing(false);
+    if (setting.type === "number") {
+      const parsed = Number(draft);
+      if (draft.trim() === "" || !Number.isFinite(parsed)) {
+        setDraft(stored);
+        return;
+      }
+      props.onCommit(parsed);
+      return;
+    }
+    props.onCommit(draft);
+  };
+
+  return (
+    <input
+      type={setting.type === "number" ? "number" : "text"}
+      spellCheck={false}
+      aria-label={setting.label}
+      data-testid={`plugin-setting-input-${setting.key}`}
+      value={editing ? draft : stored}
+      maxLength={setting.type === "string" ? MAX_SETTING_VALUE_CHARS : undefined}
+      onFocus={() => {
+        setDraft(stored);
+        setEditing(true);
+      }}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") event.currentTarget.blur();
+        if (event.key === "Escape") {
+          setDraft(stored);
+          setEditing(false);
+          event.currentTarget.blur();
+        }
+      }}
+      className="h-7 w-56 rounded-md border border-line bg-bg px-2 text-[12px] text-ink placeholder:text-subtle focus:border-ink"
+    />
+  );
+}
+
 export function PluginDetailsPage(props: {
   workspaceId: string;
   pluginId: string;
@@ -214,6 +437,10 @@ export function PluginDetailsPage(props: {
         plugin={plugin}
         catalog={catalog}
         workspaceId={props.workspaceId}
+      />
+      <PluginSettingsSection
+        workspaceId={props.workspaceId}
+        plugin={plugin}
       />
       <section className="border-t border-line px-6 py-5">
         <PluginReadme

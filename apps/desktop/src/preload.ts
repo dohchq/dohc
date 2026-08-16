@@ -31,6 +31,7 @@ import {
   OpenPluginPanelResult,
   OpenPluginWebAppResult,
   PluginActionResult,
+  PluginSettingsResult,
   PluginUninstallPreflightResult,
   StartPluginPanelResult,
   StartPluginWebAppResult,
@@ -240,6 +241,14 @@ const bridge: DohcDesktopBridge = {
     ),
   uninstallPlugin: async (payload) =>
     PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.uninstallPlugin, payload)),
+  getPluginSettings: async (payload) =>
+    PluginSettingsResult.parse(
+      await ipcRenderer.invoke(CHANNELS.getPluginSettings, payload),
+    ),
+  setPluginSettings: async (payload) =>
+    PluginSettingsResult.parse(
+      await ipcRenderer.invoke(CHANNELS.setPluginSettings, payload),
+    ),
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),
   cloudLoginStart: (payload) =>

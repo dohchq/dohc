@@ -1,7 +1,10 @@
 // This file is the single source of truth for the plugin-host wire contract.
 // The main process and plugin child share it across their process boundary.
 
-import type { DohcPluginManifest } from "./pluginManifestSchema";
+import type {
+  DohcPluginManifest,
+  PluginSettingValue,
+} from "./pluginManifestSchema";
 
 export const PLUGIN_HOST_METHODS = {
   activate: "plugin.activate",
@@ -9,6 +12,7 @@ export const PLUGIN_HOST_METHODS = {
   invokeCommand: "plugin.invokeCommand",
   startWebApp: "plugin.startWebApp",
   stopWebApp: "plugin.stopWebApp",
+  settingsChanged: "plugin.settingsChanged",
   sdkRequest: "sdk.request",
   sdkEvent: "sdk.event",
   log: "plugin.log",
@@ -21,6 +25,9 @@ export interface PluginActivateParams {
   /** See PluginActivateContext.stateRoot in @dohc/sdk/node. */
   stateRoot: string;
   manifest: DohcPluginManifest;
+  /** The plugin's settings as they stand right now, already resolved against
+   * the manifest's declarations, so a plugin never activates without them. */
+  settings: Record<string, PluginSettingValue>;
 }
 
 export interface PluginActivateResult {
@@ -48,6 +55,21 @@ export interface PluginStartWebAppResult {
  * next start pairs again. */
 export interface PluginStopWebAppParams {
   webAppId: string;
+}
+
+/**
+ * Sent by the host whenever the user changes one of this plugin's settings.
+ *
+ * A request rather than a notification: every other host-to-plugin message
+ * already travels that way, so this needs no new transport machinery, and the
+ * reply tells the host the running plugin actually took the change. The host
+ * does not wait on it — a slow plugin must never hold up a save.
+ *
+ * The values are complete and already resolved, never a patch: a plugin reads
+ * its settings, it does not merge them.
+ */
+export interface PluginSettingsChangedParams {
+  values: Record<string, PluginSettingValue>;
 }
 
 export interface SdkRequestParams {

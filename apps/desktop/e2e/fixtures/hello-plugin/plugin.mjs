@@ -120,6 +120,29 @@ switch (mode) {
       },
     };
     break;
+  // Proves the settings path end to end: the plugin reads what the host sent
+  // with activation, and hears about every change through its own listener —
+  // so the command can report both, and a test can tell them apart.
+  case "report-settings": {
+    let heard = null;
+    let changeCount = 0;
+    handler = {
+      activate(ctx) {
+        const atActivation = ctx.settings.get();
+        ctx.settings.onChange((values) => {
+          heard = values;
+          changeCount += 1;
+        });
+        ctx.commands.register("report.settings", () => ({
+          atActivation,
+          current: ctx.settings.get(),
+          heard,
+          changeCount,
+        }));
+      },
+    };
+    break;
+  }
   case "grandchild-heartbeat":
     handler = {
       async activate(ctx) {

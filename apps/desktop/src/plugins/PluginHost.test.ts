@@ -2238,4 +2238,77 @@ describe("PluginHost web apps", () => {
       pluginStateRoot(pluginDataDir(localStateDir, root), "hello-plugin"),
     );
   });
+
+  it("gives a plugin its settings at activation and tells it about every change", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "report-settings" },
+    });
+    const host = trackHost({
+      stateDir: localStateDir,
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+      readPluginSettings: async () => ({ greeting: "Hei", shout: false }),
+    });
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    type Report = {
+      atActivation: Record<string, unknown>;
+      current: Record<string, unknown>;
+      heard: Record<string, unknown> | null;
+      changeCount: number;
+    };
+
+    // The plugin never asked for these: they arrived with its activation.
+    const started = await host.invokeCommand(
+      "hello-plugin",
+      "report.settings",
+    ) as Report;
+    expect(started.atActivation).toEqual({ greeting: "Hei", shout: false });
+    expect(started.current).toEqual({ greeting: "Hei", shout: false });
+    expect(started.heard).toBeNull();
+    expect(started.changeCount).toBe(0);
+
+    await host.notifySettingsChanged("hello-plugin", {
+      greeting: "Hello",
+      shout: true,
+    });
+
+    const changed = await host.invokeCommand(
+      "hello-plugin",
+      "report.settings",
+    ) as Report;
+    // Both halves of the SDK surface: the listener fired, and the snapshot
+    // getter now answers with the new values rather than the old ones.
+    expect(changed.heard).toEqual({ greeting: "Hello", shout: true });
+    expect(changed.current).toEqual({ greeting: "Hello", shout: true });
+    expect(changed.changeCount).toBe(1);
+    // The values it activated with are still what they were.
+    expect(changed.atActivation).toEqual({ greeting: "Hei", shout: false });
+  });
+
+  it("does not push settings at a plugin that is not running", async () => {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "report-settings" },
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+
+    // Never started: a plugin with no process reads its settings from its next
+    // activation, so this must resolve quietly rather than throw or hang.
+    await expect(
+      host.notifySettingsChanged("hello-plugin", { greeting: "Hello" }),
+    ).resolves.toBeUndefined();
+  });
 });
