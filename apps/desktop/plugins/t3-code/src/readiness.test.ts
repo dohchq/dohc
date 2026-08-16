@@ -1,6 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  fetchT3Descriptor,
   pollT3Readiness,
   T3ChildExitError,
   T3ReadinessTimeoutError,
@@ -213,5 +214,30 @@ describe("pollT3Readiness", () => {
     });
     expect(descriptor.serverVersion).toBe(T3_PINNED_VERSION);
     expect(hung).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("fetchT3Descriptor", () => {
+  it("releases the connection of an answer it discards", async () => {
+    const { port } = await listen((_request, response) => {
+      response
+        .writeHead(503, { "content-type": "application/json" })
+        .end(JSON.stringify({ serverVersion: T3_PINNED_VERSION }));
+    });
+    const seen: Response[] = [];
+    const capturing = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const response = await fetch(url, init);
+      seen.push(response);
+      return response;
+    }) as typeof fetch;
+
+    expect(
+      await fetchT3Descriptor(environmentUrl(port), { fetchFn: capturing }),
+    ).toBeNull();
+
+    // MUTATION (return null without cancelling): undici keeps the connection
+    // out of its pool for every discarded answer, and readiness discards one
+    // every 100 ms for up to a minute.
+    expect(seen.at(-1)?.bodyUsed).toBe(true);
   });
 });

@@ -278,6 +278,10 @@ export function PluginSettings(props: {
     setBusy({});
     setErrors({});
     setConfirmation(null);
+    // An open still in flight for the workspace being left skips its own
+    // cleanup on the epoch guard, so this workspace clears it. Without this
+    // every Open control here stays disabled for the rest of the session.
+    setOpeningWebApp(null);
     pendingStatusEvents.current.clear();
     statusRevision.current = 0;
     void loadPlugins();

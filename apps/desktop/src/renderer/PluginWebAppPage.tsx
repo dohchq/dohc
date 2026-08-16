@@ -34,20 +34,22 @@ export function PluginWebAppPage(props: {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [load, setLoad] = useState<LoadState>({ status: "starting" });
   const startRequestRef = useRef(0);
-  // Held in a ref so a new callback identity never restarts the app.
+  // Held in a ref so a new callback identity never restarts the app, and
+  // written after the commit: a ref written while rendering keeps the value
+  // of a render React discarded.
   const onTitleRef = useRef(props.onTitle);
-  onTitleRef.current = props.onTitle;
-  const contextRef = useRef("");
+  useEffect(() => {
+    onTitleRef.current = props.onTitle;
+  });
   const context = `${props.workspaceId}\0${props.pluginId}\0${props.webAppId}`;
-  contextRef.current = context;
 
   useEffect(() => {
+    // The request token is the whole guard. This effect re-runs for every
+    // context change and its cleanup raises the token, so a response from
+    // the previous context can never pass.
     const request = ++startRequestRef.current;
-    const requestContext = context;
     setLoad({ status: "starting" });
-    const isCurrent = () =>
-      request === startRequestRef.current &&
-      requestContext === contextRef.current;
+    const isCurrent = () => request === startRequestRef.current;
 
     void bridge()
       .startPluginWebApp({
@@ -115,17 +117,11 @@ export function PluginWebAppPage(props: {
   useEffect(() => {
     if (!ready) return;
     const request = startRequestRef.current;
-    const requestContext = contextRef.current;
     let frame: number | null = null;
 
     const report = (): void => {
       frame = null;
-      if (
-        request !== startRequestRef.current ||
-        requestContext !== contextRef.current
-      ) {
-        return;
-      }
+      if (request !== startRequestRef.current) return;
       const element = containerRef.current;
       if (!element) return;
       const rect = element.getBoundingClientRect();

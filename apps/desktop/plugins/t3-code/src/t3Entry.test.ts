@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,6 +45,18 @@ describe("resolveT3Entry", () => {
   it("resolves the pinned entry from the installed dependency", async () => {
     const root = await createBuiltRoot({ manifest: pinnedManifest });
     await expect(resolveT3Entry(root)).resolves.toBe(T3_ENTRY_MODULE_PATH);
+  });
+
+  it("returns the path of the entry file it validated", async () => {
+    const root = await createBuiltRoot({ manifest: pinnedManifest });
+    const modulePath = await resolveT3Entry(root);
+
+    // MUTATION (encode the entry a second time and point one copy elsewhere):
+    // the plugin validates one file and hands the broker another.
+    expect(existsSync(join(root, ...modulePath.split("/")))).toBe(true);
+    // The broker resolves this against the plugin root; a Windows separator
+    // is not a relative path it accepts.
+    expect(modulePath).not.toContain("\\");
   });
 
   it("refuses any other installed version, naming both versions", async () => {

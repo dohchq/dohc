@@ -34,6 +34,7 @@ import type {
   ListWorkspaceVersionsResult,
   McpConfigResult,
   PluginPanelOpenedEvent,
+  PluginWebAppOpenedEvent,
   ReadWorkspaceTextPayload,
   ReadEngineMomentResult,
   SetPluginWebAppBoundsPayload,
@@ -279,11 +280,16 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
   let pluginPanelOpenedCallback:
     | ((event: PluginPanelOpenedEvent) => void)
     | null = null;
+  let pluginWebAppOpenedCallback:
+    | ((event: PluginWebAppOpenedEvent) => void)
+    | null = null;
   return {
     emitWorkspaceActivity: () => activityCallback?.(),
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
     emitPluginPanelOpened: (event: PluginPanelOpenedEvent) =>
       pluginPanelOpenedCallback?.(event),
+    emitPluginWebAppOpened: (event: PluginWebAppOpenedEvent) =>
+      pluginWebAppOpenedCallback?.(event),
     getWorkspaceUiState: vi.fn(() => uiStatePromise),
     // The shell re-reads the registry to pick up a share's durable skip
     // record. Default: a workspace with nothing skipped.
@@ -483,7 +489,14 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
         };
       },
     ),
-    onPluginWebAppOpened: vi.fn(() => () => {}),
+    onPluginWebAppOpened: vi.fn(
+      (callback: (event: PluginWebAppOpenedEvent) => void) => {
+        pluginWebAppOpenedCallback = callback;
+        return () => {
+          pluginWebAppOpenedCallback = null;
+        };
+      },
+    ),
     startPluginWebApp: vi.fn(async () => ({
       status: "ok" as const,
       title: "T3 Code",
@@ -854,6 +867,42 @@ describe("plugin web app tabs", () => {
     const calls = bridge.setPluginWebAppBounds.mock.calls;
     return calls.at(-1)?.[0]?.visible;
   }
+
+  it("explains the 100 open-tab limit when the plugin's app cannot open", async () => {
+    const editorGroups = Array.from({ length: 100 }, (_, index) => ({
+      id: `group-${index}`,
+      tabs: [`file-${index}.md`],
+      activeTab: `file-${index}.md`,
+      size: 0.01,
+    }));
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups,
+        activeEditorGroup: "group-0",
+      }),
+    );
+    renderShell(bridge);
+    await screen.findByTestId("tab-file-0.md");
+
+    act(() => {
+      bridge.emitPluginWebAppOpened({
+        workspaceId: WORKSPACE.workspaceId,
+        pluginId: "t3-code",
+        webAppId: "app",
+      });
+    });
+
+    // MUTATION (open the tab without reading the refusal): the user clicks
+    // Open in plugin settings, the dialog closes, and nothing appears — with
+    // nothing on screen naming the limit that refused it.
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain(
+      "This workspace has 100 open tabs; the limit is 100. Close a tab to open another tab.",
+    );
+    expect(screen.queryByTestId(`tab-${path}`)).toBeNull();
+  });
 
   it("labels the tab with the title the plugin's manifest declares", async () => {
     const bridge = makeBridge(

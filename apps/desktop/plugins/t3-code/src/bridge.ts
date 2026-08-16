@@ -122,9 +122,24 @@ export function createT3Bridge(
     // orphan keeps the workspace's checkpoint refs. Both fields are known
     // here: the port was allocated before the spawn, the pid comes back with
     // the handle.
-    if (child.pid !== null) {
-      await writeOwnerRecord(ownerPath, { pid: child.pid, port });
-    }
+    const pid = child.pid;
+    if (pid !== null) await writeOwnerRecord(ownerPath, { pid, port });
+    /**
+     * Ends a failed attempt's child and disarms its record — but only once
+     * this plugin has done everything it can to end the process the record
+     * names. A terminate that did not resolve leaves a child that may still
+     * hold the port and the workspace's checkpoint refs, and the record is
+     * what lets the next start probe and signal it.
+     */
+    const endFailedAttempt = async (alreadyGone = false): Promise<void> => {
+      const gone =
+        alreadyGone ||
+        (await child.terminate().then(
+          () => true,
+          () => false,
+        ));
+      if (gone && pid !== null) await clearOwnerRecord(ownerPath);
+    };
     // Raw output exists in exactly one place and for exactly one purpose:
     // this bounded buffer, until the pairing URL is parsed out of it. Every
     // line leaves this closure redacted.
@@ -160,7 +175,7 @@ export function createT3Bridge(
       // A refusal for any other reason leaves a server this plugin can no
       // longer read; ending it keeps the workspace's t3 refs free for the
       // next attempt. Terminating an exited child is a no-op.
-      await child.terminate().catch(() => undefined);
+      await endFailedAttempt();
       return null;
     }
     const exited = child.wait({ timeoutMs: CHILD_WAIT_TIMEOUT_MS });
@@ -176,15 +191,18 @@ export function createT3Bridge(
         ...options.readiness,
       });
     } catch (error) {
-      if (error instanceof T3ChildExitError) return null;
+      if (error instanceof T3ChildExitError) {
+        await endFailedAttempt(true);
+        return null;
+      }
       // Version mismatch or readiness deadline: the process is not a server
       // this plugin may keep. Destroy it and report.
-      await child.terminate().catch(() => undefined);
+      await endFailedAttempt();
       throw error;
     }
 
     if (captured.pairingUrl === null) {
-      await child.terminate().catch(() => undefined);
+      await endFailedAttempt();
       throw new Error(
         "The t3 server became ready without printing its pairing URL. " +
           "Disable and re-enable the t3-code plugin to retry.",

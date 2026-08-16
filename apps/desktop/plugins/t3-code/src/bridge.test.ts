@@ -28,7 +28,10 @@ type FakeBoot =
   | "exit-early"
   | "exit-before-subscribe"
   | "exit-split-token"
-  | "wrong-version";
+  | "wrong-version"
+  // A server this plugin must destroy and cannot: the broker's terminate
+  // gives up, and the process keeps the port and the workspace's t3 refs.
+  | "wrong-version-unkillable";
 
 // A real stream chunk boundary can fall anywhere. The worst place for the
 // log path is inside the word `Token`, because that word is the redaction
@@ -57,6 +60,9 @@ class FakeT3Child implements PluginChildProcessHandle {
   /** A child that dies the moment the bridge starts listening. The
    * subscription lands, and the readiness poll is what notices the exit. */
   private exitOnSubscribe = false;
+  /** The broker's terminate gives up on this child: it exceeded the stop
+   * grace and the force kill did not take. */
+  private unkillable = false;
 
   constructor(index: number) {
     this.id = `child-${index}`;
@@ -94,8 +100,10 @@ class FakeT3Child implements PluginChildProcessHandle {
       this.exitOnSubscribe = true;
       return;
     }
-    const serverVersion =
-      mode === "wrong-version" ? "9.9.9" : T3_PINNED_VERSION;
+    const wrongVersion =
+      mode === "wrong-version" || mode === "wrong-version-unkillable";
+    this.unkillable = mode === "wrong-version-unkillable";
+    const serverVersion = wrongVersion ? "9.9.9" : T3_PINNED_VERSION;
     this.server = createServer((_request, response) => {
       response
         .writeHead(200, { "content-type": "application/json" })
@@ -175,6 +183,9 @@ class FakeT3Child implements PluginChildProcessHandle {
 
   async terminate(): Promise<PluginChildProcessExit> {
     this.terminated = true;
+    if (this.unkillable) {
+      throw new Error(`Child process "${this.id}" did not exit within 5000 ms.`);
+    }
     await this.closeServer();
     this.finishExit({ code: null, reason: "terminated" });
     return { code: null, reason: "terminated" };
@@ -404,6 +415,37 @@ describe("createT3Bridge", () => {
     ]);
     await expect(bridge.startWebApp(T3_WEB_APP_ID)).rejects.toThrow("3 attempts");
     expect(spawns).toHaveLength(3);
+  });
+
+  it("leaves no armed record behind when every attempt fails", async () => {
+    const { bridge, stateRoot } = await createFixture([
+      "exit-early",
+      "exit-early",
+      "exit-early",
+    ]);
+    await expect(bridge.startWebApp(T3_WEB_APP_ID)).rejects.toThrow("3 attempts");
+
+    // MUTATION (keep the record whatever the attempt did): the last attempt's
+    // dead pid stays armed on disk, and the next start would consider
+    // signalling a number the operating system is free to reuse.
+    expect(existsSync(join(stateRoot, "t3-owner.json"))).toBe(false);
+  });
+
+  it("keeps the record armed for a failed attempt it could not end", async () => {
+    const { spawns, bridge, stateRoot } = await createFixture([
+      "wrong-version-unkillable",
+    ]);
+    await expect(bridge.startWebApp(T3_WEB_APP_ID)).rejects.toThrow("9.9.9");
+
+    // MUTATION (clear on every failure): this server survived the terminate
+    // and still holds the port and the workspace's checkpoint refs. With no
+    // record the next start reads no owner, so recovery only deletes the
+    // runtime file and leaves the orphan running.
+    const owner = JSON.parse(
+      await readFile(join(stateRoot, "t3-owner.json"), "utf8"),
+    ) as { pid: number; port: number };
+    expect(owner.pid).toBe(spawns[0]!.child.pid);
+    expect(owner.port).toBe(portFromArgs(spawns[0]!.request.args));
   });
 
   it("counts a child that exits before the subscription as a failed attempt", async () => {

@@ -133,7 +133,11 @@ describe("assessStaleState", () => {
   it("carries the owner's port so the caller can prove the pid before signalling", () => {
     expect(
       assessStaleState({
-        runtime: realRuntimeShape(4242),
+        // A runtime port that differs from the owner's. MUTATION (return
+        // runtime.port): the caller would probe a port this plugin never
+        // recorded, and vouching for the wrong port authorizes a signal
+        // against a process it does not own.
+        runtime: realRuntimeShape(4242, 51_111),
         owner,
         isPidAlive: (pid) => pid === 4242,
       }),
@@ -201,6 +205,9 @@ describe("recoverStaleState", () => {
     expect(signals[0]).toEqual([4242, "SIGTERM"]);
     expect(signals.at(-1)).toEqual([4242, "SIGKILL"]);
     expect(existsSync(serverRuntimePath(baseDir))).toBe(false);
+    // MUTATION (keep the record): recovery has already escalated to SIGKILL,
+    // so the record can only arm the next start against a reusable number.
+    expect(existsSync(ownerPath)).toBe(false);
   });
 
   it("stops at SIGTERM when the orphan exits within the grace", async () => {
@@ -227,6 +234,7 @@ describe("recoverStaleState", () => {
     });
 
     expect(signals).toEqual(["SIGTERM"]);
+    expect(existsSync(ownerPath)).toBe(false);
   });
 
   // A1: pid reuse is the routine case after a reboot — the runtime file and

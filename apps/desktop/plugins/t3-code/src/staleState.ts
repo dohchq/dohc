@@ -151,6 +151,11 @@ export async function recoverStaleState(
       await waitMs(100);
     }
     if (isPidAlive(assessment.pid)) killPid(assessment.pid, "SIGKILL");
+    // The record authorizes a signal against this pid, and this path has just
+    // spent that authority down to SIGKILL. Nothing a later start could do
+    // with it remains, so keeping it only arms that start against a number
+    // the operating system is free to hand to someone else.
+    await clearOwnerRecord(deps.ownerPath);
   }
   if (assessment.action !== "none") {
     await unlink(runtimePath).catch(() => undefined);

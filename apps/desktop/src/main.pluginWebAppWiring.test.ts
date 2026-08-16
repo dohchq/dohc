@@ -101,7 +101,9 @@ describe("plugin web app main-process wiring", () => {
     // be torn down and respawned on every tab close, and the guest's session
     // cookie — which already landed, and which the next open reuses — would
     // be worthless. Only the recovery path unpairs.
-    expect(closePath).not.toContain("stopWebApp(pluginId");
+    // The method, not one spelling of its first argument: the same unpair
+    // written as host.stopWebApp(input.pluginId, …) must fail this too.
+    expect(closePath).not.toContain(".stopWebApp(");
     expect(closePath).not.toContain("recoverConsumedWebAppCredential");
   });
 
@@ -140,32 +142,23 @@ describe("plugin web app main-process wiring", () => {
   });
 
   it("destroys guest views on every teardown path a view could outlive", () => {
-    const reload = mainSource.slice(
-      mainSource.indexOf("async function prepareForRendererReload("),
-      mainSource.indexOf("\n}\n", mainSource.indexOf("async function prepareForRendererReload(")),
-    );
+    // functionSource, not a hand-built slice: an end marker that stops
+    // matching returns -1, and slice(start, -1) silently widens the section
+    // to the rest of main.ts — where the call being looked for exists.
+    const reload = functionSource("async function prepareForRendererReload(");
     expect(reload).toContain(
       "destroyPluginWebAppViews(pluginWebAppViews.removeForSender(senderId));",
     );
 
-    const stopWorkspace = mainSource.slice(
-      mainSource.indexOf("async function stopPluginWorkspace("),
-      mainSource.indexOf("\n}\n", mainSource.indexOf("async function stopPluginWorkspace(")),
-    );
+    const stopWorkspace = functionSource("async function stopPluginWorkspace(");
     expect(stopWorkspace).toContain(
       "destroyPluginWebAppViews(pluginWebAppViews.removeForWorkspace(workspaceId));",
     );
 
-    const stopAll = mainSource.slice(
-      mainSource.indexOf("async function stopAllPluginWorkspaces("),
-      mainSource.indexOf("\n}\n", mainSource.indexOf("async function stopAllPluginWorkspaces(")),
-    );
+    const stopAll = functionSource("async function stopAllPluginWorkspaces(");
     expect(stopAll).toContain("destroyPluginWebAppViews(pluginWebAppViews.removeAll());");
 
-    const pipeline = mainSource.slice(
-      mainSource.indexOf("function createPluginPipeline"),
-      mainSource.indexOf("\n}\n\nasync function ensurePluginPipeline"),
-    );
+    const pipeline = functionSource("function createPluginPipeline");
     expect(pipeline).toContain(
       "stopPluginWebAppsForPlugin(workspace.workspaceId, pluginId);",
     );

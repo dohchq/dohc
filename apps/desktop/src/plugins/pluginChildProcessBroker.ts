@@ -255,7 +255,7 @@ function childIdFromParams(params: unknown, method: string): string {
   return params.childId;
 }
 
-async function forkElectronUtilityProcess(
+export async function forkElectronUtilityProcess(
   modulePath: string,
   args: string[],
   options: PluginChildProcessForkOptions,
@@ -266,6 +266,16 @@ async function forkElectronUtilityProcess(
   child.once("exit", (code) => lifecycle.onExit(code));
   child.once("error", (type, location, report) =>
     lifecycle.onError(type, location, report));
+  // Electron leaves `pid` undefined until the child spawns, so returning here
+  // hands every caller a live child with no pid: this broker's Windows tree
+  // kill skips it, and a plugin that records the pid to recognise its own
+  // orphan later records nothing. Wait for the spawn, or for the end that
+  // means no pid is coming — the caller's spawn request has its own timeout.
+  await new Promise<void>((settle) => {
+    child.once("spawn", () => settle());
+    child.once("exit", () => settle());
+    child.once("error", () => settle());
+  });
   return child;
 }
 

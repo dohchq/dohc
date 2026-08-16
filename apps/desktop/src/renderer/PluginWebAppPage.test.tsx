@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { StartPluginWebAppResult } from "../ipc/bridgeContract";
 import type {
   PluginWebAppFailedEvent,
   SetPluginWebAppBoundsPayload,
-  StartPluginWebAppResult,
 } from "../ipc/bridgeContract";
 import { PluginWebAppPage } from "./PluginWebAppPage";
 
@@ -190,21 +190,32 @@ describe("PluginWebAppPage", () => {
     expect(lastReport()?.visible).toBe(true);
   });
 
-  it("never receives the guest URL: the start result carries only title and origin", async () => {
-    render(
-      <PluginWebAppPage workspaceId="ws-1" pluginId="t3-code" webAppId="app" />,
-    );
-    await screen.findByTestId("plugin-web-app-frame");
-    const results = await Promise.all(
-      bridgeMock.startPluginWebApp.mock.results.map((entry) => entry.value),
-    );
-    for (const result of results) {
-      expect(Object.keys(result as object).sort()).toEqual([
-        "origin",
-        "status",
-        "title",
-      ]);
-    }
+  it("never receives the guest URL: the start result contract refuses one", async () => {
+    // What reaches this page is whatever survives the contract — main parses
+    // its answer through this schema and preload parses it again before the
+    // renderer sees it. Asserting the keys of this file's own mock would
+    // prove only that the mock is unchanged.
+    // MUTATION (drop .strict() from the ok result): a start URL carrying the
+    // one-time pairing credential in its fragment reaches the renderer.
+    expect(() =>
+      StartPluginWebAppResult.parse({
+        status: "ok",
+        title: "T3 Code",
+        origin: "http://127.0.0.1:49160",
+        url: "http://127.0.0.1:49160/pair#token=secret",
+      }),
+    ).toThrow();
+    expect(
+      StartPluginWebAppResult.parse({
+        status: "ok",
+        title: "T3 Code",
+        origin: "http://127.0.0.1:49160",
+      }),
+    ).toEqual({
+      status: "ok",
+      title: "T3 Code",
+      origin: "http://127.0.0.1:49160",
+    });
   });
 
   it("drops a start response that resolves after unmount and stops the app", async () => {

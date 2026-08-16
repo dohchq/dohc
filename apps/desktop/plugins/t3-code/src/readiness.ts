@@ -77,7 +77,12 @@ export async function fetchT3Descriptor(
     const response = await fetchFn(environmentUrl, {
       signal: AbortSignal.timeout(requestTimeoutMs),
     });
-    if (response.status !== 200) return null;
+    if (response.status !== 200) {
+      // undici keeps the connection out of the pool until the body is read or
+      // cancelled, and this runs every 100 ms for up to a minute per start.
+      await response.body?.cancel().catch(() => undefined);
+      return null;
+    }
     return decodeDescriptor(await response.json());
   } catch {
     return null;

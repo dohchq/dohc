@@ -6,9 +6,11 @@ import { join } from "node:path";
 // running server's readiness descriptor. Never launch a PATH-resolved `t3`,
 // never npx — only the pinned dependency's own entry.
 export const T3_PINNED_VERSION = "0.0.33";
-export const T3_ENTRY_MODULE_PATH = "snapshot/node_modules/t3/dist/bin.mjs";
 
 const T3_PACKAGE_RELATIVE = ["snapshot", "node_modules", "t3"] as const;
+const T3_ENTRY_RELATIVE = [...T3_PACKAGE_RELATIVE, "dist", "bin.mjs"] as const;
+/** POSIX-separated: the broker resolves it against the plugin's built root. */
+export const T3_ENTRY_MODULE_PATH = T3_ENTRY_RELATIVE.join("/");
 
 /**
  * Resolves the pinned t3 server entry from the installed dependency inside
@@ -45,7 +47,7 @@ export async function resolveT3Entry(pluginRoot: string): Promise<string> {
         `t3@${T3_PINNED_VERSION} declares "./dist/bin.mjs". Reinstall the t3-code plugin.`,
     );
   }
-  const entryPath = join(packageDir, "dist", "bin.mjs");
+  const entryPath = join(pluginRoot, ...T3_ENTRY_RELATIVE);
   const entryStats = await stat(entryPath).catch(() => null);
   if (!entryStats?.isFile()) {
     throw new Error(

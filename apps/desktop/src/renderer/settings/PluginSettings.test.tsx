@@ -182,6 +182,54 @@ describe("PluginSettings", () => {
     expect(onOpenedWebApp).toHaveBeenCalledTimes(1);
   });
 
+  it("can open a web app after leaving a workspace whose open never answered", async () => {
+    const installed = plugin("t3-code", {
+      webApps: [{ id: "app", title: "T3 Code" }],
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [installed] });
+    const stuck = deferred<{ pluginId: string; webAppId: string }>();
+    bridgeMock.openPluginWebApp.mockReturnValueOnce(stuck.promise);
+    const onOpenedWebApp = vi.fn();
+
+    const view = render(
+      <PluginSettings workspaceId="ws-old" onOpenedWebApp={onOpenedWebApp} />,
+    );
+    const stuckOpen = await screen.findByTestId("plugin-open-web-app");
+    await act(async () => {
+      fireEvent.click(stuckOpen);
+      await Promise.resolve();
+    });
+    // The old workspace's open is still in flight, so its control is busy.
+    expect(screen.getByTestId("plugin-open-web-app").hasAttribute("disabled")).toBe(
+      true,
+    );
+
+    bridgeMock.openPluginWebApp.mockResolvedValue({
+      pluginId: "t3-code",
+      webAppId: "app",
+    });
+    view.rerender(
+      <PluginSettings workspaceId="ws-new" onOpenedWebApp={onOpenedWebApp} />,
+    );
+
+    // MUTATION (leave openingWebApp alone across the switch): the stale
+    // request never clears it — its own cleanup is skipped by the epoch
+    // guard — and every Open control in this workspace stays disabled.
+    const open = await screen.findByTestId("plugin-open-web-app");
+    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
+    await act(async () => {
+      fireEvent.click(open);
+      await Promise.resolve();
+    });
+    expect(bridgeMock.openPluginWebApp).toHaveBeenLastCalledWith({
+      workspaceId: "ws-new",
+      pluginRoot: installed.rootPath,
+      pluginId: "t3-code",
+      webAppId: "app",
+    });
+    expect(onOpenedWebApp).toHaveBeenCalledTimes(1);
+  });
+
   it("shows the open failure and keeps the dialog when the app cannot start", async () => {
     const installed = plugin("t3-code", {
       webApps: [{ id: "app", title: "T3 Code" }],

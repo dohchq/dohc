@@ -1998,23 +1998,6 @@ export function DesktopWorkspaceShell(props: {
     [invalidateDeferredFileOpen, mutateWb, workspaceId],
   );
 
-  useEffect(
-    () =>
-      bridge().onPluginWebAppOpened((event) => {
-        if (event.workspaceId !== workspaceId) return;
-        const targetGroupId = wbRef.current.activeEditorGroup;
-        invalidateDeferredFileOpen(targetGroupId);
-        mutateWb((state) =>
-          openTab(
-            state,
-            pluginWebAppTabPath(event.pluginId, event.webAppId),
-            targetGroupId,
-          ),
-        );
-      }),
-    [invalidateDeferredFileOpen, mutateWb, workspaceId],
-  );
-
   useEffect(() => {
     let cancelled = false;
     void bridge()
@@ -3053,6 +3036,17 @@ export function DesktopWorkspaceShell(props: {
       mutateWb,
       showTabLimitError,
     ],
+  );
+  // Main confirmed the plugin's Open action and asked for the tab. It takes
+  // the same path every other virtual tab takes — including the refusal at
+  // MAX_OPEN_TABS, which the user must read rather than watch nothing happen.
+  useEffect(
+    () =>
+      bridge().onPluginWebAppOpened((event) => {
+        if (event.workspaceId !== workspaceId) return;
+        openVirtualTab(pluginWebAppTabPath(event.pluginId, event.webAppId));
+      }),
+    [openVirtualTab, workspaceId],
   );
   const openVersionCompareTab = useCallback(
     (versionId: string) => {
