@@ -644,6 +644,24 @@ function stubScrollSpy(
 // div -- and `.value` on a div is undefined, which is the `indexOf` TypeError
 // #590 records as shape 3. Wait for the surface the test actually means. The
 // testids are pinned by e2e and must not be renamed.
+// The edit toggle is `disabled={readOnly || opening}`, and a click on a
+// disabled button does nothing and does not retry. A click fired the moment the
+// button exists is therefore dropped whenever the open has not answered yet,
+// and the wait for the source surface then times out on a toggle that never
+// happened. Clicking a mode toggle more than once is not a fix — the modes
+// cycle — so the enabled button is the thing to wait for (#797).
+async function findEnabledMarkdownEditToggle(): Promise<HTMLElement> {
+  return await waitFor(() => {
+    const toggle = screen.getByTestId("markdown-edit-toggle");
+    if (toggle instanceof HTMLButtonElement && toggle.disabled) {
+      throw new Error(
+        "markdown-edit-toggle is still disabled — the document is opening",
+      );
+    }
+    return toggle;
+  });
+}
+
 async function findSourceEditor(): Promise<HTMLTextAreaElement> {
   return await waitFor(() => {
     const editor = screen.getByTestId("markdown-editor");
@@ -5511,7 +5529,7 @@ describe("markdown editor unmount flush", () => {
         refreshKey={1}
       />,
     );
-    fireEvent.click(await screen.findByTestId("markdown-edit-toggle"));
+    fireEvent.click(await findEnabledMarkdownEditToggle());
     const firstSource = await findSourceEditor();
     fireEvent.change(firstSource, { target: { value: `${firstSource.value}v1` } });
     await waitFor(
@@ -5574,7 +5592,7 @@ describe("markdown editor unmount flush", () => {
         engineVersionKey={1}
       />,
     );
-    fireEvent.click(await screen.findByTestId("markdown-edit-toggle"));
+    fireEvent.click(await findEnabledMarkdownEditToggle());
     const source = await findSourceEditor();
     fireEvent.change(source, { target: { value: `${source.value}Draft` } });
     await waitFor(
@@ -5800,7 +5818,7 @@ describe("markdown editor unmount flush", () => {
         refreshKey={1}
       />,
     );
-    fireEvent.click(await screen.findByTestId("markdown-edit-toggle"));
+    fireEvent.click(await findEnabledMarkdownEditToggle());
     const firstSource = await findSourceEditor();
     fireEvent.change(firstSource, { target: { value: `${firstSource.value}v1` } });
     await waitFor(() =>
