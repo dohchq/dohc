@@ -663,6 +663,8 @@ const LazySitePreviewPage = lazy(() =>
 const LazyPluginPanelPage = lazy(() =>
   import("./PluginPanelPage").then((mod) => ({ default: mod.PluginPanelPage })),
 );
+const EMPTY_TAB_LABELS: ReadonlyMap<string, string> = new Map();
+
 const LazyPluginWebAppPage = lazy(() =>
   import("./PluginWebAppPage").then((mod) => ({ default: mod.PluginWebAppPage })),
 );
@@ -1820,6 +1822,54 @@ export function DesktopWorkspaceShell(props: {
       ),
     [dirtyRevision, openTabs],
   );
+  // A plugin web app tab is labelled with the title its manifest declares.
+  // The path carries only ids, and a restored tab has no running page to ask,
+  // so the shell reads the manifests the same way settings does. The record
+  // carries the workspace it answered for: a slow response for one workspace
+  // must never relabel another's tabs.
+  const webAppTabKey = useMemo(
+    () =>
+      openTabs
+        .map((tab) => tab.path)
+        .filter((path) => isPluginWebAppTabPath(path))
+        .join("\n"),
+    [openTabs],
+  );
+  const [webAppTitles, setWebAppTitles] = useState<{
+    workspaceId: string;
+    titles: ReadonlyMap<string, string>;
+  }>({ workspaceId: "", titles: EMPTY_TAB_LABELS });
+  useEffect(() => {
+    if (webAppTabKey.length === 0) return;
+    let cancelled = false;
+    void bridge()
+      .listPlugins({ workspaceId })
+      .then((result) => {
+        if (cancelled || !result.ok) return;
+        setWebAppTitles({
+          workspaceId,
+          titles: new Map(
+            result.plugins.flatMap((plugin) =>
+              plugin.webApps.map(
+                (webApp) =>
+                  [
+                    pluginWebAppTabPath(plugin.id, webApp.id),
+                    webApp.title,
+                  ] as const,
+              ),
+            ),
+          ),
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, webAppTabKey]);
+  const tabLabels =
+    webAppTitles.workspaceId === workspaceId
+      ? webAppTitles.titles
+      : EMPTY_TAB_LABELS;
   const anyTabDirty = dirtyPaths.size > 0;
   const activeDocumentPath = isVirtualTabPath(focusedTabPath)
     ? null
@@ -2732,6 +2782,18 @@ export function DesktopWorkspaceShell(props: {
   // Lists every open conflict — two machines editing apart, or a merge left
   // with "Finish later" — with the same side-by-side cards as the merge flow.
   const [conflictReviewOpen, setConflictReviewOpen] = useState(false);
+  // A plugin web app's guest is a main-process view layered over this shell,
+  // so it composites above every overlay this component paints. While one is
+  // open, the guest must be hidden or it keeps the clicks made over it.
+  const overlayOpen =
+    paletteOpen ||
+    quickOpenOpen ||
+    newFileOpen ||
+    cloudOpen ||
+    conflictReviewOpen ||
+    openShareOpen ||
+    settingsSection !== null ||
+    shareTarget !== null;
   const onVersionWorkspaceStateChanged = useCallback(
     (activeVersionId?: string) => {
       setVersionEpoch((epoch) => epoch + 1);
@@ -4929,6 +4991,7 @@ export function DesktopWorkspaceShell(props: {
                       tabs={editorGroup.tabs}
                       activeTab={tabPath}
                       activeTabDirty={!!tabPath && dirtyPaths.has(tabPath)}
+                      tabLabels={tabLabels}
                       recoveryPaths={recoveryPaths}
                       groupNumber={groupIndex + 1}
                       onActivate={(path) => activateEditorTab(editorGroup.id, path)}
@@ -5162,11 +5225,14 @@ export function DesktopWorkspaceShell(props: {
                     workspaceId={workspaceId}
                     pluginId={groupPluginWebApp.pluginId}
                     webAppId={groupPluginWebApp.webAppId}
+                    hiddenByOverlay={overlayOpen}
                   />
                 </Suspense>
               ) : (
                 <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-                  <span className="text-sm text-ink">Could not open plugin app</span>
+                  <span className="text-sm text-ink">
+                    dohc could not open the plugin app
+                  </span>
                   <button
                     type="button"
                     className="text-xs text-accent hover:underline"

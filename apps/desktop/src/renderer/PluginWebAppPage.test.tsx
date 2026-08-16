@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { StartPluginWebAppResult } from "../ipc/bridgeContract";
+import type {
+  SetPluginWebAppBoundsPayload,
+  StartPluginWebAppResult,
+} from "../ipc/bridgeContract";
 import { PluginWebAppPage } from "./PluginWebAppPage";
 
 const bridgeMock = {
@@ -10,7 +13,9 @@ const bridgeMock = {
     title: "T3 Code",
     origin: "http://127.0.0.1:49160",
   })),
-  setPluginWebAppBounds: vi.fn(async () => undefined),
+  setPluginWebAppBounds: vi.fn(
+    async (_payload: SetPluginWebAppBoundsPayload) => undefined,
+  ),
   stopPluginWebApp: vi.fn(async () => undefined),
 };
 
@@ -87,6 +92,46 @@ describe("PluginWebAppPage", () => {
       bounds: { x: 10, y: 20, width: 640, height: 480 },
       visible: true,
     });
+  });
+
+  it("reports the guest hidden while an overlay covers it, and visible again after", async () => {
+    const lastReport = () =>
+      bridgeMock.setPluginWebAppBounds.mock.calls.at(-1)?.[0];
+    const view = render(
+      <PluginWebAppPage workspaceId="ws-1" pluginId="t3-code" webAppId="app" />,
+    );
+    await screen.findByTestId("plugin-web-app-frame");
+    expect(lastReport()?.visible).toBe(true);
+
+    // MUTATION (ignore the overlay signal): the guest keeps compositing over
+    // the dialog and keeps the clicks aimed at it.
+    await act(async () => {
+      view.rerender(
+        <PluginWebAppPage
+          workspaceId="ws-1"
+          pluginId="t3-code"
+          webAppId="app"
+          hiddenByOverlay
+        />,
+      );
+      await Promise.resolve();
+    });
+    expect(lastReport()?.visible).toBe(false);
+    // The placeholder has not moved: only visibility changed.
+    expect(lastReport()?.bounds).toEqual({ x: 10, y: 20, width: 640, height: 480 });
+
+    await act(async () => {
+      view.rerender(
+        <PluginWebAppPage
+          workspaceId="ws-1"
+          pluginId="t3-code"
+          webAppId="app"
+          hiddenByOverlay={false}
+        />,
+      );
+      await Promise.resolve();
+    });
+    expect(lastReport()?.visible).toBe(true);
   });
 
   it("never receives the guest URL: the start result carries only title and origin", async () => {

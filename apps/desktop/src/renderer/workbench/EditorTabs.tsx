@@ -15,7 +15,10 @@ import {
   parsePluginWebAppTabPath,
 } from "./workbenchState";
 
-function fileName(path: string): string {
+// A plugin web app's own name lives in its manifest, which only the shell can
+// read; the tab path carries the id. `label` is that manifest title when the
+// shell has it, and the id is the fallback until then.
+function fileName(path: string, label?: string): string {
   if (isGraphTabPath(path)) return "Graph";
   if (isHistoryTabPath(path)) return "History";
   if (isChatsTabPath(path)) return "Chats";
@@ -23,7 +26,7 @@ function fileName(path: string): string {
     return parsePluginPanelTabPath(path)?.panelId ?? "Plugin panel";
   }
   if (isPluginWebAppTabPath(path)) {
-    return parsePluginWebAppTabPath(path)?.webAppId ?? "Plugin app";
+    return label ?? parsePluginWebAppTabPath(path)?.webAppId ?? "Plugin app";
   }
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
@@ -34,7 +37,7 @@ function fileName(path: string): string {
   return path.split("/").pop() ?? path;
 }
 
-function tabTitle(path: string): string {
+function tabTitle(path: string, label?: string): string {
   if (isGraphTabPath(path)) return "Workspace graph";
   if (isHistoryTabPath(path)) return "Workspace history";
   if (isChatsTabPath(path)) return "Workspace chats";
@@ -44,7 +47,8 @@ function tabTitle(path: string): string {
   }
   if (isPluginWebAppTabPath(path)) {
     const webApp = parsePluginWebAppTabPath(path);
-    return webApp ? `${webApp.pluginId} — ${webApp.webAppId}` : "Plugin app";
+    if (!webApp) return "Plugin app";
+    return `${webApp.pluginId} — ${label ?? webApp.webAppId}`;
   }
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
@@ -60,6 +64,9 @@ function tabTitle(path: string): string {
 const Tab = memo(function Tab(props: {
   groupId: string;
   path: string;
+  /** The tab's display name when the path alone cannot supply it. A string,
+   * not a lookup: this component is memoized on its props. */
+  label?: string;
   active: boolean;
   dirty: boolean;
   dragging: boolean;
@@ -72,7 +79,7 @@ const Tab = memo(function Tab(props: {
   onMove: (path: string, toIndex: number) => void;
   onMoveToGroup: (path: string, targetGroupId: string, toIndex: number) => void;
 }) {
-  const name = fileName(props.path);
+  const name = fileName(props.path, props.label);
   // Pointer-drag reorder (no dnd dep): a press only becomes a drag after 4px
   // of travel, so plain clicks never reorder. While captured, the tab lives
   // at "how many sibling midpoints sit left of the cursor" (live reorder,
@@ -110,7 +117,7 @@ const Tab = memo(function Tab(props: {
       aria-selected={props.active}
       data-testid={`tab-${props.path}`}
       data-active={props.active || undefined}
-      title={tabTitle(props.path)}
+      title={tabTitle(props.path, props.label)}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
@@ -323,6 +330,9 @@ export function EditorTabs(props: {
   tabs: Array<{ path: string }>;
   activeTab: string | null;
   activeTabDirty: boolean;
+  /** Display names the tab path cannot supply, keyed by path. Today: a plugin
+   * web app's manifest title, which only the shell can read. */
+  tabLabels?: ReadonlyMap<string, string>;
   // Paths with a set-aside draft (#567). Unlike `activeTabDirty`, this is
   // knowable for EVERY tab — the store outlives the keyed inspectors — so an
   // inactive tab keeps its marker (#579 review, r4).
@@ -430,6 +440,9 @@ export function EditorTabs(props: {
             key={tab.path}
             groupId={props.groupId}
             path={tab.path}
+            {...(props.tabLabels?.has(tab.path)
+              ? { label: props.tabLabels.get(tab.path) }
+              : {})}
             active={tab.path === props.activeTab}
             dirty={
               (tab.path === props.activeTab && props.activeTabDirty) ||
@@ -573,7 +586,9 @@ export function EditorTabs(props: {
                     : "text-muted hover:bg-line/50 hover:text-ink"
                 }`}
               >
-                <span className="truncate">{fileName(tab.path)}</span>
+                <span className="truncate">
+                  {fileName(tab.path, props.tabLabels?.get(tab.path))}
+                </span>
               </button>
             ))}
           </div>

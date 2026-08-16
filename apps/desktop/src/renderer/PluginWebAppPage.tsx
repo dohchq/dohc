@@ -19,6 +19,12 @@ export function PluginWebAppPage(props: {
   workspaceId: string;
   pluginId: string;
   webAppId: string;
+  /** True while the shell paints a full-screen overlay — a dialog, the
+   * command palette, quick open. The guest is a main-process view layered
+   * over this page, so it composites above every overlay and would take the
+   * clicks meant for one. Nothing in the renderer can cover it; only main can
+   * hide it, and this is how main is told. */
+  hiddenByOverlay?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [load, setLoad] = useState<LoadState>({ status: "starting" });
@@ -76,6 +82,7 @@ export function PluginWebAppPage(props: {
   // resizes with every layout change that moves it (sidebar, group splits),
   // so a ResizeObserver plus window resize covers repositioning.
   const ready = load.status === "ready";
+  const hiddenByOverlay = props.hiddenByOverlay ?? false;
   useEffect(() => {
     if (!ready) return;
     const request = startRequestRef.current;
@@ -105,7 +112,7 @@ export function PluginWebAppPage(props: {
           pluginId: props.pluginId,
           webAppId: props.webAppId,
           bounds,
-          visible: bounds.width > 0 && bounds.height > 0,
+          visible: !hiddenByOverlay && bounds.width > 0 && bounds.height > 0,
         })
         .catch(() => undefined);
     };
@@ -123,7 +130,7 @@ export function PluginWebAppPage(props: {
       window.removeEventListener("resize", schedule);
       if (frame !== null) cancelAnimationFrame(frame);
     };
-  }, [props.pluginId, props.webAppId, props.workspaceId, ready]);
+  }, [props.pluginId, props.webAppId, props.workspaceId, ready, hiddenByOverlay]);
 
   return (
     <div
@@ -150,12 +157,12 @@ export function PluginWebAppPage(props: {
       ) : load.status === "error" ? (
         <div
           role="alert"
-          aria-label="Could not open plugin app"
+          aria-label="dohc could not open the plugin app"
           data-testid="plugin-web-app-error"
           className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
         >
           <AlertTriangle size={20} aria-hidden className="text-warning" />
-          <span className="text-sm text-ink">Could not open plugin app</span>
+          <span className="text-sm text-ink">dohc could not open the plugin app</span>
           <span className="max-w-sm text-xs text-muted">{load.message}</span>
           <span className="max-w-sm text-xs text-muted">
             Close this tab and try again.

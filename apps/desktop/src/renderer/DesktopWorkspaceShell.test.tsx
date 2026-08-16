@@ -10,7 +10,7 @@ import {
 } from "@testing-library/react";
 import { configure } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 
@@ -36,6 +36,7 @@ import type {
   PluginPanelOpenedEvent,
   ReadWorkspaceTextPayload,
   ReadEngineMomentResult,
+  SetPluginWebAppBoundsPayload,
   RefreshSharedViewResult,
   StartAgentRunResult,
   SwitchWorkspaceVersionResult,
@@ -86,6 +87,7 @@ import {
   OPEN_EDITORS_MIN_HEIGHT,
   momentDiffTabPath,
   pluginPanelTabPath,
+  pluginWebAppTabPath,
   versionCompareTabPath,
 } from "./workbench/workbenchState";
 import {
@@ -482,12 +484,37 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       },
     ),
     onPluginWebAppOpened: vi.fn(() => () => {}),
+    // The shell reads web app titles from the manifests the same way the
+    // settings page does.
+    listPlugins: vi.fn(async () => ({
+      ok: true as const,
+      plugins: [
+        {
+          id: "t3-code",
+          directoryName: "t3-code",
+          rootPath: "C:/ws/plugins/t3-code",
+          valid: true,
+          status: "ready" as const,
+          disabledReason: null,
+          runtimeStatus: "ready" as const,
+          sourceHash: null,
+          approvedHash: null,
+          installedBaselineHash: null,
+          webApps: [{ id: "app", title: "T3 Code" }],
+          diagnostics: [],
+          warnings: [],
+          error: null,
+        },
+      ],
+    })),
     startPluginWebApp: vi.fn(async () => ({
       status: "ok" as const,
       title: "T3 Code",
       origin: "http://127.0.0.1:49161",
     })),
-    setPluginWebAppBounds: vi.fn(async () => undefined),
+    setPluginWebAppBounds: vi.fn(
+      async (_payload: SetPluginWebAppBoundsPayload) => undefined,
+    ),
     stopPluginWebApp: vi.fn(async () => undefined),
     emitMenuCommand: (command: MenuCommandId) => menuCallback?.(command),
     onUpdateState: vi.fn(() => () => {}),
@@ -807,6 +834,110 @@ describe("plugin panel tabs", () => {
         panelId: "main",
       }),
     );
+  });
+});
+
+describe("plugin web app tabs", () => {
+  const path = pluginWebAppTabPath("t3-code", "app");
+  const GUEST_RECT = {
+    x: 10,
+    y: 20,
+    width: 640,
+    height: 480,
+    top: 20,
+    left: 10,
+    right: 650,
+    bottom: 500,
+    toJSON: () => ({}),
+  } as DOMRect;
+  let rectSpy: { mockRestore: () => void } | null = null;
+
+  beforeEach(() => {
+    // The file's module-level stub is removed by the global afterEach's
+    // unstubAllGlobals, so every test after the first must stub it again.
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+  });
+
+  afterEach(() => {
+    rectSpy?.mockRestore();
+    rectSpy = null;
+  });
+
+  function lastReportedVisibility(
+    bridge: ReturnType<typeof makeBridge>,
+  ): boolean | undefined {
+    const calls = bridge.setPluginWebAppBounds.mock.calls;
+    return calls.at(-1)?.[0]?.visible;
+  }
+
+  it("labels the tab with the title the plugin's manifest declares", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs([path], path)),
+    );
+    renderShell(bridge);
+
+    const tab = await screen.findByTestId(`tab-${path}`);
+    // MUTATION (label from the tab path): the tab reads "app", the id, and
+    // the name the user installed never appears.
+    await waitFor(() => expect(tab.textContent).toContain("T3 Code"));
+    await waitFor(() => expect(tab.title).toBe("t3-code — T3 Code"));
+  });
+
+  // A WebContentsView guest composites above the whole renderer. Nothing the
+  // shell paints can cover it, so an overlay that overlaps the editor area
+  // would take clicks meant for the dialog under the pointer.
+  it("hides the guest while the command palette is open", async () => {
+    rectSpy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockReturnValue(GUEST_RECT);
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs([path], path)),
+    );
+    renderShell(bridge);
+    await screen.findByTestId("plugin-web-app-frame");
+    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(true));
+
+    fireEvent(
+      window,
+      new KeyboardEvent("keydown", {
+        key: "K",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await screen.findByTestId("command-palette");
+
+    // MUTATION (drop the overlay signal): the guest keeps painting over the
+    // palette and keeps its clicks.
+    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(false));
+  });
+
+  it("hides the guest while the settings dialog is open, and restores it after", async () => {
+    rectSpy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockReturnValue(GUEST_RECT);
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs([path], path)),
+    );
+    renderShell(bridge);
+    await screen.findByTestId("plugin-web-app-frame");
+    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(true));
+
+    act(() => bridge.emitMenuCommand("settings"));
+    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(false));
+
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    await waitFor(() => expect(lastReportedVisibility(bridge)).toBe(true));
   });
 });
 
