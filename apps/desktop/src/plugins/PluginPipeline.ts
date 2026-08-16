@@ -430,6 +430,17 @@ export class PluginPipeline {
   >();
   /** Orders door writes against each build's snapshot; see runFullBuild. */
   private doorWriteSeq = 0;
+  /**
+   * The plugins whose first install is running right now, and the ones whose
+   * source changed while that install ran. A fresh install hashes the tree,
+   * then spends the whole dependency install and build on those bytes; a
+   * write landing in that window leaves the recorded approval describing a
+   * tree that is already gone. The queued refresh then holds for approval,
+   * which is right — nothing may auto-approve a hash nobody approved — but
+   * the user edited nothing, so the hold has to name what moved (#803).
+   */
+  private readonly freshInstallsInFlight = new Set<string>();
+  private readonly sourceChangedDuringInstall = new Set<string>();
   private discovery: InstalledPluginRecord[] = [];
   private discoveryTail: Promise<void> = Promise.resolve();
   private startPromise: Promise<void> | null = null;
@@ -1299,6 +1310,10 @@ export class PluginPipeline {
     pluginId: string,
     startRuntime: boolean,
   ): Promise<void> {
+    // Consumed first, before any early return: this is the refresh the racing
+    // write queued, and a mark left behind by an install that never recorded
+    // an approval would explain a later, unrelated hold (#803).
+    const racedInstall = this.sourceChangedDuringInstall.delete(pluginId);
     const candidate = this.validCandidate(pluginId);
     if (!candidate) return;
     const record = await this.localRecord(pluginId);
@@ -1320,7 +1335,12 @@ export class PluginPipeline {
     if (verified.kind === "changed") {
       const doorHash = await this.doorApprovedHash(pluginId, record.approvedHash);
       if (doorHash === null || verified.sourceHash !== doorHash) {
-        await this.holdForApproval(candidate, verified.sourceHash, priorDisabledReason);
+        await this.holdForApproval(
+          candidate,
+          verified.sourceHash,
+          priorDisabledReason,
+          racedInstall ? "changed-during-install" : "changed-after-install",
+        );
         return;
       }
       const disabled = priorDisabledReason === "user";
@@ -1413,6 +1433,7 @@ export class PluginPipeline {
       await this.removePluginData(candidate.id);
       this.statuses.delete(candidate.id);
       this.doorWrittenDeltas.delete(candidate.id);
+      this.sourceChangedDuringInstall.delete(candidate.id);
       this.uninstallConfirmations.delete(candidate.id);
       this.emit({ kind: "removed", pluginId: candidate.id });
     } catch (error) {
@@ -1477,6 +1498,7 @@ export class PluginPipeline {
     // delta above it landed after the snapshot and must survive for its own
     // queued refresh (#779 round 14 A1).
     const doorSeqAtSnapshot = this.doorWriteSeq;
+    if (input.freshInstall) this.freshInstallsInFlight.add(candidate.id);
     try {
       const snapshot = await this.snapshotOrThrow(validCandidate);
       unpublishedSource = snapshot;
@@ -1703,14 +1725,40 @@ export class PluginPipeline {
         });
       }
       return this.failure(candidate.id, detail);
+    } finally {
+      this.freshInstallsInFlight.delete(candidate.id);
     }
   }
 
+  /**
+   * Turns a plugin off until the user approves the source now on disk, and
+   * says which change did it. `cause` separates the two ways a tree can stop
+   * matching its approval: an edit after the install finished, or a write
+   * that raced the install itself. Both hold — the approval gate never bends
+   * — but only one of them is something the user did, so a hold with no
+   * message left a plugin that switched itself off seconds after Install
+   * with nothing on screen to explain it (#803).
+   */
   private async holdForApproval(
     candidate: InstalledPluginRecord & { manifest: DohcPluginManifest },
     sourceHash: string,
     priorDisabledReason?: PluginPipelinePluginStatus["disabledReason"],
+    cause: "changed-after-install" | "changed-during-install" =
+      "changed-after-install",
   ): Promise<PluginPipelineActionResult> {
+    const error = cause === "changed-during-install"
+      ? pipelineError(
+        "snapshot",
+        "source-changed-during-install",
+        `The source of "${candidate.id}" changed while dohc was installing ` +
+          "it. Approve the new source to install it.",
+      )
+      : pipelineError(
+        "snapshot",
+        "source-changed-after-install",
+        `The source of "${candidate.id}" changed after dohc installed it. ` +
+          "Approve the new source to install it.",
+      );
     try {
       await this.operations.mutateRecord(
         this.options.stateDir,
@@ -1727,12 +1775,12 @@ export class PluginPipeline {
         sourceHash,
         approvedHash: record?.approvedHash ?? null,
         installedBaselineHash: record?.installedBaselineHash ?? null,
-        error: null,
+        error,
       }));
-    } catch (error) {
+    } catch (holdError) {
       return this.failure(
         candidate.id,
-        pipelineError("state", "approval-hold-failed", errorMessage(error)),
+        pipelineError("state", "approval-hold-failed", errorMessage(holdError)),
       );
     }
   }
@@ -2280,6 +2328,12 @@ export class PluginPipeline {
 
   private enqueueSourceRefresh(pluginId: string, run: () => Promise<void>): void {
     if (this.disposed) return;
+    // Marked before the dedup: the refresh already queued is the one that
+    // will read this change, so dropping this entry must not drop the fact
+    // that the change arrived mid-install.
+    if (this.freshInstallsInFlight.has(pluginId)) {
+      this.sourceChangedDuringInstall.add(pluginId);
+    }
     const queue = this.queueFor(pluginId);
     if (queue.sourceRefreshQueued) return;
     queue.sourceRefreshQueued = true;

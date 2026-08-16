@@ -1346,6 +1346,126 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
+  it("names the source change that raced a fresh install, and tells that hold apart from a plain post-install edit (#803)", async () => {
+    const fixture = await createPluginWorkspace();
+    const installGate = deferred();
+    let installCalls = 0;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: async (input) => {
+          installCalls += 1;
+          // The first install is the fresh one. Holding it open stands in
+          // for the real cold run: the dependency install takes minutes,
+          // and the tree it was told to trust was hashed before it started.
+          if (installCalls === 1) await installGate.promise;
+          return installPluginDependencies({ ...input, forkProcess: nodeForkProcess });
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installPromise = pipeline.install("example-plugin");
+      await waitFor(
+        () => installCalls === 1,
+        "install() never reached the gated dependency install.",
+      );
+
+      // The write that races: it lands after the install's snapshot hashed
+      // the tree and before the install finishes, so the hash the install
+      // is about to record already describes bytes that are gone.
+      await writeFile(fixture.entryPath, [
+        'export const marker = "raced-the-install";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      await pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin/src/index.ts",
+        operation: "update",
+      }]);
+
+      installGate.resolve();
+      const installed = await installPromise;
+      expect(installed.ok).toBe(true);
+
+      await waitFor(
+        () => pipeline.list()[0]?.status === "disabled-pending-approval",
+        `The raced change was not held for approval; status is `
+          + `"${pipeline.list()[0]?.status}".`,
+      );
+      // The hold itself is the invariant and stays: nothing auto-approved
+      // the raced bytes.
+      expect(pipeline.list()[0]).toMatchObject({
+        status: "disabled-pending-approval",
+        disabledReason: "approval",
+      });
+      expect(await readFile(
+        liveBundlePath(fixture, "example-plugin"),
+        "utf8",
+      )).not.toContain("raced-the-install");
+      // What #803 adds: the plugin no longer switches itself off in silence.
+      expect(pipeline.list()[0]?.error).toMatchObject({
+        stage: "snapshot",
+        code: "source-changed-during-install",
+      });
+      expect(pipeline.list()[0]?.error?.message)
+        .toContain("changed while dohc was installing it");
+
+      // The named recovery: approving installs the NEW bytes through the
+      // normal flow, which is the only thing that ever approves them.
+      const approved = await pipeline.approve("example-plugin");
+      expect(approved.ok).toBe(true);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "The raced bytes never installed after approval.",
+      );
+      expect(pipeline.list()[0]?.error).toBe(null);
+      expect(await readFile(
+        liveBundlePath(fixture, "example-plugin"),
+        "utf8",
+      )).toContain("raced-the-install");
+
+      // The contrast that keeps the name honest: with no install in flight,
+      // the same hold reports the edit the user actually made.
+      await writeFile(fixture.entryPath, [
+        'export const marker = "edited-later";',
+        "export default { activate() {} };",
+        "",
+      ].join("\n"));
+      await pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin/src/index.ts",
+        operation: "update",
+      }]);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "disabled-pending-approval",
+        "The later edit was not held for approval.",
+      );
+      expect(pipeline.list()[0]?.error).toMatchObject({
+        stage: "snapshot",
+        code: "source-changed-after-install",
+      });
+      expect(pipeline.list()[0]?.error?.message)
+        .toContain("changed after dohc installed it");
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
   it("leaves a failed uninstall in an actionable, retryable state instead of a stuck spinner (#779 round 4 finding 2)", async () => {
     const fixture = await createPluginWorkspace();
     let removeCalls = 0;
