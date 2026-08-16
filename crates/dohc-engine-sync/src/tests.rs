@@ -23610,13 +23610,17 @@ fn the_submit_bound_matches_the_relay_contract() {
 /// The submit bound and the replication page size are different numbers for
 /// different things. Collapsing them re-couples one user act to a paging size,
 /// which is how the bound came to sit inside measured healthy work.
+/// Checked when the crate COMPILES, because the relationship between the two
+/// is a fact about the constants rather than about any run.
+const _: () = assert!(
+    crate::MAX_SHARE_PROPOSAL_OPS > crate::MAX_PUSH_OPS_PER_BATCH,
+    "MUTATION: a submit bounded by the page size rejects a week of ordinary work",
+);
+
 #[test]
 fn the_submit_bound_is_not_the_replication_page_size() {
     assert_eq!(crate::MAX_PUSH_OPS_PER_BATCH, 500);
-    assert!(
-        crate::MAX_SHARE_PROPOSAL_OPS > crate::MAX_PUSH_OPS_PER_BATCH,
-        "MUTATION: a submit bounded by the page size rejects a week of ordinary work",
-    );
+    assert_eq!(crate::MAX_SHARE_PROPOSAL_OPS, 2_500);
 }
 
 /// The bound counts FILES, and it stops at the op that would admit one file
