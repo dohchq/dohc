@@ -67,8 +67,8 @@ the person who opened it, not for every network the machine is on.
 
 ## What it cannot do yet
 
-- **Push refresh.** dohc serves `files.watch` to a plugin's own process, and
-  the list lives in a panel, which cannot subscribe. The list reads the
+- **Push refresh.** dohc serves `files.watch` to a plugin's own process only,
+  and this list lives in a panel, which cannot subscribe. The list reads the
   workspace when it opens and when you ask it to.
 - **Open a preview in a browser.** dohc has no external-open route a plugin
   can reach.

@@ -62,6 +62,25 @@ describe("assertLoopbackOnlyCommand", () => {
     );
   });
 
+  it("refuses a host flag whatever case it is written in, in either spelling", () => {
+    // The two spellings once disagreed: the inline form matched without case
+    // and the separated form did not, so --HOST 0.0.0.0 ran.
+    for (const args of [
+      ["dev", "--HOST", "0.0.0.0"],
+      ["dev", "--HOST=0.0.0.0"],
+      ["dev", "--Host", "0.0.0.0"],
+      ["dev", "--HostName", "0.0.0.0"],
+      ["dev", "--HOSTNAME=0.0.0.0"],
+    ]) {
+      expect(() => assertLoopbackOnlyCommand("pnpm", args), args.join(" ")).toThrow(/loopback/);
+    }
+  });
+
+  it("reads a short host flag by its own case, because -h is help", () => {
+    expect(() => assertLoopbackOnlyCommand("pnpm", ["dev", "-H", "0.0.0.0"])).toThrow(/loopback/);
+    expect(() => assertLoopbackOnlyCommand("pnpm", ["dev", "-h"])).not.toThrow();
+  });
+
   it("names the command it refused, so the message says what to change", () => {
     expect(() => assertLoopbackOnlyCommand("pnpm", ["dev", "--host", "0.0.0.0"])).toThrow(
       /pnpm dev --host 0\.0\.0\.0/,
@@ -71,13 +90,15 @@ describe("assertLoopbackOnlyCommand", () => {
 
 describe("isLoopbackHostname", () => {
   it("knows every spelling of this machine", () => {
-    for (const host of ["localhost", "LOCALHOST", "127.0.0.1", "127.1.2.3", "::1", "[::1]", "::ffff:127.0.0.1", "::ffff:7f00:1"]) {
+    for (const host of ["localhost", "LOCALHOST", "127.0.0.1", "127.1.2.3", "::1", "[::1]", "::ffff:127.0.0.1"]) {
       expect(isLoopbackHostname(host), host).toBe(true);
     }
   });
 
   it("knows what is not this machine", () => {
-    for (const host of ["0.0.0.0", "10.0.0.4", "example.com", "128.0.0.1", "::2"]) {
+    // The hextet spelling of a mapped address (::ffff:7f00:1) is refused too.
+    // No dev server takes it, and refusing is the safe direction.
+    for (const host of ["0.0.0.0", "10.0.0.4", "example.com", "128.0.0.1", "::2", "::ffff:7f00:1"]) {
       expect(isLoopbackHostname(host), host).toBe(false);
     }
   });

@@ -254,14 +254,29 @@ describe("PluginChildProcessBroker", () => {
       { workspaceRoot: "workspace" },
       { workspaceRoot: {} },
       { workspaceRoot: true, extra: 1 },
-      { workspaceRoot: true, path: 1 },
-      { workspaceRoot: true, path: "" },
-      { workspaceRoot: true, path: "sites\0" },
       { root: "workspace" },
     ]) {
       await expect(
         spawnChild(fixture, brokerContext, { modulePath: "server.mjs", cwd }),
       ).rejects.toThrow("cwd object form must be");
+    }
+    expect(fixture.forks).toHaveLength(0);
+  });
+
+  it("reports a bad workspace cwd path as a bad path, not as the wrong form", async () => {
+    const fixture = await createFixture();
+    const brokerContext = context("plugin-a", "spawn-a");
+
+    // MUTATION (fold the path check back into the shape guard): the request
+    // form was right and only the path was wrong, so an author's agent reading
+    // "object form must be" would rewrite the wrong half.
+    for (const path of [1, "", "sites\0", "/absolute"]) {
+      await expect(
+        spawnChild(fixture, brokerContext, {
+          modulePath: "server.mjs",
+          cwd: { workspaceRoot: true, path },
+        }),
+      ).rejects.toThrow("cwd path must be a non-empty path relative to the workspace root");
     }
     expect(fixture.forks).toHaveLength(0);
   });
@@ -1383,12 +1398,17 @@ describe("PluginChildProcessBroker command children", () => {
       { workspaceRoot: 1 },
       { workspaceRoot: "workspace" },
       { workspaceRoot: true, extra: 1 },
-      { workspaceRoot: true, path: 1 },
     ]) {
       await expect(
         spawnCommandChild(fixture, brokerContext, { command: "tool", cwd }),
       ).rejects.toThrow("cwd object form must be");
     }
+    await expect(
+      spawnCommandChild(fixture, brokerContext, {
+        command: "tool",
+        cwd: { workspaceRoot: true, path: 1 },
+      }),
+    ).rejects.toThrow("cwd path must be a non-empty path relative to the workspace root");
     expect(fixture.commands).toEqual([]);
 
     await spawnCommandChild(fixture, brokerContext, {

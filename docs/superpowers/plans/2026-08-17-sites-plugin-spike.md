@@ -396,12 +396,14 @@ panel is static files with no bundler. Preview-mode memory stays in
 `stateRoot` where §4 put it, but the key carries the mode the user asked for
 (`"<mode>:<root>"`), because the panel cannot ask the process anything else.
 
-**P2 cannot serve the sites list.** `files.watch` is refused on the panel
-request path — a subscription needs a channel to push events on, and only a
-plugin's own process has one (`pluginSdkHost.ts:214-219`). The list is a
-panel, so the push refresh row 14 promised is out of reach, and P2's own
-comment naming the sites conversion as its consumer is now wrong. The list
-reads the workspace when it opens and when the user asks. **The next
+**P2 cannot serve the sites list.** `files.watch` works from a plugin's own
+process — `main.ts:994-1011` supplies `subscribeFileWatch` on that route — and
+is refused on the panel path, because a subscription needs a channel to push
+events on and only the process has one (`pluginSdkHost.ts:214-219`). The list
+is a panel, so the push refresh row 14 promised is out of reach, and P2's own
+comment naming the sites conversion as its consumer is now wrong. P2 is
+process-only with no shipped consumer, not dead. The list reads the workspace
+when it opens and when the user asks. **The next
 primitive this argues for is panel subscriptions**: the renderer already
 pushes one message kind to a panel (the theme), so the missing part is a
 guarded relay from the workspace event feed to the panel that asked, with the
@@ -431,11 +433,16 @@ a log nobody reads. A mode that will refuse is still offered, and says why
 when it does.
 
 **A defect this turned up, in P6 rather than in sites.** The activity bar does
-not pick up a plugin installed in the same session. Installing emits one
-status event — `snapshotting`, before approval — and no more, so the rail's
-catalog copy never learns the plugin became approved; the Plugins list looks
-right only because it merges the install call's own response. A reload fixes
-it. `plugin-panel.spec.ts` never caught this because it starts a view panel
+not pick up a plugin installed in the same session; a reload fixes it, and the
+Plugins list looks right throughout only because it merges the install call's
+own response. The symptom is confirmed. **The cause is not isolated.** The
+pipeline does emit the final status that records the approval
+(`PluginPipeline.ts:1750-1759`, through `setStatus` → `emit`), and the rail's
+catalog is subscribed, so the event is lost between them. Two candidates, both
+silent: the window filter that only sends to a sender whose active workspace
+matches (`main.ts:941`), and the preload's schema check, which drops a payload
+that fails to parse without a word (`preload.ts:413-419`). Filed as its own
+issue. `plugin-panel.spec.ts` never caught this because it starts a view panel
 through the bridge and never looks at the rail.
 
 ## The substrate-vs-app line for the other candidates

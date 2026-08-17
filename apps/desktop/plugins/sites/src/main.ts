@@ -2,12 +2,14 @@ import type {
   PluginActivateContext,
   PluginChildProcessCommandHandle,
   PluginHandler,
+  PluginSettingValue,
   PluginWebAppStart,
 } from "@dohc/sdk/node";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   availableModes,
+  BUILD_OUTPUT_DIRS,
   discoverSites,
   heuristicMode,
   parsePreviewInstanceKey,
@@ -24,7 +26,7 @@ import {
   splitCommandLine,
   type SiteCommand,
 } from "./command.js";
-import { startSiteServer, type SiteServer } from "./staticServer.js";
+import { PREVIEW_LOG_LINES, startSiteServer, type SiteServer } from "./staticServer.js";
 
 /** The web app every preview opens under. */
 const PREVIEW_WEB_APP_ID = "preview";
@@ -38,29 +40,22 @@ const PREVIEW_WEB_APP_ID = "preview";
  */
 const BUILD_TIMEOUT_MS = 120_000;
 
-/** Directories a build writes its site into, when nothing names one. */
-const DEFAULT_BUILD_OUTPUTS = ["dist", "build", "out"];
-
 /** Where this plugin remembers the mode each site last opened in. */
 const PREVIEW_MODE_FILE = "preview-modes.json";
-
-/** Log lines one preview keeps for its status page. */
-const MAX_LOG_LINES = 500;
 
 interface Preview {
   stop(): Promise<void>;
 }
 
 let context: PluginActivateContext | null = null;
+
+/** One preview per open tab, keyed by the instance the tab was opened for.
+ * This plugin serves one web app, so the instance names the preview. */
 const previews = new Map<string, Preview>();
 
 function requireContext(): PluginActivateContext {
   if (!context) throw new Error("The sites plugin is not running.");
   return context;
-}
-
-function previewKey(webAppId: string, instanceKey: string): string {
-  return `${webAppId}\0${instanceKey}`;
 }
 
 function siteAbsolutePath(workspaceRoot: string, root: string, child = ""): string {
@@ -69,7 +64,7 @@ function siteAbsolutePath(workspaceRoot: string, root: string, child = ""): stri
 }
 
 /** Splits a site-relative page into the directory to serve and the page in it. */
-export function servedEntry(entry: string): { directory: string; page: string } {
+function servedEntry(entry: string): { directory: string; page: string } {
   const slash = entry.lastIndexOf("/");
   return slash === -1
     ? { directory: "", page: entry }
@@ -90,7 +85,8 @@ async function loadSite(
   const entries = await ctx.client.files.list(root === "" ? "." : root, {
     recursive: true,
   });
-  /** @type The site's own config decides what it is; deeper ones are other sites. */
+  // Only the site's own config decides what it is; a deeper one is another
+  // site, so only signal files directly in this root are read.
   const sources: SiteSource[] = [];
   for (const entry of entries) {
     const slash = entry.path.lastIndexOf("/");
@@ -134,11 +130,7 @@ export function resolveMode(
   }
   if (remembered && modes.includes(remembered)) return remembered;
   if (configured !== "auto" && modes.includes(configured)) return configured;
-  const heuristic = heuristicMode(site, modes);
-  if (!heuristic) {
-    throw new Error(`"${site.title}" has nothing to preview.`);
-  }
-  return heuristic;
+  return heuristicMode(site, modes) ?? modes[0]!;
 }
 
 async function readRememberedModes(
@@ -161,11 +153,11 @@ async function readRememberedModes(
 
 async function rememberMode(
   ctx: PluginActivateContext,
+  modes: Record<string, RunnableMode>,
   root: string,
   mode: RunnableMode,
 ): Promise<void> {
   try {
-    const modes = await readRememberedModes(ctx);
     if (modes[root] === mode) return;
     modes[root] = mode;
     await mkdir(ctx.stateRoot, { recursive: true });
@@ -205,7 +197,7 @@ function pushLines(log: string[], text: string): void {
   for (const line of text.split(/\r?\n/)) {
     if (line.length > 0) log.push(line);
   }
-  if (log.length > MAX_LOG_LINES) log.splice(0, log.length - MAX_LOG_LINES);
+  if (log.length > PREVIEW_LOG_LINES) log.splice(0, log.length - PREVIEW_LOG_LINES);
 }
 
 async function startStaticPreview(
@@ -266,7 +258,8 @@ async function startBuildPreview(
       const exit = await child.wait();
       if (stopped) return;
       if (exit.code !== 0) {
-        server.setFailed({
+        server.setStatus({
+          failed: true,
           heading: `${site.title} did not build`,
           detail:
             exit.reason === "terminated"
@@ -286,7 +279,8 @@ async function startBuildPreview(
   void run().catch((error: unknown) => {
     if (stopped) return;
     pushLines(log, error instanceof Error ? error.message : String(error));
-    server.setFailed({
+    server.setStatus({
+      failed: true,
       heading: `${site.title} did not build`,
       detail: "The build could not run.",
       log,
@@ -315,7 +309,7 @@ async function serveBuildOutput(
   server: SiteServer,
   log: string[],
 ): Promise<void> {
-  const candidates = [...site.buildOutputs, ...DEFAULT_BUILD_OUTPUTS];
+  const candidates = [...site.buildOutputs, ...BUILD_OUTPUT_DIRS];
   for (const candidate of candidates) {
     try {
       await server.serveDirectory({
@@ -327,7 +321,8 @@ async function serveBuildOutput(
       // Try the next place a build writes its site into.
     }
   }
-  server.setFailed({
+  server.setStatus({
+    failed: true,
     heading: `${site.title} built, but has no page`,
     detail: `The build wrote no index.html into ${candidates.join(", ")}. Name the directory in this site's dohc.json under build.output.`,
     log,
@@ -446,10 +441,11 @@ const handler: PluginHandler = {
     const site = await loadSite(ctx, root);
     const settings = ctx.settings.get();
     const configured = settings.defaultPreviewMode;
+    const remembered = await readRememberedModes(ctx);
     const resolved = resolveMode(
       site,
       mode,
-      (await readRememberedModes(ctx))[root] ?? null,
+      remembered[root] ?? null,
       configured === "static" || configured === "dev" || configured === "build"
         ? configured
         : "auto",
@@ -458,8 +454,7 @@ const handler: PluginHandler = {
     // A second start for the same tab replaces the first: dohc calls this
     // again when a guest never arrived, and two servers for one tab would
     // leave the older one running with nothing showing it.
-    const key = previewKey(webAppId, instanceKey);
-    await stopPreview(key);
+    await stopPreview(instanceKey);
 
     const readyTimeoutMs = devReadyTimeoutMs(settings.devServerTimeoutSeconds);
     const started =
@@ -469,14 +464,14 @@ const handler: PluginHandler = {
           ? await startBuildPreview(ctx, site)
           : await startDevPreview(ctx, site, readyTimeoutMs);
 
-    previews.set(key, started.preview);
-    await rememberMode(ctx, root, resolved);
+    previews.set(instanceKey, started.preview);
+    await rememberMode(ctx, remembered, root, resolved);
     return { url: started.url, title: `${site.title} (${resolved})` };
   },
 
-  async stopWebApp(webAppId, instanceKey) {
+  async stopWebApp(_webAppId, instanceKey) {
     if (instanceKey === null) return;
-    await stopPreview(previewKey(webAppId, instanceKey));
+    await stopPreview(instanceKey);
   },
 
   async deactivate() {
@@ -486,9 +481,15 @@ const handler: PluginHandler = {
   },
 };
 
-/** Seconds the user set, held to what a dev server plausibly takes. */
-export function devReadyTimeoutMs(value: unknown): number {
-  const seconds = typeof value === "number" && Number.isFinite(value) ? value : 15;
+/**
+ * Seconds the user set, held to what a dev server plausibly takes.
+ *
+ * The host resolves a declared setting to its declared type before a plugin
+ * sees it, so the `typeof` is narrowing rather than validation. The clamp is
+ * not: the number is the user's own.
+ */
+function devReadyTimeoutMs(value: PluginSettingValue): number {
+  const seconds = typeof value === "number" ? value : 15;
   return Math.min(Math.max(Math.round(seconds), 1), 120) * 1_000;
 }
 

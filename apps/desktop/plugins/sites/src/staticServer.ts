@@ -33,8 +33,9 @@ const READ_NO_FOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 /** How often a waiting page asks whether the site is ready, in seconds. */
 const STATUS_REFRESH_SECONDS = 2;
 
-/** How many log lines a waiting page shows. */
-const STATUS_LOG_LINES = 200;
+/** How many log lines a preview keeps, and shows. One limit, so the page
+ * cannot promise more history than the preview kept. */
+export const PREVIEW_LOG_LINES = 200;
 
 interface ServedDirectory {
   root: string;
@@ -60,10 +61,18 @@ interface ServedStatus {
 export interface SiteServer {
   /** The origin this preview is served on, with a trailing slash. */
   url: string;
-  /** Reports what the preview is waiting for, until a directory is served. */
-  setStatus(status: { heading: string; detail: string; log?: readonly string[] }): void;
-  /** Reports that the preview will not arrive. */
-  setFailed(status: { heading: string; detail: string; log?: readonly string[] }): void;
+  /**
+   * Reports what the preview is doing, until a directory is served.
+   *
+   * `failed: true` says it will not arrive: the page stops asking again, and
+   * a directory served earlier is dropped.
+   */
+  setStatus(status: {
+    heading: string;
+    detail: string;
+    log?: readonly string[];
+    failed?: boolean;
+  }): void;
   /**
    * Serves a directory from now on. Throws, and keeps serving what it served
    * before, if the directory is not one this workspace may publish.
@@ -91,7 +100,7 @@ function escapeHtml(value: string): string {
 }
 
 function statusPage(status: ServedStatus): string {
-  const log = status.log.slice(-STATUS_LOG_LINES).map(escapeHtml).join("\n");
+  const log = status.log.slice(-PREVIEW_LOG_LINES).map(escapeHtml).join("\n");
   // A failed preview stops asking. One that is still working reloads, and
   // lands on the site itself as soon as the server has one to serve.
   const refresh = status.failed
@@ -218,11 +227,8 @@ export async function startSiteServer(input: {
   return {
     url: `${origin}/`,
     setStatus: (next) => {
-      status = { ...next, log: next.log ?? [], failed: false };
-    },
-    setFailed: (next) => {
-      status = { ...next, log: next.log ?? [], failed: true };
-      served = null;
+      status = { ...next, log: next.log ?? [], failed: next.failed === true };
+      if (status.failed) served = null;
     },
     async serveDirectory(directory) {
       const root = await realpath(directory.rootPath);

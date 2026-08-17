@@ -188,34 +188,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-// `{ workspaceRoot: true }`, optionally naming one directory inside it — an
-// extra key or another value is a malformed request, not a fallback to
-// plugin-relative resolution.
-function isWorkspaceCwd(value: unknown): value is WorkspaceCwd {
+// `{ workspaceRoot: true }`, optionally naming one directory inside it. Shape
+// only: whether a `path` is a usable relative path is decided by the same
+// check a plugin-relative cwd gets, so a bad path is reported as a bad path
+// rather than as the wrong request form.
+function isWorkspaceCwd(value: unknown): value is { workspaceRoot: true; path?: unknown } {
   if (!isRecord(value) || value.workspaceRoot !== true) return false;
   const keys = Object.keys(value);
-  if (keys.length === 1) return true;
-  return (
-    keys.length === 2 &&
-    "path" in value &&
-    (value.path === undefined ||
-      (typeof value.path === "string" &&
-        value.path.length > 0 &&
-        !value.path.includes("\0") &&
-        !isAbsolute(value.path)))
-  );
+  return keys.length === 1 || (keys.length === 2 && "path" in value);
 }
 
-function assertRelativePluginPath(value: unknown, label: string): string {
+function assertRelativePath(value: unknown, label: string, root: string): string {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
     value.includes("\0") ||
     isAbsolute(value)
   ) {
-    throw new Error(
-      `${label} must be a non-empty path relative to the plugin's built directory.`,
-    );
+    throw new Error(`${label} must be a non-empty path relative to the ${root}.`);
   }
   return value;
 }
@@ -225,13 +215,19 @@ function parseSpawnCwd(
   method: string,
 ): string | WorkspaceCwd | undefined {
   if (value === undefined) return undefined;
-  if (isWorkspaceCwd(value)) return value;
+  if (isWorkspaceCwd(value)) {
+    if (value.path === undefined) return { workspaceRoot: true };
+    return {
+      workspaceRoot: true,
+      path: assertRelativePath(value.path, `${method} cwd path`, "workspace root"),
+    };
+  }
   if (isRecord(value)) {
     throw new Error(
       `${method} cwd object form must be { workspaceRoot: true } for the workspace root, or { workspaceRoot: true, path } for a relative directory inside it.`,
     );
   }
-  return assertRelativePluginPath(value, `${method} cwd`);
+  return assertRelativePath(value, `${method} cwd`, "plugin's built directory");
 }
 
 /**
@@ -286,7 +282,11 @@ function parseSpawnRequest(value: unknown): SpawnRequest {
     throw new Error(`${method} input must be an object.`);
   }
   return {
-    modulePath: assertRelativePluginPath(value.modulePath, `${method} modulePath`),
+    modulePath: assertRelativePath(
+      value.modulePath,
+      `${method} modulePath`,
+      "plugin's built directory",
+    ),
     ...parseCommonSpawnFields(value, method),
   };
 }

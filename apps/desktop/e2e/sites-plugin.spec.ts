@@ -68,12 +68,11 @@ test("the sites plugin lists a workspace's sites and serves one in its own tab",
     });
 
     // KNOWN DEFECT, not this plugin's: the activity bar does not pick up a
-    // plugin installed in this session until the window reloads. Installing
-    // emits one status event ("snapshotting", before approval) and no more,
-    // so the rail's catalog copy never learns the plugin became approved —
-    // the Plugins list only looks right because it merges the install call's
-    // own response. Reported with the sites conversion; the reload stands in
-    // for the refresh that should happen on its own.
+    // plugin installed in this session until the window reloads. The pipeline
+    // does emit the final status carrying the approval, so something between
+    // it and the rail's catalog drops it; the cause is not isolated. Filed
+    // separately. The reload stands in for the refresh that should happen on
+    // its own.
     await page.reload();
     await page.getByTestId("workspace-shell").waitFor();
 

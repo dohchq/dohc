@@ -84,7 +84,7 @@ describe("the site server", () => {
   it("stops asking once the preview has failed", async () => {
     const { workspaceRoot } = await workspaceWithSite();
     const server = await start(workspaceRoot);
-    server.setFailed({ heading: "Marketing did not build", detail: "Exit code 2.", log: ["boom"] });
+    server.setStatus({ failed: true, heading: "Marketing did not build", detail: "Exit code 2.", log: ["boom"] });
 
     const response = await get(server, "/");
     expect(response.status).toBe(503);
@@ -97,7 +97,8 @@ describe("the site server", () => {
   it("escapes log text into the page rather than letting it become markup", async () => {
     const { workspaceRoot } = await workspaceWithSite();
     const server = await start(workspaceRoot);
-    server.setFailed({
+    server.setStatus({
+      failed: true,
       heading: "Marketing did not build",
       detail: "Exit code 2.",
       log: ["<script>alert(1)</script>"],
@@ -149,6 +150,26 @@ describe("the site server", () => {
     // other traversal spelling is already flattened by the time it arrives.
     expect((await rawGet(server, "/..%2foutside.txt")).status).toBe(400);
     expect((await rawGet(server, "/%00index.html")).status).toBe(400);
+  });
+
+  it("refuses a request that resolves out of the site through a link", async () => {
+    const { workspaceRoot, siteRoot } = await workspaceWithSite();
+    try {
+      await symlink(workspaceRoot, join(siteRoot, "escape"), "junction");
+    } catch {
+      // A machine that refuses to make links has nothing to test here.
+      return;
+    }
+    const server = await start(workspaceRoot);
+    await server.serveDirectory({ rootPath: siteRoot, entry: "index.html" });
+
+    // Nothing about "/escape/outside.txt" is spelled wrong: no traversal
+    // segment, no reserved name, and the file is really there. Only resolving
+    // it and comparing against the served directory refuses it, which makes
+    // this the one request that reaches that check.
+    const response = await rawGet(server, "/escape/outside.txt");
+    expect(response.status).toBe(403);
+    expect(response.body).not.toContain("not this site");
   });
 
   it("refuses a request naming a reserved workspace directory", async () => {

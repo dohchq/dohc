@@ -2,7 +2,22 @@
 
 export type PackageManager = "pnpm" | "npm" | "yarn" | "bun";
 
-const HOST_BIND_FLAGS = new Set(["--host", "--hostname", "-H"]);
+/**
+ * The flags that tell a dev server what to bind to.
+ *
+ * One list, read the same way for both spellings a flag has — `--host=x` and
+ * `--host x`. Reading them differently is how `--HOST 0.0.0.0` once got past
+ * the refusal that `--HOST=0.0.0.0` hit.
+ *
+ * A long flag matches without case, because nothing else is spelled that way.
+ * `-H` matches exactly, because `-h` is help.
+ */
+const LONG_HOST_BIND_FLAGS = ["--host", "--hostname"];
+const SHORT_HOST_BIND_FLAG = "-H";
+
+function isHostBindFlag(flag: string): boolean {
+  return flag === SHORT_HOST_BIND_FLAG || LONG_HOST_BIND_FLAGS.includes(flag.toLowerCase());
+}
 
 // Dev tools colorize the "Local: http://..." line whenever FORCE_COLOR reaches
 // them. Vite bolds the port — "http://127.0.0.1:\x1b[1m5173\x1b[22m/" — which
@@ -79,12 +94,15 @@ export function splitCommandLine(commandLine: string): SiteCommand {
 function explicitHostBind(args: readonly string[]): string | null {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
-    const inlineHost = /^(?:--host|--hostname|-H)=(.+)$/i.exec(arg)?.[1];
-    if (inlineHost !== undefined) return inlineHost;
-    if (HOST_BIND_FLAGS.has(arg)) {
-      const next = args[index + 1];
-      return next && !next.startsWith("-") ? next : "";
+    const separator = arg.indexOf("=");
+    if (!isHostBindFlag(separator === -1 ? arg : arg.slice(0, separator))) continue;
+    if (separator !== -1) {
+      const inlineHost = arg.slice(separator + 1);
+      if (inlineHost.length > 0) return inlineHost;
+      continue;
     }
+    const next = args[index + 1];
+    return next && !next.startsWith("-") ? next : "";
   }
   return null;
 }
@@ -120,20 +138,8 @@ export function isLoopbackHostname(hostname: string): boolean {
     normalized === "localhost" ||
     normalized === "::1" ||
     isIpv4Loopback(normalized) ||
-    (normalized.startsWith("::ffff:") &&
-      isIpv4MappedLoopback(normalized.slice("::ffff:".length)))
+    (normalized.startsWith("::ffff:") && isIpv4Loopback(normalized.slice("::ffff:".length)))
   );
-}
-
-function isIpv4MappedLoopback(suffix: string): boolean {
-  if (isIpv4Loopback(suffix)) return true;
-  const hextets = suffix.split(":");
-  if (hextets.length !== 2 || !hextets.every((part) => /^[0-9a-f]{1,4}$/i.test(part))) {
-    return false;
-  }
-  const high = Number.parseInt(hextets[0]!, 16);
-  const low = Number.parseInt(hextets[1]!, 16);
-  return isIpv4Loopback([high >> 8, high & 0xff, low >> 8, low & 0xff].join("."));
 }
 
 function isIpv4Loopback(hostname: string): boolean {

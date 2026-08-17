@@ -22,7 +22,6 @@
  * @property {string} [dev]
  * @property {string} [start]
  * @property {string} [build]
- * @property {string} [preview]
  */
 
 /**
@@ -47,7 +46,6 @@
  *   the site's own package manager runs.
  * @property {boolean} hasPackage True when the site root holds a package.json.
  * @property {string[]} buildOutputs
- * @property {string} [configPath]
  * @property {boolean} shared True for a site inside a share mount.
  * @property {SiteDiagnostic[]} diagnostics
  */
@@ -58,8 +56,10 @@
  * @property {string} [body]
  */
 
-const PACKAGE_SCRIPT_KEYS = ["dev", "start", "build", "preview"];
-const BUILD_OUTPUT_DIRS = ["dist", "build", "out"];
+const PACKAGE_SCRIPT_KEYS = ["dev", "start", "build"];
+
+/** Where a build writes its site, when nothing names somewhere else. */
+export const BUILD_OUTPUT_DIRS = ["dist", "build", "out"];
 
 /** The mount every share a user accepted lands under. */
 const SHARE_MOUNT_PREFIX = "shared-with-me/";
@@ -167,7 +167,7 @@ function stripAliasSuffix(segment) {
 }
 
 /** @param {string} path @returns {string | null} */
-export function normalizeWorkspacePath(path) {
+function normalizeWorkspacePath(path) {
   if (path.includes("\0")) return null;
   const segments = path
     .replaceAll("\\", "/")
@@ -209,15 +209,10 @@ function parentPath(path) {
   return slash === -1 ? "" : path.slice(0, slash);
 }
 
-/** @param {string} path @returns {string} */
+/** The last segment of a path: its file name, or a directory's own name. */
 function fileName(path) {
   const slash = path.lastIndexOf("/");
   return slash === -1 ? path : path.slice(slash + 1);
-}
-
-/** @param {string} path @returns {string} */
-function pathBasename(path) {
-  return path === "" ? "" : (path.split("/").at(-1) ?? path);
 }
 
 /** @param {string} value @returns {string | undefined} */
@@ -362,7 +357,7 @@ function parseBuild(value, path, diagnostics) {
  * @param {string} json
  * @param {string} [path]
  */
-export function parseSiteConfig(json, path = "dohc.json") {
+function parseSiteConfig(json, path = "dohc.json") {
   /** @type {SiteDiagnostic[]} */
   const diagnostics = [];
   /** @type {unknown} */
@@ -525,7 +520,7 @@ function hasWebScript(pkg) {
  * @param {{ preview?: { mode?: RunnableMode; command?: string }; build?: { command?: string } } | undefined} config
  * @returns {SiteScripts}
  */
-export function inferSiteScripts(pkg, config) {
+function inferSiteScripts(pkg, config) {
   const scripts = packageScripts(pkg);
   /** @type {SiteScripts} */
   const inferred = {};
@@ -534,12 +529,14 @@ export function inferSiteScripts(pkg, config) {
     if (typeof value === "string") inferred[key] = value;
   }
 
-  if (config?.preview?.command) {
-    if (config.preview.mode === "build" || config.preview.mode === "static") {
-      inferred.preview = config.preview.command;
-    } else {
-      inferred.dev = config.preview.command;
-    }
+  // A preview command belongs to a mode that runs something. One declared for
+  // static or build has nothing to run it, so it is not a script.
+  if (
+    config?.preview?.command &&
+    config.preview.mode !== "build" &&
+    config.preview.mode !== "static"
+  ) {
+    inferred.dev = config.preview.command;
   }
   if (config?.build?.command) inferred.build = config.build.command;
   return inferred;
@@ -560,7 +557,7 @@ function packageManagerFromString(value) {
  * @param {Record<string, unknown>} [pkg]
  * @returns {SitePackageManager | undefined}
  */
-export function detectPackageManager(names, pkg) {
+function detectPackageManager(names, pkg) {
   if (names.has("pnpm-lock.yaml")) return "pnpm";
   if (names.has("package-lock.json") || names.has("npm-shrinkwrap.json")) return "npm";
   if (names.has("yarn.lock")) return "yarn";
@@ -651,7 +648,7 @@ export function discoverSites(sources) {
     if (name === "index.html") {
       // A build output is an artifact of its parent site, never a site of
       // its own.
-      if (BUILD_OUTPUT_DIRS.includes(pathBasename(root))) continue;
+      if (BUILD_OUTPUT_DIRS.includes(fileName(root))) continue;
       candidate.hasIndexHtml = true;
       candidate.entry = "index.html";
       continue;
@@ -659,7 +656,6 @@ export function discoverSites(sources) {
 
     if (name === "dohc.json") {
       candidate.hasDohcConfig = true;
-      candidate.dohcConfigPath = source.path;
       if (source.body !== undefined) {
         const parsed = parseSiteConfig(source.body, source.path);
         candidate.dohcConfig = parsed.config;
@@ -681,10 +677,7 @@ export function discoverSites(sources) {
       continue;
     }
 
-    if (isFrameworkConfig(name)) {
-      candidate.hasFrameworkConfig = true;
-      candidate.frameworkConfigPath ??= source.path;
-    }
+    if (isFrameworkConfig(name)) candidate.hasFrameworkConfig = true;
   }
 
   for (const path of normalizedPaths) {
@@ -730,7 +723,6 @@ function finalizeSite(candidate) {
   const buildOutputs = new Set(candidate.buildOutputs);
   if (config?.build?.output) buildOutputs.add(config.build.output);
 
-  const configPath = candidate.dohcConfigPath ?? candidate.frameworkConfigPath;
   const entry = config?.preview?.entry ?? candidate.entry;
   return {
     root: candidate.root,
@@ -747,7 +739,6 @@ function finalizeSite(candidate) {
     configuredScripts: inferSiteScripts(undefined, config),
     hasPackage: candidate.hasPackageJson === true,
     buildOutputs: [...buildOutputs].sort(),
-    ...(configPath ? { configPath } : {}),
     shared: isSharedRoot(candidate.root),
     diagnostics: [...candidate.diagnostics],
   };
@@ -767,7 +758,7 @@ function siteConfidence(candidate) {
  * @param {string} root
  * @returns {boolean}
  */
-export function isSharedRoot(root) {
+function isSharedRoot(root) {
   return `${root}/`.startsWith(SHARE_MOUNT_PREFIX);
 }
 
