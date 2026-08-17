@@ -39,6 +39,10 @@ export function PluginPanelPage(props: {
     webAppId: string,
     instanceKey: string,
   ) => void;
+  /** Where this panel is mounted, in the manifest's own words. "view" is the
+   * side panel, which draws its own header; main refuses a panel the plugin
+   * placed elsewhere. */
+  placement: "editor" | "view";
 }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
@@ -65,6 +69,7 @@ export function PluginPanelPage(props: {
         workspaceId: props.workspaceId,
         pluginId: props.pluginId,
         panelId: props.panelId,
+        placement: props.placement,
       })
       .then((result) => {
         if (
@@ -112,7 +117,7 @@ export function PluginPanelPage(props: {
         })
         .catch(() => undefined);
     };
-  }, [props.panelId, props.pluginId, props.workspaceId, sdkContext]);
+  }, [props.panelId, props.placement, props.pluginId, props.workspaceId, sdkContext]);
 
   useEffect(() => {
     async function handleSdkRequest(event: MessageEvent) {
@@ -241,15 +246,19 @@ export function PluginPanelPage(props: {
       data-testid="plugin-panel-page"
       className="flex min-h-0 flex-1 flex-col bg-bg"
     >
-      <header className="flex min-h-10 shrink-0 items-center gap-2 border-b border-line px-4 py-1.5">
-        <Plug size={14} aria-hidden className="text-subtle" />
-        <span className="truncate text-[13px] font-medium text-ink">
-          {panel?.title ?? props.panelId}
-        </span>
-        <span className="truncate font-mono text-[11px] text-subtle">
-          {props.pluginId}
-        </span>
-      </header>
+      {/* The side panel prints the view's name in its own header, so a panel
+          shown there would otherwise carry two title bands. */}
+      {props.placement === "view" ? null : (
+        <header className="flex min-h-10 shrink-0 items-center gap-2 border-b border-line px-4 py-1.5">
+          <Plug size={14} aria-hidden className="text-subtle" />
+          <span className="truncate text-[13px] font-medium text-ink">
+            {panel?.title ?? props.panelId}
+          </span>
+          <span className="truncate font-mono text-[11px] text-subtle">
+            {props.pluginId}
+          </span>
+        </header>
+      )}
 
       {load.status === "loading" ? (
         <div

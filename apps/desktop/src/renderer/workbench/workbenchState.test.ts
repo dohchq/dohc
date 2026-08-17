@@ -42,8 +42,11 @@ import {
   parseHistoryDiffTabPath,
   parseSiteTabPath,
   parsePluginPanelTabPath,
+  parsePluginViewId,
   parsePluginWebAppTabPath,
   parseUiState,
+  pluginViewId,
+  clearPluginView,
   pruneMissingRestoredTabs,
   serializeUiState,
   setSidebarWidth,
@@ -876,6 +879,76 @@ describe("views and panels", () => {
     expect(state.chatsVisible).toBe(false);
     expect(toggleChats(state).chatsVisible).toBe(true);
     expect(toggleChats(state).sidebarVisible).toBe(false);
+  });
+});
+
+describe("plugin-contributed views", () => {
+  it("round-trips a plugin view id through the rail selection", () => {
+    const viewId = pluginViewId("dohc-sites", "sites");
+    const next = setView(defaultWorkbenchState(), viewId);
+
+    expect(next.activeView).toBe(viewId);
+    expect(next.sidebarVisible).toBe(true);
+    expect(parsePluginViewId(viewId)).toEqual({
+      pluginId: "dohc-sites",
+      panelId: "sites",
+    });
+  });
+
+  it("re-selecting a plugin view toggles the panel like a built-in view", () => {
+    const viewId = pluginViewId("dohc-sites", "sites");
+    const shown = setView(defaultWorkbenchState(), viewId);
+    expect(setView(shown, viewId).sidebarVisible).toBe(false);
+  });
+
+  it("encodes ids whose characters would otherwise split the view id", () => {
+    const viewId = pluginViewId("scope/plugin", "a/b");
+    expect(parsePluginViewId(viewId)).toEqual({
+      pluginId: "scope/plugin",
+      panelId: "a/b",
+    });
+  });
+
+  it.each([
+    ["a built-in view", "explorer"],
+    ["a plugin panel tab path", "dohc://plugin-panel/p/main"],
+    ["a bare prefix", "plugin-view:"],
+    ["one segment", "plugin-view:only"],
+    ["three segments", "plugin-view:a/b/c"],
+    ["an empty segment", "plugin-view:a/"],
+  ])("does not read %s as a plugin view id", (_case, value) => {
+    expect(parsePluginViewId(value)).toBeNull();
+  });
+
+  it("keeps a plugin view selected across the persistence round-trip", () => {
+    const viewId = pluginViewId("dohc-sites", "sites");
+    const state = setView(defaultWorkbenchState(), viewId);
+
+    expect(serializeUiState(state).activeView).toBe(viewId);
+    expect(parseUiState(serializeUiState(state)).activeView).toBe(viewId);
+  });
+
+  it("falls back to the explorer for a stored view id that parses as neither", () => {
+    expect(
+      parseUiState({
+        ...serializeUiState(defaultWorkbenchState()),
+        activeView: "plugin-view:",
+      }).activeView,
+    ).toBe("explorer");
+  });
+
+  it("drops only a plugin view when its plugin is gone, keeping the panel state", () => {
+    const hidden = toggleSidebar(
+      setView(defaultWorkbenchState(), pluginViewId("dohc-sites", "sites")),
+    );
+    const cleared = clearPluginView(hidden);
+
+    expect(cleared.activeView).toBe("explorer");
+    // Uninstall must not also reopen a panel the user had collapsed.
+    expect(cleared.sidebarVisible).toBe(false);
+
+    const builtIn = setView(defaultWorkbenchState(), "history");
+    expect(clearPluginView(builtIn)).toBe(builtIn);
   });
 });
 

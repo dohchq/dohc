@@ -239,6 +239,14 @@ export async function loadPluginPanelRegistration(input: {
       `Plugin "${input.pluginId}" does not declare panel "${input.panelId}".`,
     );
   }
+  // One panel runs once per workspace, so a panel cannot be a tab and a view
+  // at the same time: opening this one as a tab would stop the rail's copy.
+  if (panel.placement !== "editor") {
+    throw new Error(
+      `Plugin "${input.pluginId}" panel "${input.panelId}" has placement ` +
+        `"${panel.placement}", so it opens in the activity bar, not as a tab.`,
+    );
+  }
   return { pluginRoot, manifest, panel };
 }
 

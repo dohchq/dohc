@@ -26,6 +26,8 @@ import {
   OPEN_EDITORS_MIN_HEIGHT,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
+  parsePluginViewId,
+  PLUGIN_VIEW_ID_PREFIX,
   VIEW_IDS,
 } from "../renderer/workbench/workbenchState";
 import {
@@ -2293,11 +2295,13 @@ export type StopSitePreviewPayload = z.infer<typeof StopSitePreviewPayload>;
 export const StopSitePreviewResult = z.void();
 export type StopSitePreviewResult = z.infer<typeof StopSitePreviewResult>;
 
-const PLUGIN_ID = z.string().min(1).max(214).refine(
+const MAX_PLUGIN_ID_CHARS = 214;
+const MAX_PLUGIN_PANEL_ID_CHARS = 120;
+const PLUGIN_ID = z.string().min(1).max(MAX_PLUGIN_ID_CHARS).refine(
   (value) => !value.includes("\0"),
   "plugin id must not contain NUL bytes",
 );
-const PLUGIN_PANEL_ID = z.string().min(1).max(120).refine(
+const PLUGIN_PANEL_ID = z.string().min(1).max(MAX_PLUGIN_PANEL_ID_CHARS).refine(
   (value) => !value.includes("\0"),
   "plugin panel id must not contain NUL bytes",
 );
@@ -2331,6 +2335,10 @@ export const StartPluginPanelPayload = z.object({
   workspaceId: WORKSPACE_ID,
   pluginId: PLUGIN_ID,
   panelId: PLUGIN_PANEL_ID,
+  /** Where the caller is mounting this panel. Main refuses a panel whose
+   * manifest places it elsewhere, so a tab restored from before an update
+   * cannot mount a panel the plugin has since moved to the view rail. */
+  placement: z.enum(["editor", "view"]),
 }).strict();
 export type StartPluginPanelPayload = z.infer<typeof StartPluginPanelPayload>;
 
@@ -2344,7 +2352,13 @@ export const StartPluginPanelResult = z.discriminatedUnion("status", [
 ]);
 export type StartPluginPanelResult = z.infer<typeof StartPluginPanelResult>;
 
-export const StopPluginPanelPayload = StartPluginPanelPayload;
+// Stopping names the running panel, which is keyed by workspace, plugin, and
+// panel alone. It carries no placement: a panel must stop wherever it runs.
+export const StopPluginPanelPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  panelId: PLUGIN_PANEL_ID,
+}).strict();
 export type StopPluginPanelPayload = z.infer<typeof StopPluginPanelPayload>;
 export const StopPluginPanelResult = z.void();
 export type StopPluginPanelResult = z.infer<typeof StopPluginPanelResult>;
@@ -2512,6 +2526,17 @@ export const PluginStatusRecord = z.object({
   /** What the plugin declares the user may set. Values travel separately —
    * they are per-workspace state, not part of the plugin's identity. */
   settings: z.array(PluginSettingDeclarationSchema).max(MAX_PLUGIN_SETTINGS),
+  /** The plugin's declared panels. `placement` says where each one shows:
+   * "editor" opens a tab, "view" gets a button in the activity bar. The
+   * entry path never crosses — the renderer asks for a panel by id. */
+  panels: z.array(
+    z.object({
+      id: PLUGIN_PANEL_ID,
+      title: z.string().min(1).max(120),
+      placement: z.enum(["editor", "view"]),
+      icon: z.string().min(1).max(1024).nullable(),
+    }).strict(),
+  ).max(100),
   webApps: z.array(
     z.object({
       id: z.string().min(1).max(120),
@@ -3847,9 +3872,33 @@ const WorkspaceEditorGroups = z.preprocess(
   z.array(WorkspaceEditorGroup).min(1),
 );
 
+// `plugin-view:<plugin>/<panel>`, both segments percent-encoded. The bound is
+// that worst case: each id character can encode to nine characters, because a
+// three-byte character spends "%XX" three times.
+const PLUGIN_VIEW_ID = z
+  .string()
+  .max(
+    PLUGIN_VIEW_ID_PREFIX.length +
+      MAX_PLUGIN_ID_CHARS * 9 +
+      "/".length +
+      MAX_PLUGIN_PANEL_ID_CHARS * 9,
+  )
+  .refine((value) => {
+    const parsed = parsePluginViewId(value);
+    // The ids it decodes to must be ids this contract would accept anywhere
+    // else — same length caps, same refusal of NUL.
+    return (
+      parsed !== null &&
+      PLUGIN_ID.safeParse(parsed.pluginId).success &&
+      PLUGIN_PANEL_ID.safeParse(parsed.panelId).success
+    );
+  });
+
 export const WorkspaceUiState = z.object({
   version: z.literal(2),
-  activeView: z.enum(VIEW_IDS).catch("explorer"),
+  // dohc's own views, or a view a plugin contributes. The catch keeps a
+  // stored id that names neither from failing the whole file.
+  activeView: z.union([z.enum(VIEW_IDS), PLUGIN_VIEW_ID]).catch("explorer"),
   sidebarVisible: z.boolean(),
   sidebarWidth: z.number().int().min(SIDEBAR_MIN_WIDTH).max(SIDEBAR_MAX_WIDTH),
   editorGroups: WorkspaceEditorGroups,

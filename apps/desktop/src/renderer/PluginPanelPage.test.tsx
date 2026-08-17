@@ -72,6 +72,7 @@ describe("PluginPanelPage", () => {
       <PluginPanelPage
         workspaceId="ws-plugins"
         pluginId="hello-plugin"
+        placement="editor"
         panelId="main"
       />,
     );
@@ -81,6 +82,7 @@ describe("PluginPanelPage", () => {
       workspaceId: "ws-plugins",
       pluginId: "hello-plugin",
       panelId: "main",
+      placement: "editor",
     });
     expect(frame.getAttribute("sandbox")).toBe(
       "allow-forms allow-same-origin allow-scripts",
@@ -96,6 +98,7 @@ describe("PluginPanelPage", () => {
       <PluginPanelPage
         workspaceId="ws-plugins"
         pluginId="hello-plugin"
+        placement="editor"
         panelId="main"
       />,
     );
@@ -113,6 +116,7 @@ describe("PluginPanelPage", () => {
       <PluginPanelPage
         workspaceId="ws-plugins"
         pluginId="hello-plugin"
+        placement="editor"
         panelId="main"
       />,
     );
@@ -161,6 +165,7 @@ describe("PluginPanelPage", () => {
       <PluginPanelPage
         workspaceId="ws-plugins"
         pluginId="hello-plugin"
+        placement="editor"
         panelId="main"
         onOpenPath={onOpenPath}
       />,
@@ -193,6 +198,7 @@ describe("PluginPanelPage", () => {
       <PluginPanelPage
         workspaceId="ws-plugins"
         pluginId="hello-plugin"
+        placement="editor"
         panelId="main"
         onOpenWebApp={onOpenWebApp}
       />,
@@ -231,6 +237,7 @@ describe("PluginPanelPage", () => {
       <PluginPanelPage
         workspaceId="ws-plugins"
         pluginId="hello-plugin"
+        placement="editor"
         panelId="main"
         onOpenPath={onOpenPath}
       />,
@@ -258,6 +265,7 @@ describe("PluginPanelPage", () => {
       <PluginPanelPage
         workspaceId="ws-plugins"
         pluginId="hello-plugin"
+        placement="editor"
         panelId="other"
         onOpenPath={onOpenPath}
       />,
@@ -277,6 +285,7 @@ describe("PluginPanelPage", () => {
       <PluginPanelPage
         workspaceId="ws-plugins"
         pluginId="hello-plugin"
+        placement="editor"
         panelId="main"
       />,
     );
@@ -303,6 +312,7 @@ describe("PluginPanelPage", () => {
       <PluginPanelPage
         workspaceId="ws-plugins"
         pluginId="hello-plugin"
+        placement="editor"
         panelId="other"
       />,
     );
@@ -327,6 +337,7 @@ describe("PluginPanelPage", () => {
       <PluginPanelPage
         workspaceId="ws-plugins"
         pluginId="hello-plugin"
+        placement="editor"
         panelId="main"
       />,
     );
@@ -338,6 +349,7 @@ describe("PluginPanelPage", () => {
       <PluginPanelPage
         workspaceId="ws-plugins"
         pluginId="hello-plugin"
+        placement="editor"
         panelId="other"
       />,
     );
@@ -364,6 +376,7 @@ describe("PluginPanelPage", () => {
       <PluginPanelPage
         workspaceId="ws-plugins"
         pluginId="hello-plugin"
+        placement="editor"
         panelId="main"
       />,
     );
@@ -384,6 +397,7 @@ describe("PluginPanelPage", () => {
       <PluginPanelPage
         workspaceId="ws-plugins"
         pluginId="hello-plugin"
+        placement="editor"
         panelId="main"
       />,
     );
@@ -403,6 +417,7 @@ describe("PluginPanelPage", () => {
       <PluginPanelPage
         workspaceId="ws-plugins"
         pluginId="hello-plugin"
+        placement="editor"
         panelId="main"
       />,
     );
@@ -423,6 +438,7 @@ describe("PluginPanelPage", () => {
       <PluginPanelPage
         workspaceId="ws-plugins"
         pluginId="hello-plugin"
+        placement="editor"
         panelId="remote"
       />,
     );
@@ -444,6 +460,7 @@ describe("PluginPanelPage", () => {
         <PluginPanelPage
           workspaceId="ws-plugins"
           pluginId="hello-plugin"
+          placement="editor"
           panelId="main"
         />,
       );

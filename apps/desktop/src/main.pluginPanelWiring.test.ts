@@ -74,17 +74,33 @@ describe("plugin panel main-process wiring", () => {
     );
   });
 
+  it("starts a panel only where its manifest places it, and serves a view with no tab (B1)", () => {
+    const start = handler("startPluginPanel");
+    const panelAt = start.indexOf("plugin.manifest.panels?.find(");
+    const placementAt = start.indexOf("panel.placement !== input.placement");
+    const lockAt = start.indexOf("startPluginPanelWithLock(");
+
+    // MUTATION (stale tab): without this check a tab restored from before an
+    // update mounts a panel the plugin has since moved to the view rail, and
+    // the two mounts stop each other over one panel key.
+    expect(panelAt).toBeGreaterThan(-1);
+    expect(placementAt).toBeGreaterThan(panelAt);
+    expect(placementAt).toBeLessThan(lockAt);
+
+    // A rail view opens no tab, so nothing fills the registration map for it.
+    // registeredPlugin must fall back to the pipeline's own discovery, or a
+    // view-only plugin's panel can never start. Behavior is pinned end to end
+    // by e2e/plugin-panel.spec.ts.
+    const lookup = functionSource("function registeredPlugin(");
+    expect(lookup).toContain("pluginRegistrations.get(workspaceId)?.get(pluginId)");
+    expect(lookup).toContain("pluginPipelines.get(workspaceId)?.pluginRegistration(pluginId)");
+  });
+
   it("authorizes panel SDK calls before routing them through the plugin host", () => {
     const invoke = handler("invokePluginPanelSdk");
     const authorizeAt = invoke.indexOf("pluginPanelSdkAuthorities.authorize({");
     const routeAt = invoke.indexOf("invokeWorkspacePluginSdk({");
-    const routerStart = mainSource.indexOf("function invokeWorkspacePluginSdk");
-    const routerEnd = mainSource.indexOf(
-      "\n}\n\nfunction registeredPlugin",
-      routerStart,
-    );
-    expect(routerEnd).toBeGreaterThan(-1);
-    const router = mainSource.slice(routerStart, routerEnd);
+    const router = functionSource("function invokeWorkspacePluginSdk");
 
     expect(authorizeAt).toBeGreaterThan(-1);
     expect(routeAt).toBeGreaterThan(authorizeAt);
@@ -94,13 +110,7 @@ describe("plugin panel main-process wiring", () => {
   });
 
   it("wires the production authored-text writer with this invocation's own signal and pipeline (CERT779L D1)", () => {
-    const routerStart = mainSource.indexOf("function invokeWorkspacePluginSdk");
-    const routerEnd = mainSource.indexOf(
-      "\n}\n\nfunction registeredPlugin",
-      routerStart,
-    );
-    expect(routerEnd).toBeGreaterThan(-1);
-    const router = mainSource.slice(routerStart, routerEnd);
+    const router = functionSource("function invokeWorkspacePluginSdk");
     const writerAt = router.indexOf(
       "writeAuthoredText: createPluginAuthoredTextWriter({",
     );

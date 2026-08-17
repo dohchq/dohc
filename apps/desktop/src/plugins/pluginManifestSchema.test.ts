@@ -11,6 +11,7 @@ import {
   MAX_PLUGIN_SETTINGS,
   MAX_PLUGIN_URL_CHARS,
   MAX_PLUGIN_VERSION_CHARS,
+  MAX_PLUGIN_VIEW_PANELS,
   MAX_SETTING_OPTIONS,
   MAX_SETTING_VALUE_CHARS,
 } from "./pluginManifestSchema";
@@ -38,8 +39,13 @@ describe("DohcPluginManifest", () => {
     })).toEqual({
       ...minimalManifest,
       panels: [
-        { id: "main", title: "Main", entry: "panel/index.html" },
-        { id: "tools", title: "Tools", entry: "panel/tools/index.html" },
+        { id: "main", title: "Main", entry: "panel/index.html", placement: "editor" },
+        {
+          id: "tools",
+          title: "Tools",
+          entry: "panel/tools/index.html",
+          placement: "editor",
+        },
       ],
       commands: [{ id: "open", title: "Open plugin" }],
     });
@@ -146,6 +152,92 @@ describe("DohcPluginManifest", () => {
     expect(result.error.issues).toContainEqual(expect.objectContaining({
       message: "panels: at most 100 entries allowed",
     }));
+  });
+
+  it("places a panel in the editor unless it asks for the view rail", () => {
+    const manifest = DohcPluginManifest.parse({
+      ...minimalManifest,
+      panels: [
+        { id: "main", title: "Main", entry: "main.html" },
+        {
+          id: "sites",
+          title: "Sites",
+          entry: "sites.html",
+          placement: "view",
+          icon: "icons/./sites.svg",
+        },
+      ],
+    });
+
+    expect(manifest.panels).toEqual([
+      { id: "main", title: "Main", entry: "main.html", placement: "editor" },
+      {
+        id: "sites",
+        title: "Sites",
+        entry: "sites.html",
+        placement: "view",
+        icon: "icons/sites.svg",
+      },
+    ]);
+  });
+
+  it.each([
+    ["an unknown placement", "sidebar"],
+    ["an empty placement", ""],
+  ])("rejects %s", (_case, placement) => {
+    expect(DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      panels: [{ id: "main", title: "Main", entry: "main.html", placement }],
+    }).success).toBe(false);
+  });
+
+  it("rejects a panel icon that is not a .png or .svg", () => {
+    expect(DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      panels: [
+        { id: "main", title: "Main", entry: "main.html", icon: "icon.gif" },
+      ],
+    }).success).toBe(false);
+  });
+
+  it(`accepts ${MAX_PLUGIN_VIEW_PANELS} view panels and reports the limit for one more`, () => {
+    const viewPanels = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        id: `v${index}`,
+        title: `V${index}`,
+        entry: `v${index}.html`,
+        placement: "view" as const,
+      }));
+
+    expect(DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      panels: viewPanels(MAX_PLUGIN_VIEW_PANELS),
+    }).success).toBe(true);
+
+    const result = DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      panels: viewPanels(MAX_PLUGIN_VIEW_PANELS + 1),
+    });
+    if (result.success) {
+      throw new Error("expected the view-panel limit to reject the manifest");
+    }
+    expect(result.error.issues).toContainEqual(expect.objectContaining({
+      message:
+        `panels: at most ${MAX_PLUGIN_VIEW_PANELS} may set placement "view" ` +
+        `(observed ${MAX_PLUGIN_VIEW_PANELS + 1})`,
+    }));
+  });
+
+  it("counts only view-placed panels against the view limit", () => {
+    expect(DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      panels: Array.from({ length: 100 }, (_, index) => ({
+        id: `p${index}`,
+        title: `P${index}`,
+        entry: `p${index}.html`,
+        ...(index < MAX_PLUGIN_VIEW_PANELS ? { placement: "view" as const } : {}),
+      })),
+    }).success).toBe(true);
   });
 
   it("rejects duplicate command ids", () => {

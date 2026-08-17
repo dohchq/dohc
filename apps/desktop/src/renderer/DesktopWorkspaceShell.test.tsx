@@ -98,6 +98,7 @@ import {
   OPEN_EDITORS_MIN_HEIGHT,
   momentDiffTabPath,
   pluginDetailsTabPath,
+  pluginViewId,
   pluginPanelTabPath,
   pluginWebAppTabPath,
   versionCompareTabPath,
@@ -862,6 +863,7 @@ describe("plugin panel tabs", () => {
       workspaceId: WORKSPACE.workspaceId,
       pluginId: "hello-plugin",
       panelId: "main",
+      placement: "editor",
     });
 
     await user.click(screen.getByRole("button", { name: "Close main" }));
@@ -907,6 +909,7 @@ describe("plugin panel tabs", () => {
         workspaceId: otherWorkspace.workspaceId,
         pluginId: "hello-plugin",
         panelId: "main",
+        placement: "editor",
       }),
     );
   });
@@ -1104,6 +1107,149 @@ describe("plugin web app tabs", () => {
   });
 });
 
+describe("plugin activity-bar views", () => {
+  const viewId = pluginViewId("hello-plugin", "hello-view");
+  const viewPanel = {
+    id: "hello-view",
+    title: "Hello view",
+    placement: "view" as const,
+    icon: "icon.svg",
+  };
+
+  function withViewPlugin(
+    bridge: ReturnType<typeof makeBridge>,
+    overrides: Partial<PluginStatusRecord> = {},
+  ) {
+    bridge.listPlugins = vi.fn(async () => ({
+      ok: true as const,
+      plugins: [
+        {
+          id: "hello-plugin",
+          directoryName: "hello-plugin",
+          rootPath: "/workspace/plugins/hello-plugin",
+          valid: true,
+          status: "ready",
+          disabledReason: null,
+          runtimeStatus: "ready",
+          sourceHash: "a".repeat(64),
+          approvedHash: "a".repeat(64),
+          installedBaselineHash: "a".repeat(64),
+          displayName: "Hello Plugin",
+          description: null,
+          publisher: null,
+          pluginVersion: null,
+          repository: null,
+          issues: null,
+          license: null,
+          icon: null,
+          settings: [],
+          panels: [
+            { id: "main", title: "Hello", placement: "editor", icon: null },
+            viewPanel,
+          ],
+          webApps: [],
+          diagnostics: [],
+          warnings: [],
+          error: null,
+          ...overrides,
+        },
+      ] as PluginStatusRecord[],
+    }));
+    return bridge;
+  }
+
+  it("opens a contributed view's panel in the side panel", async () => {
+    const bridge = withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)));
+    renderShell(bridge);
+
+    await userEvent.click(await screen.findByTestId(`activity-${viewId}`));
+
+    // The side panel names the view and mounts the panel behind it — the
+    // same panel machinery an editor tab uses, asked for by (plugin, panel).
+    expect(await screen.findByTestId("plugin-panel-page")).toBeTruthy();
+    await waitFor(() =>
+      expect(bridge.startPluginPanel).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        pluginId: "hello-plugin",
+        panelId: "hello-view",
+        placement: "view",
+      }),
+    );
+    expect(
+      screen.getByTestId("side-panel").querySelector("header")?.textContent,
+    ).toBe("Hello view");
+  });
+
+  it("restores the plugin view the user left open before a restart", async () => {
+    const bridge = withViewPlugin(
+      makeBridge(Promise.resolve({ ...STORED_STATE, activeView: viewId })),
+    );
+    renderShell(bridge);
+
+    const rail = await screen.findByTestId(`activity-${viewId}`);
+    await waitFor(() => expect(rail.getAttribute("aria-current")).toBe("page"));
+    expect(await screen.findByTestId("plugin-panel-page")).toBeTruthy();
+  });
+
+  it("names the plugin to turn back on when its view is off", async () => {
+    const bridge = withViewPlugin(
+      makeBridge(Promise.resolve({ ...STORED_STATE, activeView: viewId })),
+      { status: "disabled", disabledReason: "user", runtimeStatus: "disabled" },
+    );
+    renderShell(bridge);
+
+    const off = await screen.findByTestId("plugin-view-off");
+    expect(off.textContent).toContain("Hello view is off");
+    expect(off.textContent).toContain("Hello Plugin is turned off");
+    // A turned-off plugin contributes no button, and no panel starts for it.
+    expect(screen.queryByTestId(`activity-${viewId}`)).toBeNull();
+    expect(screen.queryByTestId("plugin-panel-page")).toBeNull();
+    expect(bridge.startPluginPanel).not.toHaveBeenCalled();
+
+    // The way back is on this surface: the empty state opens the list that
+    // can turn the plugin on again.
+    await userEvent.click(screen.getByTestId("plugin-view-off-open-plugins"));
+    expect(
+      screen.getByTestId("activity-plugins").getAttribute("aria-current"),
+    ).toBe("page");
+  });
+
+  it("says so when the plugin list will not load", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({ ...STORED_STATE, activeView: viewId }),
+    );
+    bridge.listPlugins = vi.fn(async () => {
+      throw new Error("The plugin pipeline is unavailable.");
+    });
+    renderShell(bridge);
+
+    const unknown = await screen.findByTestId("plugin-view-unknown");
+    expect(unknown.textContent).toContain("Could not load plugins");
+    // The selection stands: a list dohc could not read is no evidence the
+    // plugin is gone.
+    expect(screen.queryByTestId("activity-explorer")?.getAttribute("aria-current"))
+      .toBeNull();
+  });
+
+  it("drops the selection once the plugin is gone", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({ ...STORED_STATE, activeView: viewId }),
+    );
+    bridge.listPlugins = vi.fn(async () => ({
+      ok: true as const,
+      plugins: [] as PluginStatusRecord[],
+    }));
+    renderShell(bridge);
+
+    const explorer = await screen.findByTestId("activity-explorer");
+    await waitFor(() =>
+      expect(explorer.getAttribute("aria-current")).toBe("page"),
+    );
+    expect(screen.queryByTestId("plugin-view-off")).toBeNull();
+    expect(screen.queryByTestId("plugin-panel-page")).toBeNull();
+  });
+});
+
 describe("plugin details tabs", () => {
   const detailsPath = pluginDetailsTabPath("t3-code");
 
@@ -1134,6 +1280,7 @@ describe("plugin details tabs", () => {
           license: null,
           icon: null,
           settings: [],
+          panels: [],
           webApps: [],
           diagnostics: [],
           warnings: [],

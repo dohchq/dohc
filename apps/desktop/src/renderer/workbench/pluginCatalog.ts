@@ -202,17 +202,23 @@ export function openableWebApps(
   return plugin.webApps.filter((webApp) => !webApp.instanced);
 }
 
-// An installed, non-disabled plugin can open its web apps. openPluginWebApp
-// re-reads and re-verifies the manifest in main, so this predicate only
-// decides whether the control is worth showing.
-export function canOpenWebApps(plugin: PluginStatusRecord): boolean {
+/**
+ * Whether this plugin can serve its surfaces right now: installed, approved,
+ * and not on its way out. Main re-reads and re-verifies the manifest before
+ * it serves anything, so this only decides what is worth showing.
+ */
+export function canServeSurfaces(plugin: PluginStatusRecord): boolean {
   return (
     plugin.valid &&
     plugin.approvedHash !== null &&
-    openableWebApps(plugin).length > 0 &&
     !plugin.status.startsWith("disabled") &&
     plugin.status !== "uninstalling"
   );
+}
+
+// An installed, non-disabled plugin can open its web apps.
+export function canOpenWebApps(plugin: PluginStatusRecord): boolean {
+  return canServeSurfaces(plugin) && openableWebApps(plugin).length > 0;
 }
 
 // Uninstall is the one action an installed plugin keeps once its manifest

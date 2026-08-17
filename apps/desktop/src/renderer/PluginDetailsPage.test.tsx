@@ -66,6 +66,7 @@ function plugin(
     license: null,
     icon: null,
     settings: [],
+    panels: [],
     webApps: [],
     diagnostics: [],
     warnings: [],

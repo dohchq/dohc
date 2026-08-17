@@ -102,6 +102,11 @@ import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 // user clicked to open the panel — queries arrived with their first letters
 // missing. The view carries no dependency the shell does not already load.
 import { PluginsView } from "./workbench/PluginsView";
+import {
+  pluginActivityViews,
+  resolvePluginView,
+} from "./workbench/pluginActivityViews";
+import { usePluginCatalog } from "./workbench/pluginCatalog";
 import { SearchView } from "./workbench/SearchView";
 import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
@@ -168,6 +173,7 @@ import {
   isPluginWebAppTabPath,
   isSingletonEditorTabPath,
   isSiteTabPath,
+  isViewId,
   isVirtualTabPath,
   MAX_OPEN_TABS,
   moveTab,
@@ -178,7 +184,9 @@ import {
   parseHistoryDiffTabPath,
   parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
+  parsePluginViewId,
   parsePluginWebAppTabPath,
+  clearPluginView,
   pluginDetailsTabPath,
   pluginPanelTabPath,
   pluginWebAppTabPath,
@@ -2026,6 +2034,42 @@ export function DesktopWorkspaceShell(props: {
     },
     [],
   );
+
+  // Plugin-contributed views (P6). The catalog is the same guarded data layer
+  // the Plugins panel uses, so the rail follows an install, an enable, and an
+  // uninstall without its own listener.
+  const pluginCatalog = usePluginCatalog(workspaceId);
+  const pluginCatalogLoad = pluginCatalog.load;
+  const railPluginViews = useMemo(
+    () =>
+      pluginCatalogLoad.status === "ready"
+        ? pluginActivityViews(pluginCatalogLoad.plugins)
+        : [],
+    [pluginCatalogLoad],
+  );
+  const selectedPluginView = parsePluginViewId(wb.activeView);
+  const selectedPluginViewState =
+    selectedPluginView === null || pluginCatalogLoad.status !== "ready"
+      ? null
+      : resolvePluginView(pluginCatalogLoad.plugins, selectedPluginView);
+
+  // The panel's header names dohc's own view, or the plugin panel behind a
+  // contributed one — including while its plugin is off, so the header keeps
+  // saying which view the user is looking at.
+  const sidePanelTitle = isViewId(wb.activeView)
+    ? activityViewLabel(wb.activeView)
+    : (selectedPluginViewState?.status === "ready" ||
+        selectedPluginViewState?.status === "off"
+      ? selectedPluginViewState.title
+      : "Plugin view");
+
+  // An uninstalled plugin leaves no selection behind. Only a LOADED list can
+  // say a plugin is gone — before it lands, the selection stands, so a restart
+  // never loses the view the user left open.
+  useEffect(() => {
+    if (selectedPluginViewState?.status !== "absent") return;
+    mutateWb(clearPluginView);
+  }, [selectedPluginViewState?.status, mutateWb]);
 
   useEffect(
     () =>
@@ -4392,6 +4436,14 @@ export function DesktopWorkspaceShell(props: {
         label: `View: ${activityViewLabel(view)}`,
         run: () => mutateWb((state) => setView(state, view)),
       })),
+      // A contributed view is a view like any other, so the palette offers it
+      // the same way. The list follows the rail: a plugin that is gone or off
+      // contributes no command either.
+      ...railPluginViews.map((view) => ({
+        id: `show-${view.viewId}`,
+        label: `View: ${view.title}`,
+        run: () => mutateWb((state) => setView(state, view.viewId)),
+      })),
       {
         id: "connect-cloud",
         label: "Connect dohc Cloud",
@@ -4430,6 +4482,7 @@ export function DesktopWorkspaceShell(props: {
     ],
     [
       activeDocumentPath,
+      railPluginViews,
       createUntitledDrawing,
       openWorkspaceFolder,
       closeActiveTab,
@@ -5144,7 +5197,9 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       <div className="flex min-h-0 flex-1">
         <ActivityBar
+          workspaceId={workspaceId}
           activeView={wb.activeView}
+          pluginViews={railPluginViews}
           sidebarVisible={wb.sidebarVisible}
           hasConflict={syncStatus?.state === "conflict"}
           searchResultCount={
@@ -5158,7 +5213,7 @@ export function DesktopWorkspaceShell(props: {
         {/* Side panel (Ctrl+B / activity bar toggle; hidden ⇒ unmounted) */}
         {wb.sidebarVisible ? (
           <SidePanel
-            title={activityViewLabel(wb.activeView)}
+            title={sidePanelTitle}
             width={wb.sidebarWidth}
             onWidthChange={(width) => mutateWb((state) => setSidebarWidth(state, width))}
             actions={
@@ -5236,7 +5291,52 @@ export function DesktopWorkspaceShell(props: {
                 activePluginId={activePluginDetailsId}
                 onOpenDetails={openPluginDetailsTab}
               />
-            ) : null}
+            ) : selectedPluginViewState?.status === "ready" ? (
+              <Suspense fallback={<PanelLoading label="plugin panel" />}>
+                <LazyPluginPanelPage
+                  workspaceId={workspaceId}
+                  pluginId={selectedPluginViewState.pluginId}
+                  panelId={selectedPluginViewState.panelId}
+                  placement="view"
+                  onOpenPath={openPathWithHeading}
+                  onOpenWebApp={openPluginWebAppInstanceTab}
+                />
+              </Suspense>
+            ) : selectedPluginViewState?.status === "off" ? (
+              <div
+                data-testid="plugin-view-off"
+                className="flex min-h-0 flex-1 flex-col items-center justify-center gap-1 px-6 text-center"
+              >
+                <span className="text-sm text-ink">
+                  {selectedPluginViewState.title} is off
+                </span>
+                <span className="text-xs text-muted">
+                  {selectedPluginViewState.pluginTitle} is turned off.
+                </span>
+                <button
+                  type="button"
+                  data-testid="plugin-view-off-open-plugins"
+                  onClick={() => mutateWb((state) => setView(state, "plugins"))}
+                  className="text-xs text-accent hover:underline"
+                >
+                  Open Plugins
+                </button>
+              </div>
+            ) : selectedPluginView === null ? null : pluginCatalogLoad.status ===
+              "error" ? (
+              // A failed plugin list cannot say whether this view still
+              // exists, and a spinner that never ends would claim it is
+              // still coming.
+              <div
+                data-testid="plugin-view-unknown"
+                className="flex min-h-0 flex-1 flex-col items-center justify-center gap-1 px-6 text-center"
+              >
+                <span className="text-sm text-ink">Could not load plugins</span>
+                <span className="text-xs text-muted">{pluginCatalogLoad.message}</span>
+              </div>
+            ) : (
+              <PanelLoading label="plugin panel" />
+            )}
             </ErrorBoundary>
           </SidePanel>
         ) : null}
@@ -5528,6 +5628,7 @@ export function DesktopWorkspaceShell(props: {
                     workspaceId={workspaceId}
                     pluginId={groupPluginPanel.pluginId}
                     panelId={groupPluginPanel.panelId}
+                    placement="editor"
                     onOpenPath={openPathWithHeading}
                     onOpenWebApp={openPluginWebAppInstanceTab}
                   />

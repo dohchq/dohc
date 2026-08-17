@@ -3125,11 +3125,20 @@ function invokeWorkspacePluginSdk(input: {
   );
 }
 
+// A plugin this workspace can serve panels for. The registration map only
+// remembers plugins a tab opened, and a view in the activity bar opens no
+// tab, so the pipeline's own discovery — where the manifest actually lives —
+// answers for the rest. Approval is unaffected either way: ensurePluginStarted
+// still hash-verifies before it executes anything, and panels still serve from
+// the approved snapshot rather than from pluginRoot.
 function registeredPlugin(
   workspaceId: string,
   pluginId: string,
 ): RegisteredPlugin | undefined {
-  return pluginRegistrations.get(workspaceId)?.get(pluginId);
+  const remembered = pluginRegistrations.get(workspaceId)?.get(pluginId);
+  if (remembered) return remembered;
+  return pluginPipelines.get(workspaceId)?.pluginRegistration(pluginId) ??
+    undefined;
 }
 
 // Panels serve from the approved, hash-verified snapshot — never from
@@ -7063,6 +7072,16 @@ function registerIpcHandlers(
     if (!panel) {
       throw new Error(
         `Plugin "${input.pluginId}" does not declare panel "${input.panelId}".`,
+      );
+    }
+    // One panel runs once per workspace, so it belongs in one place. A tab
+    // restored from before an update can still name a panel the plugin has
+    // since moved to the view rail.
+    if (panel.placement !== input.placement) {
+      throw new Error(
+        `Plugin "${input.pluginId}" panel "${input.panelId}" has placement ` +
+          `"${panel.placement}", so it cannot open with placement ` +
+          `"${input.placement}".`,
       );
     }
     const key = pluginPanelKey(

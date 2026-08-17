@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "./channels";
 import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
 import { DohcPluginManifest } from "../plugins/pluginManifestSchema";
+import { pluginViewId } from "../renderer/workbench/workbenchState";
 import {
   ListChatChannelsResult,
   ListPersonalChatFeedResult,
@@ -704,6 +705,32 @@ describe("workspace UI state IPC contract", () => {
     expect(parsed.editorGroups).toEqual(validState.editorGroups);
   });
 
+  it("carries a plugin-contributed view across the persistence boundary", () => {
+    const activeView = pluginViewId("dohc-sites", "sites");
+    expect(
+      WorkspaceUiState.parse({ ...validState, activeView }).activeView,
+    ).toBe(activeView);
+  });
+
+  it.each([
+    ["a bare prefix", "plugin-view:"],
+    ["a missing panel segment", "plugin-view:dohc-sites"],
+    ["an over-long id", `plugin-view:${"a".repeat(4096)}/sites`],
+    ["a NUL byte in either segment", "plugin-view:%00/%00"],
+    [
+      "a segment past the plugin id cap",
+      `plugin-view:${encodeURIComponent("a".repeat(215))}/sites`,
+    ],
+    [
+      "a segment past the panel id cap",
+      `plugin-view:dohc-sites/${encodeURIComponent("a".repeat(121))}`,
+    ],
+  ])("falls back to Explorer for %s", (_case, activeView) => {
+    expect(
+      WorkspaceUiState.parse({ ...validState, activeView }).activeView,
+    ).toBe("explorer");
+  });
+
   it("rejects the replaced version-1 flat-tab contract", () => {
     expect(
       WorkspaceUiState.safeParse({
@@ -1320,8 +1347,13 @@ describe("site IPC contract", () => {
     };
     expect(OpenPluginPanelResult.parse(panelIdentity)).toEqual(panelIdentity);
     expect(PluginPanelOpenedEvent.parse(identity)).toEqual(identity);
-    expect(StartPluginPanelPayload.parse(identity)).toEqual(identity);
+    // Starting names where the panel is mounted; stopping names only the
+    // running panel, which is keyed without placement.
+    const startPayload = { ...identity, placement: "view" as const };
+    expect(StartPluginPanelPayload.parse(startPayload)).toEqual(startPayload);
+    expect(StartPluginPanelPayload.safeParse(identity).success).toBe(false);
     expect(StopPluginPanelPayload.parse(identity)).toEqual(identity);
+    expect(StopPluginPanelPayload.safeParse(startPayload).success).toBe(false);
     expect(
       StartPluginPanelResult.parse({
         status: "ok",

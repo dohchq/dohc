@@ -37,12 +37,43 @@ a row.
 | `license` | Licence name, SPDX id, or `https://` URL | 120 chars |
 | `icon` | Plugin-root-relative `.png` or `.svg` | 1,024-char path |
 | `entry` | Plugin-root-relative module | 1,024-char path |
-| `panels` | `{ id, title, entry }` | 100 entries |
+| `panels` | `{ id, title, entry, placement?, icon? }` | 100 entries, 4 in the rail |
 | `commands` | `{ id, title }` | 200 entries |
 | `webApps` | `{ id, title, instanced? }` | 100 entries |
 | `drivers` | `{ id, displayName }` | 8 entries |
 | `settings` | `{ key, type, label, description?, default, options? }` | 20 entries |
 | `allowSkippedScripts` | `true`, or npm package names | 300 names |
+
+A `panels` entry contributes one panel: a sandboxed page the plugin serves,
+carrying that plugin's SDK authority. `placement` says where it shows.
+
+- `placement: "editor"` (the default) opens the panel as an editor tab.
+- `placement: "view"` gives the panel a button in the activity bar, dohc's
+  leftmost rail, and renders it in the side panel beside the explorer, the
+  graph, and history. This is how a plugin owns a place in the workbench
+  rather than a tab someone has to open.
+
+The two are exclusive. A running panel is keyed by workspace, plugin, and
+panel id, and starting a second one stops the first, so one panel cannot hold
+both places at once. A plugin that wants a view and a tab declares two panels.
+
+A view's button draws the panel's `icon`, then the plugin's own `icon`, then
+the glyph every plugin without one already shows. Icons are plugin-root
+relative `.png` or `.svg` files, served like any other workspace file.
+
+At most four panels per plugin may take `placement: "view"`. The bound is the
+rail's: at the smallest window dohc opens, the rail shows eleven buttons and
+six are dohc's own, so four leaves a plugin unable to fill the rail by itself.
+Past what one window shows, the rail scrolls — no contribution is refused for
+lack of room.
+
+The view id is `plugin-view:<plugin>/<panel>`, and the selected view persists
+with the rest of the workbench. A view whose plugin is turned off keeps its
+place: the side panel names the plugin to turn back on, and enabling it brings
+the view back. A view whose plugin is uninstalled is gone, and the selection
+goes with it — the workbench falls back to the explorer. Only a loaded plugin
+list can say a plugin is gone, so a restart never drops a view while the list
+is still arriving.
 
 A `webApps` entry contributes one embedded web app, shown in a hardened
 main-process guest over a loopback origin the running plugin supplies. It opens
