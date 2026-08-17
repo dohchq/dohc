@@ -623,13 +623,15 @@ import {
   type SitePackageInfo,
 } from "./workspaces/sitePackage";
 import {
+  startStaticDirectoryPreview,
+  type StaticDirectoryPreview,
+} from "./security/staticDirectoryPreview";
+import {
   buildSite,
   packageManagerCommand,
   splitCommandLine,
   startSiteDevServer,
-  startStaticDirectoryPreview,
   startStaticSitePreview,
-  type StaticSitePreview,
   type SiteLogEntry,
 } from "./workspaces/siteRunner";
 import { invokeSiteSdkHost } from "./workspaces/siteSdkHost";
@@ -2957,7 +2959,7 @@ async function openWorkspaceActivity(
 }
 
 interface RunningPluginPanel {
-  handle: StaticSitePreview;
+  handle: StaticDirectoryPreview;
   releaseOrigin: () => void;
   workspaceId: string;
   pluginId: string;
@@ -3183,7 +3185,7 @@ async function ensurePluginStarted(
 }
 
 async function stopRunningPluginPanelPreview(input: {
-  handle: StaticSitePreview;
+  handle: StaticDirectoryPreview;
   releaseOrigin: () => void;
 }): Promise<void> {
   await stopPluginPanelPreview(

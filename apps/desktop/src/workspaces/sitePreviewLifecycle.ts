@@ -1,6 +1,7 @@
-import type { SiteProcessHandle, StaticSitePreview } from "./siteRunner";
+import type { StaticDirectoryPreview } from "../security/staticDirectoryPreview";
+import type { SiteProcessHandle } from "./siteRunner";
 
-export type SitePreviewHandle = StaticSitePreview | SiteProcessHandle;
+export type SitePreviewHandle = StaticDirectoryPreview | SiteProcessHandle;
 
 export function assertActiveWorkspaceForSitePreviewStop(
   activeWorkspaceId: string | undefined,
