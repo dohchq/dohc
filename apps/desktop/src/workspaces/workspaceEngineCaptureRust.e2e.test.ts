@@ -1,10 +1,10 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
-import { defaultWorkspaceMode } from "@dohc/workspace-core";
+import { defaultWorkspaceMode, type WatcherEvent } from "@dohc/workspace-core";
 import {
   EngineDaemonLifecycle,
   EngineWorkspaceSessions,
@@ -20,6 +20,7 @@ import {
   YDocUncapturedArtifactError,
 } from "./workspaceEngineCapture";
 import { createWorkspaceActivity } from "./workspaceActivity";
+import { startWorkspaceWatch } from "./workspaceWatcher";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
@@ -798,6 +799,119 @@ it.skipIf(engine.missing)(
       await capture.stop();
       await sessions.closeAll();
       await lifecycle.stop();
+    }
+  },
+  60_000,
+);
+
+// #815: the engine's Markdown settlement rewrote unedited files on close —
+// mangling CRLF and trailing newlines, churning mtimes, and feeding the
+// watcher a settled write for content nobody changed. For a plugin README
+// that settled write is exactly what `PluginPipeline.handleWatcherEvents`
+// holds for approval on (main.ts wires the watcher's settled batch straight
+// into it), so merely opening and closing a plugin README disabled the
+// plugin. The engine now proves the session held nothing beyond the declared
+// seed and skips the write. This drives the full desktop feed — real daemon,
+// real capture, real fs watcher — and pins both halves: no edit means no
+// event for the pipeline to hold on; a real edit still produces one.
+// PluginPipeline.test.ts owns the other link (a README watcher event ->
+// disabled-pending-approval), so the two suites together pin the #815 chain.
+it.skipIf(engine.missing)(
+  "a no-edit open and close of a plugin README feeds the watcher nothing; a real edit still does",
+  async () => {
+    const root = await createTestScratch("dohc-capture-rust-815-");
+    const markerDirectory = join(root, ".dohc", "engine");
+    await mkdir(markerDirectory, { recursive: true });
+    await writeFile(
+      join(markerDirectory, "SHADOW_CLONE"),
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "utf8",
+    );
+    const lifecycle = new EngineDaemonLifecycle({
+      command: engine.require(),
+      maxRestarts: 0,
+    });
+    await lifecycle.start();
+    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "capture-rust-815",
+      rootPath: root,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+    });
+    const workspace: CreatedWorkspace = {
+      workspaceId: "capture-rust-815",
+      rootPath: root,
+      kind: "personal",
+      mode: defaultWorkspaceMode("personal"),
+    };
+    const readmePath = "plugins/sample/README.md";
+    // Both normalization victims at once: CRLF line endings and no trailing
+    // newline. Any settle write would change these bytes.
+    const readme = "# Sample plugin\r\n\r\nOpened, never edited";
+    const batches: WatcherEvent[][] = [];
+    const readmeEvents = () =>
+      batches.flat().filter((event) => event.path === readmePath);
+    try {
+      await mkdir(join(root, "plugins", "sample"), { recursive: true });
+      await writeFile(join(root, readmePath), readme, "utf8");
+      await waitForPathMoments(capture, readmePath, 1);
+      const watch = startWorkspaceWatch(workspace, {
+        settleMs: 60,
+        engineCapture: () => capture,
+        onSettledBatch: (events) => batches.push(events),
+      });
+      await watch.ready;
+      try {
+        const before = await stat(join(root, readmePath));
+        const session = await capture.openYDocSession({
+          path: readmePath,
+          contentKind: "richdoc",
+          onRemoteUpdate: () => undefined,
+        });
+        await session.close();
+        // A full settle window plus slack: any write the close made would
+        // surface here.
+        await delay(750);
+        expect(readmeEvents()).toEqual([]);
+        expect(await readFile(join(root, readmePath), "utf8")).toBe(readme);
+        const after = await stat(join(root, readmePath));
+        expect(after.mtimeMs).toBe(before.mtimeMs);
+
+        // The control half: a REAL edit must reach the feed exactly as
+        // before the skip existed.
+        const edited = await capture.openYDocSession({
+          path: readmePath,
+          contentKind: "richdoc",
+          onRemoteUpdate: () => undefined,
+        });
+        const editor = new Y.Doc();
+        Y.applyUpdate(editor, edited.initialUpdate);
+        const vector = Y.encodeStateVector(editor);
+        const body = editor.getXmlFragment("body");
+        const paragraph = new Y.XmlElement("paragraph");
+        paragraph.insert(0, [new Y.XmlText("A real edit.")]);
+        body.insert(body.length, [paragraph]);
+        await edited.applyLocalUpdate(Y.encodeStateAsUpdate(editor, vector));
+        await edited.close();
+        for (
+          let attempt = 0;
+          attempt < 100 && readmeEvents().length === 0;
+          attempt += 1
+        ) {
+          await delay(50);
+        }
+        expect(readmeEvents().length).toBeGreaterThan(0);
+        expect(await readFile(join(root, readmePath), "utf8")).toContain(
+          "A real edit.",
+        );
+      } finally {
+        await watch.stop().catch(() => undefined);
+      }
+    } finally {
+      await capture.stop().catch(() => undefined);
+      await sessions.closeAll().catch(() => undefined);
+      await lifecycle.stop().catch(() => undefined);
     }
   },
   60_000,

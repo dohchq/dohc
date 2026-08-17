@@ -349,6 +349,7 @@ async fn ydoc_settle_replaces_old_search_content_with_projected_text() {
             None,
             true,
             None,
+            None,
             40,
             Arc::new(NoFaults),
             CancellationToken::new(),

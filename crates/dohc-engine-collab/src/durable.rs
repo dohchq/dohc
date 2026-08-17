@@ -592,6 +592,7 @@ where
         None,
         ensure_parent_row,
         require_empty_lineage,
+        None,
         request_id,
         faults,
         now_ms,
@@ -602,6 +603,12 @@ where
 /// [`record_local_update_creating_marker_guarded`] with an active-lineage CAS.
 /// `None` means the caller is bound to an unclaimed lineage, not "skip the
 /// guard". The idempotency hash binds the expected claim before replay.
+///
+/// `seed_source_sha256` is the captured head whose content this update
+/// imports, recorded on the marker with the append (#815). Pass it only for a
+/// client-declared seed; any other first update (a crash-replayed prior
+/// state, for example) must leave it `None` so settle and close never treat
+/// the file as already holding the doc.
 #[allow(clippy::too_many_arguments)]
 pub fn record_local_update_creating_marker_guarded_for_lineage<F>(
     store: &mut EngineStore,
@@ -614,6 +621,7 @@ pub fn record_local_update_creating_marker_guarded_for_lineage<F>(
     expected_lineage_claim_id: Option<&str>,
     ensure_parent_row: bool,
     require_empty_lineage: bool,
+    seed_source_sha256: Option<&str>,
     request_id: Option<&str>,
     faults: &dyn FaultInjector,
     now_ms: i64,
@@ -633,6 +641,7 @@ where
         Some(expected_lineage_claim_id),
         ensure_parent_row,
         require_empty_lineage,
+        seed_source_sha256,
         request_id,
         faults,
         now_ms,
@@ -652,6 +661,7 @@ fn record_local_update_creating_marker_guarded_inner<F>(
     lineage_guard: Option<Option<&str>>,
     ensure_parent_row: bool,
     require_empty_lineage: bool,
+    seed_source_sha256: Option<&str>,
     request_id: Option<&str>,
     faults: &dyn FaultInjector,
     now_ms: i64,
@@ -800,6 +810,27 @@ where
             let outcome =
                 append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)?;
             if !outcome.deduped {
+                // The seed's provenance commits WITH the seed append: the
+                // marker now records which captured head this lineage's
+                // first update imported (#815). A dedup replays the original
+                // append whose commit already recorded it. Only the
+                // lineage's FIRST update can be a seed — any other stamp
+                // request is dropped, so a misuse degrades to a redundant
+                // settle write, never a false claim that the file already
+                // holds the doc.
+                if let Some(seed_source) = seed_source_sha256.filter(|_| outcome.seq == 1) {
+                    tx.execute(
+                        "UPDATE ydoc_docs SET seed_source_sha256 = ?4 \
+                         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                        rusqlite::params![
+                            key.workspace_id,
+                            key.version_id,
+                            key.object_id,
+                            seed_source,
+                        ],
+                    )
+                    .map_err(map_sql)?;
+                }
                 post_append(tx, &outcome)?;
             }
             if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
@@ -1380,7 +1411,8 @@ fn replace_base_snapshot(
     .map_err(map_sql)?;
     tx.execute(
         "UPDATE ydoc_docs SET content_kind=?4,regime='replicated',head_update_seq=0, \
-         head_snapshot_seq=0,last_settled_sha=NULL,lineage_claim_status='exact', \
+         head_snapshot_seq=0,last_settled_sha=NULL,seed_source_sha256=NULL, \
+         lineage_claim_status='exact', \
          lineage_claim_id=?5,lineage_parent_claim_id=NULL,lineage_epoch_tag=NULL, \
          base_origin_id=?6,base_origin_seq=?7,base_relay_seq=?8, \
          base_relay_confirmed_absent=0,updated_at_ms=?9 \
@@ -1553,7 +1585,7 @@ pub fn replace_lineage_with_successor_in_tx(
     .map_err(map_sql)?;
     tx.execute(
         "UPDATE ydoc_docs SET content_kind=?4, regime='replicated', head_update_seq=0, \
-         head_snapshot_seq=0, lineage_claim_status='exact', \
+         head_snapshot_seq=0, seed_source_sha256=NULL, lineage_claim_status='exact', \
          lineage_claim_id=?5, lineage_parent_claim_id=?6, lineage_epoch_tag=?7, \
          path=?8, last_settled_sha=?9, updated_at_ms=?10 \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -2054,10 +2086,19 @@ pub fn close_session(
         // narrower head/projection match to dedupe a converged envelope; it
         // does not gate this prune.
         let covered = store.read_with(|conn| -> Result<bool, CollabError> {
-            Ok(
-                last_settled_sha(conn, key)?.as_deref() == Some(content_sha.as_str())
-                    || captured_head_sha(conn, key)?.as_deref() == Some(content_sha.as_str()),
-            )
+            if last_settled_sha(conn, key)?.as_deref() == Some(content_sha.as_str())
+                || captured_head_sha(conn, key)?.as_deref() == Some(content_sha.as_str())
+            {
+                return Ok(true);
+            }
+            // THIRD proof (#815): a seed-only lineage whose recorded source
+            // is still the captured head. The projection sha cannot match —
+            // projecting normalizes — but everything the doc contains was
+            // imported from bytes the captured head (and the version store's
+            // moment for it) still holds, so the prune discards a cache of
+            // the file, not content.
+            let seed_source = seed_only_lineage_source(conn, key)?;
+            Ok(seed_source.is_some() && seed_source == captured_head_sha(conn, key)?)
         })?;
         if !covered {
             return Err(CollabError::UnsettledClose);
@@ -2120,7 +2161,7 @@ pub fn close_session(
         // capture/edit into a permanent ConflictStaleTarget.
         tx.execute(
             "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0, \
-             last_settled_sha = NULL, updated_at_ms = ?4 \
+             last_settled_sha = NULL, seed_source_sha256 = NULL, updated_at_ms = ?4 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id, now_ms],
         )
@@ -2309,6 +2350,51 @@ pub fn read_last_settled_sha(
     key: &DocKey,
 ) -> Result<Option<String>, CollabError> {
     store.read_with(|conn| last_settled_sha(conn, key))
+}
+
+/// The captured head sha a SEED-ONLY lineage imported, or `None` when the
+/// lineage is anything else (#815).
+///
+/// `Some(sha)` proves, from durable state alone, that the doc's entire
+/// history is one client-declared seed update importing the captured head
+/// `sha`: local-only regime, exactly one update in the log (and the head
+/// pointers agreeing), no snapshots, never settled. While the captured head
+/// still holds `sha`, the doc's canonical content IS that file's content —
+/// the live Y.Doc stays canonical, and there is nothing to write on settle
+/// and nothing a prune could lose. Every doubt (a second update, a snapshot,
+/// a prior settle, a replicated regime, no recorded seed source) answers
+/// `None`, and the caller falls back to writing exactly as before.
+pub(crate) fn seed_only_lineage_source(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<Option<String>, CollabError> {
+    conn.query_row(
+        "SELECT d.seed_source_sha256 FROM ydoc_docs d \
+         WHERE d.workspace_id = ?1 AND d.version_id = ?2 AND d.object_id = ?3 \
+           AND d.regime = 'local-only' \
+           AND d.head_update_seq = 1 AND d.head_snapshot_seq = 0 \
+           AND d.last_settled_sha IS NULL \
+           AND d.seed_source_sha256 IS NOT NULL \
+           AND (SELECT COUNT(*) FROM ydoc_updates u \
+                 WHERE u.workspace_id = ?1 AND u.version_id = ?2 \
+                   AND u.object_id = ?3) = 1 \
+           AND NOT EXISTS (SELECT 1 FROM ydoc_snapshots s \
+                 WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
+                   AND s.object_id = ?3)",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map_err(map_sql)
+    .map(Option::flatten)
+}
+
+/// Store-level [`seed_only_lineage_source`].
+pub fn read_seed_only_lineage_source(
+    store: &mut EngineStore,
+    key: &DocKey,
+) -> Result<Option<String>, CollabError> {
+    store.read_with(|conn| seed_only_lineage_source(conn, key))
 }
 
 fn last_settled_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, CollabError> {

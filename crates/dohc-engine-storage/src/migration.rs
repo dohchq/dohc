@@ -2860,6 +2860,16 @@ CREATE TABLE share_proposal_push_state (
 
 pub(crate) const SHARE_PROPOSAL_PUSH_STATE_MIGRATION_ID: &str = "v1-share-proposal-push-state";
 
+/// Ordinal 38. The captured head a lineage's seed update imported (#815).
+/// Set only when the client's declared seed append commits; a lineage whose
+/// entire durable history is that one seed, with the recorded source still
+/// the captured head, settles and prunes without writing the file.
+const V1_YDOC_SEED_SOURCE_DDL: &str = "\
+ALTER TABLE ydoc_docs ADD COLUMN seed_source_sha256 TEXT;
+";
+
+pub(crate) const YDOC_SEED_SOURCE_MIGRATION_ID: &str = "v1-ydoc-seed-source";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -3131,6 +3141,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: SHARE_PROPOSAL_PUSH_STATE_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_SHARE_PROPOSAL_PUSH_STATE_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 38,
+        id: YDOC_SEED_SOURCE_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_YDOC_SEED_SOURCE_DDL,
         sets_user_version: None,
     },
 ];
@@ -3760,7 +3777,20 @@ mod tests {
             )
             .expect("scene recovery migration ledger row");
         assert_eq!(scene_recovery_migration, 1);
-        assert_eq!(dump_table_rows(&conn, "ydoc_docs"), docs_before);
+        // The upgrade runs every LATER migration too: ordinal 38 adds
+        // `seed_source_sha256` (#815), which a pre-38 row gains as NULL. The
+        // scene migration itself must still preserve every pre-existing value.
+        let docs_expected: Vec<Vec<(String, rusqlite::types::Value)>> = docs_before
+            .into_iter()
+            .map(|mut row| {
+                row.push((
+                    "seed_source_sha256".to_owned(),
+                    rusqlite::types::Value::Null,
+                ));
+                row
+            })
+            .collect();
+        assert_eq!(dump_table_rows(&conn, "ydoc_docs"), docs_expected);
         assert_eq!(dump_table_rows(&conn, "ydoc_updates"), updates_before);
         assert_eq!(dump_table_rows(&conn, "ydoc_snapshots"), snapshots_before);
         assert_eq!(

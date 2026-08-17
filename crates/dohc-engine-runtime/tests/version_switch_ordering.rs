@@ -94,6 +94,7 @@ async fn binary_head_retires_its_ydoc_lineage_before_the_unsettled_scan() {
             None,
             true,
             None,
+            None,
             3,
             Arc::new(NoFaults),
             CancellationToken::new(),

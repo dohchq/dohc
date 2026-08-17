@@ -4267,9 +4267,10 @@ describe("the ydoc.open deadline (#616)", () => {
     // this exact content and nothing was ever "untouched" from the
     // daemon's point of view.
     await expect(session.close({ settle: true })).resolves.toBeUndefined();
-    expect(materialized).toEqual([
-      { path: PATH, content: "captured content" },
-    ]);
+    // The settle SUCCEEDS — and since the session's only update is the
+    // declared seed of the untouched captured file, it succeeds without
+    // rewriting the artifact (#815).
+    expect(materialized).toEqual([]);
     adapter.dispose();
   });
 
@@ -4426,5 +4427,132 @@ describe("the ydoc.open deadline (#616)", () => {
       onRemoteUpdate: () => undefined,
     });
     await reopened.close({ settle: false });
+  });
+});
+
+describe("no-edit settle skip (#815)", () => {
+  it("declares the seed on exactly the update built from seedContent", async () => {
+    const engine = seedPlaintextEngine("seeded body");
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    await session.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "edit ",
+    });
+    await session.close();
+    adapter.dispose();
+
+    const records = engine.requests.filter(
+      (request) => request.method === YDOC_METHOD.recordUpdate,
+    );
+    expect(records).toHaveLength(2);
+    expect(records[0]?.params).toMatchObject({ seed: true });
+    expect(records[1]?.params).not.toHaveProperty("seed");
+  });
+
+  it("a seed-only session settles and closes without materializing", async () => {
+    const materialize = vi.fn();
+    const engine = new YdocLoopbackEngine({ materialize });
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      content: "seeded body",
+      contentKind: "plaintext",
+    });
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    const settled = await session.settle();
+    // The engine answers with the file's own bytes — the artifact already
+    // holds this settlement.
+    expect(settled.content).toBe("seeded body");
+    expect(settled.materialized).toBe(true);
+    await session.close();
+    adapter.dispose();
+    expect(materialize).not.toHaveBeenCalled();
+  });
+
+  it("one edit after the seed still materializes on close", async () => {
+    const materialize = vi.fn();
+    const engine = new YdocLoopbackEngine({ materialize });
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      content: "seeded body",
+      contentKind: "plaintext",
+    });
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    await session.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "edited ",
+    });
+    await session.close();
+    adapter.dispose();
+    expect(materialize).toHaveBeenCalledWith({
+      path: PATH,
+      content: "edited seeded body",
+    });
+  });
+
+  it("a replayed prior state never declares a seed and still materializes", async () => {
+    const materialize = vi.fn();
+    const engine = new YdocLoopbackEngine({ materialize });
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      content: "seeded body",
+      contentKind: "plaintext",
+    });
+    const adapter = new YdocLiveAdapter(engine);
+    // The capture rebind path: a replacement generation opens with
+    // `seedAbsentLineage: false` and re-establishes the renderer's canonical
+    // doc — file content plus unsettled prior edits — as its first update.
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      seedAbsentLineage: false,
+    });
+    const canonical = new Y.Doc();
+    canonical.getMap("frontmatter");
+    canonical.getMap("meta");
+    canonical.getXmlFragment("body");
+    canonical.getText("plainText").insert(0, "prior edit seeded body");
+    await session.applyLocalUpdate(Y.encodeStateAsUpdate(canonical));
+    await session.close();
+    adapter.dispose();
+
+    const records = engine.requests.filter(
+      (request) => request.method === YDOC_METHOD.recordUpdate,
+    );
+    expect(records).toHaveLength(1);
+    // The replayed state is NOT a seed: declaring it would let the engine
+    // skip the settle write and prune the prior edits unlanded.
+    expect(records[0]?.params).not.toHaveProperty("seed");
+    expect(materialize).toHaveBeenCalledWith({
+      path: PATH,
+      content: "prior edit seeded body",
+    });
   });
 });

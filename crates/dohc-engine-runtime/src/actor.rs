@@ -1308,6 +1308,7 @@ enum Command {
         actor_origin_id: Option<String>,
         expected_lineage_claim_id: Option<String>,
         require_empty_lineage: bool,
+        seed_source_sha256: Option<String>,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
@@ -3540,6 +3541,7 @@ impl ActorHandle {
         actor_origin_id: Option<String>,
         expected_lineage_claim_id: Option<String>,
         require_empty_lineage: bool,
+        seed_source_sha256: Option<String>,
         request_id: Option<String>,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
@@ -3557,6 +3559,7 @@ impl ActorHandle {
                 actor_origin_id,
                 expected_lineage_claim_id,
                 require_empty_lineage,
+                seed_source_sha256,
                 now_ms,
                 faults,
                 token,
@@ -7816,6 +7819,7 @@ fn worker_main(
                 actor_origin_id,
                 expected_lineage_claim_id,
                 require_empty_lineage,
+                seed_source_sha256,
                 now_ms,
                 faults,
                 token,
@@ -7831,6 +7835,7 @@ fn worker_main(
                     actor_origin_id,
                     expected_lineage_claim_id,
                     require_empty_lineage,
+                    seed_source_sha256,
                     request_id,
                     now_ms,
                     faults.as_ref(),
@@ -9757,7 +9762,7 @@ fn ydoc_open_state_on_store(
             )
             .map_err(StorageError::persist_public)?;
             tx.execute(
-                "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0,                  last_settled_sha = NULL, updated_at_ms = ?4                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0,                  last_settled_sha = NULL, seed_source_sha256 = NULL, updated_at_ms = ?4                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                 params![key.workspace_id, key.version_id, key.object_id, now_ms],
             )
             .map_err(StorageError::persist_public)?;
@@ -9980,6 +9985,7 @@ fn ydoc_record_update_on_store(
     actor_origin_id: Option<String>,
     expected_lineage_claim_id: Option<String>,
     require_empty_lineage: bool,
+    seed_source_sha256: Option<String>,
     request_id: Option<String>,
     now_ms: i64,
     faults: &dyn FaultInjector,
@@ -10019,6 +10025,7 @@ fn ydoc_record_update_on_store(
         // refusing seed-onto-existing-lineage.
         true,
         require_empty_lineage,
+        seed_source_sha256.as_deref(),
         request_id.as_deref(),
         faults,
         now_ms,
@@ -10397,6 +10404,34 @@ fn ydoc_settle_on_store(
             sha256: current.blob_sha256,
             // Any pending job for this head was replayed above, and a Blocked
             // replay returns Err rather than reaching here.
+            materialized: true,
+            projection,
+        });
+    }
+    // A session with no edits settles WITHOUT writing (#815). The lineage's
+    // durable history is exactly one client-declared seed importing the
+    // captured head — and the head guard above proved the store still holds
+    // that head, while the disk probe proved the file still holds its bytes.
+    // The live Y.Doc is canonical, and an unedited doc's canonical content IS
+    // the imported file's content, so the file already holds this settlement;
+    // writing would only re-encode it through the projection's normalization
+    // (mint a moment, churn the mtime, trip every watcher). Answer with the
+    // current head, like the idempotent no-op above. Any doubt — a second
+    // update, a snapshot, a prior settle, no recorded seed source, a moved
+    // head or disk — falls through to the write below.
+    if let Some(seed_source) = dohc_engine_collab::read_seed_only_lineage_source(store, key)?
+        && Some(&seed_source) == probe_sha.as_ref()
+        && matches!(
+            &disk_preimage,
+            Some(Preimage::Present(disk_sha)) if Some(disk_sha) == probe_sha.as_ref()
+        )
+    {
+        let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
+        return Ok(YdocSettlement {
+            moment_id: current.latest_moment_id,
+            path: current.path,
+            content: inband_settled_content(current.text),
+            sha256: current.blob_sha256,
             materialized: true,
             projection,
         });
