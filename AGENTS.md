@@ -248,9 +248,13 @@ launch / first users). Do not "fix" the missing checks.
 
 ### Mark agent-written GitHub prose
 
-When an agent publishes prose through the user's GitHub account, start the body with:
+When an agent publishes prose through the user's GitHub account, start the body
+with a `[!NOTE]` alert:
 
+```markdown
+> [!NOTE]
 > Written by `<exact model slug>`.
+```
 
 Use the exact runtime model slug. Do not use a family name or display name.
 
@@ -266,15 +270,24 @@ normalize, or guess the slug.
 
 If no exact model slug is available, use the known agent name:
 
+```markdown
+> [!NOTE]
 > Written by Codex.
+```
 
 or:
 
+```markdown
+> [!NOTE]
 > Written by Claude.
+```
 
 If neither the model slug nor agent name is available, use:
 
+```markdown
+> [!NOTE]
 > Written by an AI agent (model name unavailable).
+```
 
 Apply this rule to:
 
@@ -285,6 +298,14 @@ Apply this rule to:
 
 Leave one blank line after the attribution. Keep the attribution when the user
 edits or approves an agent-written draft.
+
+### Give issues a "For humans" section
+
+When an agent opens a GitHub issue, add a `## For humans` section immediately
+after the attribution, the same way a PR description does
+([`skills/file-pr/SKILL.md`](skills/file-pr/SKILL.md)). Explain the problem in
+plain language, then say what should happen instead. Put file names, internal
+architecture, and other technical detail in the sections after it, not here.
 
 ### Select local gates
 

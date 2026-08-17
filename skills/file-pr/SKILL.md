@@ -73,7 +73,8 @@ Start every description with the attribution required by `AGENTS.md`. Put the
 human section immediately after it:
 
 ```markdown
-> Written by <exact model slug>.
+> [!NOTE]
+> Written by `<exact model slug>`.
 
 ## For humans
 
