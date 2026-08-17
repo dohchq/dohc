@@ -258,6 +258,21 @@ Three pieces. The engine stays the core.
   Site discovery must also exclude `plugins/` roots
   (`discoverSites` currently would promote a plugin's panel code to a
   workspace site) — lands with PR1b/PR2.
+- **Theme tokens** — a panel runs on its own loopback origin, so the app's
+  stylesheet never reaches it and the host cannot touch its document. dohc
+  sends the tokens instead: the renderer answers `ui.theme` with the palette
+  that is on screen, then pushes a `dohc:theme:v1` message whenever the user
+  changes theme, density, or reduced motion. `dohc.ui.applyTheme()` writes
+  them onto the panel's `<html>` and keeps following, so panel CSS names
+  colors the way dohc's own stylesheet does — `var(--dohc-ink)`.
+
+  The payload is built from `renderer/tokens.ts`, which `tokens.test.ts`
+  already holds byte-identical to `styles.css`, so a panel and the app
+  cannot show different colors for the same token. Theme is styling data:
+  it grants no authority, gates on no capability, and a panel that ignores
+  it is unaffected. Plugin **web apps** get nothing here — they render a
+  server the plugin spawned, over a `WebContentsView` with no bridge at
+  all, so there is no channel to send tokens on.
 
 Language split: anything that must be true (history, atomicity, replication,
 gates) is Rust below the daemon RPC. The host, SDK, pipeline, and plugins

@@ -1,11 +1,14 @@
 import {
   DOHC_SDK_PROTOCOL,
+  DOHC_THEME_PROTOCOL,
   type DohcSdkResponseMessage,
+  type DohcThemeMessage,
 } from "@dohc/sdk";
 import { AlertTriangle, Plug } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { StartPluginPanelResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import { THEME_ATTRIBUTES, readDohcTheme } from "./pluginPanelTheme";
 import {
   frameUrlWithHostOrigin,
   isActiveFrameOrigin,
@@ -122,6 +125,22 @@ export function PluginPanelPage(props: {
       if (!isDohcSdkRequest(event.data)) return;
 
       const request = event.data;
+      // Answered here, not over IPC: the theme is renderer state, and asking
+      // main for it would invent a second copy that could disagree with the
+      // window the user is looking at. Synchronous, so the liveness guards
+      // the awaited path below needs have nothing to race against.
+      if (request.method === "ui.theme") {
+        frameWindow.postMessage(
+          {
+            protocol: DOHC_SDK_PROTOCOL,
+            id: request.id,
+            ok: true,
+            result: readDohcTheme(document.documentElement),
+          } satisfies DohcSdkResponseMessage,
+          event.origin,
+        );
+        return;
+      }
       const requestGeneration = sdkGenerationRef.current;
       const requestContext = sdkContext;
       let response: DohcSdkResponseMessage;
@@ -192,6 +211,30 @@ export function PluginPanelPage(props: {
 
   const panel = load.status === "ready" ? load.panel : null;
   const panelUrlAllowed = panel ? isLoopbackOrigin(panel.url) : false;
+  const panelOrigin =
+    panel && panelUrlAllowed ? new URL(panel.url).origin : null;
+
+  // Theme changes reach a mounted panel without a reload. The app's own
+  // appearance state is these three attributes, so watching them covers every
+  // way a user changes it — settings, the command palette, or the OS flipping
+  // while the mode is "system".
+  useEffect(() => {
+    if (!panelOrigin) return;
+    const root = document.documentElement;
+    const push = () => {
+      if (stoppingRef.current || !panelRef.current) return;
+      iframeRef.current?.contentWindow?.postMessage(
+        {
+          protocol: DOHC_THEME_PROTOCOL,
+          theme: readDohcTheme(root),
+        } satisfies DohcThemeMessage,
+        panelOrigin,
+      );
+    };
+    const observer = new MutationObserver(push);
+    observer.observe(root, { attributeFilter: [...THEME_ATTRIBUTES] });
+    return () => observer.disconnect();
+  }, [panelOrigin]);
 
   return (
     <div

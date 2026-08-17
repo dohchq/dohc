@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+import { palette } from "../src/renderer/tokens";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -146,6 +147,24 @@ test("plugin panel crosses the utility process, iframe SDK, and attributed write
     );
     await expect(panel.getByTestId("sdk-error")).toHaveCount(1);
     await expect(panel.getByTestId("sdk-error")).toBeHidden();
+
+    // dohc's tokens reach the panel's own origin, and a theme the user
+    // changes afterwards reaches the panel already on screen — no reload,
+    // and the values are the app's, not the panel's guess at them.
+    await expect(panel.getByTestId("theme-mode")).toHaveText("light");
+    await expect(panel.getByTestId("theme-ink")).toHaveText(palette.light.ink);
+
+    await page.getByTestId("activity-settings").click();
+    await page.getByTestId("settings-nav-appearance").click();
+    await page
+      .getByRole("radiogroup", { name: "Theme" })
+      .getByRole("radio", { name: "Dark" })
+      .click();
+    await page.keyboard.press("Escape");
+
+    await expect(panel.getByTestId("theme-mode")).toHaveText("dark");
+    await expect(panel.getByTestId("theme-ink")).toHaveText(palette.dark.ink);
+    await expect(tab).toHaveAttribute("data-active", "true");
 
     await expect
       .poll(() =>

@@ -102,6 +102,48 @@ Use `files.readInfo()` when a site intentionally wants to inspect
 text artifacts; canonical Markdown documents require dohc's document-editing
 path so live Y.Doc state, locks, history, and collaboration remain coherent.
 
+## Theme tokens
+
+A plugin panel renders on its own origin, so dohc's stylesheet never reaches
+it. Ask for the tokens instead:
+
+```ts
+import { dohc } from "@dohc/sdk";
+
+await dohc.ui.applyTheme();
+```
+
+That one call writes dohc's design tokens onto this document's `<html>` and
+keeps writing them when the user changes theme, density, or reduced motion —
+no reload. Panel CSS then names colors the way dohc's own stylesheet does:
+
+```css
+body {
+  background: var(--dohc-bg);
+  color: var(--dohc-ink);
+  font-family: var(--font-sans);
+}
+```
+
+`applyTheme` also mirrors the three attributes dohc switches on, so a panel
+can write `[data-theme='dark']`, `[data-density='compact']`, and
+`[data-reduce-motion='true']` rules the same way. It returns a function that
+stops following.
+
+Use `dohc.ui.theme()` to read the tokens as data — for a canvas, a chart, or
+an SVG fill that CSS cannot reach:
+
+```ts
+const theme = await dohc.ui.theme();
+chart.setStroke(theme.tokens["--dohc-accent"]);
+```
+
+Theme is styling data. It grants no authority and gates on no capability. A
+panel that never asks for it behaves exactly as it did before.
+
+Panels only. A site preview or a plugin's own Node process has no window to
+read a theme from, and both refuse these calls by name.
+
 ## Security Note: file:// Previews
 
 For `file://` dohc hosts, browser `postMessage` requires request `targetOrigin`

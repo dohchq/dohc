@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen } from "@testing-library/react";
-import { DOHC_SDK_PROTOCOL } from "@dohc/sdk";
+import { DOHC_SDK_PROTOCOL, DOHC_THEME_PROTOCOL } from "@dohc/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   InvokePluginPanelSdkResult,
   StartPluginPanelResult,
 } from "../ipc/bridgeContract";
 import { PluginPanelPage } from "./PluginPanelPage";
+import { THEME_ATTRIBUTES } from "./pluginPanelTheme";
+import { palette } from "./tokens";
 
 const bridgeMock = {
   startPluginPanel: vi.fn(async (): Promise<StartPluginPanelResult> => ({
@@ -428,5 +430,103 @@ describe("PluginPanelPage", () => {
       await screen.findByText("The plugin panel URL must use loopback HTTP."),
     ).toBeTruthy();
     expect(screen.queryByTestId("plugin-panel-frame")).toBeNull();
+  });
+
+  describe("theme tokens", () => {
+    afterEach(() => {
+      for (const name of THEME_ATTRIBUTES) {
+        document.documentElement.removeAttribute(name);
+      }
+    });
+
+    async function mountWithFrame() {
+      const view = render(
+        <PluginPanelPage
+          workspaceId="ws-plugins"
+          pluginId="hello-plugin"
+          panelId="main"
+        />,
+      );
+      const frame = (await screen.findByTestId(
+        "plugin-panel-frame",
+      )) as HTMLIFrameElement;
+      const postMessage = vi.fn();
+      const source = { postMessage } as unknown as Window;
+      Object.defineProperty(frame, "contentWindow", {
+        configurable: true,
+        value: source,
+      });
+      return { view, source, postMessage };
+    }
+
+    it("answers ui.theme in the renderer without reaching main", async () => {
+      document.documentElement.setAttribute("data-theme", "dark");
+      const { source, postMessage } = await mountWithFrame();
+
+      sdkMessage(source, "http://127.0.0.1:49160", "ui.theme", undefined);
+
+      await vi.waitFor(() => expect(postMessage).toHaveBeenCalled());
+      // The theme is renderer state; routing it over IPC would invent a
+      // second copy that could disagree with the window on screen.
+      expect(bridgeMock.invokePluginPanelSdk).not.toHaveBeenCalled();
+      const [message, targetOrigin] = postMessage.mock.calls[0]!;
+      expect(targetOrigin).toBe("http://127.0.0.1:49160");
+      expect(message.protocol).toBe(DOHC_SDK_PROTOCOL);
+      expect(message.id).toBe("request-1");
+      expect(message.ok).toBe(true);
+      expect(message.result.mode).toBe("dark");
+      expect(message.result.tokens["--dohc-ink"]).toBe(palette.dark.ink);
+    });
+
+    it("pushes the new theme to a mounted panel when the user switches", async () => {
+      const { postMessage } = await mountWithFrame();
+      expect(postMessage).not.toHaveBeenCalled();
+
+      await act(async () => {
+        document.documentElement.setAttribute("data-theme", "dark");
+      });
+
+      await vi.waitFor(() => expect(postMessage).toHaveBeenCalled());
+      const [message, targetOrigin] = postMessage.mock.calls.at(-1)!;
+      expect(targetOrigin).toBe("http://127.0.0.1:49160");
+      expect(message.protocol).toBe(DOHC_THEME_PROTOCOL);
+      expect(message.theme.mode).toBe("dark");
+      expect(message.theme.tokens["--dohc-bg"]).toBe(palette.dark.bg);
+    });
+
+    it("pushes a reduced-motion change too", async () => {
+      const { postMessage } = await mountWithFrame();
+
+      await act(async () => {
+        document.documentElement.setAttribute("data-reduce-motion", "true");
+      });
+
+      await vi.waitFor(() => expect(postMessage).toHaveBeenCalled());
+      const [message] = postMessage.mock.calls.at(-1)!;
+      expect(message.theme.reduceMotion).toBe(true);
+    });
+
+    // The liveness refs already refuse a stale push, so they would hide a
+    // leaked observer. This watches the observer itself: one panel open must
+    // not leave something watching <html> for the rest of the session.
+    it("releases its observer when the panel unmounts", async () => {
+      const disconnect = vi.spyOn(MutationObserver.prototype, "disconnect");
+      const { view } = await mountWithFrame();
+      const before = disconnect.mock.calls.length;
+      view.unmount();
+      expect(disconnect.mock.calls.length).toBeGreaterThan(before);
+      disconnect.mockRestore();
+    });
+
+    it("stops pushing after the panel unmounts", async () => {
+      const { view, postMessage } = await mountWithFrame();
+      view.unmount();
+
+      await act(async () => {
+        document.documentElement.setAttribute("data-theme", "dark");
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(postMessage).not.toHaveBeenCalled();
+    });
   });
 });

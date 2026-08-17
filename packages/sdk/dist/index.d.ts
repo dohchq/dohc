@@ -163,6 +163,43 @@ export type DohcProvenanceRecord = {
     summary: string;
     [key: string]: unknown;
 };
+/**
+ * The envelope dohc pushes when its appearance changes. Theme is styling
+ * data: it carries no authority, gates on no capability, and a panel that
+ * ignores these messages behaves exactly as it did before.
+ */
+export declare const DOHC_THEME_PROTOCOL = "dohc:theme:v1";
+export type DohcThemeMode = "light" | "dark";
+export type DohcThemeDensity = "comfortable" | "compact";
+export type DohcTheme = {
+    /** Which palette is on screen. dohc's "system" mode is already resolved. */
+    mode: DohcThemeMode;
+    density: DohcThemeDensity;
+    reduceMotion: boolean;
+    /**
+     * CSS custom properties, spelled exactly as dohc's own stylesheet spells
+     * them ("--dohc-ink", "--font-sans"). Write `var(--dohc-ink)` in panel CSS
+     * and the panel matches the app.
+     */
+    tokens: Record<string, string>;
+};
+export type DohcThemeMessage = {
+    protocol: typeof DOHC_THEME_PROTOCOL;
+    theme: DohcTheme;
+};
+export type DohcApplyThemeOptions = DohcRequestOptions & {
+    /** Defaults to this document's <html>. */
+    root?: HTMLElement;
+};
+export declare function isDohcTheme(value: unknown): value is DohcTheme;
+export declare function isDohcThemeMessage(value: unknown): value is DohcThemeMessage;
+/**
+ * Writes one theme onto an element, normally the guest document's <html>:
+ * every token as a custom property, plus the three attributes dohc's own
+ * stylesheet switches on, so a panel can write `[data-theme='dark']` rules
+ * the same way dohc does.
+ */
+export declare function applyDohcTheme(theme: DohcTheme, root: HTMLElement): void;
 export type CreateDohcClientOptions = {
     transport?: DohcTransport;
     timeoutMs?: number;
@@ -218,6 +255,24 @@ export declare function createDohcClient(options?: CreateDohcClientOptions): {
          * app must be declared in the manifest with `"instanced": true`.
          */
         openWebApp: (webAppId: string, instanceKey: string, requestOptions?: DohcRequestOptions) => Promise<unknown>;
+        /**
+         * dohc's design tokens as they are on screen right now. Read this to
+         * color something CSS cannot reach — a canvas, a chart, an SVG fill.
+         * To style a panel, prefer `applyTheme`.
+         *
+         * Theme is styling data, so this gates on no capability.
+         */
+        theme: (requestOptions?: DohcRequestOptions) => Promise<DohcTheme>;
+        /**
+         * The one line that makes a panel look native: it writes dohc's tokens
+         * onto this document and keeps writing them when the user changes
+         * theme, density, or reduced motion. Panel CSS then uses the same
+         * names dohc uses — `color: var(--dohc-ink)`.
+         *
+         * Returns a function that stops following. A panel that never calls
+         * this is unaffected; the host's messages are simply ignored.
+         */
+        applyTheme: (applyOptions?: DohcApplyThemeOptions) => Promise<() => void>;
     };
     collections: {
         list: (name: string, params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
@@ -273,6 +328,24 @@ export declare const dohc: {
          * app must be declared in the manifest with `"instanced": true`.
          */
         openWebApp: (webAppId: string, instanceKey: string, requestOptions?: DohcRequestOptions) => Promise<unknown>;
+        /**
+         * dohc's design tokens as they are on screen right now. Read this to
+         * color something CSS cannot reach — a canvas, a chart, an SVG fill.
+         * To style a panel, prefer `applyTheme`.
+         *
+         * Theme is styling data, so this gates on no capability.
+         */
+        theme: (requestOptions?: DohcRequestOptions) => Promise<DohcTheme>;
+        /**
+         * The one line that makes a panel look native: it writes dohc's tokens
+         * onto this document and keeps writing them when the user changes
+         * theme, density, or reduced motion. Panel CSS then uses the same
+         * names dohc uses — `color: var(--dohc-ink)`.
+         *
+         * Returns a function that stops following. A panel that never calls
+         * this is unaffected; the host's messages are simply ignored.
+         */
+        applyTheme: (applyOptions?: DohcApplyThemeOptions) => Promise<() => void>;
     };
     collections: {
         list: (name: string, params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;

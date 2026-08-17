@@ -47,6 +47,38 @@ function request(method, params) {
   });
 }
 
+// The theme bridge, hand-rolled the way this fixture hand-rolls the SDK. A
+// panel that bundles @dohc/sdk gets all of this from one call:
+//
+//   await dohc.ui.applyTheme();
+// Mirrors DOHC_THEME_PROTOCOL from @dohc/sdk. This fixture ships as plain
+// files with no bundler, so it spells the constant out, the same way the
+// `protocol` above spells out DOHC_SDK_PROTOCOL.
+const themeProtocol = "dohc:theme:v1";
+const modeOutput = document.querySelector("[data-testid=theme-mode]");
+const inkOutput = document.querySelector("[data-testid=theme-ink]");
+
+function applyTheme(theme) {
+  for (const [name, value] of Object.entries(theme.tokens)) {
+    document.documentElement.style.setProperty(name, value);
+  }
+  document.documentElement.dataset.theme = theme.mode;
+  document.documentElement.dataset.density = theme.density;
+  document.documentElement.dataset.reduceMotion = String(theme.reduceMotion);
+  modeOutput.textContent = theme.mode;
+  inkOutput.textContent = theme.tokens["--dohc-ink"];
+}
+
+// Listening starts before the first read, so a theme change during startup is
+// applied rather than lost. dohc pushes one of these whenever the user
+// changes theme, density, or reduced motion.
+window.addEventListener("message", (event) => {
+  if (event.source !== window.parent || event.origin !== responseOrigin) return;
+  const message = event.data;
+  if (!message || message.protocol !== themeProtocol) return;
+  applyTheme(message.theme);
+});
+
 const capabilitiesOutput = document.querySelector(
   "[data-testid=sdk-capabilities]",
 );
@@ -54,6 +86,7 @@ const writeOutput = document.querySelector("[data-testid=sdk-write-result]");
 const errorOutput = document.querySelector("[data-testid=sdk-error]");
 
 try {
+  applyTheme(await request("ui.theme"));
   const capabilities = await request("capabilities");
   capabilitiesOutput.textContent = JSON.stringify(capabilities.files);
   const write = await request("files.write", {

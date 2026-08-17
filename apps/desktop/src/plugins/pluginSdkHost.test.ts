@@ -362,6 +362,21 @@ describe("invokePluginSdkHost", () => {
     ).rejects.toThrow(/ui.open is unavailable for this request path/);
   });
 
+  // The renderer answers ui.theme for a panel before it reaches main, so
+  // BOTH paths refuse here — and say why rather than "unsupported method".
+  it("refuses ui.theme by name on either request path", async () => {
+    const root = await workspaceRoot();
+    const paths: PluginSdkHostContext[] = [
+      context(root),
+      { ...context(root), requestPath: "panel" },
+    ];
+    for (const ctx of paths) {
+      await expect(invokePluginSdkHost(ctx, "ui.theme", undefined)).rejects.toThrow(
+        /ui.theme is unavailable for this request path/,
+      );
+    }
+  });
+
   // ui.openWebApp is the only way an instance key ever enters dohc: the
   // plugin's page in dohc knows manifest ids and nothing about instances.
   describe("ui.openWebApp", () => {
