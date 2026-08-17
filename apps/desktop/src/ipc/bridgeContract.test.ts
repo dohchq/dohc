@@ -1500,9 +1500,9 @@ describe("try-in-version IPC contract (PR 0N-2)", () => {
       TryInWorkspaceVersionPayload.parse({
         workspaceId: "ws-try",
         task: "tidy the notes",
-        driverId: "codex-app-server",
+        driverId: "codex",
       }).driverId,
-    ).toBe("codex-app-server");
+    ).toBe("codex");
     expect(
       TryInVersionStateResult.parse({ state: null }).state,
     ).toBeNull();

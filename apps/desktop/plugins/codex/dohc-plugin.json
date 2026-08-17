@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "name": "codex",
+  "displayName": "Codex",
+  "description": "Runs the Codex CLI on this workspace as a dohc agent.",
+  "publisher": "dohc",
+  "pluginVersion": "0.1.0",
+  "repository": "https://github.com/openai/codex",
+  "issues": "https://github.com/openai/codex/issues",
+  "license": "Apache-2.0",
+  "entry": "src/main.ts",
+  "drivers": [{ "id": "codex", "displayName": "Codex" }]
+}

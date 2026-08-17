@@ -44,14 +44,14 @@ describe("the drivers dohc ships", () => {
 
 describe("AgentDriverRegistry", () => {
   it("keeps drivers lookup-only and rejects duplicate ids", () => {
-    const one = driver("codex-app-server");
+    const one = driver("generic-acp");
     const two = driver("claude-acp");
     const registry = createAgentDriverRegistry([one, two]);
 
     expect(registry.list()).toEqual([one, two]);
-    expect(registry.get("codex-app-server")).toBe(one);
+    expect(registry.get("generic-acp")).toBe(one);
     expect(registry.get("missing")).toBeNull();
-    expect(() => createAgentDriverRegistry([one, driver("codex-app-server")])).toThrow(
+    expect(() => createAgentDriverRegistry([one, driver("generic-acp")])).toThrow(
       /Duplicate agent driver id/,
     );
   });
@@ -62,7 +62,7 @@ describe("AgentDriverRegistry", () => {
     const brokenProbe = vi.fn(async () => {
       throw new Error("claude not found");
     });
-    const ok = driver("codex-app-server", okProbe);
+    const ok = driver("generic-acp", okProbe);
     const broken = driver("claude-acp", brokenProbe);
     const registry = createAgentDriverRegistry([ok, broken]);
 
