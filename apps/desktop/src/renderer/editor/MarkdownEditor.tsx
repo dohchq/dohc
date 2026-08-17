@@ -413,7 +413,6 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const blockInsertRef = useRef<(pos: number) => void>(() => {});
     const blockMenuOpenRef = useRef<(pos: number, rect: DOMRect) => void>(() => {});
     const knownFilesRef = useRef<ReadonlyMap<string, WikilinkFile>>(new Map());
-    const dirtyTrackingReadyRef = useRef(false);
     const applyingPendingUndoRef = useRef(false);
     const appliedPendingUndoToken = useRef<number | null>(null);
     const includePlaceholdersRef = useRef(
@@ -720,10 +719,16 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           },
         },
         immediatelyRender: true,
+        // Every programmatic change this component makes says so at the point
+        // it makes it: `setContent` passes `emitUpdate: false`, `setEditable`
+        // passes its own false, and a pending undo raises
+        // `applyingPendingUndoRef`. What reaches here after those is the user's
+        // own edit, so it is reported. There is deliberately no window in which
+        // updates are ignored — one used to exist, keyed on an animation frame,
+        // and it dropped keystrokes that arrived first (#797).
         onUpdate({ editor, transaction }) {
           if (collabActive) return;
           if (applyingPendingUndoRef.current) return;
-          if (!dirtyTrackingReadyRef.current) return;
           if (!transaction.docChanged) return;
           const document = editor.state.doc;
           onDirty(() =>
@@ -740,15 +745,6 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       // scheduling) in non-collab mode; nothing about the document changed.
       editor?.setEditable(!readOnly, false);
     }, [editor, readOnly]);
-
-    useEffect(() => {
-      dirtyTrackingReadyRef.current = false;
-      if (!editor) return;
-      const frame = requestAnimationFrame(() => {
-        dirtyTrackingReadyRef.current = true;
-      });
-      return () => cancelAnimationFrame(frame);
-    }, [editor]);
 
     useEffect(() => {
       setChromeReady(false);
