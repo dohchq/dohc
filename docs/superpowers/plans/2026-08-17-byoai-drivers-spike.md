@@ -26,8 +26,10 @@ rendered thread on stdin, and the harness reports back into chat through
 `dohc chat reply --as-agent`, captured and run-linked. Path B, the agent
 drivers, already speaks `codex app-server` and Claude-over-ACP as supervised
 JSON-RPC children with dohc's MCP server injected — but its output dead-ends
-in an in-memory panel snapshot and never reaches chat. All harness-specific
-code in both paths is one 711-line file (`AgentProcessDrivers.ts`); everything
+in an in-memory panel snapshot and never reaches chat. Essentially all
+harness-specific code in both paths is one 711-line file
+(`AgentProcessDrivers.ts`, plus its e2e double and two inert strings — §3.1);
+everything
 above it — dispatch ledger, budgets, recovery, attribution, MCP config, the
 Settings probe UI — is harness-neutral and stays core. The recommended
 contribution point is therefore **core calls plugins**: a `drivers` manifest
@@ -52,8 +54,9 @@ the `agent` kind is the auto-provisioned "My agent" channel
 
 Messages are rows in the engine's SQLite store at `.dohc/engine/engine.db`
 (`engine.ts:38,1220`), written by the Rust engine
-(`crates/dohc-engine-domain/src/chats.rs:2932-2951`; DDL in
-`crates/dohc-engine-storage/src/migration.rs:515-575`). A message carries
+(`crates/dohc-engine-domain/src/chats.rs:2932-2951`; DDL at
+`crates/dohc-engine-storage/src/migration.rs:515-601`, `chat_messages` at
+`:577-601`). A message carries
 `author: ChatActor` — `{kind: "human"|"agent", displayName}`, nothing more
 (`engine.ts:1222-1224`) — plus `authorUserId` (opaque relay id, the authz key;
 `engine.ts:1339-1344`) and `origin?: "cli"` (`engine.ts:1346`). There is no
@@ -73,8 +76,11 @@ linked run (command, start time, exit code, log path). Agent authorship
 displays as "<Name>'s agent" (`chatMessages.tsx:33-43`). One invariant to
 carry: **the renderer send path can only author human messages** — the author
 is derived in main and hardcoded `kind: "human"`
-(`apps/desktop/src/main.ts:8530-8537`). Agent-authored messages exist only
-through the CLI server (§1.2).
+(`apps/desktop/src/main.ts:8530-8537`). Agent authorship has exactly two
+producers: the CLI server, serving the CLI and MCP verbs alike (§1.2), and
+main's own dispatch service, whose `sendAgentMessage` posts service notes —
+failure, no-runner, budget-pause — as `{kind: "agent"}` directly
+(`apps/desktop/src/agents/chatDispatchService.ts:616-665`).
 
 ### 1.2 Path A: the chat runner — the full BYOAI loop, today
 
@@ -82,9 +88,15 @@ through the CLI server (§1.2).
 `agent`, records a pending dispatch. The rule is durable SQL in the engine
 (`chats.rs:5451-5476`): `author_kind = 'human'`, `origin <> 'cli'`, verified
 author when signed in, channel kind `agent` or a mention row with handle
-`'agent'`. `origin: "cli"` — stamped unconditionally on every CLI/MCP post
-(`apps/desktop/src/cli/cliServer.ts:1950`) — is the loop breaker: an agent's
-own reply can never re-trigger dispatch. The TS mirror is `messageCanTrigger`
+`'agent'`. Loop safety is per path, not one stamp. The CLI `post`/`reply`
+verbs stamp `origin: "cli"` (`apps/desktop/src/cli/cliServer.ts:1950,2012`);
+the MCP verbs `startChannelChat`/`replyToChat` omit `origin` entirely — their
+rows land NULL (`cliServer.ts:1689,1727-1738`) — and are loop-safe only
+because `requestCli` hardcodes `actor: "agent"`
+(`packages/mcp/src/tools.ts:2699`) and the trigger requires
+`author_kind = 'human'`; main's own service notes are agent-authored for the
+same reason. A future human-actor MCP write would need its own origin
+discipline. The TS mirror is `messageCanTrigger`
 (`chatDispatchService.ts:340-352`).
 
 **Claim and budget.** The dispatch ledger lives in the engine
@@ -92,8 +104,8 @@ own reply can never re-trigger dispatch. The TS mirror is `messageCanTrigger`
 `liveAgentDispatchStore.ts` adapts it over the daemon RPC). Dispatch claims
 one run per workspace, pauses a thread after 10 dispatches in 10 minutes with
 a visible resume path (`chatDispatchService.ts:30-32,1178-1207`), posts
-failure notes for no-reply/timeout/app-quit, and requeues interrupted runs
-once (`:1319-1395`).
+failure notes for no-reply/timeout/app-quit (`:835-857,891-921`), and
+requeues interrupted runs once (`:1319-1395`).
 
 **Spawn.** The runner is one user-level free-text command —
 `runner: {command ≤4096, enabled, timeoutMinutes 1-1440}` in desktop user
@@ -124,14 +136,15 @@ from env (`packages/cli/src/index.ts:176`) and links the message to its run
 write tools (`dohc_reply_to_chat`, `dohc_start_channel_chat`) are thin
 wrappers over the same socket with `actor: "agent"`
 (`packages/mcp/src/tools.ts:2689-2711`, `packages/mcp/src/server.ts:446-457`)
-— one write path, one authorship rule.
+— but through their own verb handlers, which share the authorship rule and
+skip the `origin` stamp (see the trigger note above).
 
 **Test coverage caveat.** The dispatch e2e
 (`apps/desktop/e2e/workspace-agent-dispatch.spec.ts`) skips on Windows
 (`:17-22`) and its fixture is stale: `fakeChatRunner.mjs:7` still reads the
 prompt from argv, but production moved the prompt to stdin, so the fixture's
 own guard (`:11-14`, `prompt === mode`) exits 2 and both tests would fail on
-any platform. The loop is effectively untested end to end right now.
+any platform. The loop is effectively untested end to end right now (#824).
 
 ### 1.3 Path B: agent drivers — the harness clients, without chat
 
@@ -287,16 +300,28 @@ baseline — the diff `7ac22086..cf8a9fb0` touches only docs and one test):
 command ids already register (`PluginActivateResult.commands`,
 `plugins/pluginHostProtocol.ts:33-35`); the host protocol grows
 `driver.probe` / `driver.startSession` / `driver.prompt` / `driver.cancel` /
-`driver.answerPermission` / `driver.stop` requests and a `driver.event`
-notification carrying the `AgentEvent` union; core wraps each registration in
-an adapter that satisfies `AgentDriver` and merges it into the existing
-registry (`AgentDriver.ts:128-166`). Chat, dispatch, attribution, MCP config,
-and the Settings UI do not change. Two details the code already anticipates:
-the event union's `raw` fields must be dropped at the process boundary — the
+`driver.answerPermission` / `driver.stop` / `driver.dispose` requests — plus
+the optional `setModel` and `answerUserInput` members
+(`AgentDriver.ts:107-110`) — and a `driver.event` notification carrying the
+`AgentEvent` union; core wraps each registration in an adapter that satisfies
+`AgentDriver` and merges it into the existing registry
+(`AgentDriver.ts:128-166`). Chat, dispatch, attribution, MCP config, and the
+Settings UI do not change. Two shapes do not serialize as they stand and must
+be redesigned at the seam, not passed through: `permissionPolicy` is a
+**function-valued** field of the start input (`AgentDriver.ts:94`), so it
+becomes a declarative policy or stays a host-side callback the plugin never
+sees; `resumeCursor` is typed `unknown` (`:99-100`) and must be constrained
+to JSON-serializable data. Two more details the code already anticipates: the
+event union's `raw` fields must be dropped at the process boundary — the
 type's own comment demands exactly that for future IPC consumers
 (`AgentDriver.ts:11-13`) — and a crashing plugin maps to the session's
 `closed`/fatal-error path, with the host's crash-loop auto-disable
-(`pluginHostProtocol.ts:115-116`) bounding the blast radius.
+(`pluginHostProtocol.ts:115-116`) bounding the blast radius. One trust
+direction is new and inbound: `AgentProbe.auth.email`/`loginHint` carry a
+must-not-cross-into-IPC-or-logs comment (`AgentDriver.ts:67-68`), and under
+this option a **plugin supplies** those fields into core — core must treat
+every probe field as untrusted display data and keep the redaction rule at
+its own boundary.
 
 **Option B — plugins call core (a chat SDK).** The SDK grows `chat.*` methods
 plus a turn subscription; the plugin owns the loop: claim triggers, spawn the
@@ -304,9 +329,12 @@ harness, post replies. This is the wrong default for three reasons the code
 makes concrete. The machinery a plugin would re-own is the 1,948-line
 dispatch service — durable claims, budgets and pauses, failure notes,
 presence, app-quit recovery, the self-test — per plugin. The invariants would
-leave core: a plugin that posts without `origin: "cli"` creates an infinite
-dispatch loop (`chats.rs:5468`), and single-claim-per-workspace becomes a
-convention instead of a served guarantee. And it contradicts the agreed
+leave core: a plugin post is loop-safe only through the guards the trigger
+SQL encodes — agent author kind, or the `origin` exclusion (§1.2,
+`chats.rs:5451-5476`) — and a chat SDK that ever posts human-authored text
+without that discipline creates an infinite dispatch loop, while
+single-claim-per-workspace becomes a convention instead of a served
+guarantee. And it contradicts the agreed
 split — chat stays core; option B is chat-as-plugin wearing a smaller hat.
 Option B's one real merit is agent shapes that are not "a local process per
 harness" (a cloud agent, a fleet). That argues for a chat SDK **later**, as
@@ -314,10 +342,20 @@ its own decision, not for making it the driver mechanism now.
 
 **Recommendation: option A.** The seam already exists and is exactly
 harness-sized: everything harness-specific in the tree is
-`AgentProcessDrivers.ts` (711 lines, two harnesses plus shared helpers);
-everything above it is neutral. The smallest honest contribution point is
-driver registration routed through the core machinery — and it requires no
-new chat authority anywhere.
+`AgentProcessDrivers.ts` (711 lines, two harnesses plus shared helpers) — the
+residue elsewhere is inert (the literal id union at `AgentDriver.ts:1`, a
+placeholder runner command at `RunnerSettingsCard.tsx:14-15`) plus one test
+double, the 301-line `e2e/fixtures/fakeAgentProcess.mjs`, which encodes both
+harness protocols and moves with the drivers; everything above the drivers is
+neutral. The smallest honest contribution point is
+driver registration routed through the core machinery. It adds no new chat
+authority *surface*, but it does re-aim an existing one: the state-dir token
+that the CLI client treats as the sole authentication gate
+(`packages/cli/src/client.ts:21-31`) is handed to a harness child spawned by
+installed plugin code instead of by a command the user typed. That is
+acceptable exactly on the plugin plan's full-trust premise (Ice's 2026-07-28
+call, design rule 3 in `2026-08-13-plugin-system.md`) — and it is the real
+stake of decision 5 below.
 
 ### 3.2 What still has to meet in the middle
 
@@ -371,8 +409,8 @@ driver contribution (§3.1) and command-capable broker (P3):
   (§1.5); review surfaces like the try-in-version card hang off the same
   run-ended seam (`main.ts:2210-2219`). Replies enter chat through the
   harness's own `dohc chat reply --as-agent` / `dohc_reply_to_chat`, keeping
-  authorship, `origin: "cli"`, and the run chip intact with zero new write
-  paths.
+  authorship, loop safety, and the run chip intact without adding any write
+  path beyond the ones §1.2 names.
 - **The worked example**: harness #3 is a copy of one driver class — roughly
   250–330 lines of "spawn this, map these events, probe like this" — plus a
   manifest. That matches the stated goal: the plugin is the documentation.
@@ -407,19 +445,22 @@ driver contribution (§3.1) and command-capable broker (P3):
    today (no permission model at all), while driver sessions hardcode
    approval-required (`AgentSessionManager.ts:395`) — when dispatch drives a
    driver, which mode does it get, and does waiting-permission surface
-   in-thread?
+   in-thread? Decide with the consequence in view: approval-required maps
+   Codex to a **read-only** sandbox (`AgentProcessDrivers.ts:168-173`), and no
+   in-thread permission surface exists yet — choosing it today makes
+   unattended dispatch useless as-is.
 
 ## 6. Verdict and sizes
 
 | Piece | Size | Why this size |
 | --- | --- | --- |
-| **W1. Driver contribution point** — manifest field, `driver.*` host-protocol methods, plugin-backed `AgentDriver` adapter, registry merge, Settings list merge | **M** | Every seam exists: the interface (`AgentDriver.ts:113-118`), the registry, the bidirectional request/notify transport (`pluginHostProtocol.ts:121-128`), the activation-registration pattern (`:33-35`). New work is protocol cases, serializable event mapping (drop `raw`), and lifetime binding to plugin crashes. |
+| **W1. Driver contribution point** — manifest field, `driver.*` host-protocol methods, plugin-backed `AgentDriver` adapter, registry merge, Settings list merge | **M** | Every seam exists: the interface (`AgentDriver.ts:113-118`), the registry, the bidirectional request/notify transport (`pluginHostProtocol.ts:121-128`), the activation-registration pattern (`:33-35`). New work is protocol cases, serializable event mapping (drop `raw`), the two non-serializable shapes (§3.1: `permissionPolicy`, `resumeCursor`), and lifetime binding to plugin crashes. |
 | **W2. Command-capable broker with duplex stdio** — supersets the sites spike's P3 | **M** | P3's spawn/teardown/containment argument carries over unchanged; the addition is message-stream access to the child's stdio, which the broker's existing supervised-child plumbing was built around. |
-| **W3. Dispatch drives driver sessions** — claim → `startSession`/`prompt`, resume cursors per thread, runner command kept as fallback | **M** | `startClaim` is one seam (`chatDispatchService.ts:977-1050`); the sessions and cursors exist; the work is lifecycle (session-per-thread vs per-workspace), mode selection (decision 7), and failure-note parity. |
+| **W3. Dispatch drives driver sessions** — claim → `startSession`/`prompt`, resume cursors per thread, runner command kept as fallback | **M** | `startClaim` is one seam (`chatDispatchService.ts:977-1050`); the sessions and cursors exist; the work is lifecycle (session-per-thread vs per-workspace), mode selection (decision 7), and failure-note parity. One favorable fact: the broker is constructed main-side per workspace with POSIX and Windows tree kills and `disposeSpawn` (`pluginChildProcessBroker.ts:11,96-101,282`), so core keeps kill authority over a harness child without plugin cooperation — the dispatch timeout crosses the boundary as a broker dispose, never as a request the plugin must honor. |
 | **W4. Session events into the chat surface** — presence upgrade, optional turn-text posting per decision 2 | **S–M** | Presence and `onMessagePosted` push exist; posting turn text is a `sendMessage` from main (the service-note path, `chatDispatchService.ts:638-649`) — the size is in the product choice, not the plumbing. |
 | **W5. `claude-code` driver plugin** | **S** | One driver class plus manifest (§4); the ACP variant is a move of existing code. Native-protocol variant needs the two binary-strings claims verified first. |
 | **W6. `codex` driver plugin** | **S** | `CodexAppServerDriver` moves nearly verbatim (`AgentProcessDrivers.ts:541-703`). |
-| **W7. Settings reconciliation** — wire or delete `agents.*`; auth-status probes | **S** | Decision 6; probes are two exit-code spawns once W2 exists. |
+| **W7. Settings reconciliation** — wire or delete `agents.*`; auth-status probes | **S** | Decision 6; probes are two exit-code spawns once W2 exists. Mid-session expiry is already modelled: the event union carries `auth`/`login-required` (`AgentDriver.ts:53-57`), emitted today on Codex token-refresh refusals (`AgentProcessDrivers.ts:586-593`) — wire it to a visible re-login prompt so an expired login fails as itself, not as a run timeout. |
 
 **Buildable on the planned primitives — yes, and with less substrate work
 than Sites needed.** The sites conversion surfaced two L items (read-only
@@ -427,9 +468,12 @@ authority, scoped sub-grants); the driver program surfaces none, because the
 heavy machinery — chat tables, dispatch ledger, run attribution, MCP
 tiering — already ships in the engine and stays there. The one genuinely new
 authority question (plugins writing chat) is avoided entirely by option A.
+The verdict's one exposure is W2: if arbitrary-executable containment becomes
+a policy question — which executables a plugin may spawn, whether the user
+approves them — W2 grows L-shaped.
 Sequencing that falls out: W1+W2 together (W1 is inert without a spawn
 primitive), then W5/W6 as the extraction proof (delete the moved classes from
 `AgentProcessDrivers.ts` in the same change, per the no-compat rule), with
 W3/W4 as the product milestone that makes the two existing paths one. Fix the
-stale dispatch fixture (§1.2) before any of it, so the loop being changed is
-the loop being tested.
+stale dispatch fixture (§1.2, #824) before any of it, so the loop being
+changed is the loop being tested.
