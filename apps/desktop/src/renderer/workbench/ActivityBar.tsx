@@ -41,6 +41,11 @@ export function activityViewLabel(view: ViewId): string {
   return LABELS[view];
 }
 
+// Every rail glyph is drawn the same size and weight; only the icon differs.
+function RailGlyph(props: { Icon: typeof Files }) {
+  return <props.Icon size={18} strokeWidth={1.9} aria-hidden />;
+}
+
 function RailButton(props: {
   label: string;
   testId: string;
@@ -134,22 +139,19 @@ export function ActivityBar(props: {
       {/* The view list scrolls, so enough contributed views never push the
           Cloud and Settings buttons off the rail. */}
       <div className="flex min-h-0 flex-col items-center gap-1 overflow-y-auto">
-        {VIEW_IDS.map((view) => {
-          const Icon = ICONS[view];
-          return (
-            <RailButton
-              key={view}
-              testId={`activity-${view}`}
-              label={LABELS[view]}
-              // The rail reflects a collapsed panel: no active mark while hidden.
-              active={props.sidebarVisible && props.activeView === view}
-              badge={view === "explorer" && props.hasConflict ? "danger" : undefined}
-              count={view === "search" ? props.searchResultCount : undefined}
-              onClick={() => props.onSelectView(view)}
-              icon={<Icon size={18} strokeWidth={1.9} aria-hidden />}
-            />
-          );
-        })}
+        {VIEW_IDS.map((view) => (
+          <RailButton
+            key={view}
+            testId={`activity-${view}`}
+            label={LABELS[view]}
+            // The rail reflects a collapsed panel: no active mark while hidden.
+            active={props.sidebarVisible && props.activeView === view}
+            badge={view === "explorer" && props.hasConflict ? "danger" : undefined}
+            count={view === "search" ? props.searchResultCount : undefined}
+            onClick={() => props.onSelectView(view)}
+            icon={<RailGlyph Icon={ICONS[view]} />}
+          />
+        ))}
         {props.pluginViews.map((view) => (
           <RailButton
             key={view.viewId}
@@ -178,13 +180,13 @@ export function ActivityBar(props: {
           label="dohc Cloud"
           badge={props.hasConflict ? "danger" : undefined}
           onClick={props.onOpenCloud}
-          icon={<Cloud size={18} strokeWidth={1.9} aria-hidden />}
+          icon={<RailGlyph Icon={Cloud} />}
         />
         <RailButton
           testId="activity-settings"
           label="Open settings"
           onClick={props.onOpenSettings}
-          icon={<Settings size={18} strokeWidth={1.9} aria-hidden />}
+          icon={<RailGlyph Icon={Settings} />}
         />
       </div>
     </nav>

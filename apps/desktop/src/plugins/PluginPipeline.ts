@@ -632,6 +632,25 @@ export class PluginPipeline {
   }
 
   /**
+   * The root and manifest of a discovered plugin, in the shape main serves
+   * panels from.
+   *
+   * main also keeps a registration map, but that map is filled only when a
+   * tab opens a panel or a web app. A view in the activity bar opens no tab,
+   * so nothing fills it for a view-only plugin, and the panel it declares
+   * could never start. This is where the manifest actually lives.
+   */
+  pluginRegistration(
+    pluginId: string,
+  ): { pluginRoot: string; manifest: DohcPluginManifest } | null {
+    for (const candidate of this.discovery) {
+      if (candidate.id !== pluginId || !candidate.manifest) continue;
+      return { pluginRoot: candidate.rootPath, manifest: candidate.manifest };
+    }
+    return null;
+  }
+
+  /**
    * Resolves an absolute workspace path to the id of the discovered plugin
    * whose root contains it, or null when no plugin owns that path. Lets a
    * door-attributed write (main.ts's writeAuthoredText) tell this pipeline

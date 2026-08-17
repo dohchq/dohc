@@ -863,6 +863,7 @@ describe("plugin panel tabs", () => {
       workspaceId: WORKSPACE.workspaceId,
       pluginId: "hello-plugin",
       panelId: "main",
+      placement: "editor",
     });
 
     await user.click(screen.getByRole("button", { name: "Close main" }));
@@ -908,6 +909,7 @@ describe("plugin panel tabs", () => {
         workspaceId: otherWorkspace.workspaceId,
         pluginId: "hello-plugin",
         panelId: "main",
+        placement: "editor",
       }),
     );
   });
@@ -1156,14 +1158,6 @@ describe("plugin activity-bar views", () => {
     return bridge;
   }
 
-  function withNoPlugins(bridge: ReturnType<typeof makeBridge>) {
-    bridge.listPlugins = vi.fn(async () => ({
-      ok: true as const,
-      plugins: [] as PluginStatusRecord[],
-    }));
-    return bridge;
-  }
-
   it("opens a contributed view's panel in the side panel", async () => {
     const bridge = withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)));
     renderShell(bridge);
@@ -1178,6 +1172,7 @@ describe("plugin activity-bar views", () => {
         workspaceId: WORKSPACE.workspaceId,
         pluginId: "hello-plugin",
         panelId: "hello-view",
+        placement: "view",
       }),
     );
     expect(
@@ -1237,9 +1232,13 @@ describe("plugin activity-bar views", () => {
   });
 
   it("drops the selection once the plugin is gone", async () => {
-    const bridge = withNoPlugins(
-      makeBridge(Promise.resolve({ ...STORED_STATE, activeView: viewId })),
+    const bridge = makeBridge(
+      Promise.resolve({ ...STORED_STATE, activeView: viewId }),
     );
+    bridge.listPlugins = vi.fn(async () => ({
+      ok: true as const,
+      plugins: [] as PluginStatusRecord[],
+    }));
     renderShell(bridge);
 
     const explorer = await screen.findByTestId("activity-explorer");

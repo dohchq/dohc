@@ -1,4 +1,5 @@
 import type { PluginStatusRecord } from "../../ipc/bridgeContract";
+import { canServeSurfaces } from "./pluginCatalog";
 import { pluginViewId, type PluginViewId } from "./workbenchState";
 
 // Which plugin views the activity bar shows, and what the side panel does
@@ -15,27 +16,13 @@ export interface PluginActivityView {
   plugin: PluginStatusRecord;
 }
 
-/**
- * Whether a plugin's views belong in the rail right now. A view is a live
- * panel behind a running plugin, so the test is the one the Open control for
- * web apps already uses: installed, approved, and not on its way out.
- */
-export function contributesViews(plugin: PluginStatusRecord): boolean {
-  return (
-    plugin.valid &&
-    plugin.approvedHash !== null &&
-    !plugin.status.startsWith("disabled") &&
-    plugin.status !== "uninstalling"
-  );
-}
-
 /** Every view the rail shows, in plugin order, then manifest order. */
 export function pluginActivityViews(
   plugins: readonly PluginStatusRecord[],
 ): PluginActivityView[] {
   const views: PluginActivityView[] = [];
   for (const plugin of plugins) {
-    if (!contributesViews(plugin)) continue;
+    if (!canServeSurfaces(plugin)) continue;
     for (const panel of plugin.panels) {
       if (panel.placement !== "view") continue;
       views.push({
@@ -60,7 +47,7 @@ export function pluginActivityViews(
  * must bring the view back where the user left it.
  */
 export type PluginViewResolution =
-  | { status: "ready"; view: PluginActivityView }
+  | { status: "ready"; pluginId: string; panelId: string; title: string }
   | { status: "off"; title: string; pluginTitle: string }
   | { status: "absent" };
 
@@ -73,22 +60,16 @@ export function resolvePluginView(
     (candidate) => candidate.id === target.panelId && candidate.placement === "view",
   );
   if (!plugin || !panel) return { status: "absent" };
-  if (!contributesViews(plugin)) {
-    return {
+  return canServeSurfaces(plugin)
+    ? {
+      status: "ready",
+      pluginId: plugin.id,
+      panelId: panel.id,
+      title: panel.title,
+    }
+    : {
       status: "off",
       title: panel.title,
       pluginTitle: plugin.displayName ?? plugin.id,
     };
-  }
-  return {
-    status: "ready",
-    view: {
-      viewId: pluginViewId(plugin.id, panel.id),
-      pluginId: plugin.id,
-      panelId: panel.id,
-      title: panel.title,
-      icon: panel.icon,
-      plugin,
-    },
-  };
 }

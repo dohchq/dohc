@@ -33,11 +33,9 @@ export function pluginViewId(pluginId: string, panelId: string): PluginViewId {
 }
 
 export function parsePluginViewId(
-  value: string | null,
+  value: string,
 ): { pluginId: string; panelId: string } | null {
-  if (typeof value !== "string" || !value.startsWith(PLUGIN_VIEW_ID_PREFIX)) {
-    return null;
-  }
+  if (!value.startsWith(PLUGIN_VIEW_ID_PREFIX)) return null;
   const parts = value.slice(PLUGIN_VIEW_ID_PREFIX.length).split("/");
   if (parts.length !== 2 || parts.some((part) => part.length === 0)) return null;
   try {

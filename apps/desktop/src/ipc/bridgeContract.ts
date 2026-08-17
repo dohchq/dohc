@@ -2335,6 +2335,10 @@ export const StartPluginPanelPayload = z.object({
   workspaceId: WORKSPACE_ID,
   pluginId: PLUGIN_ID,
   panelId: PLUGIN_PANEL_ID,
+  /** Where the caller is mounting this panel. Main refuses a panel whose
+   * manifest places it elsewhere, so a tab restored from before an update
+   * cannot mount a panel the plugin has since moved to the view rail. */
+  placement: z.enum(["editor", "view"]),
 }).strict();
 export type StartPluginPanelPayload = z.infer<typeof StartPluginPanelPayload>;
 
@@ -2348,7 +2352,13 @@ export const StartPluginPanelResult = z.discriminatedUnion("status", [
 ]);
 export type StartPluginPanelResult = z.infer<typeof StartPluginPanelResult>;
 
-export const StopPluginPanelPayload = StartPluginPanelPayload;
+// Stopping names the running panel, which is keyed by workspace, plugin, and
+// panel alone. It carries no placement: a panel must stop wherever it runs.
+export const StopPluginPanelPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  panelId: PLUGIN_PANEL_ID,
+}).strict();
 export type StopPluginPanelPayload = z.infer<typeof StopPluginPanelPayload>;
 export const StopPluginPanelResult = z.void();
 export type StopPluginPanelResult = z.infer<typeof StopPluginPanelResult>;
@@ -3873,7 +3883,16 @@ const PLUGIN_VIEW_ID = z
       "/".length +
       MAX_PLUGIN_PANEL_ID_CHARS * 9,
   )
-  .refine((value) => parsePluginViewId(value) !== null);
+  .refine((value) => {
+    const parsed = parsePluginViewId(value);
+    // The ids it decodes to must be ids this contract would accept anywhere
+    // else — same length caps, same refusal of NUL.
+    return (
+      parsed !== null &&
+      PLUGIN_ID.safeParse(parsed.pluginId).success &&
+      PLUGIN_PANEL_ID.safeParse(parsed.panelId).success
+    );
+  });
 
 export const WorkspaceUiState = z.object({
   version: z.literal(2),

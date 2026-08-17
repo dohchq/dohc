@@ -85,7 +85,7 @@ describe("pluginActivityViews", () => {
     ).toEqual([]);
   });
 
-  it("orders views by plugin, then by the manifest", () => {
+  it("keeps the catalog's own order rather than sorting views itself", () => {
     const views = pluginActivityViews([
       plugin("b-plugin", { panels: [sitesPanel] }),
       plugin("a-plugin", {
@@ -113,9 +113,12 @@ describe("resolvePluginView", () => {
       target,
     );
 
-    expect(resolution.status).toBe("ready");
-    if (resolution.status !== "ready") throw new Error("expected a live view");
-    expect(resolution.view.panelId).toBe("sites");
+    expect(resolution).toEqual({
+      status: "ready",
+      pluginId: "dohc-sites",
+      panelId: "sites",
+      title: "Sites",
+    });
   });
 
   it("keeps a turned-off plugin's view, naming what to turn back on", () => {

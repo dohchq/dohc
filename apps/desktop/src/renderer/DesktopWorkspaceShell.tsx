@@ -2058,11 +2058,10 @@ export function DesktopWorkspaceShell(props: {
   // saying which view the user is looking at.
   const sidePanelTitle = isViewId(wb.activeView)
     ? activityViewLabel(wb.activeView)
-    : selectedPluginViewState?.status === "ready"
-      ? selectedPluginViewState.view.title
-      : selectedPluginViewState?.status === "off"
-        ? selectedPluginViewState.title
-        : "Plugin view";
+    : (selectedPluginViewState?.status === "ready" ||
+        selectedPluginViewState?.status === "off"
+      ? selectedPluginViewState.title
+      : "Plugin view");
 
   // An uninstalled plugin leaves no selection behind. Only a LOADED list can
   // say a plugin is gone — before it lands, the selection stands, so a restart
@@ -4437,6 +4436,14 @@ export function DesktopWorkspaceShell(props: {
         label: `View: ${activityViewLabel(view)}`,
         run: () => mutateWb((state) => setView(state, view)),
       })),
+      // A contributed view is a view like any other, so the palette offers it
+      // the same way. The list follows the rail: a plugin that is gone or off
+      // contributes no command either.
+      ...railPluginViews.map((view) => ({
+        id: `show-${view.viewId}`,
+        label: `View: ${view.title}`,
+        run: () => mutateWb((state) => setView(state, view.viewId)),
+      })),
       {
         id: "connect-cloud",
         label: "Connect dohc Cloud",
@@ -4475,6 +4482,7 @@ export function DesktopWorkspaceShell(props: {
     ],
     [
       activeDocumentPath,
+      railPluginViews,
       createUntitledDrawing,
       openWorkspaceFolder,
       closeActiveTab,
@@ -5287,9 +5295,9 @@ export function DesktopWorkspaceShell(props: {
               <Suspense fallback={<PanelLoading label="plugin panel" />}>
                 <LazyPluginPanelPage
                   workspaceId={workspaceId}
-                  pluginId={selectedPluginViewState.view.pluginId}
-                  panelId={selectedPluginViewState.view.panelId}
-                  variant="panel"
+                  pluginId={selectedPluginViewState.pluginId}
+                  panelId={selectedPluginViewState.panelId}
+                  placement="view"
                   onOpenPath={openPathWithHeading}
                   onOpenWebApp={openPluginWebAppInstanceTab}
                 />
@@ -5620,6 +5628,7 @@ export function DesktopWorkspaceShell(props: {
                     workspaceId={workspaceId}
                     pluginId={groupPluginPanel.pluginId}
                     panelId={groupPluginPanel.panelId}
+                    placement="editor"
                     onOpenPath={openPathWithHeading}
                     onOpenWebApp={openPluginWebAppInstanceTab}
                   />
