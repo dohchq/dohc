@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +16,7 @@ import {
   type PluginChildProcessForkOptions,
   type PluginChildProcessHandle,
   type PluginChildProcessOutput,
+  type PluginCommandSpawnOptions,
 } from "./pluginChildProcessBroker";
 import { PLUGIN_HOST_METHODS } from "./pluginHostProtocol";
 
@@ -42,14 +43,38 @@ class FakeUtilityProcess extends EventEmitter implements PluginChildProcessHandl
   }
 }
 
+/** A command child: no message channel, a writable standard input. */
+class FakeCommandProcess extends EventEmitter implements PluginChildProcessHandle {
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  readonly stdin = new PassThrough();
+  killCalls = 0;
+
+  constructor(readonly pid: number) {
+    super();
+  }
+
+  kill(): boolean {
+    this.killCalls += 1;
+    queueMicrotask(() => this.emit("exit", 0));
+    return true;
+  }
+}
+
 interface BrokerFixture {
   root: string;
   broker: PluginChildProcessBroker;
   children: FakeUtilityProcess[];
+  commandChildren: FakeCommandProcess[];
   forks: Array<{
     modulePath: string;
     args: string[];
     options: PluginChildProcessForkOptions;
+  }>;
+  commands: Array<{
+    command: string;
+    args: string[];
+    options: PluginCommandSpawnOptions;
   }>;
   windowsTreeKills: number[];
 }
@@ -78,7 +103,9 @@ async function createFixture(
     await writeFile(join(pluginRoot, "server.mjs"), "export {};\n");
   }
   const children: FakeUtilityProcess[] = [];
+  const commandChildren: FakeCommandProcess[] = [];
   const forks: BrokerFixture["forks"] = [];
+  const commands: BrokerFixture["commands"] = [];
   const windowsTreeKills: number[] = [];
   await mkdir(join(root, "workspace"), { recursive: true });
   if (options.linkedWorkspaceRoot) {
@@ -97,10 +124,19 @@ async function createFixture(
       child.once(
         "error",
         (type: string, location: string, report: string) =>
-          lifecycle.onError(type, location, report),
+          lifecycle.onError(
+            `Utility process error ${type} at ${location}: ${report}`,
+          ),
       );
       children.push(child);
       forks.push({ modulePath, args, options: forkOptions });
+      return child;
+    },
+    spawnCommandProcess: (command, args, commandOptions, lifecycle) => {
+      const child = new FakeCommandProcess(20_000 + commandChildren.length);
+      child.once("exit", (code: number) => lifecycle.onExit(code));
+      commandChildren.push(child);
+      commands.push({ command, args, options: commandOptions });
       return child;
     },
     killWindowsTree: async (pid) => {
@@ -111,7 +147,15 @@ async function createFixture(
     stopGraceMs: 10,
     exitWaitMs: 50,
   });
-  return { root, broker, children, forks, windowsTreeKills };
+  return {
+    root,
+    broker,
+    children,
+    commandChildren,
+    forks,
+    commands,
+    windowsTreeKills,
+  };
 }
 
 function context(
@@ -364,7 +408,15 @@ describe("PluginChildProcessBroker", () => {
     const brokerContext = context("plugin-a", "spawn-a");
 
     const childId = await spawnChild(
-      { root, broker, children: [child], forks: [], windowsTreeKills: [] },
+      {
+        root,
+        broker,
+        children: [child],
+        commandChildren: [],
+        forks: [],
+        commands: [],
+        windowsTreeKills: [],
+      },
       brokerContext,
     );
 
@@ -875,5 +927,451 @@ describe("PluginChildProcessBroker", () => {
         childId: "00000000-0000-4000-8000-000000000000",
       }),
     ).rejects.toThrow(/^Child process "[^"]+" was not found\.$/);
+  });
+});
+
+/**
+ * A broker with no injected launchers: real spawns, real pids, the real
+ * platform's tree kill. Command children run real executables, so their pins
+ * run real executables — a fake that spawns nothing can certify neither a
+ * pid, an exit code, a standard-input round trip, nor a tree that has to die.
+ */
+async function createRealFixture(): Promise<BrokerFixture> {
+  const root = await createTestScratch("dohc-plugin-command-broker-");
+  roots.push(root);
+  await mkdir(join(root, "plugins", "plugin-a", "data"), { recursive: true });
+  await mkdir(join(root, "workspace"), { recursive: true });
+  return {
+    root,
+    broker: new PluginChildProcessBroker({
+      dohcDir: root,
+      workspaceRoot: join(root, "workspace"),
+    }),
+    children: [],
+    commandChildren: [],
+    forks: [],
+    commands: [],
+    windowsTreeKills: [],
+  };
+}
+
+async function commandScript(
+  fixture: BrokerFixture,
+  name: string,
+  source: string,
+): Promise<string> {
+  const path = join(fixture.root, "plugins", "plugin-a", name);
+  await writeFile(path, source);
+  return path;
+}
+
+async function spawnCommandChild(
+  fixture: BrokerFixture,
+  brokerContext: PluginChildProcessBrokerContext,
+  input: Record<string, unknown>,
+): Promise<{ childId: string; pid: number | null }> {
+  const result = await fixture.broker.invoke(
+    brokerContext,
+    PLUGIN_CHILD_PROCESS_METHODS.spawnCommand,
+    input,
+  );
+  if (
+    typeof result !== "object" ||
+    result === null ||
+    !("childId" in result) ||
+    typeof result.childId !== "string"
+  ) {
+    throw new Error("Broker returned an invalid test child id.");
+  }
+  return result as { childId: string; pid: number | null };
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function until<T>(
+  probe: () => T | undefined | Promise<T | undefined>,
+  label: string,
+  timeoutMs = 10_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await probe();
+    if (value !== undefined) return value;
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}.`);
+    await new Promise((settle) => setTimeout(settle, 25));
+  }
+}
+
+describe("PluginChildProcessBroker command children", () => {
+  it(
+    "runs a real executable and reports its pid and exit code",
+    async () => {
+      const fixture = await createRealFixture();
+      const brokerContext = context("plugin-a", "spawn-a");
+      const script = await commandScript(
+        fixture,
+        "exit-seven.mjs",
+        "process.exit(7);\n",
+      );
+
+      const spawned = await spawnCommandChild(fixture, brokerContext, {
+        command: process.execPath,
+        args: [script],
+      });
+
+      expect(spawned.pid).toBeGreaterThan(0);
+      await expect(
+        fixture.broker.invoke(brokerContext, PLUGIN_CHILD_PROCESS_METHODS.wait, {
+          childId: spawned.childId,
+        }),
+      ).resolves.toEqual({ code: 7, reason: "exited" });
+    },
+    20_000,
+  );
+
+  it(
+    "carries a duplex round trip: written standard input comes back on stdout",
+    async () => {
+      const fixture = await createRealFixture();
+      const events: Array<{
+        subscriptionId: string;
+        event: string;
+        data: unknown;
+      }> = [];
+      const brokerContext = context("plugin-a", "spawn-a", undefined, events);
+      // The shape a harness CLI speaks: read a line, answer a line, and stay
+      // alive until its input ends.
+      const newline = "String.fromCharCode(10)";
+      const script = await commandScript(
+        fixture,
+        "echo-lines.mjs",
+        [
+          'process.stdin.setEncoding("utf8");',
+          'let buffered = "";',
+          'process.stdin.on("data", (chunk) => {',
+          "  buffered += chunk;",
+          `  let breakAt = buffered.indexOf(${newline});`,
+          "  while (breakAt >= 0) {",
+          "    const line = buffered.slice(0, breakAt);",
+          "    buffered = buffered.slice(breakAt + 1);",
+          `    process.stdout.write("echo:" + line + ${newline});`,
+          `    breakAt = buffered.indexOf(${newline});`,
+          "  }",
+          "});",
+          'process.stdin.on("end", () => process.exit(0));',
+          "",
+        ].join("\n"),
+      );
+      const spawned = await spawnCommandChild(fixture, brokerContext, {
+        command: process.execPath,
+        args: [script],
+      });
+      await fixture.broker.invoke(
+        brokerContext,
+        PLUGIN_CHILD_PROCESS_METHODS.subscribeOutput,
+        { childId: spawned.childId },
+      );
+
+      await fixture.broker.invoke(
+        brokerContext,
+        PLUGIN_CHILD_PROCESS_METHODS.write,
+        { childId: spawned.childId, data: "ping\n" },
+      );
+
+      // MUTATION (the write never reaches stdin): the answer never arrives
+      // and this times out.
+      await until(
+        () =>
+          events.find(
+            ({ event, data }) =>
+              event === "stdout" &&
+              (data as PluginChildProcessOutput).text.includes("echo:ping"),
+          ),
+        "the child's answer on stdout",
+      );
+
+      await fixture.broker.invoke(
+        brokerContext,
+        PLUGIN_CHILD_PROCESS_METHODS.endInput,
+        { childId: spawned.childId },
+      );
+
+      // MUTATION (endInput does not end the pipe): the child never sees end
+      // of file, never exits, and this wait times out.
+      await expect(
+        fixture.broker.invoke(brokerContext, PLUGIN_CHILD_PROCESS_METHODS.wait, {
+          childId: spawned.childId,
+        }),
+      ).resolves.toEqual({ code: 0, reason: "exited" });
+    },
+    20_000,
+  );
+
+  it(
+    "kills a command child's own children when the spawn is torn down",
+    async () => {
+      const fixture = await createRealFixture();
+      const brokerContext = context("plugin-a", "spawn-a");
+      const pidFile = join(fixture.root, "grandchild.pid");
+      const grandchild = await commandScript(
+        fixture,
+        "grandchild.mjs",
+        [
+          'import { writeFileSync } from "node:fs";',
+          `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`,
+          "setInterval(() => {}, 1000);",
+          "",
+        ].join("\n"),
+      );
+      // The grandchild detaches on purpose. Measured on Windows 2026-08-17: an
+      // attached grandchild dies with its parent anyway, so a test built on
+      // one passes whether the broker kills the tree or only the child it
+      // spawned. A detached grandchild survives a plain kill of its parent and
+      // dies only to a real tree kill, which is the difference being pinned.
+      const parent = await commandScript(
+        fixture,
+        "parent.mjs",
+        [
+          'import { spawn } from "node:child_process";',
+          `const child = spawn(process.execPath, [${JSON.stringify(grandchild)}], { stdio: "ignore", detached: true });`,
+          "child.unref();",
+          "setInterval(() => {}, 1000);",
+          "",
+        ].join("\n"),
+      );
+
+      const spawned = await spawnCommandChild(fixture, brokerContext, {
+        command: process.execPath,
+        args: [parent],
+      });
+      const grandchildPid = await until(async () => {
+        const pid = Number((await readFile(pidFile, "utf8").catch(() => "")).trim());
+        return pid > 0 ? pid : undefined;
+      }, "the grandchild to record its pid");
+      expect(spawned.pid).toBeGreaterThan(0);
+      expect(isAlive(grandchildPid)).toBe(true);
+
+      await fixture.broker.disposeSpawn("plugin-a", "spawn-a");
+
+      try {
+        // MUTATION (the tree kill becomes a plain kill of the spawned child):
+        // the grandchild outlives the teardown and is still alive here.
+        await until(
+          () => (isAlive(grandchildPid) ? undefined : true),
+          "the grandchild to die with its parent",
+        );
+        expect(isAlive(grandchildPid)).toBe(false);
+      } finally {
+        // A detached survivor would outlive the whole test run.
+        if (isAlive(grandchildPid)) process.kill(grandchildPid, "SIGKILL");
+      }
+    },
+    30_000,
+  );
+
+  it(
+    "names the executable and where it was looked for when it does not exist",
+    async () => {
+      const fixture = await createRealFixture();
+      const brokerContext = context("plugin-a", "spawn-a");
+
+      await expect(
+        spawnCommandChild(fixture, brokerContext, {
+          command: "dohc-no-such-executable-w2",
+        }),
+      ).rejects.toThrow(/looked up on the child environment's PATH/);
+      await expect(
+        spawnCommandChild(fixture, brokerContext, {
+          command: join(fixture.root, "plugins", "plugin-a", "missing-tool"),
+        }),
+      ).rejects.toThrow("No executable exists at that path.");
+    },
+    20_000,
+  );
+
+  it(
+    "passes arguments as argv, so no shell ever reads them",
+    async () => {
+      const fixture = await createRealFixture();
+      const brokerContext = context("plugin-a", "spawn-a");
+      const script = await commandScript(
+        fixture,
+        "print-argv.mjs",
+        "process.stdout.write(JSON.stringify(process.argv.slice(2)));\n",
+      );
+      // Every one of these means something to a shell and nothing to argv.
+      const args = ["a && echo pwned", "$(id)", "; rm -rf /", "|", ">out.txt"];
+
+      const spawned = await spawnCommandChild(fixture, brokerContext, {
+        command: process.execPath,
+        args: [script, ...args],
+      });
+      await fixture.broker.invoke(brokerContext, PLUGIN_CHILD_PROCESS_METHODS.wait, {
+        childId: spawned.childId,
+      });
+      const logs = (await fixture.broker.invoke(
+        brokerContext,
+        PLUGIN_CHILD_PROCESS_METHODS.logs,
+        { childId: spawned.childId },
+      )) as PluginChildProcessOutput[];
+
+      // MUTATION (`shell: true`): the child receives split and expanded
+      // tokens, and this exact array never comes back.
+      expect(
+        logs
+          .filter(({ stream }) => stream === "stdout")
+          .map(({ text }) => text)
+          .join(""),
+      ).toBe(JSON.stringify(args));
+    },
+    20_000,
+  );
+
+  it("refuses a whole command line in place of an executable name", async () => {
+    const fixture = await createFixture();
+    const brokerContext = context("plugin-a", "spawn-a");
+
+    // A command line is not a command: this names one executable that cannot
+    // exist, and no request form would make it two.
+    await expect(
+      spawnCommandChild(fixture, brokerContext, {
+        command: "./node_modules/.bin/tool --flag",
+      }),
+    ).rejects.toThrow(
+      'command "./node_modules/.bin/tool --flag" must be an absolute path to an executable, or a name with no path separator',
+    );
+    // MUTATION (args accepts a string): a caller could pass one command line
+    // and depend on something splitting it.
+    await expect(
+      spawnCommandChild(fixture, brokerContext, {
+        command: "tool",
+        args: "--flag value",
+      }),
+    ).rejects.toThrow("args must contain at most");
+    expect(fixture.commands).toEqual([]);
+  });
+
+  it("contains a command child's cwd exactly as it contains a module child's", async () => {
+    const fixture = await createFixture();
+    const brokerContext = context("plugin-a", "spawn-a");
+
+    // MUTATION (containment skipped for commands): a command child would run
+    // in another plugin's directory, and "the same cwd rules" would be a
+    // sentence the code does not keep.
+    await expect(
+      spawnCommandChild(fixture, brokerContext, {
+        command: "tool",
+        cwd: "../plugin-b",
+      }),
+    ).rejects.toThrow(
+      'childProcesses.command.spawn cwd "../plugin-b" escapes plugin directory',
+    );
+    expect(fixture.commands).toEqual([]);
+
+    await spawnCommandChild(fixture, brokerContext, {
+      command: "tool",
+      args: ["--serve"],
+      cwd: "data",
+      env: { PLUGIN_PORT: "0" },
+    });
+    expect(fixture.commands).toHaveLength(1);
+    expect(fixture.commands[0]).toMatchObject({
+      command: "tool",
+      args: ["--serve"],
+      options: {
+        cwd: resolve(fixture.root, "plugins", "plugin-a", "data"),
+        env: expect.objectContaining({ PLUGIN_PORT: "0" }),
+        requestedCommand: "tool",
+      },
+    });
+  });
+
+  it("keeps the workspace-root cwd form exact for commands too", async () => {
+    const fixture = await createFixture();
+    const brokerContext = context("plugin-a", "spawn-a");
+
+    for (const cwd of [
+      { workspaceRoot: false },
+      // MUTATION (`=== true` → `Boolean(...)`): the command path would take a
+      // truthy value as the escape and run outside the plugin's root.
+      { workspaceRoot: 1 },
+      { workspaceRoot: "workspace" },
+      { workspaceRoot: true, extra: 1 },
+    ]) {
+      await expect(
+        spawnCommandChild(fixture, brokerContext, { command: "tool", cwd }),
+      ).rejects.toThrow("must be exactly { workspaceRoot: true }");
+    }
+    expect(fixture.commands).toEqual([]);
+
+    await spawnCommandChild(fixture, brokerContext, {
+      command: "tool",
+      cwd: { workspaceRoot: true },
+    });
+    expect(fixture.commands[0]?.options.cwd).toBe(
+      await realpath(join(fixture.root, "workspace")),
+    );
+  });
+
+  it("refuses to subscribe to a command child that has exited", async () => {
+    const fixture = await createFixture();
+    const brokerContext = context("plugin-a", "spawn-a");
+    const spawned = await spawnCommandChild(fixture, brokerContext, {
+      command: "tool",
+    });
+    fixture.commandChildren[0]?.emit("exit", 0);
+
+    await expect(
+      fixture.broker.invoke(
+        brokerContext,
+        PLUGIN_CHILD_PROCESS_METHODS.subscribeOutput,
+        { childId: spawned.childId },
+      ),
+    ).rejects.toThrow(`Child process "${spawned.childId}" has exited.`);
+    await expect(
+      fixture.broker.invoke(brokerContext, PLUGIN_CHILD_PROCESS_METHODS.write, {
+        childId: spawned.childId,
+        data: "ping\n",
+      }),
+    ).rejects.toThrow(`Child process "${spawned.childId}" has exited.`);
+  });
+
+  it("routes input by child kind and names the member that fits", async () => {
+    const fixture = await createFixture();
+    const brokerContext = context("plugin-a", "spawn-a");
+    const moduleChildId = await spawnChild(fixture, brokerContext);
+    const commandChild = await spawnCommandChild(fixture, brokerContext, {
+      command: "tool",
+    });
+
+    await expect(
+      fixture.broker.invoke(brokerContext, PLUGIN_CHILD_PROCESS_METHODS.write, {
+        childId: moduleChildId,
+        data: "ping\n",
+      }),
+    ).rejects.toThrow(
+      `runs a module and has no standard input; post it a message with ${PLUGIN_CHILD_PROCESS_METHODS.send}`,
+    );
+    await expect(
+      fixture.broker.invoke(brokerContext, PLUGIN_CHILD_PROCESS_METHODS.send, {
+        childId: commandChild.childId,
+        message: { kind: "ping" },
+      }),
+    ).rejects.toThrow(
+      `runs a command and has no message channel; write to its standard input with ${PLUGIN_CHILD_PROCESS_METHODS.write}`,
+    );
+
+    await fixture.broker.invoke(brokerContext, PLUGIN_CHILD_PROCESS_METHODS.write, {
+      childId: commandChild.childId,
+      data: "ping\n",
+    });
+    expect(fixture.commandChildren[0]?.stdin.read()?.toString()).toBe("ping\n");
   });
 });

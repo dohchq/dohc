@@ -107,10 +107,10 @@ describe("forkElectronUtilityProcess", () => {
     child.emit("error", "FatalError", "utility_process", "launch failed");
 
     expect((await handle).pid).toBeUndefined();
+    // The launcher, not the broker, words the failure: a command child's
+    // launcher reports a different one over the same lifecycle member.
     expect(onError).toHaveBeenCalledWith(
-      "FatalError",
-      "utility_process",
-      "launch failed",
+      "Utility process error FatalError at utility_process: launch failed",
     );
   });
 });
