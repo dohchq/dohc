@@ -299,11 +299,16 @@ Apply this rule to:
 Leave one blank line after the attribution. Keep the attribution when the user
 edits or approves an agent-written draft.
 
-### Give issues a "For humans" section
+### Write issues for humans
 
-When an agent opens a GitHub issue, add a `## For humans` section immediately
-after the attribution, the same way a PR description does
-([`skills/file-pr/SKILL.md`](skills/file-pr/SKILL.md)). Explain the problem in
+When an agent opens a GitHub issue, write the title the way a PR title is
+written ([`skills/file-pr/SKILL.md`](skills/file-pr/SKILL.md)): one short
+plain-language line that names the problem a person will notice. Keep test
+names, file paths, and other identifiers out of the title unless it is unclear
+without them.
+
+Add a `## For humans` section immediately after the attribution, the same way
+a PR description does. Explain the problem in
 plain language, then say what should happen instead. Put file names, internal
 architecture, and other technical detail in the sections after it, not here.
 
