@@ -55,6 +55,7 @@ import {
 import {
   isHttpsUrl,
   MAX_PLUGIN_DESCRIPTION_CHARS,
+  MAX_PLUGIN_DRIVER_NAME_CHARS,
   MAX_PLUGIN_LICENSE_CHARS,
   MAX_PLUGIN_PUBLISHER_CHARS,
   MAX_PLUGIN_URL_CHARS,
@@ -2035,6 +2036,18 @@ export type ResolveWorkspaceVersionConflictResult = z.infer<
 // the workspace-engine alpha capture like every version operation.
 export const TRY_IN_VERSION_TASK_MAX = 2000;
 
+// How a driver is named wherever a payload or a result carries one. Every
+// surface on the path — the manifest, the probe list, the workspace's own
+// `agents.defaultDriverId`, and the task a driver is handed — reads these two,
+// so a driver dohc lists is always one dohc can be asked to run.
+//
+// A driver id is bounded by what workspace settings can store, because
+// `agents.defaultDriverId` has to be able to name any driver the list shows —
+// dohc's own and a plugin's alike. A display name takes the bound a plugin
+// manifest gives it, shared with it rather than matched by eye.
+const AgentDriverIdSchema = z.string().min(1).max(DEFAULT_DRIVER_ID_MAX_LENGTH);
+const AgentDriverNameSchema = z.string().min(1).max(MAX_PLUGIN_DRIVER_NAME_CHARS);
+
 export const TryInWorkspaceVersionPayload = z.object({
   workspaceId: WORKSPACE_ID,
   task: z
@@ -2046,8 +2059,10 @@ export const TryInWorkspaceVersionPayload = z.object({
     }),
   // When present, main hands the task to this installed agent driver (a
   // dohc-managed driver session); absent = a bare dohc-tracked run the
-  // user's own agent tool works inside.
-  driverId: z.string().min(1).max(100).optional(),
+  // user's own agent tool works inside. The id comes from the agent panel's
+  // own driver list, so it takes that list's bound: a tighter one here would
+  // refuse a driver dohc offered, chose, and probed.
+  driverId: AgentDriverIdSchema.optional(),
 });
 export type TryInWorkspaceVersionPayload = z.infer<
   typeof TryInWorkspaceVersionPayload
@@ -3521,12 +3536,6 @@ export const McpConfigResult = z.object({
 });
 export type McpConfigResult = z.infer<typeof McpConfigResult>;
 
-// A driver id is bounded by what workspace settings can store, because
-// `agents.defaultDriverId` has to be able to name any driver this list shows —
-// dohc's own and a plugin's alike.
-const AgentDriverIdSchema = z.string().min(1).max(DEFAULT_DRIVER_ID_MAX_LENGTH);
-// The bound every display name in a plugin manifest carries.
-const AgentDriverNameSchema = z.string().min(1).max(120);
 const AgentPermissionKindSchema = z.enum([
   "allow_once",
   "allow_always",

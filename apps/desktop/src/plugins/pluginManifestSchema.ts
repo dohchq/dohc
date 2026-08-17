@@ -165,9 +165,18 @@ const PluginDriverId = z.string()
     "must start with a letter or digit and use only letters, digits, '.', '_', or '-'",
   );
 
+// What a driver is called on screen. The same bound every other display name
+// in this manifest carries, named because the IPC contract that carries this
+// name to the renderer has to use the same one — a driver dohc lists must be
+// a driver dohc can describe.
+export const MAX_PLUGIN_DRIVER_NAME_CHARS = 120;
+
 const PluginDriver = z.object({
   id: PluginDriverId,
-  displayName: z.string().min(1).max(120),
+  displayName: z.string().min(1).max(
+    MAX_PLUGIN_DRIVER_NAME_CHARS,
+    `must be ${MAX_PLUGIN_DRIVER_NAME_CHARS} characters or fewer`,
+  ),
 }).strict();
 
 // A plugin's own settings, declared flat so dohc can render them without the
