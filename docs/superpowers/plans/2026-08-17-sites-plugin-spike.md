@@ -15,11 +15,11 @@ with what the t3 plugin already needed.
 **Yes, with a clean seam — the missing surface is a small set of general
 primitives, not a swamp.** Most of what a sites plugin needs already exists
 and is merely not plumbed: the plugin SDK host routes fewer methods than the
-site SDK host it wraps (no `databases.*`, no `ui.open`), and both plumb-throughs
-are S-sized. The genuinely new primitives — workspace events, a
-command-capable child broker, dynamic tabs over plugin-owned origins, a
-design-token bridge — are M-sized and every one of them is something a user's
-agent building an arbitrary app would also ask for. Two items are L and mark
+site SDK host it wraps (no `databases.*`, no `ui.open`), and that plumb-through
+is S-sized. The genuinely new primitives run S to M — workspace events, a
+command-capable child broker, and view contribution at M; dynamic tabs over
+plugin-owned origins S–M; a design-token bridge S — and every one of them is
+something a user's agent building an arbitrary app would also ask for. Two items are L and mark
 the substrate line: read-only (shared-view) plugin authority, and scoped SDK
 sub-grants for content a plugin itself embeds. Those two are dohc's sandbox
 and sharing model showing through Sites, and they should stay substrate. The
@@ -130,8 +130,9 @@ today; the renderer sends a concrete `static`/`dev`/`build` over IPC and
 
 ### Renderer surfaces
 
-- **SitesView** in the activity bar (`workbenchState.ts:9-16`,
-  `ActivityBar.tsx:19-35`): lists `listSites` results, shows an optimistic
+- **SitesView** in the activity bar (view id `sites`,
+  `workbenchState.ts:9-16`; mounted by the shell,
+  `DesktopWorkspaceShell.tsx:676-678,5204`): lists `listSites` results, shows an optimistic
   static-site fallback synthesized from the shell's file list while loading
   (`SitesView.tsx:18-53,79-82`), and opens `dohc://site/<root>` tabs
   (`workbenchState.ts:23,59-61`). A refresh button bumps a key and re-lists
@@ -143,10 +144,11 @@ today; the renderer sends a concrete `static`/`dev`/`build` over IPC and
   (`sdkFrame.ts:54-64`); a postMessage bridge that checks source window and
   exact active-preview origin on both legs
   (`SitePreviewPage.tsx:218-274`); mode menu, stop, reload, open-external via
-  the audited renderer bridge (`SitePreviewPage.tsx:451`), a log drawer, and
-  the share flow that builds (if needed) and hands the share manifest to the
-  relay share dialog (`SitePreviewPage.tsx:313-358`,
-  `DesktopWorkspaceShell.tsx:5589`).
+  the validated, user-confirmed renderer bridge (`SitePreviewPage.tsx:451`,
+  `editor/linkMenu.ts:83-92`, `main.ts:5032-5039`), a log drawer, and
+  the share flow that builds (if needed) and hands a derived
+  `{paths, label}` selector to the relay share dialog
+  (`SitePreviewPage.tsx:137-146,313-358`, `DesktopWorkspaceShell.tsx:5589`).
 
 ## 2. The plugin SDK as shipped
 
@@ -163,7 +165,11 @@ today; the renderer sends a concrete `static`/`dev`/`build` over IPC and
 - **Activation context** (`packages/sdk/src/node.ts:147-165`): `pluginId`,
   `workspaceRoot`, `pluginRoot`, a durable per-workspace `stateRoot` under the
   app's own userData, the `DohcClient`, the child-process broker,
-  `settings.get()/onChange()`, and `commands.register`.
+  `settings.get()/onChange()`, and `commands.register`. Note: manifest
+  `commands` and registered command ids are validated, stored, and exposed —
+  `PluginHost.invokeCommand` exists (`PluginHost.ts:259-274`) — but no
+  surface invokes a plugin command today; the contribution point ships ahead
+  of its first consumer.
 - **Child processes**: the broker forks a **JavaScript module** inside the
   plugin's built root via `utilityProcess.fork`, cwd either the built root or
   the canonical workspace root (`sdk/src/node.ts:54-68`,
@@ -205,9 +211,16 @@ today; the renderer sends a concrete `static`/`dev`/`build` over IPC and
 
 ## 3. Gap analysis
 
-Every capability Sites actually uses, against today's SDK. HAS names the
+The load-bearing capabilities Sites uses, against today's SDK. HAS names the
 route; LACKS names the missing primitive; AWKWARD is possible but
-wrong-shaped.
+wrong-shaped. Smaller dependencies are not rowed separately — the dev
+command's inherited environment (`siteRunner.ts:420`), the static server's
+MIME table (`siteRunner.ts:56-75`), and the log pane fed by handle logs
+(`SitePreviewPage.tsx:577-584`) each travel with the primitive or plugin code
+that owns them. Surfaces contributable by neither side are symmetric
+non-issues: sites and plugins alike contribute nothing to context menus, the
+command palette, keyboard shortcuts, toasts, or the status bar, so the
+conversion loses nothing there.
 
 | # | Sites capability | Status | Detail |
 | --- | --- | --- | --- |
@@ -217,17 +230,17 @@ wrong-shaped.
 | 4 | Serve static files on loopback | AWKWARD | The full-trust host can run `node:http` itself, but the containment, reserved-path, and single-open guards (`siteRunner.ts:184-306`) are not offered as a primitive — a plugin re-implements them or silently drops them. |
 | 5 | Spawn dev/build commands (`pnpm dev` …) | LACKS | The broker forks JS modules only (`pluginChildProcessBroker.ts:469-472`). Direct `child_process.spawn` works under full trust but loses the broker's supervised teardown — the exact orphan problem the broker exists to prevent. Primitive: command-capable brokered spawn. |
 | 6 | Show an arbitrary loopback origin as UI | LACKS | Panels serve only snapshot files; subframe origins are allow-listed solely by main for its own previews and panels (`createMainWindow.ts:97-102`). `webApps` does show a plugin-provided origin, but as static manifest ids, one guest each. Primitive: dynamic surface instances. |
-| 7 | One tab per site (`dohc://site/<root>`) | LACKS | Panel and web-app tabs are keyed by manifest ids (`workbenchState.ts:24-25`); nothing mints per-instance tabs. Same primitive as #6. |
+| 7 | One tab per site (`dohc://site/<root>`) | LACKS | Panel and web-app tabs are keyed by manifest ids (`workbenchState.ts:24-25`). Site tabs already carry per-instance identity — `canonicalSingletonEditorTabPath` keys them by runtime content (`workbenchState.ts:59-61,126-136`) — but a plugin cannot mint one. Same primitive as #6. |
 | 8 | An activity-bar view | LACKS | `VIEW_IDS` is a static union (`workbenchState.ts:9-16`). Primitive: view contribution. |
 | 9 | Open a workspace path in dohc (`ui.open`) | LACKS (plumb) | Served to sites (`siteSdkHost.ts:366-371`), not routed for plugins (`pluginSdkHost.ts:119-190`); `PluginPanelPage` has no open-path handling. |
-| 10 | Open a URL in the OS browser | LACKS | Sites use the renderer's audited `openLinkExternally` (`SitePreviewPage.tsx:451`); a sandboxed panel denies popups. Belongs with #9 as one navigation primitive. |
+| 10 | Open a URL in the OS browser | LACKS | Sites use the renderer's validated, user-confirmed `openLinkExternally` (`SitePreviewPage.tsx:451`, `editor/linkMenu.ts:83-92`); a sandboxed panel denies popups. Belongs with #9 as one navigation primitive. |
 | 11 | `databases.read` / `databases.edit` | LACKS (plumb) | Served to sites (`siteSdkHost.ts:336-365`), not routed for plugins. |
 | 12 | Workspace search | HAS | `workspace.search`. |
 | 13 | Write workspace text | HAS | Stronger than sites': author-stamped, engine-captured, door-attributed (`pluginSdkHost.ts:135-176`). |
 | 14 | React to workspace changes | LACKS | `files.watch` and `workspace.events` are false everywhere (`siteSdkHost.ts:134-135`, `pluginSdkHost.ts:83`); SitesView leans on the shell's file list and a manual refresh button (`DesktopWorkspaceShell.tsx:2268-2273`). The subscription protocol already exists end to end (`sdk/src/index.ts:47-53`, `node.ts:404-467`); no host emits workspace events over it. |
 | 15 | A user-visible setting for preview mode | HAS | Manifest settings render with real UI (`pluginManifestSchema.ts:175-235`) — better than the current setting, which nothing reads. |
 | 16 | Read-only previews in shared views and share mounts | LACKS | Every plugin surface refuses a non-writable workspace (`main.ts:6880,6930`) and the plugin SDK context hardcodes `scopeRoot: null` (`pluginSdkHost.ts:112-117`). Sites serve shared-view and `shared-with-me` static previews today (`main.ts:6769-6785`). |
-| 17 | Share a site over relay | LACKS | `prepareShare` hands a manifest to the shell's share dialog (`SitePreviewPage.tsx:313-358`, `DesktopWorkspaceShell.tsx:5589`) — main-process/renderer integration a guest cannot reach. |
+| 17 | Share a site over relay | LACKS | `prepareShare` hands a derived `{paths, label}` selector to the shell's share dialog (`SitePreviewPage.tsx:137-146,313-358`, `DesktopWorkspaceShell.tsx:5589`) — main-process/renderer integration a guest cannot reach. |
 | 18 | Host the dohc SDK for the previewed site | LACKS | The panel bridge carries the **plugin's** authority (`main.ts:7069-7077`). Forwarding it to an embedded site's code would hand sandboxed site code the plugin's writable, full-trust-adjacent surface — an authority escalation the site host's own `plugins/` write refusal exists to prevent. Primitive: scoped sub-grants. |
 | 19 | dohc-native look | LACKS | SitesView renders with theme tokens (`SitesView.tsx:106-199`); a panel iframe gets raw HTML with no token bridge. |
 | 20 | Lifecycle policy (stop on switch/quit, generation guards) | HAS | The pipeline/host teardown and panel authorities provide the plugin-shaped equivalents (`PluginHost.ts:442-459`, `pluginPanelSdkAuthority.ts`). |
@@ -240,10 +253,10 @@ invented numbers.
 
 | Primitive | Closes | Size | Why this size |
 | --- | --- | --- | --- |
-| **P1. SDK parity plumb-through** — route `databases.read/edit` and `ui.open` (plus open-external) through the plugin SDK host and panel bridge | #9, #10, #11 | **S** | The handlers exist in `siteSdkHost.ts`; the work is switch cases, the panel page's open-path callback (mirror `SitePreviewPage.tsx:240-267`), and authority thought about writes-while-read-only. |
+| **P1. SDK parity plumb-through** — route `databases.read/edit` and `ui.open` (plus open-external) through the plugin SDK host and panel bridge | #9, #10, #11 | **S** | The handlers exist in `siteSdkHost.ts`; the work is switch cases, the panel page's open-path callback (mirror `SitePreviewPage.tsx:240-267`), and authority thought about writes-while-read-only. The one part that is more than a switch case: the site host stamps database edits `{ kind: "user", userId: "local" }` (`siteSdkHost.ts:357-364`), and the plugin route must substitute the plugin author the way `files.write` already does (`pluginSdkHost.ts:158-163`). |
 | **P2. Workspace events** — `files.watch` / a workspace-changed subscription served per authority | #14 | **M** | Protocol and transports are done (`sdk/src/index.ts:47-53`); new work is wiring the existing watcher to per-grant subscriptions with the async-guard invariant. Sites itself would get push refresh out of it. |
 | **P3. Command-capable child broker** — brokered spawn of a command line with the tree-kill teardown `siteRunner` already has | #5 | **M** | The broker's supervision, retention, and output plumbing exist (954 lines); `resolveSpawnCommand`/`killChildTreeWin32` exist (`siteRunner.ts:7`). New is the containment story for arbitrary executables. |
-| **P4. Dynamic surfaces** — per-instance tabs whose content is a plugin-provided loopback origin (a dynamic generalization of `webApps`/panels) | #6, #7 | **M** | Guest hardening, origin allow-listing, and tab plumbing all exist; the new part is instance identity (id minted at runtime), restore semantics, and bounds on instance count. |
+| **P4. Dynamic surfaces** — per-instance tabs whose content is a plugin-provided loopback origin (a dynamic generalization of `webApps`/panels) | #6, #7 | **S–M** | Guest hardening, origin allow-listing, and tab plumbing all exist, and tabs already key on runtime content identity — `canonicalSingletonEditorTabPath` treats each `dohc://site/<root>` as its own singleton (`workbenchState.ts:126-136`). The genuinely new part narrows to the plugin-supplied origin grant, its lifetime, and bounds on instance count. |
 | **P5. Design-token bridge** — dohc's theme tokens served to panel origins | #19 | **S** | Panels are same-origin loopback pages; a token stylesheet or a postMessage token payload rides existing channels. |
 | **P6. View contribution** — a plugin-declared activity-bar view backed by a panel | #8 | **M** | Manifest shape is trivial; making `VIEW_IDS` dynamic touches workbench state persistence and layout. |
 | **P7. Read-only plugin authority** — plugins run with a read-only scope in shared views/mounts | #16 | **L** | Not plumbing: every plugin surface currently asserts writability, attribution assumes an owned workspace, and the approval model must decide what "approved" means for a workspace you do not own. |
@@ -300,9 +313,12 @@ What a `sites` plugin looks like on today's SDK **plus P1–P6**:
 **The bundled-plugin approval question, crisply.** A converted Sites must be
 present on first run without a prompt. Two honest options:
 
-1. **Ship it inside the app image**, pre-approved per release (its hash is
-   known at build; the pipeline's `resourcesBasePath`/snapshot machinery
-   already reads app-owned paths). Invisible in `plugins/`, not forkable in
+1. **Ship it inside the app image**, pre-approved per release. Its hash is
+   known at build, but this needs a new mechanism, not a flag on an existing
+   one: the pipeline reads app resources only for bundled binaries — esbuild
+   and the pnpm runner (`pluginBuildRunner.ts:555,689`,
+   `pluginInstallRunner.ts:701`) — and its source snapshots read workspace
+   trees, never the app image. Invisible in `plugins/`, not forkable in
    place — it behaves like a feature that happens to use the SDK.
 2. **Install it into `plugins/` on first run**, approved by that device.
    Fully visible and forkable — the philosophy's preferred answer — but then
@@ -310,18 +326,20 @@ present on first run without a prompt. Two honest options:
    it for approval (`PluginPipeline.ts:1300-1310`), and once workspace sync
    exists its source syncs to collaborators as executable content.
 
-A hybrid (ship in the image, "eject to `plugins/`" as the fork gesture) keeps
-both properties and matches design rule 4's fork-in-place intent. This is
-Ice's call; nothing in the code forces either.
+A hybrid (ship in the image, "eject to `plugins/`" as the fork gesture) would
+keep both properties and match design rule 4's fork-in-place intent — but it
+inherits option 1's new load path and adds the eject gesture, so it is the
+most mechanism of the three, not a free middle. This is Ice's call; nothing
+in the code forces any of them.
 
 ## 5. Verdict
 
-The missing surface is **clean, not a swamp**: two S plumb-throughs that
-correct an inversion (a sandboxed site can read databases and open tabs; a
-full-trust plugin cannot), three or four M primitives that generalize
-machinery that already exists once (events, command broker, dynamic surfaces,
-tokens, views), and two L items that are not really "missing plugin API" at
-all — they are dohc's authority model (read-only scopes, derived grants)
+The missing surface is **clean, not a swamp**: one S plumb-through that
+corrects an inversion (a sandboxed site can read databases and open tabs; a
+full-trust plugin cannot), an S token bridge, three primitives at M and one
+at S–M that generalize machinery that already exists once (events, command
+broker, and view contribution; dynamic surfaces), and two L items that are
+not really "missing plugin API" at all — they are dohc's authority model (read-only scopes, derived grants)
 surfacing exactly where AGENTS.md says the substrate should be. Sites splits
 on that line: discovery, servers, and list UI are app; sandboxed rendering,
 origin allow-listing, share scoping, and authority stay engine/substrate.
@@ -341,7 +359,9 @@ lose shared-view previews.
 2. Do P1's parity plumb-throughs (`databases.*`, `ui.open`) land now on their
    own merit, or wait for the conversion to force them?
 3. Does the child broker learn arbitrary commands (P3, larger supervised
-   surface) or stay JS-only, limiting a sites plugin to static/build previews?
+   surface) or stay JS-only, limiting a sites plugin to static previews —
+   dev *and* build both spawn user commands
+   (`siteRunner.ts:407-429,568-589`)?
 4. Is losing shared-view/shared-with-me site previews acceptable for a
    first conversion, or is P7 (read-only plugin authority) a precondition?
 5. Do plugin-embedded guests ever get scoped SDK sub-grants (P8), or do sites
