@@ -4,9 +4,11 @@ import {
   type Request,
 } from "@dohc/workspace-engine-client";
 import { existsSync } from "node:fs";
-import { mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { databaseOpLogPath } from "@dohc/workspace-core";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JsonRpcTransport } from "../agents/JsonRpcTransport";
@@ -82,6 +84,23 @@ async function stateDir(): Promise<string> {
   const scratch = await createTestScratch("dohc-plugin-state-");
   tempRoots.push(scratch);
   return scratch;
+}
+
+const requireModule = createRequire(import.meta.url);
+
+async function seedFixtureDatabase(root: string): Promise<void> {
+  const { DatabaseSync } = requireModule("node:sqlite") as {
+    DatabaseSync: new (path: string) => { exec(sql: string): void; close(): void };
+  };
+  await mkdir(join(root, "data"), { recursive: true });
+  const database = new DatabaseSync(join(root, "data", "app.sqlite"));
+  try {
+    database.exec(
+      "CREATE TABLE sentinel (id TEXT PRIMARY KEY, marker TEXT); INSERT INTO sentinel VALUES ('1', 'start');",
+    );
+  } finally {
+    database.close();
+  }
 }
 
 async function fixtureManifest(): Promise<DohcPluginManifest> {
@@ -305,6 +324,7 @@ describe("PluginHost", () => {
             pluginId,
             workspaceRoot: root,
             spawnId,
+            requestPath: "plugin-process",
             isWritable: () => true,
             writeAvailable: async () => true,
             signal,
@@ -339,6 +359,104 @@ describe("PluginHost", () => {
         },
       },
     ]);
+  });
+
+  it("round-trips databases.read and a plugin-attributed databases.edit over the real protocol", async () => {
+    const root = await workspaceRoot();
+    await seedFixtureDatabase(root);
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "use-workspace" },
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: (pluginId, method, params, spawnId, signal) =>
+        invokePluginSdkHost(
+          {
+            pluginId,
+            workspaceRoot: root,
+            spawnId,
+            requestPath: "plugin-process",
+            isWritable: () => true,
+            writeAvailable: async () => true,
+            signal,
+            invokeChildProcess: async () => ({}),
+            writeAuthoredText: async (path) => ({ path }),
+          },
+          method,
+          params,
+        ),
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    // The snapshot really crossed the protocol.
+    expect(await host.invokeCommand("hello-plugin", "database.roundTrip")).toEqual({
+      tables: ["sentinel"],
+    });
+
+    // The edit landed, and the op log names the plugin as its author.
+    const log = await readFile(
+      join(root, databaseOpLogPath("data/app.sqlite")),
+      "utf8",
+    );
+    const ops = log
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { payload: unknown; author: unknown });
+    expect(ops).toHaveLength(1);
+    expect(ops[0]?.payload).toEqual({ marker: "edited-by-plugin" });
+    expect(ops[0]?.author).toEqual({
+      kind: "agent",
+      agentId: "plugin:hello-plugin",
+      onBehalfOf: "local",
+    });
+  });
+
+  it("tells a plugin's own process that ui.open needs a renderer", async () => {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "use-workspace" },
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: (pluginId, method, params, spawnId, signal) =>
+        invokePluginSdkHost(
+          {
+            pluginId,
+            workspaceRoot: root,
+            spawnId,
+            requestPath: "plugin-process",
+            isWritable: () => true,
+            writeAvailable: async () => true,
+            signal,
+            invokeChildProcess: async () => ({}),
+            writeAuthoredText: async (path) => ({ path }),
+          },
+          method,
+          params,
+        ),
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    const result = (await host.invokeCommand("hello-plugin", "ui.tryOpen")) as {
+      opened: boolean;
+      message: string | null;
+    };
+    expect(result.opened).toBe(false);
+    expect(result.message).toMatch(/ui\.open capability is disabled by this host/);
   });
 
   it("rejects invokeCommand for an unregistered command by name", async () => {
@@ -1331,6 +1449,7 @@ describe("PluginHost", () => {
         pluginId: "hello-plugin",
         workspaceRoot: root,
         spawnId: authority.spawnId,
+        requestPath: "panel",
         isWritable: () => true,
         writeAvailable: async () => true,
         writeAuthoredText: async (path, _text, options) => {
@@ -1428,6 +1547,7 @@ describe("PluginHost", () => {
         pluginId: "hello-plugin",
         workspaceRoot: root,
         spawnId,
+        requestPath: "panel",
         isWritable: () => true,
         writeAvailable: async () => true,
         signal: grant.signal,
@@ -1526,6 +1646,7 @@ describe("PluginHost", () => {
         pluginId: "hello-plugin",
         workspaceRoot: root,
         spawnId,
+        requestPath: "panel",
         isWritable: () => true,
         writeAvailable: async () => true,
         signal: grant.signal,

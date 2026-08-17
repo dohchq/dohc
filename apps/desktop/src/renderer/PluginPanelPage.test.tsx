@@ -33,6 +33,8 @@ function deferred<T>() {
 function sdkMessage(
   source: Window,
   origin = "http://127.0.0.1:49160",
+  method = "files.read",
+  params: unknown = { path: "notes.txt" },
 ) {
   window.dispatchEvent(
     new MessageEvent("message", {
@@ -41,11 +43,15 @@ function sdkMessage(
       data: {
         protocol: DOHC_SDK_PROTOCOL,
         id: "request-1",
-        method: "files.read",
-        params: { path: "notes.txt" },
+        method,
+        params,
       },
     }),
   );
+}
+
+function uiOpenMessage(source: Window, origin = "http://127.0.0.1:49160") {
+  sdkMessage(source, origin, "ui.open", { target: "notes/today.md" });
 }
 
 describe("PluginPanelPage", () => {
@@ -142,6 +148,83 @@ describe("PluginPanelPage", () => {
       },
       "http://127.0.0.1:49160",
     );
+  });
+
+  it("opens the target a panel asked for through ui.open", async () => {
+    const onOpenPath = vi.fn();
+    bridgeMock.invokePluginPanelSdk.mockResolvedValueOnce({
+      result: { target: "notes/today.md" },
+    });
+    render(
+      <PluginPanelPage
+        workspaceId="ws-plugins"
+        pluginId="hello-plugin"
+        panelId="main"
+        onOpenPath={onOpenPath}
+      />,
+    );
+    const frame = (await screen.findByTestId(
+      "plugin-panel-frame",
+    )) as HTMLIFrameElement;
+    const postMessage = vi.fn();
+    const source = { postMessage } as unknown as Window;
+    Object.defineProperty(frame, "contentWindow", {
+      configurable: true,
+      value: source,
+    });
+
+    uiOpenMessage(source);
+    await vi.waitFor(() =>
+      expect(onOpenPath).toHaveBeenCalledWith("notes/today.md"),
+    );
+    expect(onOpenPath).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not open a ui.open target the panel is no longer live for", async () => {
+    const onOpenPath = vi.fn();
+    const pending = deferred<InvokePluginPanelSdkResult>();
+    bridgeMock.invokePluginPanelSdk.mockReturnValueOnce(pending.promise);
+    const view = render(
+      <PluginPanelPage
+        workspaceId="ws-plugins"
+        pluginId="hello-plugin"
+        panelId="main"
+        onOpenPath={onOpenPath}
+      />,
+    );
+    const frame = (await screen.findByTestId(
+      "plugin-panel-frame",
+    )) as HTMLIFrameElement;
+    const postMessage = vi.fn();
+    const source = { postMessage } as unknown as Window;
+    Object.defineProperty(frame, "contentWindow", {
+      configurable: true,
+      value: source,
+    });
+    uiOpenMessage(source);
+    await vi.waitFor(() =>
+      expect(bridgeMock.invokePluginPanelSdk).toHaveBeenCalledTimes(1),
+    );
+
+    bridgeMock.startPluginPanel.mockResolvedValueOnce({
+      status: "ok",
+      url: "http://127.0.0.1:49161/",
+      title: "Other",
+    });
+    view.rerender(
+      <PluginPanelPage
+        workspaceId="ws-plugins"
+        pluginId="hello-plugin"
+        panelId="other"
+        onOpenPath={onOpenPath}
+      />,
+    );
+    await screen.findByTitle("Other");
+    await act(async () => {
+      pending.resolve({ result: { target: "notes/today.md" } });
+      await pending.promise;
+    });
+    expect(onOpenPath).not.toHaveBeenCalled();
   });
 
   it("drops an SDK response after the panel context changes", async () => {

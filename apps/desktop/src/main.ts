@@ -960,6 +960,7 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
         workspaceId: workspace.workspaceId,
         pluginId,
         spawnId,
+        requestPath: "plugin-process",
         isWritable: () => !sharedViewOf(workspace.workspaceId),
         signal,
         invokeChildProcess: (childMethod, childParams) =>
@@ -2976,6 +2977,7 @@ function invokeWorkspacePluginSdk(input: {
   workspaceId: string;
   pluginId: string;
   spawnId: string;
+  requestPath: "panel" | "plugin-process";
   isWritable: () => boolean;
   signal?: AbortSignal;
   invokeChildProcess?: (method: string, params?: unknown) => Promise<unknown>;
@@ -2988,6 +2990,7 @@ function invokeWorkspacePluginSdk(input: {
       pluginId: input.pluginId,
       workspaceRoot: workspace.rootPath,
       spawnId: input.spawnId,
+      requestPath: input.requestPath,
       isWritable: input.isWritable,
       writeAvailable: async () => {
         try {
@@ -6859,6 +6862,9 @@ function registerIpcHandlers(
         scopeRoot: authority.scopeRoot,
         writable: authority.writable,
         signal: authority.signal,
+        // A site preview is the user driving their own workspace through a
+        // sandboxed page, so its database edits are the user's.
+        author: { kind: "user", userId: "local" },
       },
       input.method,
       input.params,
@@ -7070,6 +7076,7 @@ function registerIpcHandlers(
       workspaceId: authority.workspaceId,
       pluginId: authority.pluginId,
       spawnId: authority.spawnId,
+      requestPath: "panel",
       isWritable: () => !sharedViewOf(authority.workspaceId),
       signal: authority.signal,
       method: input.method,
