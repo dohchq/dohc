@@ -8,6 +8,7 @@ import {
 } from "../workspaces/siteSdkHost";
 import { isPluginChildProcessMethod } from "./pluginChildProcessBroker";
 import {
+  hasControlCharacter,
   MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS,
   requireDeclaredWebApp,
   type DeclaredWebApp,
@@ -259,9 +260,9 @@ export async function invokePluginSdkHost(
           `ui.openWebApp instanceKey is ${instance.length} characters, past the limit of ${MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS} characters for an instance key.`,
         );
       }
-      if (instance.includes("\0")) {
+      if (hasControlCharacter(instance)) {
         throw new Error(
-          "ui.openWebApp instanceKey must not contain NUL bytes.",
+          "ui.openWebApp instanceKey must not contain control characters (U+0000 to U+001F, or U+007F).",
         );
       }
       requireDeclaredWebApp(

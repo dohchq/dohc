@@ -5,6 +5,7 @@
 // editor's save state) and never lives here or on disk.
 
 import type { WorkspaceUiState } from "../../ipc/bridgeContract";
+import { MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS } from "../../plugins/pluginWebAppInstances";
 
 export const VIEW_IDS = [
   "explorer",
@@ -186,7 +187,17 @@ export function parsePluginWebAppTabPath(
     const webAppId = decodeURIComponent(parts[1]!);
     const instanceKey = parts.length === 3 ? decodeURIComponent(parts[2]!) : null;
     if (pluginId.length === 0 || webAppId.length === 0) return null;
-    if (instanceKey !== null && instanceKey.length === 0) return null;
+    // The same bound the IPC boundary enforces. Without it here, a persisted
+    // path with an over-long key would restore, mount, and only then be
+    // refused by the boundary — surfacing a raw schema error where the shell
+    // already has one sentence for a tab path that names no app.
+    if (
+      instanceKey !== null &&
+      (instanceKey.length === 0 ||
+        instanceKey.length > MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS)
+    ) {
+      return null;
+    }
     return { pluginId, webAppId, instanceKey };
   } catch {
     return null;

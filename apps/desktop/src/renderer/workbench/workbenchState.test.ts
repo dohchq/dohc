@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS } from "../../plugins/pluginWebAppInstances";
 import {
   activateTab,
   activeGroup,
@@ -629,6 +630,28 @@ describe("tabs", () => {
     ]) {
       expect(parsePluginWebAppTabPath(path)).toBeNull();
     }
+  });
+
+  // MUTATION (drop the bound here and lean on the IPC schema): a persisted
+  // over-long key would restore and mount, and the boundary's refusal would
+  // reach the user as a raw schema error instead of the shell's one sentence
+  // for a tab path that names no app.
+  it("refuses an instance key past the bound the boundary enforces", () => {
+    const atBound = "s".repeat(MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS);
+    const pastBound = "s".repeat(MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS + 1);
+
+    expect(
+      parsePluginWebAppTabPath(pluginWebAppTabPath("acme", "preview", atBound)),
+    ).toEqual({ pluginId: "acme", webAppId: "preview", instanceKey: atBound });
+    expect(
+      parsePluginWebAppTabPath(pluginWebAppTabPath("acme", "preview", pastBound)),
+    ).toBeNull();
+    // ...and the shell therefore treats it as a tab path that names no app.
+    expect(
+      canonicalSingletonEditorTabPath(
+        pluginWebAppTabPath("acme", "preview", pastBound),
+      ),
+    ).toBeNull();
   });
 
   // A per-instance web app's tab is keyed by the instance, the way a site tab

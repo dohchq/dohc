@@ -445,13 +445,40 @@ describe("invokePluginSdkHost", () => {
       ).rejects.toThrow(/513 characters, past the limit of 512 characters/);
     });
 
-    it("refuses a NUL byte in an instance key", async () => {
+    // MUTATION (check only for NUL, or lean on the SDK's own check): the SDK
+    // check is the caller's copy and a caller can skip it, so this side is
+    // what keeps a control character out of a tab path and a tab label.
+    it.each([
+      ["a NUL byte", "sites/a\u0000b"],
+      ["a newline", "sites/a\nb"],
+      ["a unit separator", "sites/a\u001fb"],
+      ["a delete character", "sites/a\u007fb"],
+    ])("refuses %s in an instance key", async (_label, instanceKey) => {
       await expect(
         invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
           webAppId: "preview",
-          instanceKey: "sites/a\0b",
+          instanceKey,
         }),
-      ).rejects.toThrow(/must not contain NUL bytes/);
+      ).rejects.toThrow(/must not contain control characters/);
+    });
+
+    it("names the control-character range it refused", async () => {
+      await expect(
+        invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
+          webAppId: "preview",
+          instanceKey: "sites/a\nb",
+        }),
+      ).rejects.toThrow(/U\+0000 to U\+001F, or U\+007F/);
+    });
+
+    it("keeps ordinary punctuation and spaces in an instance key", async () => {
+      const instanceKey = "sites/My Site (draft) v2";
+      await expect(
+        invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
+          webAppId: "preview",
+          instanceKey,
+        }),
+      ).resolves.toEqual({ webAppId: "preview", instanceKey });
     });
   });
 

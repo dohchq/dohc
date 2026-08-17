@@ -30,6 +30,18 @@ export const MAX_PLUGIN_WEB_APP_TITLE_CHARS = 120;
  */
 export const MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS = 512;
 
+/**
+ * An instance key names a thing on screen and rides in a tab path, so it holds
+ * no control characters — a NUL would split the key the view registry builds,
+ * and the rest would break the label or the path it is written into. The rule
+ * lives here, on the trusted side, because the SDK that also checks it is the
+ * caller's own copy and a caller can skip it.
+ */
+export function hasControlCharacter(value: string): boolean {
+  // eslint-disable-next-line no-control-regex
+  return /[\u0000-\u001f\u007f]/.test(value);
+}
+
 export interface DeclaredWebApp {
   id: string;
   instanced: boolean;
