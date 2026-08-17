@@ -51,6 +51,9 @@ function request(method, params) {
 // panel that bundles @dohc/sdk gets all of this from one call:
 //
 //   await dohc.ui.applyTheme();
+// Mirrors DOHC_THEME_PROTOCOL from @dohc/sdk. This fixture ships as plain
+// files with no bundler, so it spells the constant out, the same way the
+// `protocol` above spells out DOHC_SDK_PROTOCOL.
 const themeProtocol = "dohc:theme:v1";
 const modeOutput = document.querySelector("[data-testid=theme-mode]");
 const inkOutput = document.querySelector("[data-testid=theme-ink]");

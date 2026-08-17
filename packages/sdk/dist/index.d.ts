@@ -190,9 +190,6 @@ export type DohcThemeMessage = {
 export type DohcApplyThemeOptions = DohcRequestOptions & {
     /** Defaults to this document's <html>. */
     root?: HTMLElement;
-    currentWindow?: Window;
-    targetWindow?: Window;
-    targetOrigin?: string;
 };
 export declare function isDohcTheme(value: unknown): value is DohcTheme;
 export declare function isDohcThemeMessage(value: unknown): value is DohcThemeMessage;

@@ -1113,12 +1113,7 @@ describe("dohc theme", () => {
       },
     });
 
-    const stop = await client.ui.applyTheme({
-      root: root.element,
-      currentWindow: harness.currentWindow,
-      targetWindow: harness.targetWindow,
-      targetOrigin: "https://host.dohc.test",
-    });
+    const stop = await client.ui.applyTheme({ root: root.element });
     expect(root.dataset.theme).toBe("light");
     expect(root.properties["--dohc-ink"]).toBe("#1c1b18");
 
@@ -1158,12 +1153,7 @@ describe("dohc theme", () => {
       },
     });
 
-    const applying = client.ui.applyTheme({
-      root: root.element,
-      currentWindow: harness.currentWindow,
-      targetWindow: harness.targetWindow,
-      targetOrigin: "https://host.dohc.test",
-    });
+    const applying = client.ui.applyTheme({ root: root.element });
     harness.dispatch({ protocol: DOHC_THEME_PROTOCOL, theme: DARK });
     expect(root.dataset.theme).toBe("dark");
     release();

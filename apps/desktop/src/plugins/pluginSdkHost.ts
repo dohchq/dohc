@@ -222,6 +222,12 @@ export async function invokePluginSdkHost(
       if (context.signal?.aborted) throw abortError();
       return context.subscribeFileWatch(params);
     }
+    // The renderer answers this for a panel before it reaches main, so a
+    // request arriving here has no window to read a theme from.
+    case "ui.theme":
+      throw new Error(
+        `ui.theme is unavailable for this request path (requestPath "${context.requestPath}"). dohc answers it in the renderer showing the panel, and a plugin process has no UI to theme.`,
+      );
     case "ui.open": {
       if (context.requestPath !== "panel") {
         throw new Error(

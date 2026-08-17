@@ -1,11 +1,7 @@
 // @vitest-environment jsdom
-import { DOHC_THEME_PROTOCOL, isDohcTheme } from "@dohc/sdk";
+import { isDohcTheme } from "@dohc/sdk";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  THEME_ATTRIBUTES,
-  dohcThemeMessage,
-  readDohcTheme,
-} from "./pluginPanelTheme";
+import { THEME_ATTRIBUTES, readDohcTheme } from "./pluginPanelTheme";
 import { CSS_TOKEN_NAMES, fonts, palette } from "./tokens";
 
 function root(attributes: Record<string, string> = {}): HTMLElement {
@@ -61,13 +57,5 @@ describe("readDohcTheme", () => {
 
   it("produces a payload the SDK accepts", () => {
     expect(isDohcTheme(readDohcTheme(root({ "data-theme": "dark" })))).toBe(true);
-  });
-});
-
-describe("dohcThemeMessage", () => {
-  it("stamps the theme protocol", () => {
-    const message = dohcThemeMessage(readDohcTheme(root()));
-    expect(message.protocol).toBe(DOHC_THEME_PROTOCOL);
-    expect(message.theme.mode).toBe("light");
   });
 });

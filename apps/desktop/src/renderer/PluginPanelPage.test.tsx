@@ -440,7 +440,7 @@ describe("PluginPanelPage", () => {
     });
 
     async function mountWithFrame() {
-      render(
+      const view = render(
         <PluginPanelPage
           workspaceId="ws-plugins"
           pluginId="hello-plugin"
@@ -456,7 +456,7 @@ describe("PluginPanelPage", () => {
         configurable: true,
         value: source,
       });
-      return { source, postMessage };
+      return { view, source, postMessage };
     }
 
     it("answers ui.theme in the renderer without reaching main", async () => {
@@ -494,7 +494,7 @@ describe("PluginPanelPage", () => {
       expect(message.theme.tokens["--dohc-bg"]).toBe(palette.dark.bg);
     });
 
-    it("pushes density and reduced-motion changes too", async () => {
+    it("pushes a reduced-motion change too", async () => {
       const { postMessage } = await mountWithFrame();
 
       await act(async () => {
@@ -511,14 +511,7 @@ describe("PluginPanelPage", () => {
     // not leave something watching <html> for the rest of the session.
     it("releases its observer when the panel unmounts", async () => {
       const disconnect = vi.spyOn(MutationObserver.prototype, "disconnect");
-      const view = render(
-        <PluginPanelPage
-          workspaceId="ws-plugins"
-          pluginId="hello-plugin"
-          panelId="main"
-        />,
-      );
-      await screen.findByTestId("plugin-panel-frame");
+      const { view } = await mountWithFrame();
       const before = disconnect.mock.calls.length;
       view.unmount();
       expect(disconnect.mock.calls.length).toBeGreaterThan(before);
@@ -526,21 +519,7 @@ describe("PluginPanelPage", () => {
     });
 
     it("stops pushing after the panel unmounts", async () => {
-      const view = render(
-        <PluginPanelPage
-          workspaceId="ws-plugins"
-          pluginId="hello-plugin"
-          panelId="main"
-        />,
-      );
-      const frame = (await screen.findByTestId(
-        "plugin-panel-frame",
-      )) as HTMLIFrameElement;
-      const postMessage = vi.fn();
-      Object.defineProperty(frame, "contentWindow", {
-        configurable: true,
-        value: { postMessage } as unknown as Window,
-      });
+      const { view, postMessage } = await mountWithFrame();
       view.unmount();
 
       await act(async () => {

@@ -57,6 +57,16 @@ describe("site SDK host authority", () => {
     );
   });
 
+  // Theme tokens are a plugin panel surface. A site asking gets told that,
+  // not a generic "unsupported method".
+  it("refuses ui.theme by name", async () => {
+    const root = await workspace();
+    const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };
+    await expect(invokeSiteSdkHost(context, "ui.theme", undefined)).rejects.toThrow(
+      /ui.theme is unavailable to a site/,
+    );
+  });
+
   it("reads, lists, and writes through owned workspace authority", async () => {
     const root = await workspace();
     const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };

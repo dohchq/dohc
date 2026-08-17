@@ -1,16 +1,14 @@
 import {
   DOHC_SDK_PROTOCOL,
+  DOHC_THEME_PROTOCOL,
   type DohcSdkResponseMessage,
+  type DohcThemeMessage,
 } from "@dohc/sdk";
 import { AlertTriangle, Plug } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { StartPluginPanelResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
-import {
-  THEME_ATTRIBUTES,
-  dohcThemeMessage,
-  readDohcTheme,
-} from "./pluginPanelTheme";
+import { THEME_ATTRIBUTES, readDohcTheme } from "./pluginPanelTheme";
 import {
   frameUrlWithHostOrigin,
   isActiveFrameOrigin,
@@ -226,7 +224,10 @@ export function PluginPanelPage(props: {
     const push = () => {
       if (stoppingRef.current || !panelRef.current) return;
       iframeRef.current?.contentWindow?.postMessage(
-        dohcThemeMessage(readDohcTheme(root)),
+        {
+          protocol: DOHC_THEME_PROTOCOL,
+          theme: readDohcTheme(root),
+        } satisfies DohcThemeMessage,
         panelOrigin,
       );
     };

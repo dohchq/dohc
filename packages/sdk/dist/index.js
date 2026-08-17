@@ -513,6 +513,21 @@ export function createDohcClient(options = {}) {
             throw new DohcSdkError(DohcSdkErrorCodes.capabilityDisabled, `dohc ${namespace}.${capability} capability is disabled by this host.`);
         }
     };
+    /**
+     * dohc's design tokens as they are on screen right now. Read this to color
+     * something CSS cannot reach — a canvas, a chart, an SVG fill. To style a
+     * panel, prefer `applyTheme`.
+     *
+     * Theme is styling data, so this gates on no capability.
+     */
+    const readTheme = async (requestOptions) => {
+        assertRequestOptions(requestOptions);
+        const result = await request("ui.theme", undefined, requestOptions);
+        if (!isDohcTheme(result)) {
+            throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned an invalid theme response.");
+        }
+        return result;
+    };
     const listCollection = async (name, params = {}, requestOptions) => {
         assertRequestOptions(requestOptions);
         assertCollectionName(name);
@@ -669,14 +684,7 @@ export function createDohcClient(options = {}) {
              *
              * Theme is styling data, so this gates on no capability.
              */
-            theme: async (requestOptions) => {
-                assertRequestOptions(requestOptions);
-                const result = await request("ui.theme", undefined, requestOptions);
-                if (!isDohcTheme(result)) {
-                    throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned an invalid theme response.");
-                }
-                return result;
-            },
+            theme: readTheme,
             /**
              * The one line that makes a panel look native: it writes dohc's tokens
              * onto this document and keeps writing them when the user changes
@@ -687,21 +695,17 @@ export function createDohcClient(options = {}) {
              * this is unaffected; the host's messages are simply ignored.
              */
             applyTheme: async (applyOptions = {}) => {
-                const currentWindow = applyOptions.currentWindow ??
-                    options.currentWindow ??
+                const currentWindow = options.currentWindow ??
                     (typeof window === "undefined" ? undefined : window);
                 if (!currentWindow) {
                     throw new DohcSdkError(DohcSdkErrorCodes.hostUnavailable, "dohc SDK is not running in a browser window.");
                 }
                 const root = applyOptions.root ?? currentWindow.document.documentElement;
-                const hostOrigin = applyOptions.targetOrigin ??
-                    options.targetOrigin ??
-                    targetOriginFromLocation(currentWindow);
+                const hostOrigin = options.targetOrigin ?? targetOriginFromLocation(currentWindow);
                 if (!hostOrigin) {
                     throw new DohcSdkError(DohcSdkErrorCodes.hostMissingOrigin, "No dohc host origin is available for this panel.");
                 }
-                const hostWindow = applyOptions.targetWindow ??
-                    options.targetWindow ??
+                const hostWindow = options.targetWindow ??
                     (currentWindow.parent && currentWindow.parent !== currentWindow
                         ? currentWindow.parent
                         : undefined);
@@ -722,15 +726,7 @@ export function createDohcClient(options = {}) {
                 currentWindow.addEventListener("message", onMessage);
                 const stop = () => currentWindow.removeEventListener("message", onMessage);
                 try {
-                    const theme = await request("ui.theme", undefined, {
-                        ...(applyOptions.signal ? { signal: applyOptions.signal } : {}),
-                        ...(applyOptions.timeoutMs === undefined
-                            ? {}
-                            : { timeoutMs: applyOptions.timeoutMs }),
-                    });
-                    if (!isDohcTheme(theme)) {
-                        throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned an invalid theme response.");
-                    }
+                    const theme = await readTheme(applyOptions);
                     if (!pushed)
                         applyDohcTheme(theme, root);
                 }

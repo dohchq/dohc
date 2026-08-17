@@ -5,11 +5,7 @@
 // This is styling only. The payload grants no authority, gates on no
 // capability, and a panel that never asks for it is unaffected.
 
-import {
-  DOHC_THEME_PROTOCOL,
-  type DohcTheme,
-  type DohcThemeMessage,
-} from "@dohc/sdk";
+import { type DohcTheme } from "@dohc/sdk";
 import { CSS_TOKEN_NAMES, fonts, palette, type ThemeTokens } from "./tokens";
 
 /**
@@ -41,8 +37,4 @@ export function readDohcTheme(root: HTMLElement): DohcTheme {
     reduceMotion: root.dataset.reduceMotion === "true",
     tokens,
   };
-}
-
-export function dohcThemeMessage(theme: DohcTheme): DohcThemeMessage {
-  return { protocol: DOHC_THEME_PROTOCOL, theme };
 }

@@ -377,6 +377,10 @@ export async function invokeSiteSdkHost(
         ...(typeof input.position === "string" ? { position: input.position } : {}),
       };
     }
+    case "ui.theme":
+      throw new Error(
+        "ui.theme is unavailable to a site. dohc serves its design tokens to plugin panels only; a site brings its own styling.",
+      );
     default:
       throw new Error(`Unsupported dohc SDK method: ${method}`);
   }

@@ -141,6 +141,9 @@ chart.setStroke(theme.tokens["--dohc-accent"]);
 Theme is styling data. It grants no authority and gates on no capability. A
 panel that never asks for it behaves exactly as it did before.
 
+Panels only. A site preview or a plugin's own Node process has no window to
+read a theme from, and both refuse these calls by name.
+
 ## Security Note: file:// Previews
 
 For `file://` dohc hosts, browser `postMessage` requires request `targetOrigin`
