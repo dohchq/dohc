@@ -276,7 +276,7 @@ export function AgentsMcpSettings(props: {
             </div>
             {drivers === null && !probeError ? (
               <p data-testid="agent-probes-loading" className="m-0 text-[11px] text-subtle">
-                Checking Codex, Claude, and ACP…
+                Checking local agents…
               </p>
             ) : probeError ? (
               <p data-testid="agent-probes-error" className="m-0 text-[11px] text-danger">
