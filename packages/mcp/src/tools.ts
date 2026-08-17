@@ -2348,7 +2348,7 @@ export async function previewSite(ctx: ToolContext, args: { siteRoot: string }) 
     modes,
     message:
       modes.length > 0
-        ? "Open this site in the dohc Sites panel to run the preview."
+        ? "Open this site in the Sites plugin to run the preview."
         : "No preview mode is available yet.",
     checks: tested.checks,
   };

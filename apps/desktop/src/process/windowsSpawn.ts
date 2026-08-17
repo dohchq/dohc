@@ -18,7 +18,7 @@ import { win32 } from "node:path";
 //   - a percent sign: cmd.exe still expands %VAR% inside double quotes with no
 //     reliable escape, so a crafted env value (e.g. DOHC_PWN='" & calc & "')
 //     would break out of the quotes and inject a second command that the
-//     pre-expansion argv allowlist in siteRunner never saw. Quoting cannot
+//     pre-expansion argv allowlist of the caller never saw. Quoting cannot
 //     contain it, so any token carrying % is rejected.
 function quoteForCmd(token: string): string {
   if (token.includes('"')) {

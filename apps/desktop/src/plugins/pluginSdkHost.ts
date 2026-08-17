@@ -1,11 +1,11 @@
 import type { ChangeAuthor, MomentAuthor } from "@dohc/workspace-contracts/engine";
 import {
   assertRawTextWritable,
-  invokeSiteSdkHost,
+  invokeWorkspaceSdkHost,
   record,
-  siteSdkWorkspacePath,
-  type SiteSdkHostContext,
-} from "../workspaces/siteSdkHost";
+  sdkWorkspacePath,
+  type WorkspaceSdkHostContext,
+} from "../workspaces/workspaceSdkHost";
 import { isPluginChildProcessMethod } from "./pluginChildProcessBroker";
 import {
   hasControlCharacter,
@@ -174,9 +174,8 @@ export async function invokePluginSdkHost(
   // waitForOperation's generic DOHC_ABORTED for reads/searches/child
   // processes) — a single check here would win over files.write's more
   // specific "Plugin panel is no longer active." message.
-  const siteContext: SiteSdkHostContext = {
+  const hostContext: WorkspaceSdkHostContext = {
     workspaceRoot: context.workspaceRoot,
-    scopeRoot: null,
     writable: context.isWritable(),
     signal: context.signal,
     author: pluginDatabaseAuthor(context.pluginId),
@@ -200,7 +199,7 @@ export async function invokePluginSdkHost(
     case "databases.read":
       return waitForOperation(
         context.signal,
-        invokeSiteSdkHost(siteContext, method, params),
+        invokeWorkspaceSdkHost(hostContext, method, params),
       );
     case "databases.edit": {
       if (!context.isWritable()) {
@@ -208,7 +207,7 @@ export async function invokePluginSdkHost(
       }
       return waitForOperation(
         context.signal,
-        invokeSiteSdkHost(siteContext, method, params),
+        invokeWorkspaceSdkHost(hostContext, method, params),
       );
     }
     case "files.watch": {
@@ -236,7 +235,7 @@ export async function invokePluginSdkHost(
       }
       return waitForOperation(
         context.signal,
-        invokeSiteSdkHost(siteContext, method, params),
+        invokeWorkspaceSdkHost(hostContext, method, params),
       );
     }
     // A plugin opens one of its OWN web apps, naming the instance it wants.
@@ -290,7 +289,7 @@ export async function invokePluginSdkHost(
         throw new Error("Plugin panel is no longer active.");
       }
       const input = record(params);
-      const path = siteSdkWorkspacePath(null, input.path, "write");
+      const path = sdkWorkspacePath(input.path, "write");
       assertRawTextWritable(path);
       if (typeof input.text !== "string") {
         throw new Error("files.write text must be a string.");

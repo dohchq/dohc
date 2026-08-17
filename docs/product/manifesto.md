@@ -11,7 +11,7 @@ and keep control of every important decision.
 
 - A local-first workspace made of ordinary files.
 - An agent that organizes work instead of hiding it in chat history.
-- A document editor, chat surface, search tool, site builder, and history
+- A document editor, chat surface, search tool, plugin host, and history
   system over the same workspace.
 - A product for individuals first, with sharing and collaboration available
   when the user asks for them.

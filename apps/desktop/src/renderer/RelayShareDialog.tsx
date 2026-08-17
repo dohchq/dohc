@@ -11,8 +11,6 @@ import { IconButton, PrimaryButton } from "./ui/controls";
 
 export interface RelayShareTarget {
   path?: string;
-  paths?: string[];
-  label?: string;
   versionId?: string;
   versionName?: string;
 }
@@ -65,7 +63,7 @@ export function RelayShareDialog(props: {
 
   const subject = props.target.versionId
     ? `version “${props.target.versionName ?? props.target.versionId}”`
-    : (props.target.label ?? props.target.path ?? "this selection");
+    : (props.target.path ?? "this selection");
 
   const canSubmit = useMemo(() => email.trim().length > 2 && !busy, [busy, email]);
 
@@ -78,11 +76,7 @@ export function RelayShareDialog(props: {
         workspaceId: props.workspaceId,
         recipientEmail: email.trim(),
         access,
-        ...(props.target.paths
-          ? { paths: props.target.paths }
-          : props.target.path
-            ? { paths: [props.target.path] }
-            : {}),
+        ...(props.target.path ? { paths: [props.target.path] } : {}),
         ...(props.target.versionId ? { versionId: props.target.versionId } : {}),
       });
       setCreated({ shareCode: result.shareCode, recipientEmail: result.recipientEmail });

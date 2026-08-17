@@ -23,7 +23,7 @@ A core dohc feature should answer yes to these questions:
 - Markdown and ordinary files for durable source.
 - Explicit links, paths, and metadata.
 - Search, graph, history, and chat for context.
-- Sites and SQLite files for richer views and structured work.
+- Plugins and SQLite files for richer views and structured work.
 - Diffs, moments, versions, and provenance for review.
 - Host-enforced permissions for shared work.
 

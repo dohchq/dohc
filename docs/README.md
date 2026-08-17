@@ -7,13 +7,12 @@ These documents describe the current repository and product.
 - [Manifesto](product/manifesto.md)
 - [Product spec](product/spec.md)
 - [AI-native positioning](product/ai-native-positioning.md)
-- [Site SDK](product/site-sdk.md)
 
 ## Architecture and security
 
 - [Backend modes](architecture/backend-modes.md)
 - [Import, export, and sharing](architecture/import-export-sharing.md)
-- [Site preview security](architecture/site-preview-security.md)
+- [Guest preview security](architecture/guest-preview-security.md)
 - [Authorization boundaries](security/authz-boundaries.md)
 - [Self-hosting](self-hosting.md)
 

@@ -28,12 +28,14 @@ backend.
   messages.
 - **History:** inspect moments, versions, comparisons, conflicts, and restores.
 - **Search and graph:** find content and follow workspace links.
-- **Sites:** preview ordinary static or package-based websites inside dohc.
+- **Plugins:** extend dohc with views, panels, and web apps, including the
+  Sites plugin that previews ordinary websites.
 - **Databases:** inspect and edit supported SQLite data through bounded tools.
 - **Sharing:** grant paths, versions, or chat channels through the sync relay.
 
 Document computation is not implicit. Formula-like text and fenced code remain
-text unless an explicit site, script, database tool, or agent workflow runs it.
+text unless an explicit plugin, script, database tool, or agent workflow runs
+it.
 
 ## Collaboration
 
@@ -48,4 +50,5 @@ derives the actor from the authenticated session and enforces share boundaries.
 - A slow asynchronous response cannot repaint another workspace.
 - Live document editing treats the Y.Doc session as canonical.
 - Settlement writes the Markdown artifact through the engine.
-- Site and HTML previews do not grant workspace authority by themselves.
+- Plugin guests and HTML previews do not grant workspace authority by
+  themselves.

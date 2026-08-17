@@ -29,30 +29,27 @@ import {
 
 type RecordValue = Record<string, unknown>;
 
-export interface SiteSdkHostContext {
+export interface WorkspaceSdkHostContext {
   workspaceRoot: string;
-  // null grants the current user's owned workspace. A concrete root is the
-  // read-only collaboration projection that the shared site arrived through.
-  scopeRoot: string | null;
   writable: boolean;
   // Who a database edit is recorded as. Required, never defaulted: this host
-  // serves both the user's own sites and the plugin SDK route, and an
-  // inherited default would record one surface's work as the other's.
+  // serves every plugin SDK route, and an inherited default would record
+  // one plugin's work as another's.
   author: ChangeAuthor;
-  // Preview-lifetime cancellation. Search subprocesses must not survive the
-  // renderer/preview that owns their SDK authority.
+  // Surface-lifetime cancellation. Search subprocesses must not survive the
+  // surface that owns their SDK authority.
   signal?: AbortSignal;
-  // Test/lifecycle seam for proving that preview cancellation terminates the
-  // owned search handle. Production callers use startRipgrepSearch.
-  searchStarter?: SiteSdkSearchStarter;
+  // Test/lifecycle seam for proving that cancellation terminates the owned
+  // search handle. Production callers use startRipgrepSearch.
+  searchStarter?: SdkSearchStarter;
   // Injectable clock/id seams (oracle/tests) for database edits made through
-  // the site SDK. Omitted ⇒ the real wall clock / randomUUID, identical to
+  // the SDK. Omitted ⇒ the real wall clock / randomUUID, identical to
   // today's behavior.
   now?: () => number;
   createId?: () => string;
 }
 
-export type SiteSdkSearchStarter = typeof startRipgrepSearch;
+export type SdkSearchStarter = typeof startRipgrepSearch;
 
 const MAX_LIST_RESULTS = 10_000;
 const MAX_SEARCH_RESULTS = 2_000;
@@ -71,34 +68,14 @@ function text(value: unknown, label: string, max = 4096): string {
   return value;
 }
 
-function normalizeScopeRoot(scopeRoot: string | null): string | null {
-  return !scopeRoot || scopeRoot === "." ? null : scopeRoot.replace(/\/$/, "");
-}
-
-function validatedPath(path: unknown, kind: "read" | "write"): string {
-  const raw = text(path, "path");
-  const result = kind === "read" ? validateUserReadPath(raw) : validateUserMaterializePath(raw);
-  if (!result.ok) throw new Error(`Invalid ${kind} path (${result.reason}): ${raw}`);
-  return result.normalized;
-}
-
-/** Maps the site's logical path into the host-derived collaboration scope. */
-export function siteSdkWorkspacePath(
-  scopeRoot: string | null,
+export function sdkWorkspacePath(
   requestedPath: unknown,
   kind: "read" | "write" = "read",
 ): string {
-  const requested = validatedPath(requestedPath, kind);
-  const scope = normalizeScopeRoot(scopeRoot);
-  return scope ? `${scope}/${requested}` : requested;
-}
-
-function visiblePath(scopeRoot: string | null, workspacePath: string): string | null {
-  const scope = normalizeScopeRoot(scopeRoot);
-  if (!scope) return workspacePath;
-  if (workspacePath === scope) return ".";
-  const prefix = `${scope}/`;
-  return workspacePath.startsWith(prefix) ? workspacePath.slice(prefix.length) : null;
+  const raw = text(requestedPath, "path");
+  const result = kind === "read" ? validateUserReadPath(raw) : validateUserMaterializePath(raw);
+  if (!result.ok) throw new Error(`Invalid ${kind} path (${result.reason}): ${raw}`);
+  return result.normalized;
 }
 
 /** Whether a workspace path sits at or below a root, where "." is the whole
@@ -111,12 +88,12 @@ export function assertRawTextWritable(
   path: string,
   options: { protectPluginSource?: boolean } = {},
 ): void {
-  // Plugins run with full-trust authority. A sandboxed site must not change
+  // Plugins run with full-trust authority. A sandboxed guest must not change
   // plugin source and cross that authority boundary.
   const [topLevel] = path.replaceAll("\\", "/").split("/");
   if (options.protectPluginSource && topLevel?.toLowerCase() === "plugins") {
     throw new Error(
-      "files.write cannot write plugin source under the workspace-root plugins/ tree. Sandboxed sites cannot modify source that runs with full-trust authority.",
+      "files.write cannot write plugin source under the workspace-root plugins/ tree. A sandboxed guest cannot modify source that runs with full-trust authority.",
     );
   }
   // SQLite files are canonical structured artifacts. Replacing their raw
@@ -135,70 +112,64 @@ export function assertRawTextWritable(
     );
   }
 }
-function capabilities(context: SiteSdkHostContext) {
-  const canWrite = context.writable && !normalizeScopeRoot(context.scopeRoot);
+
+function capabilities(context: WorkspaceSdkHostContext) {
   return {
-    files: { read: true, list: true, write: canWrite, watch: false },
+    files: { read: true, list: true, write: context.writable, watch: false },
     workspace: { search: true, events: false },
-    databases: { read: true, edit: canWrite },
+    databases: { read: true, edit: context.writable },
     ui: { open: true },
     collections: { read: false, list: false },
     provenance: { record: false },
   };
 }
 
-function assertSitePreviewActive(context: SiteSdkHostContext): void {
+function assertRequestSurfaceActive(context: WorkspaceSdkHostContext): void {
   if (context.signal?.aborted) {
-    throw new Error("Site preview is no longer active.");
+    throw new Error("The surface that owns this SDK request is no longer active.");
   }
 }
 
-async function listVisibleFiles(context: SiteSdkHostContext, params: unknown) {
+async function listVisibleFiles(context: WorkspaceSdkHostContext, params: unknown) {
   const input = params === undefined ? {} : record(params);
   const requestedRoot =
-    input.path === undefined || input.path === "." ? "." : validatedPath(input.path, "read");
+    input.path === undefined || input.path === "." ? "." : sdkWorkspacePath(input.path);
   const recursive = input.recursive !== false;
   const listed = await listFiles(context.workspaceRoot);
   const files = [];
   for (const entry of listed.files) {
-    const path = visiblePath(context.scopeRoot, entry.path);
-    if (!path || !isAtOrBelow(path, requestedRoot)) continue;
+    const path = entry.path;
+    if (!isAtOrBelow(path, requestedRoot)) continue;
+
     if (!recursive) {
       const remainder = requestedRoot === "." ? path : path.slice(requestedRoot.length + 1);
       if (remainder.includes("/")) continue;
     }
-    files.push({ ...entry, path, name: basename(path) });
+    files.push({ ...entry, name: basename(path) });
     if (files.length >= MAX_LIST_RESULTS) break;
   }
   return files;
 }
 
-async function scopedIncludeGlob(
+async function requestedIncludeGlob(
   workspaceRoot: string,
-  scopeRoot: string | null,
   requestedPath: unknown,
 ): Promise<string | undefined> {
-  const scope = normalizeScopeRoot(scopeRoot);
-  const path =
-    requestedPath === undefined || requestedPath === "."
-      ? null
-      : validatedPath(requestedPath, "read");
-  const roots = [scope, path].filter((part): part is string => Boolean(part && part !== "."));
-  if (roots.length === 0) return undefined;
-  const scopedPath = roots.join("/");
-  const literalGlob = scopedPath.replace(/([*?[\]{}!\\])/g, "\\$1");
+  if (requestedPath === undefined || requestedPath === ".") return undefined;
+  const path = sdkWorkspacePath(requestedPath);
+  const literalGlob = path.replace(/([*?[\]{}!\\])/g, "\\$1");
   try {
-    if ((await stat(join(workspaceRoot, scopedPath))).isFile()) return literalGlob;
+    if ((await stat(join(workspaceRoot, path))).isFile()) return literalGlob;
   } catch {
     // A missing path simply produces no rg matches through the directory glob.
   }
   return `${literalGlob}/**`;
 }
 
-async function searchVisibleWorkspace(context: SiteSdkHostContext, params: unknown) {
+async function searchVisibleWorkspace(context: WorkspaceSdkHostContext, params: unknown) {
   const input = record(params);
   const query = text(input.query, "query", 2_000);
-  const includeGlob = await scopedIncludeGlob(context.workspaceRoot, context.scopeRoot, input.path);
+  const includeGlob = await requestedIncludeGlob(context.workspaceRoot, input.path);
   const requestedLimit =
     typeof input.limit === "number" && Number.isInteger(input.limit)
       ? input.limit
@@ -214,13 +185,13 @@ async function searchVisibleWorkspace(context: SiteSdkHostContext, params: unkno
   };
   const root = await realpath(context.workspaceRoot);
   if (context.signal?.aborted) {
-    throw new Error("Site preview is no longer active.");
+    throw new Error("The surface that owns this SDK request is no longer active.");
   }
-  return new Promise<Array<SearchResultEntry & { path: string }>>((resolve, reject) => {
-    const entries: Array<SearchResultEntry & { path: string }> = [];
+  return new Promise<SearchResultEntry[]>((resolve, reject) => {
+    const entries: SearchResultEntry[] = [];
     let handle: ReturnType<typeof startRipgrepSearch> | null = null;
     let settled = false;
-    const finish = (result: Array<SearchResultEntry & { path: string }>) => {
+    const finish = (result: SearchResultEntry[]) => {
       if (settled) return;
       settled = true;
       context.signal?.removeEventListener("abort", abort);
@@ -231,18 +202,17 @@ async function searchVisibleWorkspace(context: SiteSdkHostContext, params: unkno
       settled = true;
       handle?.kill();
       context.signal?.removeEventListener("abort", abort);
-      reject(new Error("Site preview is no longer active."));
+      reject(new Error("The surface that owns this SDK request is no longer active."));
     };
     context.signal?.addEventListener("abort", abort, { once: true });
     handle = (context.searchStarter ?? startRipgrepSearch)({
       rgPath,
       realRoot: root,
-      searchId: `site-sdk-${Date.now()}`,
+      searchId: `workspace-sdk-${Date.now()}`,
       request,
       onBatch(batch) {
         for (const entry of batch.entries) {
-          const path = visiblePath(context.scopeRoot, entry.path);
-          if (path) entries.push({ ...entry, path });
+          entries.push(entry);
           if (entries.length >= limit) {
             handle?.kill();
             finish(entries.slice(0, limit));
@@ -289,12 +259,12 @@ function databaseEdits(value: unknown): DatabaseEdit[] {
   });
 }
 
-export async function invokeSiteSdkHost(
-  context: SiteSdkHostContext,
+export async function invokeWorkspaceSdkHost(
+  context: WorkspaceSdkHostContext,
   method: string,
   params?: unknown,
 ): Promise<unknown> {
-  if (method !== "capabilities") assertSitePreviewActive(context);
+  if (method !== "capabilities") assertRequestSurfaceActive(context);
   switch (method) {
     case "capabilities":
       return capabilities(context);
@@ -302,17 +272,17 @@ export async function invokeSiteSdkHost(
       const input = record(params);
       return readWorkspaceText(
         context.workspaceRoot,
-        siteSdkWorkspacePath(context.scopeRoot, input.path),
+        sdkWorkspacePath(input.path),
       );
     }
     case "files.list":
       return listVisibleFiles(context, params);
     case "files.write": {
-      if (!context.writable || normalizeScopeRoot(context.scopeRoot)) {
-        throw new Error("This site has read-only collaboration authority.");
+      if (!context.writable) {
+        throw new Error("This plugin has read-only workspace authority.");
       }
       const input = record(params);
-      const path = siteSdkWorkspacePath(null, input.path, "write");
+      const path = sdkWorkspacePath(input.path, "write");
       assertRawTextWritable(path, { protectPluginSource: true });
       const body = typeof input.text === "string" ? input.text : null;
       if (body === null) throw new Error("files.write text must be a string.");
@@ -349,18 +319,18 @@ export async function invokeSiteSdkHost(
       }
       return readDatabaseSnapshot(
         context.workspaceRoot,
-        siteSdkWorkspacePath(context.scopeRoot, input.path),
+        sdkWorkspacePath(input.path),
       );
     }
     case "databases.edit": {
-      if (!context.writable || normalizeScopeRoot(context.scopeRoot)) {
-        throw new Error("This site has read-only collaboration authority.");
+      if (!context.writable) {
+        throw new Error("This plugin has read-only workspace authority.");
       }
       const input = record(params);
-      const path = siteSdkWorkspacePath(null, input.path, "write");
+      const path = sdkWorkspacePath(input.path, "write");
       const [edit] = databaseEdits(input);
       await readDatabaseSnapshot(context.workspaceRoot, path);
-      assertSitePreviewActive(context);
+      assertRequestSurfaceActive(context);
       return applyDatabaseEdit(
         context.workspaceRoot,
         path,
@@ -373,14 +343,10 @@ export async function invokeSiteSdkHost(
     case "ui.open": {
       const input = record(params);
       return {
-        target: siteSdkWorkspacePath(context.scopeRoot, input.target),
+        target: sdkWorkspacePath(input.target),
         ...(typeof input.position === "string" ? { position: input.position } : {}),
       };
     }
-    case "ui.theme":
-      throw new Error(
-        "ui.theme is unavailable to a site. dohc serves its design tokens to plugin panels only; a site brings its own styling.",
-      );
     default:
       throw new Error(`Unsupported dohc SDK method: ${method}`);
   }

@@ -2,7 +2,6 @@ import {
   Blocks,
   Cloud,
   Files,
-  Globe2,
   History,
   Search,
   Settings,
@@ -23,7 +22,6 @@ const ICONS: Record<ViewId, typeof Files> = {
   explorer: Files,
   search: Search,
   graph: Workflow,
-  sites: Globe2,
   history: History,
   plugins: Blocks,
 };
@@ -32,7 +30,6 @@ const LABELS: Record<ViewId, string> = {
   explorer: "Explorer",
   search: "Search",
   graph: "Graph",
-  sites: "Sites",
   history: "History",
   plugins: "Plugins",
 };
