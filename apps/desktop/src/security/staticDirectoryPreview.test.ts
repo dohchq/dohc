@@ -44,6 +44,7 @@ describe("startStaticDirectoryPreview", () => {
     const preview = await startStaticDirectoryPreview(panelRoot, {
       containmentRoot: pluginRoot,
       entry: "index.html",
+      entryLabel: "panel entry",
     });
     try {
       const response = await fetch(preview.url);
@@ -72,6 +73,7 @@ describe("startStaticDirectoryPreview", () => {
       startStaticDirectoryPreview(outside, {
         containmentRoot: containment,
         entry: "index.html",
+        entryLabel: "panel entry",
       }),
     ).rejects.toThrow(/escapes its containment root/);
   });
@@ -85,6 +87,7 @@ describe("startStaticDirectoryPreview", () => {
       startStaticDirectoryPreview(reserved, {
         containmentRoot: root,
         entry: "index.html",
+        entryLabel: "panel entry",
       }),
     ).rejects.toThrow(/reserved metadata path/);
   });
@@ -98,8 +101,9 @@ describe("startStaticDirectoryPreview", () => {
       startStaticDirectoryPreview(panelRoot, {
         containmentRoot: root,
         entry: "../index.html",
+        entryLabel: "panel entry",
       }),
-    ).rejects.toThrow(/Invalid static entry/);
+    ).rejects.toThrow(/Invalid panel entry/);
   });
 
   it("serves files under the root and refuses traversal out of it", async () => {
@@ -112,6 +116,7 @@ describe("startStaticDirectoryPreview", () => {
     const preview = await startStaticDirectoryPreview(panelRoot, {
       containmentRoot: root,
       entry: "index.html",
+      entryLabel: "panel entry",
     });
     try {
       const asset = await fetch(new URL("/assets/app.js", preview.url));
@@ -160,6 +165,7 @@ describe("startStaticDirectoryPreview", () => {
     const preview = await startStaticDirectoryPreview(panelRoot, {
       containmentRoot: pluginRoot,
       entry: "index.html",
+      entryLabel: "panel entry",
     });
     try {
       // MUTATION (served-root narrowing): drop the isInside(root, realTarget)

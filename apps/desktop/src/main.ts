@@ -783,7 +783,7 @@ function requireWorkspace(workspaceId: string) {
 
 // PR 18 read-only shared views: a shared view is a read-only local workspace.
 // `sharedViewOf` is the ONE authoritative predicate; every mutation surface
-// (file writes, agent runs, code-executing site previews, and the MCP config)
+// (file writes, agent runs, and the MCP config)
 // routes through it so a shared view can never be changed, only read. The
 // renderer also hides its edit affordances; this main-process layer is the
 // enforcement that cannot be skipped.
@@ -4533,7 +4533,7 @@ function registerIpcHandlers(
     return ImportWorkspaceFilesResult.parse(await importInto(result.filePaths, null));
   });
 
-  // Site preview SDK reads use the combined helper to make the main-process
+  // Plugin SDK reads use the combined helper to make the main-process
   // workspace authorization boundary explicit. Older workspace handlers keep
   // the equivalent assertTrustedSender + requireWorkspace steps separate.
   ipcMain.handle(CHANNELS.readWorkspaceText, async (event, payload) => {

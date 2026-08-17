@@ -69,7 +69,7 @@ export function clearPluginView(state: WorkbenchState): WorkbenchState {
 }
 // Reserved for dohc's own tabs. A workspace file path is never spelled this
 // way, so a persisted tab carrying it is always one of the kinds below.
-export const DOHC_TAB_SCHEME = "dohc://";
+const DOHC_TAB_SCHEME = "dohc://";
 export const GRAPH_TAB_PATH = "dohc://graph";
 export const HISTORY_TAB_PATH = "dohc://history";
 // Chats expanded to a full editor tab (singleton, graph/history precedent).
@@ -1088,7 +1088,7 @@ export function parseUiState(raw: unknown): WorkbenchState {
       const rawTabs = groupOwn("tabs");
       const rawActiveTab = groupOwn("activeTab");
       const normalizedActiveTab =
-        typeof rawActiveTab === "string" && !isRemovedVirtualTabPath(rawActiveTab)
+        typeof rawActiveTab === "string"
           ? (canonicalSingletonEditorTabPath(rawActiveTab) ??
             (isSingletonEditorTabPath(rawActiveTab) ? null : rawActiveTab))
           : null;

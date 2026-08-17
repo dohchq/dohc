@@ -45,13 +45,13 @@ const MIME_TYPES: Record<string, string> = {
 // residual named at the read site.
 const READ_NO_FOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 
-export function isInside(parent: string, child: string): boolean {
+function isInside(parent: string, child: string): boolean {
   if (child === parent) return true;
   const rel = relative(parent, child);
   return rel.length > 0 && !isAbsolute(rel) && !rel.startsWith("..") && !rel.startsWith(sep);
 }
 
-export function assertContainedFilePath(path: string, label: string): void {
+function assertContainedFilePath(path: string, label: string): void {
   if (
     path.includes("\0") ||
     path.includes("\\") ||
@@ -95,7 +95,7 @@ export async function startStaticDirectoryPreview(
   options: {
     containmentRoot: string;
     entry: string;
-    entryLabel?: string;
+    entryLabel: string;
   },
 ): Promise<StaticDirectoryPreview> {
   const root = await realpath(rootPath);
@@ -108,8 +108,7 @@ export async function startStaticDirectoryPreview(
     throw new Error(`Static root uses a reserved metadata path: ${rootRelative}`);
   }
   const entry = options.entry;
-  const entryLabel = options.entryLabel ?? "static entry";
-  assertContainedFilePath(entry, entryLabel);
+  assertContainedFilePath(entry, options.entryLabel);
   await access(join(root, entry), constants.R_OK);
 
   const server = createServer(async (request, response) => {

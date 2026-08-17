@@ -2664,7 +2664,7 @@ function sdkParamsIssue(root: unknown): string | null {
   return null;
 }
 
-export const SdkParams = z.unknown().superRefine((value, ctx) => {
+const SdkParams = z.unknown().superRefine((value, ctx) => {
   const issue = sdkParamsIssue(value);
   if (!issue) return;
   ctx.addIssue({

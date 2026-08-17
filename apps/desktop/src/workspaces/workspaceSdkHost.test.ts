@@ -11,7 +11,7 @@ import {
 import { createTestScratch } from "./testTemp";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 
-// A site preview acts for the user driving it.
+// A plugin surface acts for the user driving it.
 const USER_AUTHOR: ChangeAuthor = { kind: "user", userId: "local" };
 
 const requireModule = createRequire(import.meta.url);
@@ -29,7 +29,7 @@ afterEach(async () => {
 });
 
 async function workspace() {
-  const root = await createTestScratch("dohc-site-sdk-");
+  const root = await createTestScratch("dohc-workspace-sdk-");
   roots.push(root);
   await mkdir(join(root, "notes"), { recursive: true });
   await writeFile(join(root, "notes", "today.md"), "hello from dohc\n");
@@ -61,11 +61,11 @@ describe("workspace SDK host authority", () => {
       expect.objectContaining({ path: "notes/today.md", name: "today.md" }),
     );
     await invokeWorkspaceSdkHost(context, "files.write", {
-      path: "notes/from-site.txt",
-      text: "written by site\n",
+      path: "notes/from-plugin.txt",
+      text: "written by a plugin\n",
     });
-    await expect(readFile(join(root, "notes", "from-site.txt"), "utf8")).resolves.toBe(
-      "written by site\n",
+    await expect(readFile(join(root, "notes", "from-plugin.txt"), "utf8")).resolves.toBe(
+      "written by a plugin\n",
     );
   });
 
@@ -127,7 +127,7 @@ describe("workspace SDK host authority", () => {
     );
   });
 
-  it("rejects site writes under the workspace-root plugins tree", async () => {
+  it("rejects writes under the workspace-root plugins tree", async () => {
     const root = await workspace();
     const context = { workspaceRoot: root, writable: true, author: USER_AUTHOR };
 
@@ -159,7 +159,7 @@ describe("workspace SDK host authority", () => {
     );
   });
 
-  it("rejects site writes through a real directory alias into the plugin tree", async () => {
+  it("rejects writes through a real directory alias into the plugin tree", async () => {
     const root = await workspace();
     const context = { workspaceRoot: root, writable: true, author: USER_AUTHOR };
     await mkdir(join(root, "plugins", "example"), { recursive: true });
@@ -233,7 +233,7 @@ describe("workspace SDK host authority", () => {
       writable: true,
       author: USER_AUTHOR,
       now: () => 1_700_000_000_000,
-      createId: () => "op_site_0001",
+      createId: () => "op_sdk_0001",
     };
     await invokeWorkspaceSdkHost(context, "databases.edit", {
       path: "data/app.sqlite",
@@ -242,7 +242,7 @@ describe("workspace SDK host authority", () => {
     const log = await readFile(join(root, databaseOpLogPath("data/app.sqlite")), "utf8");
     const ops = log.trim().split("\n").map((l) => JSON.parse(l));
     expect(ops[0]).toMatchObject({
-      operationId: "op_site_0001",
+      operationId: "op_sdk_0001",
       appliedAt: 1_700_000_000_000,
       author: { kind: "user", userId: "local" },
     });

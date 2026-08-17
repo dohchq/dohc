@@ -60,7 +60,7 @@ apps/desktop/src/workspaces/siteRunner.ts:119	Date.now() pushLog timestamp	no	ad
 apps/desktop/src/workspaces/siteRunner.ts:352	setTimeout failTimer (dev-server start)	no	n/a, process supervision timer	out-of-scope-timer
 apps/desktop/src/workspaces/siteRunner.ts:424	setTimeout hardKill grace	no	n/a	out-of-scope-timer
 apps/desktop/src/workspaces/siteRunner.ts:504	setTimeout build timeout	no	n/a	out-of-scope-timer
-apps/desktop/src/workspaces/siteSdkHost.ts:203	searchId: site-sdk-${Date.now()}	no	add createId option if needed	cosmetic
+apps/desktop/src/workspaces/workspaceSdkHost.ts:211	searchId: workspace-sdk-${Date.now()}	no	add createId option if needed	cosmetic
 apps/desktop/src/workspaces/siteSdkHost.ts:346	Date.now() passed as applyDatabaseEdit's nowMs arg	yes — underlying API takes nowMs, but this call site hardcodes real clock	thread a testable clock through siteSdkHost's context into this call	blocks-trace-determinism
 apps/desktop/src/main.ts:4035	Date.now() passed as applyDatabaseEdit's nowMs arg (renderer database-edit IPC handler)	yes — underlying API takes nowMs, but this call site hardcodes real clock	thread the same testable clock seam as siteSdkHost.ts:346 through the IPC handler; nowMs becomes appliedAt in the persisted JSONL operation log, so replaying ordinary renderer-initiated edits stays nondeterministic without it	blocks-trace-determinism
 apps/desktop/src/workspaces/workspaceActivity.ts:187	entry.lastSyncedAtMs = Date.now()	no	add nowMs option; value is in-memory UI status only	cosmetic

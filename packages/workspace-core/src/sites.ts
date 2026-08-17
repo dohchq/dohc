@@ -4,7 +4,7 @@
 
 export type SiteKind = "static" | "package" | "configured";
 export type SiteConfidence = "high" | "medium" | "low";
-export type SitePackageManager = "pnpm" | "npm" | "yarn" | "bun";
+type SitePackageManager = "pnpm" | "npm" | "yarn" | "bun";
 
 export interface SiteScripts {
   dev?: string;
@@ -60,7 +60,7 @@ export type PackageJson = {
 // Framework/package signals are intentionally limited to mainstream web stacks
 // with recognizable package dependencies or official CLI/build tooling. Refresh
 // this list periodically as npm usage and framework conventions move.
-export const WEB_DEPENDENCY_NAMES = [
+const WEB_DEPENDENCIES: ReadonlySet<string> = new Set([
   "@angular/cli",
   "@angular/core",
   "@astrojs/react",
@@ -89,9 +89,7 @@ export const WEB_DEPENDENCY_NAMES = [
   "vite",
   "vue",
   "webpack",
-] as const;
-
-export const WEB_DEPENDENCIES: ReadonlySet<string> = new Set(WEB_DEPENDENCY_NAMES);
+]);
 
 const CONFIG_PATTERNS = [
   /^app\.config\.(cjs|cts|js|mjs|mts|ts)$/,
@@ -103,31 +101,18 @@ const CONFIG_PATTERNS = [
   /^vinxi\.config\.(cjs|cts|js|mjs|mts|ts)$/,
 ];
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function objectKeys(value: unknown): string[] {
-  return isRecord(value) ? Object.keys(value) : [];
-}
-
-function packageDependencyNames(pkg: PackageJson | null | undefined): Set<string> {
-  const names = new Set<string>();
-  if (!pkg) return names;
+export function hasWebDependency(pkg: PackageJson | null | undefined): boolean {
+  if (!pkg) return false;
   for (const field of [
     pkg.dependencies,
     pkg.devDependencies,
     pkg.peerDependencies,
     pkg.optionalDependencies,
   ]) {
-    for (const name of objectKeys(field)) names.add(name);
-  }
-  return names;
-}
-
-export function hasWebDependency(pkg: PackageJson | null | undefined): boolean {
-  for (const name of packageDependencyNames(pkg)) {
-    if (WEB_DEPENDENCIES.has(name)) return true;
+    if (typeof field !== "object" || field === null || Array.isArray(field)) continue;
+    for (const name of Object.keys(field)) {
+      if (WEB_DEPENDENCIES.has(name)) return true;
+    }
   }
   return false;
 }

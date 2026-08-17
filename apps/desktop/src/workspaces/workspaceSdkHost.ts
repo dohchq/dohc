@@ -68,18 +68,14 @@ function text(value: unknown, label: string, max = 4096): string {
   return value;
 }
 
-function validatedPath(path: unknown, kind: "read" | "write"): string {
-  const raw = text(path, "path");
-  const result = kind === "read" ? validateUserReadPath(raw) : validateUserMaterializePath(raw);
-  if (!result.ok) throw new Error(`Invalid ${kind} path (${result.reason}): ${raw}`);
-  return result.normalized;
-}
-
 export function sdkWorkspacePath(
   requestedPath: unknown,
   kind: "read" | "write" = "read",
 ): string {
-  return validatedPath(requestedPath, kind);
+  const raw = text(requestedPath, "path");
+  const result = kind === "read" ? validateUserReadPath(raw) : validateUserMaterializePath(raw);
+  if (!result.ok) throw new Error(`Invalid ${kind} path (${result.reason}): ${raw}`);
+  return result.normalized;
 }
 
 /** Whether a workspace path sits at or below a root, where "." is the whole
@@ -118,11 +114,10 @@ export function assertRawTextWritable(
 }
 
 function capabilities(context: WorkspaceSdkHostContext) {
-  const canWrite = context.writable;
   return {
-    files: { read: true, list: true, write: canWrite, watch: false },
+    files: { read: true, list: true, write: context.writable, watch: false },
     workspace: { search: true, events: false },
-    databases: { read: true, edit: canWrite },
+    databases: { read: true, edit: context.writable },
     ui: { open: true },
     collections: { read: false, list: false },
     provenance: { record: false },
@@ -138,18 +133,19 @@ function assertRequestSurfaceActive(context: WorkspaceSdkHostContext): void {
 async function listVisibleFiles(context: WorkspaceSdkHostContext, params: unknown) {
   const input = params === undefined ? {} : record(params);
   const requestedRoot =
-    input.path === undefined || input.path === "." ? "." : validatedPath(input.path, "read");
+    input.path === undefined || input.path === "." ? "." : sdkWorkspacePath(input.path);
   const recursive = input.recursive !== false;
   const listed = await listFiles(context.workspaceRoot);
   const files = [];
   for (const entry of listed.files) {
     const path = entry.path;
     if (!isAtOrBelow(path, requestedRoot)) continue;
+
     if (!recursive) {
       const remainder = requestedRoot === "." ? path : path.slice(requestedRoot.length + 1);
       if (remainder.includes("/")) continue;
     }
-    files.push({ ...entry, path, name: basename(path) });
+    files.push({ ...entry, name: basename(path) });
     if (files.length >= MAX_LIST_RESULTS) break;
   }
   return files;
@@ -159,15 +155,11 @@ async function requestedIncludeGlob(
   workspaceRoot: string,
   requestedPath: unknown,
 ): Promise<string | undefined> {
-  const path =
-    requestedPath === undefined || requestedPath === "."
-      ? null
-      : validatedPath(requestedPath, "read");
-  if (!path || path === ".") return undefined;
-  const scopedPath = path;
-  const literalGlob = scopedPath.replace(/([*?[\]{}!\\])/g, "\\$1");
+  if (requestedPath === undefined || requestedPath === ".") return undefined;
+  const path = sdkWorkspacePath(requestedPath);
+  const literalGlob = path.replace(/([*?[\]{}!\\])/g, "\\$1");
   try {
-    if ((await stat(join(workspaceRoot, scopedPath))).isFile()) return literalGlob;
+    if ((await stat(join(workspaceRoot, path))).isFile()) return literalGlob;
   } catch {
     // A missing path simply produces no rg matches through the directory glob.
   }
@@ -195,11 +187,11 @@ async function searchVisibleWorkspace(context: WorkspaceSdkHostContext, params: 
   if (context.signal?.aborted) {
     throw new Error("The surface that owns this SDK request is no longer active.");
   }
-  return new Promise<Array<SearchResultEntry & { path: string }>>((resolve, reject) => {
-    const entries: Array<SearchResultEntry & { path: string }> = [];
+  return new Promise<SearchResultEntry[]>((resolve, reject) => {
+    const entries: SearchResultEntry[] = [];
     let handle: ReturnType<typeof startRipgrepSearch> | null = null;
     let settled = false;
-    const finish = (result: Array<SearchResultEntry & { path: string }>) => {
+    const finish = (result: SearchResultEntry[]) => {
       if (settled) return;
       settled = true;
       context.signal?.removeEventListener("abort", abort);
