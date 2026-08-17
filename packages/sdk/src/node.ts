@@ -30,8 +30,11 @@ interface PendingRequest {
 
 export const PLUGIN_CHILD_PROCESS_METHODS = {
   spawn: "childProcesses.spawn",
+  spawnCommand: "childProcesses.command.spawn",
   subscribeOutput: "childProcesses.output.subscribe",
   send: "childProcesses.send",
+  write: "childProcesses.stdin.write",
+  endInput: "childProcesses.stdin.end",
   logs: "childProcesses.logs",
   wait: "childProcesses.wait",
   terminate: "childProcesses.terminate",
@@ -67,7 +70,33 @@ export interface PluginChildProcessSpawnOptions {
   env?: Record<string, string>;
 }
 
-export interface PluginChildProcessHandle {
+/**
+ * An executable to run as a supervised child.
+ *
+ * dohc runs the file this names and passes `args` as argv entries. There is
+ * no shell and no command line: a whole command written into `command` is one
+ * executable name that will not be found, not a script to interpret.
+ */
+export interface PluginChildProcessCommandOptions {
+  /**
+   * An absolute path to an executable, or a bare name (no path separator)
+   * looked up on the child's PATH — where a harness CLI installed on the
+   * machine lives.
+   */
+  command: string;
+  args?: string[];
+  /**
+   * Plugin-built-root-relative working directory, or
+   * `{ workspaceRoot: true }` for the canonical workspace root. Defaults to
+   * the built root. Identical to a module child's rule: the executable may
+   * come from anywhere, the directory it runs in may not.
+   */
+  cwd?: string | { workspaceRoot: true };
+  /** String environment overrides merged over the host environment. */
+  env?: Record<string, string>;
+}
+
+interface PluginChildProcessHandleBase {
   readonly id: string;
   /** The child's OS pid at spawn time, or null if it exited before one was
    * observed. Wrapper plugins record it beside their server's state so a
@@ -77,10 +106,25 @@ export interface PluginChildProcessHandle {
     listener: (output: PluginChildProcessOutput) => void,
     options?: DohcRequestOptions,
   ): Promise<DohcUnsubscribe>;
-  send(message: unknown, options?: DohcRequestOptions): Promise<void>;
   logs(options?: DohcRequestOptions): Promise<PluginChildProcessOutput[]>;
   wait(options?: DohcRequestOptions): Promise<PluginChildProcessExit>;
   terminate(options?: DohcRequestOptions): Promise<PluginChildProcessExit>;
+}
+
+/** A module child, started by `spawn`. Input is a structured message. */
+export interface PluginChildProcessHandle extends PluginChildProcessHandleBase {
+  send(message: unknown, options?: DohcRequestOptions): Promise<void>;
+}
+
+/** A command child, started by `spawnCommand`. Input is bytes on standard
+ * input, which is how a harness CLI takes a prompt or speaks a protocol. */
+export interface PluginChildProcessCommandHandle
+  extends PluginChildProcessHandleBase {
+  /** Writes to the child's standard input. */
+  write(data: string, options?: DohcRequestOptions): Promise<void>;
+  /** Closes the child's standard input, so a child that reads to end of file
+   * sees one. Later writes fail. */
+  endInput(options?: DohcRequestOptions): Promise<void>;
 }
 
 /**
@@ -93,10 +137,19 @@ export interface PluginChildProcessHandle {
  * logs and exit result before spawning more.
  */
 export interface PluginChildProcessClient {
+  /** Runs a JavaScript file from the plugin's own built root. */
   spawn(
     input: PluginChildProcessSpawnOptions,
     options?: DohcRequestOptions,
   ): Promise<PluginChildProcessHandle>;
+  /**
+   * Runs any executable the machine has, supervised the same way: dohc owns
+   * the process tree and kills it when the plugin stops.
+   */
+  spawnCommand(
+    input: PluginChildProcessCommandOptions,
+    options?: DohcRequestOptions,
+  ): Promise<PluginChildProcessCommandHandle>;
 }
 
 export interface ProcessTransport extends DohcTransport {
@@ -505,7 +558,7 @@ export function createPluginChildProcessClient(
   const handle = (
     childId: string,
     pid: number | null,
-  ): PluginChildProcessHandle => ({
+  ): PluginChildProcessHandleBase => ({
     id: childId,
     pid,
     async onOutput(listener, options) {
@@ -532,13 +585,6 @@ export function createPluginChildProcessClient(
             listener(event.data);
           }
         },
-        options,
-      );
-    },
-    async send(message, options) {
-      await transport.request(
-        PLUGIN_CHILD_PROCESS_METHODS.send,
-        { childId, message },
         options,
       );
     },
@@ -578,31 +624,79 @@ export function createPluginChildProcessClient(
     },
   });
 
+  const started = async (
+    method: string,
+    input: unknown,
+    options: DohcRequestOptions | undefined,
+  ): Promise<PluginChildProcessHandleBase> => {
+    if (!isRecord(input)) {
+      throw new DohcSdkError(
+        DohcSdkErrorCodes.invalidInput,
+        `Child-process input for ${method} must be an object.`,
+      );
+    }
+    const result = await transport.request(method, input, options);
+    if (
+      !isRecord(result) ||
+      typeof result.childId !== "string" ||
+      result.childId.length === 0 ||
+      (result.pid !== null && !Number.isSafeInteger(result.pid))
+    ) {
+      throw new DohcSdkError(
+        DohcSdkErrorCodes.badResponse,
+        "dohc host returned an invalid child-process spawn response.",
+      );
+    }
+    return handle(result.childId, result.pid as number | null);
+  };
+
   return {
     async spawn(input, options) {
-      if (!isRecord(input)) {
-        throw new DohcSdkError(
-          DohcSdkErrorCodes.invalidInput,
-          "Child-process spawn input must be an object.",
-        );
-      }
-      const result = await transport.request(
+      const base = await started(
         PLUGIN_CHILD_PROCESS_METHODS.spawn,
         input,
         options,
       );
-      if (
-        !isRecord(result) ||
-        typeof result.childId !== "string" ||
-        result.childId.length === 0 ||
-        (result.pid !== null && !Number.isSafeInteger(result.pid))
-      ) {
-        throw new DohcSdkError(
-          DohcSdkErrorCodes.badResponse,
-          "dohc host returned an invalid child-process spawn response.",
-        );
-      }
-      return handle(result.childId, result.pid as number | null);
+      return {
+        ...base,
+        async send(message, sendOptions) {
+          await transport.request(
+            PLUGIN_CHILD_PROCESS_METHODS.send,
+            { childId: base.id, message },
+            sendOptions,
+          );
+        },
+      };
+    },
+    async spawnCommand(input, options) {
+      const base = await started(
+        PLUGIN_CHILD_PROCESS_METHODS.spawnCommand,
+        input,
+        options,
+      );
+      return {
+        ...base,
+        async write(data, writeOptions) {
+          if (typeof data !== "string") {
+            throw new DohcSdkError(
+              DohcSdkErrorCodes.invalidInput,
+              "Child-process standard input takes a string.",
+            );
+          }
+          await transport.request(
+            PLUGIN_CHILD_PROCESS_METHODS.write,
+            { childId: base.id, data },
+            writeOptions,
+          );
+        },
+        async endInput(endOptions) {
+          await transport.request(
+            PLUGIN_CHILD_PROCESS_METHODS.endInput,
+            { childId: base.id },
+            endOptions,
+          );
+        },
+      };
     },
   };
 }

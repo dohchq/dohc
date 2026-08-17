@@ -4,8 +4,11 @@ import { abortedError, assertRequestOptions } from "./requestOptions.js";
 export { createDohcClient };
 export const PLUGIN_CHILD_PROCESS_METHODS = {
     spawn: "childProcesses.spawn",
+    spawnCommand: "childProcesses.command.spawn",
     subscribeOutput: "childProcesses.output.subscribe",
     send: "childProcesses.send",
+    write: "childProcesses.stdin.write",
+    endInput: "childProcesses.stdin.end",
     logs: "childProcesses.logs",
     wait: "childProcesses.wait",
     terminate: "childProcesses.terminate",
@@ -271,9 +274,6 @@ export function createPluginChildProcessClient(transport) {
                 }
             }, options);
         },
-        async send(message, options) {
-            await transport.request(PLUGIN_CHILD_PROCESS_METHODS.send, { childId, message }, options);
-        },
         async logs(options) {
             const result = await transport.request(PLUGIN_CHILD_PROCESS_METHODS.logs, { childId }, options);
             if (!Array.isArray(result) || !result.every(isPluginChildProcessOutput)) {
@@ -288,19 +288,43 @@ export function createPluginChildProcessClient(transport) {
             return pluginChildProcessExit(await transport.request(PLUGIN_CHILD_PROCESS_METHODS.terminate, { childId }, options), PLUGIN_CHILD_PROCESS_METHODS.terminate);
         },
     });
+    const started = async (method, input, options) => {
+        if (!isRecord(input)) {
+            throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, `Child-process input for ${method} must be an object.`);
+        }
+        const result = await transport.request(method, input, options);
+        if (!isRecord(result) ||
+            typeof result.childId !== "string" ||
+            result.childId.length === 0 ||
+            (result.pid !== null && !Number.isSafeInteger(result.pid))) {
+            throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned an invalid child-process spawn response.");
+        }
+        return handle(result.childId, result.pid);
+    };
     return {
         async spawn(input, options) {
-            if (!isRecord(input)) {
-                throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Child-process spawn input must be an object.");
-            }
-            const result = await transport.request(PLUGIN_CHILD_PROCESS_METHODS.spawn, input, options);
-            if (!isRecord(result) ||
-                typeof result.childId !== "string" ||
-                result.childId.length === 0 ||
-                (result.pid !== null && !Number.isSafeInteger(result.pid))) {
-                throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned an invalid child-process spawn response.");
-            }
-            return handle(result.childId, result.pid);
+            const base = await started(PLUGIN_CHILD_PROCESS_METHODS.spawn, input, options);
+            return {
+                ...base,
+                async send(message, sendOptions) {
+                    await transport.request(PLUGIN_CHILD_PROCESS_METHODS.send, { childId: base.id, message }, sendOptions);
+                },
+            };
+        },
+        async spawnCommand(input, options) {
+            const base = await started(PLUGIN_CHILD_PROCESS_METHODS.spawnCommand, input, options);
+            return {
+                ...base,
+                async write(data, writeOptions) {
+                    if (typeof data !== "string") {
+                        throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Child-process standard input takes a string.");
+                    }
+                    await transport.request(PLUGIN_CHILD_PROCESS_METHODS.write, { childId: base.id, data }, writeOptions);
+                },
+                async endInput(endOptions) {
+                    await transport.request(PLUGIN_CHILD_PROCESS_METHODS.endInput, { childId: base.id }, endOptions);
+                },
+            };
         },
     };
 }

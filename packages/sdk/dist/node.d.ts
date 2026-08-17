@@ -4,8 +4,11 @@ export type { DohcClient };
 type RequestHandler = (params: unknown) => Promise<unknown> | unknown;
 export declare const PLUGIN_CHILD_PROCESS_METHODS: {
     readonly spawn: "childProcesses.spawn";
+    readonly spawnCommand: "childProcesses.command.spawn";
     readonly subscribeOutput: "childProcesses.output.subscribe";
     readonly send: "childProcesses.send";
+    readonly write: "childProcesses.stdin.write";
+    readonly endInput: "childProcesses.stdin.end";
     readonly logs: "childProcesses.logs";
     readonly wait: "childProcesses.wait";
     readonly terminate: "childProcesses.terminate";
@@ -38,17 +41,56 @@ export interface PluginChildProcessSpawnOptions {
     /** String environment overrides merged over the host environment. */
     env?: Record<string, string>;
 }
-export interface PluginChildProcessHandle {
+/**
+ * An executable to run as a supervised child.
+ *
+ * dohc runs the file this names and passes `args` as argv entries. There is
+ * no shell and no command line: a whole command written into `command` is one
+ * executable name that will not be found, not a script to interpret.
+ */
+export interface PluginChildProcessCommandOptions {
+    /**
+     * An absolute path to an executable, or a bare name (no path separator)
+     * looked up on the child's PATH — where a harness CLI installed on the
+     * machine lives.
+     */
+    command: string;
+    args?: string[];
+    /**
+     * Plugin-built-root-relative working directory, or
+     * `{ workspaceRoot: true }` for the canonical workspace root. Defaults to
+     * the built root. Identical to a module child's rule: the executable may
+     * come from anywhere, the directory it runs in may not.
+     */
+    cwd?: string | {
+        workspaceRoot: true;
+    };
+    /** String environment overrides merged over the host environment. */
+    env?: Record<string, string>;
+}
+interface PluginChildProcessHandleBase {
     readonly id: string;
     /** The child's OS pid at spawn time, or null if it exited before one was
      * observed. Wrapper plugins record it beside their server's state so a
      * later start can tell a live orphan from a stale runtime file. */
     readonly pid: number | null;
     onOutput(listener: (output: PluginChildProcessOutput) => void, options?: DohcRequestOptions): Promise<DohcUnsubscribe>;
-    send(message: unknown, options?: DohcRequestOptions): Promise<void>;
     logs(options?: DohcRequestOptions): Promise<PluginChildProcessOutput[]>;
     wait(options?: DohcRequestOptions): Promise<PluginChildProcessExit>;
     terminate(options?: DohcRequestOptions): Promise<PluginChildProcessExit>;
+}
+/** A module child, started by `spawn`. Input is a structured message. */
+export interface PluginChildProcessHandle extends PluginChildProcessHandleBase {
+    send(message: unknown, options?: DohcRequestOptions): Promise<void>;
+}
+/** A command child, started by `spawnCommand`. Input is bytes on standard
+ * input, which is how a harness CLI takes a prompt or speaks a protocol. */
+export interface PluginChildProcessCommandHandle extends PluginChildProcessHandleBase {
+    /** Writes to the child's standard input. */
+    write(data: string, options?: DohcRequestOptions): Promise<void>;
+    /** Closes the child's standard input, so a child that reads to end of file
+     * sees one. Later writes fail. */
+    endInput(options?: DohcRequestOptions): Promise<void>;
 }
 /**
  * Spawns child processes for one plugin activation.
@@ -60,7 +102,13 @@ export interface PluginChildProcessHandle {
  * logs and exit result before spawning more.
  */
 export interface PluginChildProcessClient {
+    /** Runs a JavaScript file from the plugin's own built root. */
     spawn(input: PluginChildProcessSpawnOptions, options?: DohcRequestOptions): Promise<PluginChildProcessHandle>;
+    /**
+     * Runs any executable the machine has, supervised the same way: dohc owns
+     * the process tree and kills it when the plugin stops.
+     */
+    spawnCommand(input: PluginChildProcessCommandOptions, options?: DohcRequestOptions): Promise<PluginChildProcessCommandHandle>;
 }
 export interface ProcessTransport extends DohcTransport {
     subscribe<T = unknown>(method: string, params: unknown, listener: (event: DohcSubscriptionEvent<T>) => void, options?: DohcRequestOptions): Promise<DohcUnsubscribe>;
