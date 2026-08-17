@@ -321,6 +321,8 @@ are TypeScript above it.
 | Agent drivers | Core calls plugins: a `drivers` contribution behind dohc's own driver registry, with no plugin-to-chat SDK. The start input's `permissionPolicy` stays a main-process function that no plugin sees. | 2026-08-17 |
 | Workspace agent settings | `agents.defaultDriverId` chooses the driver a workspace uses; `agents.defaultModel` starts its sessions. Both were declared and unread until the driver contribution gave them a reader. | 2026-08-17 |
 | Open source | Entire codebase opens at MVP launch. Cloud layer licensed against commercial rehosting. Register the trademark first. | 2026-07-29 |
+| First feature conversion | Sites. The experience — the list, the servers, the preview tabs — ships as `apps/desktop/plugins/sites/`. Sandboxed rendering, origin locking, share scoping, and authority stay core. | 2026-08-18 |
+| A brokered child's working directory | The plugin's built root, or a workspace directory: `cwd: { workspaceRoot: true, path? }`, contained by the same realpath rule. A tool that works on part of a workspace has to run there. | 2026-08-18 |
 
 Constraints these choices create:
 

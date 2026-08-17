@@ -241,7 +241,7 @@ describe("PluginChildProcessBroker", () => {
     );
   });
 
-  it("rejects any cwd object that is not exactly { workspaceRoot: true }", async () => {
+  it("rejects any cwd object that is not the workspace request form", async () => {
     const fixture = await createFixture();
     const brokerContext = context("plugin-a", "spawn-a");
 
@@ -254,13 +254,92 @@ describe("PluginChildProcessBroker", () => {
       { workspaceRoot: "workspace" },
       { workspaceRoot: {} },
       { workspaceRoot: true, extra: 1 },
+      { workspaceRoot: true, path: 1 },
+      { workspaceRoot: true, path: "" },
+      { workspaceRoot: true, path: "sites\0" },
       { root: "workspace" },
     ]) {
       await expect(
         spawnChild(fixture, brokerContext, { modulePath: "server.mjs", cwd }),
-      ).rejects.toThrow("must be exactly { workspaceRoot: true }");
+      ).rejects.toThrow("cwd object form must be");
     }
     expect(fixture.forks).toHaveLength(0);
+  });
+
+  it("runs a child in a directory inside the workspace when one is named", async () => {
+    const fixture = await createFixture();
+    await mkdir(join(fixture.root, "workspace", "apps", "marketing"), {
+      recursive: true,
+    });
+    const brokerContext = context("plugin-a", "spawn-a");
+
+    await spawnChild(fixture, brokerContext, {
+      modulePath: "server.mjs",
+      cwd: { workspaceRoot: true, path: "apps/marketing" },
+    });
+
+    // MUTATION (ignore `path`): every site in a subdirectory would build and
+    // serve from the workspace root instead of its own directory.
+    expect(fixture.forks[0]?.options.cwd).toBe(
+      await realpath(join(fixture.root, "workspace", "apps", "marketing")),
+    );
+  });
+
+  it("refuses a workspace cwd that leaves the workspace", async () => {
+    const fixture = await createFixture();
+    await mkdir(join(fixture.root, "outside"), { recursive: true });
+    const brokerContext = context("plugin-a", "spawn-a");
+
+    for (const path of ["../outside", "apps/../../outside"]) {
+      await expect(
+        spawnChild(fixture, brokerContext, {
+          modulePath: "server.mjs",
+          cwd: { workspaceRoot: true, path },
+        }),
+      ).rejects.toThrow(/escapes workspace/);
+    }
+    expect(fixture.forks).toHaveLength(0);
+  });
+
+  it("refuses a workspace cwd that resolves out of the workspace through a link", async () => {
+    const fixture = await createFixture();
+    const outside = join(fixture.root, "outside");
+    await mkdir(outside, { recursive: true });
+    try {
+      await symlink(outside, join(fixture.root, "workspace", "escape"), "junction");
+    } catch {
+      return;
+    }
+    const brokerContext = context("plugin-a", "spawn-a");
+
+    // MUTATION (drop the post-realpath check): a link inside the workspace
+    // would run the child anywhere on the machine.
+    await expect(
+      spawnChild(fixture, brokerContext, {
+        modulePath: "server.mjs",
+        cwd: { workspaceRoot: true, path: "escape" },
+      }),
+    ).rejects.toThrow(/resolves outside workspace/);
+    expect(fixture.forks).toHaveLength(0);
+  });
+
+  it("refuses a workspace cwd that is a file, or is not there", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.root, "workspace", "note.md"), "hi\n");
+    const brokerContext = context("plugin-a", "spawn-a");
+
+    await expect(
+      spawnChild(fixture, brokerContext, {
+        modulePath: "server.mjs",
+        cwd: { workspaceRoot: true, path: "note.md" },
+      }),
+    ).rejects.toThrow(/is not a directory/);
+    await expect(
+      spawnChild(fixture, brokerContext, {
+        modulePath: "server.mjs",
+        cwd: { workspaceRoot: true, path: "nowhere" },
+      }),
+    ).rejects.toThrow(/is unavailable/);
   });
 
   it("returns the forked child's pid from spawn", async () => {
@@ -1293,7 +1372,7 @@ describe("PluginChildProcessBroker command children", () => {
     });
   });
 
-  it("keeps the workspace-root cwd form exact for commands too", async () => {
+  it("keeps the workspace cwd form exact for commands too", async () => {
     const fixture = await createFixture();
     const brokerContext = context("plugin-a", "spawn-a");
 
@@ -1304,10 +1383,11 @@ describe("PluginChildProcessBroker command children", () => {
       { workspaceRoot: 1 },
       { workspaceRoot: "workspace" },
       { workspaceRoot: true, extra: 1 },
+      { workspaceRoot: true, path: 1 },
     ]) {
       await expect(
         spawnCommandChild(fixture, brokerContext, { command: "tool", cwd }),
-      ).rejects.toThrow("must be exactly { workspaceRoot: true }");
+      ).rejects.toThrow("cwd object form must be");
     }
     expect(fixture.commands).toEqual([]);
 

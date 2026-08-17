@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "name": "sites",
+  "displayName": "Sites",
+  "description": "Finds the sites in this workspace and previews them.",
+  "publisher": "dohc",
+  "pluginVersion": "0.1.0",
+  "license": "MIT",
+  "icon": "icon.svg",
+  "entry": "src/main.ts",
+  "panels": [
+    {
+      "id": "list",
+      "title": "Sites",
+      "entry": "ui/index.html",
+      "placement": "view",
+      "icon": "icon.svg"
+    }
+  ],
+  "webApps": [{ "id": "preview", "title": "Site preview", "instanced": true }],
+  "settings": [
+    {
+      "key": "defaultPreviewMode",
+      "type": "select",
+      "label": "Default preview mode",
+      "description": "How a site opens when you have not chosen a mode for it.",
+      "default": "auto",
+      "options": ["auto", "static", "dev", "build"]
+    },
+    {
+      "key": "devServerTimeoutSeconds",
+      "type": "number",
+      "label": "Dev server start limit",
+      "description": "How long to wait for a dev server to report its address.",
+      "default": 15
+    }
+  ]
+}
