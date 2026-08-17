@@ -101,7 +101,9 @@ function visiblePath(scopeRoot: string | null, workspacePath: string): string | 
   return workspacePath.startsWith(prefix) ? workspacePath.slice(prefix.length) : null;
 }
 
-function isAtOrBelow(path: string, root: string): boolean {
+/** Whether a workspace path sits at or below a root, where "." is the whole
+ * workspace. Segment-aware, so "docsx/a" is not below "docs". */
+export function isAtOrBelow(path: string, root: string): boolean {
   return root === "." || path === root || path.startsWith(`${root}/`);
 }
 

@@ -642,6 +642,7 @@ import { createPluginAuthoredTextWriter } from "./plugins/pluginAuthoredWrite";
 import { invokePluginSdkHost } from "./plugins/pluginSdkHost";
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
+import { PluginWorkspaceEvents } from "./plugins/pluginWorkspaceEvents";
 import {
   createPluginAgentDrivers,
   type PluginAgentDrivers,
@@ -880,6 +881,9 @@ const pluginPipelines = new Map<string, PluginPipeline>();
 const pluginPipelineDisposals = new Map<string, Promise<void>>();
 // One per workspace, alive for as long as that workspace's plugin pipeline is.
 const pluginAgentDriversByWorkspace = new Map<string, PluginAgentDrivers>();
+// Also one per workspace, so one workspace's settled batch can only ever
+// reach the plugins running in that workspace.
+const pluginWorkspaceEventsByWorkspace = new Map<string, PluginWorkspaceEvents>();
 const sitePreviewStartLocks = new Map<string, Promise<void>>();
 const sitePreviewStartControllersBySender = new Map<
   number,
@@ -957,6 +961,10 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     reservedDriverIds: BUILT_IN_AGENT_DRIVER_IDS,
   });
   pluginAgentDriversByWorkspace.set(workspace.workspaceId, pluginDrivers);
+  // This workspace's plugin file subscriptions, fed by the settled watcher
+  // batch (see onWatcherBatch) — the same feed the pipeline reads.
+  const workspaceEvents = new PluginWorkspaceEvents();
+  pluginWorkspaceEventsByWorkspace.set(workspace.workspaceId, workspaceEvents);
   const pluginHost = new PluginHost({
     stateDir: stateDir(),
     workspaceRoot: workspace.rootPath,
@@ -992,6 +1000,10 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
             childMethod,
             childParams,
           ),
+        subscribeFileWatch: (watchParams) =>
+          workspaceEvents.subscribe({ pluginId, spawnId, emitEvent }, watchParams),
+        unsubscribeFileWatch: (watchParams) =>
+          workspaceEvents.unsubscribe({ pluginId, spawnId }, watchParams),
         method,
         params,
       }),
@@ -1007,9 +1019,13 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     // takes the harness's whole process tree down. Neither asks the plugin.
     onSpawnEnd: (pluginId, spawnId) => {
       pluginDrivers.endSpawn(pluginId, spawnId);
+      workspaceEvents.disposeSpawn(pluginId, spawnId);
       return childProcessBroker.disposeSpawn(pluginId, spawnId);
     },
-    onDispose: () => childProcessBroker.dispose(),
+    onDispose: () => {
+      workspaceEvents.dispose();
+      return childProcessBroker.dispose();
+    },
     onStatusChange: (pluginId, status) => {
       pipeline?.noteRuntimeStatus(pluginId, status);
       revokePluginPanelAuthoritiesForStatus({
@@ -1065,6 +1081,8 @@ async function disposePluginPipeline(
     await pipeline.dispose();
   } finally {
     pluginAgentDriversByWorkspace.delete(workspaceId);
+    pluginWorkspaceEventsByWorkspace.get(workspaceId)?.dispose();
+    pluginWorkspaceEventsByWorkspace.delete(workspaceId);
   }
 }
 
@@ -2225,8 +2243,13 @@ const activity = createWorkspaceActivity(notifyRenderer, {
       hooks,
       requireEngineSessions(),
     ),
+  // One settled batch, two readers: the approval pipeline, and the plugins
+  // that subscribed to a prefix of it. Neither changes the batch.
   onWatcherBatch: (workspace, events) => {
     pluginPipelines.get(workspace.workspaceId)?.handleWatcherEvents(events);
+    pluginWorkspaceEventsByWorkspace
+      .get(workspace.workspaceId)
+      ?.handleWatcherEvents(events);
   },
 });
 const panelAgentRunSlots = new Map<string, string>();
@@ -3047,6 +3070,8 @@ function invokeWorkspacePluginSdk(input: {
   isWritable: () => boolean;
   signal?: AbortSignal;
   invokeChildProcess?: (method: string, params?: unknown) => Promise<unknown>;
+  subscribeFileWatch?: (params: unknown) => { subscriptionId: string };
+  unsubscribeFileWatch?: (params: unknown) => boolean;
   method: string;
   params?: unknown;
 }): Promise<unknown> {
@@ -3069,6 +3094,8 @@ function invokeWorkspacePluginSdk(input: {
       },
       signal: input.signal,
       invokeChildProcess: input.invokeChildProcess,
+      subscribeFileWatch: input.subscribeFileWatch,
+      unsubscribeFileWatch: input.unsubscribeFileWatch,
       writeAuthoredText: createPluginAuthoredTextWriter({
         signal: input.signal,
         requireWritableCapture: async () => {

@@ -522,6 +522,15 @@ export function createDohcClient(options = {}) {
                 // able to replace the path/text that were just validated above.
                 return request("files.write", { ...options, path, text }, requestOptions);
             },
+            /**
+             * Reports settled changes at or below `path`, which is a prefix: a file
+             * to watch on its own, a folder to watch with everything under it, or
+             * "." for the whole workspace. Changes outside it never arrive.
+             *
+             * Returns a function that stops the subscription. A subscription also
+             * ends on its own when the plugin stops, so a plugin that watches for
+             * its whole life needs no teardown.
+             */
             watch: async (path, listener, requestOptions) => {
                 assertRequestOptions(requestOptions);
                 assertWorkspacePath(path);

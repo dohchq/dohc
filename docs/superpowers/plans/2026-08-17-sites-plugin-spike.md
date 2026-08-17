@@ -262,6 +262,13 @@ invented numbers.
 | **P7. Read-only plugin authority** — plugins run with a read-only scope in shared views/mounts | #16 | **L** | Not plumbing: every plugin surface currently asserts writability, attribution assumes an owned workspace, and the approval model must decide what "approved" means for a workspace you do not own. |
 | **P8. Scoped sub-grants** — a plugin asks the host to mint a *lesser* SDK grant for content it embeds | #18 | **L** | A new authority concept: grant derivation, revocation tied to two lifetimes, and an escalation-proof capability lattice. Nothing like it exists. |
 
+**Since this spike (2026-08-18):** P2 landed. Plugins serve `files.watch` from
+the settled watcher batch — one subscription per contained path prefix, capped
+per spawn, torn down with the spawn and with the workspace
+(`apps/desktop/src/plugins/pluginWorkspaceEvents.ts`). Row 14 above still
+describes sites, which remains without it. `workspace.events` did not land: a
+plugin that wants the whole workspace watches `"."`.
+
 Share-over-relay (#17) is deliberately not a primitive: sharing is
 collaboration substrate (AGENTS.md), and the honest sketch below keeps it in
 dohc.

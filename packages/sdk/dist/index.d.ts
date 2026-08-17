@@ -107,9 +107,25 @@ export type DohcFileWriteOptions = {
     overwrite?: boolean;
     [key: string]: unknown;
 };
+/**
+ * One settled change to one workspace file.
+ *
+ * `operation` has exactly two members because that is what the host can
+ * observe: it decides a path's operation by checking whether the file exists
+ * once the workspace goes quiet, so a new file and an edited file both arrive
+ * as `update`. There is no create, rename, or move.
+ *
+ * Events are settled, not raw: the host waits for a quiet window, folds the
+ * repeated saves of one editor keystroke burst into one event per path, and
+ * drops its own metadata writes. A burst of ten saves to one file is one
+ * event.
+ */
 export type DohcFileWatchEvent = {
     path: string;
-    kind?: "created" | "changed" | "deleted" | "renamed" | (string & {});
+    operation: "update" | "delete";
+    /** The file's content hash, when the host could read it. Absent on a
+     * delete, and on a file the host could not read at settle time. */
+    sha256?: string;
     [key: string]: unknown;
 };
 export type DohcSearchOptions = {
@@ -172,6 +188,15 @@ export declare function createDohcClient(options?: CreateDohcClientOptions): {
         read: (path: string, requestOptions?: DohcRequestOptions) => Promise<string>;
         list: (path?: string, options?: DohcFileListOptions, requestOptions?: DohcRequestOptions) => Promise<DohcFileEntry[]>;
         write: (path: string, text: string, options?: DohcFileWriteOptions, requestOptions?: DohcRequestOptions) => Promise<unknown>;
+        /**
+         * Reports settled changes at or below `path`, which is a prefix: a file
+         * to watch on its own, a folder to watch with everything under it, or
+         * "." for the whole workspace. Changes outside it never arrive.
+         *
+         * Returns a function that stops the subscription. A subscription also
+         * ends on its own when the plugin stops, so a plugin that watches for
+         * its whole life needs no teardown.
+         */
         watch: (path: string, listener: (event: DohcSubscriptionEvent<DohcFileWatchEvent>) => void, requestOptions?: DohcRequestOptions) => Promise<DohcUnsubscribe>;
     };
     workspace: {
@@ -208,6 +233,15 @@ export declare const dohc: {
         read: (path: string, requestOptions?: DohcRequestOptions) => Promise<string>;
         list: (path?: string, options?: DohcFileListOptions, requestOptions?: DohcRequestOptions) => Promise<DohcFileEntry[]>;
         write: (path: string, text: string, options?: DohcFileWriteOptions, requestOptions?: DohcRequestOptions) => Promise<unknown>;
+        /**
+         * Reports settled changes at or below `path`, which is a prefix: a file
+         * to watch on its own, a folder to watch with everything under it, or
+         * "." for the whole workspace. Changes outside it never arrive.
+         *
+         * Returns a function that stops the subscription. A subscription also
+         * ends on its own when the plugin stops, so a plugin that watches for
+         * its whole life needs no teardown.
+         */
         watch: (path: string, listener: (event: DohcSubscriptionEvent<DohcFileWatchEvent>) => void, requestOptions?: DohcRequestOptions) => Promise<DohcUnsubscribe>;
     };
     workspace: {
