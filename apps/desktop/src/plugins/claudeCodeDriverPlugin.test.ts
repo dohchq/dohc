@@ -75,6 +75,7 @@ async function startClaudePlugin(
     command: process.execPath,
     args: [fakeClaude, "ok"],
   },
+  readyTimeoutMs?: number,
 ): Promise<ClaudeFixture> {
   const root = await createTestScratch("dohc-claude-plugin-");
   scratchRoots.push(root);
@@ -102,12 +103,17 @@ async function startClaudePlugin(
       command: process.execPath,
       args: [pluginHostProcessPath],
       cwd: params.pluginRoot,
-      env: claudeCommand
-        ? {
-            DOHC_AGENT_CLAUDE_CODE_COMMAND: claudeCommand.command,
-            DOHC_AGENT_CLAUDE_CODE_ARGS_JSON: JSON.stringify(claudeCommand.args),
-          }
-        : {},
+      env: {
+        ...(claudeCommand
+          ? {
+              DOHC_AGENT_CLAUDE_CODE_COMMAND: claudeCommand.command,
+              DOHC_AGENT_CLAUDE_CODE_ARGS_JSON: JSON.stringify(claudeCommand.args),
+            }
+          : {}),
+        ...(readyTimeoutMs === undefined
+          ? {}
+          : { DOHC_AGENT_CLAUDE_CODE_READY_TIMEOUT_MS: String(readyTimeoutMs) }),
+      },
       detached: true,
       label: `plugin ${params.pluginId}`,
       onNotification: params.onNotification,
@@ -560,6 +566,75 @@ describe("dohc's Claude Code driver, as a plugin", () => {
         undefined,
       "the failed Claude process to close",
     );
+  }, 30_000);
+
+  it("gives up on a Claude that starts but never answers", async () => {
+    // The control channel is dead: the process is up, so nothing fails at
+    // spawn, and it will never speak. Without a deadline the session waits
+    // forever and the surface waits with it.
+    const fixture = await startClaudePlugin(
+      { command: process.execPath, args: [fakeClaude, "no-handshake"] },
+      1500,
+    );
+    const events: AgentEvent[] = [];
+
+    const started = Date.now();
+    await expect(
+      claudeDriver(fixture).startSession({
+        workspaceRoot: fixture.workspaceRoot,
+        mode: "approval-required",
+        mcp: { command: "dohc-mcp", args: ["--workspace", fixture.workspaceRoot] },
+        onEvent: (event) => events.push(event),
+      }),
+    ).rejects.toThrow(/did not answer dohc's handshake within 1500ms/);
+    // The deadline is the configured one, not the production default.
+    expect(Date.now() - started).toBeLessThan(15_000);
+
+    // A session that reported "starting" reports an end.
+    await until(
+      () =>
+        events.some((event) => event.kind === "session-state" && event.state === "closed") ||
+        undefined,
+      "the silent Claude to close",
+    );
+
+    // And the harness dohc gave up on is gone, not left running.
+    const pid = Number(
+      await readFile(join(fixture.workspaceRoot, "no-handshake.pid"), "utf8"),
+    );
+    expect(Number.isFinite(pid)).toBe(true);
+    await until(
+      () => {
+        try {
+          process.kill(pid, 0);
+          return undefined;
+        } catch {
+          return true;
+        }
+      },
+      `the abandoned harness (pid ${pid}) to be gone`,
+    );
+  }, 30_000);
+
+  it("says so when Claude speaks before dohc can place the message", async () => {
+    const fixture = await startClaudePlugin({
+      command: process.execPath,
+      args: [fakeClaude, "speaks-early"],
+    });
+    const { session, events } = await startSession(fixture);
+
+    // The message is dropped either way. Reporting it is what separates a
+    // protocol that changed under dohc from a silence nobody can explain.
+    expect(events).toContainEqual({
+      kind: "error",
+      message: "Claude spoke before the session was ready; the message was dropped.",
+      fatal: false,
+    });
+    // Not fatal: the session still started.
+    expect(events.some((event) => event.kind === "session-state" && event.state === "ready")).toBe(
+      true,
+    );
+    await session.dispose();
   }, 30_000);
 
   it("refuses the request dohc cannot answer, and says so", async () => {

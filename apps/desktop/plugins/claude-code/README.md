@@ -48,6 +48,12 @@ dohc's MCP server arrives additively as `--mcp-config`. Claude keeps the MCP
 servers the user configured for themselves, because `--strict-mcp-config` —
 which would drop them — is not passed.
 
+Two limits worth knowing. Keeping the user's servers rests on Claude's merge
+default rather than on a flag dohc passes, so a future Claude that made
+`--mcp-config` replacing instead of merging would drop them silently. And dohc
+registers its server under the name `dohc`, so a user server with that exact
+name is shadowed.
+
 ### Modes
 
 dohc's three modes map to Claude's own `--permission-mode` values. The values
@@ -82,6 +88,9 @@ Two environment variables, read once when the plugin activates:
 - `DOHC_AGENT_CLAUDE_CODE_COMMAND` — the command to run instead of `claude`.
 - `DOHC_AGENT_CLAUDE_CODE_ARGS_JSON` — a JSON array of arguments to put before
   the plugin's own. A value that is not JSON is split on spaces.
+- `DOHC_AGENT_CLAUDE_CODE_READY_TIMEOUT_MS` — how long Claude has to answer
+  dohc's handshake before the session gives up. The default is 20000, against
+  a measured answer of about one second.
 
 ## The ACP driver dohc still ships
 

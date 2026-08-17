@@ -22,8 +22,22 @@ import { ClaudeStream } from "./streamJson.ts";
 /** How long a one-shot `claude` command has to answer a probe. */
 export const PROBE_TIMEOUT_MS = 5000;
 
-/** How long Claude has to answer the handshake before the session gives up. */
+/**
+ * How long Claude has to answer the handshake before the session gives up.
+ *
+ * Measured: the real `claude` answers in about one second on this machine,
+ * cold, with no prompt sent. Twenty seconds leaves a slow start — a cold disk,
+ * a machine under load, a long MCP server list — far more room than it needs,
+ * and `DOHC_AGENT_CLAUDE_CODE_READY_TIMEOUT_MS` moves it for a machine where
+ * that is still not enough.
+ */
 export const READY_TIMEOUT_MS = 20_000;
+
+/** The handshake deadline this machine wants, in milliseconds. */
+export function readyTimeoutMs(env: Record<string, string | undefined>): number {
+  const raw = Number(env.DOHC_AGENT_CLAUDE_CODE_READY_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : READY_TIMEOUT_MS;
+}
 
 /** What a failed probe reports back, cut to what the driver list shows. */
 const MAX_PROBE_ERROR_CHARS = 300;
@@ -186,6 +200,7 @@ class ClaudeSession implements PluginAgentSession {
 export function createClaudeDriver(
   spawnCommand: SpawnCommand,
   spec: ClaudeCommandSpec,
+  readyTimeout: number = READY_TIMEOUT_MS,
 ): PluginAgentDriver {
   interface CommandResult {
     code: number | null;
@@ -294,7 +309,19 @@ export function createClaudeDriver(
           ready?.();
           return;
         }
-        session?.handleMessage(message);
+        if (!session) {
+          // Claude sends nothing before it answers the handshake except that
+          // answer, so anything else here is a message dohc cannot place. It
+          // is dropped either way; saying so is the difference between a
+          // protocol that changed under dohc and a silence nobody can explain.
+          input.onEvent({
+            kind: "error",
+            message: "Claude spoke before the session was ready; the message was dropped.",
+            fatal: false,
+          });
+          return;
+        }
+        session.handleMessage(message);
       },
       onStderr: (line) => {
         input.onEvent({ kind: "error", message: line, fatal: isFatalStderr(line) });
@@ -319,8 +346,13 @@ export function createClaudeDriver(
         handshake,
         new Promise<never>((_, reject) => {
           timer = setTimeout(
-            () => reject(new Error(`Claude Code did not answer within ${READY_TIMEOUT_MS}ms.`)),
-            READY_TIMEOUT_MS,
+            () =>
+              reject(
+                new Error(
+                  `Claude Code did not answer dohc's handshake within ${readyTimeout}ms. Set DOHC_AGENT_CLAUDE_CODE_READY_TIMEOUT_MS to allow longer.`,
+                ),
+              ),
+            readyTimeout,
           );
         }),
       ]);
