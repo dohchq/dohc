@@ -26,13 +26,13 @@ import { errorMessage, raceWithTimeout } from "./pluginShared";
 /**
  * How many plugin-contributed drivers one workspace may register.
  *
- * dohc ships three drivers for two harnesses, and the BYOAI plan is one
- * plugin per harness: a person connecting Claude Code, Codex, and one harness
- * of their own registers three. Sixteen is several times that, and it is the
- * number that keeps the merged list inside the bound the agent panel's IPC
- * contract already carries (20 rows, three of them dohc's own). Registering
- * past it refuses the plugin rather than break the list every other driver is
- * shown in.
+ * dohc ships two drivers, and the BYOAI plan is one plugin per harness: a
+ * person connecting Codex, Claude Code, and one harness of their own
+ * registers three. Sixteen is several times that, and it is the number that
+ * keeps the merged list inside the bound the agent panel's IPC contract
+ * already carries (20 rows, two of them dohc's own). Registering past it
+ * refuses the plugin rather than break the list every other driver is shown
+ * in.
  */
 export const MAX_WORKSPACE_PLUGIN_DRIVERS = 16;
 

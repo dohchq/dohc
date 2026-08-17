@@ -83,7 +83,7 @@ const bridge = {
   probeAgentDrivers: vi.fn(async () => ({
     drivers: [
       {
-        id: "codex-app-server",
+        id: "codex",
         displayName: "Codex",
         installed: true,
         version: "codex 1.0",
