@@ -24,20 +24,30 @@ export interface PluginChildProcessExit {
     code: number | null;
     reason: "exited" | "terminated";
 }
+/**
+ * A working directory in the workspace.
+ *
+ * `{ workspaceRoot: true }` is the workspace root itself. Adding `path` names
+ * one directory inside it — the site a preview builds, the package a tool
+ * runs on. dohc resolves the path and refuses one that leaves the workspace,
+ * so a child always runs in the workspace or in the plugin's own built root,
+ * and nowhere else.
+ */
+export interface PluginChildProcessWorkspaceCwd {
+    workspaceRoot: true;
+    /** Workspace-relative directory. Omit it for the workspace root. */
+    path?: string;
+}
 export interface PluginChildProcessSpawnOptions {
     /** Plugin-built-root-relative JavaScript entry passed to utilityProcess.fork(). */
     modulePath: string;
     args?: string[];
     /**
-     * Plugin-built-root-relative working directory, or
-     * `{ workspaceRoot: true }` for the canonical workspace root — the one
-     * location outside the plugin's built root a wrapper's server may run in
-     * (its provider sessions work on the workspace). Defaults to the built
-     * root.
+     * Plugin-built-root-relative working directory, or a workspace directory —
+     * the one place outside the plugin's built root a child may run (a
+     * wrapper's server works on the workspace). Defaults to the built root.
      */
-    cwd?: string | {
-        workspaceRoot: true;
-    };
+    cwd?: string | PluginChildProcessWorkspaceCwd;
     /** String environment overrides merged over the host environment. */
     env?: Record<string, string>;
 }
@@ -57,14 +67,11 @@ export interface PluginChildProcessCommandOptions {
     command: string;
     args?: string[];
     /**
-     * Plugin-built-root-relative working directory, or
-     * `{ workspaceRoot: true }` for the canonical workspace root. Defaults to
-     * the built root. Identical to a module child's rule: the executable may
-     * come from anywhere, the directory it runs in may not.
+     * Plugin-built-root-relative working directory, or a workspace directory.
+     * Defaults to the built root. Identical to a module child's rule: the
+     * executable may come from anywhere, the directory it runs in may not.
      */
-    cwd?: string | {
-        workspaceRoot: true;
-    };
+    cwd?: string | PluginChildProcessWorkspaceCwd;
     /** String environment overrides merged over the host environment. */
     env?: Record<string, string>;
 }

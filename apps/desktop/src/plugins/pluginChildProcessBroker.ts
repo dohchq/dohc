@@ -101,9 +101,10 @@ export interface PluginChildProcessBrokerOptions {
    * A brokered child's cwd/modulePath must resolve inside
    * <dohcDir>/plugins/<safeId>. */
   dohcDir: string;
-  /** The workspace root this broker serves. The one cwd a spawn may use
+  /** The workspace root this broker serves. The one tree a spawn may run in
    * outside the plugin's built root, and only through the explicit
-   * `{ workspaceRoot: true }` request form — never a path string. */
+   * `{ workspaceRoot: true }` request form — never a bare path string, which
+   * always means the plugin's own root. */
   workspaceRoot: string;
   forkProcess?: (
     modulePath: string,
@@ -137,9 +138,15 @@ export interface PluginChildProcessBrokerContext {
   emitEvent: (subscriptionId: string, event: string, data: unknown) => void;
 }
 
+/** The workspace root, or one directory inside it. */
+interface WorkspaceCwd {
+  workspaceRoot: true;
+  path?: string;
+}
+
 interface CommonSpawnRequest {
   args: string[];
-  cwd?: string | { workspaceRoot: true };
+  cwd?: string | WorkspaceCwd;
   env: Record<string, string>;
 }
 
@@ -181,26 +188,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-// Exactly `{ workspaceRoot: true }` — an extra key or another value is a
-// malformed request, not a fallback to plugin-relative resolution.
-function isWorkspaceRootCwd(value: unknown): value is { workspaceRoot: true } {
-  return (
-    isRecord(value) &&
-    value.workspaceRoot === true &&
-    Object.keys(value).length === 1
-  );
+// `{ workspaceRoot: true }`, optionally naming one directory inside it. Shape
+// only: whether a `path` is a usable relative path is decided by the same
+// check a plugin-relative cwd gets, so a bad path is reported as a bad path
+// rather than as the wrong request form.
+function isWorkspaceCwd(value: unknown): value is { workspaceRoot: true; path?: unknown } {
+  if (!isRecord(value) || value.workspaceRoot !== true) return false;
+  const keys = Object.keys(value);
+  return keys.length === 1 || (keys.length === 2 && "path" in value);
 }
 
-function assertRelativePluginPath(value: unknown, label: string): string {
+function assertRelativePath(value: unknown, label: string, root: string): string {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
     value.includes("\0") ||
     isAbsolute(value)
   ) {
-    throw new Error(
-      `${label} must be a non-empty path relative to the plugin's built directory.`,
-    );
+    throw new Error(`${label} must be a non-empty path relative to the ${root}.`);
   }
   return value;
 }
@@ -208,15 +213,21 @@ function assertRelativePluginPath(value: unknown, label: string): string {
 function parseSpawnCwd(
   value: unknown,
   method: string,
-): string | { workspaceRoot: true } | undefined {
+): string | WorkspaceCwd | undefined {
   if (value === undefined) return undefined;
-  if (isWorkspaceRootCwd(value)) return value;
+  if (isWorkspaceCwd(value)) {
+    if (value.path === undefined) return { workspaceRoot: true };
+    return {
+      workspaceRoot: true,
+      path: assertRelativePath(value.path, `${method} cwd path`, "workspace root"),
+    };
+  }
   if (isRecord(value)) {
     throw new Error(
-      `${method} cwd object form must be exactly { workspaceRoot: true }.`,
+      `${method} cwd object form must be { workspaceRoot: true } for the workspace root, or { workspaceRoot: true, path } for a relative directory inside it.`,
     );
   }
-  return assertRelativePluginPath(value, `${method} cwd`);
+  return assertRelativePath(value, `${method} cwd`, "plugin's built directory");
 }
 
 /**
@@ -271,7 +282,11 @@ function parseSpawnRequest(value: unknown): SpawnRequest {
     throw new Error(`${method} input must be an object.`);
   }
   return {
-    modulePath: assertRelativePluginPath(value.modulePath, `${method} modulePath`),
+    modulePath: assertRelativePath(
+      value.modulePath,
+      `${method} modulePath`,
+      "plugin's built directory",
+    ),
     ...parseCommonSpawnFields(value, method),
   };
 }
@@ -711,16 +726,33 @@ export class PluginChildProcessBroker {
     });
   }
 
-  /** The cwd both spawn kinds share: inside the plugin's built root, or the
-   * workspace root through the one explicit request form. */
+  /** The cwd both spawn kinds share: inside the plugin's built root, or inside
+   * the workspace through the one explicit request form. A workspace path is
+   * contained the same way a plugin path is, so the directory a child runs in
+   * is always one of those two trees. */
   private async spawnCwd(
     pluginRoot: string,
-    requested: string | { workspaceRoot: true } | undefined,
+    requested: string | WorkspaceCwd | undefined,
     method: string,
   ): Promise<string> {
-    return isWorkspaceRootCwd(requested)
-      ? this.canonicalWorkspaceRoot(method)
-      : this.containedDirectory(pluginRoot, requested ?? ".", "cwd", method);
+    if (!isWorkspaceCwd(requested)) {
+      return this.containedDirectory(
+        pluginRoot,
+        requested ?? ".",
+        "cwd",
+        method,
+        "plugin directory",
+      );
+    }
+    const workspaceRoot = await this.canonicalWorkspaceRoot(method);
+    if (requested.path === undefined) return workspaceRoot;
+    return this.containedDirectory(
+      workspaceRoot,
+      requested.path,
+      "cwd",
+      method,
+      "workspace",
+    );
   }
 
   /**
@@ -1174,16 +1206,18 @@ export class PluginChildProcessBroker {
   }
 
   private async containedDirectory(
-    pluginRoot: string,
+    root: string,
     requested: string,
     label: string,
     method: string,
+    rootLabel: string,
   ): Promise<string> {
     const contained = await this.containedPath(
-      pluginRoot,
+      root,
       requested,
       label,
       method,
+      rootLabel,
     );
     if (!(await stat(contained)).isDirectory()) {
       throw new Error(`${method} ${label} "${requested}" is not a directory.`);
@@ -1202,6 +1236,7 @@ export class PluginChildProcessBroker {
       requested,
       label,
       method,
+      "plugin directory",
     );
     if (!(await stat(contained)).isFile()) {
       throw new Error(`${method} ${label} "${requested}" is not a file.`);
@@ -1210,15 +1245,16 @@ export class PluginChildProcessBroker {
   }
 
   private async containedPath(
-    pluginRoot: string,
+    root: string,
     requested: string,
     label: string,
     method: string,
+    rootLabel: string,
   ): Promise<string> {
-    const candidate = resolve(pluginRoot, requested);
-    if (!isInside(pluginRoot, candidate)) {
+    const candidate = resolve(root, requested);
+    if (!isInside(root, candidate)) {
       throw new Error(
-        `${method} ${label} "${requested}" escapes plugin directory "${pluginRoot}".`,
+        `${method} ${label} "${requested}" escapes ${rootLabel} "${root}".`,
       );
     }
     const contained = await realpath(candidate).catch((error: unknown) => {
@@ -1226,9 +1262,9 @@ export class PluginChildProcessBroker {
         `${method} ${label} "${requested}" is unavailable: ${errorMessage(error)}`,
       );
     });
-    if (!isInside(pluginRoot, contained)) {
+    if (!isInside(root, contained)) {
       throw new Error(
-        `${method} ${label} "${requested}" resolves outside plugin directory "${pluginRoot}" to "${contained}".`,
+        `${method} ${label} "${requested}" resolves outside ${rootLabel} "${root}" to "${contained}".`,
       );
     }
     return contained;
