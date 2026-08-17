@@ -29,16 +29,15 @@ import {
   ReadEngineYDocArtifactAssetResult,
   ExportDocumentFilePayload,
   ExportDocumentFileResult,
-  InvokeSiteSdkPayload,
   InvokePluginPanelSdkPayload,
   ListEngineMomentsPayload,
   ListEngineMomentsResult,
   WorkspaceSummary,
   ListFileChatsPayload,
   PRESENCE_STATE_MAX_BYTES,
-  SITE_SDK_PARAMS_MAX_BYTES,
-  SITE_SDK_PARAMS_MAX_DEPTH,
-  SITE_SDK_PARAMS_MAX_VALUES,
+  SDK_PARAMS_MAX_BYTES,
+  SDK_PARAMS_MAX_DEPTH,
+  SDK_PARAMS_MAX_VALUES,
   PresencePublishPayload,
   presenceStateWithinCap,
   RestoreEngineMomentFileResult,
@@ -67,12 +66,8 @@ import {
   WorkspaceUiState,
   WorkspaceGraphResult,
   WorkspaceVersionConflict,
-  ListSitesResult,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
-  StartSitePreviewPayload,
-  StartSitePreviewResult,
-  StopSitePreviewPayload,
   OpenPluginPanelPayload,
   OpenPluginPanelResult,
   PluginPanelOpenedEvent,
@@ -86,7 +81,6 @@ import {
   ReadWorkspaceTextResult,
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
-  parseInvokeSiteSdkPayloadForIpc,
   parseInvokePluginPanelSdkPayloadForIpc,
   CloudJoinWorkspacePayload,
   ReadShareProposalFileContentPayload,
@@ -108,7 +102,6 @@ import {
   MAX_EDITOR_GROUPS,
   MAX_EDITOR_GROUP_ID_CHARS,
   pluginPanelTabPath,
-  siteTabPath,
 } from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
@@ -806,7 +799,6 @@ describe("workspace UI state IPC contract", () => {
   });
 
   it.each([
-    ["site preview", siteTabPath("client-portal"), "dohc://site/%63lient-portal"],
     [
       "plugin panel",
       pluginPanelTabPath("hello-plugin", "main"),
@@ -1001,268 +993,14 @@ describe("update IPC contract", () => {
   });
 });
 
-describe("site IPC contract", () => {
-  it("accepts detected normal website metadata", () => {
-    expect(
-      ListSitesResult.parse({
-        sites: [
-          {
-            root: "client-portal",
-            title: "Client Portal",
-            kind: "package",
-            confidence: "high",
-            entryPath: "client-portal/index.html",
-            configPath: "client-portal/vite.config.ts",
-            packagePath: "client-portal/package.json",
-            packageManager: "pnpm",
-            scripts: { dev: "vite", build: "vite build" },
-            buildOutputs: ["dist"],
-            sourceFiles: ["client-portal/index.html", "client-portal/package.json"],
-            shareManifest: null,
-            diagnostics: [],
-            authority: { kind: "workspace" },
-          },
-        ],
-      }).sites[0]?.root,
-    ).toBe("client-portal");
-    expect(ListSitesResult.parse({ sites: [] }).sites).toEqual([]);
-    expect(
-      ListSitesResult.parse({
-        sites: [
-          {
-            root: "static",
-            title: "Static",
-            kind: "static",
-            confidence: "medium",
-            entryPath: null,
-            configPath: null,
-            packagePath: null,
-            packageManager: null,
-            scripts: {},
-            buildOutputs: [],
-            sourceFiles: [],
-            shareManifest: null,
-            diagnostics: [],
-            authority: { kind: "workspace" },
-          },
-        ],
-      }).sites[0]?.entryPath,
-    ).toBeNull();
-  });
-
-  it("requires a mount root for shared-site authority", () => {
-    const sharedSite = {
-      root: "shared-with-me/alex/report",
-      title: "Report",
-      kind: "static",
-      confidence: "high",
-      entryPath: "shared-with-me/alex/report/index.html",
-      configPath: null,
-      packagePath: null,
-      packageManager: null,
-      scripts: {},
-      configuredScripts: {},
-      buildOutputs: [],
-      sourceFiles: ["shared-with-me/alex/report/index.html"],
-      shareManifest: {
-        entryPath: "shared-with-me/alex/report/index.html",
-        assets: [],
-      },
-      diagnostics: [],
-    };
-    expect(
-      ListSitesResult.safeParse({
-        sites: [
-          {
-            ...sharedSite,
-            authority: { kind: "share", mountRoot: "shared-with-me/alex" },
-          },
-        ],
-      }).success,
-    ).toBe(true);
-    expect(
-      ListSitesResult.safeParse({
-        sites: [{ ...sharedSite, authority: { kind: "share" } }],
-      }).success,
-    ).toBe(false);
-    expect(
-      ListSitesResult.safeParse({
-        sites: [{ ...sharedSite, authority: { kind: "share", mountRoot: "." } }],
-      }).success,
-    ).toBe(false);
-    expect(
-      ListSitesResult.safeParse({
-        sites: [
-          {
-            ...sharedSite,
-            authority: { kind: "share", mountRoot: "shared-with-me/someone-else" },
-          },
-        ],
-      }).success,
-    ).toBe(false);
-  });
-
-  it("accepts bounded preview start/result payloads", () => {
-    expect(
-      StartSitePreviewPayload.parse({
-        workspaceId: "ws-sites",
-        siteRoot: ".",
-        mode: "static",
-      }),
-    ).toEqual({
-      workspaceId: "ws-sites",
-      siteRoot: ".",
-      mode: "static",
-    });
-
-    expect(
-      StartSitePreviewResult.parse({
-        siteRoot: ".",
-        mode: "build",
-        url: "http://127.0.0.1:4173/",
-        logs: [{ stream: "stdout", text: "built", at: 1 }],
-        sdkScopeRoot: null,
-        build: {
-          ok: true,
-          command: "pnpm",
-          args: ["build"],
-          outputPath: "/tmp/workspace/dist",
-          exitCode: 0,
-        },
-      }).mode,
-    ).toBe("build");
-    expect(
-      StartSitePreviewResult.parse({
-        siteRoot: "site",
-        mode: "static",
-        url: "http://localhost:4173/",
-        logs: [],
-        sdkScopeRoot: "shared-with-me/alex",
-      }).logs,
-    ).toEqual([]);
-    expect(
-      StopSitePreviewPayload.parse({
-        workspaceId: "ws-sites",
-        siteRoot: ".",
-      }),
-    ).toEqual({ workspaceId: "ws-sites", siteRoot: "." });
-    for (const workspaceId of ["", "WS-SITES", "ws_sites"]) {
-      expect(
-        StartSitePreviewPayload.safeParse({
-          workspaceId,
-          siteRoot: "site",
-          mode: "static",
-        }).success,
-      ).toBe(false);
-      expect(
-        StopSitePreviewPayload.safeParse({
-          workspaceId,
-          siteRoot: "site",
-        }).success,
-      ).toBe(false);
-    }
-    for (const siteRoot of [
-      "",
-      "../escape",
-      "site/../../escape",
-      "/tmp/site",
-      "C:/site",
-      "site/./dist",
-      "site\0/index.html",
-      "site\\index.html",
-    ]) {
-      expect(
-        StartSitePreviewPayload.safeParse({
-          workspaceId: "ws-sites",
-          siteRoot,
-          mode: "static",
-        }).success,
-      ).toBe(false);
-      expect(
-        StopSitePreviewPayload.safeParse({
-          workspaceId: "ws-sites",
-          siteRoot,
-        }).success,
-      ).toBe(false);
-    }
-  });
-
-  it("rejects unknown preview modes and non-local preview URLs", () => {
-    expect(
-      StartSitePreviewPayload.safeParse({
-        workspaceId: "ws-sites",
-        siteRoot: "site",
-        mode: "native",
-      }).success,
-    ).toBe(false);
-    expect(
-      StartSitePreviewResult.safeParse({
-        siteRoot: "site",
-        mode: "static",
-        url: "http://127.0.0.1:43210",
-        logs: [],
-      }).success,
-    ).toBe(true);
-    expect(
-      StartSitePreviewResult.safeParse({
-        siteRoot: "site",
-        mode: "static",
-        url: "http://[::1]:43210/",
-        logs: [],
-      }).success,
-    ).toBe(true);
-    expect(
-      StartSitePreviewResult.safeParse({
-        siteRoot: "site",
-        mode: "static",
-        url: "http://[::ffff:127.0.0.1]:43210/",
-        logs: [],
-      }).success,
-    ).toBe(true);
-    expect(
-      StartSitePreviewResult.safeParse({
-        siteRoot: "site",
-        mode: "static",
-        url: "http://127.0.0.1/",
-        logs: [],
-      }).success,
-    ).toBe(true);
-    expect(
-      StartSitePreviewResult.safeParse({
-        siteRoot: "site",
-        mode: "static",
-        url: "http://127.42.0.7:43210/",
-        logs: [],
-      }).success,
-    ).toBe(true);
-    for (const url of [
-      "https://example.com/",
-      "file:///tmp/site/index.html",
-      "javascript:alert(1)",
-      "data:text/html,<h1>x</h1>",
-      "http://0.0.0.0:43210/",
-      "http://user:pass@127.0.0.1:43210/",
-      "http://127.0.0.1:abc/",
-      "http://127.0.0.1:0/",
-      "http://127.0.0.1:70000/",
-    ]) {
-      expect(
-        StartSitePreviewResult.safeParse({
-          siteRoot: "site",
-          mode: "static",
-          url,
-          logs: [],
-        }).success,
-      ).toBe(false);
-    }
-  });
-
+describe("plugin guest SDK IPC contract", () => {
   it("accepts realistic JSON-safe SDK params at the preload IPC boundary", () => {
     const text = "x".repeat(2 * 1024 * 1024);
     expect(
-      parseInvokeSiteSdkPayloadForIpc({
-        workspaceId: "ws-sites",
-        siteRoot: "report",
+      parseInvokePluginPanelSdkPayloadForIpc({
+        workspaceId: "ws-plugins",
+        pluginId: "hello-plugin",
+        panelId: "main",
         method: "files.write",
         params: {
           path: "exports/report.txt",
@@ -1276,17 +1014,18 @@ describe("site IPC contract", () => {
 
   it("rejects oversized, excessively deep, and over-populated SDK params", () => {
     const base = {
-      workspaceId: "ws-sites",
-      siteRoot: "report",
+      workspaceId: "ws-plugins",
+      pluginId: "hello-plugin",
+      panelId: "main",
       method: "files.write",
     };
     const oversized = {
       ...base,
-      params: { text: "x".repeat(SITE_SDK_PARAMS_MAX_BYTES + 1) },
+      params: { text: "x".repeat(SDK_PARAMS_MAX_BYTES + 1) },
     };
-    expect(() => parseInvokeSiteSdkPayloadForIpc(oversized)).toThrow(/JSON-safe/);
+    expect(() => parseInvokePluginPanelSdkPayloadForIpc(oversized)).toThrow(/JSON-safe/);
     expect(
-      InvokeSiteSdkPayload.safeParse({
+      InvokePluginPanelSdkPayload.safeParse({
         ...base,
         params: oversized.params,
       }).success,
@@ -1294,25 +1033,28 @@ describe("site IPC contract", () => {
 
     let deep: Record<string, unknown> = {};
     const root = deep;
-    for (let depth = 0; depth <= SITE_SDK_PARAMS_MAX_DEPTH; depth += 1) {
+    for (let depth = 0; depth <= SDK_PARAMS_MAX_DEPTH; depth += 1) {
       const child: Record<string, unknown> = {};
       deep.child = child;
       deep = child;
     }
-    expect(InvokeSiteSdkPayload.safeParse({ ...base, params: root }).success).toBe(false);
+    expect(InvokePluginPanelSdkPayload.safeParse({ ...base, params: root }).success).toBe(
+      false,
+    );
 
     expect(
-      InvokeSiteSdkPayload.safeParse({
+      InvokePluginPanelSdkPayload.safeParse({
         ...base,
-        params: Array.from({ length: SITE_SDK_PARAMS_MAX_VALUES }, () => null),
+        params: Array.from({ length: SDK_PARAMS_MAX_VALUES }, () => null),
       }).success,
     ).toBe(false);
   });
 
   it("rejects SDK params that are not a finite, acyclic JSON data tree", () => {
     const base = {
-      workspaceId: "ws-sites",
-      siteRoot: "report",
+      workspaceId: "ws-plugins",
+      pluginId: "hello-plugin",
+      panelId: "main",
       method: "databases.edit",
     };
     const cyclic: Record<string, unknown> = {};
@@ -1325,7 +1067,9 @@ describe("site IPC contract", () => {
       { value: new Uint8Array([1, 2, 3]) },
       ["first", , "third"],
     ]) {
-      expect(InvokeSiteSdkPayload.safeParse({ ...base, params }).success).toBe(false);
+      expect(InvokePluginPanelSdkPayload.safeParse({ ...base, params }).success).toBe(
+        false,
+      );
     }
   });
 
@@ -1410,7 +1154,7 @@ describe("site IPC contract", () => {
     ).toBe(false);
   });
 
-  it("reuses the bounded site SDK params contract for plugin panels", () => {
+  it("bounds SDK params on the plugin panel payload", () => {
     const payload = {
       workspaceId: "ws-plugins",
       pluginId: "hello-plugin",
@@ -1422,7 +1166,7 @@ describe("site IPC contract", () => {
     expect(
       InvokePluginPanelSdkPayload.safeParse({
         ...payload,
-        params: { text: "x".repeat(SITE_SDK_PARAMS_MAX_BYTES + 1) },
+        params: { text: "x".repeat(SDK_PARAMS_MAX_BYTES + 1) },
       }).success,
     ).toBe(false);
     expect(

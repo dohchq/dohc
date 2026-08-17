@@ -1,6 +1,6 @@
 import type { WatcherEvent } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
-import { isAtOrBelow, siteSdkWorkspacePath } from "../workspaces/siteSdkHost";
+import { isAtOrBelow, sdkWorkspacePath } from "../workspaces/workspaceSdkHost";
 
 /**
  * How many workspace file subscriptions one plugin spawn may hold.
@@ -47,7 +47,7 @@ function watchPrefix(value: unknown): string {
   // files.read uses, so a traversal or absolute prefix is refused here rather
   // than matched against event paths that could never contain it.
   if (value === ".") return ".";
-  return siteSdkWorkspacePath(null, value, "read");
+  return sdkWorkspacePath(value, "read");
 }
 
 /**

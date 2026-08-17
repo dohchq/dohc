@@ -85,7 +85,7 @@ test("aggressive click-around keeps the shell mounted with no renderer errors", 
       // Panel toggles: sidebar off/on, activity views, history rail off/on.
       await page.keyboard.press("Control+b");
       await page.keyboard.press("Control+b");
-      for (const view of ["search", "graph", "sites", "history", "explorer"]) {
+      for (const view of ["search", "graph", "history", "explorer"]) {
         await page.getByTestId(`activity-${view}`).click();
       }
       const railToggle = page.getByTestId("history-collapse");

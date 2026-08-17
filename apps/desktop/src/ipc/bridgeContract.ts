@@ -13,7 +13,6 @@ import {
   canonicalSingletonEditorTabPath,
   isPluginPanelTabPath,
   isSingletonEditorTabPath,
-  isSiteTabPath,
   MAX_EXPANDED_FOLDERS,
   MAX_EDITOR_GROUPS,
   MAX_EDITOR_GROUP_ID_CHARS,
@@ -153,23 +152,6 @@ function engineStoredText(label: string) {
     });
   });
 }
-
-const SITE_ROOT_STRING = PATH_STRING.superRefine((value, ctx) => {
-  if (
-    value.includes("\0") ||
-    value.includes("\\") ||
-    value.startsWith("/") ||
-    /^[A-Za-z]:/.test(value) ||
-    value
-      .split("/")
-      .some((segment) => segment === "" || segment === ".." || (segment === "." && value !== "."))
-  ) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "site root must be a safe workspace-relative path",
-    });
-  }
-});
 
 // Enums derive from the workspace-core tuples (single source of truth) so a
 // new kind/mode cannot make the type and the runtime validator disagree.
@@ -2104,144 +2086,6 @@ export const TryInVersionStateResult = z.object({
 });
 export type TryInVersionStateResult = z.infer<typeof TryInVersionStateResult>;
 
-const SiteDiagnostic = z.object({
-  path: PATH_STRING.optional(),
-  severity: z.enum(["warning", "error"]),
-  code: z.string().min(1).max(100),
-  message: z.string().max(10_000).optional(),
-});
-export type SiteDiagnostic = z.infer<typeof SiteDiagnostic>;
-
-const SiteScripts = z.object({
-  dev: z.string().optional(),
-  start: z.string().optional(),
-  build: z.string().optional(),
-  preview: z.string().optional(),
-});
-export type SiteScripts = z.infer<typeof SiteScripts>;
-
-const SiteSharePath = SITE_ROOT_STRING.refine((path) => path !== ".", {
-  message: "site share paths must name a file",
-});
-
-const SiteShareMountRoot = SITE_ROOT_STRING.refine((path) => path !== ".", {
-  message: "site share mount roots must name the mounted share",
-});
-
-const SiteShareManifest = z
-  .object({
-    entryPath: SiteSharePath,
-    assets: z.array(SiteSharePath).max(99),
-  })
-  .superRefine((manifest, ctx) => {
-    const paths = [manifest.entryPath, ...manifest.assets];
-    if (new Set(paths).size !== paths.length) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "site share manifest paths must be unique",
-      });
-    }
-  });
-
-const SitePackageInfo = z
-  .object({
-    root: PATH_STRING,
-    title: z.string().min(1).max(200),
-    kind: z.enum(["static", "package", "configured"]),
-    confidence: z.enum(["high", "medium", "low"]),
-    entryPath: PATH_STRING.nullable(),
-    configPath: PATH_STRING.nullable(),
-    packagePath: PATH_STRING.nullable(),
-    packageManager: z.enum(["pnpm", "npm", "yarn", "bun"]).nullable(),
-    scripts: SiteScripts,
-    configuredScripts: SiteScripts.optional(),
-    buildOutputs: z.array(PATH_STRING).max(100),
-    sourceFiles: z.array(PATH_STRING).max(1000),
-    shareManifest: SiteShareManifest.nullable(),
-    diagnostics: z.array(SiteDiagnostic).max(100),
-    authority: z.discriminatedUnion("kind", [
-      z.object({ kind: z.literal("workspace") }),
-      z.object({ kind: z.literal("share"), mountRoot: SiteShareMountRoot }),
-    ]),
-  })
-  .superRefine((site, ctx) => {
-    if (
-      site.authority.kind === "share" &&
-      site.root !== site.authority.mountRoot &&
-      !site.root.startsWith(`${site.authority.mountRoot}/`)
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "shared site roots must stay inside their authority mount root",
-        path: ["root"],
-      });
-    }
-    if (!site.shareManifest) return;
-    const paths = [site.shareManifest.entryPath, ...site.shareManifest.assets];
-    for (const path of paths) {
-      if (!site.sourceFiles.includes(path)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "site share manifest paths must exist in sourceFiles",
-          path: ["shareManifest"],
-        });
-        return;
-      }
-      if (site.root !== "." && !path.startsWith(`${site.root}/`)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "site share manifest paths must stay inside the site root",
-          path: ["shareManifest"],
-        });
-        return;
-      }
-    }
-    if (!/\.html?$/i.test(site.shareManifest.entryPath)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "site share manifest entryPath must be HTML",
-        path: ["shareManifest", "entryPath"],
-      });
-    }
-  });
-export type SitePackageInfo = z.infer<typeof SitePackageInfo>;
-
-export const ListSitesPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-});
-export type ListSitesPayload = z.infer<typeof ListSitesPayload>;
-
-export const ListSitesResult = z.object({
-  sites: z.array(SitePackageInfo).max(100),
-});
-export type ListSitesResult = z.infer<typeof ListSitesResult>;
-
-export const SitePackagePayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  path: PATH_STRING,
-});
-export type SitePackagePayload = z.infer<typeof SitePackagePayload>;
-
-export const SitePackageResult = SitePackageInfo.nullable();
-export type SitePackageResult = z.infer<typeof SitePackageResult>;
-
-export const SitePreviewMode = z.enum(["static", "dev", "build"]);
-export type SitePreviewMode = z.infer<typeof SitePreviewMode>;
-
-export const StartSitePreviewPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  siteRoot: SITE_ROOT_STRING,
-  mode: SitePreviewMode,
-});
-export type StartSitePreviewPayload = z.infer<typeof StartSitePreviewPayload>;
-
-const SiteLogEntry = z.object({
-  stream: z.enum(["stdout", "stderr", "system"]),
-  text: z.string().max(10_000),
-  at: z.number(),
-});
-export type SiteLogEntry = z.infer<typeof SiteLogEntry>;
-
 const LoopbackPreviewUrl = z.string().min(1).max(2048).superRefine((value, ctx) => {
   let url: URL;
   try {
@@ -2265,35 +2109,6 @@ const LoopbackPreviewUrl = z.string().min(1).max(2048).superRefine((value, ctx) 
     });
   }
 });
-
-export const StartSitePreviewResult = z.object({
-  siteRoot: SITE_ROOT_STRING,
-  mode: SitePreviewMode,
-  url: LoopbackPreviewUrl,
-  logs: z.array(SiteLogEntry).max(500),
-  // null means the locally-owned site has the current user's full workspace
-  // authority. Shared sites are constrained to their materialized share mount.
-  // Main derives this from siteRoot; the renderer is never authoritative.
-  sdkScopeRoot: SITE_ROOT_STRING.nullable().default(null),
-  build: z
-    .object({
-      ok: z.boolean(),
-      command: z.string(),
-      args: z.array(z.string()),
-      outputPath: z.string().nullable(),
-      exitCode: z.number().nullable(),
-    })
-    .optional(),
-});
-export type StartSitePreviewResult = z.infer<typeof StartSitePreviewResult>;
-
-export const StopSitePreviewPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  siteRoot: SITE_ROOT_STRING,
-});
-export type StopSitePreviewPayload = z.infer<typeof StopSitePreviewPayload>;
-export const StopSitePreviewResult = z.void();
-export type StopSitePreviewResult = z.infer<typeof StopSitePreviewResult>;
 
 const MAX_PLUGIN_ID_CHARS = 214;
 const MAX_PLUGIN_PANEL_ID_CHARS = 120;
@@ -2701,16 +2516,16 @@ export function parsePluginStatusChangedEventForIpc(
   return parsed.success ? parsed.data : null;
 }
 
-// Sites never supply user or workspace identity. The containing renderer
-// identifies the open site and main re-derives its owned/share authority.
+// A guest never supplies user or workspace identity. The containing renderer
+// identifies the open surface and main re-derives its authority.
 // The preload applies this contract before ipcRenderer.invoke. The byte cap
 // is the exact UTF-8 size of the JSON representation; 4 MiB preserves the
 // supported 2 MiB text-write payload while bounding Electron deserialization.
-export const SITE_SDK_PARAMS_MAX_BYTES = 4 * 1024 * 1024;
-export const SITE_SDK_PARAMS_MAX_DEPTH = 32;
-export const SITE_SDK_PARAMS_MAX_VALUES = 20_000;
+export const SDK_PARAMS_MAX_BYTES = 4 * 1024 * 1024;
+export const SDK_PARAMS_MAX_DEPTH = 32;
+export const SDK_PARAMS_MAX_VALUES = 20_000;
 
-type SiteSdkParamFrame =
+type SdkParamFrame =
   | { kind: "visit"; value: unknown; depth: number }
   | { kind: "leave"; value: object };
 
@@ -2748,15 +2563,15 @@ function boundedJsonStringBytes(value: string, remaining: number): number {
   return bytes;
 }
 
-function siteSdkParamsIssue(root: unknown): string | null {
-  const stack: SiteSdkParamFrame[] = [{ kind: "visit", value: root, depth: 0 }];
+function sdkParamsIssue(root: unknown): string | null {
+  const stack: SdkParamFrame[] = [{ kind: "visit", value: root, depth: 0 }];
   const ancestors = new WeakSet<object>();
   let bytes = 0;
   let values = 0;
 
   const addBytes = (amount: number): boolean => {
     bytes += amount;
-    return bytes <= SITE_SDK_PARAMS_MAX_BYTES;
+    return bytes <= SDK_PARAMS_MAX_BYTES;
   };
 
   try {
@@ -2766,9 +2581,9 @@ function siteSdkParamsIssue(root: unknown): string | null {
         ancestors.delete(frame.value);
         continue;
       }
-      if (frame.depth > SITE_SDK_PARAMS_MAX_DEPTH) return "nesting is too deep";
+      if (frame.depth > SDK_PARAMS_MAX_DEPTH) return "nesting is too deep";
       values += 1;
-      if (values > SITE_SDK_PARAMS_MAX_VALUES) return "too many values";
+      if (values > SDK_PARAMS_MAX_VALUES) return "too many values";
 
       const current = frame.value;
       if (current === null) {
@@ -2778,7 +2593,7 @@ function siteSdkParamsIssue(root: unknown): string | null {
       if (typeof current === "string") {
         if (!addBytes(boundedJsonStringBytes(
           current,
-          SITE_SDK_PARAMS_MAX_BYTES - bytes,
+          SDK_PARAMS_MAX_BYTES - bytes,
         ))) return "serialized value is too large";
         continue;
       }
@@ -2832,7 +2647,7 @@ function siteSdkParamsIssue(root: unknown): string | null {
         }
         if (!addBytes(boundedJsonStringBytes(
           key,
-          SITE_SDK_PARAMS_MAX_BYTES - bytes,
+          SDK_PARAMS_MAX_BYTES - bytes,
         ))) return "serialized value is too large";
         childValues.push(descriptor.value);
       }
@@ -2849,38 +2664,23 @@ function siteSdkParamsIssue(root: unknown): string | null {
   return null;
 }
 
-export const SiteSdkParams = z.unknown().superRefine((value, ctx) => {
-  const issue = siteSdkParamsIssue(value);
+export const SdkParams = z.unknown().superRefine((value, ctx) => {
+  const issue = sdkParamsIssue(value);
   if (!issue) return;
   ctx.addIssue({
     code: z.ZodIssueCode.custom,
     message:
-      `params must be JSON-safe and within ${SITE_SDK_PARAMS_MAX_BYTES} bytes, ` +
-      `${SITE_SDK_PARAMS_MAX_DEPTH} levels, and ${SITE_SDK_PARAMS_MAX_VALUES} values: ${issue}`,
+      `params must be JSON-safe and within ${SDK_PARAMS_MAX_BYTES} bytes, ` +
+      `${SDK_PARAMS_MAX_DEPTH} levels, and ${SDK_PARAMS_MAX_VALUES} values: ${issue}`,
   });
 });
-
-export const InvokeSiteSdkPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  siteRoot: SITE_ROOT_STRING,
-  method: z.string().min(1).max(200),
-  params: SiteSdkParams.optional(),
-});
-export type InvokeSiteSdkPayload = z.infer<typeof InvokeSiteSdkPayload>;
-
-export function parseInvokeSiteSdkPayloadForIpc(value: unknown): InvokeSiteSdkPayload {
-  return InvokeSiteSdkPayload.parse(value);
-}
-
-export const InvokeSiteSdkResult = z.object({ result: z.unknown() });
-export type InvokeSiteSdkResult = z.infer<typeof InvokeSiteSdkResult>;
 
 export const InvokePluginPanelSdkPayload = z.object({
   workspaceId: WORKSPACE_ID,
   pluginId: PLUGIN_ID,
   panelId: PLUGIN_PANEL_ID,
   method: z.string().min(1).max(200),
-  params: SiteSdkParams.optional(),
+  params: SdkParams.optional(),
 }).strict();
 export type InvokePluginPanelSdkPayload = z.infer<
   typeof InvokePluginPanelSdkPayload
@@ -3956,11 +3756,9 @@ export const WorkspaceUiState = z.object({
           message:
             tab === CHATS_TAB_PATH
               ? "Chats can be open in only one editor group."
-              : isSiteTabPath(tab)
-                ? "A site preview can be open in only one editor group."
-                : isPluginPanelTabPath(tab)
-                  ? "A plugin panel can be open in only one editor group."
-                  : "This tab can be open in only one editor group.",
+              : isPluginPanelTabPath(tab)
+                ? "A plugin panel can be open in only one editor group."
+                : "This tab can be open in only one editor group.",
         });
       } else {
         singletonOwners.add(identity);
@@ -4350,11 +4148,6 @@ export interface DohcDesktopBridge {
   importToDatabase(
     payload: ImportToDatabasePayload,
   ): Promise<ImportToDatabaseResult>;
-  listSites(payload: ListSitesPayload): Promise<ListSitesResult>;
-  getSitePackage(payload: SitePackagePayload): Promise<SitePackageResult>;
-  startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewResult>;
-  stopSitePreview(payload: StopSitePreviewPayload): Promise<StopSitePreviewResult>;
-  invokeSiteSdk(payload: InvokeSiteSdkPayload): Promise<InvokeSiteSdkResult>;
   openPluginPanel(payload: OpenPluginPanelPayload): Promise<OpenPluginPanelResult>;
   onPluginPanelOpened(
     listener: (event: PluginPanelOpenedEvent) => void,

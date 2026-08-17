@@ -2,9 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
-  InvokeSiteSdkPayload,
   InvokePluginPanelSdkPayload,
-  ListSitesPayload,
   MenuCommand,
   PluginPanelOpenedEvent,
   PluginStatusChangedEvent,
@@ -16,12 +14,9 @@ import type {
   StopPluginWebAppPayload,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
-  SitePackagePayload,
-  StartSitePreviewPayload,
   OpenPluginPanelPayload,
   StartPluginPanelPayload,
   StopPluginPanelPayload,
-  StopSitePreviewPayload,
   WorkspaceSettingsPayload,
   WorkspaceSummary,
   WriteClipboardTextPayload,
@@ -37,7 +32,6 @@ import {
   StartPluginPanelResult,
   StartPluginWebAppResult,
   parseInvokePluginPanelSdkPayloadForIpc,
-  parseInvokeSiteSdkPayloadForIpc,
   parsePluginStatusChangedEventForIpc,
   parsePluginWebAppFailedEventForIpc,
 } from "./ipc/bridgeContract";
@@ -156,19 +150,6 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.applyDatabaseEdit, payload),
   importToDatabase: (payload) =>
     ipcRenderer.invoke(CHANNELS.importToDatabase, payload),
-  listSites: (payload: ListSitesPayload) =>
-    ipcRenderer.invoke(CHANNELS.listSites, payload),
-  getSitePackage: (payload: SitePackagePayload) =>
-    ipcRenderer.invoke(CHANNELS.getSitePackage, payload),
-  startSitePreview: (payload: StartSitePreviewPayload) =>
-    ipcRenderer.invoke(CHANNELS.startSitePreview, payload),
-  stopSitePreview: (payload: StopSitePreviewPayload) =>
-    ipcRenderer.invoke(CHANNELS.stopSitePreview, payload),
-  invokeSiteSdk: (payload: InvokeSiteSdkPayload) =>
-    ipcRenderer.invoke(
-      CHANNELS.invokeSiteSdk,
-      parseInvokeSiteSdkPayloadForIpc(payload),
-    ),
   openPluginPanel: async (payload: OpenPluginPanelPayload) => {
     const result = OpenPluginPanelResult.parse(
       await ipcRenderer.invoke(CHANNELS.openPluginPanel, payload),

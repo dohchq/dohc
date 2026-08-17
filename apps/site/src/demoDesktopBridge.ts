@@ -240,7 +240,6 @@ type DemoDesktopBridge = Pick<
   | "searchWorkspace"
   | "cancelWorkspaceSearch"
   | "readWorkspaceGraph"
-  | "listSites"
   | "createWorkspaceFile"
   | "createWorkspaceFolder"
   | "moveWorkspacePath"
@@ -458,28 +457,6 @@ const demoBridge = {
       scannedFileCount: nodes.length,
       omittedFileCount: 0,
       truncatedFileCount: 0,
-    };
-  },
-  async listSites() {
-    return {
-      sites: [
-        {
-          root: "sites/launch-room",
-          title: "Launch room",
-          kind: "configured" as const,
-          confidence: "high" as const,
-          entryPath: "projects/launch-plan.md",
-          configPath: "sites/launch-room/site.yaml",
-          packagePath: null,
-          packageManager: null,
-          scripts: { build: "dohc site build" },
-          buildOutputs: ["dist"],
-          sourceFiles: ["projects/launch-plan.md"],
-          shareManifest: null,
-          diagnostics: [],
-          authority: { kind: "workspace" as const },
-        },
-      ],
     };
   },
   async createWorkspaceFile(payload: { relativePath: string }) {

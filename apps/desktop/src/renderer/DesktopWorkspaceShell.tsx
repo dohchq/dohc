@@ -172,7 +172,6 @@ import {
   isPluginPanelTabPath,
   isPluginWebAppTabPath,
   isSingletonEditorTabPath,
-  isSiteTabPath,
   isViewId,
   isVirtualTabPath,
   MAX_OPEN_TABS,
@@ -190,7 +189,6 @@ import {
   pluginDetailsTabPath,
   pluginPanelTabPath,
   pluginWebAppTabPath,
-  parseSiteTabPath,
   parseUiState,
   pruneMissingRestoredTabs,
   recordRecentFile,
@@ -680,12 +678,6 @@ function scheduleMarkdownEditorPreload(): () => void {
 }
 const LazyGraphView = lazy(() =>
   import("./workbench/GraphView").then((mod) => ({ default: mod.GraphView })),
-);
-const LazySitesView = lazy(() =>
-  import("./workbench/SitesView").then((mod) => ({ default: mod.SitesView })),
-);
-const LazySitePreviewPage = lazy(() =>
-  import("./SitePreviewPage").then((mod) => ({ default: mod.SitePreviewPage })),
 );
 const LazyPluginPanelPage = lazy(() =>
   import("./PluginPanelPage").then((mod) => ({ default: mod.PluginPanelPage })),
@@ -1350,24 +1342,6 @@ function PanelLoading({ label }: { label: string }) {
   );
 }
 
-function InvalidSitePathFallback({
-  activeTab,
-  onClose,
-}: {
-  activeTab: string | null;
-  onClose: () => void;
-}) {
-  useEffect(() => {
-    console.error("[desktop] invalid site tab path", {
-      activeTab,
-      detail: "active tab matched site tab format but activeSiteRoot parsed to null",
-    });
-    onClose();
-  }, [activeTab, onClose]);
-
-  return null;
-}
-
 export function DesktopWorkspaceShell(props: {
   workspace: Workspace;
   workspaces: Workspace[];
@@ -1424,7 +1398,6 @@ export function DesktopWorkspaceShell(props: {
   // identifiable and filtered out of "others". Lazily minted ONCE — a fresh id
   // per render would churn the presence channel.
   const [presenceClientId] = useState(() => crypto.randomUUID());
-  const [sitesRefreshKey, setSitesRefreshKey] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
@@ -1435,8 +1408,6 @@ export function DesktopWorkspaceShell(props: {
   // Relay-share dialog target (PR 18): a path (file/folder) or a version.
   const [shareTarget, setShareTarget] = useState<{
     path?: string;
-    paths?: string[];
-    label?: string;
     versionId?: string;
     versionName?: string;
   } | null>(null);
@@ -2316,13 +2287,6 @@ export function DesktopWorkspaceShell(props: {
     },
     [],
   );
-
-  const refreshSites = useCallback(() => {
-    setSitesRefreshKey((key) => key + 1);
-    void refreshFiles().catch((error) =>
-      reportShellError("Could not refresh workspace files.", error),
-    );
-  }, [refreshFiles, reportShellError]);
 
   // Workspace-engine alpha (PR 0M-4/0M-5): versions surface, ENGINE history
   // source, and the linked Chats rail all key off this one per-workspace
@@ -5239,17 +5203,6 @@ export function DesktopWorkspaceShell(props: {
                 >
                   <Maximize2 size={13} aria-hidden />
                 </button>
-              ) : wb.activeView === "sites" ? (
-                <button
-                  type="button"
-                  data-testid="sites-refresh"
-                  aria-label="Refresh sites"
-                  title="Refresh sites"
-                  onClick={refreshSites}
-                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
-                >
-                  <RefreshCw size={13} aria-hidden />
-                </button>
               ) : undefined
             }
           >
@@ -5272,15 +5225,6 @@ export function DesktopWorkspaceShell(props: {
                   onOpenChatThread={openGraphChatThread}
                   chatMentionsAvailable={captureAvailable}
                   variant="panel"
-                />
-              </Suspense>
-            ) : wb.activeView === "sites" ? (
-              <Suspense fallback={<PanelLoading label="sites" />}>
-                <LazySitesView
-                  workspaceId={workspaceId}
-                  files={files}
-                  refreshKey={sitesRefreshKey}
-                  onOpenPath={openPathWithHeading}
                 />
               </Suspense>
             ) : wb.activeView === "history" ? (
@@ -5396,7 +5340,6 @@ export function DesktopWorkspaceShell(props: {
                 ? callbacksForEditor(editorGroup.id, tab)
                 : null;
               const groupDocumentPath = isVirtualTabPath(tabPath) ? null : tabPath;
-              const groupSiteRoot = parseSiteTabPath(tabPath);
               const groupPluginPanel = parsePluginPanelTabPath(tabPath);
               const groupPluginWebApp = parsePluginWebAppTabPath(tabPath);
               const groupPluginDetailsId = parsePluginDetailsTabPath(tabPath);
@@ -5699,27 +5642,6 @@ export function DesktopWorkspaceShell(props: {
                     Close tab
                   </button>
                 </div>
-              )
-            ) : isSiteTabPath(tabPath) ? (
-              groupSiteRoot ? (
-                <Suspense fallback={<PanelLoading label="site" />}>
-                  <LazySitePreviewPage
-                    workspaceId={workspaceId}
-                    siteRoot={groupSiteRoot}
-                    sharedView={!!shareView}
-                    onOpenPath={openFile}
-                    {...(shareView
-                      ? {}
-                      : { onShareSite: setShareTarget })}
-                  />
-                </Suspense>
-              ) : (
-                <InvalidSitePathFallback
-                  activeTab={tabPath}
-                  onClose={() => {
-                    if (tabPath) closeFileTab(editorGroup.id, tabPath);
-                  }}
-                />
               )
             ) : tabPath && tab && editorCallbacks ? (
               <FileInspector

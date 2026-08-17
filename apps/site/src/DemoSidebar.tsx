@@ -9,7 +9,6 @@ import { Explorer } from "../../desktop/src/renderer/workbench/Explorer";
 import { GraphView } from "../../desktop/src/renderer/workbench/GraphView";
 import { SearchView } from "../../desktop/src/renderer/workbench/SearchView";
 import { SidePanel } from "../../desktop/src/renderer/workbench/SidePanel";
-import { SitesView } from "../../desktop/src/renderer/workbench/SitesView";
 import { useWorkspaceSearch } from "../../desktop/src/renderer/workbench/useWorkspaceSearch";
 import type { ViewId } from "../../desktop/src/renderer/workbench/workbenchState";
 import {
@@ -227,13 +226,6 @@ export function DemoSidebar(props: {
           activePath={props.activePath}
           refreshKey={refreshKey}
           onOpenPath={open}
-        />
-      ) : props.activePanel === "sites" ? (
-        <SitesView
-          workspaceId="marketing-demo"
-          files={files}
-          refreshKey={props.documents.length}
-          onOpenPath={() => open("projects/launch-plan.md")}
         />
       ) : (
         <EngineHistoryView

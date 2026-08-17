@@ -4,10 +4,10 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  invokeSiteSdkHost,
-  siteSdkWorkspacePath,
-  type SiteSdkSearchStarter,
-} from "./siteSdkHost";
+  invokeWorkspaceSdkHost,
+  sdkWorkspacePath,
+  type SdkSearchStarter,
+} from "./workspaceSdkHost";
 import { createTestScratch } from "./testTemp";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 
@@ -47,39 +47,20 @@ function seedDatabase(path: string, marker: string): void {
   }
 }
 
-describe("site SDK host authority", () => {
-  it("maps shared site paths into the derived mount", () => {
-    expect(siteSdkWorkspacePath("shared-with-me/Plan", "notes/today.md")).toBe(
-      "shared-with-me/Plan/notes/today.md",
-    );
-    expect(() => siteSdkWorkspacePath("shared-with-me/Plan", "../secret.txt")).toThrow(
-      /Invalid read path/,
-    );
-  });
-
-  // Theme tokens are a plugin panel surface. A site asking gets told that,
-  // not a generic "unsupported method".
-  it("refuses ui.theme by name", async () => {
-    const root = await workspace();
-    const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };
-    await expect(invokeSiteSdkHost(context, "ui.theme", undefined)).rejects.toThrow(
-      /ui.theme is unavailable to a site/,
-    );
-  });
-
+describe("workspace SDK host authority", () => {
   it("reads, lists, and writes through owned workspace authority", async () => {
     const root = await workspace();
-    const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };
-    await expect(invokeSiteSdkHost(context, "files.read", { path: "notes/today.md" })).resolves.toMatchObject({
+    const context = { workspaceRoot: root, writable: true, author: USER_AUTHOR };
+    await expect(invokeWorkspaceSdkHost(context, "files.read", { path: "notes/today.md" })).resolves.toMatchObject({
       text: "hello from dohc\n",
     });
-    await expect(invokeSiteSdkHost(context, "files.list", { path: "notes" })).resolves.toContainEqual(
+    await expect(invokeWorkspaceSdkHost(context, "files.list", { path: "notes" })).resolves.toContainEqual(
       expect.objectContaining({ path: "notes/today.md", name: "today.md" }),
     );
-    await expect(invokeSiteSdkHost(context, "files.list", { path: "." })).resolves.toContainEqual(
+    await expect(invokeWorkspaceSdkHost(context, "files.list", { path: "." })).resolves.toContainEqual(
       expect.objectContaining({ path: "notes/today.md", name: "today.md" }),
     );
-    await invokeSiteSdkHost(context, "files.write", {
+    await invokeWorkspaceSdkHost(context, "files.write", {
       path: "notes/from-site.txt",
       text: "written by site\n",
     });
@@ -90,14 +71,14 @@ describe("site SDK host authority", () => {
 
   it("atomically honors overwrite false under concurrent writes", async () => {
     const root = await workspace();
-    const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };
+    const context = { workspaceRoot: root, writable: true, author: USER_AUTHOR };
     const attempts = await Promise.allSettled([
-      invokeSiteSdkHost(context, "files.write", {
+      invokeWorkspaceSdkHost(context, "files.write", {
         path: "notes/exclusive.txt",
         text: "first",
         overwrite: false,
       }),
-      invokeSiteSdkHost(context, "files.write", {
+      invokeWorkspaceSdkHost(context, "files.write", {
         path: "notes/exclusive.txt",
         text: "second",
         overwrite: false,
@@ -116,10 +97,10 @@ describe("site SDK host authority", () => {
 
   it("rejects raw live-document writes without changing the document", async () => {
     const root = await workspace();
-    const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };
+    const context = { workspaceRoot: root, writable: true, author: USER_AUTHOR };
 
     await expect(
-      invokeSiteSdkHost(context, "files.write", {
+      invokeWorkspaceSdkHost(context, "files.write", {
         path: "notes/today.md",
         text: "replacement that bypasses Y.Doc\n",
       }),
@@ -129,14 +110,14 @@ describe("site SDK host authority", () => {
     );
 
     await expect(
-      invokeSiteSdkHost(context, "files.write", {
+      invokeWorkspaceSdkHost(context, "files.write", {
         path: "notes/also-canonical.MARKDOWN",
         text: "not written\n",
       }),
     ).rejects.toThrow(/live documents/i);
 
     await expect(
-      invokeSiteSdkHost(context, "files.write", {
+      invokeWorkspaceSdkHost(context, "files.write", {
         path: "notes/not-live.mdx",
         text: "ordinary source\n",
       }),
@@ -148,17 +129,17 @@ describe("site SDK host authority", () => {
 
   it("rejects site writes under the workspace-root plugins tree", async () => {
     const root = await workspace();
-    const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };
+    const context = { workspaceRoot: root, writable: true, author: USER_AUTHOR };
 
     await expect(
-      invokeSiteSdkHost(context, "files.write", {
+      invokeWorkspaceSdkHost(context, "files.write", {
         path: "plugins/example/index.txt",
         text: "full-trust source\n",
       }),
     ).rejects.toThrow(/cannot write plugin source.*plugins\/.*full-trust/i);
 
     await expect(
-      invokeSiteSdkHost(context, "files.write", {
+      invokeWorkspaceSdkHost(context, "files.write", {
         path: "notes/todo.txt",
         text: "ordinary text\n",
       }),
@@ -168,7 +149,7 @@ describe("site SDK host authority", () => {
     );
 
     await expect(
-      invokeSiteSdkHost(context, "files.write", {
+      invokeWorkspaceSdkHost(context, "files.write", {
         path: "src/plugins/readme.txt",
         text: "nested folder\n",
       }),
@@ -180,7 +161,7 @@ describe("site SDK host authority", () => {
 
   it("rejects site writes through a real directory alias into the plugin tree", async () => {
     const root = await workspace();
-    const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };
+    const context = { workspaceRoot: root, writable: true, author: USER_AUTHOR };
     await mkdir(join(root, "plugins", "example"), { recursive: true });
     await symlink(
       join(root, "plugins"),
@@ -189,7 +170,7 @@ describe("site SDK host authority", () => {
     );
 
     await expect(
-      invokeSiteSdkHost(context, "files.write", {
+      invokeWorkspaceSdkHost(context, "files.write", {
         path: "plugin-alias/example/index.txt",
         text: "full-trust source\n",
       }),
@@ -203,11 +184,11 @@ describe("site SDK host authority", () => {
     "rejects a Windows case alias for the workspace plugin tree",
     async () => {
       const root = await workspace();
-      const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };
+      const context = { workspaceRoot: root, writable: true, author: USER_AUTHOR };
       await mkdir(join(root, "plugins", "example"), { recursive: true });
 
       await expect(
-        invokeSiteSdkHost(context, "files.write", {
+        invokeWorkspaceSdkHost(context, "files.write", {
           path: "Plugins/example/index.txt",
           text: "full-trust source\n",
         }),
@@ -217,7 +198,7 @@ describe("site SDK host authority", () => {
 
   it("rejects raw database writes and requires structured databases.edit", async () => {
     const root = await workspace();
-    const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };
+    const context = { workspaceRoot: root, writable: true, author: USER_AUTHOR };
 
     for (const path of [
       "data/app.db",
@@ -234,7 +215,7 @@ describe("site SDK host authority", () => {
       "data/app.sqlite3-journal",
     ]) {
       await expect(
-        invokeSiteSdkHost(context, "files.write", {
+        invokeWorkspaceSdkHost(context, "files.write", {
           path,
           text: "not sqlite bytes",
         }),
@@ -249,13 +230,12 @@ describe("site SDK host authority", () => {
     seedDatabase(join(root, "data", "app.sqlite"), "start");
     const context = {
       workspaceRoot: root,
-      scopeRoot: null,
       writable: true,
       author: USER_AUTHOR,
       now: () => 1_700_000_000_000,
       createId: () => "op_site_0001",
     };
-    await invokeSiteSdkHost(context, "databases.edit", {
+    await invokeWorkspaceSdkHost(context, "databases.edit", {
       path: "data/app.sqlite",
       edit: { table: "sentinel", op: "update", pkColumn: "id", rowId: "1", payload: { marker: "edited" } },
     });
@@ -268,59 +248,56 @@ describe("site SDK host authority", () => {
     });
   });
 
-  it("keeps a mounted shared site read-only and hides paths outside its mount", async () => {
+  it("refuses every write when the context has no write authority", async () => {
     const root = await workspace();
-    const outsideToken = "outside-mount-search-sentinel-7f32";
-    await writeFile(join(root, "outside-secret.txt"), outsideToken);
-    seedDatabase(join(root, "outside-secret.sqlite"), "outside-database-sentinel");
-    await mkdir(join(root, "shared-with-me", "Plan", "notes"), { recursive: true });
-    await writeFile(join(root, "shared-with-me", "Plan", "notes", "shared.md"), "shared\n");
+    await mkdir(join(root, "notes"), { recursive: true });
+    await writeFile(join(root, "notes", "today.md"), "today\n");
+    seedDatabase(join(root, "tasks.sqlite"), "task-sentinel");
     const context = {
       workspaceRoot: root,
-      scopeRoot: "shared-with-me/Plan",
       writable: false,
       author: USER_AUTHOR,
     };
-    await expect(invokeSiteSdkHost(context, "capabilities")).resolves.toMatchObject({
+    // Reads stay available; only the write half is withheld.
+    await expect(invokeWorkspaceSdkHost(context, "capabilities")).resolves.toMatchObject({
       files: { read: true, list: true, write: false },
       workspace: { search: true },
       databases: { read: true, edit: false },
     });
-    await expect(invokeSiteSdkHost(context, "files.list")).resolves.toEqual([
-      expect.objectContaining({ path: "notes/shared.md" }),
-    ]);
     await expect(
-      invokeSiteSdkHost(context, "files.read", { path: "outside-secret.txt" }),
-    ).rejects.toThrow();
+      invokeWorkspaceSdkHost(context, "files.read", { path: "notes/today.md" }),
+    ).resolves.toBeDefined();
+    // MUTATION (write authority): drop either gate and a read-only surface
+    // writes the workspace.
     await expect(
-      invokeSiteSdkHost(context, "workspace.search", { query: outsideToken }),
-    ).resolves.toEqual([]);
+      invokeWorkspaceSdkHost(context, "files.write", { path: "notes/no.md", text: "no" }),
+    ).rejects.toThrow(/read-only workspace authority/);
     await expect(
-      invokeSiteSdkHost(context, "databases.read", { path: "outside-secret.sqlite" }),
-    ).rejects.toThrow();
-    await expect(
-      invokeSiteSdkHost(context, "files.write", { path: "notes/no.md", text: "no" }),
-    ).rejects.toThrow(/read-only collaboration authority/);
+      invokeWorkspaceSdkHost(context, "databases.edit", {
+        path: "tasks.sqlite",
+        edits: [{ kind: "insert", table: "items", values: { title: "no" } }],
+      }),
+    ).rejects.toThrow(/read-only workspace authority/);
   });
 
-  it("cancels search when its preview authority is already gone", async () => {
+  it("cancels search when its surface authority is already gone", async () => {
     const root = await workspace();
     const controller = new AbortController();
     controller.abort();
     await expect(
-      invokeSiteSdkHost(
-        { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR, signal: controller.signal },
+      invokeWorkspaceSdkHost(
+        { workspaceRoot: root, writable: true, author: USER_AUTHOR, signal: controller.signal },
         "workspace.search",
         { query: "hello" },
       ),
-    ).rejects.toThrow(/preview is no longer active/i);
+    ).rejects.toThrow(/surface that owns this SDK request is no longer active/i);
   });
 
   it("cancels an in-flight file write when preview authority is revoked", async () => {
     const root = await workspace();
     const controller = new AbortController();
-    const write = invokeSiteSdkHost(
-      { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR, signal: controller.signal },
+    const write = invokeWorkspaceSdkHost(
+      { workspaceRoot: root, writable: true, author: USER_AUTHOR, signal: controller.signal },
       "files.write",
       { path: "notes/stale.txt", text: "must not be written" },
     );
@@ -337,15 +314,15 @@ describe("site SDK host authority", () => {
     await writeFile(join(root, "notes", "[draft].txt"), "literal glob sentinel\n");
 
     await expect(
-      invokeSiteSdkHost(
-        { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR },
+      invokeWorkspaceSdkHost(
+        { workspaceRoot: root, writable: true, author: USER_AUTHOR },
         "workspace.search",
         { query: "literal glob sentinel", path: "notes/[draft].txt" },
       ),
     ).resolves.toContainEqual(expect.objectContaining({ path: "notes/[draft].txt" }));
   });
 
-  it("kills an in-flight search when preview authority is revoked", async () => {
+  it("kills an in-flight search when surface authority is revoked", async () => {
     const root = await workspace();
     const controller = new AbortController();
     let signalStarted: (() => void) | undefined;
@@ -353,7 +330,7 @@ describe("site SDK host authority", () => {
       signalStarted = resolve;
     });
     let killCount = 0;
-    const searchStarter: SiteSdkSearchStarter = ({ searchId }) => {
+    const searchStarter: SdkSearchStarter = ({ searchId }) => {
       signalStarted?.();
       return {
         searchId,
@@ -362,11 +339,10 @@ describe("site SDK host authority", () => {
         },
       };
     };
-    const search = invokeSiteSdkHost(
+    const search = invokeWorkspaceSdkHost(
       {
         workspaceRoot: root,
-        scopeRoot: null,
-        writable: true,
+          writable: true,
         author: USER_AUTHOR,
         signal: controller.signal,
         searchStarter,
@@ -377,15 +353,15 @@ describe("site SDK host authority", () => {
 
     await started;
     controller.abort();
-    await expect(search).rejects.toThrow(/preview is no longer active/i);
+    await expect(search).rejects.toThrow(/surface that owns this SDK request is no longer active/i);
     expect(killCount).toBe(1);
   });
 
   it("rejects multi-operation database edits until they can be transactional", async () => {
     const root = await workspace();
     await expect(
-      invokeSiteSdkHost(
-        { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR },
+      invokeWorkspaceSdkHost(
+        { workspaceRoot: root, writable: true, author: USER_AUTHOR },
         "databases.edit",
         {
           path: "missing.sqlite",

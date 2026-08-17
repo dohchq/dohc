@@ -7,7 +7,6 @@ import {
   Folder,
   FolderPlus,
   FolderOpen,
-  Globe2,
   LayoutGrid,
   Pin,
   RefreshCw,
@@ -47,14 +46,12 @@ import {
   isPluginDetailsTabPath,
   isPluginPanelTabPath,
   isPluginWebAppTabPath,
-  isSiteTabPath,
   isVersionCompareTabPath,
   isVirtualTabPath,
   parseHistoryDiffTabPath,
   parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
   parsePluginWebAppTabPath,
-  parseSiteTabPath,
 } from "./workbenchState";
 
 // The explorer: a real nested tree over the flat (files, folders) lists with
@@ -201,16 +198,12 @@ export function editorTitle(path: string): string {
   if (isPluginDetailsTabPath(path)) {
     return `Plugin: ${parsePluginDetailsTabPath(path) ?? "details"}`;
   }
-  if (isSiteTabPath(path)) return `Site: ${parseSiteTabPath(path) ?? "preview"}`;
   if (isVersionCompareTabPath(path)) return "Compare with Main";
   return leafOf(path);
 }
 
 function OpenEditorIcon(props: { path: string; kind: WorkspaceFileEntry["kind"] | null }) {
   if (isVirtualTabPath(props.path)) {
-    if (isSiteTabPath(props.path)) {
-      return <Globe2 size={13} aria-hidden className="shrink-0" />;
-    }
     return <LayoutGrid size={13} aria-hidden className="shrink-0" />;
   }
   return <FileKindIcon kind={props.kind ?? "file"} />;
