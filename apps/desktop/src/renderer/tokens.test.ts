@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import indexHtml from "./index.html?raw";
 import stylesCss from "./styles.css?raw";
-import { palette, type ThemeTokens } from "./tokens";
+import { CSS_TOKEN_NAMES, fonts, palette, type ThemeTokens } from "./tokens";
 
 // THE duplication guard for the design tokens: styles.css (static, first
 // paint) and tokens.ts (window chrome) deliberately carry the same values;
@@ -26,23 +26,14 @@ function tokenBlock(selector: string): Record<string, string> {
   return tokens;
 }
 
-// tokens.ts key → the --dohc-* custom property name in styles.css.
-const CSS_NAME: Record<keyof ThemeTokens, string> = {
-  bg: "bg",
-  panel: "panel",
-  panel2: "panel-2",
-  line: "line",
-  ink: "ink",
-  muted: "muted",
-  subtle: "subtle",
-  accent: "accent",
-  agent: "agent",
-  match: "match",
-  success: "success",
-  warning: "warning",
-  danger: "danger",
-  selection: "selection",
-};
+// tokens.ts key → the --dohc-* suffix in styles.css, derived from the one
+// name map tokens.ts exports so the map itself cannot drift from the test.
+const CSS_NAME = Object.fromEntries(
+  Object.entries(CSS_TOKEN_NAMES).map(([key, name]) => [
+    key,
+    name.replace(/^--dohc-/, ""),
+  ]),
+) as Record<keyof ThemeTokens, string>;
 
 describe("tokens.ts ⟷ styles.css sync", () => {
   const blocks = {
@@ -64,6 +55,18 @@ describe("tokens.ts ⟷ styles.css sync", () => {
       );
     });
   }
+
+  // The plugin panel theme bridge sends these stacks to another origin, so
+  // they get the same guard the colors have.
+  it("font stacks match styles.css exactly", () => {
+    const open = stylesCss.indexOf("{", stylesCss.search(/^:root\s*\{/m));
+    const body = stylesCss.slice(open + 1, stylesCss.indexOf("}", open));
+    const declared: Record<string, string> = {};
+    for (const match of body.matchAll(/(--font-[a-z]+):\s*([^;]+);/g)) {
+      declared[match[1]] = match[2].trim();
+    }
+    expect(declared).toEqual({ ...fonts });
+  });
 });
 
 // index.html's inline first-paint block is the THIRD copy of bg/ink (it

@@ -5,7 +5,12 @@ import {
   createDohcClient,
   createPostMessageTransport,
   DOHC_SDK_PROTOCOL,
+  DOHC_THEME_PROTOCOL,
+  applyDohcTheme,
+  isDohcTheme,
+  isDohcThemeMessage,
   type DohcDatabaseEditRequest,
+  type DohcTheme,
 } from ".";
 
 function createWindowHarness() {
@@ -1002,5 +1007,167 @@ describe("@dohc/sdk", () => {
     await expect(unsupported.files.watch("notes", () => undefined)).rejects.toMatchObject({
       code: DohcSdkErrorCodes.subscriptionsUnsupported,
     });
+  });
+});
+
+interface FakeRoot {
+  element: HTMLElement;
+  properties: Record<string, string>;
+  dataset: Record<string, string>;
+}
+
+function createFakeRoot(): FakeRoot {
+  const properties: Record<string, string> = {};
+  const dataset: Record<string, string> = {};
+  const element = {
+    style: {
+      setProperty(name: string, value: string) {
+        properties[name] = value;
+      },
+    },
+    dataset,
+  } as unknown as HTMLElement;
+  return { element, properties, dataset };
+}
+
+const LIGHT: DohcTheme = {
+  mode: "light",
+  density: "comfortable",
+  reduceMotion: false,
+  tokens: { "--dohc-ink": "#1c1b18", "--font-sans": "InterVariable" },
+};
+
+const DARK: DohcTheme = {
+  mode: "dark",
+  density: "compact",
+  reduceMotion: true,
+  tokens: { "--dohc-ink": "#f6f4ee", "--font-sans": "InterVariable" },
+};
+
+describe("dohc theme", () => {
+  it("writes tokens and the attributes dohc's own stylesheet switches on", () => {
+    const root = createFakeRoot();
+    applyDohcTheme(DARK, root.element);
+    expect(root.properties["--dohc-ink"]).toBe("#f6f4ee");
+    expect(root.dataset.theme).toBe("dark");
+    expect(root.dataset.density).toBe("compact");
+    expect(root.dataset.reduceMotion).toBe("true");
+  });
+
+  // Token names are written into a style declaration, so a name that is not
+  // a custom property must never get that far.
+  it("refuses a payload whose token name is not a custom property", () => {
+    expect(isDohcTheme({ ...LIGHT, tokens: { "--dohc-ink": "#000" } })).toBe(true);
+    expect(isDohcTheme({ ...LIGHT, tokens: { color: "red" } })).toBe(false);
+    expect(
+      isDohcTheme({ ...LIGHT, tokens: { "--x: red; background": "url(x)" } }),
+    ).toBe(false);
+    expect(isDohcTheme({ ...LIGHT, tokens: { "--dohc-ink": 1 } })).toBe(false);
+    expect(isDohcTheme({ ...LIGHT, mode: "sepia" })).toBe(false);
+    expect(isDohcThemeMessage({ protocol: "dohc:sdk:v1", theme: LIGHT })).toBe(
+      false,
+    );
+    expect(
+      isDohcThemeMessage({ protocol: DOHC_THEME_PROTOCOL, theme: LIGHT }),
+    ).toBe(true);
+  });
+
+  it("reads the current theme without asking for a capability", async () => {
+    const calls: string[] = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method) {
+          calls.push(method);
+          return LIGHT;
+        },
+      },
+    });
+    await expect(client.ui.theme()).resolves.toEqual(LIGHT);
+    // Styling data grants nothing, so it must not be gated behind one.
+    expect(calls).toEqual(["ui.theme"]);
+  });
+
+  it("rejects a theme response that is not a theme", async () => {
+    const client = createDohcClient({
+      transport: {
+        async request() {
+          return { mode: "light" };
+        },
+      },
+    });
+    await expect(client.ui.theme()).rejects.toMatchObject({
+      code: DohcSdkErrorCodes.badResponse,
+    });
+  });
+
+  it("applies the current theme and then follows the user's changes", async () => {
+    const harness = createWindowHarness();
+    const root = createFakeRoot();
+    const client = createDohcClient({
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      transport: {
+        async request() {
+          return LIGHT;
+        },
+      },
+    });
+
+    const stop = await client.ui.applyTheme({
+      root: root.element,
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      targetOrigin: "https://host.dohc.test",
+    });
+    expect(root.dataset.theme).toBe("light");
+    expect(root.properties["--dohc-ink"]).toBe("#1c1b18");
+
+    harness.dispatch({ protocol: DOHC_THEME_PROTOCOL, theme: DARK });
+    expect(root.dataset.theme).toBe("dark");
+    expect(root.properties["--dohc-ink"]).toBe("#f6f4ee");
+
+    // A push from anywhere but the host is not a theme change.
+    harness.dispatch(
+      { protocol: DOHC_THEME_PROTOCOL, theme: LIGHT },
+      { origin: "https://evil.test" },
+    );
+    expect(root.dataset.theme).toBe("dark");
+
+    stop();
+    harness.dispatch({ protocol: DOHC_THEME_PROTOCOL, theme: LIGHT });
+    expect(root.dataset.theme).toBe("dark");
+  });
+
+  // The listener goes on before the read, so the answer to "what is the
+  // theme now" cannot arrive late and undo a change that already landed.
+  it("keeps a change that lands while the first read is still running", async () => {
+    const harness = createWindowHarness();
+    const root = createFakeRoot();
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client = createDohcClient({
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      transport: {
+        async request() {
+          await pending;
+          return LIGHT;
+        },
+      },
+    });
+
+    const applying = client.ui.applyTheme({
+      root: root.element,
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      targetOrigin: "https://host.dohc.test",
+    });
+    harness.dispatch({ protocol: DOHC_THEME_PROTOCOL, theme: DARK });
+    expect(root.dataset.theme).toBe("dark");
+    release();
+    await applying;
+    expect(root.dataset.theme).toBe("dark");
   });
 });

@@ -11,6 +11,51 @@ export const DohcSdkErrorCodes = {
     subscriptionsUnsupported: "DOHC_SUBSCRIPTIONS_UNSUPPORTED",
     responseTruncated: "DOHC_RESPONSE_TRUNCATED",
 };
+/**
+ * The envelope dohc pushes when its appearance changes. Theme is styling
+ * data: it carries no authority, gates on no capability, and a panel that
+ * ignores these messages behaves exactly as it did before.
+ */
+export const DOHC_THEME_PROTOCOL = "dohc:theme:v1";
+export function isDohcTheme(value) {
+    if (!value || typeof value !== "object")
+        return false;
+    const theme = value;
+    if (theme.mode !== "light" && theme.mode !== "dark")
+        return false;
+    if (theme.density !== "comfortable" && theme.density !== "compact")
+        return false;
+    if (typeof theme.reduceMotion !== "boolean")
+        return false;
+    if (!theme.tokens || typeof theme.tokens !== "object")
+        return false;
+    // A token whose name is not a custom property would be written straight
+    // into a style attribute, so the shape is checked, not trusted.
+    return Object.entries(theme.tokens).every(([name, tokenValue]) => typeof tokenValue === "string" && /^--[A-Za-z0-9-]+$/.test(name));
+}
+export function isDohcThemeMessage(value) {
+    if (!value || typeof value !== "object")
+        return false;
+    const message = value;
+    return message.protocol === DOHC_THEME_PROTOCOL && isDohcTheme(message.theme);
+}
+/**
+ * Writes one theme onto an element, normally the guest document's <html>:
+ * every token as a custom property, plus the three attributes dohc's own
+ * stylesheet switches on, so a panel can write `[data-theme='dark']` rules
+ * the same way dohc does.
+ */
+export function applyDohcTheme(theme, root) {
+    if (!isDohcTheme(theme)) {
+        throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "applyDohcTheme needs a dohc theme payload.");
+    }
+    for (const [name, value] of Object.entries(theme.tokens)) {
+        root.style.setProperty(name, value);
+    }
+    root.dataset.theme = theme.mode;
+    root.dataset.density = theme.density;
+    root.dataset.reduceMotion = String(theme.reduceMotion);
+}
 export class DohcSdkError extends Error {
     code;
     constructor(code, message) {
@@ -616,6 +661,84 @@ export function createDohcClient(options = {}) {
                 assertWebAppInstance(webAppId, instanceKey);
                 await requireCapability("ui", "open", requestOptions);
                 return request("ui.openWebApp", { webAppId, instanceKey }, requestOptions);
+            },
+            /**
+             * dohc's design tokens as they are on screen right now. Read this to
+             * color something CSS cannot reach — a canvas, a chart, an SVG fill.
+             * To style a panel, prefer `applyTheme`.
+             *
+             * Theme is styling data, so this gates on no capability.
+             */
+            theme: async (requestOptions) => {
+                assertRequestOptions(requestOptions);
+                const result = await request("ui.theme", undefined, requestOptions);
+                if (!isDohcTheme(result)) {
+                    throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned an invalid theme response.");
+                }
+                return result;
+            },
+            /**
+             * The one line that makes a panel look native: it writes dohc's tokens
+             * onto this document and keeps writing them when the user changes
+             * theme, density, or reduced motion. Panel CSS then uses the same
+             * names dohc uses — `color: var(--dohc-ink)`.
+             *
+             * Returns a function that stops following. A panel that never calls
+             * this is unaffected; the host's messages are simply ignored.
+             */
+            applyTheme: async (applyOptions = {}) => {
+                const currentWindow = applyOptions.currentWindow ??
+                    options.currentWindow ??
+                    (typeof window === "undefined" ? undefined : window);
+                if (!currentWindow) {
+                    throw new DohcSdkError(DohcSdkErrorCodes.hostUnavailable, "dohc SDK is not running in a browser window.");
+                }
+                const root = applyOptions.root ?? currentWindow.document.documentElement;
+                const hostOrigin = applyOptions.targetOrigin ??
+                    options.targetOrigin ??
+                    targetOriginFromLocation(currentWindow);
+                if (!hostOrigin) {
+                    throw new DohcSdkError(DohcSdkErrorCodes.hostMissingOrigin, "No dohc host origin is available for this panel.");
+                }
+                const hostWindow = applyOptions.targetWindow ??
+                    options.targetWindow ??
+                    (currentWindow.parent && currentWindow.parent !== currentWindow
+                        ? currentWindow.parent
+                        : undefined);
+                // The listener goes on before the first read, so a theme change that
+                // lands mid-read is applied rather than lost — and, once one has
+                // landed, the older read result is not allowed to overwrite it.
+                let pushed = false;
+                const onMessage = (event) => {
+                    if (hostWindow && event.source !== hostWindow)
+                        return;
+                    if (!responseOriginMatches(event.origin, hostOrigin))
+                        return;
+                    if (!isDohcThemeMessage(event.data))
+                        return;
+                    pushed = true;
+                    applyDohcTheme(event.data.theme, root);
+                };
+                currentWindow.addEventListener("message", onMessage);
+                const stop = () => currentWindow.removeEventListener("message", onMessage);
+                try {
+                    const theme = await request("ui.theme", undefined, {
+                        ...(applyOptions.signal ? { signal: applyOptions.signal } : {}),
+                        ...(applyOptions.timeoutMs === undefined
+                            ? {}
+                            : { timeoutMs: applyOptions.timeoutMs }),
+                    });
+                    if (!isDohcTheme(theme)) {
+                        throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned an invalid theme response.");
+                    }
+                    if (!pushed)
+                        applyDohcTheme(theme, root);
+                }
+                catch (error) {
+                    stop();
+                    throw error;
+                }
+                return stop;
             },
         },
         collections: {
