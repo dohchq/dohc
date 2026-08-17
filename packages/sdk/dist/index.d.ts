@@ -208,6 +208,16 @@ export declare function createDohcClient(options?: CreateDohcClientOptions): {
     };
     ui: {
         open: (target: string, options?: DohcUiOpenOptions, requestOptions?: DohcRequestOptions) => Promise<unknown>;
+        /**
+         * Opens one instance of this plugin's own per-instance web app in its
+         * own tab. `instanceKey` names the thing the tab shows — a site root,
+         * a record id, whatever the plugin serves — and comes back to the
+         * plugin's `startWebApp`, which returns the origin for that instance.
+         *
+         * Only a panel may call this: opening a tab needs a renderer. The web
+         * app must be declared in the manifest with `"instanced": true`.
+         */
+        openWebApp: (webAppId: string, instanceKey: string, requestOptions?: DohcRequestOptions) => Promise<unknown>;
     };
     collections: {
         list: (name: string, params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
@@ -253,6 +263,16 @@ export declare const dohc: {
     };
     ui: {
         open: (target: string, options?: DohcUiOpenOptions, requestOptions?: DohcRequestOptions) => Promise<unknown>;
+        /**
+         * Opens one instance of this plugin's own per-instance web app in its
+         * own tab. `instanceKey` names the thing the tab shows — a site root,
+         * a record id, whatever the plugin serves — and comes back to the
+         * plugin's `startWebApp`, which returns the origin for that instance.
+         *
+         * Only a panel may call this: opening a tab needs a renderer. The web
+         * app must be declared in the manifest with `"instanced": true`.
+         */
+        openWebApp: (webAppId: string, instanceKey: string, requestOptions?: DohcRequestOptions) => Promise<unknown>;
     };
     collections: {
         list: (name: string, params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;

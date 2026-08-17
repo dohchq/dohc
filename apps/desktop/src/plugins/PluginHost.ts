@@ -27,6 +27,10 @@ import {
   type PluginTransport,
   type SdkRequestParams,
 } from "./pluginHostProtocol";
+import {
+  MAX_PLUGIN_WEB_APP_TITLE_CHARS,
+  requireDeclaredWebApp,
+} from "./pluginWebAppInstances";
 import type { PluginSettingValue } from "./pluginManifestSchema";
 import { raceWithTimeout } from "./pluginShared";
 
@@ -343,6 +347,7 @@ export class PluginHost {
   async startWebApp(
     pluginId: string,
     webAppId: string,
+    instanceKey: string | null,
   ): Promise<PluginStartWebAppResult> {
     const record = this.plugins.get(pluginId);
     const spawn = record?.current;
@@ -355,16 +360,18 @@ export class PluginHost {
     if (record.status === "starting") {
       throw new Error(`Plugin "${pluginId}" is still starting.`);
     }
-    if (!record.manifest.webApps?.some((webApp) => webApp.id === webAppId)) {
-      throw new Error(
-        `Plugin "${pluginId}" does not declare web app "${webAppId}".`,
-      );
-    }
+    requireDeclaredWebApp(
+      pluginId,
+      record.manifest.webApps,
+      webAppId,
+      instanceKey,
+    );
     const timeoutMs =
       this.options.webAppStartTimeoutMs ?? PLUGIN_WEB_APP_START_TIMEOUT_MS;
     const result = await raceWithTimeout(
       spawn.transport.request(PLUGIN_HOST_METHODS.startWebApp, {
         webAppId,
+        instanceKey,
       } satisfies PluginStartWebAppParams),
       timeoutMs,
       `Plugin "${pluginId}" web app "${webAppId}" did not start within ${timeoutMs} ms.`,
@@ -380,7 +387,20 @@ export class PluginHost {
         `Plugin "${pluginId}" web app "${webAppId}" returned an invalid start result: "url" must be a non-empty string.`,
       );
     }
-    return { url: result.url };
+    const title = "title" in result ? result.title : undefined;
+    if (title !== undefined) {
+      if (typeof title !== "string" || title.length === 0) {
+        throw new Error(
+          `Plugin "${pluginId}" web app "${webAppId}" returned an invalid start result: "title" must be a non-empty string when present.`,
+        );
+      }
+      if (title.length > MAX_PLUGIN_WEB_APP_TITLE_CHARS) {
+        throw new Error(
+          `Plugin "${pluginId}" web app "${webAppId}" returned a ${title.length}-character title, past the limit of ${MAX_PLUGIN_WEB_APP_TITLE_CHARS} characters for a web app title.`,
+        );
+      }
+    }
+    return { url: result.url, ...(title === undefined ? {} : { title }) };
   }
 
   /**
@@ -393,18 +413,24 @@ export class PluginHost {
    * wrapper's whole process tree down with the spawn, so its server and the
    * session are already gone.
    */
-  async stopWebApp(pluginId: string, webAppId: string): Promise<void> {
+  async stopWebApp(
+    pluginId: string,
+    webAppId: string,
+    instanceKey: string | null,
+  ): Promise<void> {
     const record = this.plugins.get(pluginId);
     const spawn = record?.current;
     if (!record || !spawn?.transport || spawn.stopping) return;
-    if (!record.manifest.webApps?.some((webApp) => webApp.id === webAppId)) {
-      throw new Error(
-        `Plugin "${pluginId}" does not declare web app "${webAppId}".`,
-      );
-    }
+    requireDeclaredWebApp(
+      pluginId,
+      record.manifest.webApps,
+      webAppId,
+      instanceKey,
+    );
     await raceWithTimeout(
       spawn.transport.request(PLUGIN_HOST_METHODS.stopWebApp, {
         webAppId,
+        instanceKey,
       } satisfies PluginStopWebAppParams),
       PLUGIN_WEB_APP_STOP_TIMEOUT_MS,
       `Plugin "${pluginId}" web app "${webAppId}" did not stop within ${PLUGIN_WEB_APP_STOP_TIMEOUT_MS} ms.`,

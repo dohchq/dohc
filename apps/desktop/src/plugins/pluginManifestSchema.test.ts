@@ -164,7 +164,30 @@ describe("DohcPluginManifest", () => {
       webApps: [{ id: "app", title: "T3 Code" }],
     });
     if (!result.success) throw new Error(result.error.message);
-    expect(result.data.webApps).toEqual([{ id: "app", title: "T3 Code" }]);
+    // A web app opens one tab unless it says otherwise, so a manifest that
+    // never heard of instances parses into the shape it always meant.
+    expect(result.data.webApps).toEqual([
+      { id: "app", title: "T3 Code", instanced: false },
+    ]);
+  });
+
+  it("accepts a web app that opens one tab per instance", () => {
+    const result = DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      webApps: [{ id: "preview", title: "Preview", instanced: true }],
+    });
+    if (!result.success) throw new Error(result.error.message);
+    expect(result.data.webApps).toEqual([
+      { id: "preview", title: "Preview", instanced: true },
+    ]);
+  });
+
+  it("rejects a non-boolean instanced flag", () => {
+    const result = DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      webApps: [{ id: "preview", title: "Preview", instanced: "yes" }],
+    });
+    if (result.success) throw new Error("expected a non-boolean instanced to reject");
   });
 
   it("rejects duplicate web app ids", () => {

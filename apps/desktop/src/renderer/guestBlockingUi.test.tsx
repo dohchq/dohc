@@ -75,6 +75,7 @@ function Shell(props: { children?: React.ReactNode }) {
         workspaceId="ws-1"
         pluginId="t3-code"
         webAppId="app"
+        instanceKey={null}
         hiddenByOverlay={overlayOpen}
       />
       {props.children}

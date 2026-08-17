@@ -339,6 +339,13 @@ export interface PluginActivateContext {
  * fragment, so it crosses process boundaries in memory only — never logs. */
 export interface PluginWebAppStart {
     url: string;
+    /**
+     * What to call this instance's tab. Every instance of one web app shares
+     * the manifest title, so a plugin that opens a tab per site names each one
+     * here. Omit it to use the manifest title. Titles longer than 120
+     * characters are refused.
+     */
+    title?: string;
 }
 export interface PluginHandler {
     activate(ctx: PluginActivateContext): Promise<void> | void;
@@ -348,8 +355,16 @@ export interface PluginHandler {
      * the user opens the web app's tab, never during activate — a wrapper's
      * server start is exactly the long-running readiness work activation must
      * not await.
+     *
+     * `instanceKey` is the instance the user opened, for a web app the manifest
+     * marks `"instanced": true`, and null for one that opens a single app. dohc
+     * holds no opinion about what an instance is: the key is whatever the
+     * plugin's panel named when it opened the tab. Each instance is its own tab
+     * over its own origin, so a handler may run one server per instance or one
+     * server serving all of them — but it must return the URL that shows this
+     * instance, because the guest is locked to that URL's origin.
      */
-    startWebApp?(webAppId: string): Promise<PluginWebAppStart> | PluginWebAppStart;
+    startWebApp?(webAppId: string, instanceKey: string | null): Promise<PluginWebAppStart> | PluginWebAppStart;
     /**
      * Ends the session the matching `startWebApp` began, so the next start
      * pairs from scratch. The host calls this when the guest it started the app
@@ -357,8 +372,11 @@ export interface PluginHandler {
      * only the plugin can retire the session it paired. A handler that
      * implements `startWebApp` must implement this too — the host reports a
      * handler that does not.
+     *
+     * It names one instance. Ending it must leave the plugin's other instances
+     * of the same web app running.
      */
-    stopWebApp?(webAppId: string): Promise<void> | void;
+    stopWebApp?(webAppId: string, instanceKey: string | null): Promise<void> | void;
     deactivate?(): Promise<void> | void;
 }
 export declare function createPluginChildProcessClient(transport: ProcessTransport): PluginChildProcessClient;

@@ -64,6 +64,10 @@ import {
   PluginSettingDeclarationSchema,
   PluginSettingValueSchema,
 } from "../plugins/pluginManifestSchema";
+import {
+  MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS,
+  MAX_PLUGIN_WEB_APP_TITLE_CHARS,
+} from "../plugins/pluginWebAppInstances";
 import { isLoopbackHostname } from "../security/loopback";
 import {
   DesktopUserSettings as DesktopUserSettingsSchema,
@@ -2354,17 +2358,38 @@ const PLUGIN_WEB_APP_ID = z.string().min(1).max(120).refine(
   "plugin web app id must not contain NUL bytes",
 );
 
+/**
+ * The instance an open targets, or null for a web app that opens one tab for
+ * the whole manifest id. Null is a value here, never an absent field: which
+ * of the two shapes a request means is exactly what the handlers check
+ * against the manifest, so it must not arrive by omission.
+ */
+const PLUGIN_WEB_APP_INSTANCE_KEY = z
+  .string()
+  .min(1)
+  .max(
+    MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS,
+    `plugin web app instance key: must be ${MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS} characters or fewer`,
+  )
+  .refine(
+    (value) => !value.includes("\0"),
+    "plugin web app instance key must not contain NUL bytes",
+  )
+  .nullable();
+
 export const OpenPluginWebAppPayload = z.object({
   workspaceId: WORKSPACE_ID,
   pluginRoot: PLUGIN_ROOT,
   pluginId: PLUGIN_ID,
   webAppId: PLUGIN_WEB_APP_ID,
+  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
 }).strict();
 export type OpenPluginWebAppPayload = z.infer<typeof OpenPluginWebAppPayload>;
 
 export const OpenPluginWebAppResult = z.object({
   pluginId: PLUGIN_ID,
   webAppId: PLUGIN_WEB_APP_ID,
+  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
 }).strict();
 export type OpenPluginWebAppResult = z.infer<typeof OpenPluginWebAppResult>;
 
@@ -2372,6 +2397,7 @@ export const PluginWebAppOpenedEvent = z.object({
   workspaceId: WORKSPACE_ID,
   pluginId: PLUGIN_ID,
   webAppId: PLUGIN_WEB_APP_ID,
+  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
 }).strict();
 export type PluginWebAppOpenedEvent = z.infer<typeof PluginWebAppOpenedEvent>;
 
@@ -2379,13 +2405,16 @@ export const StartPluginWebAppPayload = z.object({
   workspaceId: WORKSPACE_ID,
   pluginId: PLUGIN_ID,
   webAppId: PLUGIN_WEB_APP_ID,
+  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
 }).strict();
 export type StartPluginWebAppPayload = z.infer<typeof StartPluginWebAppPayload>;
 
 export const StartPluginWebAppResult = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("ok"),
-    title: z.string().min(1).max(120),
+    // The manifest title, or the one the plugin named for this instance.
+    // Both land here, so both answer to the same bound.
+    title: z.string().min(1).max(MAX_PLUGIN_WEB_APP_TITLE_CHARS),
     origin: LoopbackPreviewUrl,
   }).strict(),
   z.object({ status: z.literal("not-registered") }).strict(),
@@ -2397,6 +2426,7 @@ export const SetPluginWebAppBoundsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   pluginId: PLUGIN_ID,
   webAppId: PLUGIN_WEB_APP_ID,
+  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
   bounds: z.object({
     x: z.number().int().min(-GUEST_BOUNDS_LIMIT).max(GUEST_BOUNDS_LIMIT),
     y: z.number().int().min(-GUEST_BOUNDS_LIMIT).max(GUEST_BOUNDS_LIMIT),
@@ -2419,6 +2449,7 @@ export const PluginWebAppFailedEvent = z.object({
   workspaceId: WORKSPACE_ID,
   pluginId: PLUGIN_ID,
   webAppId: PLUGIN_WEB_APP_ID,
+  instanceKey: PLUGIN_WEB_APP_INSTANCE_KEY,
 }).strict();
 export type PluginWebAppFailedEvent = z.infer<typeof PluginWebAppFailedEvent>;
 
@@ -2485,6 +2516,10 @@ export const PluginStatusRecord = z.object({
     z.object({
       id: z.string().min(1).max(120),
       title: z.string().min(1).max(120),
+      /** True when this app opens one tab per instance. The plugin's page
+       * has no instance to name, so it offers no Open button for one — the
+       * plugin opens these from its own panel. */
+      instanced: z.boolean(),
     }).strict(),
   ).max(100),
   diagnostics: z.array(PLUGIN_DIAGNOSTIC),

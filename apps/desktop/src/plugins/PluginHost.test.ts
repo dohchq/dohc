@@ -2294,7 +2294,7 @@ describe("PluginHost web apps", () => {
   async function webAppManifest(): Promise<DohcPluginManifest> {
     return {
       ...(await fixtureManifest()),
-      webApps: [{ id: "main-app", title: "Hello App" }],
+      webApps: [{ id: "main-app", title: "Hello App", instanced: false }],
     };
   }
 
@@ -2323,28 +2323,28 @@ describe("PluginHost web apps", () => {
 
   it("routes startWebApp through the real plugin process and returns its URL in memory", async () => {
     const host = await startWebAppHost({ mode: "web-app" });
-    await expect(host.startWebApp("hello-plugin", "main-app")).resolves.toEqual({
+    await expect(host.startWebApp("hello-plugin", "main-app", null)).resolves.toEqual({
       url: "http://127.0.0.1:43210/pair#token=fixture-main-app",
     });
   });
 
   it("refuses a web app the manifest does not declare", async () => {
     const host = await startWebAppHost({ mode: "web-app" });
-    await expect(host.startWebApp("hello-plugin", "other")).rejects.toThrow(
+    await expect(host.startWebApp("hello-plugin", "other", null)).rejects.toThrow(
       'does not declare web app "other"',
     );
   });
 
   it("reports a handler that does not implement startWebApp", async () => {
     const host = await startWebAppHost({ mode: "hello" });
-    await expect(host.startWebApp("hello-plugin", "main-app")).rejects.toThrow(
+    await expect(host.startWebApp("hello-plugin", "main-app", null)).rejects.toThrow(
       "does not implement startWebApp",
     );
   });
 
   it("rejects an empty url from the plugin", async () => {
     const host = await startWebAppHost({ mode: "web-app-bad-result" });
-    await expect(host.startWebApp("hello-plugin", "main-app")).rejects.toThrow(
+    await expect(host.startWebApp("hello-plugin", "main-app", null)).rejects.toThrow(
       "non-empty string url",
     );
   });
@@ -2354,7 +2354,7 @@ describe("PluginHost web apps", () => {
       mode: "web-app-hang",
       webAppStartTimeoutMs: 200,
     });
-    await expect(host.startWebApp("hello-plugin", "main-app")).rejects.toThrow(
+    await expect(host.startWebApp("hello-plugin", "main-app", null)).rejects.toThrow(
       "did not start within 200 ms",
     );
   });
@@ -2367,41 +2367,41 @@ describe("PluginHost web apps", () => {
       spawnTransport: createProcessHarness().spawnTransport,
       routeSdkRequest: defaultRouter,
     });
-    await expect(host.startWebApp("hello-plugin", "main-app")).rejects.toThrow(
+    await expect(host.startWebApp("hello-plugin", "main-app", null)).rejects.toThrow(
       'Plugin "hello-plugin" is not running.',
     );
   });
 
   it("carries a stop to the plugin, so the next start pairs again", async () => {
     const host = await startWebAppHost({ mode: "web-app-pairing" });
-    const first = await host.startWebApp("hello-plugin", "main-app");
+    const first = await host.startWebApp("hello-plugin", "main-app", null);
     expect(first.url).toBe("http://127.0.0.1:43210/pair#token=fixture-1");
     // Paired: a second start rides the session the first one established.
-    await expect(host.startWebApp("hello-plugin", "main-app")).resolves.toEqual({
+    await expect(host.startWebApp("hello-plugin", "main-app", null)).resolves.toEqual({
       url: "http://127.0.0.1:43210/?app=main-app",
     });
 
-    await host.stopWebApp("hello-plugin", "main-app");
+    await host.stopWebApp("hello-plugin", "main-app", null);
 
     // MUTATION (drop the protocol stop dispatch, or the host method): the
     // plugin never learns the guest is gone, so this start returns the paired
     // URL into a guest with no session — the workspace-started host's whole
     // failure mode.
-    await expect(host.startWebApp("hello-plugin", "main-app")).resolves.toEqual({
+    await expect(host.startWebApp("hello-plugin", "main-app", null)).resolves.toEqual({
       url: "http://127.0.0.1:43210/pair#token=fixture-2",
     });
   });
 
   it("reports a handler that implements startWebApp without stopWebApp", async () => {
     const host = await startWebAppHost({ mode: "web-app" });
-    await expect(host.stopWebApp("hello-plugin", "main-app")).rejects.toThrow(
+    await expect(host.stopWebApp("hello-plugin", "main-app", null)).rejects.toThrow(
       "does not implement stopWebApp",
     );
   });
 
   it("refuses to stop a web app the manifest does not declare", async () => {
     const host = await startWebAppHost({ mode: "web-app-pairing" });
-    await expect(host.stopWebApp("hello-plugin", "other")).rejects.toThrow(
+    await expect(host.stopWebApp("hello-plugin", "other", null)).rejects.toThrow(
       'does not declare web app "other"',
     );
   });
@@ -2418,7 +2418,7 @@ describe("PluginHost web apps", () => {
     // a dead plugin's server and session are already gone. The recovery must
     // not turn that into a failure it reports.
     await expect(
-      host.stopWebApp("hello-plugin", "main-app"),
+      host.stopWebApp("hello-plugin", "main-app", null),
     ).resolves.toBeUndefined();
   });
 
@@ -2522,4 +2522,93 @@ describe("PluginHost web apps", () => {
       host.notifySettingsChanged("hello-plugin", { greeting: "Hello" }),
     ).resolves.toBeUndefined();
   });
+});
+
+// Two instances of one web app, served by the real fixture process over two
+// real loopback servers. These are the facts the whole per-instance surface
+// rests on: the plugin hears which instance it is asked for, and answers with
+// a different origin for each.
+describe("PluginHost instanced web apps", () => {
+  async function instancedManifest(): Promise<DohcPluginManifest> {
+    return {
+      ...(await fixtureManifest()),
+      webApps: [
+        { id: "preview", title: "Preview", instanced: true },
+        { id: "main-app", title: "Hello App", instanced: false },
+      ],
+    };
+  }
+
+  async function startInstancedHost(): Promise<PluginHost> {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "instanced-web-app" },
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+    await host.start(helloPluginRoot, await instancedManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+    return host;
+  }
+
+  // MUTATION (drop instanceKey from the start params): both instances would
+  // come back on one origin, and the two tabs would show the same app.
+  it("serves a different origin for each instance of one web app", async () => {
+    const host = await startInstancedHost();
+    const first = await host.startWebApp("hello-plugin", "preview", "sites/a");
+    const second = await host.startWebApp("hello-plugin", "preview", "sites/b");
+
+    expect(new URL(first.url).origin).not.toEqual(new URL(second.url).origin);
+    expect(new URL(first.url).hostname).toBe("127.0.0.1");
+    expect(new URL(second.url).hostname).toBe("127.0.0.1");
+  });
+
+  it("reuses one instance's own origin when it starts again", async () => {
+    const host = await startInstancedHost();
+    const first = await host.startWebApp("hello-plugin", "preview", "sites/a");
+    const again = await host.startWebApp("hello-plugin", "preview", "sites/a");
+    expect(again.url).toEqual(first.url);
+  });
+
+  it("carries a per-instance title back from the plugin", async () => {
+    const host = await startInstancedHost();
+    const started = await host.startWebApp("hello-plugin", "preview", "sites/a");
+    expect(started.title).toBe("Preview sites/a");
+  });
+
+  // MUTATION (stop every instance, or ignore instanceKey in stopWebApp): one
+  // closed preview tab would take the plugin's other previews down with it.
+  it("stops one instance and leaves the others running", async () => {
+    const host = await startInstancedHost();
+    await host.startWebApp("hello-plugin", "preview", "sites/a");
+    const second = await host.startWebApp("hello-plugin", "preview", "sites/b");
+
+    await host.stopWebApp("hello-plugin", "preview", "sites/a");
+    expect(await host.invokeCommand("hello-plugin", "webapp.running")).toEqual([
+      "sites/b",
+    ]);
+
+    // The survivor is still the same live server, not a restarted one.
+    const stillSecond = await host.startWebApp(
+      "hello-plugin",
+      "preview",
+      "sites/b",
+    );
+    expect(stillSecond.url).toEqual(second.url);
+  });
+
+  it("refuses a per-instance web app started without an instance", async () => {
+    const host = await startInstancedHost();
+    await expect(
+      host.startWebApp("hello-plugin", "preview", null),
+    ).rejects.toThrow(/must name an instance/);
+  });
+
 });

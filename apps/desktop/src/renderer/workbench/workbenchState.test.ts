@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS } from "../../plugins/pluginWebAppInstances";
 import {
   activateTab,
   activeGroup,
@@ -613,6 +614,7 @@ describe("tabs", () => {
     expect(parsePluginWebAppTabPath(path)).toEqual({
       pluginId: "@dohc/acme plugin",
       webAppId: "app/main",
+      instanceKey: null,
     });
   });
 
@@ -621,11 +623,93 @@ describe("tabs", () => {
       "dohc://plugin-web/",
       "dohc://plugin-web/plugin-only",
       "dohc://plugin-web//app",
-      "dohc://plugin-web/plugin/app/extra",
+      "dohc://plugin-web/plugin/app/",
+      "dohc://plugin-web/plugin/app//instance",
+      "dohc://plugin-web/plugin/app/instance/extra",
       null,
     ]) {
       expect(parsePluginWebAppTabPath(path)).toBeNull();
     }
+  });
+
+  // MUTATION (drop the bound here and lean on the IPC schema): a persisted
+  // over-long key would restore and mount, and the boundary's refusal would
+  // reach the user as a raw schema error instead of the shell's one sentence
+  // for a tab path that names no app.
+  it("refuses an instance key past the bound the boundary enforces", () => {
+    const atBound = "s".repeat(MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS);
+    const pastBound = "s".repeat(MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS + 1);
+
+    expect(
+      parsePluginWebAppTabPath(pluginWebAppTabPath("acme", "preview", atBound)),
+    ).toEqual({ pluginId: "acme", webAppId: "preview", instanceKey: atBound });
+    expect(
+      parsePluginWebAppTabPath(pluginWebAppTabPath("acme", "preview", pastBound)),
+    ).toBeNull();
+    // ...and the shell therefore treats it as a tab path that names no app.
+    expect(
+      canonicalSingletonEditorTabPath(
+        pluginWebAppTabPath("acme", "preview", pastBound),
+      ),
+    ).toBeNull();
+  });
+
+  // A per-instance web app's tab is keyed by the instance, the way a site tab
+  // is keyed by its root: identity is a runtime value, not a manifest id.
+  it("keys a per-instance web app tab by its instance", () => {
+    const path = pluginWebAppTabPath("acme", "preview", "sites/marketing #1");
+    expect(path).toBe("dohc://plugin-web/acme/preview/sites%2Fmarketing%20%231");
+    expect(isPluginWebAppTabPath(path)).toBe(true);
+    expect(isVirtualTabPath(path)).toBe(true);
+    expect(parsePluginWebAppTabPath(path)).toEqual({
+      pluginId: "acme",
+      webAppId: "preview",
+      instanceKey: "sites/marketing #1",
+    });
+  });
+
+  // MUTATION (canonicalize an instanced path back to its keyless form): every
+  // instance of one web app would fold onto one tab, so opening a second site
+  // would just re-activate the first one's tab.
+  it("makes each instance its own singleton, distinct from its siblings", () => {
+    const a = pluginWebAppTabPath("acme", "preview", "sites/a");
+    const b = pluginWebAppTabPath("acme", "preview", "sites/b");
+    const keyless = pluginWebAppTabPath("acme", "preview");
+
+    expect(isSingletonEditorTabPath(a)).toBe(true);
+    expect(canonicalSingletonEditorTabPath(a)).toBe(a);
+    expect(canonicalSingletonEditorTabPath(b)).toBe(b);
+    expect(canonicalSingletonEditorTabPath(a)).not.toBe(
+      canonicalSingletonEditorTabPath(b),
+    );
+    expect(canonicalSingletonEditorTabPath(a)).not.toBe(
+      canonicalSingletonEditorTabPath(keyless),
+    );
+  });
+
+  it("opens two instances as two tabs and folds a repeat of one", () => {
+    const a = pluginWebAppTabPath("acme", "preview", "sites/a");
+    const b = pluginWebAppTabPath("acme", "preview", "sites/b");
+
+    let state = openTab(defaultWorkbenchState(), a);
+    state = openTab(state, b);
+    expect(allTabs(state).map((tab) => tab.path)).toEqual([a, b]);
+
+    state = openTab(state, a);
+    expect(allTabs(state).map((tab) => tab.path)).toEqual([a, b]);
+    expect(activeTabPath(state)).toBe(a);
+  });
+
+  it("restores both instances of one web app after a reload", () => {
+    const a = pluginWebAppTabPath("acme", "preview", "sites/a");
+    const b = pluginWebAppTabPath("acme", "preview", "sites/b");
+
+    let state = openTab(defaultWorkbenchState(), a);
+    state = openTab(state, b);
+
+    const restored = parseUiState(serializeUiState(state));
+    expect(allTabs(restored).map((tab) => tab.path)).toEqual([a, b]);
+    expect(activeTabPath(restored)).toBe(b);
   });
 
   it("recognizes a plugin's details page as a virtual tab keyed by the plugin id", () => {

@@ -8,6 +8,11 @@ export interface PluginWebAppViewIdentity {
   workspaceId: string;
   pluginId: string;
   webAppId: string;
+  /** Which instance of the web app this view shows, or null for a web app
+   * that opens one view for the whole manifest id. Two instances of one id
+   * are two views over two origins, so the instance is part of the identity
+   * every lookup here keys on. */
+  instanceKey: string | null;
 }
 
 export interface PluginWebAppViewRecord<TView>
@@ -19,8 +24,13 @@ export interface PluginWebAppViewRecord<TView>
   view: TView;
 }
 
-function viewKey(identity: PluginWebAppViewIdentity): string {
-  return `${identity.workspaceId}\0${identity.pluginId}\0${identity.webAppId}`;
+/**
+ * One web app instance's identity as a string. The registry keys its views by
+ * it and main keys its start locks by it, so the shape is written once: an
+ * instance is only ever the same instance if both agree on what names it.
+ */
+export function webAppInstanceKey(identity: PluginWebAppViewIdentity): string {
+  return `${identity.workspaceId}\0${identity.pluginId}\0${identity.webAppId}\0${identity.instanceKey ?? ""}`;
 }
 
 export class PluginWebAppViewRegistry<TView> {
@@ -31,7 +41,7 @@ export class PluginWebAppViewRegistry<TView> {
   register(
     record: PluginWebAppViewRecord<TView>,
   ): PluginWebAppViewRecord<TView> | null {
-    const key = viewKey(record);
+    const key = webAppInstanceKey(record);
     const displaced = this.views.get(key) ?? null;
     this.views.set(key, record);
     return displaced;
@@ -46,7 +56,7 @@ export class PluginWebAppViewRegistry<TView> {
   authorizeBounds(
     request: PluginWebAppViewIdentity & { senderId: number; generation: number },
   ): PluginWebAppViewRecord<TView> | null {
-    const record = this.views.get(viewKey(request));
+    const record = this.views.get(webAppInstanceKey(request));
     if (
       !record ||
       record.senderId !== request.senderId ||
@@ -58,17 +68,38 @@ export class PluginWebAppViewRegistry<TView> {
   }
 
   get(identity: PluginWebAppViewIdentity): PluginWebAppViewRecord<TView> | null {
-    return this.views.get(viewKey(identity)) ?? null;
+    return this.views.get(webAppInstanceKey(identity)) ?? null;
   }
 
   /** Removes one view; the caller destroys the returned record. */
   remove(
     identity: PluginWebAppViewIdentity,
   ): PluginWebAppViewRecord<TView> | null {
-    const key = viewKey(identity);
+    const key = webAppInstanceKey(identity);
     const record = this.views.get(key) ?? null;
     this.views.delete(key);
     return record;
+  }
+
+  /**
+   * How many instances of one web app are live, not counting the identity
+   * about to replace itself — a restart of an instance that is already open
+   * displaces its own view rather than adding one.
+   */
+  countOtherInstances(identity: PluginWebAppViewIdentity): number {
+    const key = webAppInstanceKey(identity);
+    let count = 0;
+    for (const [candidate, record] of this.views) {
+      if (
+        record.workspaceId === identity.workspaceId &&
+        record.pluginId === identity.pluginId &&
+        record.webAppId === identity.webAppId &&
+        candidate !== key
+      ) {
+        count += 1;
+      }
+    }
+    return count;
   }
 
   hasForPlugin(workspaceId: string, pluginId: string): boolean {

@@ -374,9 +374,39 @@ describe("PluginDetailsPage", () => {
     });
   });
 
+  // MUTATION (offer Open for a per-instance app too): this page has no
+  // instance to name, so the open would be refused — and a user would be
+  // handed a button that never works. The plugin's own panel opens these.
+  it("offers no Open for a web app that opens one tab per instance", async () => {
+    const installed = plugin("t3-code", {
+      webApps: [{ id: "preview", title: "Preview", instanced: true }],
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [installed] });
+
+    renderPage("t3-code");
+    await screen.findByTestId("plugin-details-page");
+    expect(screen.queryByTestId("plugin-open-web-app")).toBeNull();
+  });
+
+  it("offers Open only for the single-tab web apps beside a per-instance one", async () => {
+    const installed = plugin("t3-code", {
+      webApps: [
+        { id: "preview", title: "Preview", instanced: true },
+        { id: "app", title: "T3 Code", instanced: false },
+      ],
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [installed] });
+
+    renderPage("t3-code");
+    const buttons = await screen.findAllByTestId("plugin-open-web-app");
+    expect(buttons.map((button) => button.getAttribute("data-web-app-id"))).toEqual([
+      "app",
+    ]);
+  });
+
   it("offers Open for an installed plugin's web app and frees the control on success", async () => {
     const installed = plugin("t3-code", {
-      webApps: [{ id: "app", title: "T3 Code" }],
+      webApps: [{ id: "app", title: "T3 Code", instanced: false }],
     });
     bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [installed] });
     bridgeMock.openPluginWebApp.mockResolvedValue({
@@ -398,6 +428,7 @@ describe("PluginDetailsPage", () => {
       pluginRoot: installed.rootPath,
       pluginId: "t3-code",
       webAppId: "app",
+      instanceKey: null,
     });
     // The app opens in its own tab beside this one. The only thing the
     // success path owes this page is its control back.
@@ -407,7 +438,7 @@ describe("PluginDetailsPage", () => {
 
   it("can open a web app after leaving a workspace whose open never answered", async () => {
     const installed = plugin("t3-code", {
-      webApps: [{ id: "app", title: "T3 Code" }],
+      webApps: [{ id: "app", title: "T3 Code", instanced: false }],
     });
     bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [installed] });
     const stuck = deferred<{ pluginId: string; webAppId: string }>();
@@ -446,12 +477,13 @@ describe("PluginDetailsPage", () => {
       pluginRoot: installed.rootPath,
       pluginId: "t3-code",
       webAppId: "app",
+      instanceKey: null,
     });
   });
 
   it("shows the open failure on the page when the app cannot start", async () => {
     const installed = plugin("t3-code", {
-      webApps: [{ id: "app", title: "T3 Code" }],
+      webApps: [{ id: "app", title: "T3 Code", instanced: false }],
     });
     bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [installed] });
     bridgeMock.openPluginWebApp.mockRejectedValue(
@@ -476,7 +508,7 @@ describe("PluginDetailsPage", () => {
         plugin("disabled-plugin", {
           status: "disabled",
           disabledReason: "user",
-          webApps: [{ id: "app", title: "App" }],
+          webApps: [{ id: "app", title: "App", instanced: false }],
         }),
       ],
     });

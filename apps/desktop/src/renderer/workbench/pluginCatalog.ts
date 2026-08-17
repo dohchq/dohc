@@ -193,6 +193,15 @@ export function canApprove(plugin: PluginStatusRecord): boolean {
   );
 }
 
+/** The web apps this page may offer a button for: the ones that open a single
+ * tab. A per-instance app needs an instance to open, and this page has none —
+ * the plugin's own panel opens those. */
+export function openableWebApps(
+  plugin: PluginStatusRecord,
+): PluginStatusRecord["webApps"] {
+  return plugin.webApps.filter((webApp) => !webApp.instanced);
+}
+
 // An installed, non-disabled plugin can open its web apps. openPluginWebApp
 // re-reads and re-verifies the manifest in main, so this predicate only
 // decides whether the control is worth showing.
@@ -200,7 +209,7 @@ export function canOpenWebApps(plugin: PluginStatusRecord): boolean {
   return (
     plugin.valid &&
     plugin.approvedHash !== null &&
-    plugin.webApps.length > 0 &&
+    openableWebApps(plugin).length > 0 &&
     !plugin.status.startsWith("disabled") &&
     plugin.status !== "uninstalling"
   );
@@ -441,6 +450,10 @@ export function usePluginCatalog(workspaceId: string): PluginCatalog {
         pluginRoot: plugin.rootPath,
         pluginId: plugin.id,
         webAppId,
+        // The plugin's page has no instance to name. Per-instance apps are
+        // opened by the plugin's own panel, which knows what its instances
+        // are, and this page offers no button for one.
+        instanceKey: null,
       });
     } catch (error) {
       if (epoch !== workspaceEpoch.current) return;

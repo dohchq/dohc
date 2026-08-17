@@ -5,6 +5,7 @@
 // editor's save state) and never lives here or on disk.
 
 import type { WorkspaceUiState } from "../../ipc/bridgeContract";
+import { MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS } from "../../plugins/pluginWebAppInstances";
 
 export const VIEW_IDS = [
   "explorer",
@@ -64,8 +65,20 @@ export function pluginPanelTabPath(pluginId: string, panelId: string): string {
   return `${PLUGIN_PANEL_TAB_PREFIX}${encodeURIComponent(pluginId)}/${encodeURIComponent(panelId)}`;
 }
 
-export function pluginWebAppTabPath(pluginId: string, webAppId: string): string {
-  return `${PLUGIN_WEB_APP_TAB_PREFIX}${encodeURIComponent(pluginId)}/${encodeURIComponent(webAppId)}`;
+/**
+ * One tab per web app, or — when the plugin names an instance — one tab per
+ * instance. The instance key is a runtime value the plugin chose, so it is
+ * encoded like every other segment and read back the same way. Keying the tab
+ * by it is what makes each instance its own singleton: the site-tab precedent,
+ * where identity is content rather than a manifest id.
+ */
+export function pluginWebAppTabPath(
+  pluginId: string,
+  webAppId: string,
+  instanceKey: string | null = null,
+): string {
+  const base = `${PLUGIN_WEB_APP_TAB_PREFIX}${encodeURIComponent(pluginId)}/${encodeURIComponent(webAppId)}`;
+  return instanceKey === null ? base : `${base}/${encodeURIComponent(instanceKey)}`;
 }
 
 export function pluginDetailsTabPath(pluginId: string): string {
@@ -132,7 +145,7 @@ export function canonicalSingletonEditorTabPath(path: string | null): string | n
   const webApp = parsePluginWebAppTabPath(path);
   return webApp === null
     ? null
-    : pluginWebAppTabPath(webApp.pluginId, webApp.webAppId);
+    : pluginWebAppTabPath(webApp.pluginId, webApp.webAppId, webApp.instanceKey);
 }
 
 export function parseSiteTabPath(path: string | null): string | null {
@@ -164,16 +177,27 @@ export function parsePluginPanelTabPath(
 
 export function parsePluginWebAppTabPath(
   path: string | null,
-): { pluginId: string; webAppId: string } | null {
+): { pluginId: string; webAppId: string; instanceKey: string | null } | null {
   if (typeof path !== "string" || !isPluginWebAppTabPath(path)) return null;
   const parts = path.slice(PLUGIN_WEB_APP_TAB_PREFIX.length).split("/");
-  if (parts.length !== 2 || parts.some((part) => part.length === 0)) return null;
+  if (parts.length < 2 || parts.length > 3) return null;
+  if (parts.some((part) => part.length === 0)) return null;
   try {
     const pluginId = decodeURIComponent(parts[0]!);
     const webAppId = decodeURIComponent(parts[1]!);
-    return pluginId.length > 0 && webAppId.length > 0
-      ? { pluginId, webAppId }
-      : null;
+    const instanceKey = parts.length === 3 ? decodeURIComponent(parts[2]!) : null;
+    if (pluginId.length === 0 || webAppId.length === 0) return null;
+    // The same bound the IPC boundary enforces. Without it here, a persisted
+    // path with an over-long key would restore, mount, and only then be
+    // refused by the boundary — surfacing a raw schema error where the shell
+    // already has one sentence for a tab path that names no app.
+    if (
+      instanceKey !== null &&
+      instanceKey.length > MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS
+    ) {
+      return null;
+    }
+    return { pluginId, webAppId, instanceKey };
   } catch {
     return null;
   }

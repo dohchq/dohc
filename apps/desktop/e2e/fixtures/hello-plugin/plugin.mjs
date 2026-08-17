@@ -97,6 +97,40 @@ switch (mode) {
     };
     break;
   }
+  // A per-instance web app that behaves like the real thing: one HTTP server
+  // per instance, on its own ephemeral port, so two instances of one web app
+  // really are two origins. Each page says which instance it is, so a guest
+  // locked to one origin can be shown to have reached that instance and no
+  // other. stopWebApp closes only the instance it names.
+  case "instanced-web-app": {
+    const servers = new Map();
+    handler = {
+      activate(ctx) {
+        ctx.commands.register("webapp.running", () => [...servers.keys()].sort());
+      },
+      async startWebApp(webAppId, instanceKey) {
+        const existing = servers.get(instanceKey);
+        if (existing) return { url: existing.url, title: `Preview ${instanceKey}` };
+        const { createServer } = await import("node:http");
+        const server = createServer((_request, response) => {
+          response.writeHead(200, { "content-type": "text/html" });
+          response.end(`<!doctype html><title>${instanceKey}</title>`);
+        });
+        await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const { port } = server.address();
+        const url = `http://127.0.0.1:${port}/?app=${encodeURIComponent(webAppId)}`;
+        servers.set(instanceKey, { server, url });
+        return { url, title: `Preview ${instanceKey}` };
+      },
+      async stopWebApp(_webAppId, instanceKey) {
+        const running = servers.get(instanceKey);
+        if (!running) return;
+        servers.delete(instanceKey);
+        await new Promise((resolve) => running.server.close(resolve));
+      },
+    };
+    break;
+  }
   case "web-app-hang":
     handler = {
       activate() {},

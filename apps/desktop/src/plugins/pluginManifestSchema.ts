@@ -132,12 +132,21 @@ const PluginCommand = z.object({
 // webview tag, never a plain iframe. The URL comes from the running plugin
 // (PluginHandler.startWebApp), not the manifest, because it exists only once
 // the plugin's server is ready.
+// An instanced web app opens one tab per runtime instance instead of one tab
+// for the whole manifest id: a sites plugin previews each site in its own tab,
+// over its own loopback origin. dohc holds no opinion about what an instance
+// is — the plugin names it with an instance key, gets that key back in
+// startWebApp, and serves whatever origin that instance needs. The flag is
+// what tells dohc which of the two shapes an id uses, so an open that carries
+// no key (the plugin page's Open button) and an open that carries one are each
+// refused for the wrong id instead of quietly serving the wrong app.
 const PluginWebApp = z.object({
   id: z.string().min(1).max(120).refine(
     (value) => !value.includes("\0"),
     "web app id must not contain NUL bytes",
   ),
   title: z.string().min(1).max(120),
+  instanced: z.boolean().default(false),
 }).strict();
 
 // An agent driver this plugin contributes: one harness dohc can talk to,

@@ -974,6 +974,7 @@ describe("plugin web app tabs", () => {
         workspaceId: WORKSPACE.workspaceId,
         pluginId: "t3-code",
         webAppId: "app",
+        instanceKey: null,
       });
     });
 
