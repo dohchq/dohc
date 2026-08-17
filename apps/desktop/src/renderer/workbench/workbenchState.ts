@@ -193,8 +193,7 @@ export function parsePluginWebAppTabPath(
     // already has one sentence for a tab path that names no app.
     if (
       instanceKey !== null &&
-      (instanceKey.length === 0 ||
-        instanceKey.length > MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS)
+      instanceKey.length > MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS
     ) {
       return null;
     }
