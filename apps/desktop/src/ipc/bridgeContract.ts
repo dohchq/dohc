@@ -64,7 +64,10 @@ import {
   PluginSettingDeclarationSchema,
   PluginSettingValueSchema,
 } from "../plugins/pluginManifestSchema";
-import { MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS } from "../plugins/pluginWebAppInstances";
+import {
+  MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS,
+  MAX_PLUGIN_WEB_APP_TITLE_CHARS,
+} from "../plugins/pluginWebAppInstances";
 import { isLoopbackHostname } from "../security/loopback";
 import {
   DesktopUserSettings as DesktopUserSettingsSchema,
@@ -2361,7 +2364,7 @@ const PLUGIN_WEB_APP_ID = z.string().min(1).max(120).refine(
  * of the two shapes a request means is exactly what the handlers check
  * against the manifest, so it must not arrive by omission.
  */
-export const PLUGIN_WEB_APP_INSTANCE_KEY = z
+const PLUGIN_WEB_APP_INSTANCE_KEY = z
   .string()
   .min(1)
   .max(
@@ -2409,7 +2412,9 @@ export type StartPluginWebAppPayload = z.infer<typeof StartPluginWebAppPayload>;
 export const StartPluginWebAppResult = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("ok"),
-    title: z.string().min(1).max(120),
+    // The manifest title, or the one the plugin named for this instance.
+    // Both land here, so both answer to the same bound.
+    title: z.string().min(1).max(MAX_PLUGIN_WEB_APP_TITLE_CHARS),
     origin: LoopbackPreviewUrl,
   }).strict(),
   z.object({ status: z.literal("not-registered") }).strict(),

@@ -17,26 +17,10 @@ function handler(channel: string): string {
 }
 
 /**
- * One call's own argument list, from `opener` to its matching close paren.
- * Slicing to the balanced paren is what lets these assertions name the
- * ARGUMENT a call must pass without also pinning how it is wrapped: the
- * arguments may sit on one line or five, but they may not belong to a
- * different call.
+ * Source with every run of whitespace removed, so an assertion can name a
+ * whole call — arguments, order, and all — without pinning how it wraps.
  */
-function callRegion(source: string, opener: string, from = 0): string {
-  const start = source.indexOf(opener, from);
-  expect(start, `expected to find ${opener}`).toBeGreaterThan(-1);
-  let depth = 0;
-  for (let index = start + opener.length - 1; index < source.length; index += 1) {
-    const character = source[index];
-    if (character === "(") depth += 1;
-    else if (character === ")") {
-      depth -= 1;
-      if (depth === 0) return source.slice(start, index + 1);
-    }
-  }
-  throw new Error(`unbalanced parentheses after ${opener}`);
-}
+const squeeze = (source: string): string => source.replace(/\s+/g, "");
 
 function functionSource(signature: string): string {
   const start = mainSource.indexOf(signature);
@@ -69,8 +53,8 @@ describe("plugin web app main-process wiring", () => {
     // key): every instance would start under one identity, so two preview
     // tabs would share one origin. PluginHost.test.ts pins that the host
     // sends whatever key it is given; only this pins WHICH key main gives it.
-    expect(callRegion(start, "host.startWebApp(")).toContain(
-      "input.instanceKey",
+    expect(squeeze(start)).toContain(
+      "awaithost.startWebApp(input.pluginId,input.webAppId,input.instanceKey,)",
     );
     const spawnRecheckAt = start.indexOf(
       "host.getSpawnId(input.pluginId) !== spawnId",
@@ -102,16 +86,12 @@ describe("plugin web app main-process wiring", () => {
     // behavior in pluginWebAppRecovery.test.ts; that the start hands it the
     // PLUGIN's unpair — not just the view stop — is this handler's own claim.
     expect(start).toContain("recoverConsumedWebAppCredential({");
-    const unpairAt = start.indexOf("unpair: () =>");
-    expect(unpairAt).toBeGreaterThan(-1);
     // The unpair must BE the host call — not merely be followed by one — and
     // it must name the instance the failed start paired, or the recovery
     // would retire a sibling instance's session instead of this one's.
-    const unpairCall = callRegion(start, "host.stopWebApp(", unpairAt);
-    expect(start.slice(unpairAt, start.indexOf(unpairCall, unpairAt))).not.toContain(
-      ",",
+    expect(squeeze(start)).toContain(
+      "unpair:()=>host.stopWebApp(input.pluginId,input.webAppId,input.instanceKey,)",
     );
-    expect(unpairCall).toContain("input.instanceKey");
     expect(start).toContain("notifyFailed: () =>");
     expect(start).toContain("onLoadFailure: () => {");
     expect(start).toContain("recoverConsumedCredential();");
@@ -158,25 +138,25 @@ describe("plugin web app main-process wiring", () => {
   // whichever instance sorts first under the keyless identity, so one
   // preview's resize, stop, or failure would land on another preview.
   it("keys every web app path by the instance the request named", () => {
-    const start = handler("startPluginWebApp");
-    expect(callRegion(start, "stopPluginWebAppUnderStartLock(")).toContain(
-      "input.instanceKey",
+    const start = squeeze(handler("startPluginWebApp"));
+    expect(start).toContain(
+      "stopView:()=>stopPluginWebAppUnderStartLock(workspace.workspaceId,input.pluginId,input.webAppId,input.instanceKey,)",
     );
-    expect(callRegion(start, "assertInstanceBudget(")).toContain(
-      "countOtherInstances(identity)",
+    expect(start).toContain(
+      "assertInstanceBudget(input.pluginId,input.webAppId,pluginWebAppViews.countOtherInstances(identity),)",
     );
-    expect(callRegion(handler("openPluginWebApp"), "requireDeclaredWebApp(")).toContain(
-      "input.instanceKey",
+    expect(squeeze(handler("openPluginWebApp"))).toContain(
+      "requireDeclaredWebApp(input.pluginId,plugin.manifest.webApps,input.webAppId,input.instanceKey,)",
     );
-    expect(
-      callRegion(handler("setPluginWebAppBounds"), "authorizeBounds({"),
-    ).toContain("instanceKey: input.instanceKey,");
-    const stop = handler("stopPluginWebApp");
-    expect(callRegion(stop, "pluginWebAppViews.get({")).toContain(
-      "instanceKey: input.instanceKey,",
+    expect(squeeze(handler("setPluginWebAppBounds"))).toContain(
+      "authorizeBounds({workspaceId:input.workspaceId,pluginId:input.pluginId,webAppId:input.webAppId,instanceKey:input.instanceKey,",
     );
-    expect(callRegion(stop, "await stopPluginWebApp(")).toContain(
-      "input.instanceKey",
+    const stop = squeeze(handler("stopPluginWebApp"));
+    expect(stop).toContain(
+      "pluginWebAppViews.get({workspaceId:workspace.workspaceId,pluginId:input.pluginId,webAppId:input.webAppId,instanceKey:input.instanceKey,})",
+    );
+    expect(stop).toContain(
+      "awaitstopPluginWebApp(workspace.workspaceId,input.pluginId,input.webAppId,input.instanceKey,)",
     );
   });
 

@@ -687,6 +687,7 @@ import {
 } from "./plugins/pluginWebAppInstances";
 import {
   PluginWebAppViewRegistry,
+  webAppInstanceKey,
   type PluginWebAppViewRecord,
 } from "./plugins/pluginWebAppViews";
 import type { DohcPluginManifest } from "./plugins/pluginManifestSchema";
@@ -3012,7 +3013,7 @@ function pluginWebAppKey(
   webAppId: string,
   instanceKey: string | null,
 ): string {
-  return `${workspaceId}\0${pluginId}\0${webAppId}\0${instanceKey ?? ""}`;
+  return webAppInstanceKey({ workspaceId, pluginId, webAppId, instanceKey });
 }
 
 function destroyPluginWebAppViews(

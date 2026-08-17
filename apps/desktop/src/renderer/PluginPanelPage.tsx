@@ -125,8 +125,9 @@ export function PluginPanelPage(props: {
       const requestGeneration = sdkGenerationRef.current;
       const requestContext = sdkContext;
       let response: DohcSdkResponseMessage;
-      let openedTarget: string | null = null;
-      let openedWebApp: { webAppId: string; instanceKey: string } | null = null;
+      // What this request asks dohc to open, held until the liveness guard
+      // below says the panel that asked is still the one on screen.
+      let open: (() => void) | null = null;
       try {
         const invoked = await bridge().invokePluginPanelSdk({
           workspaceId: props.workspaceId,
@@ -135,23 +136,20 @@ export function PluginPanelPage(props: {
           method: request.method,
           ...(request.params === undefined ? {} : { params: request.params }),
         });
-        if (request.method === "ui.open") {
-          const opened = invoked.result as { target?: unknown } | undefined;
-          if (typeof opened?.target === "string") openedTarget = opened.target;
+        const opened = invoked.result as
+          | { target?: unknown; webAppId?: unknown; instanceKey?: unknown }
+          | undefined;
+        if (request.method === "ui.open" && typeof opened?.target === "string") {
+          const target = opened.target;
+          open = () => props.onOpenPath?.(target);
         }
-        if (request.method === "ui.openWebApp") {
-          const opened = invoked.result as
-            | { webAppId?: unknown; instanceKey?: unknown }
-            | undefined;
-          if (
-            typeof opened?.webAppId === "string" &&
-            typeof opened.instanceKey === "string"
-          ) {
-            openedWebApp = {
-              webAppId: opened.webAppId,
-              instanceKey: opened.instanceKey,
-            };
-          }
+        if (
+          request.method === "ui.openWebApp" &&
+          typeof opened?.webAppId === "string" &&
+          typeof opened.instanceKey === "string"
+        ) {
+          const { webAppId, instanceKey } = opened;
+          open = () => props.onOpenWebApp?.(props.pluginId, webAppId, instanceKey);
         }
         response = {
           protocol: DOHC_SDK_PROTOCOL,
@@ -176,14 +174,7 @@ export function PluginPanelPage(props: {
         iframeRef.current?.contentWindow === frameWindow &&
         isActiveFrameOrigin(event.origin, currentPanel.url)
       ) {
-        if (openedTarget) props.onOpenPath?.(openedTarget);
-        if (openedWebApp) {
-          props.onOpenWebApp?.(
-            props.pluginId,
-            openedWebApp.webAppId,
-            openedWebApp.instanceKey,
-          );
-        }
+        open?.();
         frameWindow.postMessage(response, event.origin);
       }
     }

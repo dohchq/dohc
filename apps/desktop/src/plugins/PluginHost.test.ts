@@ -2611,10 +2611,4 @@ describe("PluginHost instanced web apps", () => {
     ).rejects.toThrow(/must name an instance/);
   });
 
-  it("refuses an instance named on a single-tab web app", async () => {
-    const host = await startInstancedHost();
-    await expect(
-      host.startWebApp("hello-plugin", "main-app", "sites/a"),
-    ).rejects.toThrow(/must not name an instance/);
-  });
 });

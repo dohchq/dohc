@@ -30,12 +30,11 @@ function fileName(path: string, label?: string): string {
     return parsePluginPanelTabPath(path)?.panelId ?? "Plugin panel";
   }
   if (isPluginWebAppTabPath(path)) {
-    const webApp = parsePluginWebAppTabPath(path);
-    if (!webApp) return label ?? "Plugin app";
     // Until the app starts and reports its own title, every instance of one
     // web app would read alike. The instance key is what the user picked, so
     // it names the tab in the meantime.
-    return label ?? webApp.instanceKey ?? webApp.webAppId;
+    const webApp = parsePluginWebAppTabPath(path);
+    return label ?? webApp?.instanceKey ?? webApp?.webAppId ?? "Plugin app";
   }
   if (isPluginDetailsTabPath(path)) {
     return label ?? parsePluginDetailsTabPath(path) ?? "Plugin";

@@ -62,26 +62,16 @@ describe("assertInstanceBudget", () => {
 
   // MUTATION (drop the budget, or compare with > instead of >=): one plugin
   // could hold a live WebContentsView and a spawned server per open tab, up
-  // to the whole 100-tab budget.
-  it("refuses the instance that would pass the limit", () => {
+  // to the whole 100-tab budget. The refusal names the plugin, the web app,
+  // the observed count, the configured limit, and the way out.
+  it("refuses the instance that would pass the limit, and says why", () => {
     expect(() =>
-      assertInstanceBudget("p", "preview", MAX_PLUGIN_WEB_APP_INSTANCES),
-    ).toThrow();
-  });
-
-  it("names the constraint, the observed count, and the configured limit", () => {
-    const message = (() => {
-      try {
-        assertInstanceBudget("acme", "preview", MAX_PLUGIN_WEB_APP_INSTANCES);
-        return "";
-      } catch (error) {
-        return error instanceof Error ? error.message : "";
-      }
-    })();
-    expect(message).toContain("acme");
-    expect(message).toContain("preview");
-    expect(message).toContain(String(MAX_PLUGIN_WEB_APP_INSTANCES));
-    expect(message).toContain("instances per web app");
-    expect(message).toContain("Close an instance tab");
+      assertInstanceBudget("acme", "preview", MAX_PLUGIN_WEB_APP_INSTANCES),
+    ).toThrow(
+      new RegExp(
+        `acme.*preview.*${MAX_PLUGIN_WEB_APP_INSTANCES} instances.*limit of ${MAX_PLUGIN_WEB_APP_INSTANCES} instances per web app.*Close an instance tab`,
+        "s",
+      ),
+    );
   });
 });
