@@ -28,6 +28,14 @@ export function PluginPanelPage(props: {
   pluginId: string;
   panelId: string;
   onOpenPath?: (path: string) => void;
+  /** The panel asked dohc to open one instance of its plugin's own web app.
+   * It runs under the same liveness guards as onOpenPath: a panel that went
+   * stale while the request ran never opens a tab. */
+  onOpenWebApp?: (
+    pluginId: string,
+    webAppId: string,
+    instanceKey: string,
+  ) => void;
 }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
@@ -118,6 +126,7 @@ export function PluginPanelPage(props: {
       const requestContext = sdkContext;
       let response: DohcSdkResponseMessage;
       let openedTarget: string | null = null;
+      let openedWebApp: { webAppId: string; instanceKey: string } | null = null;
       try {
         const invoked = await bridge().invokePluginPanelSdk({
           workspaceId: props.workspaceId,
@@ -129,6 +138,20 @@ export function PluginPanelPage(props: {
         if (request.method === "ui.open") {
           const opened = invoked.result as { target?: unknown } | undefined;
           if (typeof opened?.target === "string") openedTarget = opened.target;
+        }
+        if (request.method === "ui.openWebApp") {
+          const opened = invoked.result as
+            | { webAppId?: unknown; instanceKey?: unknown }
+            | undefined;
+          if (
+            typeof opened?.webAppId === "string" &&
+            typeof opened.instanceKey === "string"
+          ) {
+            openedWebApp = {
+              webAppId: opened.webAppId,
+              instanceKey: opened.instanceKey,
+            };
+          }
         }
         response = {
           protocol: DOHC_SDK_PROTOCOL,
@@ -154,6 +177,13 @@ export function PluginPanelPage(props: {
         isActiveFrameOrigin(event.origin, currentPanel.url)
       ) {
         if (openedTarget) props.onOpenPath?.(openedTarget);
+        if (openedWebApp) {
+          props.onOpenWebApp?.(
+            props.pluginId,
+            openedWebApp.webAppId,
+            openedWebApp.instanceKey,
+          );
+        }
         frameWindow.postMessage(response, event.origin);
       }
     }
@@ -162,6 +192,7 @@ export function PluginPanelPage(props: {
     return () => window.removeEventListener("message", handleSdkRequest);
   }, [
     props.onOpenPath,
+    props.onOpenWebApp,
     props.panelId,
     props.pluginId,
     props.workspaceId,

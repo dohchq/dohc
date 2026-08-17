@@ -39,10 +39,35 @@ a row.
 | `entry` | Plugin-root-relative module | 1,024-char path |
 | `panels` | `{ id, title, entry }` | 100 entries |
 | `commands` | `{ id, title }` | 200 entries |
-| `webApps` | `{ id, title }` | 100 entries |
+| `webApps` | `{ id, title, instanced? }` | 100 entries |
 | `drivers` | `{ id, displayName }` | 8 entries |
 | `settings` | `{ key, type, label, description?, default, options? }` | 20 entries |
 | `allowSkippedScripts` | `true`, or npm package names | 300 names |
+
+A `webApps` entry contributes one embedded web app, shown in a hardened
+main-process guest over a loopback origin the running plugin supplies. It opens
+in one of two shapes, and `instanced` says which:
+
+- `instanced: false` (the default) opens one tab for the whole plugin. The
+  plugin's page in dohc offers an Open button for it.
+- `instanced: true` opens one tab per runtime instance — one preview per site,
+  for example. The open carries an **instance key**: a string of at most 512
+  characters that dohc treats as opaque and hands back to `startWebApp`, so the
+  plugin can serve a different origin for each instance. The tab is keyed by it
+  (`dohc://plugin-web/<plugin>/<webApp>/<instance>`), which makes each instance
+  its own tab, its own guest, and its own origin lock. `stopWebApp` names one
+  instance and must leave the others running.
+
+dohc has no idea what an instance is, so only the plugin can name one: a
+per-instance web app is opened from the plugin's own panel with
+`dohc.ui.openWebApp(webAppId, instanceKey)`, and the plugin's page offers no
+Open button for it. At most 20 instances of one web app run at once, because
+each one is a live guest process behind a server the plugin spawned.
+
+Every instance of one plugin shares that plugin's storage partition. The
+partition exists to keep plugins out of each other's cookie jar, and every
+instance here is the same plugin's own server under the same plugin's
+authority — so uninstall still clears one partition and clears them all.
 
 A `drivers` entry contributes one agent driver: a harness dohc can talk to,
 which joins the driver registry beside the ones dohc ships and appears in the

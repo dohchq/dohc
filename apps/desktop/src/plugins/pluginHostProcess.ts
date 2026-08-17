@@ -146,10 +146,13 @@ transport.onRequest(PLUGIN_HOST_METHODS.startWebApp, async (rawParams) => {
   const params = rawParams as PluginStartWebAppParams;
   if (!activeHandler?.startWebApp) {
     throw new Error(
-      "This plugin declares web apps but its handler does not implement startWebApp(webAppId).",
+      "This plugin declares web apps but its handler does not implement startWebApp(webAppId, instanceKey).",
     );
   }
-  const started = await activeHandler.startWebApp(params.webAppId);
+  const started = await activeHandler.startWebApp(
+    params.webAppId,
+    params.instanceKey,
+  );
   if (
     typeof started !== "object" ||
     started === null ||
@@ -160,17 +163,20 @@ transport.onRequest(PLUGIN_HOST_METHODS.startWebApp, async (rawParams) => {
       "startWebApp must return { url } with a non-empty string url.",
     );
   }
-  return { url: started.url } satisfies PluginStartWebAppResult;
+  return {
+    url: started.url,
+    ...(started.title === undefined ? {} : { title: started.title }),
+  } satisfies PluginStartWebAppResult;
 });
 
 transport.onRequest(PLUGIN_HOST_METHODS.stopWebApp, async (rawParams) => {
   const params = rawParams as PluginStopWebAppParams;
   if (!activeHandler?.stopWebApp) {
     throw new Error(
-      "This plugin implements startWebApp but its handler does not implement stopWebApp(webAppId).",
+      "This plugin implements startWebApp but its handler does not implement stopWebApp(webAppId, instanceKey).",
     );
   }
-  await activeHandler.stopWebApp(params.webAppId);
+  await activeHandler.stopWebApp(params.webAppId, params.instanceKey);
   return {};
 });
 

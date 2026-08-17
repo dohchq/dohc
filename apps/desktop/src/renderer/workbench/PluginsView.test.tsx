@@ -229,7 +229,9 @@ describe("PluginsView", () => {
     bridgeMock.listPlugins.mockResolvedValue({
       ok: true,
       plugins: [
-        plugin("ready-plugin", { webApps: [{ id: "app", title: "T3 Code" }] }),
+        plugin("ready-plugin", {
+          webApps: [{ id: "app", title: "T3 Code", instanced: false }],
+        }),
         plugin("approval-plugin", {
           status: "disabled-pending-approval",
           disabledReason: "approval",

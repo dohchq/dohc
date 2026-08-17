@@ -362,6 +362,99 @@ describe("invokePluginSdkHost", () => {
     ).rejects.toThrow(/ui.open is unavailable for this request path/);
   });
 
+  // ui.openWebApp is the only way an instance key ever enters dohc: the
+  // plugin's page in dohc knows manifest ids and nothing about instances.
+  describe("ui.openWebApp", () => {
+    async function panelWithWebApps(): Promise<PluginSdkHostContext> {
+      return {
+        ...context(await workspaceRoot()),
+        requestPath: "panel",
+        declaredWebApps: [
+          { id: "preview", instanced: true },
+          { id: "app", instanced: false },
+        ],
+      };
+    }
+
+    it("returns the web app and instance a panel asked to open", async () => {
+      await expect(
+        invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
+          webAppId: "preview",
+          instanceKey: "sites/marketing",
+        }),
+      ).resolves.toEqual({
+        webAppId: "preview",
+        instanceKey: "sites/marketing",
+      });
+    });
+
+    // MUTATION (serve this from the plugin-process path too): a plugin with
+    // no renderer would ask for a tab nothing can open.
+    it("refuses the request path with no renderer behind it", async () => {
+      const root = await workspaceRoot();
+      await expect(
+        invokePluginSdkHost(
+          {
+            ...context(root),
+            declaredWebApps: [{ id: "preview", instanced: true }],
+          },
+          "ui.openWebApp",
+          { webAppId: "preview", instanceKey: "sites/a" },
+        ),
+      ).rejects.toThrow(/ui.openWebApp is unavailable for this request path/);
+    });
+
+    // MUTATION (read the declared web apps from the request instead of the
+    // registration): a panel could open a web app its manifest never declared
+    // — approval covers the manifest, so this is the line approval sits on.
+    it("refuses a web app this plugin's manifest never declared", async () => {
+      await expect(
+        invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
+          webAppId: "ghost",
+          instanceKey: "sites/a",
+        }),
+      ).rejects.toThrow(/does not declare web app "ghost"/);
+    });
+
+    it("refuses an instance on a web app that opens a single tab", async () => {
+      await expect(
+        invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
+          webAppId: "app",
+          instanceKey: "sites/a",
+        }),
+      ).rejects.toThrow(/must not name an instance/);
+    });
+
+    it("refuses an open with no instance to name", async () => {
+      await expect(
+        invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
+          webAppId: "preview",
+        }),
+      ).rejects.toThrow(/instanceKey must be a non-empty string/);
+    });
+
+    // MUTATION (drop the length bound): the key rides in a tab path that
+    // restore rejects past 4096 characters, so an unbounded key would open a
+    // tab that never comes back.
+    it("names the limit when an instance key is too long", async () => {
+      await expect(
+        invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
+          webAppId: "preview",
+          instanceKey: "s".repeat(513),
+        }),
+      ).rejects.toThrow(/513 characters, past the limit of 512 characters/);
+    });
+
+    it("refuses a NUL byte in an instance key", async () => {
+      await expect(
+        invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
+          webAppId: "preview",
+          instanceKey: "sites/a\0b",
+        }),
+      ).rejects.toThrow(/must not contain NUL bytes/);
+    });
+  });
+
   it("refuses writes from a read-only or stopped panel authority", async () => {
     const root = await workspaceRoot();
     const readOnly = { ...context(root), isWritable: () => false };

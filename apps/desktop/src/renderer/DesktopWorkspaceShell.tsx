@@ -1876,8 +1876,16 @@ export function DesktopWorkspaceShell(props: {
     [workspaceId],
   );
   const rememberWebAppTitle = useCallback(
-    (pluginId: string, webAppId: string, title: string) =>
-      rememberPluginTabTitle(pluginWebAppTabPath(pluginId, webAppId), title),
+    (
+      pluginId: string,
+      webAppId: string,
+      instanceKey: string | null,
+      title: string,
+    ) =>
+      rememberPluginTabTitle(
+        pluginWebAppTabPath(pluginId, webAppId, instanceKey),
+        title,
+      ),
     [rememberPluginTabTitle],
   );
   const rememberPluginDetailsTitle = useCallback(
@@ -3092,9 +3100,21 @@ export function DesktopWorkspaceShell(props: {
     () =>
       bridge().onPluginWebAppOpened((event) => {
         if (event.workspaceId !== workspaceId) return;
-        openVirtualTab(pluginWebAppTabPath(event.pluginId, event.webAppId));
+        openVirtualTab(
+          pluginWebAppTabPath(event.pluginId, event.webAppId, event.instanceKey),
+        );
       }),
     [openVirtualTab, workspaceId],
+  );
+  // A plugin panel asked for one instance of its own web app. The tab takes
+  // the same path a manifest-id app's tab takes, MAX_OPEN_TABS refusal
+  // included; the instance is what makes it its own tab rather than a
+  // re-activation of the last one.
+  const openPluginWebAppInstanceTab = useCallback(
+    (pluginId: string, webAppId: string, instanceKey: string) => {
+      openVirtualTab(pluginWebAppTabPath(pluginId, webAppId, instanceKey));
+    },
+    [openVirtualTab],
   );
   const openVersionCompareTab = useCallback(
     (versionId: string) => {
@@ -5509,6 +5529,7 @@ export function DesktopWorkspaceShell(props: {
                     pluginId={groupPluginPanel.pluginId}
                     panelId={groupPluginPanel.panelId}
                     onOpenPath={openPathWithHeading}
+                    onOpenWebApp={openPluginWebAppInstanceTab}
                   />
                 </Suspense>
               ) : (
@@ -5532,6 +5553,7 @@ export function DesktopWorkspaceShell(props: {
                     workspaceId={workspaceId}
                     pluginId={groupPluginWebApp.pluginId}
                     webAppId={groupPluginWebApp.webAppId}
+                    instanceKey={groupPluginWebApp.instanceKey}
                     hiddenByOverlay={overlayOpen}
                     onTitle={rememberWebAppTitle}
                   />

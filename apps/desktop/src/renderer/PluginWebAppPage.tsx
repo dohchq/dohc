@@ -20,6 +20,10 @@ export function PluginWebAppPage(props: {
   workspaceId: string;
   pluginId: string;
   webAppId: string;
+  /** Which instance this tab shows, or null for a web app that opens one tab
+   * for the whole plugin. It is part of the identity every call below carries,
+   * so two instances never start, resize, or stop each other. */
+  instanceKey: string | null;
   /** True while the shell paints UI that needs its own clicks — a dialog, the
    * command palette, an agent's floating permission ask. The guest is a
    * main-process view layered over this page, so it composites above all of
@@ -29,7 +33,12 @@ export function PluginWebAppPage(props: {
   hiddenByOverlay?: boolean;
   /** Reports the manifest title this app started under, so the tab can carry
    * the name the user installed instead of the raw web app id. */
-  onTitle?: (pluginId: string, webAppId: string, title: string) => void;
+  onTitle?: (
+    pluginId: string,
+    webAppId: string,
+    instanceKey: string | null,
+    title: string,
+  ) => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [load, setLoad] = useState<LoadState>({ status: "starting" });
@@ -41,7 +50,7 @@ export function PluginWebAppPage(props: {
   useEffect(() => {
     onTitleRef.current = props.onTitle;
   });
-  const context = `${props.workspaceId}\0${props.pluginId}\0${props.webAppId}`;
+  const context = `${props.workspaceId}\0${props.pluginId}\0${props.webAppId}\0${props.instanceKey ?? ""}`;
 
   useEffect(() => {
     // The request token is the whole guard. This effect re-runs for every
@@ -56,6 +65,7 @@ export function PluginWebAppPage(props: {
         workspaceId: props.workspaceId,
         pluginId: props.pluginId,
         webAppId: props.webAppId,
+        instanceKey: props.instanceKey,
       })
       .then((result) => {
         if (!isCurrent()) return;
@@ -64,7 +74,12 @@ export function PluginWebAppPage(props: {
           return;
         }
         setLoad({ status: "ready", title: result.title });
-        onTitleRef.current?.(props.pluginId, props.webAppId, result.title);
+        onTitleRef.current?.(
+          props.pluginId,
+          props.webAppId,
+          props.instanceKey,
+          result.title,
+        );
       })
       .catch((error: unknown) => {
         if (!isCurrent()) return;
@@ -84,10 +99,17 @@ export function PluginWebAppPage(props: {
           workspaceId: props.workspaceId,
           pluginId: props.pluginId,
           webAppId: props.webAppId,
+          instanceKey: props.instanceKey,
         })
         .catch(() => undefined);
     };
-  }, [props.pluginId, props.webAppId, props.workspaceId, context]);
+  }, [
+    props.instanceKey,
+    props.pluginId,
+    props.webAppId,
+    props.workspaceId,
+    context,
+  ]);
 
   // The guest can die after the start already answered "ok" — a rejected
   // navigation, a window that closed under it. Main destroys the view and
@@ -98,7 +120,8 @@ export function PluginWebAppPage(props: {
       if (
         event.workspaceId !== props.workspaceId ||
         event.pluginId !== props.pluginId ||
-        event.webAppId !== props.webAppId
+        event.webAppId !== props.webAppId ||
+        event.instanceKey !== props.instanceKey
       ) {
         return;
       }
@@ -107,7 +130,7 @@ export function PluginWebAppPage(props: {
         message: "The app stopped before it finished opening.",
       });
     });
-  }, [props.pluginId, props.webAppId, props.workspaceId]);
+  }, [props.instanceKey, props.pluginId, props.webAppId, props.workspaceId]);
 
   // While ready, keep main told where the placeholder sits. The container
   // resizes with every layout change that moves it (sidebar, group splits),
@@ -136,6 +159,7 @@ export function PluginWebAppPage(props: {
           workspaceId: props.workspaceId,
           pluginId: props.pluginId,
           webAppId: props.webAppId,
+          instanceKey: props.instanceKey,
           bounds,
           visible: !hiddenByOverlay && bounds.width > 0 && bounds.height > 0,
         })
@@ -155,7 +179,14 @@ export function PluginWebAppPage(props: {
       window.removeEventListener("resize", schedule);
       if (frame !== null) cancelAnimationFrame(frame);
     };
-  }, [props.pluginId, props.webAppId, props.workspaceId, ready, hiddenByOverlay]);
+  }, [
+    props.instanceKey,
+    props.pluginId,
+    props.webAppId,
+    props.workspaceId,
+    ready,
+    hiddenByOverlay,
+  ]);
 
   return (
     <div

@@ -7,6 +7,11 @@ import {
   type SiteSdkHostContext,
 } from "../workspaces/siteSdkHost";
 import { isPluginChildProcessMethod } from "./pluginChildProcessBroker";
+import {
+  MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS,
+  requireDeclaredWebApp,
+  type DeclaredWebApp,
+} from "./pluginWebAppInstances";
 
 const ABORTED_ERROR_CODE = "DOHC_ABORTED";
 
@@ -28,6 +33,13 @@ export interface PluginSdkHostContext {
   requestPath: "panel" | "plugin-process";
   isWritable: () => boolean;
   writeAvailable: () => Promise<boolean>;
+  /**
+   * The web apps this plugin's manifest declares, so `ui.openWebApp` can
+   * refuse an id the plugin never contributed and one whose shape does not
+   * match the request. The caller reads it from the registered manifest —
+   * never from the plugin's own request.
+   */
+  declaredWebApps?: readonly DeclaredWebApp[];
   /**
    * Aborts either because the renderer's panel authority went stale, or
    * because this exact plugin spawn stopped, crashed, or was replaced —
@@ -219,6 +231,46 @@ export async function invokePluginSdkHost(
         context.signal,
         invokeSiteSdkHost(siteContext, method, params),
       );
+    }
+    // A plugin opens one of its OWN web apps, naming the instance it wants.
+    // This is the only caller that can: the plugin's page in dohc knows the
+    // manifest ids and nothing about what an instance is. The plugin id comes
+    // from the panel grant this request arrived under, never from the request,
+    // so a panel cannot open another plugin's app.
+    case "ui.openWebApp": {
+      if (context.requestPath !== "panel") {
+        throw new Error(
+          'ui.openWebApp is unavailable for this request path (requestPath "plugin-process"). Opening a tab needs a renderer, so a plugin opens one from its panel.',
+        );
+      }
+      throwIfAborted(context.signal);
+      const input = record(params);
+      if (typeof input.webAppId !== "string" || input.webAppId.length === 0) {
+        throw new Error("ui.openWebApp webAppId must be a non-empty string.");
+      }
+      const instance = input.instanceKey;
+      if (typeof instance !== "string" || instance.length === 0) {
+        throw new Error(
+          "ui.openWebApp instanceKey must be a non-empty string. A web app that opens a single tab is opened from the plugin's page instead.",
+        );
+      }
+      if (instance.length > MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS) {
+        throw new Error(
+          `ui.openWebApp instanceKey is ${instance.length} characters, past the limit of ${MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS} characters for an instance key.`,
+        );
+      }
+      if (instance.includes("\0")) {
+        throw new Error(
+          "ui.openWebApp instanceKey must not contain NUL bytes.",
+        );
+      }
+      requireDeclaredWebApp(
+        context.pluginId,
+        context.declaredWebApps,
+        input.webAppId,
+        instance,
+      );
+      return { webAppId: input.webAppId, instanceKey: instance };
     }
     case "files.write": {
       if (!context.isWritable()) {

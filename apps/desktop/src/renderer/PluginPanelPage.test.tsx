@@ -180,6 +180,47 @@ describe("PluginPanelPage", () => {
     expect(onOpenPath).toHaveBeenCalledTimes(1);
   });
 
+  // A panel is the only caller that can name an instance, so this hand-off is
+  // the whole open path for a per-instance web app.
+  it("opens the web app instance a panel asked for through ui.openWebApp", async () => {
+    const onOpenWebApp = vi.fn();
+    bridgeMock.invokePluginPanelSdk.mockResolvedValueOnce({
+      result: { webAppId: "preview", instanceKey: "sites/marketing" },
+    });
+    render(
+      <PluginPanelPage
+        workspaceId="ws-plugins"
+        pluginId="hello-plugin"
+        panelId="main"
+        onOpenWebApp={onOpenWebApp}
+      />,
+    );
+    const frame = (await screen.findByTestId(
+      "plugin-panel-frame",
+    )) as HTMLIFrameElement;
+    const postMessage = vi.fn();
+    const source = { postMessage } as unknown as Window;
+    Object.defineProperty(frame, "contentWindow", {
+      configurable: true,
+      value: source,
+    });
+
+    sdkMessage(source, "http://127.0.0.1:49160", "ui.openWebApp", {
+      webAppId: "preview",
+      instanceKey: "sites/marketing",
+    });
+    // MUTATION (take the plugin id from the panel's own message): a panel
+    // could open another plugin's web app. It comes from the mounted panel.
+    await vi.waitFor(() =>
+      expect(onOpenWebApp).toHaveBeenCalledWith(
+        "hello-plugin",
+        "preview",
+        "sites/marketing",
+      ),
+    );
+    expect(onOpenWebApp).toHaveBeenCalledTimes(1);
+  });
+
   it("does not open a ui.open target the panel is no longer live for", async () => {
     const onOpenPath = vi.fn();
     const pending = deferred<InvokePluginPanelSdkResult>();

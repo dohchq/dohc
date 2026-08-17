@@ -148,6 +148,10 @@ export interface PluginInvokeCommandParams {
 
 export interface PluginStartWebAppParams {
   webAppId: string;
+  /** Which instance to serve, for a web app the manifest marks `instanced`;
+   * null for one that opens a single app. The plugin decides what the key
+   * means and may serve a different origin for each one. */
+  instanceKey: string | null;
 }
 
 /** The result's `url` may carry a one-time credential in its fragment. It
@@ -155,6 +159,9 @@ export interface PluginStartWebAppParams {
  * on this path logs it. */
 export interface PluginStartWebAppResult {
   url: string;
+  /** What to call this instance's tab. Absent means the manifest title, which
+   * is the same for every instance of one id. */
+  title?: string;
 }
 
 /** The reverse of a start. A start can hand the guest a one-time credential,
@@ -163,6 +170,9 @@ export interface PluginStartWebAppResult {
  * next start pairs again. */
 export interface PluginStopWebAppParams {
   webAppId: string;
+  /** The instance the matching start paired. Stopping one instance leaves the
+   * plugin's other instances running. */
+  instanceKey: string | null;
 }
 
 /**

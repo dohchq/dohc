@@ -42,9 +42,7 @@ describe("plugin web app main-process wiring", () => {
 
   it("builds the guest only after readiness and both post-start rechecks", () => {
     const start = handler("startPluginWebApp");
-    const startWebAppAt = start.indexOf(
-      "await host.startWebApp(input.pluginId, input.webAppId)",
-    );
+    const startWebAppAt = start.indexOf("await host.startWebApp(");
     const spawnRecheckAt = start.indexOf(
       "host.getSpawnId(input.pluginId) !== spawnId",
       startWebAppAt,
@@ -75,8 +73,10 @@ describe("plugin web app main-process wiring", () => {
     // behavior in pluginWebAppRecovery.test.ts; that the start hands it the
     // PLUGIN's unpair — not just the view stop — is this handler's own claim.
     expect(start).toContain("recoverConsumedWebAppCredential({");
-    expect(start).toContain(
-      "unpair: () => host.stopWebApp(input.pluginId, input.webAppId),",
+    const unpairAt = start.indexOf("unpair: () =>");
+    expect(unpairAt).toBeGreaterThan(-1);
+    expect(start.indexOf("host.stopWebApp(", unpairAt)).toBeGreaterThan(
+      unpairAt,
     );
     expect(start).toContain("notifyFailed: () =>");
     expect(start).toContain("onLoadFailure: () => {");

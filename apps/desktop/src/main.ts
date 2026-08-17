@@ -682,6 +682,10 @@ import {
 } from "./plugins/pluginWebAppGuest";
 import { recoverConsumedWebAppCredential } from "./plugins/pluginWebAppRecovery";
 import {
+  assertInstanceBudget,
+  requireDeclaredWebApp,
+} from "./plugins/pluginWebAppInstances";
+import {
   PluginWebAppViewRegistry,
   type PluginWebAppViewRecord,
 } from "./plugins/pluginWebAppViews";
@@ -2999,12 +3003,16 @@ const hardenedGuestPartitions = new Set<string>();
 const withPluginWebAppStartLock = <T>(key: string, operation: () => Promise<T>) =>
   withKeyedStartLock(pluginWebAppStartLocks, key, operation);
 
+// The start lock serializes one instance's own starts and teardowns. Two
+// instances of one web app are two servers behind two views, so they take two
+// locks and start side by side.
 function pluginWebAppKey(
   workspaceId: string,
   pluginId: string,
   webAppId: string,
+  instanceKey: string | null,
 ): string {
-  return `${workspaceId}\0${pluginId}\0${webAppId}`;
+  return `${workspaceId}\0${pluginId}\0${webAppId}\0${instanceKey ?? ""}`;
 }
 
 function destroyPluginWebAppViews(
@@ -3082,6 +3090,10 @@ function invokeWorkspacePluginSdk(input: {
       workspaceRoot: workspace.rootPath,
       spawnId: input.spawnId,
       requestPath: input.requestPath,
+      // Read from the registration main holds, never from the request: what a
+      // plugin may open is what its approved manifest declares.
+      declaredWebApps: registeredPlugin(input.workspaceId, input.pluginId)
+        ?.manifest.webApps,
       isWritable: input.isWritable,
       writeAvailable: async () => {
         try {
@@ -3243,10 +3255,17 @@ async function stopPluginWebApp(
   workspaceId: string,
   pluginId: string,
   webAppId: string,
+  instanceKey: string | null,
 ): Promise<void> {
   await withPluginWebAppStartLock(
-    pluginWebAppKey(workspaceId, pluginId, webAppId),
-    () => stopPluginWebAppUnderStartLock(workspaceId, pluginId, webAppId),
+    pluginWebAppKey(workspaceId, pluginId, webAppId, instanceKey),
+    () =>
+      stopPluginWebAppUnderStartLock(
+        workspaceId,
+        pluginId,
+        webAppId,
+        instanceKey,
+      ),
   );
 }
 
@@ -3257,11 +3276,17 @@ async function stopPluginWebAppUnderStartLock(
   workspaceId: string,
   pluginId: string,
   webAppId: string,
+  instanceKey: string | null,
 ): Promise<void> {
   await withPluginHostLifecycleLock(
     pluginLifecycleKey(workspaceId, pluginId),
     async () => {
-      const removed = pluginWebAppViews.remove({ workspaceId, pluginId, webAppId });
+      const removed = pluginWebAppViews.remove({
+        workspaceId,
+        pluginId,
+        webAppId,
+        instanceKey,
+      });
       if (removed) destroyPluginWebAppViews([removed]);
       await stopPluginHostIfUnclaimed(workspaceId, pluginId);
     },
@@ -7206,8 +7231,22 @@ function registerIpcHandlers(
       workspace.workspaceId,
       registration,
     );
+    // The open's shape must match the id it names before a tab appears for
+    // it: a keyless open of a per-instance app would otherwise reach start
+    // and fail there, after the user already has an empty tab.
+    requireDeclaredWebApp(
+      input.pluginId,
+      plugin.manifest.webApps,
+      input.webAppId,
+      input.instanceKey,
+    );
     await withPluginWebAppStartLock(
-      pluginWebAppKey(workspace.workspaceId, input.pluginId, input.webAppId),
+      pluginWebAppKey(
+        workspace.workspaceId,
+        input.pluginId,
+        input.webAppId,
+        input.instanceKey,
+      ),
       () =>
         withPluginHostLifecycleLock(
           pluginLifecycleKey(workspace.workspaceId, input.pluginId),
@@ -7221,6 +7260,7 @@ function registerIpcHandlers(
     return OpenPluginWebAppResult.parse({
       pluginId: input.pluginId,
       webAppId: input.webAppId,
+      instanceKey: input.instanceKey,
     });
   });
 
@@ -7240,17 +7280,34 @@ function registerIpcHandlers(
     if (!plugin) {
       return StartPluginWebAppResult.parse({ status: "not-registered" });
     }
-    const webApp = plugin.manifest.webApps?.find(
-      (candidate) => candidate.id === input.webAppId,
+    const webApp = requireDeclaredWebApp(
+      input.pluginId,
+      plugin.manifest.webApps,
+      input.webAppId,
+      input.instanceKey,
     );
-    if (!webApp) {
-      throw new Error(
-        `Plugin "${input.pluginId}" does not declare web app "${input.webAppId}".`,
-      );
-    }
+    const identity = {
+      workspaceId: workspace.workspaceId,
+      pluginId: input.pluginId,
+      webAppId: input.webAppId,
+      instanceKey: input.instanceKey,
+    };
     return withPluginWebAppStartLock(
-      pluginWebAppKey(workspace.workspaceId, input.pluginId, input.webAppId),
+      pluginWebAppKey(
+        workspace.workspaceId,
+        input.pluginId,
+        input.webAppId,
+        input.instanceKey,
+      ),
       async () => {
+        // The budget is read inside the lock, against the live views: a
+        // restore that reopens more instances than the budget allows is
+        // refused here, which is the only place that sees them all.
+        assertInstanceBudget(
+          input.pluginId,
+          input.webAppId,
+          pluginWebAppViews.countOtherInstances(identity),
+        );
         const host = await withPluginHostLifecycleLock(
           pluginLifecycleKey(workspace.workspaceId, input.pluginId),
           () => {
@@ -7267,7 +7324,11 @@ function registerIpcHandlers(
         // The returned URL can carry a one-time credential in its fragment;
         // it goes into loadURL below and nowhere else — never a log, never
         // the renderer.
-        const started = await host.startWebApp(input.pluginId, input.webAppId);
+        const started = await host.startWebApp(
+          input.pluginId,
+          input.webAppId,
+          input.instanceKey,
+        );
         if (host.getSpawnId(input.pluginId) !== spawnId) {
           throw new Error(
             `Plugin "${input.pluginId}" restarted while its web app was starting. Try again.`,
@@ -7289,27 +7350,29 @@ function registerIpcHandlers(
         // hold that section open waiting for the handler it runs inside.
         const recoverConsumedCredential = (): void => {
           void recoverConsumedWebAppCredential({
-            notifyFailed: () =>
-              notifyPluginWebAppFailed(sender, {
-                workspaceId: workspace.workspaceId,
-                pluginId: input.pluginId,
-                webAppId: input.webAppId,
-              }),
+            notifyFailed: () => notifyPluginWebAppFailed(sender, identity),
             withTeardownLock: (teardown) =>
               withPluginWebAppStartLock(
                 pluginWebAppKey(
                   workspace.workspaceId,
                   input.pluginId,
                   input.webAppId,
+                  input.instanceKey,
                 ),
                 teardown,
               ),
-            unpair: () => host.stopWebApp(input.pluginId, input.webAppId),
+            unpair: () =>
+              host.stopWebApp(
+                input.pluginId,
+                input.webAppId,
+                input.instanceKey,
+              ),
             stopView: () =>
               stopPluginWebAppUnderStartLock(
                 workspace.workspaceId,
                 input.pluginId,
                 input.webAppId,
+                input.instanceKey,
               ),
             onError: (stage, error) => {
               console.warn(
@@ -7334,9 +7397,7 @@ function registerIpcHandlers(
             attach: (view, { origin, partition }) => {
               win.contentView.addChildView(view);
               const displaced = pluginWebAppViews.register({
-                workspaceId: workspace.workspaceId,
-                pluginId: input.pluginId,
-                webAppId: input.webAppId,
+                ...identity,
                 senderId: sender.id,
                 generation,
                 origin,
@@ -7354,9 +7415,12 @@ function registerIpcHandlers(
               recoverConsumedCredential();
             },
           });
+          // Every instance of one id shares the manifest title, which would
+          // label twenty preview tabs "Preview". A plugin that knows what its
+          // instance is may name it; the manifest title is the fallback.
           return StartPluginWebAppResult.parse({
             status: "ok",
-            title: webApp.title,
+            title: started.title ?? webApp.title,
             origin: guest.origin,
           });
         } catch (error) {
@@ -7377,6 +7441,7 @@ function registerIpcHandlers(
       workspaceId: input.workspaceId,
       pluginId: input.pluginId,
       webAppId: input.webAppId,
+      instanceKey: input.instanceKey,
       senderId: event.sender.id,
       generation: rendererGeneration(event.sender.id),
     });
@@ -7398,6 +7463,7 @@ function registerIpcHandlers(
       workspaceId: workspace.workspaceId,
       pluginId: input.pluginId,
       webAppId: input.webAppId,
+      instanceKey: input.instanceKey,
     });
     if (
       record &&
@@ -7412,6 +7478,7 @@ function registerIpcHandlers(
       workspace.workspaceId,
       input.pluginId,
       input.webAppId,
+      input.instanceKey,
     );
   });
 
