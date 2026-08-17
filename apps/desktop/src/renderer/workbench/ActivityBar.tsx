@@ -8,7 +8,10 @@ import {
   Settings,
   Workflow,
 } from "lucide-react";
-import { VIEW_IDS, type ViewId } from "./workbenchState";
+import type { ReactNode } from "react";
+import type { PluginActivityView } from "./pluginActivityViews";
+import { PluginIcon } from "./PluginIcon";
+import { VIEW_IDS, type ActivityViewId, type ViewId } from "./workbenchState";
 
 // VS Code-style activity bar: 48px icon rail, leftmost column of the
 // workbench. Ported a11y/active patterns from the retired web ActivityBar
@@ -47,7 +50,9 @@ function RailButton(props: {
   // Numeric badge seam (Phase E5.0: search results count while showing).
   count?: number;
   onClick?: () => void;
-  Icon: typeof Files;
+  // A node, not a component: dohc's views draw a lucide glyph and a plugin's
+  // view draws its own icon file.
+  icon: ReactNode;
 }) {
   const className = `relative grid size-9 place-items-center rounded-lg transition-colors duration-100 ${
     props.active
@@ -64,7 +69,7 @@ function RailButton(props: {
           className="absolute -left-1.5 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-ink"
         />
       ) : null}
-      <props.Icon size={18} strokeWidth={1.9} aria-hidden />
+      {props.icon}
       {props.badge ? (
         <span
           aria-hidden
@@ -107,12 +112,16 @@ function RailButton(props: {
 }
 
 export function ActivityBar(props: {
-  activeView: ViewId;
+  workspaceId: string;
+  activeView: ActivityViewId;
   sidebarVisible: boolean;
   hasConflict: boolean;
   // Content-search results count (Phase E5.0); undefined = no badge.
   searchResultCount?: number;
-  onSelectView: (view: ViewId) => void;
+  // The views plugins contribute, after dohc's own. A plugin that is gone or
+  // turned off contributes none, so its button leaves the rail with it.
+  pluginViews: readonly PluginActivityView[];
+  onSelectView: (view: ActivityViewId) => void;
   onOpenCloud?: () => void;
   onOpenSettings?: () => void;
 }) {
@@ -122,19 +131,44 @@ export function ActivityBar(props: {
       data-testid="activity-bar"
       className="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-line bg-panel py-2"
     >
-      {VIEW_IDS.map((view) => (
-        <RailButton
-          key={view}
-          testId={`activity-${view}`}
-          label={LABELS[view]}
-          // The rail reflects a collapsed panel: no active mark while hidden.
-          active={props.sidebarVisible && props.activeView === view}
-          badge={view === "explorer" && props.hasConflict ? "danger" : undefined}
-          count={view === "search" ? props.searchResultCount : undefined}
-          onClick={() => props.onSelectView(view)}
-          Icon={ICONS[view]}
-        />
-      ))}
+      {/* The view list scrolls, so enough contributed views never push the
+          Cloud and Settings buttons off the rail. */}
+      <div className="flex min-h-0 flex-col items-center gap-1 overflow-y-auto">
+        {VIEW_IDS.map((view) => {
+          const Icon = ICONS[view];
+          return (
+            <RailButton
+              key={view}
+              testId={`activity-${view}`}
+              label={LABELS[view]}
+              // The rail reflects a collapsed panel: no active mark while hidden.
+              active={props.sidebarVisible && props.activeView === view}
+              badge={view === "explorer" && props.hasConflict ? "danger" : undefined}
+              count={view === "search" ? props.searchResultCount : undefined}
+              onClick={() => props.onSelectView(view)}
+              icon={<Icon size={18} strokeWidth={1.9} aria-hidden />}
+            />
+          );
+        })}
+        {props.pluginViews.map((view) => (
+          <RailButton
+            key={view.viewId}
+            testId={`activity-${view.viewId}`}
+            label={view.title}
+            active={props.sidebarVisible && props.activeView === view.viewId}
+            onClick={() => props.onSelectView(view.viewId)}
+            icon={
+              <PluginIcon
+                workspaceId={props.workspaceId}
+                plugin={view.plugin}
+                icon={view.icon}
+                glyphSize={18}
+                className="grid size-[18px] place-items-center"
+              />
+            }
+          />
+        ))}
+      </div>
       <div className="mt-auto flex flex-col items-center gap-1 border-t border-line pt-2">
         {/* Labels deliberately differ from the status bar's "Connect dohc
             Cloud" button and "Settings" button — several specs pin those
@@ -144,13 +178,13 @@ export function ActivityBar(props: {
           label="dohc Cloud"
           badge={props.hasConflict ? "danger" : undefined}
           onClick={props.onOpenCloud}
-          Icon={Cloud}
+          icon={<Cloud size={18} strokeWidth={1.9} aria-hidden />}
         />
         <RailButton
           testId="activity-settings"
           label="Open settings"
           onClick={props.onOpenSettings}
-          Icon={Settings}
+          icon={<Settings size={18} strokeWidth={1.9} aria-hidden />}
         />
       </div>
     </nav>

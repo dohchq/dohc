@@ -16,6 +16,60 @@ export const VIEW_IDS = [
   "plugins",
 ] as const;
 export type ViewId = (typeof VIEW_IDS)[number];
+
+// A plugin's view in the activity bar. dohc's own views are a fixed list, but
+// a plugin contributes one by placing a panel in the rail, so the selected
+// view is no longer only a member of that list.
+//
+// The id names the panel behind the view — (plugin, panel) is what the panel
+// machinery is already keyed by — and encodes both segments like every tab
+// path here, so an id containing a slash cannot split into a different view.
+export const PLUGIN_VIEW_ID_PREFIX = "plugin-view:";
+export type PluginViewId = `${typeof PLUGIN_VIEW_ID_PREFIX}${string}`;
+export type ActivityViewId = ViewId | PluginViewId;
+
+export function pluginViewId(pluginId: string, panelId: string): PluginViewId {
+  return `${PLUGIN_VIEW_ID_PREFIX}${encodeURIComponent(pluginId)}/${encodeURIComponent(panelId)}`;
+}
+
+export function parsePluginViewId(
+  value: string | null,
+): { pluginId: string; panelId: string } | null {
+  if (typeof value !== "string" || !value.startsWith(PLUGIN_VIEW_ID_PREFIX)) {
+    return null;
+  }
+  const parts = value.slice(PLUGIN_VIEW_ID_PREFIX.length).split("/");
+  if (parts.length !== 2 || parts.some((part) => part.length === 0)) return null;
+  try {
+    const pluginId = decodeURIComponent(parts[0]!);
+    const panelId = decodeURIComponent(parts[1]!);
+    return pluginId.length > 0 && panelId.length > 0
+      ? { pluginId, panelId }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function isViewId(value: unknown): value is ViewId {
+  return typeof value === "string" && (VIEW_IDS as readonly string[]).includes(value);
+}
+
+export function isActivityViewId(value: unknown): value is ActivityViewId {
+  if (typeof value !== "string") return false;
+  return isViewId(value) || parsePluginViewId(value) !== null;
+}
+
+/**
+ * Drops a plugin view once its plugin is gone, so an uninstall leaves no
+ * selection pointing at a view nothing contributes. Panel visibility is the
+ * user's and survives: an uninstall must not reopen a panel they collapsed.
+ */
+export function clearPluginView(state: WorkbenchState): WorkbenchState {
+  return parsePluginViewId(state.activeView) === null
+    ? state
+    : { ...state, activeView: defaultWorkbenchState().activeView };
+}
 export const GRAPH_TAB_PATH = "dohc://graph";
 export const HISTORY_TAB_PATH = "dohc://history";
 // Chats expanded to a full editor tab (singleton, graph/history precedent).
@@ -271,7 +325,7 @@ export interface EditorGroup {
 }
 
 export interface WorkbenchState {
-  activeView: ViewId;
+  activeView: ActivityViewId;
   sidebarVisible: boolean;
   sidebarWidth: number;
   // Editor groups appear in horizontal visual order. A path can be open once
@@ -784,7 +838,10 @@ export function closeEditorGroup(
 
 // Selecting the already-active view toggles the panel (the old explicit
 // collapse button); any other view switches AND reveals the panel.
-export function setView(state: WorkbenchState, view: ViewId): WorkbenchState {
+export function setView(
+  state: WorkbenchState,
+  view: ActivityViewId,
+): WorkbenchState {
   if (view === state.activeView) {
     return { ...state, sidebarVisible: !state.sidebarVisible };
   }
@@ -977,10 +1034,6 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
   };
 }
 
-function isViewId(value: unknown): value is ViewId {
-  return typeof value === "string" && (VIEW_IDS as readonly string[]).includes(value);
-}
-
 export function parseUiState(raw: unknown): WorkbenchState {
   const defaults = defaultWorkbenchState();
   if (typeof raw !== "object" || raw === null) return defaults;
@@ -1120,7 +1173,7 @@ export function parseUiState(raw: unknown): WorkbenchState {
   const rawChatsWidth = own("chatsWidth");
   const rawOpenEditorsHeight = own("openEditorsHeight");
   return {
-    activeView: isViewId(rawView) ? rawView : defaults.activeView,
+    activeView: isActivityViewId(rawView) ? rawView : defaults.activeView,
     sidebarVisible:
       typeof rawSidebarVisible === "boolean"
         ? rawSidebarVisible

@@ -112,6 +112,13 @@ const PluginIconPath = PluginPath.refine(
   `icon: must be a .${PLUGIN_ICON_EXTENSIONS.join(" or .")} file`,
 );
 
+// Where a panel shows. "editor" opens it as an editor tab; "view" gives it a
+// button in the activity bar and renders it in the side panel, beside the
+// explorer and the graph. The two are exclusive because a running panel is
+// keyed by (workspace, plugin, panel) and starting a second one stops the
+// first — so a panel that can be in both places at once cannot exist.
+const PluginPanelPlacement = z.enum(["editor", "view"]);
+
 const PluginPanel = z.object({
   id: z.string().min(1).max(120).refine(
     (value) => !value.includes("\0"),
@@ -119,7 +126,29 @@ const PluginPanel = z.object({
   ),
   title: z.string().min(1).max(120),
   entry: PluginPath,
+  placement: PluginPanelPlacement.default("editor"),
+  // The rail button's icon. Absent, the button falls back to the plugin's own
+  // icon, then to the glyph every plugin without one already shows — so a
+  // plugin that declares nothing still gets a usable button.
+  icon: PluginIconPath.optional(),
 }).strict();
+
+/**
+ * How many panels one plugin may place in the activity bar.
+ *
+ * Measured from the rail itself. An item is a 36px button on a 4px gap, so
+ * the pitch is 40px. At the smallest window dohc opens (620px tall, less the
+ * 40px title bar and the 28px status bar) the rail is 552px, and its own
+ * chrome — the 16px of padding plus the 89px Cloud/Settings cluster — leaves
+ * 447px, which is 11 buttons. Six of those are dohc's own views, so five are
+ * left for plugins at the smallest window.
+ *
+ * Four sits under that five: one plugin can never fill the rail on its own.
+ * It is also well past the measured healthy shape — a sites plugin wants one
+ * view, and a suite that ships two or three still fits. Nothing is rejected
+ * for lack of room: past what one window shows, the rail scrolls.
+ */
+export const MAX_PLUGIN_VIEW_PANELS = 4;
 
 const PluginCommand = z.object({
   id: z.string().min(1).max(120),
@@ -386,6 +415,18 @@ export const DohcPluginManifest = z.object({
     }
     panelIds.add(panel.id);
   });
+
+  const viewPanels =
+    manifest.panels?.filter((panel) => panel.placement === "view").length ?? 0;
+  if (viewPanels > MAX_PLUGIN_VIEW_PANELS) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["panels"],
+      message:
+        `panels: at most ${MAX_PLUGIN_VIEW_PANELS} may set placement "view" ` +
+        `(observed ${viewPanels})`,
+    });
+  }
 
   const commandIds = new Set<string>();
   manifest.commands?.forEach((command, index) => {

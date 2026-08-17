@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "./channels";
 import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
 import { DohcPluginManifest } from "../plugins/pluginManifestSchema";
+import { pluginViewId } from "../renderer/workbench/workbenchState";
 import {
   ListChatChannelsResult,
   ListPersonalChatFeedResult,
@@ -702,6 +703,23 @@ describe("workspace UI state IPC contract", () => {
     });
     expect(parsed.activeView).toBe("explorer");
     expect(parsed.editorGroups).toEqual(validState.editorGroups);
+  });
+
+  it("carries a plugin-contributed view across the persistence boundary", () => {
+    const activeView = pluginViewId("dohc-sites", "sites");
+    expect(
+      WorkspaceUiState.parse({ ...validState, activeView }).activeView,
+    ).toBe(activeView);
+  });
+
+  it.each([
+    ["a bare prefix", "plugin-view:"],
+    ["a missing panel segment", "plugin-view:dohc-sites"],
+    ["an over-long id", `plugin-view:${"a".repeat(4096)}/sites`],
+  ])("falls back to Explorer for %s", (_case, activeView) => {
+    expect(
+      WorkspaceUiState.parse({ ...validState, activeView }).activeView,
+    ).toBe("explorer");
   });
 
   it("rejects the replaced version-1 flat-tab contract", () => {

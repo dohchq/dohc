@@ -22,7 +22,12 @@ async function scratch(prefix: string): Promise<string> {
   return root;
 }
 
-async function writePlugin(root: string): Promise<void> {
+async function writePlugin(
+  root: string,
+  panels: Record<string, unknown>[] = [
+    { id: "main", title: "Hello", entry: "panel/index.html" },
+  ],
+): Promise<void> {
   await mkdir(join(root, "panel"), { recursive: true });
   await writeFile(
     join(root, "dohc-plugin.json"),
@@ -30,7 +35,7 @@ async function writePlugin(root: string): Promise<void> {
       version: 1,
       name: "hello-plugin",
       entry: "plugin.mjs",
-      panels: [{ id: "main", title: "Hello", entry: "panel/index.html" }],
+      panels,
       webApps: [{ id: "app", title: "Hello App" }],
     }),
   );
@@ -69,6 +74,41 @@ describe("plugin panel registration", () => {
         panelId: "main",
       }),
     ).resolves.toMatchObject({ pluginRoot });
+  });
+
+  it("refuses to open a view-placed panel as a tab", async () => {
+    const workspace = await scratch("dohc-plugin-panel-workspace-");
+    const pluginRoot = join(workspace, "plugins", "hello-plugin");
+    await writePlugin(pluginRoot, [
+      { id: "main", title: "Hello", entry: "panel/index.html" },
+      {
+        id: "sites",
+        title: "Sites",
+        entry: "panel/index.html",
+        placement: "view",
+      },
+    ]);
+
+    // One running panel per (workspace, plugin, panel): a tab and a rail view
+    // of the same panel would stop each other, so placement decides which of
+    // the two a panel can be.
+    await expect(
+      loadPluginPanelRegistration({
+        workspaceRoot: workspace,
+        pluginRoot,
+        pluginId: "hello-plugin",
+        panelId: "sites",
+      }),
+    ).rejects.toThrow(/placement "view"/);
+
+    await expect(
+      loadPluginPanelRegistration({
+        workspaceRoot: workspace,
+        pluginRoot,
+        pluginId: "hello-plugin",
+        panelId: "main",
+      }),
+    ).resolves.toMatchObject({ panel: { id: "main" } });
   });
 
   it("loads a declared web app under the same root and manifest checks", async () => {
@@ -486,6 +526,7 @@ describe("plugin panel registration", () => {
           license: null,
           icon: null,
           settings: [],
+          panels: [],
           webApps: [],
           sourceHash: null,
           approvedHash: null,
