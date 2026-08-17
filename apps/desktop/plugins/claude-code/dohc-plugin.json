@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "name": "claude-code",
+  "displayName": "Claude Code",
+  "description": "Runs the Claude Code CLI on this workspace as a dohc agent.",
+  "publisher": "dohc",
+  "pluginVersion": "0.1.0",
+  "repository": "https://github.com/anthropics/claude-code",
+  "issues": "https://github.com/anthropics/claude-code/issues",
+  "license": "SEE LICENSE IN https://www.anthropic.com/legal/consumer-terms",
+  "entry": "src/main.ts",
+  "drivers": [{ "id": "claude-code", "displayName": "Claude Code" }]
+}
