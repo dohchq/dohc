@@ -178,6 +178,37 @@ switch (mode) {
       },
     };
     break;
+  // Subscribes to a prefix of the workspace on activation and reports what
+  // arrived, so a test can prove settled changes reach a plugin's own code
+  // over the real host protocol.
+  case "watch-workspace": {
+    const received = [];
+    let started = null;
+    let unsubscribe = null;
+    handler = {
+      async activate(ctx) {
+        ctx.commands.register("watch.received", () => received);
+        ctx.commands.register("watch.started", () => started);
+        ctx.commands.register("watch.stop", async () => {
+          await unsubscribe?.();
+          unsubscribe = null;
+          return { stopped: true };
+        });
+        try {
+          unsubscribe = await ctx.client.files.watch(
+            process.env.DOHC_PLUGIN_WATCH_PREFIX ?? "notes",
+            (event) => {
+              received.push({ event: event.event, data: event.data });
+            },
+          );
+          started = { ok: true, message: null };
+        } catch (error) {
+          started = { ok: false, message: String(error?.message ?? error) };
+        }
+      },
+    };
+    break;
+  }
   case "grandchild-heartbeat":
     handler = {
       async activate(ctx) {

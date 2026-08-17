@@ -40,6 +40,18 @@ export interface PluginSdkHostContext {
    * child processes on its behalf. */
   invokeChildProcess?: (method: string, params?: unknown) => Promise<unknown>;
   /**
+   * Opens a workspace file subscription. Absent for panel-driven SDK calls:
+   * a subscription needs a channel to push events back on, and only the
+   * plugin's own process has one. A panel asks its plugin instead.
+   */
+  subscribeFileWatch?: (params: unknown) => { subscriptionId: string };
+  /**
+   * Ends a workspace file subscription, reporting whether this registry owned
+   * the id. A false means the id belongs to the child-process broker, which
+   * serves the same `subscriptions.unsubscribe` method.
+   */
+  unsubscribeFileWatch?: (params: unknown) => boolean;
+  /**
    * Performs the actual authored write. The host derives and stamps the
    * author; plugin code never supplies identity.
    */
@@ -101,13 +113,21 @@ function waitForOperation<T>(
 
 function pluginCapabilities(input: {
   fileWriteAvailable: boolean;
+  fileWatchAvailable: boolean;
   databaseEditAvailable: boolean;
   childProcessesAvailable: boolean;
   uiOpenAvailable: boolean;
 }) {
   const childProcesses = input.childProcessesAvailable;
   return {
-    files: { read: true, list: true, write: input.fileWriteAvailable, watch: false },
+    // watch reflects this exact request path, like childProcesses below: a
+    // panel has no channel to receive events on, so it reads false there.
+    files: {
+      read: true,
+      list: true,
+      write: input.fileWriteAvailable,
+      watch: input.fileWatchAvailable,
+    },
     workspace: { search: true },
     // Database edits are written and logged directly, so unlike files.write
     // they do not need a running engine capture — only workspace authority.
@@ -155,6 +175,7 @@ export async function invokePluginSdkHost(
         context.isWritable() && (await context.writeAvailable());
       return pluginCapabilities({
         fileWriteAvailable: writeAvailable && context.isWritable(),
+        fileWatchAvailable: context.subscribeFileWatch !== undefined,
         databaseEditAvailable: context.isWritable(),
         childProcessesAvailable: context.invokeChildProcess !== undefined,
         uiOpenAvailable: context.requestPath === "panel",
@@ -176,6 +197,17 @@ export async function invokePluginSdkHost(
         context.signal,
         invokeSiteSdkHost(siteContext, method, params),
       );
+    }
+    case "files.watch": {
+      if (!context.subscribeFileWatch) {
+        throw new Error(
+          'files.watch is unavailable for this request path (requestPath "panel"). A subscription needs a channel to push events on, and only a plugin\'s own process has one.',
+        );
+      }
+      // A subscription outlives the call that opens it, so an ended spawn
+      // must be refused here rather than left holding one until teardown.
+      if (context.signal?.aborted) throw abortError();
+      return context.subscribeFileWatch(params);
     }
     case "ui.open": {
       if (context.requestPath !== "panel") {
@@ -231,6 +263,15 @@ export async function invokePluginSdkHost(
       );
     }
     default:
+      // Both subscription kinds are closed by the one SDK method, so a file
+      // subscription gets first refusal on its own id; anything else is the
+      // broker's, which answers unknown ids itself.
+      if (
+        method === "subscriptions.unsubscribe" &&
+        context.unsubscribeFileWatch?.(params) === true
+      ) {
+        return {};
+      }
       if (isPluginChildProcessMethod(method)) {
         if (!context.invokeChildProcess) {
           throw new Error(
