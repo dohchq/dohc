@@ -44,6 +44,15 @@ interface Lineage {
   // `null` if it was never settled — mirrors `ydoc_docs.last_settled_sha`,
   // the durable close guard's coverage check.
   lastSettledSha: string | null;
+  // How many updates this lineage journaled — the loopback's stand-in for the
+  // daemon's exactly-one-update proof (`seed_only_lineage_source`,
+  // crates/dohc-engine-collab/src/durable.rs).
+  journaledUpdates: number;
+  // The captured head sha the lineage's declared seed imported, or `null` —
+  // mirrors `ydoc_docs.seed_source_sha256` (#815). With exactly one journaled
+  // update, no prior settle, and the captured file still holding this sha,
+  // settle answers without materializing and close prunes without refusing.
+  seedSourceSha: string | null;
 }
 
 interface LoopbackSession {
@@ -62,6 +71,9 @@ interface LoopbackSession {
   // lineage and has recorded no update yet.
   lineageAbsentAtOpen: boolean;
   firstUpdatePending: boolean;
+  // The captured head sha at open — the daemon session's `open_head_sha`,
+  // which a declared seed records as the lineage's seed source (#815).
+  openHeadSha: string | null;
 }
 
 export interface EmitLoopbackRemoteUpdateOptions {
@@ -140,6 +152,18 @@ function noMarkerRefusal(): Error {
     wireError: {
       code: "INVALID_PARAMS",
       message: "workspace operation failed",
+      retry: "no",
+    },
+  });
+}
+
+// The literal from crates/dohc-workspace-engine/src/lib.rs: a seed declared
+// on anything but the first update of a lineage-absent session (#815).
+function seedNotFirstUpdateRefusal(): Error {
+  return Object.assign(new Error("seed-not-first-update"), {
+    wireError: {
+      code: "INVALID_PARAMS",
+      message: "seed-not-first-update",
       retry: "no",
     },
   });
@@ -243,6 +267,8 @@ export interface YdocLoopbackEngineOptions {
   // daemon does, so no test may use this hook to prove what happens to a file
   // the daemon leaves alone. Those cases belong to a real-daemon test. Scene
   // settles refuse because the loopback has no store-backed asset projector.
+  // One deliberate exception mirrors the daemon exactly: a seed-only session
+  // (#815) settles without invoking this hook at all.
   materialize?: (input: { path: string; content: string }) => void;
 }
 
@@ -538,6 +564,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       eventSeq: 0,
       lineageAbsentAtOpen,
       firstUpdatePending: lineageAbsentAtOpen,
+      openHeadSha: file?.head === "present" ? sha256(file.content) : null,
     });
     return {
       sessionId,
@@ -567,11 +594,18 @@ export class YdocLoopbackEngine implements EngineTransport {
       requiredString(params, "updateBase64", "ydoc.recordUpdate params"),
     );
     optionalString(params, "actorOriginId");
+    const seed = optionalBoolean(params, "seed") ?? false;
+    // A seed can only be the first update of a lineage-absent session —
+    // mirrors the daemon refusal in crates/dohc-workspace-engine/src/lib.rs.
+    if (seed && !(session.lineageAbsentAtOpen && session.firstUpdatePending)) {
+      throw seedNotFirstUpdateRefusal();
+    }
     const validationDoc = declaredDoc(session.contentKind);
     Y.applyUpdate(validationDoc, Y.encodeStateAsUpdate(session.doc));
     Y.applyUpdate(validationDoc, update);
     Y.applyUpdate(session.doc, update);
-    this.journalSessionState(session);
+    const entry = this.journalSessionState(session);
+    if (seed) entry.seedSourceSha = session.openHeadSha;
     this.recordedUpdates.push(update);
     session.updateSeq += 1;
     return { seq: session.updateSeq, lineageClaimId: null };
@@ -592,10 +626,32 @@ export class YdocLoopbackEngine implements EngineTransport {
     if (session.lineageAbsentAtOpen && session.firstUpdatePending) {
       throw noMarkerRefusal();
     }
+    // A session with no edits settles WITHOUT writing (#815): the lineage's
+    // whole history is the one declared seed and the captured file still
+    // holds its source bytes, so the file already IS this settlement —
+    // mirror the daemon's `ydoc_settle_on_store` skip: no materialize, no
+    // `lastSettledSha`, answer with the file's own bytes and sha.
+    const entry = this.lineages.get(this.lineageKeyFor(session));
+    const capturedFile = this.capturedFileFor(
+      session.workspace,
+      session.versionId,
+      session.objectId,
+    );
+    if (
+      entry !== undefined &&
+      entry.regime === "local-only" &&
+      entry.journaledUpdates === 1 &&
+      entry.lastSettledSha === null &&
+      entry.seedSourceSha !== null &&
+      capturedFile !== undefined &&
+      capturedFile.head === "present" &&
+      sha256(capturedFile.content) === entry.seedSourceSha
+    ) {
+      return { content: capturedFile.content, sha256: entry.seedSourceSha };
+    }
     const content = project(session);
     const digest = sha256(content);
     this.options.materialize?.({ path: session.path, content });
-    const entry = this.lineages.get(this.lineageKeyFor(session));
     if (entry) entry.lastSettledSha = digest;
     return { content, sha256: digest };
   }
@@ -720,7 +776,22 @@ export class YdocLoopbackEngine implements EngineTransport {
         capturedFile !== undefined &&
         capturedFile.head === "present" &&
         sha256(capturedFile.content) === currentSha;
-      if (entry.lastSettledSha !== currentSha && !coveredByCapture) {
+      // THIRD proof (#815), mirroring `close_session` (durable.rs): a
+      // seed-only lineage whose recorded source is still the captured head
+      // holds nothing the file does not — pruning discards a cache of the
+      // file, not content.
+      const coveredBySeedOnly =
+        entry.journaledUpdates === 1 &&
+        entry.lastSettledSha === null &&
+        entry.seedSourceSha !== null &&
+        capturedFile !== undefined &&
+        capturedFile.head === "present" &&
+        sha256(capturedFile.content) === entry.seedSourceSha;
+      if (
+        entry.lastSettledSha !== currentSha &&
+        !coveredByCapture &&
+        !coveredBySeedOnly
+      ) {
         throw unsettledCloseRefusal();
       }
       this.lineages.delete(key);
@@ -742,7 +813,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     return { evicted: true };
   }
 
-  private journalSessionState(session: LoopbackSession): void {
+  private journalSessionState(session: LoopbackSession): Lineage {
     // Journal the session's whole state because each delta depends on the
     // state that seeded its session.
     const key = this.lineageKeyFor(session);
@@ -751,10 +822,14 @@ export class YdocLoopbackEngine implements EngineTransport {
       regime: "local-only" as LineageRegime,
       contentKind: session.contentKind,
       lastSettledSha: null,
+      journaledUpdates: 0,
+      seedSourceSha: null,
     };
     Y.applyUpdate(entry.doc, Y.encodeStateAsUpdate(session.doc));
+    entry.journaledUpdates += 1;
     this.lineages.set(key, entry);
     session.firstUpdatePending = false;
+    return entry;
   }
 
   private resync(value: JsonValue): JsonValue {

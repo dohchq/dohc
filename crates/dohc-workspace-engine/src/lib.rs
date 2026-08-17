@@ -7448,6 +7448,14 @@ impl EngineService {
             .decode(params.update_base64)
             .map_err(|_| wire(ErrorCode::InvalidParams, "invalid update encoding"))?;
         let require_empty = session.lineage_absent && session.first_update_pending;
+        // A declared seed on anything but the first update of a
+        // lineage-absent session is a client bug: accepting it would record a
+        // false seed source and let a later settle skip a write that carried
+        // real edits. Refuse instead — a seed can only be the first update.
+        if params.seed && !require_empty {
+            return Err(wire(ErrorCode::InvalidParams, "seed-not-first-update"));
+        }
+        let seed_source_sha256 = params.seed.then(|| session.open_head_sha.clone()).flatten();
         // The record and the first-seed flag transition run in a SPAWNED
         // task: if the seed COMMITS but a deadline/cancel drops this future
         // before the post-await assignment, the session would keep
@@ -7473,6 +7481,7 @@ impl EngineService {
                         params.actor_origin_id,
                         session.lineage_claim_id,
                         require_empty,
+                        seed_source_sha256,
                         idempotency_key,
                         now,
                         Arc::new(NoFaults),
@@ -9435,6 +9444,14 @@ struct YdocRecordUpdateParams {
     update_base64: String,
     #[serde(default)]
     actor_origin_id: Option<String>,
+    /// The client declares this update as the SEED: a faithful import of the
+    /// `seedContent` the open returned, built before any user input could
+    /// reach the session (#815). Only the adapter's seed path sends it; a
+    /// crash-replay of prior state must not. The engine accepts it only for
+    /// the first update of a lineage-absent session, and records the open
+    /// head as the lineage's seed source.
+    #[serde(default)]
+    seed: bool,
 }
 
 #[derive(Serialize)]

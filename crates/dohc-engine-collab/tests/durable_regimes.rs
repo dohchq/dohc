@@ -347,6 +347,7 @@ fn record_update_lineage_guard_refuses_stale_sessions_before_any_mutation() {
         Some(&"0".repeat(64)),
         true,
         false,
+        None,
         Some("stale-session-request"),
         &NoFaults,
         1_100,

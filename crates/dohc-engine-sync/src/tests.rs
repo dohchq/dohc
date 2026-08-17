@@ -12623,6 +12623,22 @@ fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
     let local_update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "local-part ");
     dohc_engine_collab::record_local_update(&mut engine, &key, &local_update, &NoFaults, 1_460)
         .expect("local row");
+    // A lineage the client seeded from a captured head (#815). The
+    // replacement below must clear this witness — the winning base holds
+    // content the file does not, and a surviving stamp would feed the
+    // seed-only settle skip a lie about the replaced lineage.
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET seed_source_sha256='caffee00' \
+                 WHERE workspace_id='ws' AND version_id='main' \
+                   AND object_id='object-promote'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed source stamp");
 
     let base_doc = dohc_engine_collab::Ydoc::wire();
     base_doc.plaintext_insert(0, "base-part");
@@ -12679,6 +12695,22 @@ fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
         })
         .expect("recovered local content");
     assert_eq!(recovered_text, "local-part ");
+    let seed_source: Option<String> = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT seed_source_sha256 FROM ydoc_docs \
+                 WHERE workspace_id='ws' AND version_id='main' \
+                   AND object_id='object-promote'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("seed source after replacement");
+    assert_eq!(
+        seed_source, None,
+        "the lineage replacement must clear the seed-source witness (#815)"
+    );
 }
 
 #[test]
@@ -12712,6 +12744,20 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
     let local_update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "local-part ");
     dohc_engine_collab::record_local_update(&mut engine, &key, &local_update, &NoFaults, 1_460)
         .expect("local row");
+    // Same witness pin as the pulled-base twin (#815): the deferred drain's
+    // replacement must clear the seed source with the rows it described.
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET seed_source_sha256='caffee00' \
+                 WHERE workspace_id='ws' AND version_id='main' \
+                   AND object_id='object-deferred-promote'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed source stamp");
 
     let base_doc = dohc_engine_collab::Ydoc::wire();
     base_doc.plaintext_insert(0, "base-part");
@@ -12754,26 +12800,33 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
         .first()
         .expect("local-only lineage replacement");
     assert_eq!(replacement.recovered_paths.len(), 1);
-    let (head, recovered, update_rows): (String, String, i64) = engine
+    let (head, recovered, update_rows, seed_source): (String, String, i64, Option<String>) = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
                 conn.query_row(
                     "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
-                     WHERE s.workspace_id='ws' AND s.version_id='main' \
-                       AND s.object_id='object-deferred-promote'",
+                         WHERE s.workspace_id='ws' AND s.version_id='main' \
+                           AND s.object_id='object-deferred-promote'",
                     [],
                     |row| row.get(0),
                 )?,
                 conn.query_row(
                     "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
-                     WHERE s.workspace_id='ws' AND s.version_id='main' AND s.path=?1",
+                         WHERE s.workspace_id='ws' AND s.version_id='main' AND s.path=?1",
                     [&replacement.recovered_paths[0]],
                     |row| row.get(0),
                 )?,
                 conn.query_row(
                     "SELECT COUNT(*) FROM ydoc_updates \
-                     WHERE workspace_id='ws' AND version_id='main' \
-                       AND object_id='object-deferred-promote'",
+                         WHERE workspace_id='ws' AND version_id='main' \
+                           AND object_id='object-deferred-promote'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT seed_source_sha256 FROM ydoc_docs \
+                         WHERE workspace_id='ws' AND version_id='main' \
+                           AND object_id='object-deferred-promote'",
                     [],
                     |row| row.get(0),
                 )?,
@@ -12785,6 +12838,10 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
     assert_eq!(
         update_rows, 0,
         "the local lineage must not remain in the winner"
+    );
+    assert_eq!(
+        seed_source, None,
+        "the lineage replacement must clear the seed-source witness (#815)"
     );
 }
 

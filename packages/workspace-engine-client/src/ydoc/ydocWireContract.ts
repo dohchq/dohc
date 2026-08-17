@@ -69,6 +69,13 @@ export type YdocRecordUpdateParams = JsonObject & {
   sessionId: string;
   updateBase64: string;
   actorOriginId?: string;
+  // Declares this update as the SEED: a faithful import of the seedContent
+  // the open returned, built before any user input could reach the session.
+  // Only the adapter's applySeedUpdate path sends it — never a replay of
+  // prior state. The engine records the open-time head as the lineage's seed
+  // source; a session whose only update is that seed then settles and closes
+  // without rewriting the file (#815).
+  seed?: boolean;
 };
 
 export type YdocRecordUpdateResult = JsonObject & {

@@ -720,11 +720,12 @@ export class YdocAdapterSession {
   private enqueueRecordUpdate(
     update: Uint8Array,
     options?: ApplyLocalUpdateOptions,
+    seedUpdate = false,
   ): Promise<YdocRecordUpdateResult | undefined> {
     const operation = this.recordChain.then(async () => {
       this.assertOpen();
       try {
-        return await this.requestRecordUpdate(update, options);
+        return await this.requestRecordUpdate(update, options, seedUpdate);
       } catch (refusal) {
         try {
           return await this.recoverCanonicalState(update, options);
@@ -871,6 +872,7 @@ export class YdocAdapterSession {
   private async requestRecordUpdate(
     update: Uint8Array,
     options?: ApplyLocalUpdateOptions,
+    seedUpdate = false,
   ): Promise<YdocRecordUpdateResult> {
     const params: YdocRecordUpdateParams = {
       sessionId: this.sessionId,
@@ -878,6 +880,13 @@ export class YdocAdapterSession {
       ...(options?.actorOriginId
         ? { actorOriginId: options.actorOriginId }
         : {}),
+      // Declared ONLY for the update `applySeedUpdate` constructs from the
+      // open's seedContent, before any consumer sees the session. Recovery
+      // resends and every other record stay undeclared, so the engine's
+      // no-edit settle skip (#815) can never mistake replayed prior state
+      // for a seed — an undeclared seed costs one redundant write, a false
+      // declaration would cost the user's edits.
+      ...(seedUpdate ? { seed: true } : {}),
     };
     const idempotencyKey = `${this.sessionId}:${this.nextLocalUpdateSeq++}`;
     const result = decodeYdocRecordUpdateResult(
@@ -1189,7 +1198,11 @@ export class YdocAdapterSession {
             : new Map<string, number>(),
         capture?.seedUpdate ?? false,
       );
-      const operation = this.enqueueRecordUpdate(update, capture?.options);
+      const operation = this.enqueueRecordUpdate(
+        update,
+        capture?.options,
+        capture?.seedUpdate ?? false,
+      );
       if (capture !== null) capture.operation = operation;
     } catch (error) {
       if (origin === LOCAL_EDITOR_ORIGIN) {
