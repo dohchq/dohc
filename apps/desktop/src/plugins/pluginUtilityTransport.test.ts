@@ -40,8 +40,8 @@ describe("createPluginUtilityTransport", () => {
       method: "plugin.activate",
       params: { pluginId: "hello" },
     });
-    child.emit("message", { jsonrpc: "2.0", id: 1, result: { commands: [] } });
-    await expect(success).resolves.toEqual({ commands: [] });
+    child.emit("message", { jsonrpc: "2.0", id: 1, result: { commands: [], drivers: [] } });
+    await expect(success).resolves.toEqual({ commands: [], drivers: [] });
 
     const failure = transport.request("plugin.deactivate");
     child.emit("message", {

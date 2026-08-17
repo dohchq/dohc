@@ -1,6 +1,8 @@
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { describe, expect, it } from "vitest";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "./channels";
+import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
+import { DohcPluginManifest } from "../plugins/pluginManifestSchema";
 import {
   ListChatChannelsResult,
   ListPersonalChatFeedResult,
@@ -58,6 +60,7 @@ import {
   SwitchWorkspaceVersionPayload,
   TryInVersionRunState,
   TryInVersionStateResult,
+  AgentPanelSnapshotResult,
   TryInWorkspaceVersionPayload,
   GetWorkspaceUiStateResult,
   WorkspaceUiState,
@@ -2426,5 +2429,95 @@ describe("share changes IPC contract (#646 PR3a)", () => {
     expect(() =>
       WithdrawShareChangesPayload.parse({ workspaceId: "ws-1", proposalId: "p".repeat(129) }),
     ).toThrow();
+  });
+});
+
+describe("one driver id, every contract on its path", () => {
+  // A driver id is declared in a manifest, stored in workspace settings,
+  // listed in the agent panel, and then handed back to main with the task it
+  // is meant to run. One tighter bound anywhere on that path refuses a driver
+  // dohc itself offered, chose, and probed — which is what the try-in-version
+  // payload used to do at 100 characters while every other layer took 120.
+  const atCap = "d".repeat(DEFAULT_DRIVER_ID_MAX_LENGTH);
+  const overCap = "d".repeat(DEFAULT_DRIVER_ID_MAX_LENGTH + 1);
+
+  function panelWith(driverId: string) {
+    return {
+      drivers: [
+        {
+          id: driverId,
+          displayName: "Fixture Harness",
+          installed: true,
+          auth: { status: "unknown" as const },
+          models: [],
+        },
+      ],
+      session: null,
+      selectedDriverId: driverId,
+    };
+  }
+
+  function manifestWith(driverId: string) {
+    return {
+      version: 1,
+      name: "driver-plugin",
+      entry: "plugin.mjs",
+      drivers: [{ id: driverId, displayName: "Fixture Harness" }],
+    };
+  }
+
+  it("carries an id at the cap through every contract on the path", () => {
+    expect(DohcPluginManifest.safeParse(manifestWith(atCap)).success).toBe(true);
+    expect(AgentPanelSnapshotResult.parse(panelWith(atCap)).selectedDriverId)
+      .toBe(atCap);
+    // MUTATION (the try payload keeps a tighter bound): the panel offers this
+    // driver, the dialog posts it, and this one boundary refuses it.
+    expect(
+      TryInWorkspaceVersionPayload.parse({
+        workspaceId: "ws-try",
+        task: "tidy the notes",
+        driverId: atCap,
+      }).driverId,
+    ).toBe(atCap);
+  });
+
+  it("refuses an id past the cap in every contract on the path", () => {
+    expect(DohcPluginManifest.safeParse(manifestWith(overCap)).success).toBe(false);
+    expect(AgentPanelSnapshotResult.safeParse(panelWith(overCap)).success)
+      .toBe(false);
+    expect(
+      TryInWorkspaceVersionPayload.safeParse({
+        workspaceId: "ws-try",
+        task: "tidy the notes",
+        driverId: overCap,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("carries a driver display name at its bound to the renderer", () => {
+    const name = "n".repeat(120);
+    expect(DohcPluginManifest.safeParse({
+      version: 1,
+      name: "driver-plugin",
+      entry: "plugin.mjs",
+      drivers: [{ id: "fixture-harness", displayName: name }],
+    }).success).toBe(true);
+    // MUTATION (the two display-name bounds drift apart): a manifest dohc
+    // accepts names a driver the panel cannot describe.
+    expect(
+      AgentPanelSnapshotResult.parse({
+        drivers: [
+          {
+            id: "fixture-harness",
+            displayName: name,
+            installed: true,
+            auth: { status: "unknown" as const },
+            models: [],
+          },
+        ],
+        session: null,
+        selectedDriverId: "fixture-harness",
+      }).drivers[0]?.displayName,
+    ).toBe(name);
   });
 });

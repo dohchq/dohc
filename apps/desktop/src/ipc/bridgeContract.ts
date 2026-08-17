@@ -6,6 +6,7 @@ import {
 } from "@dohc/workspace-core";
 import { z } from "zod";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
+import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
 import {
   CHATS_TAB_PATH,
@@ -54,6 +55,7 @@ import {
 import {
   isHttpsUrl,
   MAX_PLUGIN_DESCRIPTION_CHARS,
+  MAX_PLUGIN_DRIVER_NAME_CHARS,
   MAX_PLUGIN_LICENSE_CHARS,
   MAX_PLUGIN_PUBLISHER_CHARS,
   MAX_PLUGIN_URL_CHARS,
@@ -2034,6 +2036,18 @@ export type ResolveWorkspaceVersionConflictResult = z.infer<
 // the workspace-engine alpha capture like every version operation.
 export const TRY_IN_VERSION_TASK_MAX = 2000;
 
+// How a driver is named wherever a payload or a result carries one. Every
+// surface on the path — the manifest, the probe list, the workspace's own
+// `agents.defaultDriverId`, and the task a driver is handed — reads these two,
+// so a driver dohc lists is always one dohc can be asked to run.
+//
+// A driver id is bounded by what workspace settings can store, because
+// `agents.defaultDriverId` has to be able to name any driver the list shows —
+// dohc's own and a plugin's alike. A display name takes the bound a plugin
+// manifest gives it, shared with it rather than matched by eye.
+const AgentDriverIdSchema = z.string().min(1).max(DEFAULT_DRIVER_ID_MAX_LENGTH);
+const AgentDriverNameSchema = z.string().min(1).max(MAX_PLUGIN_DRIVER_NAME_CHARS);
+
 export const TryInWorkspaceVersionPayload = z.object({
   workspaceId: WORKSPACE_ID,
   task: z
@@ -2045,8 +2059,10 @@ export const TryInWorkspaceVersionPayload = z.object({
     }),
   // When present, main hands the task to this installed agent driver (a
   // dohc-managed driver session); absent = a bare dohc-tracked run the
-  // user's own agent tool works inside.
-  driverId: z.string().min(1).max(100).optional(),
+  // user's own agent tool works inside. The id comes from the agent panel's
+  // own driver list, so it takes that list's bound: a tighter one here would
+  // refuse a driver dohc offered, chose, and probed.
+  driverId: AgentDriverIdSchema.optional(),
 });
 export type TryInWorkspaceVersionPayload = z.infer<
   typeof TryInWorkspaceVersionPayload
@@ -3520,7 +3536,6 @@ export const McpConfigResult = z.object({
 });
 export type McpConfigResult = z.infer<typeof McpConfigResult>;
 
-const AgentDriverIdSchema = z.string().min(1).max(100);
 const AgentPermissionKindSchema = z.enum([
   "allow_once",
   "allow_always",
@@ -3541,7 +3556,7 @@ const AgentModelSchema = z.object({
 
 const AgentDriverProbeSchema = z.object({
   id: AgentDriverIdSchema,
-  displayName: z.string().min(1).max(100),
+  displayName: AgentDriverNameSchema,
   installed: z.boolean(),
   version: z.string().max(200).optional(),
   auth: z.object({
@@ -3569,7 +3584,7 @@ const AgentPermissionRequestSchema = z.object({
 
 const AgentSessionSnapshotSchema = z.object({
   driverId: AgentDriverIdSchema,
-  driverName: z.string().min(1).max(100),
+  driverName: AgentDriverNameSchema,
   status: z.enum([
     "idle",
     "starting",
@@ -3609,11 +3624,16 @@ const AgentSessionSnapshotSchema = z.object({
     output: z.number().optional(),
   }).optional(),
   authNotices: z.array(z.string().min(1).max(300)).max(5),
+  loginRequired: z.boolean(),
 });
 
 export const AgentPanelSnapshotResult = z.object({
+  // dohc's own drivers plus this workspace's plugin drivers. The registry
+  // refuses a plugin driver past MAX_WORKSPACE_PLUGIN_DRIVERS, which keeps the
+  // merged list inside this bound instead of failing the whole list here.
   drivers: z.array(AgentDriverProbeSchema).max(20),
   session: AgentSessionSnapshotSchema.nullable(),
+  selectedDriverId: AgentDriverIdSchema.nullable(),
 });
 export type AgentPanelSnapshotResult = z.infer<typeof AgentPanelSnapshotResult>;
 

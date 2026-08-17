@@ -685,13 +685,17 @@ export function TryTaskDialog(props: {
       .probeAgentDrivers({ workspaceId })
       .then((panel) => {
         if (token !== liveToken.current) return;
-        const installed = panel.drivers.find((driver) => driver.installed);
+        // Which driver does the work is dohc's choice, not this dialog's: it
+        // reads the workspace's own default and falls back for us.
+        const selected = panel.drivers.find(
+          (driver) => driver.id === panel.selectedDriverId,
+        );
         setHelper(
-          installed
+          selected
             ? {
                 status: "driver",
-                driverId: installed.id,
-                driverName: installed.displayName,
+                driverId: selected.id,
+                driverName: selected.displayName,
               }
             : { status: "none" },
         );

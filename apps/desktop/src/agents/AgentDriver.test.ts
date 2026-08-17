@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { createDesktopAgentDrivers } from "./AgentProcessDrivers";
 import {
+  BUILT_IN_AGENT_DRIVER_IDS,
   createAgentDriverRegistry,
   selectPermissionOption,
   type AgentDriver,
@@ -29,6 +31,16 @@ function driver(id: string, probe: AgentDriver["probe"] = async () => authentica
     })),
   };
 }
+
+describe("the drivers dohc ships", () => {
+  it("are exactly the ids a plugin may not take", () => {
+    // The plugin driver registry refuses these ids by name, so a driver added
+    // to the app without joining this list would be one a plugin could
+    // shadow.
+    expect(createDesktopAgentDrivers({}).map((driver) => driver.id).sort())
+      .toEqual([...BUILT_IN_AGENT_DRIVER_IDS].sort());
+  });
+});
 
 describe("AgentDriverRegistry", () => {
   it("keeps drivers lookup-only and rejects duplicate ids", () => {

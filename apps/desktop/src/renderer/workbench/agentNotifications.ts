@@ -18,7 +18,12 @@ import {
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
 
-export type AgentNotificationKind = "finished" | "needs-input" | "asked" | "error";
+export type AgentNotificationKind =
+  | "finished"
+  | "needs-input"
+  | "asked"
+  | "error"
+  | "login-required";
 
 export interface AgentNotification {
   // Stable per (workspace, run, kind): the coalescing + dismissal key.
@@ -57,6 +62,11 @@ export interface AgentActivityInput {
   // The agent's latest message reads as directed at the user (an @mention or a
   // trailing question). Promotes a completion from "finished" to "asked".
   addressedToUser?: boolean;
+  // The harness asked for a login part-way through the run. Without this, an
+  // expired login reads as a run that failed for no stated reason.
+  loginRequired?: boolean;
+  // What the harness said about the login it wants, when it said anything.
+  loginNotice?: string;
 }
 
 // The minimal slice of an agent-session snapshot the notification model needs.
@@ -67,6 +77,8 @@ export interface AgentSessionLike {
   lastError?: string;
   messages: ReadonlyArray<{ role: "assistant" | "reasoning"; text: string }>;
   pendingPermissions: ReadonlyArray<{ title: string; requestId?: string }>;
+  loginRequired?: boolean;
+  authNotices?: readonly string[];
 }
 
 function firstLine(text: string): string {
@@ -111,6 +123,10 @@ export function deriveAgentActivity(params: {
       : {}),
     ...(latestSummary ? { latestSummary } : {}),
     addressedToUser,
+    ...(session.loginRequired ? { loginRequired: true } : {}),
+    ...(session.loginRequired && session.authNotices?.at(-1)
+      ? { loginNotice: session.authNotices.at(-1) }
+      : {}),
   };
 }
 
@@ -136,9 +152,13 @@ function notificationIdFor(
   return agentNotificationId(input.workspaceId, runId, kind, discriminator);
 }
 
-// error > needs-input > asked > finished. Only terminal / blocked states raise
-// a notice; running/ready/idle raise nothing (and auto-clear a prior one).
+// login-required > error > needs-input > asked > finished. Only terminal /
+// blocked states raise a notice; running/ready/idle raise nothing (and
+// auto-clear a prior one). A login the harness asked for outranks all of them,
+// and it raises while the run is still going: the run cannot continue without
+// it, and reporting the failure that follows would name the wrong problem.
 function desiredKind(input: AgentActivityInput): AgentNotificationKind | null {
+  if (input.loginRequired) return "login-required";
   switch (input.status) {
     case "failed":
       return "error";
@@ -187,6 +207,13 @@ function copyFor(
         body: input.lastError
           ? truncate(input.lastError)
           : `Your agent couldn't finish its work in ${where}.`,
+      };
+    case "login-required":
+      return {
+        title: "Your agent needs you to sign in",
+        body: input.loginNotice
+          ? truncate(input.loginNotice)
+          : "Sign in with the provider CLI, then start the agent again.",
       };
   }
 }

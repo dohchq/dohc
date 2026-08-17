@@ -22,6 +22,21 @@ export function delay(milliseconds: number): Promise<void> {
   });
 }
 
+/** Rejects with `message` when `promise` outlives `timeoutMs`. */
+export function raceWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 export function isInside(parent: string, child: string): boolean {
   if (child === parent) return true;
   const pathFromParent = relative(parent, child);

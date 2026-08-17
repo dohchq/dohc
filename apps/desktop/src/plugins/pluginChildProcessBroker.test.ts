@@ -708,7 +708,7 @@ describe("PluginChildProcessBroker", () => {
         return {
           request<T = unknown>(method: string): Promise<T> {
             const result = method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [] }
+              ? { commands: [], drivers: [] }
               : {};
             return Promise.resolve(result as T);
           },
