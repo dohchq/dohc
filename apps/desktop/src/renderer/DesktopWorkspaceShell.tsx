@@ -5508,6 +5508,7 @@ export function DesktopWorkspaceShell(props: {
                     workspaceId={workspaceId}
                     pluginId={groupPluginPanel.pluginId}
                     panelId={groupPluginPanel.panelId}
+                    onOpenPath={openPathWithHeading}
                   />
                 </Suspense>
               ) : (

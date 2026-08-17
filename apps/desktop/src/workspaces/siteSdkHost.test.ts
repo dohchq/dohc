@@ -9,6 +9,10 @@ import {
   type SiteSdkSearchStarter,
 } from "./siteSdkHost";
 import { createTestScratch } from "./testTemp";
+import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
+
+// A site preview acts for the user driving it.
+const USER_AUTHOR: ChangeAuthor = { kind: "user", userId: "local" };
 
 const requireModule = createRequire(import.meta.url);
 const { DatabaseSync } = requireModule("node:sqlite") as {
@@ -55,7 +59,7 @@ describe("site SDK host authority", () => {
 
   it("reads, lists, and writes through owned workspace authority", async () => {
     const root = await workspace();
-    const context = { workspaceRoot: root, scopeRoot: null, writable: true };
+    const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };
     await expect(invokeSiteSdkHost(context, "files.read", { path: "notes/today.md" })).resolves.toMatchObject({
       text: "hello from dohc\n",
     });
@@ -76,7 +80,7 @@ describe("site SDK host authority", () => {
 
   it("atomically honors overwrite false under concurrent writes", async () => {
     const root = await workspace();
-    const context = { workspaceRoot: root, scopeRoot: null, writable: true };
+    const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };
     const attempts = await Promise.allSettled([
       invokeSiteSdkHost(context, "files.write", {
         path: "notes/exclusive.txt",
@@ -102,7 +106,7 @@ describe("site SDK host authority", () => {
 
   it("rejects raw live-document writes without changing the document", async () => {
     const root = await workspace();
-    const context = { workspaceRoot: root, scopeRoot: null, writable: true };
+    const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };
 
     await expect(
       invokeSiteSdkHost(context, "files.write", {
@@ -134,7 +138,7 @@ describe("site SDK host authority", () => {
 
   it("rejects site writes under the workspace-root plugins tree", async () => {
     const root = await workspace();
-    const context = { workspaceRoot: root, scopeRoot: null, writable: true };
+    const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };
 
     await expect(
       invokeSiteSdkHost(context, "files.write", {
@@ -166,7 +170,7 @@ describe("site SDK host authority", () => {
 
   it("rejects site writes through a real directory alias into the plugin tree", async () => {
     const root = await workspace();
-    const context = { workspaceRoot: root, scopeRoot: null, writable: true };
+    const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };
     await mkdir(join(root, "plugins", "example"), { recursive: true });
     await symlink(
       join(root, "plugins"),
@@ -189,7 +193,7 @@ describe("site SDK host authority", () => {
     "rejects a Windows case alias for the workspace plugin tree",
     async () => {
       const root = await workspace();
-      const context = { workspaceRoot: root, scopeRoot: null, writable: true };
+      const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };
       await mkdir(join(root, "plugins", "example"), { recursive: true });
 
       await expect(
@@ -203,7 +207,7 @@ describe("site SDK host authority", () => {
 
   it("rejects raw database writes and requires structured databases.edit", async () => {
     const root = await workspace();
-    const context = { workspaceRoot: root, scopeRoot: null, writable: true };
+    const context = { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR };
 
     for (const path of [
       "data/app.db",
@@ -237,6 +241,7 @@ describe("site SDK host authority", () => {
       workspaceRoot: root,
       scopeRoot: null,
       writable: true,
+      author: USER_AUTHOR,
       now: () => 1_700_000_000_000,
       createId: () => "op_site_0001",
     };
@@ -246,7 +251,11 @@ describe("site SDK host authority", () => {
     });
     const log = await readFile(join(root, databaseOpLogPath("data/app.sqlite")), "utf8");
     const ops = log.trim().split("\n").map((l) => JSON.parse(l));
-    expect(ops[0]).toMatchObject({ operationId: "op_site_0001", appliedAt: 1_700_000_000_000 });
+    expect(ops[0]).toMatchObject({
+      operationId: "op_site_0001",
+      appliedAt: 1_700_000_000_000,
+      author: { kind: "user", userId: "local" },
+    });
   });
 
   it("keeps a mounted shared site read-only and hides paths outside its mount", async () => {
@@ -260,6 +269,7 @@ describe("site SDK host authority", () => {
       workspaceRoot: root,
       scopeRoot: "shared-with-me/Plan",
       writable: false,
+      author: USER_AUTHOR,
     };
     await expect(invokeSiteSdkHost(context, "capabilities")).resolves.toMatchObject({
       files: { read: true, list: true, write: false },
@@ -289,7 +299,7 @@ describe("site SDK host authority", () => {
     controller.abort();
     await expect(
       invokeSiteSdkHost(
-        { workspaceRoot: root, scopeRoot: null, writable: true, signal: controller.signal },
+        { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR, signal: controller.signal },
         "workspace.search",
         { query: "hello" },
       ),
@@ -300,7 +310,7 @@ describe("site SDK host authority", () => {
     const root = await workspace();
     const controller = new AbortController();
     const write = invokeSiteSdkHost(
-      { workspaceRoot: root, scopeRoot: null, writable: true, signal: controller.signal },
+      { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR, signal: controller.signal },
       "files.write",
       { path: "notes/stale.txt", text: "must not be written" },
     );
@@ -318,7 +328,7 @@ describe("site SDK host authority", () => {
 
     await expect(
       invokeSiteSdkHost(
-        { workspaceRoot: root, scopeRoot: null, writable: true },
+        { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR },
         "workspace.search",
         { query: "literal glob sentinel", path: "notes/[draft].txt" },
       ),
@@ -347,6 +357,7 @@ describe("site SDK host authority", () => {
         workspaceRoot: root,
         scopeRoot: null,
         writable: true,
+        author: USER_AUTHOR,
         signal: controller.signal,
         searchStarter,
       },
@@ -364,7 +375,7 @@ describe("site SDK host authority", () => {
     const root = await workspace();
     await expect(
       invokeSiteSdkHost(
-        { workspaceRoot: root, scopeRoot: null, writable: true },
+        { workspaceRoot: root, scopeRoot: null, writable: true, author: USER_AUTHOR },
         "databases.edit",
         {
           path: "missing.sqlite",

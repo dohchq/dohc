@@ -143,6 +143,41 @@ switch (mode) {
     };
     break;
   }
+  // Exercises the workspace capabilities the plugin host routes: a database
+  // snapshot, a row edit the host attributes to this plugin, and the ui.open
+  // a plugin's own process cannot serve because it has no renderer.
+  case "use-workspace":
+    handler = {
+      activate(ctx) {
+        ctx.commands.register("database.roundTrip", async () => {
+          const before = await ctx.client.databases.read({
+            path: "data/app.sqlite",
+          });
+          await ctx.client.databases.edit({
+            path: "data/app.sqlite",
+            operations: [
+              {
+                table: "sentinel",
+                op: "update",
+                pkColumn: "id",
+                rowId: "1",
+                payload: { marker: "edited-by-plugin" },
+              },
+            ],
+          });
+          return { tables: before.tables.map((table) => table.name) };
+        });
+        ctx.commands.register("ui.tryOpen", async () => {
+          try {
+            await ctx.client.ui.open("notes/today.md");
+            return { opened: true, message: null };
+          } catch (error) {
+            return { opened: false, message: String(error?.message ?? error) };
+          }
+        });
+      },
+    };
+    break;
   case "grandchild-heartbeat":
     handler = {
       async activate(ctx) {

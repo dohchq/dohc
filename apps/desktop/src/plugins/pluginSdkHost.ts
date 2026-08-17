@@ -1,4 +1,4 @@
-import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
+import type { ChangeAuthor, MomentAuthor } from "@dohc/workspace-contracts/engine";
 import {
   assertRawTextWritable,
   invokeSiteSdkHost,
@@ -19,6 +19,13 @@ export interface PluginSdkHostContext {
   workspaceRoot: string;
   /** The uuid PluginHost assigned this plugin at spawn time (agentRunId). */
   spawnId: string;
+  /**
+   * Which caller this request arrived from. "panel" is a renderer showing the
+   * plugin's panel, so it can act on a returned ui.open target; the plugin's
+   * own process has no renderer and cannot. Both paths otherwise carry the
+   * same plugin authority.
+   */
+  requestPath: "panel" | "plugin-process";
   isWritable: () => boolean;
   writeAvailable: () => Promise<boolean>;
   /**
@@ -41,6 +48,20 @@ export interface PluginSdkHostContext {
     text: string,
     options: { overwrite: boolean; author: MomentAuthor },
   ) => Promise<{ path: string }>;
+}
+
+/** The one agent identity every authored plugin operation is recorded under. */
+function pluginAgentId(pluginId: string): string {
+  return `plugin:${pluginId}`;
+}
+
+/**
+ * A plugin's database edits name the plugin, not the user running it.
+ * ChangeAuthor carries no agentRunId, so the op log records which plugin
+ * wrote a row; a file write records the spawn as well.
+ */
+function pluginDatabaseAuthor(pluginId: string): ChangeAuthor {
+  return { kind: "agent", agentId: pluginAgentId(pluginId), onBehalfOf: "local" };
 }
 
 function abortError(): PluginSdkAbortError {
@@ -78,10 +99,21 @@ function waitForOperation<T>(
   });
 }
 
-function pluginCapabilities(writable: boolean, childProcessesAvailable: boolean) {
+function pluginCapabilities(input: {
+  fileWriteAvailable: boolean;
+  databaseEditAvailable: boolean;
+  childProcessesAvailable: boolean;
+  uiOpenAvailable: boolean;
+}) {
+  const childProcesses = input.childProcessesAvailable;
   return {
-    files: { read: true, list: true, write: writable, watch: false },
+    files: { read: true, list: true, write: input.fileWriteAvailable, watch: false },
     workspace: { search: true },
+    // Database edits are written and logged directly, so unlike files.write
+    // they do not need a running engine capture — only workspace authority.
+    databases: { read: true, edit: input.databaseEditAvailable },
+    // Opening a tab is a renderer action; see requestPath.
+    ui: { open: input.uiOpenAvailable },
     // Reflects whether this exact request path can actually broker child
     // processes, not just whether the plugin's own activated code could —
     // invokeChildProcess is absent for panel-driven SDK calls, which get a
@@ -89,10 +121,10 @@ function pluginCapabilities(writable: boolean, childProcessesAvailable: boolean)
     // childProcesses.* method below regardless of what capabilities()
     // claims (#779 round 3 finding 7).
     childProcesses: {
-      spawn: childProcessesAvailable,
-      output: childProcessesAvailable,
-      send: childProcessesAvailable,
-      terminate: childProcessesAvailable,
+      spawn: childProcesses,
+      output: childProcesses,
+      send: childProcesses,
+      terminate: childProcesses,
     },
     collections: { read: false },
     provenance: { record: false },
@@ -114,24 +146,48 @@ export async function invokePluginSdkHost(
     scopeRoot: null,
     writable: context.isWritable(),
     signal: context.signal,
+    author: pluginDatabaseAuthor(context.pluginId),
   };
 
   switch (method) {
     case "capabilities": {
       const writeAvailable =
         context.isWritable() && (await context.writeAvailable());
-      return pluginCapabilities(
-        writeAvailable && context.isWritable(),
-        context.invokeChildProcess !== undefined,
-      );
+      return pluginCapabilities({
+        fileWriteAvailable: writeAvailable && context.isWritable(),
+        databaseEditAvailable: context.isWritable(),
+        childProcessesAvailable: context.invokeChildProcess !== undefined,
+        uiOpenAvailable: context.requestPath === "panel",
+      });
     }
     case "files.read":
     case "files.list":
     case "workspace.search":
+    case "databases.read":
       return waitForOperation(
         context.signal,
         invokeSiteSdkHost(siteContext, method, params),
       );
+    case "databases.edit": {
+      if (!context.isWritable()) {
+        throw new Error("This plugin has read-only workspace authority.");
+      }
+      return waitForOperation(
+        context.signal,
+        invokeSiteSdkHost(siteContext, method, params),
+      );
+    }
+    case "ui.open": {
+      if (context.requestPath !== "panel") {
+        throw new Error(
+          'ui.open is unavailable for this request path (requestPath "plugin-process"). Opening a tab needs a renderer, so a plugin opens one from its panel.',
+        );
+      }
+      return waitForOperation(
+        context.signal,
+        invokeSiteSdkHost(siteContext, method, params),
+      );
+    }
     case "files.write": {
       if (!context.isWritable()) {
         throw new Error("This plugin has read-only workspace authority.");
@@ -157,7 +213,7 @@ export async function invokePluginSdkHost(
 
       const author: MomentAuthor = {
         kind: "agent",
-        agentId: `plugin:${context.pluginId}`,
+        agentId: pluginAgentId(context.pluginId),
         onBehalfOf: "local",
         agentRunId: context.spawnId,
       };

@@ -5,6 +5,7 @@ import {
   validateUserReadPath,
 } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
+import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import { rgPath } from "@vscode/ripgrep";
 import { basename, join } from "node:path";
 import { realpath, stat } from "node:fs/promises";
@@ -34,6 +35,10 @@ export interface SiteSdkHostContext {
   // read-only collaboration projection that the shared site arrived through.
   scopeRoot: string | null;
   writable: boolean;
+  // Who a database edit is recorded as. Required, never defaulted: this host
+  // serves both the user's own sites and the plugin SDK route, and an
+  // inherited default would record one surface's work as the other's.
+  author: ChangeAuthor;
   // Preview-lifetime cancellation. Search subprocesses must not survive the
   // renderer/preview that owns their SDK authority.
   signal?: AbortSignal;
@@ -358,7 +363,7 @@ export async function invokeSiteSdkHost(
         context.workspaceRoot,
         path,
         edit,
-        { kind: "user", userId: "local" },
+        context.author,
         context.now?.() ?? Date.now(),
         { signal: context.signal, ...(context.createId ? { createId: context.createId } : {}) },
       );

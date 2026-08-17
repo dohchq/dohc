@@ -1,5 +1,7 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { databaseOpLogPath } from "@dohc/workspace-core";
 import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -17,6 +19,27 @@ interface AuthoredWrite {
   options: { overwrite: boolean; author: MomentAuthor };
 }
 
+const requireModule = createRequire(import.meta.url);
+const { DatabaseSync } = requireModule("node:sqlite") as {
+  DatabaseSync: new (path: string) => { exec(sql: string): void; close(): void };
+};
+
+async function seedDatabase(
+  root: string,
+  path: string,
+  marker: string,
+): Promise<void> {
+  await mkdir(join(root, dirname(path)), { recursive: true });
+  const database = new DatabaseSync(join(root, path));
+  try {
+    database.exec(
+      `CREATE TABLE sentinel (id TEXT PRIMARY KEY, marker TEXT); INSERT INTO sentinel VALUES ('1', '${marker}');`,
+    );
+  } finally {
+    database.close();
+  }
+}
+
 async function workspaceRoot(): Promise<string> {
   const root = await createTestScratch("dohc-plugin-sdk-host-");
   roots.push(root);
@@ -29,6 +52,7 @@ function context(root: string, writes: AuthoredWrite[] = []): PluginSdkHostConte
     pluginId: "hello-plugin",
     workspaceRoot: root,
     spawnId: "spawn-123",
+    requestPath: "plugin-process",
     isWritable: () => true,
     writeAvailable: async () => true,
     signal: controller.signal,
@@ -55,9 +79,24 @@ describe("invokePluginSdkHost", () => {
     await expect(invokePluginSdkHost(context(root), "capabilities")).resolves.toEqual({
       files: { read: true, list: true, write: true, watch: false },
       workspace: { search: true },
+      databases: { read: true, edit: true },
+      // The plugin's own process has no renderer to open a tab in.
+      ui: { open: false },
       childProcesses: { spawn: true, output: true, send: true, terminate: true },
       collections: { read: false },
       provenance: { record: false },
+    });
+  });
+
+  it("reports databases.edit on workspace authority alone, without an engine capture", async () => {
+    const root = await workspaceRoot();
+    const unavailable = { ...context(root), writeAvailable: async () => false };
+
+    await expect(
+      invokePluginSdkHost(unavailable, "capabilities"),
+    ).resolves.toMatchObject({
+      files: { write: false },
+      databases: { read: true, edit: true },
     });
   });
 
@@ -222,10 +261,105 @@ describe("invokePluginSdkHost", () => {
     const root = await workspaceRoot();
 
     await expect(
+      invokePluginSdkHost(context(root), "collections.list", { name: "people" }),
+    ).rejects.toThrow("Unsupported dohc SDK method: collections.list");
+  });
+
+  it("reads a database snapshot through the site host", async () => {
+    const root = await workspaceRoot();
+    await seedDatabase(root, "data/app.sqlite", "start");
+
+    await expect(
       invokePluginSdkHost(context(root), "databases.read", {
-        path: "data/plugin.sqlite",
+        path: "data/app.sqlite",
       }),
-    ).rejects.toThrow("Unsupported dohc SDK method: databases.read");
+    ).resolves.toMatchObject({
+      tables: [expect.objectContaining({ name: "sentinel" })],
+    });
+  });
+
+  it("records the plugin, not the user, as the author of a database edit", async () => {
+    const root = await workspaceRoot();
+    await seedDatabase(root, "data/app.sqlite", "start");
+
+    await invokePluginSdkHost(context(root), "databases.edit", {
+      path: "data/app.sqlite",
+      edit: {
+        table: "sentinel",
+        op: "update",
+        pkColumn: "id",
+        rowId: "1",
+        payload: { marker: "edited-by-plugin" },
+      },
+    });
+
+    const log = await readFile(
+      join(root, databaseOpLogPath("data/app.sqlite")),
+      "utf8",
+    );
+    const ops = log
+      .trim()
+      .split("\n")
+      .map((line: string) => JSON.parse(line) as { author: unknown });
+    expect(ops).toHaveLength(1);
+    expect(ops[0]?.author).toEqual({
+      kind: "agent",
+      agentId: "plugin:hello-plugin",
+      onBehalfOf: "local",
+    });
+  });
+
+  it("refuses database edits from a read-only workspace authority", async () => {
+    const root = await workspaceRoot();
+    await seedDatabase(root, "data/app.sqlite", "start");
+    const readOnly = { ...context(root), isWritable: () => false };
+
+    await expect(
+      invokePluginSdkHost(readOnly, "capabilities"),
+    ).resolves.toMatchObject({ databases: { read: true, edit: false } });
+    await expect(
+      invokePluginSdkHost(readOnly, "databases.edit", {
+        path: "data/app.sqlite",
+        edit: {
+          table: "sentinel",
+          op: "update",
+          pkColumn: "id",
+          rowId: "1",
+          payload: { marker: "must-not-land" },
+        },
+      }),
+    ).rejects.toThrow(/read-only workspace authority/);
+    // A shared view still reads.
+    await expect(
+      invokePluginSdkHost(readOnly, "databases.read", { path: "data/app.sqlite" }),
+    ).resolves.toMatchObject({ tables: [expect.objectContaining({ name: "sentinel" })] });
+    await expect(
+      readFile(join(root, databaseOpLogPath("data/app.sqlite")), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("validates a ui.open target and serves it only to a panel request path", async () => {
+    const root = await workspaceRoot();
+    const panel: PluginSdkHostContext = {
+      ...context(root),
+      requestPath: "panel",
+    };
+
+    await expect(
+      invokePluginSdkHost(panel, "capabilities"),
+    ).resolves.toMatchObject({ ui: { open: true } });
+    await expect(
+      invokePluginSdkHost(panel, "ui.open", { target: "notes/today.md" }),
+    ).resolves.toEqual({ target: "notes/today.md" });
+    // The target is a workspace path, never an escape from it.
+    await expect(
+      invokePluginSdkHost(panel, "ui.open", { target: "../secret.txt" }),
+    ).rejects.toThrow(/Invalid read path/);
+
+    // The plugin's own process has no renderer, so it is told so by name.
+    await expect(
+      invokePluginSdkHost(context(root), "ui.open", { target: "notes/today.md" }),
+    ).rejects.toThrow(/ui.open is unavailable for this request path/);
   });
 
   it("refuses writes from a read-only or stopped panel authority", async () => {
@@ -371,7 +505,10 @@ describe("invokePluginSdkHost", () => {
     // plugin's own routeSdkRequest path may broker child processes on its
     // behalf.
     const root = await workspaceRoot();
-    const panelContext = context(root);
+    const panelContext: PluginSdkHostContext = {
+      ...context(root),
+      requestPath: "panel",
+    };
     delete panelContext.invokeChildProcess;
 
     await expect(

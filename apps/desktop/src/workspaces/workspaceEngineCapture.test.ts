@@ -2965,6 +2965,7 @@ describe("workspaceEngineCapture agent attribution", () => {
         pluginId: "hello-plugin",
         workspaceRoot: root,
         spawnId,
+        requestPath: "plugin-process",
         isWritable: () => true,
         writeAvailable: async () => true,
         writeAuthoredText: async (path, text, options) => {

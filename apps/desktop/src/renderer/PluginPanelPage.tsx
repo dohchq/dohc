@@ -27,6 +27,7 @@ export function PluginPanelPage(props: {
   workspaceId: string;
   pluginId: string;
   panelId: string;
+  onOpenPath?: (path: string) => void;
 }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
@@ -116,6 +117,7 @@ export function PluginPanelPage(props: {
       const requestGeneration = sdkGenerationRef.current;
       const requestContext = sdkContext;
       let response: DohcSdkResponseMessage;
+      let openedTarget: string | null = null;
       try {
         const invoked = await bridge().invokePluginPanelSdk({
           workspaceId: props.workspaceId,
@@ -124,6 +126,10 @@ export function PluginPanelPage(props: {
           method: request.method,
           ...(request.params === undefined ? {} : { params: request.params }),
         });
+        if (request.method === "ui.open") {
+          const opened = invoked.result as { target?: unknown } | undefined;
+          if (typeof opened?.target === "string") openedTarget = opened.target;
+        }
         response = {
           protocol: DOHC_SDK_PROTOCOL,
           id: request.id,
@@ -147,13 +153,20 @@ export function PluginPanelPage(props: {
         iframeRef.current?.contentWindow === frameWindow &&
         isActiveFrameOrigin(event.origin, currentPanel.url)
       ) {
+        if (openedTarget) props.onOpenPath?.(openedTarget);
         frameWindow.postMessage(response, event.origin);
       }
     }
 
     window.addEventListener("message", handleSdkRequest);
     return () => window.removeEventListener("message", handleSdkRequest);
-  }, [props.panelId, props.pluginId, props.workspaceId, sdkContext]);
+  }, [
+    props.onOpenPath,
+    props.panelId,
+    props.pluginId,
+    props.workspaceId,
+    sdkContext,
+  ]);
 
   const panel = load.status === "ready" ? load.panel : null;
   const panelUrlAllowed = panel ? isLoopbackOrigin(panel.url) : false;
