@@ -30,6 +30,8 @@ function driverProbe(installed: boolean) {
       },
     ],
     session: null,
+    // What dohc chose for this workspace, which is what the dialog uses.
+    selectedDriverId: installed ? "codex-app-server" : null,
   };
 }
 
@@ -122,7 +124,7 @@ describe("TryTaskDialog", () => {
     });
   });
 
-  it("hands the task to the first installed driver when one exists", async () => {
+  it("hands the task to the driver dohc chose for this workspace", async () => {
     bridgeMock.probeAgentDrivers.mockResolvedValue(driverProbe(true));
     const user = userEvent.setup();
     render(

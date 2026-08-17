@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
 
 export const NPM_PACKAGE_NAME = /^(?:@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*$/;
 
@@ -137,6 +138,36 @@ const PluginWebApp = z.object({
     "web app id must not contain NUL bytes",
   ),
   title: z.string().min(1).max(120),
+}).strict();
+
+// An agent driver this plugin contributes: one harness dohc can talk to,
+// registered beside the built-in drivers and shown in the same probe list.
+// Core ships three drivers for two harnesses, and a harness plugin declares
+// one — plus, at most, a variant or two of that same harness (an adapter
+// transport beside a native one). Eight leaves that measured shape room and
+// still reads as a list. The workspace-wide registration cap, not this one,
+// is what keeps the merged driver list inside the bound its IPC contract
+// carries (pluginAgentDrivers.ts).
+export const MAX_PLUGIN_DRIVERS = 8;
+
+// A driver id names its driver in the driver registry, in the Settings probe
+// list, and in `agents.defaultDriverId` — a workspace-settings string whose
+// own bound is this one. The charset is the settings key's, because an id a
+// person may type into a settings file should not need quoting.
+const PluginDriverId = z.string()
+  .min(1)
+  .max(
+    DEFAULT_DRIVER_ID_MAX_LENGTH,
+    `must be ${DEFAULT_DRIVER_ID_MAX_LENGTH} characters or fewer`,
+  )
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/,
+    "must start with a letter or digit and use only letters, digits, '.', '_', or '-'",
+  );
+
+const PluginDriver = z.object({
+  id: PluginDriverId,
+  displayName: z.string().min(1).max(120),
 }).strict();
 
 // A plugin's own settings, declared flat so dohc can render them without the
@@ -306,6 +337,12 @@ export const DohcPluginManifest = z.object({
   webApps: z.array(PluginWebApp)
     .max(100, "webApps: at most 100 entries allowed")
     .optional(),
+  drivers: z.array(PluginDriver)
+    .max(
+      MAX_PLUGIN_DRIVERS,
+      `drivers: at most ${MAX_PLUGIN_DRIVERS} entries allowed`,
+    )
+    .optional(),
   settings: z.array(PluginSetting)
     .max(
       MAX_PLUGIN_SETTINGS,
@@ -354,6 +391,18 @@ export const DohcPluginManifest = z.object({
       });
     }
     webAppIds.add(webApp.id);
+  });
+
+  const driverIds = new Set<string>();
+  manifest.drivers?.forEach((driver, index) => {
+    if (driverIds.has(driver.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["drivers", index, "id"],
+        message: `driver id "${driver.id}" must be unique within drivers`,
+      });
+    }
+    driverIds.add(driver.id);
   });
 
   const settingKeys = new Set<string>();

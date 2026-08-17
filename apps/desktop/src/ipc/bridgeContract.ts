@@ -6,6 +6,7 @@ import {
 } from "@dohc/workspace-core";
 import { z } from "zod";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
+import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
 import {
   CHATS_TAB_PATH,
@@ -3520,7 +3521,12 @@ export const McpConfigResult = z.object({
 });
 export type McpConfigResult = z.infer<typeof McpConfigResult>;
 
-const AgentDriverIdSchema = z.string().min(1).max(100);
+// A driver id is bounded by what workspace settings can store, because
+// `agents.defaultDriverId` has to be able to name any driver this list shows —
+// dohc's own and a plugin's alike.
+const AgentDriverIdSchema = z.string().min(1).max(DEFAULT_DRIVER_ID_MAX_LENGTH);
+// The bound every display name in a plugin manifest carries.
+const AgentDriverNameSchema = z.string().min(1).max(120);
 const AgentPermissionKindSchema = z.enum([
   "allow_once",
   "allow_always",
@@ -3541,7 +3547,7 @@ const AgentModelSchema = z.object({
 
 const AgentDriverProbeSchema = z.object({
   id: AgentDriverIdSchema,
-  displayName: z.string().min(1).max(100),
+  displayName: AgentDriverNameSchema,
   installed: z.boolean(),
   version: z.string().max(200).optional(),
   auth: z.object({
@@ -3569,7 +3575,7 @@ const AgentPermissionRequestSchema = z.object({
 
 const AgentSessionSnapshotSchema = z.object({
   driverId: AgentDriverIdSchema,
-  driverName: z.string().min(1).max(100),
+  driverName: AgentDriverNameSchema,
   status: z.enum([
     "idle",
     "starting",
@@ -3609,11 +3615,16 @@ const AgentSessionSnapshotSchema = z.object({
     output: z.number().optional(),
   }).optional(),
   authNotices: z.array(z.string().min(1).max(300)).max(5),
+  loginRequired: z.boolean(),
 });
 
 export const AgentPanelSnapshotResult = z.object({
+  // dohc's own drivers plus this workspace's plugin drivers. The registry
+  // refuses a plugin driver past MAX_WORKSPACE_PLUGIN_DRIVERS, which keeps the
+  // merged list inside this bound instead of failing the whole list here.
   drivers: z.array(AgentDriverProbeSchema).max(20),
   session: AgentSessionSnapshotSchema.nullable(),
+  selectedDriverId: AgentDriverIdSchema.nullable(),
 });
 export type AgentPanelSnapshotResult = z.infer<typeof AgentPanelSnapshotResult>;
 

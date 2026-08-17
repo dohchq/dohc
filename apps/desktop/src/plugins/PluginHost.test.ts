@@ -132,7 +132,7 @@ function createCallbackHarness(): {
     return {
       request<T = unknown>(method: string): Promise<T> {
         const result = method === PLUGIN_HOST_METHODS.activate
-          ? { commands: [] }
+          ? { commands: [], drivers: [] }
           : {};
         return Promise.resolve(result as T);
       },
@@ -238,7 +238,7 @@ function createCrashAccountingHarness(): {
       return {
         request<T = unknown>(method: string): Promise<T> {
           const result = method === PLUGIN_HOST_METHODS.activate
-            ? { commands: [] }
+            ? { commands: [], drivers: [] }
             : {};
           if (method === PLUGIN_HOST_METHODS.activate && shouldCrash) {
             setTimeout(() => params.onExit({ code: 1, signal: null }), 0);
@@ -498,9 +498,9 @@ describe("PluginHost", () => {
     const root = await workspaceRoot();
     let invokeCommandCalls = 0;
     let resolveActivation:
-      | ((result: { commands: string[] }) => void)
+      | ((result: { commands: string[]; drivers: string[] }) => void)
       | undefined;
-    const activation = new Promise<{ commands: string[] }>((resolve) => {
+    const activation = new Promise<{ commands: string[]; drivers: string[] }>((resolve) => {
       resolveActivation = resolve;
     });
     const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
@@ -527,7 +527,7 @@ describe("PluginHost", () => {
     ).rejects.toThrow('Plugin "hello-plugin" is still starting.');
 
     expect(invokeCommandCalls).toBe(0);
-    resolveActivation?.({ commands: [] });
+    resolveActivation?.({ commands: [], drivers: [] });
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not finish activation.",
@@ -809,7 +809,7 @@ describe("PluginHost", () => {
       expect.soft(reachedFailed).toBe(true);
       expect(unhandledRejections).toEqual([]);
       expect(host.getStderrLog("hello-plugin")).toContain(
-        'Activation failed: Plugin activation returned an invalid result: "commands" must be an array of non-empty strings.',
+        'Activation failed: Plugin activation returned an invalid result: "commands" and "drivers" must be arrays of non-empty strings.',
       );
     } finally {
       process.off("unhandledRejection", onUnhandledRejection);
@@ -911,7 +911,7 @@ describe("PluginHost", () => {
         return {
           request<T = unknown>(method: string): Promise<T> {
             const result = method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [] }
+              ? { commands: [], drivers: [] }
               : {};
             return Promise.resolve(result as T);
           },
@@ -1045,7 +1045,7 @@ describe("PluginHost", () => {
         return {
           request<T = unknown>(method: string): Promise<T> {
             const result = method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [] }
+              ? { commands: [], drivers: [] }
               : {};
             return Promise.resolve(result as T);
           },
@@ -1101,7 +1101,7 @@ describe("PluginHost", () => {
       return {
         request<T = unknown>(method: string): Promise<T> {
           const result = method === PLUGIN_HOST_METHODS.activate
-            ? { commands: [] }
+            ? { commands: [], drivers: [] }
             : {};
           return Promise.resolve(result as T);
         },
@@ -1355,7 +1355,7 @@ describe("PluginHost", () => {
       (params) => ({
         request<T = unknown>(method: string): Promise<T> {
           const result = method === PLUGIN_HOST_METHODS.activate
-            ? { commands: [] }
+            ? { commands: [], drivers: [] }
             : {};
           return Promise.resolve(result as T).then((value) => {
             if (method === PLUGIN_HOST_METHODS.activate) {
@@ -1402,7 +1402,7 @@ describe("PluginHost", () => {
         return {
           request: async <T,>(method: string) =>
             (method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [] }
+              ? { commands: [], drivers: [] }
               : {}) as T,
           notify: () => undefined,
           dispose: async () => undefined,
@@ -1512,7 +1512,7 @@ describe("PluginHost", () => {
         return {
           request: async <T,>(method: string) =>
             (method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [] }
+              ? { commands: [], drivers: [] }
               : {}) as T,
           notify: () => undefined,
           dispose: async () => undefined,
@@ -1626,7 +1626,7 @@ describe("PluginHost", () => {
       spawnTransport: () => ({
         request: async <T,>(method: string) =>
           (method === PLUGIN_HOST_METHODS.activate
-            ? { commands: [] }
+            ? { commands: [], drivers: [] }
             : {}) as T,
         notify: () => undefined,
         dispose: async () => undefined,
@@ -1697,7 +1697,7 @@ describe("PluginHost", () => {
       workspaceRoot: root,
       spawnTransport: () => ({
         request: async <T,>(method: string) =>
-          (method === PLUGIN_HOST_METHODS.activate ? { commands: [] } : {}) as T,
+          (method === PLUGIN_HOST_METHODS.activate ? { commands: [], drivers: [] } : {}) as T,
         notify: () => undefined,
         dispose: async () => undefined,
       }),
@@ -1756,7 +1756,7 @@ describe("PluginHost", () => {
               await releaseStop.promise;
             }
             return (method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [] }
+              ? { commands: [], drivers: [] }
               : {}) as T;
           },
           notify: () => undefined,
@@ -1857,7 +1857,7 @@ describe("PluginHost", () => {
               deactivateRequests.push(params.pluginId);
             }
             const result = method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [] }
+              ? { commands: [], drivers: [] }
               : {};
             return Promise.resolve(result as T);
           },
@@ -1945,7 +1945,7 @@ describe("PluginHost", () => {
       request<T = unknown>(method: string): Promise<T> {
         if (method === PLUGIN_HOST_METHODS.invokeCommand) invokeCommandCalls += 1;
         const result = method === PLUGIN_HOST_METHODS.activate
-          ? { commands: [] }
+          ? { commands: [], drivers: [] }
           : {};
         return Promise.resolve(result as T);
       },

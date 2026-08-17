@@ -299,7 +299,9 @@ export function AgentsMcpSettings(props: {
                       {driver.installed
                         ? driver.auth.status === "authenticated"
                           ? "Installed · signed in"
-                          : "Installed · sign-in not verified"
+                          : driver.auth.status === "unauthenticated"
+                            ? "Installed · not signed in"
+                            : "Installed · sign-in not verified"
                         : "Not found"}
                     </span>
                   </li>

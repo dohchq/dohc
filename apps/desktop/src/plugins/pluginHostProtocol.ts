@@ -2,6 +2,12 @@
 // The main process and plugin child share it across their process boundary.
 
 import type {
+  PluginAgentEvent,
+  PluginAgentProbe,
+  PluginJsonValue,
+  PluginPermissionDecision,
+} from "@dohc/sdk/node";
+import type {
   DohcPluginManifest,
   PluginSettingValue,
 } from "./pluginManifestSchema";
@@ -16,6 +22,16 @@ export const PLUGIN_HOST_METHODS = {
   sdkRequest: "sdk.request",
   sdkEvent: "sdk.event",
   log: "plugin.log",
+  driverProbe: "driver.probe",
+  driverStartSession: "driver.startSession",
+  driverPrompt: "driver.prompt",
+  driverCancel: "driver.cancel",
+  driverAnswerPermission: "driver.answerPermission",
+  driverAnswerUserInput: "driver.answerUserInput",
+  driverSetModel: "driver.setModel",
+  driverStop: "driver.stop",
+  driverDispose: "driver.dispose",
+  driverEvent: "driver.event",
 } as const;
 
 export interface PluginActivateParams {
@@ -32,7 +48,99 @@ export interface PluginActivateParams {
 
 export interface PluginActivateResult {
   commands: string[];
+  /** The driver ids the plugin registered. The host requires these to be
+   * exactly the ids the manifest declares. */
+  drivers: string[];
 }
+
+/**
+ * The driver half of this contract, in one place.
+ *
+ * dohc's own agent-driver interface takes two values a process boundary
+ * cannot carry: an `onEvent` callback and a `permissionPolicy` function. The
+ * callback becomes the `driver.event` notification below. The policy stays in
+ * the main process, where its one caller already lives — the host applies it
+ * to an arriving permission request and answers the plugin through
+ * `driver.answerPermission`, so a plugin driver obeys the same policy as a
+ * built-in one without the function ever crossing.
+ *
+ * A session is addressed by `sessionKey`, which the host mints and sends with
+ * the start request. The plugin's own `sessionId` comes back in the result.
+ * The host cannot address a session by the plugin's id, because a driver
+ * reports events (`starting`, and a failure to start) before it has one.
+ */
+export interface PluginDriverProbeParams {
+  driverId: string;
+}
+
+export type PluginDriverProbeResult = PluginAgentProbe;
+
+export interface PluginDriverStartSessionParams {
+  driverId: string;
+  sessionKey: string;
+  workspaceRoot: string;
+  mode: "approval-required" | "auto-accept-edits" | "full-access";
+  model?: string;
+  resumeCursor?: PluginJsonValue;
+  mcp: { command: string; args: string[]; env?: Record<string, string> };
+  logDir?: string;
+}
+
+export interface PluginDriverStartSessionResult {
+  sessionId: string;
+  resumeCursor?: PluginJsonValue;
+  /** Which optional session members this session implements. dohc's session
+   * interface makes `setModel` and `answerUserInput` optional, and callers
+   * test for them, so the host must know which ones exist rather than offer
+   * both and fail one at call time. */
+  supports: { setModel: boolean; answerUserInput: boolean };
+}
+
+export interface PluginDriverSessionParams {
+  sessionKey: string;
+}
+
+export interface PluginDriverPromptParams extends PluginDriverSessionParams {
+  text: string;
+  attachments?: Array<{ type: "image"; pathOrUrl: string }>;
+}
+
+export interface PluginDriverPromptResult {
+  turnId: string;
+}
+
+export interface PluginDriverAnswerPermissionParams
+  extends PluginDriverSessionParams {
+  requestId: string;
+  decision: PluginPermissionDecision;
+}
+
+export interface PluginDriverAnswerUserInputParams
+  extends PluginDriverSessionParams {
+  requestId: string;
+  answers: Record<string, string | string[]>;
+}
+
+export interface PluginDriverSetModelParams extends PluginDriverSessionParams {
+  modelId: string;
+}
+
+/** Plugin to host, one per event the driver reports. */
+export interface PluginDriverEventParams extends PluginDriverSessionParams {
+  event: PluginAgentEvent;
+}
+
+/**
+ * A probe answers from a spawn of the harness executable. The built-in
+ * drivers allow one such spawn 3 seconds; a driver plugin's probe runs the
+ * version check and a login check, and answers over the plugin transport.
+ * Measured on this machine (2026-08-17, three runs each): `claude --version`
+ * 0.12–0.13 s, `codex --version` 0.42–0.43 s, `codex login status`
+ * 0.43 s, `claude auth whoami` 0.22 s. Fifteen seconds clears two of the
+ * slowest measured spawns many times over, and it exists so one unresponsive
+ * plugin cannot hold up the whole probe list.
+ */
+export const PLUGIN_DRIVER_PROBE_TIMEOUT_MS = 15_000;
 
 export interface PluginInvokeCommandParams {
   commandId: string;

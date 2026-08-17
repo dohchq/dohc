@@ -40,8 +40,22 @@ a row.
 | `panels` | `{ id, title, entry }` | 100 entries |
 | `commands` | `{ id, title }` | 200 entries |
 | `webApps` | `{ id, title }` | 100 entries |
+| `drivers` | `{ id, displayName }` | 8 entries |
 | `settings` | `{ key, type, label, description?, default, options? }` | 20 entries |
 | `allowSkippedScripts` | `true`, or npm package names | 300 names |
+
+A `drivers` entry contributes one agent driver: a harness dohc can talk to,
+which joins the driver registry beside the ones dohc ships and appears in the
+same probe list. A driver id also has to name its driver inside
+`agents.defaultDriverId`, so it takes that setting's own bound and charset:
+120 characters of letters, digits, `.`, `_`, and `-`, starting with a letter or
+a digit. Activation must register exactly the driver ids the manifest declares
+— a declared driver that never registers would be a probe row nothing can
+answer. One workspace holds at most 16 plugin drivers in total; the
+registration past that is refused, with the cap named, rather than the whole
+list broken. dohc keeps the harness's process tree under its own control: the
+harness runs as a brokered child of the plugin's spawn, and stopping the plugin
+takes the tree down without asking the driver.
 
 Two rules the bounds follow. Ids and titles are unique within their array.
 Every path is refused if it is absolute, carries a `..` segment, or holds a
@@ -233,6 +247,8 @@ are TypeScript above it.
 | First plugin | t3 code (wraps the published `t3` npm package; MIT). Surveyed source: https://github.com/pingdotgg/t3code at `6bc6cb6be4ebecd5bd7a3b7b88f07cb61815ded5` (cloned in `.agent-sources/pingdotgg/t3code`). The spike pins the exact npm package version. | 2026-07-29 |
 | Publishing | Registry publish requires a free dohc cloud account (namespaced, signed releases). Install and sideload need no account, ever. | 2026-08-05 |
 | Wrapper-plugin updates | Author's agent watches upstream, bumps the pinned dependency, tests, republishes. Pristine installs auto-update; forks pause. | 2026-08-05 |
+| Agent drivers | Core calls plugins: a `drivers` contribution behind dohc's own driver registry, with no plugin-to-chat SDK. The start input's `permissionPolicy` stays a main-process function that no plugin sees. | 2026-08-17 |
+| Workspace agent settings | `agents.defaultDriverId` chooses the driver a workspace uses; `agents.defaultModel` starts its sessions. Both were declared and unread until the driver contribution gave them a reader. | 2026-08-17 |
 | Open source | Entire codebase opens at MVP launch. Cloud layer licensed against commercial rehosting. Register the trademark first. | 2026-07-29 |
 
 Constraints these choices create:

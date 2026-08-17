@@ -327,7 +327,7 @@ async function doorWrite(
 function fakeSpawnTransport(): PluginHostOptions["spawnTransport"] {
   return vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
     request: async <T = unknown>(method: string): Promise<T> => (
-      method === "plugin.activate" ? { commands: [] } : {}
+      method === "plugin.activate" ? { commands: [], drivers: [] } : {}
     ) as T,
     notify: () => undefined,
     dispose: async () => undefined,
@@ -2678,7 +2678,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         request: async <T = unknown>(method: string): Promise<T> => {
           if (method !== "plugin.activate") return {} as T;
           await activationGate.promise;
-          return { commands: [] } as T;
+          return { commands: [], drivers: [] } as T;
         },
         notify: () => undefined,
         dispose: async () => undefined,

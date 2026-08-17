@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { OpenExternalUrlPayload } from "../ipc/bridgeContract";
 import { MAX_PLUGIN_MANIFEST_FILE_BYTES } from "./pluginManifest";
+import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
 import {
   DohcPluginManifest,
+  MAX_PLUGIN_DRIVERS,
   MAX_PLUGIN_DESCRIPTION_CHARS,
   MAX_PLUGIN_LICENSE_CHARS,
   MAX_PLUGIN_PUBLISHER_CHARS,
@@ -191,6 +193,89 @@ describe("DohcPluginManifest", () => {
     expect(result.error.issues).toContainEqual(expect.objectContaining({
       message: "webApps: at most 100 entries allowed",
     }));
+  });
+
+  it("accepts a driver contribution and parses it", () => {
+    const result = DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      drivers: [{ id: "claude-code", displayName: "Claude Code" }],
+    });
+    if (!result.success) throw new Error(result.error.message);
+    expect(result.data.drivers).toEqual([
+      { id: "claude-code", displayName: "Claude Code" },
+    ]);
+  });
+
+  it("rejects duplicate driver ids", () => {
+    const result = DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      drivers: [
+        { id: "claude-code", displayName: "One" },
+        { id: "claude-code", displayName: "Two" },
+      ],
+    });
+    if (result.success) throw new Error("expected duplicate driver ids to reject");
+    expect(result.error.issues).toContainEqual(expect.objectContaining({
+      message: 'driver id "claude-code" must be unique within drivers',
+    }));
+  });
+
+  it(`rejects more than ${MAX_PLUGIN_DRIVERS} drivers, naming the cap`, () => {
+    const result = DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      drivers: Array.from({ length: MAX_PLUGIN_DRIVERS + 1 }, (_, index) => ({
+        id: `d${index}`,
+        displayName: `D${index}`,
+      })),
+    });
+    if (result.success) throw new Error("expected the driver limit to reject the manifest");
+    expect(result.error.issues).toContainEqual(expect.objectContaining({
+      message: `drivers: at most ${MAX_PLUGIN_DRIVERS} entries allowed`,
+    }));
+    // The cap admits exactly what it names.
+    expect(DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      drivers: Array.from({ length: MAX_PLUGIN_DRIVERS }, (_, index) => ({
+        id: `d${index}`,
+        displayName: `D${index}`,
+      })),
+    }).success).toBe(true);
+  });
+
+  it("bounds a driver id by what workspace settings can store", () => {
+    const fits = "d".repeat(DEFAULT_DRIVER_ID_MAX_LENGTH);
+    expect(DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      drivers: [{ id: fits, displayName: "Long" }],
+    }).success).toBe(true);
+    const result = DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      drivers: [{ id: `${fits}d`, displayName: "Too long" }],
+    });
+    if (result.success) throw new Error("expected an over-long driver id to reject");
+    expect(result.error.issues).toContainEqual(expect.objectContaining({
+      message: `must be ${DEFAULT_DRIVER_ID_MAX_LENGTH} characters or fewer`,
+    }));
+  });
+
+  it("rejects a driver id a settings file could not hold plainly", () => {
+    for (const id of ["", ".leading", "has space", "has/slash", "nul\0byte"]) {
+      expect(DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        drivers: [{ id, displayName: "Bad" }],
+      }).success).toBe(false);
+    }
+  });
+
+  it("rejects a driver with unknown keys or a missing display name", () => {
+    expect(DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      drivers: [{ id: "claude-code", displayName: "Claude Code", entry: "driver.js" }],
+    }).success).toBe(false);
+    expect(DohcPluginManifest.safeParse({
+      ...minimalManifest,
+      drivers: [{ id: "claude-code" }],
+    }).success).toBe(false);
   });
 
   it("rejects a web app with unknown keys or an entry path", () => {

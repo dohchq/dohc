@@ -642,6 +642,11 @@ import { createPluginAuthoredTextWriter } from "./plugins/pluginAuthoredWrite";
 import { invokePluginSdkHost } from "./plugins/pluginSdkHost";
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
+import {
+  createPluginAgentDrivers,
+  type PluginAgentDrivers,
+} from "./plugins/pluginAgentDrivers";
+import { BUILT_IN_AGENT_DRIVER_IDS } from "./agents/AgentDriver";
 import { pluginDataDir } from "./plugins/pluginLocalState";
 import { pluginIdToSafePath } from "./plugins/pluginSourceSnapshot";
 import { createSitePreviewSdkAuthorityRegistry } from "./workspaces/sitePreviewSdkAuthority";
@@ -873,6 +878,8 @@ const sitePreviews = createSitePreviewLifecycle({
 });
 const pluginPipelines = new Map<string, PluginPipeline>();
 const pluginPipelineDisposals = new Map<string, Promise<void>>();
+// One per workspace, alive for as long as that workspace's plugin pipeline is.
+const pluginAgentDriversByWorkspace = new Map<string, PluginAgentDrivers>();
 const sitePreviewStartLocks = new Map<string, Promise<void>>();
 const sitePreviewStartControllersBySender = new Map<
   number,
@@ -934,6 +941,22 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     dohcDir,
     workspaceRoot: workspace.rootPath,
   });
+  // This workspace's plugin-contributed agent drivers. They join the driver
+  // registry the agent session manager builds, so a plugin driver is chosen,
+  // probed, and stopped exactly like one dohc ships.
+  let pluginHostRef: PluginHost | null = null;
+  const pluginDrivers = createPluginAgentDrivers({
+    host: {
+      requestDriver: (pluginId, spawnId, method, params) => {
+        if (!pluginHostRef) {
+          throw new Error(`Plugin "${pluginId}" is not running.`);
+        }
+        return pluginHostRef.requestDriver(pluginId, spawnId, method, params);
+      },
+    },
+    reservedDriverIds: BUILT_IN_AGENT_DRIVER_IDS,
+  });
+  pluginAgentDriversByWorkspace.set(workspace.workspaceId, pluginDrivers);
   const pluginHost = new PluginHost({
     stateDir: stateDir(),
     workspaceRoot: workspace.rootPath,
@@ -976,8 +999,16 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     // without them and never has to ask.
     readPluginSettings: async (pluginId) =>
       (await pipeline?.getPluginSettings(pluginId)) ?? {},
-    onSpawnEnd: (pluginId, spawnId) =>
-      childProcessBroker.disposeSpawn(pluginId, spawnId),
+    onDriversRegistered: (pluginId, spawnId, drivers) =>
+      pluginDrivers.register(pluginId, spawnId, drivers),
+    onDriverEvent: (pluginId, spawnId, params) =>
+      pluginDrivers.handleEvent(pluginId, spawnId, params),
+    // One seam ends a spawn: the driver's sessions fail here, and the broker
+    // takes the harness's whole process tree down. Neither asks the plugin.
+    onSpawnEnd: (pluginId, spawnId) => {
+      pluginDrivers.endSpawn(pluginId, spawnId);
+      return childProcessBroker.disposeSpawn(pluginId, spawnId);
+    },
     onDispose: () => childProcessBroker.dispose(),
     onStatusChange: (pluginId, status) => {
       pipeline?.noteRuntimeStatus(pluginId, status);
@@ -995,6 +1026,7 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
       }
     },
   });
+  pluginHostRef = pluginHost;
   pipeline = new PluginPipeline({
     workspaceRoot: workspace.rootPath,
     stateDir: stateDir(),
@@ -1019,8 +1051,21 @@ async function ensurePluginPipeline(
     workspaceId: workspace.workspaceId,
     create: () => createPluginPipeline(workspace),
     start: (pipeline) => pipeline.start(),
-    dispose: (pipeline) => pipeline.dispose(),
+    dispose: (pipeline) => disposePluginPipeline(workspace.workspaceId, pipeline),
   });
+}
+
+// Stopping the pipeline stops its plugins, which fails their driver sessions
+// through onSpawnEnd. This drops the registry the workspace no longer has.
+async function disposePluginPipeline(
+  workspaceId: string,
+  pipeline: PluginPipeline,
+): Promise<void> {
+  try {
+    await pipeline.dispose();
+  } finally {
+    pluginAgentDriversByWorkspace.delete(workspaceId);
+  }
 }
 
 async function stopPluginPipelineForWorkspace(workspaceId: string): Promise<void> {
@@ -1028,7 +1073,7 @@ async function stopPluginPipelineForWorkspace(workspaceId: string): Promise<void
     live: pluginPipelines,
     disposals: pluginPipelineDisposals,
     workspaceId,
-    dispose: (pipeline) => pipeline.dispose(),
+    dispose: (pipeline) => disposePluginPipeline(workspaceId, pipeline),
   });
 }
 
@@ -2274,6 +2319,23 @@ const tryInVersionSessions = createTryInVersionSessions({
   },
   onStateChanged: () => notifyRenderer(),
 });
+/**
+ * The workspace's own `agents.*` settings: which driver it prefers, and which
+ * model that driver should start with. Unreadable settings answer with the
+ * defaults, which is "no preference" — the same thing an unset file says.
+ */
+async function workspaceAgentDefaults(
+  workspaceId: string,
+): Promise<{ defaultDriverId: string | null; defaultModel: string | null }> {
+  const workspace = findWorkspace(workspaceId);
+  if (!workspace) return { defaultDriverId: null, defaultModel: null };
+  const { settings } = await readWorkspaceSettingsFile(workspace.rootPath);
+  return {
+    defaultDriverId: settings.agents.defaultDriverId,
+    defaultModel: settings.agents.defaultModel,
+  };
+}
+
 let cachedAgentSessions: AgentSessionManager | null = null;
 async function agentSessionManager(): Promise<AgentSessionManager> {
   if (!cachedAgentSessions) {
@@ -2285,6 +2347,10 @@ async function agentSessionManager(): Promise<AgentSessionManager> {
       ]);
     cachedAgentSessions = createAgentSessionManager({
       registry: createAgentDriverRegistry(createDesktopAgentDrivers(process.env)),
+      // A workspace's plugin drivers join its registry beside the built-ins.
+      pluginDriversFor: (workspaceId) =>
+        pluginAgentDriversByWorkspace.get(workspaceId)?.list() ?? [],
+      agentDefaultsFor: workspaceAgentDefaults,
       integration: agentIntegration,
       rootFor: (workspaceId) => findWorkspace(workspaceId)?.rootPath ?? null,
       mcpFor: mcpRuntimeConfigFor,
@@ -9900,7 +9966,7 @@ function registerIpcHandlers(
     const input = AgentRunPayload.parse(payload);
     requireWorkspace(input.workspaceId);
     const sessions = await agentSessionManager();
-    await sessions.probeDrivers();
+    await sessions.probeDrivers(input.workspaceId);
     return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));
   });
 

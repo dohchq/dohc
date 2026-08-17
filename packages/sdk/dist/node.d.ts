@@ -144,6 +144,168 @@ export interface PluginSettings {
      */
     onChange(listener: (values: Record<string, PluginSettingValue>) => void): () => void;
 }
+/** Data that survives JSON, which is what a driver's resume cursor is. */
+export type PluginJsonValue = string | number | boolean | null | PluginJsonValue[] | {
+    [key: string]: PluginJsonValue;
+};
+export type PluginPermissionKind = "allow_once" | "allow_always" | "reject_once" | "reject_always";
+export interface PluginPermissionOption {
+    optionId: string;
+    name: string;
+    kind: PluginPermissionKind;
+}
+export type PluginPermissionDecision = PluginPermissionKind | "cancel";
+/**
+ * What a driver tells dohc while a session runs.
+ *
+ * This is dohc's own normalized agent-event union, as it crosses the process
+ * boundary: every member is data dohc renders itself. There is deliberately no
+ * pass-through field for the harness's own message — a provider payload
+ * carries tool arguments, file contents, and account detail, and dohc drops it
+ * at this boundary rather than route it onward.
+ */
+export type PluginAgentEvent = {
+    kind: "session-state";
+    state: "starting" | "ready" | "running" | "error" | "closed";
+    reason?: string;
+} | {
+    kind: "text-delta";
+    itemId: string;
+    stream: "assistant" | "reasoning";
+    text: string;
+} | {
+    kind: "item";
+    phase: "started" | "updated" | "completed";
+    item: {
+        id: string;
+        type: "tool_call" | "command" | "file_change" | "mcp_tool_call" | "web_search" | "plan" | "other";
+        title: string;
+        detail?: string;
+        status: "pending" | "in_progress" | "completed" | "failed";
+        locations?: string[];
+    };
+} | {
+    kind: "plan";
+    steps: Array<{
+        step: string;
+        status: "pending" | "inProgress" | "completed";
+    }>;
+} | {
+    kind: "permission-request";
+    requestId: string;
+    requestType: "command" | "file-change" | "file-read" | "tool" | "other";
+    title: string;
+    detail?: string;
+    locations?: string[];
+    options: PluginPermissionOption[];
+} | {
+    kind: "permission-resolved";
+    requestId: string;
+    decision: PluginPermissionDecision;
+} | {
+    kind: "token-usage";
+    used: number;
+    max?: number;
+    input?: number;
+    output?: number;
+} | {
+    kind: "turn-completed";
+    turnId: string;
+    status: "completed" | "failed" | "cancelled";
+    errorMessage?: string;
+} | {
+    kind: "auth";
+    event: "account-updated" | "rate-limits" | "mcp-oauth-completed" | "login-required";
+    detail?: string;
+} | {
+    kind: "error";
+    message: string;
+    fatal: boolean;
+};
+export interface PluginAgentModel {
+    id: string;
+    name: string;
+    planIncluded: boolean;
+    options?: Array<{
+        id: string;
+        values: string[];
+        default?: string;
+    }>;
+}
+/**
+ * What a driver reports about its harness on this machine.
+ *
+ * `auth.email` and `loginHint` are personal data. dohc keeps them out of its
+ * renderer, its logs, and anything it stores; report the account only when the
+ * harness itself already tells you, and never report a credential.
+ */
+export interface PluginAgentProbe {
+    installed: boolean;
+    version?: string;
+    auth: {
+        status: "authenticated" | "unauthenticated" | "unknown";
+        label?: string;
+        email?: string;
+        loginHint?: string;
+    };
+    models: PluginAgentModel[];
+    errorMessage?: string;
+}
+export interface PluginAgentSessionStartInput {
+    /** The canonical workspace root. Run the harness here. */
+    workspaceRoot: string;
+    mode: "approval-required" | "auto-accept-edits" | "full-access";
+    model?: string;
+    /** A cursor a previous session of this driver returned, to resume it. */
+    resumeCursor?: PluginJsonValue;
+    /** dohc's own MCP server, for the harness to connect to the workspace. */
+    mcp: {
+        command: string;
+        args: string[];
+        env?: Record<string, string>;
+    };
+    logDir?: string;
+    /** Reports one event to dohc. Safe to call until `dispose` returns. */
+    onEvent(event: PluginAgentEvent): void;
+}
+export interface PluginAgentSession {
+    /** The harness's own id for this session, for logs and resume. */
+    sessionId: string;
+    /** What a later session needs to continue this one, or nothing. */
+    resumeCursor?: PluginJsonValue;
+    prompt(input: {
+        text: string;
+        attachments?: Array<{
+            type: "image";
+            pathOrUrl: string;
+        }>;
+    }): Promise<{
+        turnId: string;
+    }> | {
+        turnId: string;
+    };
+    cancel(): Promise<void> | void;
+    answerPermission(requestId: string, decision: PluginPermissionDecision): Promise<void> | void;
+    answerUserInput?(requestId: string, answers: Record<string, string | string[]>): Promise<void> | void;
+    setModel?(modelId: string): Promise<void> | void;
+    /** Ends the turn and the harness process. The session stays readable. */
+    stop(): Promise<void> | void;
+    /** Releases everything this session holds. */
+    dispose(): Promise<void> | void;
+}
+/**
+ * One harness dohc can talk to.
+ *
+ * dohc owns the conversation: it decides when to probe, when to start a
+ * session, and what the workspace shows. A driver's job is to run the harness
+ * and report what it says. dohc keeps the authority it already has over every
+ * child a driver starts — it takes the harness's whole process tree down with
+ * the plugin, without asking the driver.
+ */
+export interface PluginAgentDriver {
+    probe(): Promise<PluginAgentProbe> | PluginAgentProbe;
+    startSession(input: PluginAgentSessionStartInput): Promise<PluginAgentSession> | PluginAgentSession;
+}
 export interface PluginActivateContext {
     pluginId: string;
     workspaceRoot: string;
@@ -161,6 +323,15 @@ export interface PluginActivateContext {
     settings: PluginSettings;
     commands: {
         register(id: string, run: (...args: unknown[]) => unknown): void;
+    };
+    /**
+     * Registers the agent drivers this plugin's manifest declares. Register
+     * every declared driver during activation: dohc lists a declared driver in
+     * its own probe list, so one that never registers would be a row that can
+     * never answer.
+     */
+    drivers: {
+        register(id: string, driver: PluginAgentDriver): void;
     };
 }
 /** What PluginHandler.startWebApp returns: the URL the host navigates the
