@@ -263,6 +263,24 @@ describe("Codex chat web app", () => {
     await stream.close();
   });
 
+  it("serves its own static chat page, stylesheet, and script", async () => {
+    const fake = fakeDriver();
+    const { url } = await start(fake);
+
+    const page = await fetch(new URL("/", url));
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toContain("text/html");
+    expect(await page.text()).toContain("<title>Codex Chat</title>");
+
+    const css = await fetch(new URL("chat.css", url));
+    expect(css.status).toBe(200);
+    expect(css.headers.get("content-type")).toContain("text/css");
+
+    const script = await fetch(new URL("chat.js", url));
+    expect(script.status).toBe(200);
+    expect(script.headers.get("content-type")).toContain("javascript");
+  });
+
   it("streams a fatal probe error and does not start a missing harness", async () => {
     const fake = fakeDriver({
       installed: false,
