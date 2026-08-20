@@ -6,7 +6,7 @@ import { MAX_SHARE_PROPOSAL_OPS } from "./shareProposalBound";
 // itself and therefore moves with it — those prove the route and the contract
 // agree, not that the number is right.
 //
-// Evidence: docs/superpowers/plans/2026-08-17-share-submit-bound.md
+// Evidence: the share-submit bound test in packages/security-contract
 describe("the share submit bound", () => {
   // What the measurement actually found, written down here so a change to the
   // bound has to argue with it.

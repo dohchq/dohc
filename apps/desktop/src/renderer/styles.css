@@ -1017,7 +1017,7 @@ body {
  * panel-2 (#181715) is DARKER than panel (#1b1d1a) — a keyboard-selected row
  * would recede into a barely-visible well. --dohc-line (#2a2925) is lighter
  * than panel, so selection reads clearly in both themes, and it matches the
- * canonical list-row recipe (docs/brand/ui-language.md: active `bg-line`). */
+ * canonical list-row recipe (the dohc-interface skill: active `bg-line`). */
 .dohc-slash-menu__item.is-selected,
 .dohc-wikilink-picker__item.is-active {
   background: var(--dohc-line);

@@ -1,11 +1,7 @@
 ---
 name: dohc-writing
 description: >-
-  dohc's writing discipline — Orwell's six rules plus ASD-STE100 Simplified
-  Technical English, applied by register. Use when drafting or editing any prose
-  in this repo — UI copy, error messages, empty states, docs, plans, specs, PR
-  bodies, commit messages, AGENTS.md, and skills. Also use when asked to
-  rewrite, tighten, simplify, or de-slop existing text.
+  Use when drafting or editing prose in this repository that a reader thinks about rather than acts on: docs, specs, plans, PR bodies, commit messages, AGENTS.md, and other skills. Also use when asked to rewrite, tighten, simplify or de-slop existing text. Applies Orwell's six rules plus ASD-STE100 Simplified Technical English, by register. For anything a person sees in the app, use dohc-interface instead.
 ---
 
 # Writing for dohc
@@ -49,7 +45,7 @@ writing: **will a reader execute this text, or think about it?**
 Error messages, empty states, button labels, procedures, runbooks, skills,
 agent instructions, product invariants, migration steps.
 
-**Writing UI copy? Read [`docs/brand/copy.md`](../../docs/brand/copy.md) too.**
+**Writing UI copy? That is the `dohc-interface` skill, not this one.**
 It holds the concrete rules for labels, errors, empty states, toasts, and
 destructive actions, and it is binding for those surfaces.
 

@@ -56,7 +56,7 @@ This rule does not cover routing thresholds, backpressure, protocol versions, or
 
 Developers will not always read the code. Their agents will read the errors. A developer- or agent-facing rejection must name the constraint, configured limit, and unit. When available, include the requested or observed usage.
 
-A backpressure error must name the saturated resource and tell the caller how to retry or degrade. Report failures during a build or check when possible. Otherwise, use the surface's existing structured error. For user-facing copy, follow [`docs/brand/copy.md`](docs/brand/copy.md).
+A backpressure error must name the saturated resource and tell the caller how to retry or degrade. Report failures during a build or check when possible. Otherwise, use the surface's existing structured error. For user-facing copy, follow the [`dohc-interface` skill](.agents/skills/dohc-interface/SKILL.md).
 
 ### Let their agents shape the workspace they need
 
@@ -267,7 +267,7 @@ Every code PR needs one dedicated simplification review after it becomes ready.
 
 ## How we write
 
-dohc's writing discipline is Orwell's six rules plus ASD-STE100 Simplified Technical English, applied by register. The rules live in [`.agents/skills/dohc-writing/SKILL.md`](.agents/skills/dohc-writing/SKILL.md); UI copy has its own in [`docs/brand/copy.md`](docs/brand/copy.md). Read the skill before writing docs, specs, plans, PR bodies, or another skill. For UI copy — any label, error, empty state, or toast — read the copy guide as well; the skill alone does not carry those rules.
+dohc's writing discipline is Orwell's six rules plus ASD-STE100 Simplified Technical English, applied by register. The rules live in [`.agents/skills/dohc-writing/SKILL.md`](.agents/skills/dohc-writing/SKILL.md). Read it before writing docs, specs, plans, PR bodies, or another skill. Anything a person sees in the app is different work: a label, error, empty state or toast is governed by the [`dohc-interface` skill](.agents/skills/dohc-interface/SKILL.md), which carries both the words and the controls they sit in.
 
 The one idea worth carrying even without it: **the register decides the rules.** Text a reader _executes_ (an error, a button, a procedure, an agent instruction) gets strict STE. Text a reader _thinks about_ (docs, plans) gets the same discipline, loosened. Text that _persuades_ (the letter above, commit subjects) keeps its voice, and STE applies to it only as a slop filter. Flattening editorial prose into compliance-speak is a failure, not compliance.
 

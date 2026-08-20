@@ -2,7 +2,7 @@
  *
  * Brand tokens mirror packages/brand/src/tokens.css (the brand-reference
  * values; this is an external brand surface, so it inherits system fonts
- * per docs/brand/design-system.md). Almost monochrome: color separates
+ * per the dohc-interface skill). Almost monochrome: color separates
  * surface and hierarchy, never decoration. */
 
 :root {

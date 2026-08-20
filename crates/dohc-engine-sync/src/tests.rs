@@ -20239,15 +20239,6 @@ fn every_refusal_reason_round_trips_through_persist_and_read() {
 }
 
 #[test]
-fn docs_refusal_contract_does_not_name_retired_variants() {
-    let contract = include_str!("../../../docs/superpowers/plans/rust-engine/RPC_GAP.md");
-    assert!(
-        !contract.contains("MomentAppendNotImplemented"),
-        "MUTATION: the executable refusal contract must not advertise a removed disposition"
-    );
-}
-
-#[test]
 fn local_corruption_constructor_has_one_shared_definition() {
     let sources = [
         include_str!("error.rs"),

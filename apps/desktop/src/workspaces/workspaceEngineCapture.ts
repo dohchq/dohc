@@ -6205,7 +6205,7 @@ export function createWorkspaceEngineCapture(
           if (after.stoodDown) {
             // Destination-side: leave it. See the comment above.
             if (!isSourceSide(endpoint)) continue;
-            // Explorer renders this verbatim (docs/brand/copy.md): what
+            // Explorer renders this verbatim (the dohc-interface skill): what
             // happened, why, then one instruction per sentence.
             throw new Error(
               `dohc could not rename ${fromPath}. dohc gave up on writing ${endpoint} earlier, so its last edits never reached disk. The edits stay in the document's history. Open ${endpoint} to write them again. Then rename ${fromPath} again.`,
@@ -6218,7 +6218,7 @@ export function createWorkspaceEngineCapture(
           const removal = removalWindowFor(endpoint);
           throw new Error(
             // Explorer renders this verbatim, so it follows
-            // docs/brand/copy.md: what happened, why, then ONE instruction
+            // the dohc-interface skill: what happened, why, then ONE instruction
             // per sentence.
             removal
               ? `dohc could not rename ${fromPath}. ${removal.inProgress} Wait for that to finish. Then rename again.`

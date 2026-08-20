@@ -29,7 +29,7 @@ binary.
 
 The two artifacts below were written before the runner stamped anything, so
 **nothing in them ties their measurements to a tree**. The commits named here
-are what `docs/superpowers/plans/rust-engine/EXECUTION_LOG.md` says was being
+are what the program's run records said was being
 tested at the time. They are BELIEVED, not verified, and no backfill is
 possible: the runs are over. Do not edit provenance into these files.
 

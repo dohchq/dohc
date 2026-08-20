@@ -127,7 +127,6 @@ jobs:
               - 'fixtures/**'
               - 'scripts/**'
               - 'tools/**'
-              - 'docs/superpowers/plans/rust-engine/**'
               - 'tsconfig.base.json'
               - 'package.json'
               - 'pnpm-workspace.yaml'

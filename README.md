@@ -1,10 +1,6 @@
 # dohc
 
-dohc is a local-first workspace where you and your agents build documents,
-data, dashboards, and workflows from files you control.
-
-A workspace is an ordinary folder. The Rust workspace engine records versions,
-moments, chats, search state, and sync data in `.dohc/engine/engine.db`.
+dohc is a local-first file sync and collaboration workspace for humans and agents. It syncs your files and data across your devices and facilitates sharing and collaboration between you, your team and your agents.
 
 ## Repository layout
 
@@ -60,8 +56,7 @@ Start the sync relay in another terminal:
 pnpm --filter @dohc/sync-relay dev
 ```
 
-See [backend modes](docs/architecture/backend-modes.md) and
-[self-hosting](docs/self-hosting.md).
+
 
 ## Checks
 
@@ -77,9 +72,7 @@ of relying on the process exit code.
 
 ## Documentation
 
-Start with [the docs index](docs/README.md). Product direction lives in
-[the manifesto](docs/product/manifesto.md), and current behavior lives in
-[the product spec](docs/product/spec.md).
+Start with [AGENTS.md](AGENTS.md). The code is the reference for how anything behaves.
 
 ## Stack
 

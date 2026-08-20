@@ -1,6 +1,6 @@
 # YRS-SPIKE — yrs/Yjs interoperability spike report
 
-Program context: `docs/superpowers/plans/2026-07-16-dohc-rust-engine-rewrite.md`,
+Program context: the rust engine program history in git,
 section "Y.Doc: week-one spike and design". This spike is the rewrite
 program's **sole abort criterion**.
 

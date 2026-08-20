@@ -3,7 +3,7 @@ import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { DohcMark } from "@dohc/brand";
 
 // The dohc control primitives — the canonical implementations of the recipes
-// in docs/brand/ui-language.md. Surfaces compose THESE instead of re-typing
+// in the dohc-interface skill. Surfaces compose THESE instead of re-typing
 // class strings so the language cannot drift file by file. Styling changes
 // happen here (or in the spec) — never inline at a call site.
 

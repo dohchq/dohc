@@ -834,7 +834,7 @@ describe("PluginChildProcessBroker", () => {
 
   // The merged-env limit rejects otherwise valid work, so AGENTS.md requires
   // recorded evidence for it. These numbers are the environment measurements
-  // in docs/superpowers/plans/2026-08-13-plugin-timeout-measurements.md.
+  // in the measurement suite in pluginSourceSnapshot.test.ts.
   it("keeps the merged env limit clear of a healthy env plus the plugin budget", () => {
     // Largest healthy inherited environment measured on 2026-08-14 (Git Bash
     // dev shell: 82 entries, 5,052 UTF-16 code units).

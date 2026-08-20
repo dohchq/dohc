@@ -10987,7 +10987,7 @@ async function startRustEngineDaemon(): Promise<boolean> {
         if (terminal && !quitting) {
           // The dialog is for the user, so it says what broke and what to do
           // instead — no internal names, one instruction per sentence
-          // (docs/brand/copy.md). "The workspace engine" is the noun the
+          // (the dohc-interface skill). "The workspace engine" is the noun the
           // shipping UI already uses for this (SettingsDialog, StatusBar,
           // NoticeCenter), so this must not invent another one.
           //

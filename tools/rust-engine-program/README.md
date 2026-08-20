@@ -1,10 +1,6 @@
-# rust-engine-program — local runners
+# Rust engine program tooling
 
-Tooling for the dohc Rust engine rewrite program. **GitHub CI is skipped for
-this program** (Gate 0 decision, `docs/superpowers/plans/rust-engine/DECISIONS.md`):
-evidence is produced locally on the dev machine and recorded in
-`docs/superpowers/plans/rust-engine/EXECUTION_LOG.md`. These scripts are that
-local evidence pipeline.
+Scripts that run and guard the Rust workspace engine gate. `run-rust-checks.mjs` is the gate itself; the rest support it.
 
 ## Scripts
 
@@ -12,7 +8,6 @@ local evidence pipeline.
 | --- | --- |
 | `run-rust-checks.mjs` | Rust policy gate: tree provenance (the commit the run examined, read at every step boundary; a tree that moves between two readings fails the verdict and names the step, a tree already dirty at the start is recorded), native target, fixture drift, `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace` (`cargo nextest run`), `doctests` (`cargo test --doc` — nextest runs no doctests by design), the collab crash tier (`cargo nextest run -p dohc-engine-collab --features fault-injection` — those tests are compiled out of the plain workspace run), plus `cargo deny check` / `cargo audit` when installed (skip-with-warning when absent). A required step that SKIPs fails the verdict. On a host with a build-slot root it enforces the machine budget (WINDOWS_DEV.md): disk preflight, slot acquisition, capped jobs and test threads. Prints a pass/fail summary with per-step seconds and a pasteable evidence line. |
 | `native-target.mjs` | The gate's first step, importable so it can be tested: asks rustc through cargo what it compiled for. See [Native target](#native-target). |
-| `build-reviewer-packet.mjs` | (R01-ORACLE) assembles per-shard reviewer packets. Unrelated to the runners. |
 
 Banked soak artifacts live in `soak-evidence/`; see
 [`soak-evidence/README.md`](soak-evidence/README.md) for the provenance block

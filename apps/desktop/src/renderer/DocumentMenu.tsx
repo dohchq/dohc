@@ -57,7 +57,7 @@ export function DocumentMenu(props: {
     Partial<Record<DocumentMenuItemId, string>>
   >({});
   // The lasting half. A refusal owes the user a next step
-  // (docs/brand/copy.md), and a label that swaps for 1.2s has no room for one
+  // (the dohc-interface skill), and a label that swaps for 1.2s has no room for one
   // and no time to be read. It is stated in the menu's status line, which
   // every user reaches — a tooltip is not one, because focus stays on the
   // menu container and never presents it (#666). It stands until the user

@@ -2983,7 +2983,7 @@ export const SHARE_PROPOSAL_ID = z.string().min(1).max(128);
 // A proposal carries at most what one submit carries, and that number is
 // measured rather than borrowed from a paging bound
 // (`@dohc/security-contract/share-proposal-bound`; the evidence is in
-// `docs/superpowers/plans/2026-08-17-share-submit-bound.md`). A body over the
+// the share-submit bound test in packages/security-contract). A body over the
 // cap is relay damage, not a listing this surface should try to render.
 //
 // This surface can hold the number because it no longer renders content to do

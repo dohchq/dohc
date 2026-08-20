@@ -51,7 +51,7 @@ You do not set these up:
 Read the `== summary ==` block. Do not trust the exit code alone: the gate
 can exit 0 while its own summary says FAIL. The evidence line under
 `EVIDENCE` is what you paste into
-`docs/superpowers/plans/rust-engine/EXECUTION_LOG.md` when the program asks
+the program's own record when the program asks
 for evidence.
 
 Each summary row now carries its wall-clock seconds. If you change the gate

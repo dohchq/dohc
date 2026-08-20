@@ -9,11 +9,6 @@ owner already made.
 
 1. `AGENTS.md` — the repository contract. It governs everything below.
    Nothing in this file relaxes it.
-2. `docs/superpowers/plans/2026-08-09-dohc-sync-program.md` — the seven-shard
-   program and each shard's acceptance case.
-3. `docs/superpowers/plans/2026-08-10-s4-base-arbitration-design.md` — the
-   arbitration policy AND the revised mechanism. The mechanism changed on
-   2026-08-11; the section "How the loser survives" is binding.
 4. Your own model-budget setup — how this campaign spends models, how subagents
    report, and how to wait on work without burning the budget. This lives in
    your user-level skills, not in this repository.

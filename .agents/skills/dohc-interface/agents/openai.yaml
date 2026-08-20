@@ -1,0 +1,3 @@
+interface:
+  display_name: "dohc Interface"
+  short_description: "Words and controls for the dohc desktop UI"

@@ -13,7 +13,7 @@
 // The copy lives here once so it cannot drift: one noun, one shape, every
 // surface.
 //
-// The shape, per docs/brand/copy.md: what dohc could not do, what is at the
+// The shape, per the dohc-interface skill: what dohc could not do, what is at the
 // path and what it must be, one instruction, then retry.
 
 // What a guard learned from lstat. Structural, so node:fs Stats satisfies it

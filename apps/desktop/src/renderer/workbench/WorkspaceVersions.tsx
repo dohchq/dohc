@@ -1835,7 +1835,7 @@ export function VersionComparePage(props: {
               {state.files.length === 0
                 ? "The two versions have the same text files."
                 : // One numeral style with the conflict copy next door
-                  // (docs/brand/copy.md): a lone file is a sentence and
+                  // (the dohc-interface skill): a lone file is a sentence and
                   // spells "one"; scanned counts above one use numerals.
                   state.nextAfterPath !== null
                   ? state.files.length === 1

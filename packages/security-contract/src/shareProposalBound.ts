@@ -2,7 +2,7 @@
  * How many net-changed files ONE share submit carries.
  *
  * Measured, not guessed (`AGENTS.md`, "Measure limits that reject work"). The
- * evidence is in `docs/superpowers/plans/2026-08-17-share-submit-bound.md`:
+ * evidence is in the share-submit bound test in packages/security-contract:
  *
  * - Healthy work reaches **1,434 files** — one share of a repository-sized
  *   folder. A week of ordinary work in this repository nets 519 changed files,
