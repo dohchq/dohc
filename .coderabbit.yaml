@@ -204,7 +204,7 @@ reviews:
       - enabled: true
         name: "check dohc invariants"
         instructions: |
-          Read AGENTS.md and docs/security/authz-boundaries.md. Identify any
+          Read AGENTS.md. Identify any
           changed code that weakens an invariant and propose a focused fix.
 
   tools:
@@ -268,11 +268,6 @@ knowledge_base:
     enabled: true
     filePatterns:
       - "AGENTS.md"
-      - "docs/README.md"
-      - "docs/security/authz-boundaries.md"
-      - "docs/development/testing.md"
-      - "docs/product/*.md"
-      - "docs/brand/*.md"
   learnings:
     scope: "local"
   issues:

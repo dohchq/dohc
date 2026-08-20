@@ -34,7 +34,7 @@ const MAX_CHILD_ENV_VALUE_LENGTH = 32_768;
 export const MAX_CHILD_ENV_BYTES = 65_536;
 // Measured healthy environments, and the platform ceilings they sit under,
 // are recorded in
-// docs/superpowers/plans/2026-08-13-plugin-timeout-measurements.md. The
+// the measurement suite in pluginSourceSnapshot.test.ts. The
 // largest healthy inherited environment measured 5,052 UTF-16 code units,
 // and Windows caps a process environment block at 32,767 characters. This
 // limit clears that ceiling plus a plugin's whole MAX_CHILD_ENV_BYTES budget

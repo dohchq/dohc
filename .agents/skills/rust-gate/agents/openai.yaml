@@ -1,0 +1,3 @@
+interface:
+  display_name: "Rust Gate"
+  short_description: "Run the canonical Rust gate within the build budget"

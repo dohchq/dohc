@@ -105,9 +105,9 @@ describe.skipIf(!measuring)("history diff work measurement", () => {
     // Healthy work: real repository documents, small edits.
     for (const doc of [
       "AGENTS.md",
-      "docs/brand/copy.md",
-      "docs/superpowers/plans/rust-engine/SESSION_HANDOFF.md",
-      "docs/superpowers/plans/rust-engine/EXECUTION_LOG.md",
+      "README.md",
+      ".agents/skills/dohc-interface/SKILL.md",
+      ".agents/skills/dohc-writing/SKILL.md",
     ]) {
       const before = readRepoDoc(doc);
       rows.push(measure(doc, before, editEveryNthLine(before, 50)));

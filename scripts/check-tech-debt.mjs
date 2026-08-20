@@ -19,6 +19,13 @@ const debtPatterns = [
 ]
 
 const skippedDirectories = new Set([
+  // Gitignored agent scratch. Walking it reaches Windows cache folders the
+  // process cannot read, which fails the check before it reads any source.
+  '.agent-artifacts',
+  '.agent-sources',
+  '.agent-worktrees',
+  '.claude',
+  '.codex',
   '.git',
   '.gstack',
   '.turbo',
@@ -36,12 +43,6 @@ const skippedFiles = new Set([
   'package-lock.json',
   'yarn.lock',
 ])
-const skippedPathPrefixes = [
-  // These program-evidence records quote historical findings. They are not
-  // live product documentation.
-  'docs/superpowers/plans/rust-engine/',
-  'docs/superpowers/plans/2026-07-16-dohc-rust-engine-rewrite.md',
-]
 const skippedExtensions = new Set([
   '.avif',
   '.bmp',
@@ -60,7 +61,6 @@ const hits = []
 for (const file of walk(root)) {
   const rel = normalize(relative(root, file))
   if (skippedFiles.has(rel)) continue
-  if (skippedPathPrefixes.some((prefix) => rel.startsWith(prefix))) continue
   const body = readTextFile(file)
   if (body === null) continue
   const lines = body.split(/\r?\n/)

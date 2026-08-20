@@ -13,7 +13,7 @@ pub const MAX_PULL_OPS: usize = 500;
 /// folder), a week of ordinary work nets 519, and the relay stays linear past
 /// 5,000. 2,500 is 1.7x above the measured healthy maximum with 4x margin
 /// below where the relay starts to cost real time. The evidence is in
-/// `docs/superpowers/plans/2026-08-17-share-submit-bound.md`.
+/// the share-submit bound test in packages/security-contract.
 ///
 /// Must equal `MAX_SHARE_PROPOSAL_OPS` in
 /// `packages/security-contract/src/shareProposalBound.ts`, which is what the

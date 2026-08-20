@@ -29,6 +29,8 @@ import {
   pluginIdToSafePath,
   snapshotPluginSource,
   type PluginSourceSnapshotResult,
+  PLUGIN_INSTALL_TIMEOUT_MS,
+  PLUGIN_BUNDLE_TIMEOUT_MS,
 } from "./pluginSourceSnapshot";
 import { workspaceStateKey } from "./pluginLocalState";
 
@@ -909,4 +911,33 @@ describe("backslash source entry names (#779 round 7 B1)", () => {
       );
     },
   );
+});
+
+describe("plugin timeout limits sit beyond measured healthy work", () => {
+  // A limit that rejects otherwise valid work needs recorded evidence for it.
+  // These are the measurements the limits were set from, kept here so they run
+  // rather than sitting in prose that nothing checks.
+
+  it("keeps the install timeout clear of the slowest healthy install", () => {
+    // Slowest healthy install measured 2026-08-13: a medium plugin, 32
+    // dependency files, 55,150,730 bytes, 5,729.600 ms.
+    const MEASURED_SLOWEST_INSTALL_MS = 5_729.6;
+
+    expect(PLUGIN_INSTALL_TIMEOUT_MS).toBeGreaterThan(
+      MEASURED_SLOWEST_INSTALL_MS * 4,
+    );
+  });
+
+  it("keeps the bundle timeout clear of the slowest healthy bundle", () => {
+    // Slowest healthy bundle measured 2026-08-13, after the correction that
+    // replaced a JSON-constant fixture with real dependency code: react,
+    // react-dom, lucide-react and zod, 98 input files, 4,601,978 input bytes,
+    // 550.465 ms on a first build against a cold OS file cache. Warm
+    // re-bundles ran 278.561 ms and 302.402 ms.
+    const MEASURED_SLOWEST_BUNDLE_MS = 550.465;
+
+    expect(PLUGIN_BUNDLE_TIMEOUT_MS).toBeGreaterThan(
+      MEASURED_SLOWEST_BUNDLE_MS * 4,
+    );
+  });
 });

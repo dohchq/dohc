@@ -1,3 +1,0 @@
-interface:
-  display_name: "Codex Implementation"
-  short_description: "Delegate a scoped implementation patch to Codex CLI."

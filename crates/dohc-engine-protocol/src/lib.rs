@@ -6,7 +6,7 @@
 //! in-process direct-call transport required by portability guardrail 3).
 //!
 //! Design summary (full rationale in
-//! `docs/superpowers/plans/rust-engine/ENGINE_PROTOCOL.md`):
+//! this crate's own types):
 //!
 //! - **Envelope encoding**: length-framed JSON control frames. The frame
 //!   header is codec-agnostic; a future CBOR envelope encoding can be

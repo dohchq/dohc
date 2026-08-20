@@ -1207,7 +1207,7 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
           params: Record<string, unknown> = {},
           requestOptions?: DohcRequestOptions,
         ) => {
-          // Authorization boundary: docs/security/authz-boundaries.md. The SDK
+          // Authorization boundary: AGENTS.md product invariants. The SDK
           // never accepts caller-supplied workspace/user identity here; the
           // host transport decides whether collections.read is available and
           // enforces workspace scope server-side before returning rows.

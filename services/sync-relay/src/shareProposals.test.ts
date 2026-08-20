@@ -1781,7 +1781,7 @@ describe("the recipient's blob route", () => {
   });
 
   // The measured bound, at its exact edge on both sides
-  // (`docs/superpowers/plans/2026-08-17-share-submit-bound.md`). Driven at the
+  // (the share-submit bound test in packages/security-contract). Driven at the
   // real number rather than a small stand-in, because a bound tested only near
   // zero proves nothing about the number that ships.
   it("carries a submit of exactly the bound", async () => {

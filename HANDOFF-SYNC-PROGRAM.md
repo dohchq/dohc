@@ -9,14 +9,9 @@ owner already made.
 
 1. `AGENTS.md` — the repository contract. It governs everything below.
    Nothing in this file relaxes it.
-2. `docs/superpowers/plans/2026-08-09-dohc-sync-program.md` — the seven-shard
-   program and each shard's acceptance case.
-3. `docs/superpowers/plans/2026-08-10-s4-base-arbitration-design.md` — the
-   arbitration policy AND the revised mechanism. The mechanism changed on
-   2026-08-11; the section "How the loser survives" is binding.
-4. `.claude/skills/sol-first/SKILL.md` — how this campaign spends models, how
-   subagents report, and how to wait on work without burning the budget.
-5. `CAMPAIGN-SWEEP.md` — the running ledger. Append to it; do not rewrite it.
+4. Your own model-budget setup — how this campaign spends models, how subagents
+   report, and how to wait on work without burning the budget. This lives in
+   your user-level skills, not in this repository.
 
 ## Where the program stands
 
@@ -126,7 +121,7 @@ Verify each finding before applying it, apply the clear ones, and record the
 reviewed commit and result in the PR. Findings are evidence, not commands.
 
 **Reviewer coverage.** A review applies to a commit, not a pull request. Use
-the `pr-review-watch` skill; do not build another poller. Both automated
+your own review watcher; do not build another poller. Both automated
 reviewers were usage-limited on 2026-08-11 — the cloud code reviewer answered
 "You have reached your Codex usage limits for code reviews", and Fable was
 exhausted. Recheck them; they recover. When a required reviewer cannot run,

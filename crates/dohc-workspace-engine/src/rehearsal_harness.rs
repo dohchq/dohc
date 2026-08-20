@@ -2550,34 +2550,6 @@ mod tests {
     }
 
     #[test]
-    fn gate6_orphan_claim_matches_banked_schema4_evidence() {
-        let evidence: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../docs/superpowers/plans/rust-engine/REHEARSAL_EVIDENCE-2026-07-26.json"
-        ))
-        .expect("parse banked evidence");
-        assert_eq!(evidence["schema_version"], 4);
-        let orphan_count = evidence["ui_state_tmp_orphans"]
-            .as_array()
-            .expect("orphan evidence array")
-            .len();
-        let packet = include_str!("../../../docs/superpowers/plans/rust-engine/GATE6_PACKET.md");
-        let harness = include_str!("../REHEARSAL_HARNESS.md");
-
-        assert!(
-            packet.contains(&format!(
-                "the {orphan_count} `ui-state.json.tmp-*` orphans found in real data"
-            )),
-            "the release packet's orphan count must be derived from the banked artifact"
-        );
-        assert!(
-            harness.contains(&format!(
-                "banked dogfood evidence contains {orphan_count} such UI-state temp orphans"
-            )),
-            "the harness guide's real-data count must match the banked artifact"
-        );
-    }
-
-    #[test]
     fn incomplete_real_recapture_fails_without_banking_complete_evidence() {
         let source = fixture_source();
         let scratch_parent = ScratchDir::new().expect("scratch parent");

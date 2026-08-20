@@ -4,7 +4,7 @@
 // Replaces GitHub CI for the Rust workspace per the Gate 0 decision
 // (DECISIONS.md: "GitHub CI SKIPPED ... evidence is local-first"). Runs the
 // Rust policy gate and prints a timestamped evidence line the integrator
-// pastes into docs/superpowers/plans/rust-engine/EXECUTION_LOG.md.
+// pastes into the pull request.
 //
 // Requirements: Node >= 22, zero npm dependencies. Windows-first — works from
 // PowerShell and Git Bash (spawns through the platform shell).
@@ -392,7 +392,7 @@ for (const r of results) {
 }
 
 const verdict = failed ? "FAIL" : "PASS";
-console.log(`\nEVIDENCE (paste into EXECUTION_LOG.md):`);
+console.log(`\nEVIDENCE (paste into the pull request):`);
 console.log(
   `- ${stamp} | run-rust-checks | ${platform()}/${arch()} (rust cfg ${native.ok ? native.cfg : "UNVERIFIED"}, ${capsField}, head ${treeStamp}) | ${verdict} | ${summary}`,
 );

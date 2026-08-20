@@ -31,7 +31,7 @@ import {
 // oversized plugin-authored package.json/pnpm-lock.yaml fails with a named
 // limit instead of forcing a full parse of arbitrary-size, attacker-
 // controlled text. Measured 2026-08-13 (see
-// docs/superpowers/plans/2026-08-13-plugin-timeout-measurements.md): the
+// the measurement suite in pluginSourceSnapshot.test.ts): the
 // real "large" reference fixture's package.json was 490 bytes and its
 // pnpm-lock.yaml (209 entries) was 71,329 bytes. Both bounds round upward
 // to a clean value with comfortable headroom over that measured maximum.
@@ -67,7 +67,7 @@ export const PINNED_PLUGIN_PACKAGE_MANAGER =
   `pnpm@${PINNED_PLUGIN_PNPM_VERSION}`;
 
 // Measured on 2026-08-13. See
-// docs/superpowers/plans/2026-08-13-plugin-timeout-measurements.md and its
+// the measurement suite in pluginSourceSnapshot.test.ts and its
 // 2026-08-13 correction: the original bundle measurement embedded a JSON string
 // constant rather than bundling real dependency code, so it under-measured
 // real work. A real bundle of react + react-dom + lucide-react + zod (98

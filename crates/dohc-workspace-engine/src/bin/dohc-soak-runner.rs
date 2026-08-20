@@ -2452,13 +2452,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn gate6_packet_tracks_the_resolved_r15_2_decision() {
-        let packet = include_str!("../../../../docs/superpowers/plans/rust-engine/GATE6_PACKET.md");
-
-        assert!(packet.contains("RSS growth — **RESOLVED**"));
-        assert!(packet.contains("Ice accepted the steady-state tail verdict"));
-        assert!(!packet.contains("awaiting Ice's ruling"));
-        assert!(!packet.contains("Recorded as an open decision"));
-    }
 }
