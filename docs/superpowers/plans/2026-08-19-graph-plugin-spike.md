@@ -12,8 +12,8 @@ natural second conversion once P2 (events) and P1 (`ui.open`) exist, with fewer
 losses than Sites because it spawns nothing and embeds nothing"
 (`2026-08-17-sites-plugin-spike.md:456-460`). This spike checked that sentence
 against the code. **All three supporting claims are wrong.** The corrected
-picture still supports converting, but not for free and not without a decision
-from Ice about what the graph is allowed to show.
+picture still supports converting, but not for free: the recommended plugin is
+a files-only graph.
 
 ## Conclusion
 
@@ -298,7 +298,7 @@ wrong-shaped.
 
 | Primitive | Closes | Size | Why this size |
 | --- | --- | --- | --- |
-| **G1. `workspace.links`** — an SDK capability returning the bounded link derivation core already runs | 2, 3, 5 | **S** | `readWorkspaceGraph` is written and bounded (`workspaceGraph.ts:904-912`). The plumbing spans a `workspaceSdkHost.ts` case, an explicit `pluginSdkHost.ts` forwarding case because its default rejects unknown methods (`pluginSdkHost.ts:184-203,323-344`), capability and SDK exposure, and host/SDK tests. It stays S by the sites spike's P1 SDK-parity precedent, which routed `databases.*` and `ui.open` through the same layers (`2026-08-17-sites-plugin-spike.md:254-256`). G1 saves the per-file bridge calls, keeps one link resolver, and applies the core loader's secret floor. |
+| **G1. `workspace.links`** — an SDK capability returning the full bounded files-only `WorkspaceGraph`: `nodes`, `edges`, `unresolvedLinks`, `scannedFileCount`, `omittedFileCount`, and `truncatedFileCount` (`workspaceGraph.ts:28-35`; `bridgeContract.ts:674-684`) | 2, 3, 5 | **S** | `readWorkspaceGraph` is written and bounded (`workspaceGraph.ts:904-912`). The plumbing spans a `workspaceSdkHost.ts` case, an explicit `pluginSdkHost.ts` forwarding case because its default rejects unknown methods (`pluginSdkHost.ts:184-203,323-344`), capability and SDK exposure, and host/SDK tests. It stays S by the sites spike's P1 SDK-parity precedent, which routed `databases.*` and `ui.open` through the same layers (`2026-08-17-sites-plugin-spike.md:254-256`). G1 saves the per-file bridge calls, keeps one link resolver, and applies the core loader's secret floor. The panel must receive `unresolvedLinks`, `omittedFileCount`, and `truncatedFileCount` unchanged so it can keep the built-in incompleteness notices (`GraphView.tsx:427-438`). G1 must also revise the request deadline for `workspace.links`. The panel transport defaults to 10 seconds and accepts a per-call `timeoutMs` override (`packages/sdk/src/index.ts:69-72,428,499`), while the current graph IPC call has no deadline (`preload.ts:134-135`). One call can read up to 2,000 files sequentially (`workspaceGraph.ts:65-69,853-912`), so the default can reject a healthy workspace on slow storage. Measure the whole derivation on representative workspaces before setting either an evidence-based transport deadline or a per-call override. |
 | **G2. Active-document push** — the renderer sends the active workspace path to every mounted graph panel | 12 | **S** | Same channel and shape as the theme push (`PluginPanelPage.tsx:231-234`); the renderer already passes `activeDocumentPath` to the rail (`DesktopWorkspaceShell.tsx:5222`). Since the [#842](https://github.com/dohc-ai/dohc/issues/842) fix (PR #844), both built-in mounts receive `activeDocumentPath`, so G2 pushes to every mounted graph panel the plugin keeps — a rail-only push would reintroduce #842 in the editor panel. Needs the workspace/generation guard the panel's SDK responses already carry. |
 | **G3. Panel subscriptions** — a guarded relay from the workspace event feed to the panel that asked | 10, 11 | **M** | Named by the sites build as the next primitive (`2026-08-17-sites-plugin-spike.md:406-410`) and by issue #838. The feed exists and caps each plugin spawn at 16 open subscriptions (`plugins/pluginWorkspaceEvents.ts:5-14,88-95`), and the push direction exists; new work is per-panel subscriptions under the same guards, and a decision on whether a settled moment is visible at all. |
 | **G4. `ui.openPanel`** — a panel asks dohc to open another of its own panels as a tab | 7b | **S** | The same shape as `ui.openWebApp` (`pluginSdkHost.ts:246-280`): the plugin id comes from the grant, never the request, and the renderer performs the open. The tab path already exists (`workbenchState.ts:78`) and is already a singleton. Without it, graph loses its maximize button. |
@@ -336,7 +336,8 @@ edges and 20,000 link candidates today. Ripgrep cannot strip code, so a
 
 ## 4. What dies, what stays
 
-If graph converts, with the chat overlay left in core:
+If graph converts, the chat overlay is deleted with its only production
+consumer:
 
 **Moves to the plugin**
 
@@ -374,10 +375,11 @@ through to system families (`renderer/tokens.ts:103-115`).
 | `DesktopWorkspaceShell.tsx` — `graphChatOpenTarget` `:531-574`, lazy import `:679-681`, `graphRefreshKey` `:1811-1818`, `openGraphTab` `:3141-3143`, `openGraphChatThread` `:3298-3316`, `graphKey` `:4799-4801`, maximize button `:5195-5205`, two mounts `:5218-5229,5400-5411` | ~115 |
 | `workspaces/chatMentionGraphOverlay.ts` + test | 322 + 288 |
 
-About 2,180 lines are deleted or moved in total. Deleting the chat overlay is
-the honest reading, because its only importer is the graph handler
-(`main.ts:694,4759`). If Ice wants chat mentions kept, they cannot move to the
-plugin and the built-in graph does not fully die.
+About 2,180 lines are deleted or moved in total. The chat overlay goes with the
+graph handler, its only production importer (`main.ts:694,4759`), and its test
+goes with it. This records the chat-mentions mode as the conversion's
+user-visible subtraction; the overlay does not remain in core without a
+consumer.
 
 `workbenchState.ts:296` deserves its own line. It registers `dohc://graph` as
 a live virtual tab so `isRemovedVirtualTabPath` does not drop it from persisted
@@ -427,10 +429,11 @@ A `graph` plugin on today's SDK plus G1–G4:
   `GraphView` mounts (`DesktopWorkspaceShell.tsx:5218-5229,5400-5411`), and
   each mount's `GraphMap` owns its own `useForceGraph` state
   (`GraphView.tsx:199-218,441-460`).
-- **Panel code**: on open, `workspace.links` (G1) returns nodes and edges;
-  the force-simulation arithmetic ports, but every SVG utility and bespoke
-  class is rewritten as inline styles and theme-variable references. G2
-  supplies the rail's active document for centring. G3 replaces the refresh
+- **Panel code**: on open, `workspace.links` (G1) returns the full bounded
+  `WorkspaceGraph`. The panel keeps the unresolved, omitted, and truncated
+  notices. The force-simulation arithmetic ports, but every SVG utility and
+  bespoke class is rewritten as inline styles and theme-variable references.
+  G2 supplies the rail's active document for centring. G3 replaces the refresh
   key. `ui.open` handles node clicks. `ui.theme` plus the theme push supplies
   the palette.
 - **Without G1**: `files.list` then `files.read` per markdown file. Before any
@@ -440,27 +443,22 @@ A `graph` plugin on today's SDK plus G1–G4:
   browser-path port or a build step. Both copies carry the drift cost in rows 3
   and 5.
 
-**What is lost or changed — honestly:**
+**What the recommended G1-G4 design still loses or changes:**
 
 - **Chat mentions are gone.** The toggle, chat-thread nodes, both chat edge
   kinds, `heading-in-file` edges, and opening a thread from a node all go. This
   is the largest subtraction and it is not recoverable by a primitive anyone
   should build: it would mean handing plugins the chat store.
-- **Push refresh is gone until G3.** Graph rebuilds on every settled moment
-  today (`DesktopWorkspaceShell.tsx:4799-4801`). A panel gets an open-time read
-  and a refresh button. This is a user-visible regression on a view whose whole
-  value is being current.
-- **Even with G3, moment-level freshness is unproven.** `files.watch` reports
-  file events. Whether every settled edit produces one, and how quickly, is not
-  something the SDK states. Do not promise parity here without measuring.
+- **G3 replaces push refresh, but moment-level parity needs measurement.**
+  Graph rebuilds on every settled moment today
+  (`DesktopWorkspaceShell.tsx:4799-4801`). G3 relays workspace file events to
+  the panel. Measure whether every settled edit produces the expected event,
+  and how quickly, before promising identical freshness.
 - **The rail's active document is a push, not a prop.** Today it is React state
   in the same tree; converted, it is a message that can arrive late. The rail's
   centring animation will visibly lag a tab switch. The full-page graph received
   `null` until the [#842](https://github.com/dohc-ai/dohc/issues/842) fix
   (PR #844); both mounts now carry the active document.
-- **Link resolution forks without G1.** Two copies of a four-map path index and
-  a code stripper, one serving backlinks and one serving graph, free to
-  disagree — the property `workspaceGraph.ts:914-917` exists to prevent.
 - **The tests are rewritten, not moved.** No bundler in a panel, and about
   fifteen shell tests lose the Graph UI they drive through.
 - **The marketing site loses its graph panel** or keeps a forked copy
@@ -473,16 +471,26 @@ A `graph` plugin on today's SDK plus G1–G4:
 - **No right-click menu worth having.** Graph does not use one today, so
   nothing is lost — but note a panel gets no native context menu, and a
   DOM one is clipped to the iframe rectangle, which in the rail is narrow.
-- **Data cost without G1**: up to 2,000 round trips. Because each SDK read can
-  return 2 MiB while Graph counts only a 512 KiB prefix, a faithful sequential
-  port can transfer about 130 MiB before crossing Graph's 32 MiB accounting
-  (`workspaceSdkHost.ts:271-276`, `workspaceAssets.ts:416-435`,
-  `workspaceGraph.ts:65-69`). G1 restores a one-call transfer, matching today's
-  IPC shape.
 - **Shared views and share mounts.** Graph reads mounted shares today
   (`workspaceGraph.ts:869-871`). Plugin surfaces still refuse a non-writable
   workspace, so P7 remains the open item the sites spike recorded; graph
   inherits it unchanged.
+
+**What today's SDK baseline loses or changes without G1-G4:**
+
+- **Link resolution forks.** Two copies of a four-map path index and a code
+  stripper, one serving backlinks and one serving graph, can disagree. The
+  property at `workspaceGraph.ts:914-917` exists to prevent this.
+- **Data cost rises to 2,000 round trips.** Each SDK read can return 2 MiB while
+  Graph counts only a 512 KiB prefix. A faithful sequential port can transfer
+  about 130 MiB before crossing Graph's 32 MiB accounting
+  (`workspaceSdkHost.ts:271-276`, `workspaceAssets.ts:416-435`,
+  `workspaceGraph.ts:65-69`).
+- **Push refresh is gone.** Without G3, a panel gets an open-time read and a
+  refresh button, but no event that asks it to rebuild.
+- **The maximize gesture is gone.** Without G4, the rail panel cannot open the
+  editor panel. G4 keeps the built-in gesture that opens Graph in a tab
+  (`DesktopWorkspaceShell.tsx:5195-5205`).
 
 ## 6. Verdict
 
@@ -507,15 +515,22 @@ claims do not:
 The sites spike's third claim — fewer losses than Sites — is wrong about the
 total, though it names the mechanism correctly. Graph spawns nothing and embeds
 nothing, so it needs no P3, no P4, and no P8, and that is why every addition
-here is S except one. But sites lost shared-view previews and an embedded SDK;
-graph loses the chat-mentions mode, push refresh, exact typography, and the
-maximize gesture. The list is longer, not shorter. It is only cheaper to
-build.
+here is S except one.
+
+- **Recommended G1-G4 design:** Graph loses the chat-mentions mode and exact
+  typography. Moment-level refresh parity still needs measurement. G3 keeps
+  push refresh, and G4 keeps the maximize gesture.
+- **Today's SDK baseline:** Graph loses those two features plus push refresh
+  and the maximize gesture because panels lack subscriptions and a way to open
+  another panel.
+
+Sites lost shared-view previews and an embedded SDK. The recommended Graph list
+is not shorter. It is only cheaper to build.
 
 Two costs sit outside the primitives and outside the plugin: `apps/site` breaks
 until someone decides what the demo shows, and about fifteen shell tests lose
 the Graph UI they drive through. Neither is hard. Both are invisible until you
-look, which is why they are decisions 6 and 7 below.
+look, which is why they are decisions 3 and 4 below.
 
 Sequencing: G1, G2, and G4 are each small and useful beyond graph — a links
 capability serves any plugin that reasons about structure, an active-document
@@ -530,22 +545,16 @@ gets worse the longer it exists.
 
 1. Is link derivation substrate? G1 makes it an SDK capability and keeps one
    resolver; refusing it keeps the SDK smaller and forks the resolver.
-2. Do chat mentions stay in core as a separate feature, move nowhere and simply
-   die with the built-in view, or block the conversion until they have a home?
-3. Is losing push refresh acceptable for a first conversion, or is G3 a
-   precondition — noting that graph, unlike sites, has push refresh today?
-4. Does the converted graph ship in the app image or install into `plugins/`?
+2. Does the converted graph ship in the app image or install into `plugins/`?
    The same unresolved question the sites spike left open
    (`2026-08-17-sites-plugin-spike.md:326-346`); graph does not add to it.
-5. Should `workspace.links` return the whole graph, or the links for one file,
-   so backlinks-shaped plugins are served by the same call?
-6. Does the marketing site keep a graph panel? It imports the desktop component
+3. Does the marketing site keep a graph panel? It imports the desktop component
    directly (`apps/site/src/DemoSidebar.tsx:9`), so the options are a forked
    copy, no graph in the demo, or a demo that runs real plugins.
-7. Who re-homes the fifteen shell tests that drive through the Graph UI
+4. Who re-homes the fifteen shell tests that drive through the Graph UI
    (`DesktopWorkspaceShell.test.tsx:2602-2605,4059-4966`) before the view goes?
-8. Two panels plus G4, or one rail-only panel and no full-page graph? The
+5. Two panels plus G4, or one rail-only panel and no full-page graph? The
    second is free and loses the tab.
-9. Does anyone measure the panel bridge round trip before this is scheduled?
+6. Does anyone measure the panel bridge round trip before this is scheduled?
    Nothing in the repo measures it, and the choice between G1 and 2,000
    `files.read` calls turns on that number.
