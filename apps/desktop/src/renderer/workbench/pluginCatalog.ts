@@ -280,7 +280,15 @@ export function webAppKey(pluginId: string, webAppId: string): string {
   return `${pluginId}\0${webAppId}`;
 }
 
-export function usePluginCatalog(workspaceId: string): PluginCatalog {
+// Callers may take the default only when their mount necessarily follows the
+// workspace-open invoke reaching main: PluginsView and PluginDetailsPage
+// mount after the async UI-state restore, and main registers the sender
+// synchronously at the open invoke. A mount that can race that invoke, like
+// the shell's rail, must pass its own readiness signal.
+export function usePluginCatalog(
+  workspaceId: string,
+  enabled: boolean = true,
+): PluginCatalog {
   const [load, setLoad] = useState<PluginLoadState>({ status: "loading" });
   const [busy, setBusy] = useState<Record<string, PluginAction | undefined>>({});
   const [openingWebApp, setOpeningWebApp] = useState<string | null>(null);
@@ -339,6 +347,7 @@ export function usePluginCatalog(workspaceId: string): PluginCatalog {
   }
 
   useEffect(() => {
+    if (!enabled) return;
     const epoch = workspaceEpoch.current;
     setBusy({});
     setErrors({});
@@ -375,9 +384,8 @@ export function usePluginCatalog(workspaceId: string): PluginCatalog {
       workspaceEpoch.current += 1;
       pendingStatusEvents.current.clear();
     };
-    // Each workspace gets one guarded list and one scoped status listener.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId]);
+  }, [workspaceId, enabled]);
 
   function replacePlugin(plugin: PluginStatusRecord) {
     setLoad((current) =>

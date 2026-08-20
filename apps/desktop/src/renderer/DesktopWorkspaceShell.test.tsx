@@ -1158,6 +1158,24 @@ describe("plugin activity-bar views", () => {
     return bridge;
   }
 
+  it("lists contributed views after the workspace opens", async () => {
+    const workspaceOpen = deferred<SyncStatusResult>();
+    const bridge = withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)));
+    bridge.openWorkspace = vi.fn(() => workspaceOpen.promise);
+
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalled());
+    expect(bridge.listPlugins).not.toHaveBeenCalled();
+    expect(bridge.onPluginStatusChanged).not.toHaveBeenCalled();
+
+    await act(async () => {
+      workspaceOpen.resolve(SYNC_STATUS);
+    });
+
+    expect(await screen.findByTestId(`activity-${viewId}`)).toBeTruthy();
+    expect(bridge.onPluginStatusChanged).toHaveBeenCalled();
+  });
+
   it("opens a contributed view's panel in the side panel", async () => {
     const bridge = withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)));
     renderShell(bridge);

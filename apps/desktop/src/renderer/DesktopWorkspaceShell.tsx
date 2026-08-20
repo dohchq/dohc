@@ -2009,7 +2009,10 @@ export function DesktopWorkspaceShell(props: {
   // Plugin-contributed views (P6). The catalog is the same guarded data layer
   // the Plugins panel uses, so the rail follows an install, an enable, and an
   // uninstall without its own listener.
-  const pluginCatalog = usePluginCatalog(workspaceId);
+  const pluginCatalog = usePluginCatalog(
+    workspaceId,
+    captureDecidedFor === workspaceId,
+  );
   const pluginCatalogLoad = pluginCatalog.load;
   const railPluginViews = useMemo(
     () =>

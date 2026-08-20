@@ -67,15 +67,6 @@ test("the sites plugin lists a workspace's sites and serves one in its own tab",
       timeout: 180_000,
     });
 
-    // KNOWN DEFECT, not this plugin's: the activity bar does not pick up a
-    // plugin installed in this session until the window reloads. The pipeline
-    // does emit the final status carrying the approval, so something between
-    // it and the rail's catalog drops it; the cause is not isolated. Filed
-    // separately. The reload stands in for the refresh that should happen on
-    // its own.
-    await page.reload();
-    await page.getByTestId("workspace-shell").waitFor();
-
     // The rail button only exists once the plugin was discovered, installed,
     // built, approved on this device, and activated — and only because its
     // manifest asks for a view rather than a tab.
