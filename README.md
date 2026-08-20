@@ -2,19 +2,17 @@
 
 dohc is a local-first file sync and collaboration workspace for humans and agents. It syncs your files and data across your devices and facilitates sharing and collaboration between you, your team and your agents.
 
-dohc brings files, documents, data, chat, and workspace apps together. Humans and agents use the same workspace, while the underlying files remain on the user's computer.
+At a glance, it is a text editor, chat, and app runner in one. The important part is underneath. Your files stay on your computer, supports multiplayer editing/sharing, and provides storage and authorization for the apps you and your agents build.
 
 [Download a build](https://github.com/dohc-ai/dohc/releases) or [run it from source](#run-it-from-source).
 
-## What dohc is for
+## Why this exists
 
-Work with agents often spans a chat, an editor, generated artifacts, and manual file sharing. The output becomes difficult to inspect, continue, or share with its original context.
+This whole AI thing is still new and we're still trying to figure out how agents should fit into real work. So far, we mostly end up trying to bolt agents onto our old workflows with varying levels of success. dohc was built in order to help get closer to figuring this out rather than solve it.
 
-dohc keeps the work and its context in one workspace. It handles file sync, history, identity, permissions, chat, and app isolation. Users and agents decide how to organize the workspace and which workflows to build.
+Instead of a fixed CRM, project process, or agent-team template, dohc provides building blocks. It does the the boring and tedious parts such as file sync, history, identity, permissions, storage, and app isolation so users and agents can decide how to work without having to rebuild the necessary infrastructure.
 
-Teams are not a prerequisite. One person can use dohc with their agents and local files. When they share their work, the relevant files, data, apps, chats, history, and permissions can travel together.
-
-Rather than ship a fixed CRM, project process, or agent-team template, dohc provides building blocks that users and agents can adapt to the work.
+In a way, working with an agent resembles collaborating with another person: communicating with natural language and building on shared context. Which is why dohc is multiplayer by design, providing humans and agents a shared workspace. One person can use dohc as a personal workspace and can easily share their work when they're ready.
 
 ## Agents and workspace apps
 
