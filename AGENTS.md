@@ -215,27 +215,35 @@ When external behavior is unclear, inspect source instead of guessing.
 ## Where this repo's own skills live
 
 Claude Code and Codex each scan their own directory and neither scans the
-other's, so a shared skill needs one body and two adapters:
+other's. One directory holds the skills and the other points at it:
 
-| Path                             | Purpose                                             |
-| -------------------------------- | --------------------------------------------------- |
-| `skills/<name>/SKILL.md`         | The skill. Canonical, tool-neutral. Edit only here. |
-| `.claude/skills/<name>/SKILL.md` | Generated adapter — the root Claude Code scans      |
-| `.agents/skills/<name>/SKILL.md` | Generated adapter — the root Codex scans            |
+| Path                             | Purpose                                          |
+| -------------------------------- | ------------------------------------------------ |
+| `.agents/skills/<name>/SKILL.md` | The skill. Codex reads this path directly.       |
+| `.agents/skills/<name>/agents/openai.yaml` | Codex display name and invocation policy |
+| `.claude/skills`                 | A symlink to `.agents/skills`. Never a copy.     |
 
-Adapters are generated, never hand-edited: `pnpm skills:sync` writes them and
-`pnpm test` fails when one drifts or is missing. They carry the canonical
-frontmatter verbatim, because the `description` is what makes a host trigger the
-skill — a stale copy means one tool silently stops offering it.
+There is nothing to generate and nothing to keep in sync. Edit the skill and
+both hosts see it.
 
-A skill only one host should see needs no adapter and lives directly in that
+Two hosts, two ways to say the same thing. Claude reads
+`disable-model-invocation` in the frontmatter; Codex reads
+`allow_implicit_invocation` in `agents/openai.yaml`. A skill the model may not
+invoke on one host must say so on both, or Codex will fire it on its own.
+
+On Windows, `git config core.symlinks true` before you clone, or `.claude/skills`
+checks out as a text file holding the target path and Claude Code finds no repo
+skills. Codex is unaffected because it reads `.agents/skills` directly.
+
+A skill only one host should see needs no symlink and lives directly in that
 host's root. Classify by which tool consumes the skill, not by the tool it
 names: a skill that has Claude drive Codex is consumed by Claude, so it belongs
 in `.claude/skills/`.
 
-Commit a skill here only when it carries dohc knowledge a contributor needs:
-how to run this repo's gate, how to file a PR here, how we write. Personal
-setup does not belong in this repo. Model choice, cost and quota rules, and
+Commit a skill here only when it carries dohc knowledge a contributor needs.
+How to run this repo's gate and how we write both qualify. Personal setup does
+not. A workflow that depends on your review bots, your merge rights, or your
+model access is yours, not the project's. Model choice, cost and quota rules, and
 bridges to whichever other agent CLI you happen to run are yours, not the
 project's, and every contributor inherits whatever this repo commits. Keep them
 in your own user-level skills directory.
@@ -309,8 +317,8 @@ edits or approves an agent-written draft.
 ### Write issues for humans
 
 When an agent opens a GitHub issue, write the title the way a PR title is
-written ([`skills/file-pr/SKILL.md`](skills/file-pr/SKILL.md)): one short
-plain-language line that names the problem a person will notice. Keep test
+written. One short plain-language line that names the problem a person will
+notice. Keep test
 names, file paths, and other identifiers out of the title unless it is unclear
 without them.
 
@@ -321,7 +329,7 @@ architecture, and other technical detail in the sections after it, not here.
 
 ### Select local gates
 
-Run the Rust gate through the [`rust-gate` skill](skills/rust-gate/SKILL.md).
+Run the Rust gate through the [`rust-gate` skill](.agents/skills/rust-gate/SKILL.md).
 It runs the canonical script, which enforces the machine's build budget:
 disk preflight, build-slot queueing, and capped cargo parallelism.
 
@@ -395,11 +403,11 @@ improvements, or out-of-scope suggestions.
 
 ### Verify review coverage
 
-Use the
-[`pr-review-watch` skill](skills/pr-review-watch/SKILL.md) whenever a PR
-becomes ready for review or the head of a ready PR changes. Do not start the
-watcher for a draft PR. If a PR returns to draft, pause its watcher. Do not
-build another review poller.
+Watch a PR whenever it becomes ready for review or the head of a ready PR
+changes. Do not watch a draft PR. If a PR returns to draft, pause its watcher.
+Poll on a schedule you can defend rather than in a tight loop: the GitHub API
+budget is shared across every agent you are running, and a wide campaign
+exhausts it.
 
 A review applies to a commit, not a PR. Before merging, confirm that every
 required reviewer covered the current head.
@@ -424,7 +432,7 @@ Treat a failed query as unknown instead of reading empty output as no match.
 
 dohc's writing discipline is Orwell's six rules plus ASD-STE100 Simplified
 Technical English, applied by register. The rules live in
-[`skills/dohc-writing/SKILL.md`](skills/dohc-writing/SKILL.md); UI copy has its
+[`.agents/skills/dohc-writing/SKILL.md`](.agents/skills/dohc-writing/SKILL.md); UI copy has its
 own in [`docs/brand/copy.md`](docs/brand/copy.md). Read the skill before
 writing docs, specs, plans, PR bodies, or another skill. For UI copy — any
 label, error, empty state, or toast — read the copy guide as well; the skill
