@@ -6,6 +6,7 @@ import type {
   SitePackageInfo,
   StartSitePreviewResult,
 } from "../ipc/bridgeContract";
+import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { shareTargetForSite, SitePreviewPage } from "./SitePreviewPage";
 
 const site: SitePackageInfo = {
@@ -25,8 +26,14 @@ const site: SitePackageInfo = {
   authority: { kind: "workspace" },
 };
 
+const workspaceSettingsResult = {
+  settings: DEFAULT_WORKSPACE_SETTINGS,
+  source: "default" as const,
+};
+
 const bridgeMock = {
   getSitePackage: vi.fn(async (): Promise<SitePackageInfo | null> => site),
+  getWorkspaceSettings: vi.fn(async () => workspaceSettingsResult),
   startSitePreview: vi.fn(async (): Promise<StartSitePreviewResult> => ({
     siteRoot: "report",
     mode: "static" as const,
@@ -104,6 +111,59 @@ describe("SitePreviewPage", () => {
       workspaceId: "ws-sites",
       siteRoot: "report",
       mode: "dev",
+    });
+  });
+
+  it("uses the workspace default for the initial preview mode", async () => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce({
+      ...site,
+      kind: "package",
+      packagePath: "report/package.json",
+      scripts: { dev: "vite", build: "vite build" },
+      buildOutputs: ["dist"],
+    });
+    bridgeMock.getWorkspaceSettings.mockResolvedValueOnce({
+      ...workspaceSettingsResult,
+      settings: {
+        ...workspaceSettingsResult.settings,
+        sites: { defaultPreviewMode: "build" },
+      },
+    });
+
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByTestId("site-preview-frame");
+    expect(bridgeMock.startSitePreview).toHaveBeenCalledWith({
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      mode: "build",
+    });
+  });
+
+  it("keeps a stored preview mode over the workspace default", async () => {
+    window.localStorage.setItem("dohc.site-preview-mode.v1:ws-sites:report", "static");
+    bridgeMock.getSitePackage.mockResolvedValueOnce({
+      ...site,
+      kind: "package",
+      packagePath: "report/package.json",
+      scripts: { dev: "vite", build: "vite build" },
+      buildOutputs: ["dist"],
+    });
+    bridgeMock.getWorkspaceSettings.mockResolvedValueOnce({
+      ...workspaceSettingsResult,
+      settings: {
+        ...workspaceSettingsResult.settings,
+        sites: { defaultPreviewMode: "build" },
+      },
+    });
+
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByTestId("site-preview-frame");
+    expect(bridgeMock.startSitePreview).toHaveBeenCalledWith({
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      mode: "static",
     });
   });
 

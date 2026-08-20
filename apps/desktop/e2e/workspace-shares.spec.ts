@@ -263,9 +263,9 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     expect(writeAttempt).toContain("SharedFileReadOnlyError");
     expect(writeAttempt).toContain("This shared file is read-only for you.");
 
-    // The other mutation side-doors are refused at the IPC boundary too: a
-    // managed agent run and a write-capable MCP config. All route through the
-    // same shared-view guard.
+    // The other three mutation side-doors are refused at the IPC boundary too:
+    // a managed agent run, a code-executing site preview, and a write-capable
+    // MCP config. All route through the same shared-view guard.
     //
     // Snapshot the materialized shared file BEFORE the bypass so the engine
     // Y.Doc apply attempt can be proven inert — not merely non-throwing.
@@ -276,6 +276,11 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
         dohcDesktop: {
           getWorkspaceRegistry(): Promise<{ workspaces: Array<{ workspaceId: string }> }>;
           startAgentRun(payload: { workspaceId: string }): Promise<unknown>;
+          startSitePreview(payload: {
+            workspaceId: string;
+            siteRoot: string;
+            mode: "static" | "dev" | "build";
+          }): Promise<unknown>;
           getMcpConfig(payload: { workspaceId: string }): Promise<{ args: string[] }>;
           openEngineYDocSession(payload: {
             workspaceId: string;
@@ -298,6 +303,9 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
         }
       };
       const agent = await capture(() => api.startAgentRun({ workspaceId }));
+      const sitePreview = await capture(() =>
+        api.startSitePreview({ workspaceId, siteRoot: "docs", mode: "dev" }),
+      );
       const mcp = await api.getMcpConfig({ workspaceId });
       // WS-G2-C-2 gate fix 4: a live engine Y.Doc session is WRITABLE, so opening
       // one in a read-only shared view must be refused at the IPC boundary (same
@@ -321,12 +329,14 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
       );
       return {
         agent,
+        sitePreview,
         mcpArgs: mcp.args,
         engineYDocAvailable: engineYDoc.available,
         engineYDocApply,
       };
     });
     expect(bypassAttempts.agent).toContain("Agents can't run in a shared view");
+    expect(bypassAttempts.sitePreview).toContain("disabled in a shared view");
     // The copyable MCP config for a shared view carries the share's level, so
     // the launched server registers only the write tools that level grants.
     // This share was created at "view", which grants none.

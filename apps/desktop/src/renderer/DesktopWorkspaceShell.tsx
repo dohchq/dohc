@@ -1432,9 +1432,11 @@ export function DesktopWorkspaceShell(props: {
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
   const [agentSetup, setAgentSetup] = useState<AgentSetupSummary | null>(null);
   const agentSetupRequestRef = useRef(0);
-  // Relay-share dialog target (PR 18): a path (file/folder) or a version.
+  // Relay-share dialog target (PR 18): one path, multiple paths, or a version.
   const [shareTarget, setShareTarget] = useState<{
     path?: string;
+    paths?: string[];
+    label?: string;
     versionId?: string;
     versionName?: string;
   } | null>(null);
@@ -5707,6 +5709,9 @@ export function DesktopWorkspaceShell(props: {
                     workspaceId={workspaceId}
                     siteRoot={groupSiteRoot}
                     sharedView={!!shareView}
+                    onShareSite={(target) =>
+                      setShareTarget({ paths: target.paths, label: target.label })
+                    }
                   />
                 </Suspense>
               ) : (

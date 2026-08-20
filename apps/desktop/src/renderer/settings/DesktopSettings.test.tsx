@@ -1154,6 +1154,37 @@ describe("DesktopSettings", () => {
     );
   });
 
+  it("saves and resets the default site preview mode", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="workbench"
+        onClose={() => {}}
+      />,
+    );
+
+    const select = await screen.findByTestId("site-preview-mode-select");
+    expect(
+      Array.from((select as HTMLSelectElement).options).map((option) => option.value),
+    ).toEqual(["auto", "static", "dev", "build"]);
+
+    await user.selectOptions(select, "build");
+    expect(bridge.setWorkspaceSettings).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      patch: { sites: { defaultPreviewMode: "build" } },
+    });
+
+    const row = screen.getByTestId("settings-row-site-preview-mode");
+    await waitFor(() => expect(row.textContent).toContain("Modified"));
+    await user.click(screen.getByRole("button", { name: "Reset" }));
+    expect(bridge.setWorkspaceSettings).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+      patch: { sites: { defaultPreviewMode: "auto" } },
+    });
+  });
+
   // #483: over a settings file dohc cannot read, the dialog's resolved copy
   // carries the fail-closed opt-out, so saving one unrelated control would
   // land that opt-out on disk and the workspace would look opted out forever.

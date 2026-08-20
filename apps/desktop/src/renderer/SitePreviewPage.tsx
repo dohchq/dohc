@@ -16,14 +16,22 @@ import type {
   SitePackageInfo,
   SitePreviewMode,
   StartSitePreviewResult,
+  WorkspaceSettingsResult,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { openLinkExternally } from "./editor/linkMenu";
 import { isLoopbackOrigin } from "./sdkFrame";
 
+type WorkspacePreviewMode =
+  WorkspaceSettingsResult["settings"]["sites"]["defaultPreviewMode"];
+
 type LoadState =
   | { status: "loading" }
-  | { status: "ready"; site: SitePackageInfo }
+  | {
+      status: "ready";
+      site: SitePackageInfo;
+      defaultPreviewMode: WorkspacePreviewMode;
+    }
   | { status: "missing" }
   | { status: "error"; message: string };
 
@@ -82,12 +90,19 @@ function preferredMode(
   site: SitePackageInfo,
   modes: SitePreviewMode[],
   workspaceId: string,
+  defaultPreviewMode: WorkspacePreviewMode,
   sharedView = false,
 ): SitePreviewMode | null {
   const stored = readStoredMode(workspaceId, site.root, modes);
   if (stored) return stored;
   if (sharedView || site.authority.kind === "share") {
     return modes.includes("static") ? "static" : null;
+  }
+  if (
+    defaultPreviewMode !== "auto" &&
+    modes.includes(defaultPreviewMode)
+  ) {
+    return defaultPreviewMode;
   }
   if (modes.includes("dev")) return "dev";
   if (site.kind !== "static" && modes.includes("build")) return "build";
@@ -164,12 +179,24 @@ export function SitePreviewPage(props: {
     setStoppedByUser(false);
     autoStartKeyRef.current = null;
     try {
-      const site = await bridge().getSitePackage({
-        workspaceId: props.workspaceId,
-        path: props.siteRoot,
-      });
+      const [site, workspaceResult] = await Promise.all([
+        bridge().getSitePackage({
+          workspaceId: props.workspaceId,
+          path: props.siteRoot,
+        }),
+        bridge()
+          .getWorkspaceSettings({ workspaceId: props.workspaceId })
+          .catch((): WorkspaceSettingsResult | null => null),
+      ]);
       if (request !== loadRequestRef.current) return;
-      setLoad(site ? { status: "ready", site } : { status: "missing" });
+      setLoad(site
+        ? {
+            status: "ready",
+            site,
+            defaultPreviewMode:
+              workspaceResult?.settings.sites.defaultPreviewMode ?? "auto",
+          }
+        : { status: "missing" });
       setActionError(null);
     } catch (error) {
       if (request !== loadRequestRef.current) return;
@@ -285,7 +312,13 @@ export function SitePreviewPage(props: {
       preview ||
       stoppedByUser
     ) return;
-    const mode = preferredMode(load.site, modes, props.workspaceId, props.sharedView);
+    const mode = preferredMode(
+      load.site,
+      modes,
+      props.workspaceId,
+      load.defaultPreviewMode,
+      props.sharedView,
+    );
     if (!mode) return;
 
     const autoStartKey = `${props.workspaceId}:${props.siteRoot}:${mode}`;
