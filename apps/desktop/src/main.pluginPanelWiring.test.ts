@@ -26,6 +26,27 @@ const stopPluginHostIfUnclaimedSource = () =>
   functionSource("async function stopPluginHostIfUnclaimed(");
 
 describe("plugin panel main-process wiring", () => {
+  it("forwards watcher batches to the matching plugin pipeline and workspace events", () => {
+    const start = mainSource.indexOf(
+      "onWatcherBatch: (workspace, events) => {",
+    );
+    expect(start).toBeGreaterThan(-1);
+    const end = mainSource.indexOf("\n  },", start);
+    expect(end).toBeGreaterThan(start);
+    const watcherBatch = mainSource.slice(start, end);
+
+    expect(watcherBatch).toContain(
+      "pluginPipelines.get(workspace.workspaceId)?.handleWatcherEvents(events);",
+    );
+    const workspaceEventsAt = watcherBatch.indexOf(
+      "pluginWorkspaceEventsByWorkspace",
+    );
+    expect(workspaceEventsAt).toBeGreaterThan(-1);
+    const workspaceEvents = watcherBatch.slice(workspaceEventsAt);
+    expect(workspaceEvents).toContain(".get(workspace.workspaceId)");
+    expect(workspaceEvents).toContain("?.handleWatcherEvents(events);");
+  });
+
   it("drops file-watch events after the exact panel stops running", () => {
     let panelRunning = true;
     const send = vi.fn();
