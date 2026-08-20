@@ -5,6 +5,7 @@ import type {
   InvokePluginPanelSdkPayload,
   MenuCommand,
   PluginPanelOpenedEvent,
+  PluginPanelSdkEvent,
   PluginStatusChangedEvent,
   PluginWebAppFailedEvent,
   PluginWebAppOpenedEvent,
@@ -32,6 +33,7 @@ import {
   StartPluginPanelResult,
   StartPluginWebAppResult,
   parseInvokePluginPanelSdkPayloadForIpc,
+  parsePluginPanelSdkEventForIpc,
   parsePluginStatusChangedEventForIpc,
   parsePluginWebAppFailedEventForIpc,
 } from "./ipc/bridgeContract";
@@ -176,6 +178,20 @@ const bridge: DohcDesktopBridge = {
       CHANNELS.invokePluginPanelSdk,
       parseInvokePluginPanelSdkPayloadForIpc(payload),
     ),
+  onPluginPanelSdkEvent: (listener: (event: PluginPanelSdkEvent) => void) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      const parsed = parsePluginPanelSdkEventForIpc(raw);
+      if (!parsed) {
+        console.error(
+          "[desktop] dropped a plugin panel SDK event that failed the IPC schema.",
+        );
+        return;
+      }
+      listener(parsed);
+    };
+    ipcRenderer.on(CHANNELS.pluginPanelSdkEvent, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.pluginPanelSdkEvent, handler);
+  },
   openPluginWebApp: async (payload: OpenPluginWebAppPayload) => {
     const result = OpenPluginWebAppResult.parse(
       await ipcRenderer.invoke(CHANNELS.openPluginWebApp, payload),

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { createPluginPanelFileWatchEmitter } from "./plugins/pluginPanelSdkEvent";
 
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
 
@@ -25,6 +26,48 @@ const stopPluginHostIfUnclaimedSource = () =>
   functionSource("async function stopPluginHostIfUnclaimed(");
 
 describe("plugin panel main-process wiring", () => {
+  it("drops file-watch events after the exact panel stops running", () => {
+    let panelRunning = true;
+    const send = vi.fn();
+    const emitEvent = createPluginPanelFileWatchEmitter({
+      workspaceId: "ws-plugins",
+      pluginId: "sites",
+      panelId: "main",
+      isPanelRunning: () => panelRunning,
+      send,
+    });
+    const data = { path: "docs/index.md", operation: "update" as const };
+
+    emitEvent("subscription-1", "change", data);
+    panelRunning = false;
+    emitEvent("subscription-1", "change", data);
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({
+      workspaceId: "ws-plugins",
+      pluginId: "sites",
+      panelId: "main",
+      subscriptionId: "subscription-1",
+      event: "files.watch",
+      data,
+    });
+  });
+
+  it("validates panel SDK events and sends them only to the active workspace", () => {
+    const notify = functionSource("function notifyPluginPanelSdkEvent(");
+    const parseAt = notify.indexOf("PluginPanelSdkEvent.safeParse(event)");
+    const filterAt = notify.indexOf("activeWorkspaceIdBySender.get(");
+    const sendAt = notify.indexOf(
+      "win.webContents.send(CHANNELS.pluginPanelSdkEvent, payload.data)",
+    );
+
+    expect(parseAt).toBeGreaterThan(-1);
+    expect(filterAt).toBeGreaterThan(parseAt);
+    expect(sendAt).toBeGreaterThan(filterAt);
+    expect(notify).toContain("if (!payload.success)");
+    expect(notify).toContain("console.error(");
+  });
+
   it("validates a contained plugin registration before starting its host", () => {
     const open = handler("openPluginPanel");
     const loadAt = open.indexOf(
@@ -53,11 +96,14 @@ describe("plugin panel main-process wiring", () => {
     const allowAt = start.indexOf("allowLoopbackFrameOrigin(handle.url)");
     const rememberAt = start.indexOf("runningPluginPanels.set(key");
     const grantAt = start.indexOf("pluginPanelSdkAuthorities.register({");
+    const disposeAt = start.indexOf("workspaceEvents.disposeOwner({", grantAt);
 
     expect(serveAt).toBeGreaterThan(-1);
     expect(allowAt).toBeGreaterThan(serveAt);
     expect(rememberAt).toBeGreaterThan(allowAt);
     expect(grantAt).toBeGreaterThan(rememberAt);
+    expect(disposeAt).toBeGreaterThan(grantAt);
+    expect(start).toContain('grant.signal.addEventListener(\n          "abort",');
     expect(start).toContain("startPluginPanelWithLock(");
     expect(start).toContain("withPluginHostLifecycleLock,");
     expect(start).toContain("() => ensurePluginStarted(workspace, plugin)");
@@ -106,6 +152,19 @@ describe("plugin panel main-process wiring", () => {
     expect(routeAt).toBeGreaterThan(authorizeAt);
     expect(invoke).toContain("const liveSpawnId = host?.getSpawnId(input.pluginId);");
     expect(invoke).toContain("liveSpawnId,");
+    expect(invoke).toContain("createPluginPanelFileWatchEmitter({");
+    expect(invoke).toContain("!authority.signal.aborted");
+    expect(invoke).toContain("currentPanel.senderId === authority.senderId");
+    expect(invoke).toContain(
+      "currentPanel.generation === authority.generation",
+    );
+    expect(invoke).toContain("currentSpawnId === authority.spawnId");
+    expect(invoke).toContain(
+      "workspaceEvents.subscribe({ owner, emitEvent }, watchParams)",
+    );
+    expect(invoke).toContain(
+      "workspaceEvents.unsubscribe({ owner }, watchParams)",
+    );
     expect(router).toContain("return invokePluginSdkHost(");
   });
 

@@ -591,6 +591,7 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     })),
     stopPluginPanel: vi.fn(async () => undefined),
     invokePluginPanelSdk: vi.fn(async () => ({ result: null })),
+    onPluginPanelSdkEvent: vi.fn(() => () => undefined),
   };
 }
 

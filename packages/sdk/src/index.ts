@@ -544,6 +544,80 @@ export function createPostMessageTransport(
     },
   };
 
+  const subscriptionListeners = new Map<
+    string,
+    (event: DohcSubscriptionEvent<unknown>) => void
+  >();
+  const queuedSubscriptionEvents = new Map<
+    string,
+    DohcSubscriptionEvent<unknown>[]
+  >();
+  let activeSubscriptionCount = 0;
+  let subscriptionMessageListener: ((event: MessageEvent) => void) | null = null;
+  let subscriptionMessageWindow: Window | null = null;
+
+  const queueSubscriptionEvent = (
+    subscriptionId: string,
+    event: DohcSubscriptionEvent<unknown>,
+  ): void => {
+    const queued = queuedSubscriptionEvents.get(subscriptionId) ?? [];
+    queued.push(event);
+    if (queued.length > 200) queued.shift();
+    queuedSubscriptionEvents.set(subscriptionId, queued);
+  };
+
+  const handleSubscriptionMessage = (
+    event: MessageEvent,
+    targetWindow: Window,
+    targetOrigin: string,
+  ): void => {
+    if (event.source !== targetWindow) return;
+    if (!responseOriginMatches(event.origin, targetOrigin)) return;
+    if (!isDohcSdkEvent(event.data)) return;
+
+    const subscriptionEvent = {
+      event: event.data.event,
+      data: event.data.data,
+    };
+    const listener = subscriptionListeners.get(event.data.subscriptionId);
+    if (listener) listener(subscriptionEvent);
+    else queueSubscriptionEvent(event.data.subscriptionId, subscriptionEvent);
+  };
+
+  const retainSubscriptionMessageListener = (
+    currentWindow: Window,
+    targetWindow: Window,
+    targetOrigin: string,
+  ): (() => void) => {
+    let retained = true;
+    activeSubscriptionCount += 1;
+    if (activeSubscriptionCount === 1) {
+      subscriptionMessageListener = (event) => {
+        handleSubscriptionMessage(event, targetWindow, targetOrigin);
+      };
+      subscriptionMessageWindow = currentWindow;
+      currentWindow.addEventListener("message", subscriptionMessageListener);
+    }
+
+    return () => {
+      if (!retained) return;
+      retained = false;
+      activeSubscriptionCount -= 1;
+      if (
+        activeSubscriptionCount === 0 &&
+        subscriptionMessageListener &&
+        subscriptionMessageWindow
+      ) {
+        subscriptionMessageWindow.removeEventListener(
+          "message",
+          subscriptionMessageListener,
+        );
+        subscriptionMessageListener = null;
+        subscriptionMessageWindow = null;
+      }
+    };
+  };
+
   transport.subscribe = async <T>(
     method: string,
     params: unknown,
@@ -584,12 +658,24 @@ export function createPostMessageTransport(
       );
     }
 
-    const result = await transport.request(method, params, requestOptions);
+    const releaseSubscriptionMessageListener = retainSubscriptionMessageListener(
+      currentWindow,
+      targetWindow,
+      targetOrigin,
+    );
+    let result: unknown;
+    try {
+      result = await transport.request(method, params, requestOptions);
+    } catch (error) {
+      releaseSubscriptionMessageListener();
+      throw error;
+    }
     if (
       !isPlainRecord(result) ||
       typeof result.subscriptionId !== "string" ||
       result.subscriptionId.length === 0
     ) {
+      releaseSubscriptionMessageListener();
       throw new DohcSdkError(
         DohcSdkErrorCodes.badResponse,
         `dohc host returned an invalid subscription response for ${method}.`,
@@ -599,20 +685,21 @@ export function createPostMessageTransport(
     let localActive = true;
     let remoteClosed = false;
     let pendingRemoteClose: Promise<void> | null = null;
-
-    const onMessage = (event: MessageEvent) => {
-      if (!localActive || event.source !== targetWindow) return;
-      if (!responseOriginMatches(event.origin, targetOrigin)) return;
-      if (!isDohcSdkEvent(event.data)) return;
-      if (event.data.subscriptionId !== subscriptionId) return;
-      listener({ event: event.data.event, data: event.data.data as T });
-    };
-    currentWindow.addEventListener("message", onMessage);
+    const untypedListener = listener as (
+      event: DohcSubscriptionEvent<unknown>
+    ) => void;
+    subscriptionListeners.set(subscriptionId, untypedListener);
+    for (const event of queuedSubscriptionEvents.get(subscriptionId) ?? []) {
+      untypedListener(event);
+    }
+    queuedSubscriptionEvents.delete(subscriptionId);
 
     const unsubscribe: DohcUnsubscribe = async () => {
       if (localActive) {
         localActive = false;
-        currentWindow.removeEventListener("message", onMessage);
+        subscriptionListeners.delete(subscriptionId);
+        queuedSubscriptionEvents.delete(subscriptionId);
+        releaseSubscriptionMessageListener();
         requestOptions?.signal?.removeEventListener("abort", onAbort);
       }
       if (remoteClosed) return;
@@ -1030,8 +1117,9 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
        * "." for the whole workspace. Changes outside it never arrive.
        *
        * Returns a function that stops the subscription. A subscription also
-       * ends on its own when the plugin stops, so a plugin that watches for
-       * its whole life needs no teardown.
+       * ends when its plugin stops, or when the panel that opened it closes or
+       * changes its workspace, plugin, or panel identity. Same-origin in-frame
+       * navigation inside an already-open panel does not end it today.
        */
       watch: async (
         path: string,

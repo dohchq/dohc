@@ -1,6 +1,7 @@
 import {
   DOHC_SDK_PROTOCOL,
   DOHC_THEME_PROTOCOL,
+  type DohcSdkEventMessage,
   type DohcSdkResponseMessage,
   type DohcThemeMessage,
 } from "@dohc/sdk";
@@ -218,6 +219,32 @@ export function PluginPanelPage(props: {
   const panelUrlAllowed = panel ? isLoopbackOrigin(panel.url) : false;
   const panelOrigin =
     panel && panelUrlAllowed ? new URL(panel.url).origin : null;
+
+  useEffect(() => {
+    if (!panelOrigin) return;
+    return bridge().onPluginPanelSdkEvent((event) => {
+      if (
+        event.workspaceId !== props.workspaceId ||
+        event.pluginId !== props.pluginId ||
+        event.panelId !== props.panelId
+      ) {
+        return;
+      }
+      if (stoppingRef.current || !panelRef.current) return;
+      const frameWindow = iframeRef.current?.contentWindow;
+      if (!frameWindow) return;
+      frameWindow.postMessage(
+        {
+          protocol: DOHC_SDK_PROTOCOL,
+          type: "event",
+          subscriptionId: event.subscriptionId,
+          event: event.event,
+          data: event.data,
+        } satisfies DohcSdkEventMessage<typeof event.data>,
+        panelOrigin,
+      );
+    });
+  }, [panelOrigin, props.panelId, props.pluginId, props.workspaceId]);
 
   // Theme changes reach a mounted panel without a reload. The app's own
   // appearance state is these three attributes, so watching them covers every

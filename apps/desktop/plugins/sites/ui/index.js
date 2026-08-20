@@ -5,7 +5,7 @@
 // tab per site. Opening a tab is the only thing it asks dohc to do that a
 // plugin's own process cannot.
 
-import { applyTheme, request } from "./dohc.js";
+import { applyTheme, request, subscribe } from "./dohc.js";
 import {
   availableModes,
   discoverSites,
@@ -21,6 +21,7 @@ const refreshButton = /** @type {HTMLButtonElement} */ (document.getElementById(
 
 /** Raised for every load, so a slow answer never repaints a later one. */
 let loadToken = 0;
+let refreshTimeout = null;
 
 /** @param {string} message */
 function showError(message) {
@@ -232,6 +233,15 @@ document.addEventListener("visibilitychange", () => {
 });
 
 void applyTheme().catch((error) => {
+  showError(error instanceof Error ? error.message : String(error));
+});
+void subscribe("files.watch", { path: "." }, () => {
+  if (refreshTimeout !== null) window.clearTimeout(refreshTimeout);
+  refreshTimeout = window.setTimeout(() => {
+    refreshTimeout = null;
+    void load();
+  }, 300);
+}).catch((error) => {
   showError(error instanceof Error ? error.message : String(error));
 });
 void load();

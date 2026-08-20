@@ -2516,6 +2516,33 @@ export function parsePluginStatusChangedEventForIpc(
   return parsed.success ? parsed.data : null;
 }
 
+export const PLUGIN_PANEL_FILE_WATCH_EVENT = "files.watch" as const;
+
+export const PluginPanelSdkEvent = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    pluginId: PLUGIN_ID,
+    panelId: PLUGIN_PANEL_ID,
+    subscriptionId: z.string().min(1),
+    event: z.literal(PLUGIN_PANEL_FILE_WATCH_EVENT),
+    data: z
+      .object({
+        path: z.string(),
+        operation: z.enum(["update", "delete"]),
+        sha256: z.string().optional(),
+      })
+      .strict(),
+  })
+  .strict();
+export type PluginPanelSdkEvent = z.infer<typeof PluginPanelSdkEvent>;
+
+export function parsePluginPanelSdkEventForIpc(
+  value: unknown,
+): PluginPanelSdkEvent | null {
+  const parsed = PluginPanelSdkEvent.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 // A guest never supplies user or workspace identity. The containing renderer
 // identifies the open surface and main re-derives its authority.
 // The preload applies this contract before ipcRenderer.invoke. The byte cap
@@ -4157,6 +4184,9 @@ export interface DohcDesktopBridge {
   invokePluginPanelSdk(
     payload: InvokePluginPanelSdkPayload,
   ): Promise<InvokePluginPanelSdkResult>;
+  onPluginPanelSdkEvent(
+    listener: (event: PluginPanelSdkEvent) => void,
+  ): () => void;
   openPluginWebApp(payload: OpenPluginWebAppPayload): Promise<OpenPluginWebAppResult>;
   onPluginWebAppOpened(
     listener: (event: PluginWebAppOpenedEvent) => void,

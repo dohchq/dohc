@@ -886,6 +886,120 @@ describe("@dohc/sdk", () => {
     expect(harness.listeners.size).toBe(0);
   });
 
+  it("delivers subscription events that arrive before the subscribe response", async () => {
+    const harness = createWindowHarness();
+    const transport = createPostMessageTransport({
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      timeoutMs: 1000,
+    });
+    const events: unknown[] = [];
+    const pendingSubscription = transport.subscribe!(
+      "files.watch",
+      { path: "notes" },
+      (event) => events.push(event),
+    );
+    const subscribeRequest = harness.messages[0] as { id: string };
+
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      type: "event",
+      subscriptionId: "sub_race",
+      event: "changed",
+      data: { path: "notes/early.md" },
+    });
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: subscribeRequest.id,
+      ok: true,
+      result: { subscriptionId: "sub_race" },
+    });
+    const unsubscribe = await pendingSubscription;
+
+    expect(events).toEqual([{
+      event: "changed",
+      data: { path: "notes/early.md" },
+    }]);
+
+    const pendingUnsubscribe = unsubscribe();
+    const unsubscribeRequest = harness.messages.at(-1) as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: unsubscribeRequest.id,
+      ok: true,
+      result: { ok: true },
+    });
+    await pendingUnsubscribe;
+  });
+
+  it("collapses early and burst files.watch events into one debounced refresh", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createWindowHarness();
+      const transport = createPostMessageTransport({
+        currentWindow: harness.currentWindow,
+        targetWindow: harness.targetWindow,
+        timeoutMs: 1000,
+      });
+      const refresh = vi.fn();
+      let refreshTimeout: ReturnType<typeof setTimeout> | null = null;
+      const pendingSubscription = transport.subscribe!(
+        "files.watch",
+        { path: "." },
+        () => {
+          if (refreshTimeout !== null) clearTimeout(refreshTimeout);
+          refreshTimeout = setTimeout(() => {
+            refreshTimeout = null;
+            refresh();
+          }, 300);
+        },
+      );
+      const subscribeRequest = harness.messages[0] as { id: string };
+
+      harness.dispatch({
+        protocol: DOHC_SDK_PROTOCOL,
+        type: "event",
+        subscriptionId: "sub_refresh",
+        event: "changed",
+        data: { path: "early.md" },
+      });
+      harness.dispatch({
+        protocol: DOHC_SDK_PROTOCOL,
+        id: subscribeRequest.id,
+        ok: true,
+        result: { subscriptionId: "sub_refresh" },
+      });
+      const unsubscribe = await pendingSubscription;
+
+      for (const path of ["one.md", "two.md"]) {
+        harness.dispatch({
+          protocol: DOHC_SDK_PROTOCOL,
+          type: "event",
+          subscriptionId: "sub_refresh",
+          event: "changed",
+          data: { path },
+        });
+      }
+
+      await vi.advanceTimersByTimeAsync(299);
+      expect(refresh).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(refresh).toHaveBeenCalledOnce();
+
+      const pendingUnsubscribe = unsubscribe();
+      const unsubscribeRequest = harness.messages.at(-1) as { id: string };
+      harness.dispatch({
+        protocol: DOHC_SDK_PROTOCOL,
+        id: unsubscribeRequest.id,
+        ok: true,
+        result: { ok: true },
+      });
+      await pendingUnsubscribe;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("retries a failed remote unsubscribe while detaching locally only once", async () => {
     const harness = createWindowHarness();
     const transport = createPostMessageTransport({
