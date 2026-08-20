@@ -9,5 +9,6 @@
   "issues": "https://github.com/anthropics/claude-code/issues",
   "license": "SEE LICENSE IN https://www.anthropic.com/legal/consumer-terms",
   "entry": "src/main.ts",
-  "drivers": [{ "id": "claude-code", "displayName": "Claude Code" }]
+  "drivers": [{ "id": "claude-code", "displayName": "Claude Code" }],
+  "webApps": [{ "id": "chat", "title": "Claude Code Chat" }]
 }
