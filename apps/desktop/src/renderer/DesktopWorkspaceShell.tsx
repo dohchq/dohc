@@ -5339,7 +5339,6 @@ export function DesktopWorkspaceShell(props: {
               const editorCallbacks = tab
                 ? callbacksForEditor(editorGroup.id, tab)
                 : null;
-              const groupDocumentPath = isVirtualTabPath(tabPath) ? null : tabPath;
               const groupPluginPanel = parsePluginPanelTabPath(tabPath);
               const groupPluginWebApp = parsePluginWebAppTabPath(tabPath);
               const groupPluginDetailsId = parsePluginDetailsTabPath(tabPath);
@@ -5401,7 +5400,7 @@ export function DesktopWorkspaceShell(props: {
               <Suspense fallback={<PanelLoading label="graph" />}>
                 <LazyGraphView
                   workspaceId={workspaceId}
-                  activePath={groupDocumentPath}
+                  activePath={activeDocumentPath}
                   refreshKey={graphKey}
                   onOpenPath={openPathWithHeading}
                   onOpenChatThread={openGraphChatThread}
