@@ -14,9 +14,9 @@ owner already made.
 3. `docs/superpowers/plans/2026-08-10-s4-base-arbitration-design.md` — the
    arbitration policy AND the revised mechanism. The mechanism changed on
    2026-08-11; the section "How the loser survives" is binding.
-4. `.claude/skills/sol-first/SKILL.md` — how this campaign spends models, how
-   subagents report, and how to wait on work without burning the budget.
-5. `CAMPAIGN-SWEEP.md` — the running ledger. Append to it; do not rewrite it.
+4. Your own model-budget setup — how this campaign spends models, how subagents
+   report, and how to wait on work without burning the budget. This lives in
+   your user-level skills, not in this repository.
 
 ## Where the program stands
 

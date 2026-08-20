@@ -1,4 +1,0 @@
-interface:
-  display_name: "Conserve Fable"
-  short_description: "Use Opus reviews and reserve one Fable checkpoint"
-  default_prompt: "Use $conserve-fable to route planning and review while minimizing Fable use."

@@ -1,4 +1,0 @@
-interface:
-  display_name: "Claude Collaboration"
-  short_description: "Delegate scoped work and reviews to Claude CLI."
-  default_prompt: "Use $claude-collaboration to delegate a scoped subtask to Claude CLI."

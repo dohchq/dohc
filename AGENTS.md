@@ -229,9 +229,16 @@ frontmatter verbatim, because the `description` is what makes a host trigger the
 skill — a stale copy means one tool silently stops offering it.
 
 A skill only one host should see needs no adapter and lives directly in that
-host's root. The `codex-*` skills are the case to reason from: they sit in
-`.claude/skills/` because **Claude** runs them and Codex is only the worker they
-invoke. Classify by which tool consumes the skill, not by the tool it names.
+host's root. Classify by which tool consumes the skill, not by the tool it
+names: a skill that has Claude drive Codex is consumed by Claude, so it belongs
+in `.claude/skills/`.
+
+Commit a skill here only when it carries dohc knowledge a contributor needs:
+how to run this repo's gate, how to file a PR here, how we write. Personal
+setup does not belong in this repo. Model choice, cost and quota rules, and
+bridges to whichever other agent CLI you happen to run are yours, not the
+project's, and every contributor inherits whatever this repo commits. Keep them
+in your own user-level skills directory.
 
 ## Agents wrap tools, not the other way around
 
@@ -376,9 +383,10 @@ run reviews while a PR is a draft.
 - If a required reviewer cannot run, replace it with another independent
   reviewer. Record the replacement and reason in the PR.
 
-Run Claude after the PR is ready for review. Use fable-5 and fall back to
-opus-5. Add a PR comment that names the reviewed commit and summarizes the
-result.
+Run the local review after the PR is ready for review. Use the strongest model
+you have access to, from a different family than the one that wrote the change.
+Add a PR comment that names the reviewed commit, the model that reviewed it, and
+the result.
 
 Batch verified fixes before requesting a re-review. After the first re-review,
 request another only for a new verified blocker or an unresolved high-risk

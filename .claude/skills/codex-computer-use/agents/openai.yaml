@@ -1,3 +1,0 @@
-interface:
-  display_name: "Codex Computer Use"
-  short_description: "Use Codex CLI for browser, app, screenshot, or simulator verification."
