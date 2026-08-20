@@ -7502,6 +7502,9 @@ describe("graph view", () => {
     expect(
       graphNodes.find((node) => node.dataset.path === "b.md")?.dataset.active,
     ).toBe("true");
+    expect(
+      graphNodes.find((node) => node.dataset.path === "a.md")?.dataset.active,
+    ).toBe("false");
   });
 
   it("opens as a side panel first, then opens the full graph in an editor tab", async () => {

@@ -32,27 +32,6 @@ afterEach(() => {
 });
 
 describe("GraphView", () => {
-  it("marks the active document in the page graph", async () => {
-    vi.stubGlobal("dohcDesktop", {
-      readWorkspaceGraph: vi.fn(async () => graph("alpha.md")),
-    });
-
-    render(
-      <GraphView
-        workspaceId="ws-graph"
-        activePath="alpha.md"
-        refreshKey="0"
-        onOpenPath={vi.fn()}
-        variant="page"
-      />,
-    );
-
-    const graphNodes = await screen.findAllByTestId("graph-node");
-    expect(
-      graphNodes.find((node) => node.dataset.path === "alpha.md")?.dataset.active,
-    ).toBe("true");
-  });
-
   it("hides chat mentions when Chats is unavailable", async () => {
     const readWorkspaceGraph = vi.fn(async () => ({
       nodes: [],
