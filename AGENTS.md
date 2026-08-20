@@ -248,6 +248,46 @@ bridges to whichever other agent CLI you happen to run are yours, not the
 project's, and every contributor inherits whatever this repo commits. Keep them
 in your own user-level skills directory.
 
+## Where code lives
+
+- `apps/desktop` — the Electron app. Most user-visible work lands here.
+- `apps/site` — the marketing site.
+- `packages/` — 15 shared TypeScript packages: workspace contracts, core, auth,
+  the SDK, the MCP server, brand, and others.
+- `services/` — 6 backend services, including the sync relay and workspace API.
+- `crates/` — 13 Rust crates. `dohc-workspace-engine` builds the daemon binary
+  the desktop app runs; the `dohc-engine-*` crates hold storage, sync, collab,
+  crypto, protocol and files.
+
+## Dev servers
+
+Node 24.14 or newer and pnpm 11.20.0, both pinned in the root `package.json`.
+
+- `pnpm dev` starts the desktop app. It filters to `@dohc/desktop` and runs that
+  package's `scripts/dev.mjs`.
+- `pnpm dev:site` starts the marketing site. `pnpm dev:workspace-api` starts the
+  workspace API.
+- Postgres runs in Docker: `pnpm dev:postgres` brings it up, `pnpm migrate`
+  applies migrations, and `pnpm reset:postgres` clears dev data. The desktop app
+  does not need it.
+- Stop what you started, by the PID you tracked.
+
+## Verifying
+
+Run the smallest check that proves your change, not the whole tree.
+
+- `pnpm typecheck` and `pnpm test:desktop` cover most TypeScript work.
+- `pnpm test` at the root runs the brand check and the repo-level Node tests,
+  then every package's own suite. It is slow. Prefer the targeted commands.
+- End-to-end: `pnpm test:desktop:e2e` builds first, then refuses to run until
+  the engine binary is staged at `apps/desktop/target/debug`. Nothing in the
+  build puts it there. A fresh checkout without it fails every spec inside
+  `electron.launch` with the real cause buried in Playwright's log.
+- Rust: run the gate through the [`rust-gate` skill](.agents/skills/rust-gate/SKILL.md),
+  never a bare `cargo` invocation. Read its `== summary ==` block and not its
+  exit code. It can exit 0 while its own summary says FAIL.
+- A test that needs a sleep to pass is wrong. Wait on the thing itself.
+
 ## Agents wrap tools, not the other way around
 
 dohc should feel like an agent operating a set of reliable tools, not old software with a little AI sprinkled inside.
@@ -263,56 +303,23 @@ launch / first users). Do not "fix" the missing checks.
 
 ### Mark agent-written GitHub prose
 
-When an agent publishes prose through the user's GitHub account, start the body
-with a `[!NOTE]` alert:
+When an agent publishes prose through a human's GitHub account, start the body
+with an alert naming the model that wrote it:
 
 ```markdown
 > [!NOTE]
 > Written by `<exact model slug>`.
 ```
 
-Use the exact runtime model slug. Do not use a family name or display name.
+Use the runtime model slug, not a family or display name. Read it from the
+harness rather than guessing; if the harness cannot tell you, name the agent
+instead, and if you have neither, say an AI agent wrote it and that the model
+is unavailable. Leave one blank line after the attribution, and keep it when a
+human edits or approves the draft.
 
-On Codex, read `turn_context.payload.model` from the current task's latest
-rollout record. Match the rollout filename with `CODEX_THREAD_ID`.
-
-On Claude Code, use the canonical model slug from the active environment
-context. For headless runs, confirm it with the active entry's `canonicalModel`
-in the JSON `modelUsage` result. Ignore auxiliary model entries.
-
-On other harnesses, use the equivalent runtime metadata. Do not infer, shorten,
-normalize, or guess the slug.
-
-If no exact model slug is available, use the known agent name:
-
-```markdown
-> [!NOTE]
-> Written by Codex.
-```
-
-or:
-
-```markdown
-> [!NOTE]
-> Written by Claude.
-```
-
-If neither the model slug nor agent name is available, use:
-
-```markdown
-> [!NOTE]
-> Written by an AI agent (model name unavailable).
-```
-
-Apply this rule to:
-
-- pull request and issue descriptions;
-- comments, replies, review bodies, and review summaries;
-- discussion and release descriptions; and
-- other prose that GitHub displays as written by the user.
-
-Leave one blank line after the attribution. Keep the attribution when the user
-edits or approves an agent-written draft.
+This covers pull request and issue bodies, comments, replies, review bodies and
+summaries, discussions, releases, and anything else GitHub shows as written by
+that person.
 
 ### Write issues for humans
 
@@ -377,57 +384,6 @@ Every code PR needs one dedicated simplification review after it becomes ready.
   gates.
 - Record the reviewed commit and result in the PR.
 
-### Select reviewers
-
-These requirements apply only after a PR is ready for review. Do not request or
-run reviews while a PR is a draft.
-
-- Prose-only, low-risk changes need one exact-head automated review. Use
-  `review_status <PR> codex`.
-- Routine code changes need exact-head reviews from Codex and CodeRabbit. Use
-  `review_status <PR>`.
-- Add local Claude for authorization, security, privacy, migration, durability,
-  or disputed blocking findings.
-- If a required reviewer cannot run, replace it with another independent
-  reviewer. Record the replacement and reason in the PR.
-
-Run the local review after the PR is ready for review. Use the strongest model
-you have access to, from a different family than the one that wrote the change.
-Add a PR comment that names the reviewed commit, the model that reviewed it, and
-the result.
-
-Batch verified fixes before requesting a re-review. After the first re-review,
-request another only for a new verified blocker or an unresolved high-risk
-concern. Do not continue review rounds for style preferences, speculative
-improvements, or out-of-scope suggestions.
-
-### Verify review coverage
-
-Watch a PR whenever it becomes ready for review or the head of a ready PR
-changes. Do not watch a draft PR. If a PR returns to draft, pause its watcher.
-Poll on a schedule you can defend rather than in a tight loop: the GitHub API
-budget is shared across every agent you are running, and a wide campaign
-exhausts it.
-
-A review applies to a commit, not a PR. Before merging, confirm that every
-required reviewer covered the current head.
-
-Run `review_status <PR>` before merging and whenever the watcher reports new
-activity. Use `review_status <PR> codex` for prose-only, low-risk changes.
-
-Treat a failed status query as unknown coverage. Do not merge with unknown
-coverage.
-
-The status command reports findings; it does not decide whether they block.
-Document each declined finding in the PR with a brief technical reason.
-
-Merge when the required reviewers covered the current head and no verified
-blocking finding remains. Reviewer unanimity and a comment-free PR are not
-required.
-
-`gh api --jq` does not accept `--arg`. Embed values in the program string.
-Treat a failed query as unknown instead of reading empty output as no match.
-
 ## How we write
 
 dohc's writing discipline is Orwell's six rules plus ASD-STE100 Simplified
@@ -455,18 +411,3 @@ the terms settle, next to the code it describes.
 ## Regarding long code comments
 
 If you need a paragraph-long comment to justify why the workaround is OK, the code is wrong—fix the code.
-
-## Some general rules
-
-These are meant to steer us in the right direction. They are not hard-set, but we should default to following them. If you think one should be ignored, be very loud and clear about that and get approval from us before doing it.
-
-- After a PR is merged, delete its remote branch from GitHub unless the user
-  explicitly asks to keep it or another open PR still depends on it. Verify the
-  remote ref is gone. Do not delete the local branch unless asked.
-- After a PR is merged or its task is abandoned, delete the worktree you or
-  your campaign created for it, then run `git worktree prune`. Stale worktrees
-  keep multi-gigabyte build artifacts. Never delete the main tree, a worktree
-  you did not create, or a worktree another session still uses.
-- Never stop a process by name, command-line pattern, or worktree path. Stop
-  only a PID this task started. Verify a port owner's working directory before
-  stopping it.
