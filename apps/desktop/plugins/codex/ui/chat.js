@@ -5,6 +5,7 @@ const stopButton = document.querySelector("#stop");
 const composer = document.querySelector("#composer");
 const messageInput = document.querySelector("#message");
 const sendButton = document.querySelector("#send");
+const tokenMeta = document.querySelector('meta[name="chat-token"]');
 
 if (
   !transcript ||
@@ -13,14 +14,26 @@ if (
   !stopButton ||
   !composer ||
   !messageInput ||
-  !sendButton
+  !sendButton ||
+  !tokenMeta
 ) {
   throw new Error("The Codex chat page is missing a required control.");
 }
 
+// This page's own per-start credential (injected by the server into the
+// page it served itself). Every mutating request carries it; a hostile
+// cross-origin page has no way to read it back out of this same-origin
+// document.
+const TOKEN = tokenMeta.content;
+
 const textItems = new Map();
 const activityItems = new Map();
 const permissions = new Map();
+// Optimistically rendered "You" cards, keyed by the clientId this page sent
+// with the POST. When that same message echoes back over /events (the
+// submitting page's own connection sees it too), the echo confirms the
+// existing card instead of rendering a duplicate.
+const pendingMessages = new Map();
 
 function timestamp() {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -52,7 +65,7 @@ function messageCard(author, text, className) {
   card.append(header, body);
   transcript.append(card);
   scrollToLatest();
-  return body;
+  return { card, body };
 }
 
 function setSessionState(state, reason) {
@@ -85,15 +98,26 @@ function recoveryCard(message) {
   scrollToLatest();
 }
 
+function transientError(message) {
+  hideEmptyState();
+  const card = document.createElement("section");
+  card.className = "error-card";
+  const text = document.createElement("p");
+  text.textContent = message;
+  card.append(text);
+  transcript.append(card);
+  scrollToLatest();
+}
+
 function renderText(event) {
   const key = event.stream + ":" + event.itemId;
   let body = textItems.get(key);
   if (!body) {
-    body = messageCard(
+    ({ body } = messageCard(
       event.stream === "reasoning" ? "Reasoning" : "Codex",
       "",
       event.stream === "reasoning" ? "agent reasoning" : "agent",
-    );
+    ));
     textItems.set(key, body);
   }
   body.textContent += event.text;
@@ -127,6 +151,18 @@ function renderActivity(event) {
   scrollToLatest();
 }
 
+function renderUserMessage(event) {
+  const pending = pendingMessages.get(event.clientId);
+  if (pending) {
+    pendingMessages.delete(event.clientId);
+    pending.dataset.pending = "false";
+    return;
+  }
+  // No local optimistic card: this arrived on reconnect, or from a message
+  // sent before this page attached.
+  messageCard("You", event.text, "user");
+}
+
 function resolvePermission(requestId, label) {
   const card = permissions.get(requestId);
   if (!card) return;
@@ -138,13 +174,33 @@ function resolvePermission(requestId, label) {
   card.querySelector(".permission-actions").append(status);
 }
 
+function showPermissionError(requestId, message) {
+  const card = permissions.get(requestId);
+  if (!card) return;
+  let note = card.querySelector(".permission-error");
+  if (!note) {
+    note = document.createElement("p");
+    note.className = "permission-error";
+    card.append(note);
+  }
+  note.textContent = message;
+}
+
 async function answerPermission(requestId, decision, label) {
-  const response = await fetch("/permission/" + encodeURIComponent(requestId), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ decision }),
-  });
-  if (response.ok) resolvePermission(requestId, label);
+  try {
+    const response = await fetch("/permission/" + encodeURIComponent(requestId), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer " + TOKEN },
+      body: JSON.stringify({ decision }),
+    });
+    if (response.ok) {
+      resolvePermission(requestId, label);
+    } else {
+      showPermissionError(requestId, "dohc could not send this decision. Try again.");
+    }
+  } catch {
+    showPermissionError(requestId, "dohc could not send this decision. Try again.");
+  }
 }
 
 function renderPermission(event) {
@@ -190,6 +246,9 @@ function renderEvent(event) {
     case "session-state":
       setSessionState(event.state, event.reason);
       break;
+    case "user-message":
+      renderUserMessage(event);
+      break;
     case "text-delta":
       renderText(event);
       break;
@@ -233,9 +292,10 @@ function resetTranscript() {
   textItems.clear();
   activityItems.clear();
   permissions.clear();
+  pendingMessages.clear();
 }
 
-const events = new EventSource("/events");
+const events = new EventSource("/events?token=" + encodeURIComponent(TOKEN));
 events.addEventListener("open", resetTranscript);
 events.addEventListener("message", (message) => {
   renderEvent(JSON.parse(message.data));
@@ -249,17 +309,35 @@ composer.addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = messageInput.value.trim();
   if (!text) return;
-  messageCard("You", text, "user");
+  const clientId = crypto.randomUUID();
+  const { card } = messageCard("You", text, "user");
+  card.dataset.pending = "true";
+  pendingMessages.set(clientId, card);
   messageInput.value = "";
   sendButton.disabled = true;
   statePill.textContent = "Starting";
   statePill.dataset.state = "starting";
   try {
-    await fetch("/message", {
+    const response = await fetch("/message", {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text }),
+      headers: { "content-type": "application/json", authorization: "Bearer " + TOKEN },
+      body: JSON.stringify({ text, clientId }),
     });
+    if (!response.ok) {
+      pendingMessages.delete(clientId);
+      card.dataset.failed = "true";
+      const note = document.createElement("p");
+      note.className = "send-failed";
+      note.textContent = "This message was not sent. Send it again.";
+      card.append(note);
+    }
+  } catch {
+    pendingMessages.delete(clientId);
+    card.dataset.failed = "true";
+    const note = document.createElement("p");
+    note.className = "send-failed";
+    note.textContent = "This message was not sent. Send it again.";
+    card.append(note);
   } finally {
     sendButton.disabled = false;
     messageInput.focus();
@@ -275,5 +353,17 @@ messageInput.addEventListener("keydown", (event) => {
 
 stopButton.addEventListener("click", async () => {
   stopButton.disabled = true;
-  await fetch("/stop", { method: "POST" });
+  try {
+    const response = await fetch("/stop", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer " + TOKEN },
+    });
+    if (!response.ok) {
+      stopButton.disabled = false;
+      transientError("dohc could not stop this session.");
+    }
+  } catch {
+    stopButton.disabled = false;
+    transientError("dohc could not stop this session.");
+  }
 });

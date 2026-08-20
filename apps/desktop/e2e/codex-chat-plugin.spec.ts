@@ -22,6 +22,11 @@ interface GuestReport {
   text: string;
 }
 
+interface GuestCredentials {
+  origin: string;
+  token: string;
+}
+
 test.setTimeout(300_000);
 
 test("the Codex plugin serves its chat and sends a message to Codex", async () => {
@@ -100,6 +105,40 @@ test("the Codex plugin serves its chat and sends a message to Codex", async () =
     await expect
       .poll(async () => (await readGuest())?.text ?? "", { timeout: 60_000 })
       .toContain(echoedPrompt);
+
+    // Fix 1's proof against the real server, not the fake driver: a direct,
+    // unauthenticated cross-origin-shaped POST (what a hostile local page
+    // sends -- Node's fetch has no CORS of its own to stop it either) must
+    // not reach the session, and the real, page-issued token must.
+    const credentials = await desktop.app.evaluate(async ({ webContents }) => {
+      for (const contents of webContents.getAllWebContents()) {
+        const url = contents.getURL();
+        if (!url.startsWith("http://127.0.0.1")) continue;
+        const title = (await contents.executeJavaScript("document.title")) as string;
+        if (title !== "Codex Chat") continue;
+        const token = (await contents.executeJavaScript(
+          "document.querySelector('meta[name=\"chat-token\"]').content",
+        )) as string;
+        return { origin: new URL(url).origin, token };
+      }
+      return null;
+    });
+    if (!credentials) throw new Error("The Codex chat guest did not open.");
+
+    const unauthorized = await fetch(credentials.origin + "/stop", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    expect(unauthorized.status).toBe(401);
+
+    const authorized = await fetch(credentials.origin + "/stop", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer " + credentials.token,
+      },
+    });
+    expect(authorized.status).toBe(204);
   } catch (error) {
     for (const entry of desktop?.logs ?? []) {
       if (/plugin|codex/i.test(entry.text)) {

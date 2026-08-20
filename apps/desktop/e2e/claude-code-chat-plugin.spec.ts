@@ -51,6 +51,19 @@ async function readGuestText(desktop: Desktop): Promise<string> {
   return (await evalInChatGuest<string>(desktop, "(document.body ? document.body.innerText : '')")) ?? "";
 }
 
+async function readGuestOrigin(desktop: Desktop): Promise<string> {
+  return desktop.app.evaluate(async ({ webContents }, title) => {
+    for (const contents of webContents.getAllWebContents()) {
+      const url = contents.getURL();
+      if (!url.startsWith("http://127.0.0.1")) continue;
+      const pageTitle = (await contents.executeJavaScript("document.title")) as string;
+      if (pageTitle !== title) continue;
+      return new URL(url).origin;
+    }
+    throw new Error("The Claude Code chat guest did not open.");
+  }, CHAT_TITLE);
+}
+
 test.setTimeout(300_000);
 
 test("the Claude Code plugin serves its chat and answers a tool permission", async () => {
@@ -121,6 +134,29 @@ test("the Claude Code plugin serves its chat and answers a tool permission", asy
     await expect
       .poll(async () => readGuestText(desktop!), { timeout: 60_000 })
       .toContain('"behavior":"allow"');
+
+    // Fix 1's proof against the real server, not the fake driver: a direct,
+    // unauthenticated cross-origin-shaped POST (what a hostile local page
+    // sends -- Node's fetch has no CORS of its own to stop it either) must
+    // not reach the session, and the real, page-issued token must.
+    const origin = await readGuestOrigin(desktop);
+    const token = await evalInChatGuest<string>(
+      desktop,
+      "(document.querySelector('meta[name=\"chat-token\"]').content)",
+    );
+    if (!token) throw new Error("The Claude Code chat page carried no session token.");
+
+    const unauthorized = await fetch(origin + "/stop", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    });
+    expect(unauthorized.status).toBe(401);
+
+    const authorized = await fetch(origin + "/stop", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer " + token },
+    });
+    expect(authorized.status).toBe(204);
   } catch (error) {
     for (const entry of desktop?.logs ?? []) {
       if (/plugin|claude/i.test(entry.text)) {

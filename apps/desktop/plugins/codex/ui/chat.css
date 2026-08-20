@@ -179,6 +179,16 @@ button:disabled {
   color: var(--muted);
 }
 
+.message[data-failed="true"] {
+  border-color: var(--danger);
+}
+
+.send-failed,
+.permission-error {
+  margin-top: 6px;
+  color: var(--danger);
+}
+
 .message-header,
 .activity-header {
   display: flex;
