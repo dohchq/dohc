@@ -323,9 +323,12 @@ whole workspace. Two facts push back: it is a richer contract to keep stable,
 and the sites rule was "convert the surfaces, keep the authority" — link
 derivation is neither surface nor authority, so the rule does not decide it.
 
-That argument has a hard boundary. A no-G1 fallback can match the built-in only
-while the requested listing has at most 10,000 entries. Above that cap, G1 is
-mandatory unless `files.list` gains pagination or server-side filtering that
+That argument has a hard boundary, and the fallback cannot see the boundary
+from inside: `files.list` returns a bare array with no truncation marker
+(`workspaceSdkHost.ts:133-151`), so a response of exactly 10,000 entries is
+indistinguishable from a clipped larger workspace. A no-G1 fallback must
+therefore treat any cap-sized listing as requiring G1. Above the cap, G1 is
+mandatory unless `files.list` gains pagination or truncation metadata that
 preserves the core loader's classify-then-select order and omission counts.
 
 G1 does not expand the panel's raw-file read authority. It is safer than the
