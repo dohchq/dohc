@@ -9,13 +9,13 @@ use common::*;
 use dohc_engine_collab::ContentKind;
 use dohc_engine_collab::{
     apply_remote_update, claim_base, claim_base_at_relay, close_session, ensure_marker,
-    fresh_successor_base, load_persisted, read_marker, record_base_coordinate, record_local_update,
-    record_local_update_creating_marker_guarded,
+    fresh_successor_base, load_persisted, maybe_compact, read_marker, record_base_coordinate,
+    record_local_update, record_local_update_creating_marker_guarded,
     record_local_update_creating_marker_guarded_for_lineage, replace_lineage_with_successor,
     settle, BaseCoordinateRecord, BaseRelayCoordinate, ClaimOutcome, CloseOutcome, CollabError,
-    DocKey, LeaseRegistry, LineageClaimStatus, Regime, RemoteUpdate, ReplicationApplyOutcome,
-    SettleOutcome, SuccessorIdentity, SuccessorIdentityInput, SuccessorInstallOutcome,
-    SuccessorReplacement, Ydoc,
+    CompactOutcome, DocKey, LeaseRegistry, LineageClaimStatus, Regime, RemoteUpdate,
+    ReplicationApplyOutcome, SettleOutcome, SuccessorIdentity, SuccessorIdentityInput,
+    SuccessorInstallOutcome, SuccessorReplacement, Ydoc,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 use rusqlite::OptionalExtension;
@@ -1236,6 +1236,80 @@ fn append_self_bounds_the_log_at_threshold() {
             .filter(|c| *c == 'x')
             .count() as i64,
         threshold + 1
+    );
+}
+
+#[test]
+fn forced_compaction_with_nothing_pending_still_validates_the_snapshot() {
+    // #851 review finding: the cheap pending-count pre-check must never cover
+    // FORCED compaction (`threshold == 0`, the call `close_session` makes on
+    // a replicated/persist-closed lineage). A lineage that is already fully
+    // compacted has `pending == 0`, which is exactly the case the cheap path
+    // would report as a clean `Skipped { 0 }` — but forced compaction exists
+    // to guarantee a single validated snapshot, so it must still reach
+    // `load_persisted`'s blob-integrity check even when nothing is pending.
+    // Skipping that check would let `close_session` report a lineage with a
+    // corrupt or missing snapshot blob as cleanly closed.
+    let mut ts = fresh_store("forced-compact-corrupt-snapshot");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::Replicated,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let doc = Ydoc::wire();
+    let update = doc.plaintext_insert(0, "x");
+    committed(record_local_update(&mut ts.store, &key, &update, &NoFaults, 1_001).expect("rec"));
+
+    // Force a compaction: pending -> 0, a snapshot now covers the lineage.
+    let compacted = maybe_compact(&mut ts.store, &key, 0, &NoFaults, 1_002).expect("compact");
+    assert!(matches!(
+        compacted,
+        TxnOutcome::Committed(CompactOutcome::Compacted { .. })
+    ));
+    assert_eq!(
+        count(&ts.store, "ydoc_updates", &key),
+        0,
+        "folded to just the snapshot"
+    );
+
+    // Corrupt the referenced snapshot's digest to one that names no row in
+    // `binary_blobs` at all, so any read that actually fetches the blob fails
+    // closed with `Corrupt`. The FK on `snapshot_blob_sha256` blocks this
+    // through a normal transaction (proof the constraint works); toggle
+    // `PRAGMA foreign_keys` off for one connection-level statement — outside
+    // any transaction, exactly what `read_with` hands back — to reach the
+    // dangling-reference state the FK exists to prevent in the first place,
+    // simulating the kind of external corruption `load_persisted`'s check is
+    // the last line of defense against.
+    ts.store
+        .read_with(|conn| -> rusqlite::Result<()> {
+            conn.pragma_update(None, "foreign_keys", false)?;
+            conn.execute(
+                "UPDATE ydoc_snapshots SET snapshot_blob_sha256 = 'deadbeef' \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+            )?;
+            conn.pragma_update(None, "foreign_keys", true)?;
+            Ok(())
+        })
+        .expect("corrupt the snapshot reference");
+
+    // Nothing is pending, so a cheap path that covered threshold == 0 would
+    // report Skipped { 0 } without ever reading the now-corrupt snapshot.
+    // Forced compaction must instead reach load_persisted and surface it.
+    let error = maybe_compact(&mut ts.store, &key, 0, &NoFaults, 1_003)
+        .expect_err("a corrupt snapshot must fail closed even with nothing pending");
+    assert!(
+        matches!(error, CollabError::Corrupt { .. }),
+        "expected Corrupt, got {error:?}"
     );
 }
 

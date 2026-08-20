@@ -927,10 +927,14 @@ pub fn maybe_compact(
     now_ms: i64,
 ) -> Result<TxnOutcome<CompactOutcome>, CollabError> {
     // A stale cheap read only ever costs an extra full reconstruction below,
-    // never a wrong compaction.
+    // never a wrong compaction. Forced compaction (`threshold == 0`, used by
+    // replicated/persisted close) never takes this shortcut: it must always
+    // reach `load_persisted`'s torn-lineage and blob-integrity checks, even
+    // when nothing is pending, so a corrupt or missing snapshot at close
+    // surfaces as `Corrupt` instead of a falsely clean `Skipped { 0 }`.
     let marker = read_marker(store, key)?.ok_or(CollabError::NoMarker)?;
     let cheap_pending = marker.head_update_seq - marker.head_snapshot_seq;
-    if below_threshold(cheap_pending, threshold) {
+    if threshold > 0 && below_threshold(cheap_pending, threshold) {
         return Ok(TxnOutcome::Committed(CompactOutcome::Skipped {
             pending: cheap_pending,
         }));
