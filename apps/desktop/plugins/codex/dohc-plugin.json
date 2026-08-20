@@ -9,5 +9,6 @@
   "issues": "https://github.com/openai/codex/issues",
   "license": "Apache-2.0",
   "entry": "src/main.ts",
-  "drivers": [{ "id": "codex", "displayName": "Codex" }]
+  "drivers": [{ "id": "codex", "displayName": "Codex" }],
+  "webApps": [{ "id": "chat", "title": "Codex Chat" }]
 }
