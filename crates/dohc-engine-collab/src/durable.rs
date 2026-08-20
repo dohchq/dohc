@@ -919,6 +919,28 @@ pub fn maybe_compact(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<CompactOutcome>, CollabError> {
+    // Cheap pre-check: the marker row alone (one indexed SELECT, no blob
+    // fetch, no CRDT apply) tells us whether compaction can possibly fire.
+    // `self_bound_log` calls this after EVERY genuinely-new append, so on a
+    // large lineage the below-threshold case — the overwhelming common case —
+    // must not pay for a full `load_persisted` reconstruction just to learn
+    // the pending count it already has in the marker row. Single-writer-per-
+    // store means this count cannot move underneath us in-process; the
+    // authoritative check below still runs on `persisted.marker` before any
+    // bytes are written, so a stale read here only ever costs an extra (safe)
+    // full reconstruction, never a wrong compaction.
+    let cheap_pending = {
+        let marker = store
+            .read_with(|conn| query_marker(conn, key))?
+            .ok_or(CollabError::NoMarker)?;
+        marker.head_update_seq - marker.head_snapshot_seq
+    };
+    if cheap_pending < i64::from(threshold) || cheap_pending <= 0 {
+        return Ok(TxnOutcome::Committed(CompactOutcome::Skipped {
+            pending: cheap_pending,
+        }));
+    }
+
     let persisted = match load_persisted(store, key)? {
         Some(p) => p,
         None => return Err(CollabError::NoMarker),
