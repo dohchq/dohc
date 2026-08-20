@@ -92,6 +92,7 @@ import {
   ListMyShareChangesPayload,
   ListMyShareChangesResult,
   ReadShareProposalChangesResult,
+  RefreshSharedViewResult,
   SettleShareProposalPayload,
   SubmitShareChangesPayload,
   SubmitShareChangesResult,
@@ -107,6 +108,20 @@ import {
 } from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
+
+describe("shared view refresh IPC contract", () => {
+  it("preserves excluded paths in the parsed refresh result", () => {
+    expect(
+      RefreshSharedViewResult.parse({
+        status: "unchanged",
+        changedPaths: 0,
+        excludedPaths: ["docs/oversized.md"],
+        refusedOps: 0,
+        refusedDetail: null,
+      }).excludedPaths,
+    ).toEqual(["docs/oversized.md"]);
+  });
+});
 
 describe("workbench menu IPC contract", () => {
   it("carries a bounded editor group ID and the group-close capability", () => {

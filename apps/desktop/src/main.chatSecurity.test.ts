@@ -1100,13 +1100,21 @@ describe("main-process chat authorization", () => {
     expect(
       submit,
       "MUTATION: submitting without a final disk capture drops edits made after the last refresh",
-    ).toContain("await captureStandaloneShareViewDivergence({");
-    expect(submit.indexOf("await captureStandaloneShareViewDivergence({")).toBeLessThan(
-      submit.indexOf(").submitShareProposal({"),
+    ).toContain("const captured = await captureStandaloneShareViewDivergence({");
+    const captureAt = submit.indexOf(
+      "const captured = await captureStandaloneShareViewDivergence({",
     );
+    const refusalAt = submit.indexOf(
+      "assertShareChangesJournalable(captured.unjournalablePaths);",
+    );
+    const submitAt = submit.indexOf(").submitShareProposal({");
+    expect(captureAt).toBeLessThan(refusalAt);
+    expect(refusalAt).toBeLessThan(submitAt);
     expect(submit).toContain(
       "pinnedSelector: isRecordValue(scope.workspace.shareView)",
     );
     expect(submit).toContain("? scope.workspace.shareView.grantedSelector");
+    expect(submit).toContain("scope.workspace.shareView.ended === true");
+    expect(submit).not.toContain("ended: false");
   });
 });

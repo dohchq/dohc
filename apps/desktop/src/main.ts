@@ -476,6 +476,7 @@ import {
   relayUrlsMatch,
 } from "./workspaces/syncCode";
 import {
+  assertShareChangesJournalable,
   captureStandaloneShareViewDivergence,
   SharePinInvalidError,
   recordedShareSelector,
@@ -5852,7 +5853,7 @@ function registerIpcHandlers(
       requireShareViewProposalScope,
     );
     const store = sharedViewStoreFor(scope.workspace);
-    await captureStandaloneShareViewDivergence({
+    const captured = await captureStandaloneShareViewDivergence({
       rootDir: scope.workspace.rootPath,
       workspaceId: scope.workspace.workspaceId,
       store,
@@ -5860,7 +5861,11 @@ function registerIpcHandlers(
         ? scope.workspace.shareView.grantedSelector
         : null,
       shareId: scope.shareId,
+      ended:
+        isRecordValue(scope.workspace.shareView) &&
+        scope.workspace.shareView.ended === true,
     });
+    assertShareChangesJournalable(captured.unjournalablePaths);
     // The engine owns the submit: it reads this replica's own journal, so it
     // has to be the process holding the store.
     const result = await relayClientForWorkspace({
@@ -6063,6 +6068,7 @@ function registerIpcHandlers(
         relay,
         shareId: parsed.shareId,
         store,
+        ended: false,
         // Just pinned on the record above; the refresh reads it back through
         // the same defensive parse every later refresh uses.
         pinnedSelector: info.selector,
@@ -6127,6 +6133,7 @@ function registerIpcHandlers(
       return RefreshSharedViewResult.parse({
         status: "ended",
         changedPaths: 0,
+        excludedPaths: [],
         refusedOps: 0,
         refusedDetail: null,
       });
@@ -6143,6 +6150,7 @@ function registerIpcHandlers(
       return RefreshSharedViewResult.parse({
         status: "unchanged",
         changedPaths: 0,
+        excludedPaths: [],
         refusedOps: 0,
         refusedDetail: null,
       });
@@ -6178,6 +6186,7 @@ function registerIpcHandlers(
         relay,
         shareId: shareView.shareId,
         store,
+        ended: shareView.ended ?? false,
         pinnedSelector: shareView.grantedSelector,
         recordRefusals: recordShareViewRefusals(workspace.workspaceId),
         pull: async (input) =>

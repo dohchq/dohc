@@ -1,5 +1,14 @@
-import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { existingAncestor } from "./workspaceFiles";
@@ -18,7 +27,10 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
-import { withOrderedWorkspaceTextPath } from "./workspaceAssets";
+import {
+  withExclusiveWorkspaceOperation,
+  withOrderedWorkspaceTextPath,
+} from "./workspaceAssets";
 import { readDiskContent, type DiskTextState } from "./workspaceEngineCapture";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
@@ -47,6 +59,18 @@ export interface RefreshSharedViewOutcome {
 export interface CaptureSharedViewLocalDivergenceOutcome {
   capturedPaths: number;
   unjournalablePaths: string[];
+}
+
+export function assertShareChangesJournalable(paths: readonly string[]): void {
+  if (paths.length === 0) return;
+  const named = paths.slice(0, 3).join(", ");
+  const rest = paths.length > 3 ? `, and ${paths.length - 3} more` : "";
+  const one = paths.length === 1;
+  throw new Error(
+    `dohc did not send your changes. ${paths.length} ${one ? "file is" : "files are"} ` +
+      `too large to track: ${named}${rest}. Make ${one ? "it" : "them"} smaller. ` +
+      "Send your changes again.",
+  );
 }
 
 /**
@@ -304,9 +328,85 @@ export async function writeDiskContentToStore(input: {
 }
 
 const CAPTURE_IGNORED_DIRS = new Set([".dohc", "node_modules", ".git"]);
+const PENDING_MATERIALIZATION_FILE = "pending-materialization.json";
 
-async function captureDiskPaths(rootDir: string): Promise<Set<string>> {
-  const found = new Set<string>();
+function pendingMaterializationPath(rootDir: string): string {
+  return join(rootDir, ".dohc", PENDING_MATERIALIZATION_FILE);
+}
+
+export async function readPendingMaterializationPaths(
+  rootDir: string,
+): Promise<Set<string>> {
+  try {
+    return await withExclusiveWorkspaceOperation(
+      pendingMaterializationPath(rootDir),
+      async () => {
+        try {
+          const parsed: unknown = JSON.parse(
+            await readFile(pendingMaterializationPath(rootDir), "utf8"),
+          );
+          if (
+            parsed === null ||
+            typeof parsed !== "object" ||
+            Array.isArray(parsed) ||
+            !("paths" in parsed) ||
+            !Array.isArray(parsed.paths) ||
+            !parsed.paths.every((path) => typeof path === "string")
+          ) {
+            return new Set<string>();
+          }
+          return new Set(parsed.paths);
+        } catch {
+          return new Set<string>();
+        }
+      },
+    );
+  } catch {
+    return new Set<string>();
+  }
+}
+
+export async function writePendingMaterializationPaths(
+  rootDir: string,
+  paths: readonly string[],
+): Promise<void> {
+  await withExclusiveWorkspaceOperation(
+    pendingMaterializationPath(rootDir),
+    async () => {
+      const metadataDir = join(rootDir, ".dohc");
+      const target = pendingMaterializationPath(rootDir);
+      const temp = join(
+        metadataDir,
+        `.${PENDING_MATERIALIZATION_FILE}.${process.pid}.${randomUUID()}.tmp`,
+      );
+      await mkdir(metadataDir, { recursive: true });
+      try {
+        await writeFile(temp, JSON.stringify({ paths }), "utf8");
+        await rename(temp, target);
+      } finally {
+        await rm(temp, { force: true });
+      }
+    },
+  );
+}
+
+export async function clearPendingMaterializationPaths(
+  rootDir: string,
+): Promise<void> {
+  await withExclusiveWorkspaceOperation(
+    pendingMaterializationPath(rootDir),
+    async () => {
+      await rm(pendingMaterializationPath(rootDir), { force: true });
+    },
+  );
+}
+
+async function captureDiskPaths(rootDir: string): Promise<{
+  filePaths: Set<string>;
+  directoryPaths: Set<string>;
+}> {
+  const filePaths = new Set<string>();
+  const directoryPaths = new Set<string>();
   async function walk(dir: string, relativeDir: string): Promise<void> {
     const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
@@ -314,15 +414,16 @@ async function captureDiskPaths(rootDir: string): Promise<Set<string>> {
       const path = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
         if (!CAPTURE_IGNORED_DIRS.has(entry.name)) {
+          directoryPaths.add(path);
           await walk(join(dir, entry.name), path);
         }
       } else if (entry.isFile()) {
-        found.add(path);
+        filePaths.add(path);
       }
     }
   }
   await walk(rootDir, "");
-  return found;
+  return { filePaths, directoryPaths };
 }
 
 async function pathConfirmedAbsentOnDisk(
@@ -358,35 +459,81 @@ export async function captureSharedViewLocalDivergence(
     workspaceId,
     versionId: main.id,
   });
-  const diskPaths = await captureDiskPaths(realRoot);
+  const { filePaths, directoryPaths } = await captureDiskPaths(realRoot);
+  const pendingPaths = await readPendingMaterializationPaths(realRoot);
 
   let capturedPaths = 0;
   const unjournalablePaths: string[] = [];
   for (const entry of tracked) {
+    // Defense in depth: the store already refuses secret paths, so ordinary
+    // tracked metadata cannot reach this branch.
     if (classifyEngineFilePath(entry.path).kind === "secret") continue;
-    if (
-      !diskPaths.has(entry.path) &&
-      !(await pathConfirmedAbsentOnDisk(realRoot, entry.path))
-    ) {
+
+    let onDisk: "file" | "directory" | "symlink" | "absent";
+    if (filePaths.has(entry.path)) {
+      onDisk = "file";
+    } else if (directoryPaths.has(entry.path)) {
+      onDisk = "directory";
+    } else {
+      const stat = await lstat(resolve(realRoot, entry.path)).catch(() => null);
+      onDisk =
+        stat === null
+          ? "absent"
+          : stat.isSymbolicLink()
+            ? "symlink"
+            : stat.isDirectory()
+              ? "directory"
+              : "file";
+    }
+
+    if (onDisk === "symlink") continue;
+
+    if (onDisk === "directory") {
+      unjournalablePaths.push(entry.path);
       continue;
     }
+
+    if (pendingPaths.has(entry.path)) {
+      const result = await withOrderedWorkspaceTextPath(
+        rootDir,
+        entry.path,
+        async () => {
+          await materializeSharedViewPaths(
+            rootDir,
+            workspaceId,
+            [{ path: entry.path, operation: "write", contentKind: entry.contentKind }],
+            store,
+          );
+          return "repaired" as const;
+        },
+      );
+      if (typeof result === "object" && "status" in result) {
+        await materializeSharedViewPaths(
+          rootDir,
+          workspaceId,
+          [{ path: entry.path, operation: "write", contentKind: entry.contentKind }],
+          store,
+        );
+      }
+      continue;
+    }
+
+    if (onDisk === "absent") {
+      if (!(await pathConfirmedAbsentOnDisk(realRoot, entry.path))) continue;
+      await store.deleteTextFile({
+        workspaceId,
+        versionId: main.id,
+        path: entry.path,
+        metadata: { origin: "local-file" },
+      });
+      capturedPaths += 1;
+      continue;
+    }
+
     const result = await withOrderedWorkspaceTextPath(
       rootDir,
       entry.path,
       async (_readCurrent) => {
-        if (!diskPaths.has(entry.path)) {
-          if (!(await pathConfirmedAbsentOnDisk(realRoot, entry.path))) {
-            return "unchanged" as const;
-          }
-          await store.deleteTextFile({
-            workspaceId,
-            versionId: main.id,
-            path: entry.path,
-            metadata: { origin: "local-file" },
-          });
-          return "captured" as const;
-        }
-
         const disk = await readDiskContent(resolve(realRoot, entry.path));
         if (disk.kind === "absent") {
           if (!(await pathConfirmedAbsentOnDisk(realRoot, entry.path))) {
@@ -407,27 +554,16 @@ export async function captureSharedViewLocalDivergence(
           return "unchanged" as const;
         }
 
-        const changed =
-          entry.contentKind !== disk.kind || entry.sha256 !== disk.sha256;
-        if (!changed) return "unchanged" as const;
-
-        const moment = await store.getMoment({
+        const current = await store.readTextFile({
           workspaceId,
-          momentId: entry.latestMomentId,
+          versionId: main.id,
+          path: entry.path,
         });
-        if (
-          moment?.payload.before &&
-          moment.payload.before.contentKind === disk.kind &&
-          moment.payload.before.sha256 === disk.sha256
-        ) {
-          await materializeSharedViewPaths(
-            rootDir,
-            workspaceId,
-            [{ path: entry.path, operation: "write", contentKind: entry.contentKind }],
-            store,
-          );
-          return "unchanged" as const;
-        }
+        if (current === null) return "unchanged" as const;
+        const changed =
+          (current.contentKind ?? "text") !== disk.kind ||
+          current.sha256 !== disk.sha256;
+        if (!changed) return "unchanged" as const;
 
         await writeDiskContentToStore({
           store,
@@ -440,19 +576,16 @@ export async function captureSharedViewLocalDivergence(
       },
     );
     if (typeof result === "object" && "status" in result) {
-      if (!diskPaths.has(entry.path)) {
-        if (await pathConfirmedAbsentOnDisk(realRoot, entry.path)) {
-          await store.deleteTextFile({
-            workspaceId,
-            versionId: main.id,
-            path: entry.path,
-            metadata: { origin: "local-file" },
-          });
-          capturedPaths += 1;
-        }
-        continue;
+      if (await pathConfirmedAbsentOnDisk(realRoot, entry.path)) {
+        await store.deleteTextFile({
+          workspaceId,
+          versionId: main.id,
+          path: entry.path,
+          metadata: { origin: "local-file" },
+        });
+        capturedPaths += 1;
       }
-      throw new Error("unreachable: capture never reads through the ordered path");
+      continue;
     }
     if (result === "captured") capturedPaths += 1;
     if (result === "unjournalable") unjournalablePaths.push(entry.path);
@@ -467,10 +600,16 @@ export async function captureStandaloneShareViewDivergence(input: {
   store: CaptureVersionedTextStore;
   pinnedSelector: unknown;
   shareId: string;
+  ended: boolean;
 }): Promise<CaptureSharedViewLocalDivergenceOutcome> {
   const grantedSelector = recordedShareSelector(input.pinnedSelector);
   if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
-  if (!shareViewTakesLocalWrites({ access: grantedSelector.access, ended: false })) {
+  if (
+    !shareViewTakesLocalWrites({
+      access: grantedSelector.access,
+      ended: input.ended,
+    })
+  ) {
     return { capturedPaths: 0, unjournalablePaths: [] };
   }
   return captureSharedViewLocalDivergence(
@@ -599,6 +738,7 @@ export async function refreshSharedViewOnce(input: {
   // re-fetched page repeats refusals the record already holds.
   recordRefusals: (refusals: ShareViewRefusal[]) => Promise<void>;
   excludeFromMaterialization?: ReadonlySet<string>;
+  trackPendingMaterialization?: boolean;
 }): Promise<RefreshSharedViewOutcome> {
   const grantedSelector = recordedShareSelector(input.pinnedSelector);
   if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
@@ -629,14 +769,24 @@ export async function refreshSharedViewOnce(input: {
   const excludedPaths = pull.changedPaths
     .filter((change) => input.excludeFromMaterialization?.has(change.path))
     .map((change) => change.path);
+  const pathsToMaterialize = pull.changedPaths.filter(
+    (change) => !input.excludeFromMaterialization?.has(change.path),
+  );
+  if (input.trackPendingMaterialization) {
+    await writePendingMaterializationPaths(
+      input.rootDir,
+      pathsToMaterialize.map((change) => change.path),
+    );
+  }
   await materializeSharedViewPaths(
     input.rootDir,
     input.workspaceId,
-    pull.changedPaths.filter(
-      (change) => !input.excludeFromMaterialization?.has(change.path),
-    ),
+    pathsToMaterialize,
     input.store,
   );
+  if (input.trackPendingMaterialization) {
+    await clearPendingMaterializationPaths(input.rootDir);
+  }
   await pull.commitCursor();
   // Logged one line per refusal, because the count alone cannot be diagnosed.
   // The engine's message names the constraint, and for a version refusal its
@@ -659,15 +809,17 @@ export async function refreshSharedViewOnce(input: {
 }
 
 export async function refreshStandaloneShareViewOnce(
-  input: Parameters<typeof refreshSharedViewOnce>[0],
+  input: Parameters<typeof refreshSharedViewOnce>[0] & { ended: boolean },
 ): Promise<RefreshSharedViewOutcome> {
   const captured = await captureStandaloneShareViewDivergence(input);
   const outcome = await refreshSharedViewOnce({
     ...input,
     excludeFromMaterialization: new Set(captured.unjournalablePaths),
+    trackPendingMaterialization: true,
   });
   return {
     ...outcome,
+    excludedPaths: captured.unjournalablePaths,
     status:
       outcome.status === "unchanged" && captured.capturedPaths > 0
         ? "updated"

@@ -4506,6 +4506,13 @@ export function DesktopWorkspaceShell(props: {
     !shareViewDamaged && !shareViewEnded && shareView?.access === "edit";
   const shareGranterName = shareView?.granterEmail ?? "another dohc user";
   const [shareRefreshing, setShareRefreshing] = useState(false);
+  const [shareExclusions, setShareExclusions] = useState<{
+    workspaceId: string;
+    paths: string[];
+  } | null>(null);
+  const shareExcludedPaths =
+    shareExclusions?.workspaceId === workspaceId ? shareExclusions.paths : [];
+  const shareRefreshToken = useRef(0);
   // Ops this share's pulls skipped, read from the RECORD, not from the last
   // refresh. The skip is durable — the cursor committed past those ops — so a
   // later quiet refresh must not clear the warning while the content is still
@@ -4535,9 +4542,12 @@ export function DesktopWorkspaceShell(props: {
   }, [workspaceId]);
   const refreshShareView = useCallback(async () => {
     if (!shareView || shareViewEnded || shareViewDamaged) return;
+    const token = ++shareRefreshToken.current;
     setShareRefreshing(true);
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
+      if (token !== shareRefreshToken.current) return;
+      setShareExclusions({ workspaceId, paths: outcome.excludedPaths });
       if (outcome.status === "ended") {
         setShareViewEnded(true);
         return;
@@ -4557,7 +4567,7 @@ export function DesktopWorkspaceShell(props: {
       // refresh or a remount. It runs after the listing because a stale file
       // list is what the user is looking at, and this read must not delay it.
       await reloadShareSkipped().catch(() => undefined);
-      setShareRefreshing(false);
+      if (token === shareRefreshToken.current) setShareRefreshing(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shareView?.shareId, shareViewEnded, workspaceId, reloadShareSkipped]);
@@ -5001,6 +5011,21 @@ export function DesktopWorkspaceShell(props: {
                     ? `Shared view from ${shareGranterName}. You can chat about these files, not edit them.`
                     : `Shared view from ${shareGranterName} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
           </span>
+          {shareExcludedPaths.length > 0 ? (
+            <span
+              data-testid="shared-view-excluded"
+              title={shareExcludedPaths.join("\n")}
+              className="flex shrink-0 items-center gap-1.5 rounded bg-warning/10 px-1.5 py-0.5 text-[11px] text-warning"
+            >
+              {shareExcludedPaths.length === 1
+                ? `${shareExcludedPaths[0]} didn't update from this share because it is too large for dohc to track. Your copy is still on this machine. Make the file smaller, then refresh.`
+                : `${shareExcludedPaths.slice(0, 3).join(", ")}${
+                    shareExcludedPaths.length > 3
+                      ? `, and ${shareExcludedPaths.length - 3} more`
+                      : ""
+                  } didn't update from this share because they are too large for dohc to track. Your copies are still on this machine. Make the files smaller, then refresh.`}
+            </span>
+          ) : null}
           {shareSkipped
             ? shareSkipNoticeLines(shareSkipped, shareView.granterEmail).map(
                 (line) => (

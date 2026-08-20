@@ -519,6 +519,7 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       async (): Promise<RefreshSharedViewResult> => ({
         status: "unchanged",
         changedPaths: 0,
+        excludedPaths: [],
         refusedOps: 0,
         refusedDetail: null,
       }),
@@ -3580,6 +3581,7 @@ describe("ui-state merge-on-load", () => {
       pull.resolve({
         status: "updated",
         changedPaths: 1,
+        excludedPaths: [],
         refusedOps: 0,
         refusedDetail: null,
       });
@@ -3590,6 +3592,51 @@ describe("ui-state merge-on-load", () => {
       expect(screen.queryByTestId("tab-shared-gone.md")).toBeNull();
     });
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+  });
+
+  it("names excluded files after refresh and clears the notice after they recover", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    const outcomes = [
+      {
+        status: "unchanged" as const,
+        changedPaths: 0,
+        excludedPaths: ["docs/oversized.md"],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+      {
+        status: "unchanged" as const,
+        changedPaths: 0,
+        excludedPaths: [],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+    ];
+    bridge.refreshSharedView = vi.fn(async () => {
+      const outcome = outcomes.shift();
+      if (!outcome) throw new Error("No refresh outcome left.");
+      return outcome;
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "edit",
+      },
+    });
+
+    const notice = await screen.findByTestId("shared-view-excluded");
+    expect(notice.textContent).toContain(
+      "docs/oversized.md didn't update from this share because it is too large for dohc to track.",
+    );
+    expect(notice.textContent).toContain("Your copy is still on this machine.");
+    expect(notice.textContent).toContain("Make the file smaller, then refresh.");
+
+    await userEvent.click(screen.getByTestId("shared-view-refresh"));
+    await waitFor(() => {
+      expect(screen.queryByTestId("shared-view-excluded")).toBeNull();
+    });
   });
 
   // A refresh can record a refusal on an early page and then die on a later
@@ -3657,6 +3704,7 @@ describe("ui-state merge-on-load", () => {
       return {
         status: "unchanged" as const,
         changedPaths: 0,
+        excludedPaths: [],
         refusedOps: 1,
         refusedDetail: "the share granted version main, the relay offered version other",
       };
@@ -3721,6 +3769,7 @@ describe("ui-state merge-on-load", () => {
     bridge.refreshSharedView = vi.fn(async () => ({
       status: "unchanged" as const,
       changedPaths: 0,
+      excludedPaths: [],
       refusedOps: 0,
       refusedDetail: null,
     }));
@@ -10859,6 +10908,7 @@ describe("shared view versions surface", () => {
     bridge.refreshSharedView = vi.fn(async () => ({
       status: "updated" as const,
       changedPaths: 1,
+      excludedPaths: [],
       refusedOps: 0,
       refusedDetail: null,
     }));
