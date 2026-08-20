@@ -903,6 +903,13 @@ pub(crate) fn self_bound_log(
     Ok(())
 }
 
+// Below `threshold` (or nothing pending) means compaction cannot fire.
+// Shared by `maybe_compact`'s cheap pre-check and its authoritative check so
+// the two can never drift apart.
+fn below_threshold(pending: i64, threshold: u32) -> bool {
+    pending < i64::from(threshold) || pending <= 0
+}
+
 /// Fold the update log into a fresh full-state snapshot once the pending count
 /// reaches `threshold`, prune the folded updates and superseded nonzero
 /// snapshots, and advance `head_snapshot_seq`. Seq 0 remains as the permanent
@@ -919,23 +926,11 @@ pub fn maybe_compact(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<CompactOutcome>, CollabError> {
-    // Cheap pre-check: the marker row alone (one indexed SELECT, no blob
-    // fetch, no CRDT apply) tells us whether compaction can possibly fire.
-    // `self_bound_log` calls this after EVERY genuinely-new append, so on a
-    // large lineage the below-threshold case — the overwhelming common case —
-    // must not pay for a full `load_persisted` reconstruction just to learn
-    // the pending count it already has in the marker row. Single-writer-per-
-    // store means this count cannot move underneath us in-process; the
-    // authoritative check below still runs on `persisted.marker` before any
-    // bytes are written, so a stale read here only ever costs an extra (safe)
-    // full reconstruction, never a wrong compaction.
-    let cheap_pending = {
-        let marker = store
-            .read_with(|conn| query_marker(conn, key))?
-            .ok_or(CollabError::NoMarker)?;
-        marker.head_update_seq - marker.head_snapshot_seq
-    };
-    if cheap_pending < i64::from(threshold) || cheap_pending <= 0 {
+    // A stale cheap read only ever costs an extra full reconstruction below,
+    // never a wrong compaction.
+    let marker = read_marker(store, key)?.ok_or(CollabError::NoMarker)?;
+    let cheap_pending = marker.head_update_seq - marker.head_snapshot_seq;
+    if below_threshold(cheap_pending, threshold) {
         return Ok(TxnOutcome::Committed(CompactOutcome::Skipped {
             pending: cheap_pending,
         }));
@@ -946,7 +941,7 @@ pub fn maybe_compact(
         None => return Err(CollabError::NoMarker),
     };
     let pending = persisted.marker.head_update_seq - persisted.marker.head_snapshot_seq;
-    if pending < i64::from(threshold) || pending <= 0 {
+    if below_threshold(pending, threshold) {
         return Ok(TxnOutcome::Committed(CompactOutcome::Skipped { pending }));
     }
     if persisted.doc.has_missing_updates() {
