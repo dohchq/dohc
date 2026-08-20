@@ -280,7 +280,10 @@ export function webAppKey(pluginId: string, webAppId: string): string {
   return `${pluginId}\0${webAppId}`;
 }
 
-export function usePluginCatalog(workspaceId: string): PluginCatalog {
+export function usePluginCatalog(
+  workspaceId: string,
+  enabled: boolean = true,
+): PluginCatalog {
   const [load, setLoad] = useState<PluginLoadState>({ status: "loading" });
   const [busy, setBusy] = useState<Record<string, PluginAction | undefined>>({});
   const [openingWebApp, setOpeningWebApp] = useState<string | null>(null);
@@ -339,6 +342,10 @@ export function usePluginCatalog(workspaceId: string): PluginCatalog {
   }
 
   useEffect(() => {
+    if (!enabled) {
+      setLoad({ status: "loading" });
+      return;
+    }
     const epoch = workspaceEpoch.current;
     setBusy({});
     setErrors({});
@@ -377,7 +384,7 @@ export function usePluginCatalog(workspaceId: string): PluginCatalog {
     };
     // Each workspace gets one guarded list and one scoped status listener.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId]);
+  }, [workspaceId, enabled]);
 
   function replacePlugin(plugin: PluginStatusRecord) {
     setLoad((current) =>

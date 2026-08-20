@@ -33,6 +33,7 @@ import type {
   ListEngineMomentsResult,
   ListFileChatsResult,
   ListMyShareChangesResult,
+  ListPluginsResult,
   ListShareProposalsResult,
   ListWorkspaceVersionsResult,
   ReadShareProposalChangesResult,
@@ -552,7 +553,7 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
         };
       },
     ),
-    listPlugins: vi.fn(async () => ({
+    listPlugins: vi.fn(async (): Promise<ListPluginsResult> => ({
       ok: true as const,
       plugins: [] as PluginStatusRecord[],
     })),
@@ -1157,6 +1158,39 @@ describe("plugin activity-bar views", () => {
     }));
     return bridge;
   }
+
+  it("lists contributed views after the workspace opens", async () => {
+    const workspaceOpen = deferred<SyncStatusResult>();
+    let senderRegistered = false;
+    const bridge = withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)));
+    const listRegisteredWorkspacePlugins = bridge.listPlugins;
+    bridge.openWorkspace = vi.fn(() => workspaceOpen.promise);
+    bridge.listPlugins = vi.fn(async () =>
+      senderRegistered
+        ? listRegisteredWorkspacePlugins()
+        : {
+            ok: false as const,
+            error: {
+              stage: "state" as const,
+              code: "pipeline-unavailable",
+              message:
+                "The plugin request does not target the active workspace. Open the workspace and try again.",
+            },
+          },
+    );
+
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalled());
+    expect(screen.queryByTestId(`activity-${viewId}`)).toBeNull();
+
+    await act(async () => {
+      senderRegistered = true;
+      workspaceOpen.resolve(SYNC_STATUS);
+      await workspaceOpen.promise;
+    });
+
+    expect(await screen.findByTestId(`activity-${viewId}`)).toBeTruthy();
+  });
 
   it("opens a contributed view's panel in the side panel", async () => {
     const bridge = withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)));
