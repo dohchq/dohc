@@ -21,9 +21,11 @@ a files-only graph.
 port: rewrite the 886-line `GraphView` and its 333 lines of tests for an
 unbundled panel, then re-home about fifteen shell tests.** The force simulation
 needs no library, and every color token it draws with is already served to a
-panel. Both of graph's surfaces exist as placements, but a plugin cannot hold
-both at once, so the maximize gesture that promotes the rail view to a tab
-needs a small addition.
+panel. The L port must include a panel stylesheet for Graph's interaction and
+entrance rules. Both of graph's surfaces exist as placements, but a plugin
+cannot hold both at once, so the maximize gesture that promotes the rail view
+to a tab needs a small addition. The editor placement also adds a 40 px host
+title band; exact height parity costs one more S panel-layout change.
 
 Three things block a straight port. First, **no engine indexes links** — the
 desktop main process re-reads every markdown file on every graph call. A
@@ -42,9 +44,11 @@ The honest sizing: one **S** capability (`workspace.links`, serving the
 derivation core already runs for backlinks), one **S** renderer push (the
 rail's active document, on the channel that already pushes the theme), one **S**
 gesture (`ui.openPanel`, so the rail view can promote itself to a tab), and the
-**M** panel-subscription primitive the sites build already argued for. The chat
-mentions mode does not convert and should not; a plugin graph is a files-only
-graph. Removing the off-by-default toggle is still a user-visible subtraction.
+**M** panel-subscription primitive the sites build already argued for. Exact
+editor layout adds an optional **S** host change for a chrome-free editor panel;
+without it, the plugin keeps the extra title band. The chat mentions mode does
+not convert and should not; a plugin graph is a files-only graph. Removing the
+off-by-default toggle is still a user-visible subtraction.
 
 ## 1. Graph, end to end
 
@@ -285,9 +289,11 @@ wrong-shaped.
 | 6 | Rail view | HAS | P6 shipped with the sites conversion; the sites manifest declares `panels[].placement: "view"`, and the rail machinery is `PLUGIN_VIEW_ID_PREFIX`/`pluginViewId`/`parsePluginViewId` (`workbenchState.ts:26-49`). Cap is 4 view panels (`pluginManifestSchema.ts:151,419-429`). |
 | 7 | Singleton tab | HAS | `placement: "editor"` gives `dohc://plugin-panel/<pluginId>/<panelId>` (`workbenchState.ts:78,113-115`), collapsed by `canonicalSingletonEditorTabPath` (`:183-191`) — one tab per panel, which is what graph wants. P4 (`webApps`) is not required and would be wrong: a web app is a `WebContentsView` guest (`pluginManifestSchema.ts:158-171`) with no preload, Node, IPC, or workspace authority (`pluginWebAppGuest.ts:1-6`). |
 | 7b | **Both surfaces at once** | LACKS | The placements are exclusive by design: `z.enum(["editor","view"])` (`pluginManifestSchema.ts:120`) with the reason at `:115-119` — "a running panel is keyed by (workspace, plugin, panel) and starting a second one stops the first". Opening a view panel as a tab is refused (`pluginPanelRegistration.ts:242-249`). A plugin can declare **two** panels sharing one entry file, but nothing lets one open the other: graph's maximize button (`DesktopWorkspaceShell.tsx:5195-5205`, testid `graph-open-tab`) has no SDK equivalent. `ui.open` takes a workspace path, `ui.openWebApp` takes a web app. |
+| 7c | Editor panel chrome | AWKWARD | Every `placement: "editor"` panel gets a host header with the panel title and plugin id before the iframe (`PluginPanelPage.tsx:249-260`). Graph already draws its own 40 px count-and-refresh header (`GraphView.tsx:754-801`), so the converted tab gains a second title band and loses 40 px of map height. Exact parity needs an **S** panel-layout change, such as an explicit chrome-free editor-panel mode; otherwise this visible change is part of the conversion. The remedy is S: one explicit layout choice, its registration plumbing, a conditional header, and host tests. |
 | 8 | Open a file | HAS | `ui.open` is routed for panels (`pluginSdkHost.ts:230-239`) and returns `{ target }`, a workspace path (`workspaceSdkHost.ts:343-349`). |
 | 8b | Open a file **at a heading** | LACKS | Graph opens with an anchor (`GraphView.tsx:474`, shell `openPathWithHeading`). The panel page reads only `target` and calls `onOpenPath(target)` with one argument (`PluginPanelPage.tsx:166-169`); the host's `position` passthrough (`workspaceSdkHost.ts:347`) is dropped. Moot if row 13 stays out, because heading nodes come from the same overlay. |
-| 9 | dohc-native look | AWKWARD | `ui.theme` plus the theme push (`PluginPanelPage.tsx:137-147,226-242`) carries all 14 color tokens Graph draws with, so both edge kinds keep their colors. It also carries two font-family stacks, but not the font files. A panel on its own origin cannot load dohc's bundled `InterVariable` or `IBM Plex Mono`, so the stacks fall through to system families (`renderer/tokens.ts:103-115`). Typography and SVG label metrics will differ. |
+| 9 | dohc-native look and interaction | AWKWARD | `ui.theme` plus the theme push (`PluginPanelPage.tsx:137-147,226-242`) carries all 14 color tokens Graph draws with. Base paint can use inline styles, but inline styles cannot express the `:active`, `:hover`, or `:focus-visible` descendant selectors or either `@keyframes` rule (`styles.css:816-900`). Graph nodes also suppress the normal outline (`GraphView.tsx:573-578`), so dropping those rules removes keyboard-focus visibility, hover feedback, and node and edge entrance animations. The L port must ship a panel stylesheet with those rules. The theme carries two font-family stacks but not the font files, so a panel origin falls through to system families (`renderer/tokens.ts:103-115`). Typography and SVG label metrics will still differ. |
+| 9b | Native editor context menu | LACKS | The built-in page graph sits under the editor wrapper. Its right-clicks bubble to `onContextMenu`, which calls `showWorkbenchMenu("editor", ...)` (`DesktopWorkspaceShell.tsx:5384-5390`). A right-click inside `PluginPanelPage`'s iframe stays in the frame document, and the panel page has no route that forwards it (`PluginPanelPage.tsx:277-285`). The converted tab loses the native editor menu. |
 | 10 | Rebuild when files change | LACKS | `files.watch` refused on the panel path (`pluginSdkHost.ts:213-219`); tracked as open issue #838, which records zero product consumers today. Partial mitigation: `files.read` returns a `contentHash` (`workspaceAssets.ts:129-131`, passed through at `workspaceSdkHost.ts:271-277`), so a panel can poll for change without re-parsing. It is still polling. Sites polls on `visibilitychange` (`plugins/sites/ui/index.js:230-232`). |
 | 11 | Rebuild when an edit settles | LACKS | Today's key folds in `latestMomentOrder` (`DesktopWorkspaceShell.tsx:4799-4801`). No SDK surfaces moments. A file-level watch would not be equivalent: a settle rewrites the artifact, so it may arrive as a file event, but nothing in the SDK says so. |
 | 12 | Know the active document | LACKS | This is rail behavior: `activeDocumentPath` drives ordering, centring, and the ring layout there (`DesktopWorkspaceShell.tsx:5222`; `GraphView.tsx:96-102,149-160,230-250`). The tab received `null` until [#842](https://github.com/dohc-ai/dohc/issues/842) was fixed (PR #844); both mounts now pass `activeDocumentPath`. No SDK member carries the rail's active path. |
@@ -355,11 +361,16 @@ either way. Only the force-simulation arithmetic ports unchanged. The SVG uses
 Tailwind utilities such as `fill-panel`, `stroke-line`, `text-ink`, and
 `stroke-match/70`, plus four bespoke classes: `dohc-graph-edge`,
 `dohc-graph-node`, `dohc-graph-node-halo`, and `dohc-graph-node-dot`
-(`GraphView.tsx:518-643`, `styles.css:816-884`). None reaches a panel iframe.
+(`GraphView.tsx:518-643`, `styles.css:816-900`). None reaches a panel iframe.
 The 14-color theme payload covers the palette (`renderer/tokens.ts:86-101`),
-but every SVG class must become inline styles and CSS-variable references. The
-two font tokens name stacks, not loadable assets. On a panel origin they fall
-through to system families (`renderer/tokens.ts:103-115`).
+and base SVG declarations can become inline styles and CSS-variable references.
+The `:hover` and `:focus-visible` descendant selectors and the node and edge
+`@keyframes` cannot. Since each node also has `outline-none`
+(`GraphView.tsx:573-578`), the L port must include a panel stylesheet for those
+rules. Omitting it removes keyboard-focus visibility, hover feedback, and both
+entrance animations. The two font tokens name stacks, not loadable assets. On
+a panel origin they fall through to system families
+(`renderer/tokens.ts:103-115`).
 
 **Deleted from core**
 
@@ -416,6 +427,12 @@ suites touch graph as well (`e2e/renderer-stability.spec.ts:88`,
 `e2e/ui-audit-screenshots.spec.ts:213-216`), and
 `bridgeContract.test.ts:446-491` covers the wire contract that dies.
 
+One source-contract test also breaks when the handler dies:
+
+| Test | Conversion action |
+| --- | --- |
+| `main.sharedChannelSyncBound.test.ts:174-189` | Its aggregate-read loop includes `WorkspaceGraphResult`, then uses `sourceBetween` to find `return WorkspaceGraphResult.parse({` and assert the shared-channel partiality field (`:177-187`). Deleting the chat branch removes that response. Remove the graph case with the overlay, or replace it with coverage for any new host route that still exposes graph shared-channel partiality. |
+
 ## 5. Conversion sketch, and what it loses
 
 A `graph` plugin on today's SDK plus G1–G4:
@@ -428,14 +445,16 @@ A `graph` plugin on today's SDK plus G1–G4:
   introduce a simulation-state split: today's rail and editor are separate
   `GraphView` mounts (`DesktopWorkspaceShell.tsx:5218-5229,5400-5411`), and
   each mount's `GraphMap` owns its own `useForceGraph` state
-  (`GraphView.tsx:199-218,441-460`).
+  (`GraphView.tsx:199-218,441-460`). The editor panel also receives the host's
+  title-and-plugin-id header before its iframe (`PluginPanelPage.tsx:249-260`),
+  above Graph's own count-and-refresh header (`GraphView.tsx:754-801`).
 - **Panel code**: on open, `workspace.links` (G1) returns the full bounded
   `WorkspaceGraph`. The panel keeps the unresolved, omitted, and truncated
-  notices. The force-simulation arithmetic ports, but every SVG utility and
-  bespoke class is rewritten as inline styles and theme-variable references.
-  G2 supplies the rail's active document for centring. G3 replaces the refresh
-  key. `ui.open` handles node clicks. `ui.theme` plus the theme push supplies
-  the palette.
+  notices. The force-simulation arithmetic ports. Base SVG paint becomes inline
+  styles and theme-variable references, while a panel stylesheet preserves the
+  hover, focus-visible, and entrance-animation rules. G2 supplies the rail's
+  active document for centring. G3 replaces the refresh key. `ui.open` handles
+  node clicks. `ui.theme` plus the theme push supplies the palette.
 - **Without G1**: `files.list` then `files.read` per markdown file. Before any
   read or path indexing, the panel must reproduce
   `classifyEngineFilePathForRead` or it leaks markdown-named secrets. The
@@ -460,7 +479,10 @@ A `graph` plugin on today's SDK plus G1–G4:
   `null` until the [#842](https://github.com/dohc-ai/dohc/issues/842) fix
   (PR #844); both mounts now carry the active document.
 - **The tests are rewritten, not moved.** No bundler in a panel, and about
-  fifteen shell tests lose the Graph UI they drive through.
+  fifteen shell tests lose the Graph UI they drive through. The aggregate-read
+  loop in `main.sharedChannelSyncBound.test.ts:177-187` also loses its
+  `WorkspaceGraphResult.parse` source target and needs the remove-or-replace
+  action in section 4.
 - **The marketing site loses its graph panel** or keeps a forked copy
   (`apps/site/src/DemoSidebar.tsx:9,223-228`).
 - **Typography is approximate.** The theme payload carries dohc's font stacks,
@@ -468,9 +490,15 @@ A `graph` plugin on today's SDK plus G1–G4:
   fonts (`renderer/tokens.ts:103-115`). SVG node-label glyph widths and
   baselines change, so label fit and alignment can differ from the built-in
   graph.
-- **No right-click menu worth having.** Graph does not use one today, so
-  nothing is lost — but note a panel gets no native context menu, and a
-  DOM one is clipped to the iframe rectangle, which in the rail is narrow.
+- **The editor tab gains a second title band.** Every editor panel gets the
+  host's panel-title and plugin-id header (`PluginPanelPage.tsx:249-260`) above
+  Graph's own count-and-refresh header. The map loses 40 px of height. Removing
+  the band needs the S panel-layout change in row 7c; G1-G4 do not cover it.
+- **The native editor context menu is gone.** Right-clicks on the built-in page
+  graph bubble to the editor wrapper and call `showWorkbenchMenu("editor", ...)`
+  (`DesktopWorkspaceShell.tsx:5384-5390`). Events inside the panel iframe do not
+  reach that wrapper, and no panel host route replaces them. The converted tab
+  loses the native edit-role menu.
 - **Shared views and share mounts.** Graph reads mounted shares today
   (`workspaceGraph.ts:869-871`). Plugin surfaces still refuse a non-writable
   workspace, so P7 remains the open item the sites spike recorded; graph
@@ -496,8 +524,10 @@ A `graph` plugin on today's SDK plus G1–G4:
 
 **Convert with four sized additions — G1 (S), G2 (S), G4 (S), G3 (M) — plus an
 L port: rewrite the 886-line `GraphView` and its 333 lines of tests for an
-unbundled panel, then re-home about fifteen shell tests. Accept losing the chat
-mentions mode.** Ice's roadmap assumption survives, but its three supporting
+unbundled panel, then re-home about fifteen shell tests and remove or replace
+one aggregate-read source assertion. Accept losing the chat mentions mode and
+native editor context menu. Accept the extra editor title band or add an S host
+layout change.** Ice's roadmap assumption survives, but its three supporting
 claims do not:
 
 1. **The engine does not index links.** Graph is not a thin view over indexed
@@ -517,20 +547,24 @@ total, though it names the mechanism correctly. Graph spawns nothing and embeds
 nothing, so it needs no P3, no P4, and no P8, and that is why every addition
 here is S except one.
 
-- **Recommended G1-G4 design:** Graph loses the chat-mentions mode and exact
-  typography. Moment-level refresh parity still needs measurement. G3 keeps
-  push refresh, and G4 keeps the maximize gesture.
-- **Today's SDK baseline:** Graph loses those two features plus push refresh
-  and the maximize gesture because panels lack subscriptions and a way to open
-  another panel.
+- **Recommended G1-G4 design:** Graph loses the chat-mentions mode, exact
+  typography, and the native editor context menu. The editor tab gains a 40 px
+  host title band unless an S panel-layout change removes it. The L port's
+  panel stylesheet preserves keyboard-focus visibility, hover feedback, and
+  entrance animations. Moment-level refresh parity still needs measurement.
+  G3 keeps push refresh, and G4 keeps the maximize gesture.
+- **Today's SDK baseline:** Graph loses those features or changes plus push
+  refresh and the maximize gesture because panels lack subscriptions and a way
+  to open another panel.
 
 Sites lost shared-view previews and an embedded SDK. The recommended Graph list
 is not shorter. It is only cheaper to build.
 
 Two costs sit outside the primitives and outside the plugin: `apps/site` breaks
-until someone decides what the demo shows, and about fifteen shell tests lose
-the Graph UI they drive through. Neither is hard. Both are invisible until you
-look, which is why they are decisions 3 and 4 below.
+until someone decides what the demo shows, and the test suite loses about
+fifteen shell drivers plus one aggregate-read source target. Neither is hard.
+Both are invisible until you look, which is why they are decisions 3 and 4
+below.
 
 Sequencing: G1, G2, and G4 are each small and useful beyond graph — a links
 capability serves any plugin that reasons about structure, an active-document
@@ -552,9 +586,13 @@ gets worse the longer it exists.
    directly (`apps/site/src/DemoSidebar.tsx:9`), so the options are a forked
    copy, no graph in the demo, or a demo that runs real plugins.
 4. Who re-homes the fifteen shell tests that drive through the Graph UI
-   (`DesktopWorkspaceShell.test.tsx:2602-2605,4059-4966`) before the view goes?
+   (`DesktopWorkspaceShell.test.tsx:2602-2605,4059-4966`) and removes or
+   replaces the `WorkspaceGraphResult` aggregate-read assertion before the view
+   goes?
 5. Two panels plus G4, or one rail-only panel and no full-page graph? The
    second is free and loses the tab.
 6. Does anyone measure the panel bridge round trip before this is scheduled?
    Nothing in the repo measures it, and the choice between G1 and 2,000
    `files.read` calls turns on that number.
+7. Does the editor panel keep its extra 40 px host title band? Accept the lost
+   map height, or budget the S panel-layout change in row 7c.
