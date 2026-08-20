@@ -1084,8 +1084,9 @@ describe("main-process chat authorization", () => {
     // level; seeing and taking back what was already sent need membership
     // only, because a reverse path a downgrade removes is not one. Both rules
     // are driven behaviourally in `workspaces/shareProposals.test.ts`.
+    const submit = handlerSource("submitShareChanges");
     expect(
-      handlerSource("submitShareChanges"),
+      submit,
       "MUTATION: an ungated submit sends a view recipient's edits to the granter",
     ).toContain("requireShareViewProposalScope,");
     for (const channel of ["listMyShareChanges", "withdrawShareChanges"]) {
@@ -1093,8 +1094,19 @@ describe("main-process chat authorization", () => {
     }
     // The grant that leaves this machine is the PINNED one the scope resolved,
     // never a selector the renderer stated.
-    expect(handlerSource("submitShareChanges")).toContain(
+    expect(submit).toContain(
       "grantedSelector: scope.grant,",
     );
+    expect(
+      submit,
+      "MUTATION: submitting without a final disk capture drops edits made after the last refresh",
+    ).toContain("await captureStandaloneShareViewDivergence({");
+    expect(submit.indexOf("await captureStandaloneShareViewDivergence({")).toBeLessThan(
+      submit.indexOf(").submitShareProposal({"),
+    );
+    expect(submit).toContain(
+      "pinnedSelector: isRecordValue(scope.workspace.shareView)",
+    );
+    expect(submit).toContain("? scope.workspace.shareView.grantedSelector");
   });
 });

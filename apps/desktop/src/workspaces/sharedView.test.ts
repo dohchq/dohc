@@ -14,6 +14,9 @@ import {
   refreshSharedViewOnce as refreshSharedViewOnceWithPull,
   shareViewIdentitySelector,
 } from "./sharedView";
+import { MAX_ENGINE_CAPTURE_TEXT_BYTES } from "./workspaceEngineCapture";
+import { routeWorkspaceTextWrite } from "./workspaceTextWrite";
+import { withOrderedWorkspaceTextPath } from "./workspaceAssets";
 import type { ShareViewRefusal } from "@dohc/workspace-contracts/relay";
 import { createTestScratch } from "./testTemp";
 
@@ -256,7 +259,9 @@ describe("shared view refresh", () => {
         pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
         recordRefusals: async () => undefined,
       });
-      expect(refreshed.status).toBe("unchanged");
+      expect(refreshed.status).toBe("updated");
+      expect(refreshed.changedPaths).toBe(1);
+      expect(refreshed.excludedPaths).toEqual([]);
 
       const after = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
       const captured = after.moments.find((moment) => !beforeIds.has(moment.id));
@@ -288,6 +293,162 @@ describe("shared view refresh", () => {
     }
   });
 
+  it("orders capture before an in-app save on the same path", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/ordered.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "granter body");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), "outside editor", "utf8");
+    const barrierPath = "docs/barrier.md";
+    await writeFile(join(rootDir, barrierPath), "barrier", "utf8");
+
+    const store = harness.openStore(target);
+    let markCaptureWriteStarted!: () => void;
+    let releaseCaptureWrite!: () => void;
+    const captureWriteStarted = new Promise<void>((resolve) => {
+      markCaptureWriteStarted = resolve;
+    });
+    const captureWriteHeld = new Promise<void>((resolve) => {
+      releaseCaptureWrite = resolve;
+    });
+    let saveWriteStarted = false;
+    const captureStore: typeof store = {
+      ...store,
+      async writeTextFile(input) {
+        markCaptureWriteStarted();
+        await captureWriteHeld;
+        return await store.writeTextFile(input);
+      },
+    };
+    const saveStore: typeof store = {
+      ...store,
+      async writeTextFile(input) {
+        saveWriteStarted = true;
+        return await store.writeTextFile(input);
+      },
+    };
+
+    try {
+      const capturing = captureSharedViewLocalDivergence(
+        rootDir,
+        WORKSPACE,
+        captureStore,
+      );
+      await captureWriteStarted;
+      const saving = routeWorkspaceTextWrite({
+        workspaceId: WORKSPACE,
+        rootPath: rootDir,
+        relativePath: path,
+        text: "saved in app",
+        expectedContentHash: sha256("outside editor"),
+        shareView: { access: "edit", ended: false },
+        shareViewStore: () => saveStore,
+      });
+      await withOrderedWorkspaceTextPath(rootDir, barrierPath, async () => undefined);
+      const saveQueuedBehindCapture = !saveWriteStarted;
+
+      releaseCaptureWrite();
+      await Promise.all([capturing, saving]);
+
+      expect(saveQueuedBehindCapture).toBe(true);
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      await expect(
+        store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path }),
+      ).resolves.toMatchObject({ text: "saved in app" });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("saved in app");
+    } finally {
+      releaseCaptureWrite();
+      await store.close();
+    }
+  });
+
+  it("leaves unjournalable local content in place when the pull changes its path", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/oversized.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "granter body");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    const oversized = "o".repeat(MAX_ENGINE_CAPTURE_TEXT_BYTES + 1);
+    await writeFile(join(rootDir, path), oversized, "utf8");
+
+    const store = harness.openStore(target);
+    try {
+      const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+      relay.addWrite(path, "new granter body");
+      const refreshed = await refreshStandaloneShareViewOnceWithPull({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: harness.relay,
+        shareId: SHARE_ID,
+        store,
+        pull: harness.pullFor(target),
+        pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+        recordRefusals: async () => undefined,
+      });
+
+      expect(refreshed.excludedPaths).toEqual([path]);
+      expect(await readFile(join(rootDir, path), "utf8")).toBe(oversized);
+      const after = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+      expect(after.moments).toHaveLength(before.moments.length + 1);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("re-materializes a store head whose disk projection is one write behind", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/lagging.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "moment one");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    const store = harness.openStore(target);
+    try {
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      await store.writeTextFile({
+        workspaceId: WORKSPACE,
+        versionId: main.id,
+        path,
+        text: "moment two",
+        metadata: { origin: "sync" },
+      });
+      const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
+      ).resolves.toEqual({ capturedPaths: 0, unjournalablePaths: [] });
+      await expect(
+        store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path }),
+      ).resolves.toMatchObject({ text: "moment two" });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("moment two");
+      const after = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+      expect(after.moments.map((moment) => moment.id)).toEqual(
+        before.moments.map((moment) => moment.id),
+      );
+    } finally {
+      await store.close();
+    }
+  });
+
   it("captures an out-of-app delete as a local-file moment", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
@@ -307,7 +468,7 @@ describe("shared view refresh", () => {
       const beforeIds = new Set(before.moments.map((moment) => moment.id));
       await expect(
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
-      ).resolves.toEqual({ capturedPaths: 1 });
+      ).resolves.toEqual({ capturedPaths: 1, unjournalablePaths: [] });
 
       const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
       await expect(
@@ -347,7 +508,7 @@ describe("shared view refresh", () => {
       const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
       await expect(
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
-      ).resolves.toEqual({ capturedPaths: 0 });
+      ).resolves.toEqual({ capturedPaths: 0, unjournalablePaths: [] });
       const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
       await expect(
         store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path }),
@@ -377,7 +538,7 @@ describe("shared view refresh", () => {
       const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
       await expect(
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
-      ).resolves.toEqual({ capturedPaths: 0 });
+      ).resolves.toEqual({ capturedPaths: 0, unjournalablePaths: [] });
       const after = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
       expect(after.moments.map((moment) => moment.id)).toEqual(
         before.moments.map((moment) => moment.id),
@@ -407,7 +568,7 @@ describe("shared view refresh", () => {
       const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
       await expect(
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
-      ).resolves.toEqual({ capturedPaths: 0 });
+      ).resolves.toEqual({ capturedPaths: 0, unjournalablePaths: [] });
       const after = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
       expect(after.moments.map((moment) => moment.id)).toEqual(
         before.moments.map((moment) => moment.id),

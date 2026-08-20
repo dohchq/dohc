@@ -18,6 +18,7 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
+import { withOrderedWorkspaceTextPath } from "./workspaceAssets";
 import { readDiskContent, type DiskTextState } from "./workspaceEngineCapture";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
@@ -31,6 +32,10 @@ export type SharedViewRefreshStatus = "updated" | "unchanged" | "ended";
 export interface RefreshSharedViewOutcome {
   status: SharedViewRefreshStatus;
   changedPaths: number;
+  // Standalone refreshes always populate this. Direct refreshes do when the
+  // caller supplies an exclusion set. Mount refreshes predate capture and
+  // keep their existing outcome shape.
+  excludedPaths?: string[];
   // Ops the pull refused. The pull skips them and keeps going, so without
   // this the view silently stops carrying part of what the granter shares.
   refusedOps: number;
@@ -41,6 +46,7 @@ export interface RefreshSharedViewOutcome {
 
 export interface CaptureSharedViewLocalDivergenceOutcome {
   capturedPaths: number;
+  unjournalablePaths: string[];
 }
 
 /**
@@ -342,7 +348,7 @@ export async function captureSharedViewLocalDivergence(
   store: CaptureVersionedTextStore,
 ): Promise<CaptureSharedViewLocalDivergenceOutcome> {
   const realRoot = await realpath(rootDir).catch(() => null);
-  if (realRoot === null) return { capturedPaths: 0 };
+  if (realRoot === null) return { capturedPaths: 0, unjournalablePaths: [] };
 
   const main = await store.ensureMainVersion({ workspaceId });
   if (!store.listTextFileMetadata) {
@@ -355,36 +361,74 @@ export async function captureSharedViewLocalDivergence(
   const diskPaths = await captureDiskPaths(realRoot);
 
   let capturedPaths = 0;
+  const unjournalablePaths: string[] = [];
   for (const entry of tracked) {
     if (classifyEngineFilePath(entry.path).kind === "secret") continue;
-    if (!diskPaths.has(entry.path)) {
-      if (!(await pathConfirmedAbsentOnDisk(realRoot, entry.path))) continue;
-      await store.deleteTextFile({
-        workspaceId,
-        versionId: main.id,
-        path: entry.path,
-        metadata: { origin: "local-file" },
-      });
-      capturedPaths += 1;
+    if (
+      !diskPaths.has(entry.path) &&
+      !(await pathConfirmedAbsentOnDisk(realRoot, entry.path))
+    ) {
       continue;
     }
+    const result = await withOrderedWorkspaceTextPath(
+      rootDir,
+      entry.path,
+      async (_readCurrent) => {
+        if (!diskPaths.has(entry.path)) {
+          if (!(await pathConfirmedAbsentOnDisk(realRoot, entry.path))) {
+            return "unchanged" as const;
+          }
+          await store.deleteTextFile({
+            workspaceId,
+            versionId: main.id,
+            path: entry.path,
+            metadata: { origin: "local-file" },
+          });
+          return "captured" as const;
+        }
 
-    const disk = await readDiskContent(resolve(realRoot, entry.path));
-    if (disk.kind === "absent") {
-      if (await pathConfirmedAbsentOnDisk(realRoot, entry.path)) {
-        await store.deleteTextFile({
+        const disk = await readDiskContent(resolve(realRoot, entry.path));
+        if (disk.kind === "absent") {
+          if (!(await pathConfirmedAbsentOnDisk(realRoot, entry.path))) {
+            return "unchanged" as const;
+          }
+          await store.deleteTextFile({
+            workspaceId,
+            versionId: main.id,
+            path: entry.path,
+            metadata: { origin: "local-file" },
+          });
+          return "captured" as const;
+        }
+        if (disk.kind === "untracked-content") {
+          return "unjournalable" as const;
+        }
+        if (disk.kind !== "text" && disk.kind !== "binary") {
+          return "unchanged" as const;
+        }
+
+        const changed =
+          entry.contentKind !== disk.kind || entry.sha256 !== disk.sha256;
+        if (!changed) return "unchanged" as const;
+
+        const moment = await store.getMoment({
           workspaceId,
-          versionId: main.id,
-          path: entry.path,
-          metadata: { origin: "local-file" },
+          momentId: entry.latestMomentId,
         });
-        capturedPaths += 1;
-      }
-      continue;
-    }
-    if (disk.kind === "text") {
-      const changed = entry.contentKind !== "text" || entry.sha256 !== disk.sha256;
-      if (changed) {
+        if (
+          moment?.payload.before &&
+          moment.payload.before.contentKind === disk.kind &&
+          moment.payload.before.sha256 === disk.sha256
+        ) {
+          await materializeSharedViewPaths(
+            rootDir,
+            workspaceId,
+            [{ path: entry.path, operation: "write", contentKind: entry.contentKind }],
+            store,
+          );
+          return "unchanged" as const;
+        }
+
         await writeDiskContentToStore({
           store,
           workspaceId,
@@ -392,24 +436,48 @@ export async function captureSharedViewLocalDivergence(
           path: entry.path,
           content: disk,
         });
-        capturedPaths += 1;
+        return "captured" as const;
+      },
+    );
+    if (typeof result === "object" && "status" in result) {
+      if (!diskPaths.has(entry.path)) {
+        if (await pathConfirmedAbsentOnDisk(realRoot, entry.path)) {
+          await store.deleteTextFile({
+            workspaceId,
+            versionId: main.id,
+            path: entry.path,
+            metadata: { origin: "local-file" },
+          });
+          capturedPaths += 1;
+        }
+        continue;
       }
-    } else if (
-      disk.kind === "binary" &&
-      (entry.contentKind !== "binary" || entry.sha256 !== disk.sha256)
-    ) {
-      await writeDiskContentToStore({
-        store,
-        workspaceId,
-        versionId: main.id,
-        path: entry.path,
-        content: disk,
-      });
-      capturedPaths += 1;
+      throw new Error("unreachable: capture never reads through the ordered path");
     }
+    if (result === "captured") capturedPaths += 1;
+    if (result === "unjournalable") unjournalablePaths.push(entry.path);
   }
 
-  return { capturedPaths };
+  return { capturedPaths, unjournalablePaths };
+}
+
+export async function captureStandaloneShareViewDivergence(input: {
+  rootDir: string;
+  workspaceId: string;
+  store: CaptureVersionedTextStore;
+  pinnedSelector: unknown;
+  shareId: string;
+}): Promise<CaptureSharedViewLocalDivergenceOutcome> {
+  const grantedSelector = recordedShareSelector(input.pinnedSelector);
+  if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
+  if (!shareViewTakesLocalWrites({ access: grantedSelector.access, ended: false })) {
+    return { capturedPaths: 0, unjournalablePaths: [] };
+  }
+  return captureSharedViewLocalDivergence(
+    input.rootDir,
+    input.workspaceId,
+    input.store,
+  );
 }
 
 // Verify the materialized projection against the local store and repair any
@@ -530,6 +598,7 @@ export async function refreshSharedViewOnce(input: {
   // past it is committed, and idempotent by origin coordinate, because a
   // re-fetched page repeats refusals the record already holds.
   recordRefusals: (refusals: ShareViewRefusal[]) => Promise<void>;
+  excludeFromMaterialization?: ReadonlySet<string>;
 }): Promise<RefreshSharedViewOutcome> {
   const grantedSelector = recordedShareSelector(input.pinnedSelector);
   if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
@@ -548,16 +617,24 @@ export async function refreshSharedViewOnce(input: {
       return {
         status: "ended",
         changedPaths: 0,
+        ...(input.excludeFromMaterialization !== undefined
+          ? { excludedPaths: [] }
+          : {}),
         refusedOps: 0,
         refusedDetail: null,
       };
     }
     throw error;
   }
+  const excludedPaths = pull.changedPaths
+    .filter((change) => input.excludeFromMaterialization?.has(change.path))
+    .map((change) => change.path);
   await materializeSharedViewPaths(
     input.rootDir,
     input.workspaceId,
-    pull.changedPaths,
+    pull.changedPaths.filter(
+      (change) => !input.excludeFromMaterialization?.has(change.path),
+    ),
     input.store,
   );
   await pull.commitCursor();
@@ -573,6 +650,9 @@ export async function refreshSharedViewOnce(input: {
   return {
     status: pull.changedPaths.length > 0 ? "updated" : "unchanged",
     changedPaths: pull.changedPaths.length,
+    ...(input.excludeFromMaterialization !== undefined
+      ? { excludedPaths }
+      : {}),
     refusedOps: pull.refusalCount,
     refusedDetail: pull.refusals[0]?.detail ?? null,
   };
@@ -581,14 +661,17 @@ export async function refreshSharedViewOnce(input: {
 export async function refreshStandaloneShareViewOnce(
   input: Parameters<typeof refreshSharedViewOnce>[0],
 ): Promise<RefreshSharedViewOutcome> {
-  const grantedSelector = recordedShareSelector(input.pinnedSelector);
-  if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
-  if (shareViewTakesLocalWrites({ access: grantedSelector.access, ended: false })) {
-    await captureSharedViewLocalDivergence(
-      input.rootDir,
-      input.workspaceId,
-      input.store,
-    );
-  }
-  return refreshSharedViewOnce(input);
+  const captured = await captureStandaloneShareViewDivergence(input);
+  const outcome = await refreshSharedViewOnce({
+    ...input,
+    excludeFromMaterialization: new Set(captured.unjournalablePaths),
+  });
+  return {
+    ...outcome,
+    status:
+      outcome.status === "unchanged" && captured.capturedPaths > 0
+        ? "updated"
+        : outcome.status,
+    changedPaths: outcome.changedPaths + captured.capturedPaths,
+  };
 }

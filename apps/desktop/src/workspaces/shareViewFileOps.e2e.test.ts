@@ -235,7 +235,7 @@ describe("share-view file operations through the real store", () => {
           view.workspaceId,
           view.store,
         ),
-      ).resolves.toEqual({ capturedPaths: 1 });
+      ).resolves.toEqual({ capturedPaths: 1, unjournalablePaths: [] });
       const afterOutside = replicationLogRows(view.rootPath);
       const outsideRows = afterOutside - beforeOutside;
       expect(outsideRows).toBeGreaterThan(0);

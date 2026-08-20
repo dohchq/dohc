@@ -476,6 +476,7 @@ import {
   relayUrlsMatch,
 } from "./workspaces/syncCode";
 import {
+  captureStandaloneShareViewDivergence,
   SharePinInvalidError,
   recordedShareSelector,
   refreshStandaloneShareViewOnce,
@@ -5850,6 +5851,16 @@ function registerIpcHandlers(
       input.workspaceId,
       requireShareViewProposalScope,
     );
+    const store = sharedViewStoreFor(scope.workspace);
+    await captureStandaloneShareViewDivergence({
+      rootDir: scope.workspace.rootPath,
+      workspaceId: scope.workspace.workspaceId,
+      store,
+      pinnedSelector: isRecordValue(scope.workspace.shareView)
+        ? scope.workspace.shareView.grantedSelector
+        : null,
+      shareId: scope.shareId,
+    });
     // The engine owns the submit: it reads this replica's own journal, so it
     // has to be the process holding the store.
     const result = await relayClientForWorkspace({
