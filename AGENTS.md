@@ -12,21 +12,15 @@ We are currently building the MVP for dohc and haven't launched with users yet.
 
 ## How to use these instructions
 
-- If a rule here fights the task in front of you, say so loudly and get a
-  human sign-off before breaking it.
-- The rest of this document is meant to help you navigate the codebase and
-  make changes effectively. Think of these instructions less as "hard rules"
-  and more as "good defaults." The developer's preferences can override
-  anything here.
+- If a rule here fights the task in front of you, say so loudly and get a human sign-off before breaking it.
+- The rest of this document is meant to help you navigate the codebase and make changes effectively. Think of these instructions less as "hard rules" and more as "good defaults." The developer's preferences can override anything here.
 
 ## Do not preserve backward compatibility
 
-We have no users yet. Optimize for the best current design, not compatibility
-with earlier versions.
+We have no users yet. Optimize for the best current design, not compatibility with earlier versions.
 
 - Replace old contracts instead of layering new behavior over them.
-- Remove compatibility shims, deprecated aliases, dual formats, fallbacks, and
-  dead paths.
+- Remove compatibility shims, deprecated aliases, dual formats, fallbacks, and dead paths.
 - Update all internal callers, tests, fixtures, and docs in the same change.
 - Add a migration path only when the user explicitly asks for one.
 
@@ -54,24 +48,15 @@ What we're doing here is fundamentally different so treat it that way. Being tha
 
 ### Measure limits that reject work
 
-Before adding a limit that rejects otherwise valid work, measure representative
-healthy work. Record the evidence in a focused test, benchmark, or decision
-document. Set the limit beyond the measured healthy range.
+Before adding a limit that rejects otherwise valid work, measure representative healthy work. Record the evidence in a focused test, benchmark, or decision document. Set the limit beyond the measured healthy range.
 
-This rule does not cover routing thresholds, backpressure, protocol versions,
-or fixed schema values. Justify those from their actual contract. If healthy
-work reaches a rejection limit, measure again and revisit it.
+This rule does not cover routing thresholds, backpressure, protocol versions, or fixed schema values. Justify those from their actual contract. If healthy work reaches a rejection limit, measure again and revisit it.
 
 ### Show agents the limits they hit
 
-Developers will not always read the code. Their agents will read the errors.
-A developer- or agent-facing rejection must name the constraint, configured
-limit, and unit. When available, include the requested or observed usage.
+Developers will not always read the code. Their agents will read the errors. A developer- or agent-facing rejection must name the constraint, configured limit, and unit. When available, include the requested or observed usage.
 
-A backpressure error must name the saturated resource and tell the caller how
-to retry or degrade. Report failures during a build or check when possible.
-Otherwise, use the surface's existing structured error. For user-facing copy,
-follow [`docs/brand/copy.md`](docs/brand/copy.md).
+A backpressure error must name the saturated resource and tell the caller how to retry or degrade. Report failures during a build or check when possible. Otherwise, use the surface's existing structured error. For user-facing copy, follow [`docs/brand/copy.md`](docs/brand/copy.md).
 
 ### Let their agents shape the workspace they need
 
@@ -85,34 +70,19 @@ Should dohc ship a hardcoded CRM for every possible team? Probably not. A user's
 
 ### Fight for the "obvious" solution
 
-Measure twice, cut once. Understand the problem fully before building.
-We should avoid being clever and doing things because it feels smart. We want
-everything we build to be so obvious it feels kind of stupid.
-Cleverness fills the gaps when we have not done that work. The biggest
-simplicity win is refusing to solve problems we do not have.
+Measure twice, cut once. Understand the problem fully before building. We should avoid being clever and doing things because it feels smart. We want everything we build to be so obvious it feels kind of stupid. Cleverness fills the gaps when we have not done that work. The biggest simplicity win is refusing to solve problems we do not have.
 
-Good code is the simplest thing that delivers the required behavior and
-performance: nothing traded away, nothing bolted on. An obvious solution can
-have more parts. Among equally obvious designs, choose the simplest. Record
-material tradeoffs in the PR or a decision document.
+Good code is the simplest thing that delivers the required behavior and performance: nothing traded away, nothing bolted on. An obvious solution can have more parts. Among equally obvious designs, choose the simplest. Record material tradeoffs in the PR or a decision document.
 
-Push back when you see a more obvious way. Obvious solutions are the defaults
-that agents and the next reader expect. Ask another reader when uncertain.
+Push back when you see a more obvious way. Obvious solutions are the defaults that agents and the next reader expect. Ask another reader when uncertain.
 
 ### Ambitious ideas, simple systems
 
-I like ambitious ideas, simple systems, and software that feels obvious. This
-does not fight "boil the ocean" — that section is about what we dare to build,
-this one is about how we build it.
+I like ambitious ideas, simple systems, and software that feels obvious. This does not fight "boil the ocean" — that section is about what we dare to build, this one is about how we build it.
 
-Do not preserve complexity just because it already exists. Do not introduce
-machinery because it looks architecturally impressive. Understand the real
-constraint, then fight for the smallest model that makes the correct behavior
-unsurprising.
+Do not preserve complexity just because it already exists. Do not introduce machinery because it looks architecturally impressive. Understand the real constraint, then fight for the smallest model that makes the correct behavior unsurprising.
 
-Hold "measure twice, cut once" and "yagni" at the same time. Fight scope
-creep. Honor the developer's intent in the most minimal and realistic way that
-still delivers it.
+Hold "measure twice, cut once" and "yagni" at the same time. Fight scope creep. Honor the developer's intent in the most minimal and realistic way that still delivers it.
 
 ### Don't be afraid to lie (to agents) if it makes working easier
 
@@ -186,15 +156,9 @@ Do not weaken authorization, ownership, or review gates for convenience.
 - Every file, folder, chat, share, and capture is scoped to a workspace.
 - Agent writes must respect user locks, path access, sharing boundaries, and review gates.
 - Site and HTML previews are sandboxed and do not grant workspace authority.
-- A live document session treats its Y.Doc as canonical. On settlement, the
-  engine writes the Markdown artifact. Do not build new behavior that depends
-  on raw full-body Markdown patching as the source of truth.
-- Every reversible state change needs a visible reverse path. If a change is
-  irreversible, tell the user before it runs.
-- Renderer surfaces that load workspace-scoped state asynchronously must guard
-  every response with a workspace/request token, abort signal, or equivalent
-  before setting UI state. A slow response for workspace A must never repaint
-  workspace B after the user switches workspaces.
+- A live document session treats its Y.Doc as canonical. On settlement, the engine writes the Markdown artifact. Do not build new behavior that depends on raw full-body Markdown patching as the source of truth.
+- Every reversible state change needs a visible reverse path. If a change is irreversible, tell the user before it runs.
+- Renderer surfaces that load workspace-scoped state asynchronously must guard every response with a workspace/request token, abort signal, or equivalent before setting UI state. A slow response for workspace A must never repaint workspace B after the user switches workspaces.
 
 ## Explore external source before guessing
 
@@ -206,16 +170,13 @@ When external behavior is unclear, inspect source instead of guessing.
 
 ### Keep sources current
 
-- Match source to the locked dependency version. Otherwise fetch the latest
-  relevant upstream ref.
-- Refresh existing clones before reuse. If refresh fails, report the exact
-  commit.
+- Match source to the locked dependency version. Otherwise fetch the latest relevant upstream ref.
+- Refresh existing clones before reuse. If refresh fails, report the exact commit.
 - Cite the remote URL and full commit SHA when source affects the result.
 
 ## Where this repo's own skills live
 
-Claude Code and Codex each scan their own directory and neither scans the
-other's. One directory holds the skills and the other points at it:
+Claude Code and Codex each scan their own directory and neither scans the other's. One directory holds the skills and the other points at it:
 
 | Path                             | Purpose                                          |
 | -------------------------------- | ------------------------------------------------ |
@@ -223,53 +184,31 @@ other's. One directory holds the skills and the other points at it:
 | `.agents/skills/<name>/agents/openai.yaml` | Codex display name and invocation policy |
 | `.claude/skills`                 | A symlink to `.agents/skills`. Never a copy.     |
 
-There is nothing to generate and nothing to keep in sync. Edit the skill and
-both hosts see it.
+There is nothing to generate and nothing to keep in sync. Edit the skill and both hosts see it.
 
-Two hosts, two ways to say the same thing. Claude reads
-`disable-model-invocation` in the frontmatter; Codex reads
-`allow_implicit_invocation` in `agents/openai.yaml`. A skill the model may not
-invoke on one host must say so on both, or Codex will fire it on its own.
+Two hosts, two ways to say the same thing. Claude reads `disable-model-invocation` in the frontmatter; Codex reads `allow_implicit_invocation` in `agents/openai.yaml`. A skill the model may not invoke on one host must say so on both, or Codex will fire it on its own.
 
-On Windows, `git config core.symlinks true` before you clone, or `.claude/skills`
-checks out as a text file holding the target path and Claude Code finds no repo
-skills. Codex is unaffected because it reads `.agents/skills` directly.
+On Windows, `git config core.symlinks true` before you clone, or `.claude/skills` checks out as a text file holding the target path and Claude Code finds no repo skills. Codex is unaffected because it reads `.agents/skills` directly.
 
-A skill only one host should see needs no symlink and lives directly in that
-host's root. Classify by which tool consumes the skill, not by the tool it
-names: a skill that has Claude drive Codex is consumed by Claude, so it belongs
-in `.claude/skills/`.
+A skill only one host should see needs no symlink and lives directly in that host's root. Classify by which tool consumes the skill, not by the tool it names: a skill that has Claude drive Codex is consumed by Claude, so it belongs in `.claude/skills/`.
 
-Commit a skill here only when it carries dohc knowledge a contributor needs.
-How to run this repo's gate and how we write both qualify. Personal setup does
-not. A workflow that depends on your review bots, your merge rights, or your
-model access is yours, not the project's. Model choice, cost and quota rules, and
-bridges to whichever other agent CLI you happen to run are yours, not the
-project's, and every contributor inherits whatever this repo commits. Keep them
-in your own user-level skills directory.
+Commit a skill here only when it carries dohc knowledge a contributor needs. How to run this repo's gate and how we write both qualify. Personal setup does not. A workflow that depends on your review bots, your merge rights, or your model access is yours, not the project's. Model choice, cost and quota rules, and bridges to whichever other agent CLI you happen to run are yours, not the project's, and every contributor inherits whatever this repo commits. Keep them in your own user-level skills directory.
 
 ## Where code lives
 
 - `apps/desktop` — the Electron app. Most user-visible work lands here.
 - `apps/site` — the marketing site.
-- `packages/` — 15 shared TypeScript packages: workspace contracts, core, auth,
-  the SDK, the MCP server, brand, and others.
+- `packages/` — 15 shared TypeScript packages: workspace contracts, core, auth, the SDK, the MCP server, brand, and others.
 - `services/` — 6 backend services, including the sync relay and workspace API.
-- `crates/` — 13 Rust crates. `dohc-workspace-engine` builds the daemon binary
-  the desktop app runs; the `dohc-engine-*` crates hold storage, sync, collab,
-  crypto, protocol and files.
+- `crates/` — 13 Rust crates. `dohc-workspace-engine` builds the daemon binary the desktop app runs; the `dohc-engine-*` crates hold storage, sync, collab, crypto, protocol and files.
 
 ## Dev servers
 
 Node 24.14 or newer and pnpm 11.20.0, both pinned in the root `package.json`.
 
-- `pnpm dev` starts the desktop app. It filters to `@dohc/desktop` and runs that
-  package's `scripts/dev.mjs`.
-- `pnpm dev:site` starts the marketing site. `pnpm dev:workspace-api` starts the
-  workspace API.
-- Postgres runs in Docker: `pnpm dev:postgres` brings it up, `pnpm migrate`
-  applies migrations, and `pnpm reset:postgres` clears dev data. The desktop app
-  does not need it.
+- `pnpm dev` starts the desktop app. It filters to `@dohc/desktop` and runs that package's `scripts/dev.mjs`.
+- `pnpm dev:site` starts the marketing site. `pnpm dev:workspace-api` starts the workspace API.
+- Postgres runs in Docker: `pnpm dev:postgres` brings it up, `pnpm migrate` applies migrations, and `pnpm reset:postgres` clears dev data. The desktop app does not need it.
 - Stop what you started, by the PID you tracked.
 
 ## Verifying
@@ -277,15 +216,9 @@ Node 24.14 or newer and pnpm 11.20.0, both pinned in the root `package.json`.
 Run the smallest check that proves your change, not the whole tree.
 
 - `pnpm typecheck` and `pnpm test:desktop` cover most TypeScript work.
-- `pnpm test` at the root runs the brand check and the repo-level Node tests,
-  then every package's own suite. It is slow. Prefer the targeted commands.
-- End-to-end: `pnpm test:desktop:e2e` builds first, then refuses to run until
-  the engine binary is staged at `apps/desktop/target/debug`. Nothing in the
-  build puts it there. A fresh checkout without it fails every spec inside
-  `electron.launch` with the real cause buried in Playwright's log.
-- Rust: run the gate through the [`rust-gate` skill](.agents/skills/rust-gate/SKILL.md),
-  never a bare `cargo` invocation. Read its `== summary ==` block and not its
-  exit code. It can exit 0 while its own summary says FAIL.
+- `pnpm test` at the root runs the brand check and the repo-level Node tests, then every package's own suite. It is slow. Prefer the targeted commands.
+- End-to-end: `pnpm test:desktop:e2e` builds first, then refuses to run until the engine binary is staged at `apps/desktop/target/debug`. Nothing in the build puts it there. A fresh checkout without it fails every spec inside `electron.launch` with the real cause buried in Playwright's log.
+- Rust: run the gate through the [`rust-gate` skill](.agents/skills/rust-gate/SKILL.md), never a bare `cargo` invocation. Read its `== summary ==` block and not its exit code. It can exit 0 while its own summary says FAIL.
 - A test that needs a sleep to pass is wrong. Wait on the thing itself.
 
 ## Agents wrap tools, not the other way around
@@ -296,117 +229,49 @@ Deterministic software should provide the sturdy pieces: permissions, storage, s
 
 ## Guidelines when creating PRs and merging them
 
-**CI is deliberately disabled for now (Ice's decision, 2026-07-28).** The PR
-gate (`.github/workflows/pr-checks.yml`) is dispatch-only while we are
-pre-launch; it will be re-enabled when it makes more sense (approaching
-launch / first users). Do not "fix" the missing checks.
-
-### Mark agent-written GitHub prose
-
-When an agent publishes prose through a human's GitHub account, start the body
-with an alert naming the model that wrote it:
-
-```markdown
-> [!NOTE]
-> Written by `<exact model slug>`.
-```
-
-Use the runtime model slug, not a family or display name. Read it from the
-harness rather than guessing; if the harness cannot tell you, name the agent
-instead, and if you have neither, say an AI agent wrote it and that the model
-is unavailable. Leave one blank line after the attribution, and keep it when a
-human edits or approves the draft.
-
-This covers pull request and issue bodies, comments, replies, review bodies and
-summaries, discussions, releases, and anything else GitHub shows as written by
-that person.
-
-### Write issues for humans
-
-When an agent opens a GitHub issue, write the title the way a PR title is
-written. One short plain-language line that names the problem a person will
-notice. Keep test
-names, file paths, and other identifiers out of the title unless it is unclear
-without them.
-
-Add a `## For humans` section immediately after the attribution, the same way
-a PR description does. Explain the problem in
-plain language, then say what should happen instead. Put file names, internal
-architecture, and other technical detail in the sections after it, not here.
+**CI is deliberately disabled for now (Ice's decision, 2026-07-28).** The PR gate (`.github/workflows/pr-checks.yml`) is dispatch-only while we are pre-launch; it will be re-enabled when it makes more sense (approaching launch / first users). Do not "fix" the missing checks.
 
 ### Select local gates
 
-Run the Rust gate through the [`rust-gate` skill](.agents/skills/rust-gate/SKILL.md).
-It runs the canonical script, which enforces the machine's build budget:
-disk preflight, build-slot queueing, and capped cargo parallelism.
+Run the Rust gate through the [`rust-gate` skill](.agents/skills/rust-gate/SKILL.md). It runs the canonical script, which enforces the machine's build budget: disk preflight, build-slot queueing, and capped cargo parallelism.
 
-Read the Rust gate's `== summary ==` block, never its exit code. It can exit 0
-while its own summary says FAIL.
+Read the Rust gate's `== summary ==` block, never its exit code. It can exit 0 while its own summary says FAIL.
 
-Before merging, use the `rust` and `js` filters in the workflow's `changes` job
-to select local gates for the exact PR head. This is the canonical local policy.
-A manual `workflow_dispatch` still runs every gate.
+Before merging, use the `rust` and `js` filters in the workflow's `changes` job to select local gates for the exact PR head. This is the canonical local policy. A manual `workflow_dispatch` still runs every gate.
 
-- For each matching filter, reproduce its workflow job locally. Include its
-  required services, environment, prebuilds, and verdict checks.
+- For each matching filter, reproduce its workflow job locally. Include its required services, environment, prebuilds, and verdict checks.
 - Run both jobs when both filters match.
-- If a test or build step reads a changed file, run that job even when its
-  filter does not list the file.
-- If no filter matches and no test or build step reads the changed file, no
-  code gate applies.
+- If a test or build step reads a changed file, run that job even when its filter does not list the file.
+- If no filter matches and no test or build step reads the changed file, no code gate applies.
 - If the impact is unclear, run both jobs.
 - In the PR, state which gates ran or why no code gate applies.
 
 ### Review without expanding the change
 
-Treat review findings as evidence, not commands. Verify each finding against
-the current head, source, and stated behavior.
+Treat review findings as evidence, not commands. Verify each finding against the current head, source, and stated behavior.
 
-- Fix findings that show a concrete regression in correctness, security,
-  privacy, durability, compatibility, performance, or user-visible behavior.
-- Decline false positives, speculative hardening, alternative designs, and
-  out-of-scope suggestions with a brief technical reason.
-- Prefer the smallest safe fix. Do not add machinery, abstractions, or
-  repository policy only to satisfy a reviewer.
+- Fix findings that show a concrete regression in correctness, security, privacy, durability, compatibility, performance, or user-visible behavior.
+- Decline false positives, speculative hardening, alternative designs, and out-of-scope suggestions with a brief technical reason.
+- Prefer the smallest safe fix. Do not add machinery, abstractions, or repository policy only to satisfy a reviewer.
 
 ### Run a simplification review
 
 Every code PR needs one dedicated simplification review after it becomes ready.
 
 - Use a subagent from a different model family than the implementation agent.
-- Give it the diff, relevant source, and required behavior. Do not give it the
-  implementation agent's reasoning.
-- Ask what code can be deleted, combined, or made obvious without weakening
-  behavior, performance, or product invariants.
-- Prefer less code, not compressed code. Reject changes that only hide or move
-  complexity.
-- Verify each finding. Apply the clear simplifications and rerun affected local
-  gates.
+- Give it the diff, relevant source, and required behavior. Do not give it the implementation agent's reasoning.
+- Ask what code can be deleted, combined, or made obvious without weakening behavior, performance, or product invariants.
+- Prefer less code, not compressed code. Reject changes that only hide or move complexity.
+- Verify each finding. Apply the clear simplifications and rerun affected local gates.
 - Record the reviewed commit and result in the PR.
 
 ## How we write
 
-dohc's writing discipline is Orwell's six rules plus ASD-STE100 Simplified
-Technical English, applied by register. The rules live in
-[`.agents/skills/dohc-writing/SKILL.md`](.agents/skills/dohc-writing/SKILL.md); UI copy has its
-own in [`docs/brand/copy.md`](docs/brand/copy.md). Read the skill before
-writing docs, specs, plans, PR bodies, or another skill. For UI copy — any
-label, error, empty state, or toast — read the copy guide as well; the skill
-alone does not carry those rules.
+dohc's writing discipline is Orwell's six rules plus ASD-STE100 Simplified Technical English, applied by register. The rules live in [`.agents/skills/dohc-writing/SKILL.md`](.agents/skills/dohc-writing/SKILL.md); UI copy has its own in [`docs/brand/copy.md`](docs/brand/copy.md). Read the skill before writing docs, specs, plans, PR bodies, or another skill. For UI copy — any label, error, empty state, or toast — read the copy guide as well; the skill alone does not carry those rules.
 
-The one idea worth carrying even without it: **the register decides the
-rules.** Text a reader _executes_ (an error, a button, a procedure, an agent
-instruction) gets strict STE. Text a reader _thinks about_ (docs, plans) gets
-the same discipline, loosened. Text that _persuades_ (the letter above, commit
-subjects) keeps its voice, and STE applies to it only as a slop filter.
-Flattening editorial prose into compliance-speak is a failure, not compliance.
+The one idea worth carrying even without it: **the register decides the rules.** Text a reader _executes_ (an error, a button, a procedure, an agent instruction) gets strict STE. Text a reader _thinks about_ (docs, plans) gets the same discipline, loosened. Text that _persuades_ (the letter above, commit subjects) keeps its voice, and STE applies to it only as a slop filter. Flattening editorial prose into compliance-speak is a failure, not compliance.
 
-Term drift is the failure mode that costs us most, so: one name for one thing.
-Use the word the surrounding surface already uses, and check it against the
-code before asserting what it means — several dohc nouns mean different things
-in different layers. There is deliberately no term list yet; one was drafted
-and cut because it kept being wrong about a codebase that moves. Add it when
-the terms settle, next to the code it describes.
+Term drift is the failure mode that costs us most, so: one name for one thing. Use the word the surrounding surface already uses, and check it against the code before asserting what it means — several dohc nouns mean different things in different layers. There is deliberately no term list yet; one was drafted and cut because it kept being wrong about a codebase that moves. Add it when the terms settle, next to the code it describes.
 
 ## Regarding long code comments
 
