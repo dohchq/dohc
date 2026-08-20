@@ -194,6 +194,10 @@ A skill only one host should see needs no symlink and lives directly in that hos
 
 Commit a skill here only when it carries dohc knowledge a contributor needs. How to run this repo's gate and how we write both qualify. Personal setup does not. A workflow that depends on your review bots, your merge rights, or your model access is yours, not the project's. Model choice, cost and quota rules, and bridges to whichever other agent CLI you happen to run are yours, not the project's, and every contributor inherits whatever this repo commits. Keep them in your own user-level skills directory.
 
+## Documentation
+
+Say who will read a document before you merge it to main. If you can't name anyone, don't merge it to main. Keep in mind that 95% of the time humans will not read the documentation. Don't write down what already happened. We have git for that. If it's a rule the code has to follow, write a test instead. A document can't catch code that breaks the rule.
+
 ## Where code lives
 
 - `apps/desktop` — the Electron app. Most user-visible work lands here.
