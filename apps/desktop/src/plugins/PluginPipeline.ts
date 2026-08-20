@@ -40,6 +40,7 @@ import {
   pluginIdToSafePath,
   pluginStateRoot,
   snapshotPluginSource,
+  type PluginSourceFileDigest,
   type PluginSourceSnapshotResult,
 } from "./pluginSourceSnapshot";
 import {
@@ -189,6 +190,8 @@ export interface PluginPipelineOptions {
   /** See pluginInstallRunner's InstallPluginDependenciesInput.pnpmRunnerEntry. */
   pnpmRunnerEntry: string;
   onStatusChange?: (event: PluginPipelineStatusEvent) => void;
+  /** Overrides path case rules in platform-specific tests. */
+  platform?: NodeJS.Platform;
   /** Whether this workspace's engine capture is running right now — used
    * only to keep uninstall preflight's recovery promises honest (a file
    * under the capture size cap is not actually recoverable if capture
@@ -450,6 +453,33 @@ function candidateKey(candidate: InstalledPluginRecord): string {
   return `${candidate.id}\0${resolve(candidate.rootPath)}`;
 }
 
+export function overlayDoorWrittenSourceDeltas(
+  baselineFiles: readonly PluginSourceFileDigest[],
+  deltas: ReadonlyMap<string, { sha256: string; seq: number }>,
+  platform: NodeJS.Platform = process.platform,
+): PluginSourceFileDigest[] {
+  const normalize = platform === "win32"
+    ? (relPath: string): string => relPath.toLowerCase()
+    : (relPath: string): string => relPath;
+  const files = new Map(
+    baselineFiles.map((file) => [file.relPath, file.sha256]),
+  );
+  const keyIndex = new Map(
+    [...files.keys()].map((relPath) => [normalize(relPath), relPath]),
+  );
+  for (const [relPath, delta] of deltas) {
+    const normalized = normalize(relPath);
+    const existingRelPath = keyIndex.get(normalized);
+    if (existingRelPath !== undefined) {
+      files.set(existingRelPath, delta.sha256);
+    } else {
+      files.set(relPath, delta.sha256);
+      keyIndex.set(normalized, relPath);
+    }
+  }
+  return [...files].map(([relPath, sha256]) => ({ relPath, sha256 }));
+}
+
 export class PluginPipeline {
   private readonly workspaceRoot: string;
   private readonly dohcDir: string;
@@ -462,7 +492,8 @@ export class PluginPipeline {
    * relPath (POSIX, root-relative) to the sha256 of the written bytes and
    * the write's order in doorWriteSeq. See handleDoorWrittenSourceChange
    * and doorApprovedHash — this overlay, applied to the persisted baseline
-   * manifest, is the only tree the door path may auto-approve.
+   * manifest, is the only tree the door path may auto-approve. Overlay paths
+   * match case-insensitively on win32 and exactly on every other platform.
    */
   private readonly doorWrittenDeltas = new Map<
     string,
@@ -1517,7 +1548,9 @@ export class PluginPipeline {
    * deltas, so any other byte on disk — an interloper file, a
    * watcher-class edit, an out-of-band delete — makes the live tree miss
    * this hash and hold for approval. The SDK write surface has no delete,
-   * so a delta only ever adds or replaces one file.
+   * so a delta only ever adds or replaces one file. On win32, a delta whose
+   * path casing drifted still replaces the matching baseline file and keeps
+   * the baseline's original casing. Other platforms match paths exactly.
    */
   private async doorApprovedHash(
     pluginId: string,
@@ -1525,14 +1558,13 @@ export class PluginPipeline {
   ): Promise<string | null> {
     const baseline = await readPluginBaselineManifest(this.dohcDir, pluginId);
     if (!baseline || baseline.sourceHash !== approvedHash) return null;
-    const files = new Map(
-      baseline.files.map((file) => [file.relPath, file.sha256]),
-    );
-    for (const [relPath, delta] of this.doorWrittenDeltas.get(pluginId) ?? []) {
-      files.set(relPath, delta.sha256);
-    }
     return canonicalPluginSourceHash(
-      [...files].map(([relPath, sha256]) => ({ relPath, sha256 })),
+      overlayDoorWrittenSourceDeltas(
+        baseline.files,
+        this.doorWrittenDeltas.get(pluginId) ??
+          new Map<string, { sha256: string; seq: number }>(),
+        this.options.platform,
+      ),
     );
   }
 
