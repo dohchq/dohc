@@ -78,6 +78,8 @@ const lstatOverride = vi.hoisted(() => ({
 const renameRace = vi.hoisted(() => ({
   path: null as string | null,
   replaceWith: null as string | null,
+  failWith: null as NodeJS.ErrnoException | null,
+  fired: false,
 }));
 // realpath can fail where the lstat just before it succeeded: a permission
 // change, or another process moving the path in the gap between the two calls.
@@ -120,10 +122,14 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ) => {
       if (renameRace.path === String(from)) {
         const replaceWith = renameRace.replaceWith;
+        const failWith = renameRace.failWith;
         renameRace.path = null;
         renameRace.replaceWith = null;
+        renameRace.failWith = null;
+        renameRace.fired = true;
         if (replaceWith) await actual.rename(replaceWith, from);
         else await actual.rm(from);
+        if (failWith) throw failWith;
       }
       return actual.rename(from, to);
     },
@@ -647,9 +653,12 @@ describe("mcp tool path containment", () => {
       // The race lands inside the first rename, which then fails for length.
       renameRace.path = join(ctx.root, name);
       renameRace.replaceWith = join(ctx.root, "replacement.md");
+      renameRace.failWith = errnoError("ENAMETOOLONG");
       try {
         const result = await deleteWorkspacePath(ctx, { path: name });
 
+        // Prove the race ran; otherwise this test says nothing about the retry guard.
+        expect(renameRace.fired).toBe(true);
         expect(result).toMatchObject({ ok: false });
         expect(refusalReason(result)).toContain("something replaced it while dohc worked");
         // The point: the replacement is still where it was, NOT in the trash.
@@ -661,6 +670,8 @@ describe("mcp tool path containment", () => {
       } finally {
         renameRace.path = null;
         renameRace.replaceWith = null;
+        renameRace.failWith = null;
+        renameRace.fired = false;
       }
     });
   });
@@ -803,6 +814,8 @@ describe("mcp tool path containment", () => {
       renameRace.path = join(ctx.root, "note.md");
       try {
         const result = await deleteWorkspacePath(ctx, { path: "note.md" });
+        // Prove the race ran; otherwise this test says nothing about the aftermath.
+        expect(renameRace.fired).toBe(true);
         expect(result).toMatchObject({
           ok: false,
           reason:
@@ -810,6 +823,7 @@ describe("mcp tool path containment", () => {
         });
       } finally {
         renameRace.path = null;
+        renameRace.fired = false;
       }
       await expect(readFile(join(ctx.root, "note.md"), "utf8")).rejects.toThrow();
     });
@@ -837,6 +851,8 @@ describe("mcp tool path containment", () => {
         renameRace.replaceWith = join(ctx.root, "replacement.md");
 
         const result = await deleteWorkspacePath(ctx, { path: "note.md" });
+        // Prove the race ran; otherwise this test says nothing about the replacement.
+        expect(renameRace.fired).toBe(true);
         expect(refusalReason(result)).toMatch(
           /^dohc could not delete note\.md\. The move to the workspace trash failed \([A-Z]+\)\. dohc did not move it\. A different entry is at note\.md now: something replaced it while dohc worked\.$/,
         );
@@ -850,6 +866,7 @@ describe("mcp tool path containment", () => {
         uuidOverride.value = null;
         renameRace.path = null;
         renameRace.replaceWith = null;
+        renameRace.fired = false;
       }
     });
   });
