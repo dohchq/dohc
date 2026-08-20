@@ -61,13 +61,13 @@ function setSessionState(state, reason) {
     ready: "Ready",
     running: "Running",
     error: "Error",
-    closed: reason === "Stopped." ? "Stopped." : "Closed",
+    closed: "Closed",
   };
   statePill.textContent = labels[state] || state;
   statePill.dataset.state = state;
   stopButton.disabled = state === "closed" || state === "error";
-  if (state === "closed" && reason === "Stopped.") {
-    recoveryCard("Stopped.");
+  if (state === "closed" && reason) {
+    recoveryCard(reason);
   }
 }
 
@@ -79,7 +79,7 @@ function recoveryCard(message) {
   heading.textContent = message;
   const next = document.createElement("p");
   next.className = "next-action";
-  next.textContent = "Start a new message to begin a new session.";
+  next.textContent = "Send a message to start a new session.";
   card.append(heading, next);
   transcript.append(card);
   scrollToLatest();
@@ -124,25 +124,6 @@ function renderActivity(event) {
   card.querySelector(".activity-title").textContent = event.item.title;
   const details = [event.item.detail, ...(event.item.locations || [])].filter(Boolean);
   card.querySelector(".activity-detail").textContent = details.join("\n");
-  scrollToLatest();
-}
-
-function renderPlan(event) {
-  hideEmptyState();
-  const card = document.createElement("section");
-  card.className = "activity";
-  const title = document.createElement("strong");
-  title.textContent = "Plan";
-  const list = document.createElement("ol");
-  list.className = "plan";
-  for (const step of event.steps) {
-    const item = document.createElement("li");
-    item.dataset.status = step.status;
-    item.textContent = step.step;
-    list.append(item);
-  }
-  card.append(title, list);
-  transcript.append(card);
   scrollToLatest();
 }
 
@@ -214,9 +195,6 @@ function renderEvent(event) {
       break;
     case "item":
       renderActivity(event);
-      break;
-    case "plan":
-      renderPlan(event);
       break;
     case "permission-request":
       renderPermission(event);

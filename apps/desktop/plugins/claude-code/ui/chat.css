@@ -227,20 +227,6 @@ button:disabled {
   border-color: var(--danger);
 }
 
-.plan {
-  margin: 8px 0 0;
-  padding-left: 20px;
-}
-
-.plan li {
-  margin: 4px 0;
-}
-
-.plan li[data-status="completed"] {
-  color: var(--subtle);
-  text-decoration: line-through;
-}
-
 .permission {
   border-color: var(--warning);
   background: var(--panel);
@@ -267,8 +253,10 @@ button:disabled {
   color: var(--danger);
 }
 
-.next-action {
-  margin-top: 6px !important;
+/* Ties .error-card p's specificity (element + class) so this wins on
+   declaration order alone -- no !important needed. */
+p.next-action {
+  margin-top: 6px;
   color: var(--muted);
 }
 

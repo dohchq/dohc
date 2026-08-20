@@ -21,7 +21,7 @@ const handler: PluginHandler = {
       "claude-code",
       driver,
     );
-    // The built plugin root keeps static source assets in its approved snapshot.
+    // Static plugin assets live in the built root's snapshot subdirectory, not beside the bundle.
     chatWebApp = createChatWebApp(
       driver,
       ctx.workspaceRoot,

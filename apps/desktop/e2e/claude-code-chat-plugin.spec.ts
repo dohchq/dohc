@@ -15,18 +15,47 @@ const fakeClaude = fileURLToPath(
   new URL("../plugins/claude-code/test/fakeClaudeCli.mjs", import.meta.url),
 );
 const prompt = "Write the fake Claude note.";
+const CHAT_TITLE = "Claude Code Chat";
 
-interface GuestReport {
-  url: string;
-  title: string;
-  text: string;
+type Desktop = Awaited<ReturnType<typeof launchDesktopApp>>;
+
+/**
+ * Finds the chat guest's WebContentsView by its title and runs `script`
+ * against it via executeJavaScript, returning the script's completion value
+ * -- or null when no guest with that title has opened yet. The one loop
+ * every guest interaction below needs (find the 127.0.0.1 WebContentsView
+ * with the right title) lives here once.
+ */
+async function evalInChatGuest<T>(desktop: Desktop, script: string): Promise<T | null> {
+  return desktop.app.evaluate(
+    async ({ webContents }, { title, script }) => {
+      for (const contents of webContents.getAllWebContents()) {
+        if (!contents.getURL().startsWith("http://127.0.0.1")) continue;
+        const pageTitle = (await contents.executeJavaScript("document.title")) as string;
+        if (pageTitle !== title) continue;
+        return (await contents.executeJavaScript(script)) as T;
+      }
+      return null;
+    },
+    { title: CHAT_TITLE, script },
+  );
+}
+
+/** Runs an action script in the chat guest; the script must end `true;`. */
+async function runInChatGuest(desktop: Desktop, script: string): Promise<void> {
+  const ran = await evalInChatGuest<true>(desktop, script);
+  if (ran !== true) throw new Error("The Claude Code chat guest did not open.");
+}
+
+async function readGuestText(desktop: Desktop): Promise<string> {
+  return (await evalInChatGuest<string>(desktop, "(document.body ? document.body.innerText : '')")) ?? "";
 }
 
 test.setTimeout(300_000);
 
 test("the Claude Code plugin serves its chat and answers a tool permission", async () => {
   const temp = await createTempWorkspace();
-  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  let desktop: Desktop | null = null;
 
   try {
     await seedWorkspaceManifest(temp, "claude-code-chat-plugin-e2e");
@@ -64,62 +93,33 @@ test("the Claude Code plugin serves its chat and answers a tool permission", asy
     await expect(tab).toBeVisible({ timeout: 60_000 });
     await expect(tab).toHaveAttribute("data-active", "true");
 
-    const readGuest = async (): Promise<GuestReport | null> =>
-      desktop!.app.evaluate(async ({ webContents }) => {
-        for (const contents of webContents.getAllWebContents()) {
-          const url = contents.getURL();
-          if (!url.startsWith("http://127.0.0.1")) continue;
-          const title = (await contents.executeJavaScript("document.title")) as string;
-          if (title !== "Claude Code Chat") continue;
-          const text = (await contents.executeJavaScript(
-            "document.body ? document.body.innerText : ''",
-          )) as string;
-          return { url, title, text };
-        }
-        return null;
-      });
+    await expect
+      .poll(async () => (await evalInChatGuest<string>(desktop!, "(document.title)")) ?? "", {
+        timeout: 60_000,
+      })
+      .toBe(CHAT_TITLE);
+
+    await runInChatGuest(
+      desktop,
+      "document.querySelector('#message').value = " +
+        JSON.stringify(prompt) +
+        "; document.querySelector('#composer').requestSubmit(); true;",
+    );
 
     await expect
-      .poll(async () => (await readGuest())?.title ?? "", { timeout: 60_000 })
-      .toBe("Claude Code Chat");
-
-    await desktop.app.evaluate(async ({ webContents }, message) => {
-      for (const contents of webContents.getAllWebContents()) {
-        if (!contents.getURL().startsWith("http://127.0.0.1")) continue;
-        const title = (await contents.executeJavaScript("document.title")) as string;
-        if (title !== "Claude Code Chat") continue;
-        await contents.executeJavaScript(
-          "document.querySelector('#message').value = " +
-            JSON.stringify(message) +
-            "; document.querySelector('#composer').requestSubmit();",
-        );
-        return;
-      }
-      throw new Error("The Claude Code chat guest did not open.");
-    }, prompt);
-
-    await expect
-      .poll(async () => (await readGuest())?.text ?? "", { timeout: 60_000 })
+      .poll(async () => readGuestText(desktop!), { timeout: 60_000 })
       .toContain("Writing the note now.");
 
-    await desktop.app.evaluate(async ({ webContents }) => {
-      for (const contents of webContents.getAllWebContents()) {
-        if (!contents.getURL().startsWith("http://127.0.0.1")) continue;
-        const title = (await contents.executeJavaScript("document.title")) as string;
-        if (title !== "Claude Code Chat") continue;
-        await contents.executeJavaScript(
-          "const button = [...document.querySelectorAll('button')].find(" +
-            "(element) => element.textContent === 'Allow once');" +
-            "if (!button) throw new Error('The permission button did not appear.');" +
-            "button.click();",
-        );
-        return;
-      }
-      throw new Error("The Claude Code chat guest did not open.");
-    });
+    await runInChatGuest(
+      desktop,
+      "const button = [...document.querySelectorAll('button')].find(" +
+        "(element) => element.textContent === 'Allow once');" +
+        "if (!button) throw new Error('The permission button did not appear.');" +
+        "button.click(); true;",
+    );
 
     await expect
-      .poll(async () => (await readGuest())?.text ?? "", { timeout: 60_000 })
+      .poll(async () => readGuestText(desktop!), { timeout: 60_000 })
       .toContain('"behavior":"allow"');
   } catch (error) {
     for (const entry of desktop?.logs ?? []) {

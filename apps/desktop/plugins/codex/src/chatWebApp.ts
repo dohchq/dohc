@@ -6,7 +6,6 @@ import {
   type ServerResponse,
 } from "node:http";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type {
   PluginAgentDriver,
   PluginAgentEvent,
@@ -17,15 +16,10 @@ import type {
 } from "@dohc/sdk/node";
 
 const CHAT_WEB_APP_ID = "chat";
-const CHAT_TITLE = "Codex Chat";
 // Reloads replay enough history for long turns without retaining an unbounded transcript.
 const MAX_BUFFERED_EVENTS = 500;
-const UI_ROOT = fileURLToPath(new URL("../ui/", import.meta.url));
 
 type SessionStateEvent = Extract<PluginAgentEvent, { kind: "session-state" }>;
-
-// The plugin process owns one chat session. HTTP and SSE connections only attach to it.
-let processSession: PluginAgentSession | null = null;
 
 export interface ChatWebApp {
   startWebApp(webAppId: string, instanceKey: string | null): Promise<PluginWebAppStart>;
@@ -35,15 +29,10 @@ export interface ChatWebApp {
 
 interface RequestError extends Error {
   statusCode: number;
-  eventAlreadySent?: boolean;
 }
 
-function requestError(
-  statusCode: number,
-  message: string,
-  eventAlreadySent = false,
-): RequestError {
-  return Object.assign(new Error(message), { statusCode, eventAlreadySent });
+function requestError(statusCode: number, message: string): RequestError {
+  return Object.assign(new Error(message), { statusCode });
 }
 
 function errorMessage(error: unknown): string {
@@ -128,15 +117,14 @@ async function listen(server: Server): Promise<string> {
 export function createChatWebApp(
   driver: PluginAgentDriver,
   workspaceRoot: string,
-  uiRoot = UI_ROOT,
+  uiRoot: string,
 ): ChatWebApp {
   let server: Server | null = null;
   let serverUrl: string | null = null;
   let serverStart: Promise<string> | null = null;
-  let probeResult: Promise<PluginAgentProbe> | null = null;
   let sessionStart: Promise<PluginAgentSession> | null = null;
   let sessionGeneration = 0;
-  let endedGeneration: number | null = null;
+  let processSession: PluginAgentSession | null = null;
   let state: SessionStateEvent = { kind: "session-state", state: "closed" };
   const eventLog: PluginAgentEvent[] = [];
   const clients = new Set<ServerResponse>();
@@ -171,16 +159,14 @@ export function createChatWebApp(
     );
   }
 
-  async function probe(): Promise<PluginAgentProbe> {
-    probeResult ??= Promise.resolve(driver.probe());
-    return probeResult;
-  }
-
   async function startSession(): Promise<PluginAgentSession> {
     const generation = ++sessionGeneration;
-    endedGeneration = null;
-    state = { kind: "session-state", state: "starting" };
     pendingPermissions.clear();
+    // Set once this driver.startSession call itself ends before it even
+    // resolves (a session that fails during its own handshake). Local to
+    // this call: a later call gets its own flag, so nothing here needs to
+    // be reset between attempts.
+    let ended = false;
     const created = await driver.startSession({
       workspaceRoot,
       mode: "approval-required",
@@ -189,15 +175,15 @@ export function createChatWebApp(
         if (generation !== sessionGeneration) return;
         publish(event);
         if (sessionEnded(event)) {
-          endedGeneration = generation;
+          ended = true;
           processSession = null;
           pendingPermissions.clear();
         }
       },
     });
-    if (endedGeneration === generation) {
+    if (ended) {
       await Promise.resolve(created.dispose()).catch(() => undefined);
-      throw requestError(503, "The Codex session ended while it started.", true);
+      throw requestError(503, "The Codex session ended while it started.");
     }
     processSession = created;
     return created;
@@ -205,17 +191,17 @@ export function createChatWebApp(
 
   async function liveSession(): Promise<PluginAgentSession> {
     if (processSession) return processSession;
-    const available = await probe().catch((error: unknown) => {
+    const available = await Promise.resolve(driver.probe()).catch((error: unknown) => {
       const message = errorMessage(error);
       publish({ kind: "error", message, fatal: true });
-      throw requestError(503, message, true);
+      throw requestError(503, message);
     });
     if (!available.installed) {
       const message =
         available.errorMessage?.trim() ||
         "Codex isn't installed. Install the Codex CLI and add it to your PATH.";
       publish({ kind: "error", message, fatal: true });
-      throw requestError(503, message, true);
+      throw requestError(503, message);
     }
     sessionStart ??= startSession().finally(() => {
       sessionStart = null;
@@ -239,7 +225,7 @@ export function createChatWebApp(
       const message = errorMessage(error);
       publish({ kind: "error", message, fatal: true });
       await Promise.resolve(live.dispose()).catch(() => undefined);
-      throw requestError(500, message, true);
+      throw requestError(500, message);
     }
     writeEmpty(response, 202);
   }
@@ -251,7 +237,7 @@ export function createChatWebApp(
       sessionGeneration += 1;
       pendingPermissions.clear();
       await live.stop();
-      publish({ kind: "session-state", state: "closed", reason: "Stopped." });
+      publish({ kind: "session-state", state: "closed", reason: "Stopped" });
     }
     writeEmpty(response, 204);
   }
@@ -324,11 +310,13 @@ export function createChatWebApp(
       }
       writeError(response, 404, "Not found.");
     } catch (error) {
+      // Every path above that can end the session already published its own
+      // event before throwing. A request failure that reaches here -- a bad
+      // body, a missing static asset -- is a transport problem, not a
+      // session problem, so it 5xx's the request without touching session
+      // state.
       const failure = error as Partial<RequestError>;
       const message = errorMessage(error);
-      if (!failure.eventAlreadySent && (failure.statusCode ?? 500) >= 500) {
-        publish({ kind: "error", message, fatal: true });
-      }
       if (!response.headersSent) writeError(response, failure.statusCode ?? 500, message);
       else response.end();
     }
@@ -356,11 +344,11 @@ export function createChatWebApp(
           'The Codex plugin serves only the singleton "' + CHAT_WEB_APP_ID + '" web app.',
         );
       }
-      if (serverUrl) return { url: serverUrl, title: CHAT_TITLE };
+      if (serverUrl) return { url: serverUrl };
       serverStart ??= startServer().finally(() => {
         serverStart = null;
       });
-      return { url: await serverStart, title: CHAT_TITLE };
+      return { url: await serverStart };
     },
     async stopWebApp(webAppId, instanceKey) {
       if (webAppId !== CHAT_WEB_APP_ID || instanceKey !== null) {

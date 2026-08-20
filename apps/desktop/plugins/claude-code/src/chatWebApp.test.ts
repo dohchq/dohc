@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import type {
   PluginAgentDriver,
   PluginAgentEvent,
@@ -9,10 +10,17 @@ import type {
 import { afterEach, describe, expect, it } from "vitest";
 import { createChatWebApp, type ChatWebApp } from "./chatWebApp.ts";
 
+// The plugin's real ui/ folder. Once installed, the built plugin root serves
+// this same content from pluginRoot/snapshot/ui (main.ts computes that join;
+// see 0ab34172) -- this constant is the unbundled source it copies from.
+const PLUGIN_UI_ROOT = fileURLToPath(new URL("../ui/", import.meta.url));
+// This test file's own directory: a real directory with no index.html,
+// chat.css, or chat.js in it, for exercising the missing-asset path.
+const NO_UI_ASSETS_ROOT = fileURLToPath(new URL(".", import.meta.url));
+
 interface FakeSession extends PluginAgentSession {
   promptCalls: string[];
   stopCalls: number;
-  disposeCalls: number;
   permissionCalls: Array<{ requestId: string; decision: PluginPermissionDecision }>;
 }
 
@@ -23,7 +31,13 @@ interface FakeDriver {
   sessions: FakeSession[];
 }
 
-function fakeDriver(probe?: PluginAgentProbe): FakeDriver {
+const installedProbe: PluginAgentProbe = {
+  installed: true,
+  auth: { status: "authenticated" },
+  models: [],
+};
+
+function fakeDriver(probe: () => PluginAgentProbe = () => installedProbe): FakeDriver {
   const startInputs: PluginAgentSessionStartInput[] = [];
   const sessions: FakeSession[] = [];
   let probes = 0;
@@ -31,13 +45,7 @@ function fakeDriver(probe?: PluginAgentProbe): FakeDriver {
   const driver: PluginAgentDriver = {
     async probe() {
       probes += 1;
-      return (
-        probe ?? {
-          installed: true,
-          auth: { status: "authenticated" },
-          models: [],
-        }
-      );
+      return probe();
     },
     async startSession(input) {
       startInputs.push(input);
@@ -47,16 +55,12 @@ function fakeDriver(probe?: PluginAgentProbe): FakeDriver {
         decision: PluginPermissionDecision;
       }> = [];
       let stopCalls = 0;
-      let disposeCalls = 0;
       const session: FakeSession = {
         sessionId: `session-${sessions.length + 1}`,
         promptCalls,
         permissionCalls,
         get stopCalls() {
           return stopCalls;
-        },
-        get disposeCalls() {
-          return disposeCalls;
         },
         async prompt(message) {
           promptCalls.push(message.text);
@@ -69,9 +73,7 @@ function fakeDriver(probe?: PluginAgentProbe): FakeDriver {
         async stop() {
           stopCalls += 1;
         },
-        async dispose() {
-          disposeCalls += 1;
-        },
+        async dispose() {},
       };
       sessions.push(session);
       return session;
@@ -133,8 +135,11 @@ async function post(url: string, path: string, body?: unknown): Promise<Response
 
 const runningApps: ChatWebApp[] = [];
 
-async function start(fake: FakeDriver): Promise<{ app: ChatWebApp; url: string }> {
-  const app = createChatWebApp(fake.driver, "C:\\workspace");
+async function start(
+  fake: FakeDriver,
+  uiRoot = PLUGIN_UI_ROOT,
+): Promise<{ app: ChatWebApp; url: string }> {
+  const app = createChatWebApp(fake.driver, "C:\\workspace", uiRoot);
   runningApps.push(app);
   const started = await app.startWebApp("chat", null);
   return { app, url: started.url };
@@ -210,6 +215,10 @@ describe("Claude Code chat web app", () => {
     fake.startInputs[0]?.onEvent(text);
 
     const reattached = await eventStream(url);
+    // "ready" appears twice on purpose: once as the current-state snapshot
+    // every new connection gets first, and again from the buffered event
+    // log replayed right after it -- the same event reached the snapshot
+    // and the log, because publish() updates both.
     expect(await reattached.next()).toEqual(ready);
     expect(await reattached.next()).toEqual(ready);
     expect(await reattached.next()).toEqual(text);
@@ -281,13 +290,57 @@ describe("Claude Code chat web app", () => {
     expect(script.headers.get("content-type")).toContain("javascript");
   });
 
+  it("500s a missing static asset without publishing a session error", async () => {
+    const fake = fakeDriver();
+    const { url } = await start(fake, NO_UI_ASSETS_ROOT);
+    const stream = await eventStream(url);
+    expect(await stream.next()).toEqual({ kind: "session-state", state: "closed" });
+
+    const missing = await fetch(new URL("chat.js", url));
+    expect(missing.status).toBe(500);
+
+    // A missing asset never touched the session: a normal message still
+    // starts one, and the next frame on the stream is that session's own
+    // event, not a stray fatal error from the 404'd asset.
+    await post(url, "message", { text: "Still works" });
+    expect(fake.startInputs).toHaveLength(1);
+    const ready: PluginAgentEvent = { kind: "session-state", state: "ready" };
+    fake.startInputs[0]?.onEvent(ready);
+    expect(await stream.next()).toEqual(ready);
+    await stream.close();
+  });
+
+  it("probes again on every attempt -- installing the CLI after a failed probe lets the next message through", async () => {
+    let installed = false;
+    const fake = fakeDriver(() =>
+      installed
+        ? installedProbe
+        : {
+            installed: false,
+            auth: { status: "unknown" },
+            models: [],
+            errorMessage: "Claude Code isn't here yet.",
+          },
+    );
+    const { url } = await start(fake);
+
+    expect(await post(url, "message", { text: "First try" })).toMatchObject({ status: 503 });
+    expect(fake.startInputs).toHaveLength(0);
+    expect(fake.probeCalls()).toBe(1);
+
+    installed = true;
+    expect(await post(url, "message", { text: "Second try" })).toMatchObject({ status: 202 });
+    expect(fake.startInputs).toHaveLength(1);
+    expect(fake.probeCalls()).toBe(2);
+  });
+
   it("streams a fatal probe error and does not start a missing harness", async () => {
-    const fake = fakeDriver({
+    const fake = fakeDriver(() => ({
       installed: false,
       auth: { status: "unknown" },
       models: [],
       errorMessage: "Claude Code failed its probe.",
-    });
+    }));
     const { url } = await start(fake);
     const stream = await eventStream(url);
     await stream.next();

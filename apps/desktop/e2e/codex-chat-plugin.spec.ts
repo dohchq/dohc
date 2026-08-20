@@ -18,7 +18,6 @@ const prompt = "Echo this Codex chat e2e marker.";
 const echoedPrompt = '"text":"' + prompt + '"';
 
 interface GuestReport {
-  url: string;
   title: string;
   text: string;
 }
@@ -68,14 +67,13 @@ test("the Codex plugin serves its chat and sends a message to Codex", async () =
     const readGuest = async (): Promise<GuestReport | null> =>
       desktop!.app.evaluate(async ({ webContents }) => {
         for (const contents of webContents.getAllWebContents()) {
-          const url = contents.getURL();
-          if (!url.startsWith("http://127.0.0.1")) continue;
+          if (!contents.getURL().startsWith("http://127.0.0.1")) continue;
           const title = (await contents.executeJavaScript("document.title")) as string;
           if (title !== "Codex Chat") continue;
           const text = (await contents.executeJavaScript(
             "document.body ? document.body.innerText : ''",
           )) as string;
-          return { url, title, text };
+          return { title, text };
         }
         return null;
       });

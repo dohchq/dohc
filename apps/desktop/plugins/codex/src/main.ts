@@ -17,11 +17,7 @@ const handler: PluginHandler = {
       codexCommandSpec(process.env),
     );
     ctx.drivers.register("codex", driver);
-    // ctx.pluginRoot is the built bundle's live root (bundle.mjs, meta.json,
-    // dohc-plugin.generated.json). The build never copies static assets next
-    // to the bundle -- it only moves the full source copy it already had
-    // under a nested "snapshot" directory, so a plugin's own non-bundled
-    // files, like this ui/ folder, live at pluginRoot/snapshot/ui.
+    // Static plugin assets live in the built root's snapshot subdirectory, not beside the bundle.
     chatWebApp = createChatWebApp(
       driver,
       ctx.workspaceRoot,
