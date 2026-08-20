@@ -1166,12 +1166,14 @@ describe("plugin activity-bar views", () => {
     renderShell(bridge);
     await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalled());
     expect(bridge.listPlugins).not.toHaveBeenCalled();
+    expect(bridge.onPluginStatusChanged).not.toHaveBeenCalled();
 
     await act(async () => {
       workspaceOpen.resolve(SYNC_STATUS);
     });
 
     expect(await screen.findByTestId(`activity-${viewId}`)).toBeTruthy();
+    expect(bridge.onPluginStatusChanged).toHaveBeenCalled();
   });
 
   it("opens a contributed view's panel in the side panel", async () => {
