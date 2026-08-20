@@ -1,5 +1,6 @@
 import type { UtilityProcess } from "electron";
 import { createInterface } from "node:readline";
+import { killProcessTreePosix } from "../process/posixSpawn";
 import { killProcessTreeWin32 } from "../process/windowsSpawn";
 import type { PluginHostOptions } from "./PluginHost";
 import type { PluginTransport } from "./pluginHostProtocol";
@@ -141,24 +142,50 @@ export function createPluginUtilityTransport(
       close(new Error("Plugin utility transport disposed."));
       const pid = child.pid;
       if (pid === undefined) return;
-      await killProcessTreeWin32(pid, () => child.pid === undefined);
-      if (child.pid === undefined) return;
-      child.kill();
-      const forceKill = setTimeout(() => {
-        if (child.pid !== pid || process.platform === "win32") return;
+      let forceKill: NodeJS.Timeout | undefined;
+      let captured: readonly number[] = [];
+      if (process.platform === "win32") {
+        await killProcessTreeWin32(pid, () => child.pid === undefined);
+        if (child.pid === undefined) return;
+        child.kill();
+        forceKill = setTimeout(() => {
+          if (child.pid !== pid || process.platform === "win32") return;
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            // The direct utility process may already be gone.
+          }
+        }, 2_000);
+        forceKill.unref();
+      } else {
         try {
-          process.kill(pid, "SIGKILL");
+          captured = await killProcessTreePosix(pid, "SIGTERM");
         } catch {
-          // The direct utility process may already be gone.
+          child.kill();
         }
-      }, 2_000);
-      forceKill.unref();
+      }
       let waitCap: NodeJS.Timeout | undefined;
       const capped = new Promise<"capped">((resolve) => {
         waitCap = setTimeout(() => resolve("capped"), 5_000);
         waitCap.unref?.();
       });
       try {
+        if (process.platform !== "win32") {
+          let graceTimer: NodeJS.Timeout | undefined;
+          const grace = new Promise<void>((resolve) => {
+            graceTimer = setTimeout(resolve, 2_000);
+            graceTimer.unref?.();
+          });
+          await Promise.race([exited, grace]);
+          if (graceTimer) clearTimeout(graceTimer);
+          try {
+            await killProcessTreePosix(pid, "SIGKILL", {
+              alsoSignal: captured,
+            });
+          } catch {
+            child.kill();
+          }
+        }
         const outcome = await Promise.race([
           exited.then(() => "exited" as const),
           capped,
@@ -169,7 +196,7 @@ export function createPluginUtilityTransport(
           );
         }
       } finally {
-        clearTimeout(forceKill);
+        if (forceKill) clearTimeout(forceKill);
         if (waitCap) clearTimeout(waitCap);
       }
     },
