@@ -2516,15 +2516,16 @@ export function parsePluginStatusChangedEventForIpc(
   return parsed.success ? parsed.data : null;
 }
 
-export const PLUGIN_PANEL_FILE_WATCH_EVENT = "files.watch" as const;
-
 export const PluginPanelSdkEvent = z
   .object({
     workspaceId: WORKSPACE_ID,
     pluginId: PLUGIN_ID,
     panelId: PLUGIN_PANEL_ID,
     subscriptionId: z.string().min(1),
-    event: z.literal(PLUGIN_PANEL_FILE_WATCH_EVENT),
+    // Forwarded verbatim from whatever the subscribed registry emits (today,
+    // always PluginWorkspaceEvents' own "change") — not a closed set this
+    // schema owns, so a later event kind slots in without a schema change.
+    event: z.string().min(1),
     data: z
       .object({
         path: z.string(),

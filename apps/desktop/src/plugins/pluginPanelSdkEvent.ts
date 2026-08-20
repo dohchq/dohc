@@ -1,5 +1,3 @@
-import { PLUGIN_PANEL_FILE_WATCH_EVENT } from "../ipc/bridgeContract";
-
 export function createPluginPanelFileWatchEmitter(input: {
   workspaceId: string;
   pluginId: string;
@@ -7,15 +5,36 @@ export function createPluginPanelFileWatchEmitter(input: {
   isPanelRunning: () => boolean;
   send: (event: unknown) => void;
 }): (subscriptionId: string, event: string, data: unknown) => void {
-  return (subscriptionId, _event, data) => {
+  return (subscriptionId, event, data) => {
     if (!input.isPanelRunning()) return;
     input.send({
       workspaceId: input.workspaceId,
       pluginId: input.pluginId,
       panelId: input.panelId,
       subscriptionId,
-      event: PLUGIN_PANEL_FILE_WATCH_EVENT,
+      event,
       data,
     });
   };
+}
+
+/**
+ * Whether a panel's SDK authority grant still names the exact panel running
+ * right now: the grant's own signal isn't aborted, and the running panel
+ * still matches the sender, generation, and process spawn the grant was
+ * issued for.
+ */
+export function isPluginPanelIdentityLive(input: {
+  signal: AbortSignal;
+  currentPanel: { senderId: number; generation: number } | undefined;
+  currentSpawnId: string | undefined;
+  grant: { senderId: number; generation: number; spawnId: string };
+}): boolean {
+  return Boolean(
+    !input.signal.aborted &&
+      input.currentPanel &&
+      input.currentPanel.senderId === input.grant.senderId &&
+      input.currentPanel.generation === input.grant.generation &&
+      input.currentSpawnId === input.grant.spawnId,
+  );
 }

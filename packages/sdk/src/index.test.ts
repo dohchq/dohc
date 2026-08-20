@@ -932,6 +932,61 @@ describe("@dohc/sdk", () => {
     await pendingUnsubscribe;
   });
 
+  it("does not replay an orphaned subscription event once nothing is retaining the listener", async () => {
+    const harness = createWindowHarness();
+    const transport = createPostMessageTransport({
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      timeoutMs: 1000,
+    });
+
+    // The host's event for "sub_orphan" arrives before this call's own
+    // subscribe request settles, then that request fails — so this call
+    // never learns "sub_orphan" and its early-arrived event is orphaned in
+    // the queue once this call releases.
+    const firstEvents: unknown[] = [];
+    const firstSubscription = transport.subscribe!(
+      "files.watch",
+      { path: "notes" },
+      (event) => firstEvents.push(event),
+    );
+    const firstRequest = harness.messages[0] as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      type: "event",
+      subscriptionId: "sub_orphan",
+      event: "changed",
+      data: { path: "notes/orphan.md" },
+    });
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: firstRequest.id,
+      ok: false,
+      error: { code: "TIMEOUT", message: "no answer" },
+    });
+    await expect(firstSubscription).rejects.toMatchObject({ code: "TIMEOUT" });
+
+    // A second, unrelated subscribe is assigned the same id. If the orphaned
+    // queue leaked past the point where nothing was retaining the listener,
+    // registering "sub_orphan" here would replay the stale event immediately.
+    const secondEvents: unknown[] = [];
+    const secondSubscription = transport.subscribe!(
+      "files.watch",
+      { path: "notes" },
+      (event) => secondEvents.push(event),
+    );
+    const secondRequest = harness.messages.at(-1) as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: secondRequest.id,
+      ok: true,
+      result: { subscriptionId: "sub_orphan" },
+    });
+    await secondSubscription;
+
+    expect(secondEvents).toEqual([]);
+  });
+
   it("collapses early and burst files.watch events into one debounced refresh", async () => {
     vi.useFakeTimers();
     try {

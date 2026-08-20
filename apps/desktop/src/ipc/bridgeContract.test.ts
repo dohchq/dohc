@@ -1179,13 +1179,13 @@ describe("plugin guest SDK IPC contract", () => {
     ).toBe(false);
   });
 
-  it("accepts only strict files.watch events for plugin panels", () => {
+  it("accepts a strict plugin-panel SDK event and rejects excess data or an empty event name", () => {
     const event = {
       workspaceId: "ws-plugins",
       pluginId: "hello-plugin",
       panelId: "main",
       subscriptionId: "subscription-1",
-      event: "files.watch" as const,
+      event: "change",
       data: {
         path: "docs/index.md",
         operation: "update" as const,
@@ -1203,7 +1203,7 @@ describe("plugin guest SDK IPC contract", () => {
       }),
     ).toBeNull();
     expect(
-      parsePluginPanelSdkEventForIpc({ ...event, event: "other" }),
+      parsePluginPanelSdkEventForIpc({ ...event, event: "" }),
     ).toBeNull();
   });
 });

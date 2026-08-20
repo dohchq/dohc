@@ -16,8 +16,6 @@ const postOrigin = hostOrigin === "file://" ? "*" : hostOrigin;
 let nextRequestId = 1;
 const subscriptionListeners = new Map();
 const queuedSubscriptionEvents = new Map();
-let activeSubscriptionCount = 0;
-let subscriptionMessageListener = null;
 
 /**
  * Asks dohc for something.
@@ -92,24 +90,10 @@ function handleSubscriptionMessage(event) {
   else queueSubscriptionEvent(message.subscriptionId, subscriptionEvent);
 }
 
-function retainSubscriptionMessageListener() {
-  let retained = true;
-  activeSubscriptionCount += 1;
-  if (activeSubscriptionCount === 1) {
-    subscriptionMessageListener = handleSubscriptionMessage;
-    window.addEventListener("message", subscriptionMessageListener);
-  }
-
-  return () => {
-    if (!retained) return;
-    retained = false;
-    activeSubscriptionCount -= 1;
-    if (activeSubscriptionCount === 0 && subscriptionMessageListener) {
-      window.removeEventListener("message", subscriptionMessageListener);
-      subscriptionMessageListener = null;
-    }
-  };
-}
+// One listener, installed once, for this page's whole lifetime — the page
+// itself is the subscription boundary, so there's no second scope this
+// listener could outlive and leak into.
+window.addEventListener("message", handleSubscriptionMessage);
 
 /**
  * Opens a subscription and returns a function that closes it.
@@ -123,14 +107,7 @@ export async function subscribe(method, params, listener) {
     throw new Error("Subscription listener must be a function.");
   }
 
-  const releaseSubscriptionMessageListener = retainSubscriptionMessageListener();
-  let result;
-  try {
-    result = await request(method, params);
-  } catch (error) {
-    releaseSubscriptionMessageListener();
-    throw error;
-  }
+  const result = await request(method, params);
   if (
     !result ||
     typeof result !== "object" ||
@@ -138,7 +115,6 @@ export async function subscribe(method, params, listener) {
     typeof result.subscriptionId !== "string" ||
     result.subscriptionId.length === 0
   ) {
-    releaseSubscriptionMessageListener();
     throw new Error(`dohc returned an invalid subscription response for ${method}.`);
   }
 
@@ -155,7 +131,6 @@ export async function subscribe(method, params, listener) {
     active = false;
     subscriptionListeners.delete(subscriptionId);
     queuedSubscriptionEvents.delete(subscriptionId);
-    releaseSubscriptionMessageListener();
     void request("subscriptions.unsubscribe", { subscriptionId }).catch(() => undefined);
   };
 }

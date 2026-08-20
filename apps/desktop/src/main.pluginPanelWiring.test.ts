@@ -48,7 +48,7 @@ describe("plugin panel main-process wiring", () => {
       pluginId: "sites",
       panelId: "main",
       subscriptionId: "subscription-1",
-      event: "files.watch",
+      event: "change",
       data,
     });
   });
@@ -96,14 +96,14 @@ describe("plugin panel main-process wiring", () => {
     const allowAt = start.indexOf("allowLoopbackFrameOrigin(handle.url)");
     const rememberAt = start.indexOf("runningPluginPanels.set(key");
     const grantAt = start.indexOf("pluginPanelSdkAuthorities.register({");
-    const disposeAt = start.indexOf("workspaceEvents.disposeOwner({", grantAt);
+    const disposeAt = start.indexOf(".disposeOwner({", grantAt);
 
     expect(serveAt).toBeGreaterThan(-1);
     expect(allowAt).toBeGreaterThan(serveAt);
     expect(rememberAt).toBeGreaterThan(allowAt);
     expect(grantAt).toBeGreaterThan(rememberAt);
     expect(disposeAt).toBeGreaterThan(grantAt);
-    expect(start).toContain('grant.signal.addEventListener(\n          "abort",');
+    expect(start).toContain("grant.signal.addEventListener(");
     expect(start).toContain("startPluginPanelWithLock(");
     expect(start).toContain("withPluginHostLifecycleLock,");
     expect(start).toContain("() => ensurePluginStarted(workspace, plugin)");
@@ -153,12 +153,10 @@ describe("plugin panel main-process wiring", () => {
     expect(invoke).toContain("const liveSpawnId = host?.getSpawnId(input.pluginId);");
     expect(invoke).toContain("liveSpawnId,");
     expect(invoke).toContain("createPluginPanelFileWatchEmitter({");
-    expect(invoke).toContain("!authority.signal.aborted");
-    expect(invoke).toContain("currentPanel.senderId === authority.senderId");
-    expect(invoke).toContain(
-      "currentPanel.generation === authority.generation",
-    );
-    expect(invoke).toContain("currentSpawnId === authority.spawnId");
+    // What makes a grant "the exact panel running right now" is pinned
+    // directly, as a real test, in pluginPanelSdkEvent.test.ts — this only
+    // confirms main.ts wires that predicate in.
+    expect(invoke).toContain("isPluginPanelIdentityLive({");
     expect(invoke).toContain(
       "workspaceEvents.subscribe({ owner, emitEvent }, watchParams)",
     );

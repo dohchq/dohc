@@ -10,6 +10,8 @@ core that a plugin of your own could not take.
 ## What it does
 
 - Lists every site the workspace holds, in the activity bar.
+- Refreshes the list when workspace files change, in addition to a manual
+  refresh button and on return to the view.
 - Opens one preview tab per site, over a loopback origin this plugin serves.
 - Serves a static site itself; runs a site's own dev or build command through
   dohc's broker, which owns the process tree and stops it with the plugin.
@@ -67,9 +69,6 @@ the person who opened it, not for every network the machine is on.
 
 ## What it cannot do yet
 
-- **Push refresh.** The list refreshes automatically through `files.watch`
-  when workspace files change. Manual refresh and return-to-view refresh still
-  work.
 - **Open a preview in a browser.** dohc has no external-open route a plugin
   can reach.
 - **Serve a site inside a read-only workspace**, because no plugin runs in one.

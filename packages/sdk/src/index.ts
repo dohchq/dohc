@@ -554,7 +554,6 @@ export function createPostMessageTransport(
   >();
   let activeSubscriptionCount = 0;
   let subscriptionMessageListener: ((event: MessageEvent) => void) | null = null;
-  let subscriptionMessageWindow: Window | null = null;
 
   const queueSubscriptionEvent = (
     subscriptionId: string,
@@ -566,24 +565,6 @@ export function createPostMessageTransport(
     queuedSubscriptionEvents.set(subscriptionId, queued);
   };
 
-  const handleSubscriptionMessage = (
-    event: MessageEvent,
-    targetWindow: Window,
-    targetOrigin: string,
-  ): void => {
-    if (event.source !== targetWindow) return;
-    if (!responseOriginMatches(event.origin, targetOrigin)) return;
-    if (!isDohcSdkEvent(event.data)) return;
-
-    const subscriptionEvent = {
-      event: event.data.event,
-      data: event.data.data,
-    };
-    const listener = subscriptionListeners.get(event.data.subscriptionId);
-    if (listener) listener(subscriptionEvent);
-    else queueSubscriptionEvent(event.data.subscriptionId, subscriptionEvent);
-  };
-
   const retainSubscriptionMessageListener = (
     currentWindow: Window,
     targetWindow: Window,
@@ -593,9 +574,18 @@ export function createPostMessageTransport(
     activeSubscriptionCount += 1;
     if (activeSubscriptionCount === 1) {
       subscriptionMessageListener = (event) => {
-        handleSubscriptionMessage(event, targetWindow, targetOrigin);
+        if (event.source !== targetWindow) return;
+        if (!responseOriginMatches(event.origin, targetOrigin)) return;
+        if (!isDohcSdkEvent(event.data)) return;
+
+        const subscriptionEvent = {
+          event: event.data.event,
+          data: event.data.data,
+        };
+        const listener = subscriptionListeners.get(event.data.subscriptionId);
+        if (listener) listener(subscriptionEvent);
+        else queueSubscriptionEvent(event.data.subscriptionId, subscriptionEvent);
       };
-      subscriptionMessageWindow = currentWindow;
       currentWindow.addEventListener("message", subscriptionMessageListener);
     }
 
@@ -603,17 +593,13 @@ export function createPostMessageTransport(
       if (!retained) return;
       retained = false;
       activeSubscriptionCount -= 1;
-      if (
-        activeSubscriptionCount === 0 &&
-        subscriptionMessageListener &&
-        subscriptionMessageWindow
-      ) {
-        subscriptionMessageWindow.removeEventListener(
-          "message",
-          subscriptionMessageListener,
-        );
+      if (activeSubscriptionCount === 0 && subscriptionMessageListener) {
+        currentWindow.removeEventListener("message", subscriptionMessageListener);
         subscriptionMessageListener = null;
-        subscriptionMessageWindow = null;
+        // No call is retaining the listener, so none can still be waiting on
+        // a queued id — clear orphans left by a subscribe that errored or
+        // aborted after its id's events had already started arriving.
+        queuedSubscriptionEvents.clear();
       }
     };
   };
