@@ -476,6 +476,7 @@ import {
   relayUrlsMatch,
 } from "./workspaces/syncCode";
 import {
+  captureSharedViewLocalDivergence,
   SharePinInvalidError,
   recordedShareSelector,
   refreshSharedViewOnce,
@@ -6045,12 +6046,18 @@ function registerIpcHandlers(
           console.error("[desktop] share view identity:", error);
         },
       );
+      const store = sharedViewStoreFor(created);
+      await captureSharedViewLocalDivergence(
+        created.rootPath,
+        created.workspaceId,
+        store,
+      );
       const outcome = await refreshSharedViewOnce({
         rootDir: created.rootPath,
         workspaceId: created.workspaceId,
         relay,
         shareId: parsed.shareId,
-        store: sharedViewStoreFor(created),
+        store,
         // Just pinned on the record above; the refresh reads it back through
         // the same defensive parse every later refresh uses.
         pinnedSelector: info.selector,
@@ -6159,12 +6166,18 @@ function registerIpcHandlers(
       console.error("[desktop] share view chat push (refresh backstop):", error);
     });
     try {
+      const store = sharedViewStoreFor(workspace);
+      await captureSharedViewLocalDivergence(
+        workspace.rootPath,
+        workspace.workspaceId,
+        store,
+      );
       outcome = await refreshSharedViewOnce({
         rootDir: workspace.rootPath,
         workspaceId: workspace.workspaceId,
         relay,
         shareId: shareView.shareId,
-        store: sharedViewStoreFor(workspace),
+        store,
         pinnedSelector: shareView.grantedSelector,
         recordRefusals: recordShareViewRefusals(workspace.workspaceId),
         pull: async (input) =>

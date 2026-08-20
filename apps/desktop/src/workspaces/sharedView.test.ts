@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, rm, stat } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -7,6 +7,7 @@ import {
   type ShareViewDaemonHarness,
 } from "../testing/shareViewLoopbackTransport";
 import {
+  captureSharedViewLocalDivergence,
   SharePinInvalidError,
   materializeSharedViewPaths,
   refreshSharedViewOnce as refreshSharedViewOnceWithPull,
@@ -14,6 +15,7 @@ import {
 } from "./sharedView";
 import type { ShareViewRefusal } from "@dohc/workspace-contracts/relay";
 import { createTestScratch } from "./testTemp";
+import { routeWorkspaceTextWrite } from "./workspaceTextWrite";
 
 // These tests drive the pull with the selector a share record pins. It is a
 // REAL selector — no paths and no version selects nothing at all, which the
@@ -225,6 +227,229 @@ class FakeShareRelay {
 }
 
 describe("shared view refresh", () => {
+  it("captures an out-of-app modification as a local-file moment", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/a.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "granter body");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), "outside editor", "utf8");
+
+    const store = harness.openStore(target);
+    try {
+      const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+      const beforeIds = new Set(before.moments.map((moment) => moment.id));
+
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
+      ).resolves.toEqual({ capturedPaths: 1 });
+
+      const after = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+      const captured = after.moments.find((moment) => !beforeIds.has(moment.id));
+      expect(captured?.path).toBe(path);
+      expect(captured?.metadata.origin).toBe("local-file");
+      const moment = captured
+        ? await store.getMoment({ workspaceId: WORKSPACE, momentId: captured.id })
+        : null;
+      expect(moment?.payload.after.text).toBe("outside editor");
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("captures an out-of-app create without rewriting its projection", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/new.md";
+    const bytes = Buffer.from("outside create\r\n", "utf8");
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), bytes);
+
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    try {
+      const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+      const beforeIds = new Set(before.moments.map((moment) => moment.id));
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
+      ).resolves.toEqual({ capturedPaths: 1 });
+
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      await expect(
+        store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path }),
+      ).resolves.toMatchObject({ text: bytes.toString("utf8") });
+      const after = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+      const captured = after.moments.find((moment) => !beforeIds.has(moment.id));
+      expect(captured).toMatchObject({ path, metadata: { origin: "local-file" } });
+      expect(await readFile(join(rootDir, path))).toEqual(bytes);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("captures an out-of-app delete as a local-file moment", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/deleted.md";
+    relay.addWrite(path, "remove me");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await rm(join(rootDir, path));
+
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    try {
+      const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+      const beforeIds = new Set(before.moments.map((moment) => moment.id));
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
+      ).resolves.toEqual({ capturedPaths: 1 });
+
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      await expect(
+        store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path }),
+      ).resolves.toBeNull();
+      const after = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+      const captured = after.moments.find((moment) => !beforeIds.has(moment.id));
+      expect(captured).toMatchObject({
+        path,
+        operation: "delete",
+        metadata: { origin: "local-file" },
+      });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("uses the same origin for out-of-app and in-app edits", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const outsidePath = "docs/outside.md";
+    const inAppPath = "docs/in-app.md";
+    relay.addWrite(outsidePath, "outside before");
+    relay.addWrite(inAppPath, "in-app before");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, outsidePath), "outside after", "utf8");
+
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    try {
+      const beforeOutside = await store.listMoments({
+        workspaceId: WORKSPACE,
+        limit: 100,
+      });
+      const beforeOutsideIds = new Set(
+        beforeOutside.moments.map((moment) => moment.id),
+      );
+      await captureSharedViewLocalDivergence(rootDir, WORKSPACE, store);
+      const afterOutside = await store.listMoments({
+        workspaceId: WORKSPACE,
+        limit: 100,
+      });
+      const outsideMoment = afterOutside.moments.find(
+        (moment) => moment.path === outsidePath && !beforeOutsideIds.has(moment.id),
+      );
+
+      const beforeInAppIds = new Set(afterOutside.moments.map((moment) => moment.id));
+      await expect(
+        routeWorkspaceTextWrite({
+          workspaceId: WORKSPACE,
+          rootPath: rootDir,
+          relativePath: inAppPath,
+          text: "in-app after",
+          expectedContentHash: sha256("in-app before"),
+          shareView: { access: "edit", ended: false },
+          shareViewStore: () => store,
+        }),
+      ).resolves.toMatchObject({ status: "written" });
+      const afterInApp = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+      const inAppMoment = afterInApp.moments.find(
+        (moment) => moment.path === inAppPath && !beforeInAppIds.has(moment.id),
+      );
+
+      expect(outsideMoment?.metadata.origin).toBe("local-file");
+      expect(inAppMoment?.metadata.origin).toBe(outsideMoment?.metadata.origin);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("does not echo a freshly materialized file into another moment", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    relay.addWrite("docs/a.md", "fresh projection");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    try {
+      const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
+      ).resolves.toEqual({ capturedPaths: 0 });
+      const after = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+      expect(after.moments.map((moment) => moment.id)).toEqual(
+        before.moments.map((moment) => moment.id),
+      );
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("leaves out-of-app secret files outside ordinary moments", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const secretPath = "secrets/.env";
+    const plaintext = "API_TOKEN=do-not-capture\n";
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await mkdir(join(rootDir, "secrets"));
+    await writeFile(join(rootDir, secretPath), plaintext, "utf8");
+
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    try {
+      const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
+      ).resolves.toEqual({ capturedPaths: 0 });
+      const after = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
+      expect(after.moments.map((moment) => moment.id)).toEqual(
+        before.moments.map((moment) => moment.id),
+      );
+      expect(after.moments.some((moment) => moment.path === secretPath)).toBe(false);
+      expect(await readFile(join(rootDir, secretPath), "utf8")).toBe(plaintext);
+    } finally {
+      await store.close();
+    }
+  });
+
   it("pulls, materializes to disk, and reports honest statuses across refreshes", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();

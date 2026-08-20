@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { dirname, resolve, sep } from "node:path";
+import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { dirname, join, resolve, sep } from "node:path";
+import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import { validateUserMaterializePath } from "@dohc/workspace-core";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
@@ -16,6 +18,7 @@ import {
   type ShareViewRefusal,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
+import { readDiskContent } from "./workspaceEngineCapture";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 // The receive side of a relay share (PR 18): a shared view is a local
@@ -34,6 +37,10 @@ export interface RefreshSharedViewOutcome {
   // The first refusal's message, for the UI. It names the constraint the op
   // broke; the whole list goes to the log.
   refusedDetail: string | null;
+}
+
+export interface CaptureSharedViewLocalDivergenceOutcome {
+  capturedPaths: number;
 }
 
 /**
@@ -262,6 +269,123 @@ export async function materializeSharedViewPaths(
       typeof content === "string" ? { encoding: "utf8", flag: "wx" } : { flag: "wx" },
     );
   }
+}
+
+// Pull-time reconciliation for #807, for standalone share views only. Comparing
+// disk with the engine head makes this echo-free: in-app edits and the previous
+// materialization already match the store, so only out-of-app divergence is
+// captured. Mounts keep pure-overwrite semantics through
+// repairSharedViewProjection and must never call this function.
+export async function captureSharedViewLocalDivergence(
+  rootDir: string,
+  workspaceId: string,
+  store: CaptureVersionedTextStore,
+): Promise<CaptureSharedViewLocalDivergenceOutcome> {
+  const realRoot = await realpath(rootDir).catch(() => null);
+  if (realRoot === null) return { capturedPaths: 0 };
+
+  const main = await store.ensureMainVersion({ workspaceId });
+  const snapshots = await store.listTextFiles({
+    workspaceId,
+    versionId: main.id,
+  });
+  const tracked = new Map(snapshots.map((snapshot) => [snapshot.path, snapshot]));
+  const diskPaths = new Set<string>();
+  const ignoredTopLevelDirectories = new Set([".dohc", "node_modules", ".git"]);
+
+  async function walk(dir: string, relativeDir: string): Promise<void> {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (
+        relativeDir.length === 0 &&
+        entry.isDirectory() &&
+        ignoredTopLevelDirectories.has(entry.name)
+      ) {
+        continue;
+      }
+      const path = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        await walk(join(dir, entry.name), path);
+      } else {
+        diskPaths.add(path);
+      }
+    }
+  }
+  await walk(realRoot, "");
+
+  let capturedPaths = 0;
+  for (const snapshot of snapshots) {
+    if (classifyEngineFilePath(snapshot.path).kind === "secret") continue;
+    if (!diskPaths.has(snapshot.path)) {
+      await store.deleteTextFile({
+        workspaceId,
+        versionId: main.id,
+        path: snapshot.path,
+        metadata: { origin: "local-file" },
+      });
+      capturedPaths += 1;
+      continue;
+    }
+
+    const disk = await readDiskContent(resolve(realRoot, snapshot.path));
+    if (disk.kind === "text") {
+      const changed =
+        snapshot.contentKind === "binary" ||
+        (typeof snapshot.sha256 === "string" && snapshot.sha256.length > 0
+          ? snapshot.sha256 !== disk.sha256
+          : snapshot.text !== disk.text);
+      if (changed) {
+        await store.writeTextFile({
+          workspaceId,
+          versionId: main.id,
+          path: snapshot.path,
+          text: disk.text,
+          metadata: { origin: "local-file" },
+        });
+        capturedPaths += 1;
+      }
+    } else if (
+      disk.kind === "binary" &&
+      (snapshot.sha256 !== disk.sha256 || snapshot.contentKind !== "binary")
+    ) {
+      await store.writeBinaryFile({
+        workspaceId,
+        versionId: main.id,
+        path: snapshot.path,
+        bytes: disk.bytes,
+        metadata: { origin: "local-file" },
+      });
+      capturedPaths += 1;
+    }
+  }
+
+  for (const path of diskPaths) {
+    if (tracked.has(path) || classifyEngineFilePath(path).kind === "secret") continue;
+    const validated = validateUserMaterializePath(path);
+    if (!validated.ok) continue;
+    const disk = await readDiskContent(resolve(realRoot, validated.normalized));
+    if (disk.kind === "text") {
+      await store.writeTextFile({
+        workspaceId,
+        versionId: main.id,
+        path: validated.normalized,
+        text: disk.text,
+        metadata: { origin: "local-file" },
+      });
+      capturedPaths += 1;
+    } else if (disk.kind === "binary") {
+      await store.writeBinaryFile({
+        workspaceId,
+        versionId: main.id,
+        path: validated.normalized,
+        bytes: disk.bytes,
+        metadata: { origin: "local-file" },
+      });
+      capturedPaths += 1;
+    }
+  }
+
+  return { capturedPaths };
 }
 
 // Verify the materialized projection against the local store and repair any
