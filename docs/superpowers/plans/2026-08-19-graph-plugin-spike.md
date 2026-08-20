@@ -20,15 +20,17 @@ from Ice about what the graph is allowed to show.
 **Convert the files half after three S additions, one M primitive, and one L
 port: rewrite the 886-line `GraphView` and its 333 lines of tests for an
 unbundled panel, then re-home about fifteen shell tests.** The force simulation
-needs no library, and every theme token it draws with is already served to a
+needs no library, and every color token it draws with is already served to a
 panel. Both of graph's surfaces exist as placements, but a plugin cannot hold
 both at once, so the maximize gesture that promotes the rail view to a tab
 needs a small addition.
 
 Three things block a straight port. First, **no engine indexes links** — the
-desktop main process re-reads every markdown file on every graph call, so a
-plugin either re-reads 32 MiB through a per-file postMessage bridge or gets the
-derivation as a capability. Second, **half the graph contract is chat**: three
+desktop main process re-reads every markdown file on every graph call. A
+faithful panel fallback can move about 130 MiB through per-file postMessage
+calls before it crosses the graph's own 32 MiB accounting. The plugin should
+get the derivation as a capability. Second, **half the graph contract is
+chat**: three
 node kinds and five edge kinds, of which the chat ones need the engine capture,
 the linked-chat store, and shared-channel sync — collaboration substrate a
 plugin must not reach. That mode is off by default, per mount, and unpersisted
@@ -220,15 +222,29 @@ gate for methods that need a renderer or process event channel
 | chat / threads / channels | absent | SDK groups are `files`, `workspace`, `databases`, `ui` (`packages/sdk/src/index.ts:966,1047,1067,1107`) |
 | active document | absent | same |
 
-Three details matter for graph specifically. `files.list` returns files only —
-`listFiles` yields `{ files, folders }` but the SDK route uses `.files`
-(`workspaceSdkHost.ts:137-150`) — which is exactly what the path index needs
-(`workspaceGraph.ts:871-874`), so nothing is lost. Entries carry no size and no
-mtime, so a panel cannot skip a file cheaply. And `files.read` returns a
-`contentHash` — `null` on a truncated read (`workspaceAssets.ts:129-131`),
-passed through at `workspaceSdkHost.ts:271-277`. The SDK's own type drops it,
-but a raw `request("files.read", …)` sees it. It is the only change-detection a
-panel has.
+Three details matter for graph specifically. `files.list` returns files only:
+`listFiles` yields `{ files, folders }`, and the SDK route uses `.files`
+(`workspaceSdkHost.ts:133-151`). But this is not the graph loader's visible
+set. `listFiles` skips symlinks and the `.dohc`, `node_modules`, and `.git`
+directories (`workspaceFiles.ts:183-218`). `listVisibleFiles` then applies only
+the requested root, recursion mode, and 10,000-entry cap. It never calls
+`classifyEngineFilePathForRead`. A markdown-named secret such as
+`.env.local.md` therefore appears in `files.list`.
+
+`files.read` does not close that gap. Its `sdkWorkspacePath` call uses
+`validateUserReadPath`, which rejects traversal, reserved metadata, ignored
+segments, and unsafe read paths (`workspaceSdkHost.ts:71-79`,
+`packages/workspace-core/src/paths.ts:192-212`). `readWorkspaceText` repeats that path
+safety and real-path containment (`workspaceAssets.ts:60-95`), but neither
+layer classifies `.env`-family secrets. The same `.env.local.md` is readable
+through the SDK. The graph loader separately calls
+`classifyEngineFilePathForRead` before it indexes or reads a path
+(`workspaceGraph.ts:859-875`). Entries also carry no size and no mtime, so a
+panel cannot skip a file cheaply. `files.read` returns a `contentHash`, or
+`null` on a truncated read (`workspaceAssets.ts:129-131`), passed through at
+`workspaceSdkHost.ts:271-277`. The SDK's own type drops it, but a raw
+`request("files.read", …)` sees it. It is the only change-detection a panel
+has.
 `collections.*` and `provenance.record` read false for a panel
 (`pluginSdkHost.ts:162-163`); graph needs neither.
 
@@ -262,16 +278,16 @@ wrong-shaped.
 | # | Graph capability | Status | Detail |
 | --- | --- | --- | --- |
 | 1 | Enumerate workspace files | HAS | `files.list`, 10,000-entry cap (`workspaceSdkHost.ts:54`), well above `MAX_GRAPH_FILES` of 2,000. |
-| 2 | Read every markdown body | AWKWARD | `files.read` is one call per file, capped at 2 MiB each (`workspaceAssets.ts:127`), above graph's own 512 KiB. A full graph is up to 2,000 round trips and 32 MiB across the panel bridge (`workspaceGraph.ts:65-69`), against one IPC call today. No batch read exists, and the panel's default request timeout is 10 s per call (`packages/sdk/src/index.ts:428`). **No round-trip cost has ever been measured** — no benchmark, no budget entry, no timing in `PluginPanelPage.tsx` or `pluginSdkHost.ts`. AGENTS.md says to measure before setting a limit that rejects healthy work; this fan-out is the same question in reverse and is unmeasured. |
-| 3 | Link extraction and resolution | HAS | Pure TypeScript (`workspaceGraph.ts:350-492`); a plugin bundles it. Cost: the copy forks from the one backlinks still uses, so an edge and a backlink can drift apart — the exact property `:914-917` exists to hold. |
+| 2 | Read every markdown body | AWKWARD | `files.read` is one call per file. The route uses only `path`, so a raw request cannot ask for the graph's 512 KiB prefix (`workspaceSdkHost.ts:271-276`). `readWorkspaceText` returns up to 2 MiB (`workspaceTextLimits.ts:1`, `workspaceAssets.ts:416-435`). With files at least that large, a faithful sequential port transfers 65 × 2 MiB, about 130 MiB, before the 65th 512 KiB graph slice crosses the graph's 32 MiB total (`workspaceGraph.ts:65-69`). That makes G1 more valuable, not less. A full graph is still up to 2,000 round trips. No batch read exists, and the panel's default request timeout is 10 s per call (`packages/sdk/src/index.ts:428`). **No round-trip cost has ever been measured** — no benchmark, no budget entry, no timing in `PluginPanelPage.tsx` or `pluginSdkHost.ts`. AGENTS.md says to measure before setting a limit that rejects healthy work; this fan-out is the same question in reverse and is unmeasured. |
+| 3 | Link extraction and resolution | AWKWARD | The logic is TypeScript, but `workspaceGraph.ts` imports `posix` from `node:path` and calls `extname`, `basename`, `normalize`, `join`, and `dirname` (`workspaceGraph.ts:1,111-125,377-482`). An unbundled browser panel cannot copy it unchanged. The fallback needs a browser-path port or a build step. Either choice still forks the resolver backlinks uses, so an edge and a backlink can drift apart — the exact property `:914-917` exists to hold. |
 | 4 | Node titles | HAS | Needs each file's first H1 (`:120-127`), which comes with row 2's reads. |
-| 5 | The secret floor | HAS | `files.list` and `files.read` enforce workspace policy; the plugin never opens files itself. |
+| 5 | The secret floor | AWKWARD | `files.list` does not call `classifyEngineFilePathForRead`, and `files.read` enforces path safety rather than the `.env`-family secret floor (`workspaceSdkHost.ts:133-151,271-279`; `packages/workspace-core/src/paths.ts:192-212`). A no-G1 fallback must reproduce the loader's filter before it reads or indexes any path. If it does not, `.env.local.md` is readable and becomes graph input even though the core loader excludes it (`workspaceGraph.ts:859-875`). G1 is safer because it runs that loader. |
 | 6 | Rail view | HAS | P6 shipped with the sites conversion; the sites manifest declares `panels[].placement: "view"`, and the rail machinery is `PLUGIN_VIEW_ID_PREFIX`/`pluginViewId`/`parsePluginViewId` (`workbenchState.ts:26-49`). Cap is 4 view panels (`pluginManifestSchema.ts:151,419-429`). |
 | 7 | Singleton tab | HAS | `placement: "editor"` gives `dohc://plugin-panel/<pluginId>/<panelId>` (`workbenchState.ts:78,113-115`), collapsed by `canonicalSingletonEditorTabPath` (`:183-191`) — one tab per panel, which is what graph wants. P4 (`webApps`) is not required and would be wrong: a web app is a `WebContentsView` guest (`pluginManifestSchema.ts:158-171`) with no preload, Node, IPC, or workspace authority (`pluginWebAppGuest.ts:1-6`). |
 | 7b | **Both surfaces at once** | LACKS | The placements are exclusive by design: `z.enum(["editor","view"])` (`pluginManifestSchema.ts:120`) with the reason at `:115-119` — "a running panel is keyed by (workspace, plugin, panel) and starting a second one stops the first". Opening a view panel as a tab is refused (`pluginPanelRegistration.ts:242-249`). A plugin can declare **two** panels sharing one entry file, but nothing lets one open the other: graph's maximize button (`DesktopWorkspaceShell.tsx:5195-5205`, testid `graph-open-tab`) has no SDK equivalent. `ui.open` takes a workspace path, `ui.openWebApp` takes a web app. |
 | 8 | Open a file | HAS | `ui.open` is routed for panels (`pluginSdkHost.ts:230-239`) and returns `{ target }`, a workspace path (`workspaceSdkHost.ts:343-349`). |
 | 8b | Open a file **at a heading** | LACKS | Graph opens with an anchor (`GraphView.tsx:474`, shell `openPathWithHeading`). The panel page reads only `target` and calls `onOpenPath(target)` with one argument (`PluginPanelPage.tsx:166-169`); the host's `position` passthrough (`workspaceSdkHost.ts:347`) is dropped. Moot if row 13 stays out, because heading nodes come from the same overlay. |
-| 9 | dohc-native look | HAS | `ui.theme` plus the theme push (`PluginPanelPage.tsx:137-147,226-242`) — P5. The payload carries 14 color tokens and 2 font stacks (`renderer/tokens.ts:86-101,111-115`), including every one graph draws with: `--dohc-panel`, `--dohc-line`, `--dohc-ink`, `--dohc-muted`, `--dohc-match`. Both edge kinds keep their colors. |
+| 9 | dohc-native look | AWKWARD | `ui.theme` plus the theme push (`PluginPanelPage.tsx:137-147,226-242`) carries all 14 color tokens Graph draws with, so both edge kinds keep their colors. It also carries two font-family stacks, but not the font files. A panel on its own origin cannot load dohc's bundled `InterVariable` or `IBM Plex Mono`, so the stacks fall through to system families (`renderer/tokens.ts:103-115`). Typography and SVG label metrics will differ. |
 | 10 | Rebuild when files change | LACKS | `files.watch` refused on the panel path (`pluginSdkHost.ts:213-219`); tracked as open issue #838, which records zero product consumers today. Partial mitigation: `files.read` returns a `contentHash` (`workspaceAssets.ts:129-131`, passed through at `workspaceSdkHost.ts:271-277`), so a panel can poll for change without re-parsing. It is still polling. Sites polls on `visibilitychange` (`plugins/sites/ui/index.js:230-232`). |
 | 11 | Rebuild when an edit settles | LACKS | Today's key folds in `latestMomentOrder` (`DesktopWorkspaceShell.tsx:4799-4801`). No SDK surfaces moments. A file-level watch would not be equivalent: a settle rewrites the artifact, so it may arrive as a file event, but nothing in the SDK says so. |
 | 12 | Know the active document | LACKS | This is rail behavior: `activeDocumentPath` drives ordering, centring, and the ring layout there (`DesktopWorkspaceShell.tsx:5222`; `GraphView.tsx:96-102,149-160,230-250`). The tab received `null` until [#842](https://github.com/dohc-ai/dohc/issues/842) was fixed (PR #844); both mounts now pass `activeDocumentPath`. No SDK member carries the rail's active path. |
@@ -282,8 +298,8 @@ wrong-shaped.
 
 | Primitive | Closes | Size | Why this size |
 | --- | --- | --- | --- |
-| **G1. `workspace.links`** — an SDK capability returning the bounded link derivation core already runs | 2, 3 | **S** | `readWorkspaceGraph` is written and bounded (`workspaceGraph.ts:904-912`); the work is a switch case in `workspaceSdkHost.ts` beside `files.list`, plus deciding the result shape. It grants no new read authority: the panel can already enumerate and read every graph input through `files.list` and `files.read` (`workspaceSdkHost.ts:133-150,271-279`). It saves the per-file bridge calls and keeps one link resolver instead of two. |
-| **G2. Rail active-document push** — the renderer sends the active workspace path to the rail panel | 12 | **S** | Same channel and shape as the theme push (`PluginPanelPage.tsx:231-234`); the renderer already passes `activeDocumentPath` to the rail (`DesktopWorkspaceShell.tsx:5222`). Since the [#842](https://github.com/dohc-ai/dohc/issues/842) fix (PR #844), both built-in mounts receive `activeDocumentPath`, so G2 serves whatever surfaces the plugin keeps. Needs the workspace/generation guard the panel's SDK responses already carry. |
+| **G1. `workspace.links`** — an SDK capability returning the bounded link derivation core already runs | 2, 3, 5 | **S** | `readWorkspaceGraph` is written and bounded (`workspaceGraph.ts:904-912`). The plumbing spans a `workspaceSdkHost.ts` case, an explicit `pluginSdkHost.ts` forwarding case because its default rejects unknown methods (`pluginSdkHost.ts:184-203,323-344`), capability and SDK exposure, and host/SDK tests. It stays S by the sites spike's P1 SDK-parity precedent, which routed `databases.*` and `ui.open` through the same layers (`2026-08-17-sites-plugin-spike.md:254-256`). G1 saves the per-file bridge calls, keeps one link resolver, and applies the core loader's secret floor. |
+| **G2. Active-document push** — the renderer sends the active workspace path to every mounted graph panel | 12 | **S** | Same channel and shape as the theme push (`PluginPanelPage.tsx:231-234`); the renderer already passes `activeDocumentPath` to the rail (`DesktopWorkspaceShell.tsx:5222`). Since the [#842](https://github.com/dohc-ai/dohc/issues/842) fix (PR #844), both built-in mounts receive `activeDocumentPath`, so G2 pushes to every mounted graph panel the plugin keeps — a rail-only push would reintroduce #842 in the editor panel. Needs the workspace/generation guard the panel's SDK responses already carry. |
 | **G3. Panel subscriptions** — a guarded relay from the workspace event feed to the panel that asked | 10, 11 | **M** | Named by the sites build as the next primitive (`2026-08-17-sites-plugin-spike.md:406-410`) and by issue #838. The feed exists and caps each plugin spawn at 16 open subscriptions (`plugins/pluginWorkspaceEvents.ts:5-14,88-95`), and the push direction exists; new work is per-panel subscriptions under the same guards, and a decision on whether a settled moment is visible at all. |
 | **G4. `ui.openPanel`** — a panel asks dohc to open another of its own panels as a tab | 7b | **S** | The same shape as `ui.openWebApp` (`pluginSdkHost.ts:246-280`): the plugin id comes from the grant, never the request, and the renderer performs the open. The tab path already exists (`workbenchState.ts:78`) and is already a singleton. Without it, graph loses its maximize button. |
 
@@ -294,11 +310,15 @@ whole workspace. Two facts push back: it is a richer contract to keep stable,
 and the sites rule was "convert the surfaces, keep the authority" — link
 derivation is neither surface nor authority, so the rule does not decide it.
 
-G1 grants no new read authority. The panel can already enumerate and read every
-non-secret byte the graph loader consumes through `files.list` and `files.read`
-(`workspaceSdkHost.ts:133-150,271-279`). `workspace.links` would run the same
-loader, including its secret floor (`workspaceGraph.ts:859-873`), and replace up
-to 2,000 per-file bridge calls with one bounded derivation call.
+G1 does not expand the panel's raw-file read authority. It is safer than the
+no-G1 fallback. The panel can already list and read `.env.local.md`, because
+the SDK routes apply path safety but not `classifyEngineFilePathForRead`
+(`workspaceSdkHost.ts:133-151,271-279`). `workspace.links` would run the core
+loader and exclude that path before reading or indexing it
+(`workspaceGraph.ts:859-875`). A no-G1 fallback must reproduce that filter
+exactly. If it reads every markdown path returned by `files.list`, it leaks
+content that the graph and backlinks deliberately exclude. G1 also replaces
+up to 2,000 per-file bridge calls with one bounded derivation call.
 
 G1's payload fits. The 4 MiB, depth-32, 20,000-value bound
 (`bridgeContract.ts:2524-2526`) applies to request **params**, enforced in the
@@ -335,9 +355,10 @@ Tailwind utilities such as `fill-panel`, `stroke-line`, `text-ink`, and
 `stroke-match/70`, plus four bespoke classes: `dohc-graph-edge`,
 `dohc-graph-node`, `dohc-graph-node-halo`, and `dohc-graph-node-dot`
 (`GraphView.tsx:518-643`, `styles.css:816-884`). None reaches a panel iframe.
-The 14-color and 2-font theme payload covers the palette
-(`renderer/tokens.ts:86-101,111-115`), but every SVG class must become inline
-styles and CSS-variable references.
+The 14-color theme payload covers the palette (`renderer/tokens.ts:86-101`),
+but every SVG class must become inline styles and CSS-variable references. The
+two font tokens name stacks, not loadable assets. On a panel origin they fall
+through to system families (`renderer/tokens.ts:103-115`).
 
 **Deleted from core**
 
@@ -401,16 +422,23 @@ A `graph` plugin on today's SDK plus G1–G4:
   file — `graph` with `placement: "view"` for the rail, `graph-tab` with
   `placement: "editor"` for the full-page shape. Two ids are needed because the
   placements are exclusive (`pluginManifestSchema.ts:115-120`), and G4 is what
-  lets the first open the second. Each is its own running panel with its own
-  state, so the layout the user left behind in one does not carry to the other.
+  lets the first open the second. Each is its own running panel. That does not
+  introduce a simulation-state split: today's rail and editor are separate
+  `GraphView` mounts (`DesktopWorkspaceShell.tsx:5218-5229,5400-5411`), and
+  each mount's `GraphMap` owns its own `useForceGraph` state
+  (`GraphView.tsx:199-218,441-460`).
 - **Panel code**: on open, `workspace.links` (G1) returns nodes and edges;
   the force-simulation arithmetic ports, but every SVG utility and bespoke
   class is rewritten as inline styles and theme-variable references. G2
   supplies the rail's active document for centring. G3 replaces the refresh
   key. `ui.open` handles node clicks. `ui.theme` plus the theme push supplies
   the palette.
-- **Without G1**: `files.list` then `files.read` per markdown file, with a
-  bundled copy of the extractor and resolver, and the drift cost in row 3.
+- **Without G1**: `files.list` then `files.read` per markdown file. Before any
+  read or path indexing, the panel must reproduce
+  `classifyEngineFilePathForRead` or it leaks markdown-named secrets. The
+  extractor and resolver also import `node:path`; an unbundled panel needs a
+  browser-path port or a build step. Both copies carry the drift cost in rows 3
+  and 5.
 
 **What is lost or changed — honestly:**
 
@@ -437,15 +465,20 @@ A `graph` plugin on today's SDK plus G1–G4:
   fifteen shell tests lose the Graph UI they drive through.
 - **The marketing site loses its graph panel** or keeps a forked copy
   (`apps/site/src/DemoSidebar.tsx:9,223-228`).
-- **Rail and tab stop sharing state.** Today one component serves both through
-  a `variant` prop (`GraphView.tsx:61-90`), so the node layout the force
-  simulation settled on is the same object. As two panels, they are two
-  processes' worth of separate state: maximizing restarts the simulation.
+- **Typography is approximate.** The theme payload carries dohc's font stacks,
+  but a panel origin cannot load the bundled families and falls back to system
+  fonts (`renderer/tokens.ts:103-115`). SVG node-label glyph widths and
+  baselines change, so label fit and alignment can differ from the built-in
+  graph.
 - **No right-click menu worth having.** Graph does not use one today, so
   nothing is lost — but note a panel gets no native context menu, and a
   DOM one is clipped to the iframe rectangle, which in the rail is narrow.
-- **Data cost without G1**: up to 2,000 round trips and 32 MiB across a
-  postMessage bridge, per open and per refresh, against one IPC call today.
+- **Data cost without G1**: up to 2,000 round trips. Because each SDK read can
+  return 2 MiB while Graph counts only a 512 KiB prefix, a faithful sequential
+  port can transfer about 130 MiB before crossing Graph's 32 MiB accounting
+  (`workspaceSdkHost.ts:271-276`, `workspaceAssets.ts:416-435`,
+  `workspaceGraph.ts:65-69`). G1 restores a one-call transfer, matching today's
+  IPC shape.
 - **Shared views and share mounts.** Graph reads mounted shares today
   (`workspaceGraph.ts:869-871`). Plugin surfaces still refuse a non-writable
   workspace, so P7 remains the open item the sites spike recorded; graph
@@ -475,8 +508,8 @@ The sites spike's third claim — fewer losses than Sites — is wrong about the
 total, though it names the mechanism correctly. Graph spawns nothing and embeds
 nothing, so it needs no P3, no P4, and no P8, and that is why every addition
 here is S except one. But sites lost shared-view previews and an embedded SDK;
-graph loses the chat-mentions mode, push refresh, shared rail-and-tab state, and
-the maximize gesture. The list is longer, not shorter. It is only cheaper to
+graph loses the chat-mentions mode, push refresh, exact typography, and the
+maximize gesture. The list is longer, not shorter. It is only cheaper to
 build.
 
 Two costs sit outside the primitives and outside the plugin: `apps/site` breaks
