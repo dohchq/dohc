@@ -6,6 +6,9 @@ import {
   heuristicMode,
   parsePreviewInstanceKey,
   previewInstanceKey,
+  shouldRetryWatchSubscription,
+  watchSubscriptionFailed,
+  watchSubscriptionSucceeded,
 } from "../ui/sites.js";
 
 function siteAt(root: string, sources: Array<string | { path: string; body?: string }>) {
@@ -209,5 +212,20 @@ describe("preview instance keys", () => {
   it("stays inside the 512-character limit dohc puts on an instance key", () => {
     const root = "a".repeat(500);
     expect(previewInstanceKey(root, "static").length).toBeLessThanOrEqual(512);
+  });
+});
+
+describe("watch subscription recovery", () => {
+  it("latches a failure until a watch subscription succeeds", () => {
+    const failed = watchSubscriptionFailed("files.watch failed");
+    expect(failed).toEqual({ failed: true, message: "files.watch failed" });
+    expect(shouldRetryWatchSubscription(failed)).toBe(true);
+
+    const stillFailed = watchSubscriptionFailed("files.watch failed again");
+    expect(shouldRetryWatchSubscription(stillFailed)).toBe(true);
+
+    const watching = watchSubscriptionSucceeded();
+    expect(watching).toEqual({ failed: false, message: null });
+    expect(shouldRetryWatchSubscription(watching)).toBe(false);
   });
 });

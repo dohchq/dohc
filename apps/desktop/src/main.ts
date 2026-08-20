@@ -623,7 +623,8 @@ import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
 import { PluginWorkspaceEvents } from "./plugins/pluginWorkspaceEvents";
 import {
   createPluginPanelFileWatchEmitter,
-  isPluginPanelIdentityLive,
+  isPluginPanelPushLive,
+  isPluginPanelRequestLive,
 } from "./plugins/pluginPanelSdkEvent";
 import {
   createPluginAgentDrivers,
@@ -6783,12 +6784,12 @@ function registerIpcHandlers(
     const workspaceEvents = pluginWorkspaceEventsByWorkspace.get(input.workspaceId);
     const liveSpawnId = host?.getSpawnId(input.pluginId);
     const generation = rendererGeneration(sender.id);
-    const panelRunning = Boolean(
-      panel &&
-        panel.senderId === sender.id &&
-        panel.generation === generation &&
-        Boolean(liveSpawnId),
-    );
+    const panelRunning = isPluginPanelRequestLive({
+      currentPanel: panel,
+      senderId: sender.id,
+      generation,
+      liveSpawnId,
+    });
     const authority = pluginPanelSdkAuthorities.authorize({
       senderId: sender.id,
       generation,
@@ -6814,16 +6815,12 @@ function registerIpcHandlers(
           pluginId: authority.pluginId,
           panelId: authority.panelId,
           isPanelRunning: () =>
-            isPluginPanelIdentityLive({
+            isPluginPanelPushLive({
               signal: authority.signal,
               currentPanel: runningPluginPanels.get(key),
-              currentSpawnId: pluginPipelines
-                .get(authority.workspaceId)
-                ?.host.getSpawnId(authority.pluginId),
               grant: {
                 senderId: authority.senderId,
                 generation: authority.generation,
-                spawnId: authority.spawnId,
               },
             }),
           send: notifyPluginPanelSdkEvent,

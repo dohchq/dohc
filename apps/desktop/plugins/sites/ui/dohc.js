@@ -16,6 +16,30 @@ const postOrigin = hostOrigin === "file://" ? "*" : hostOrigin;
 let nextRequestId = 1;
 const subscriptionListeners = new Map();
 const queuedSubscriptionEvents = new Map();
+let pendingSubscribeCount = 0;
+
+// A failed request has no id to close. Grant-abort disposal eventually removes
+// its main-process authority and registry record. MAX_PLUGIN_FILE_WATCHES_PER_OWNER = 16
+// bounds each owner until then.
+function collectUnclaimedSubscriptionEvents() {
+  if (pendingSubscribeCount !== 0) return;
+  for (const subscriptionId of queuedSubscriptionEvents.keys()) {
+    if (!subscriptionListeners.has(subscriptionId)) {
+      queuedSubscriptionEvents.delete(subscriptionId);
+    }
+  }
+}
+
+function retainPendingSubscribe() {
+  let pending = true;
+  pendingSubscribeCount += 1;
+  return () => {
+    if (!pending) return;
+    pending = false;
+    pendingSubscribeCount -= 1;
+    collectUnclaimedSubscriptionEvents();
+  };
+}
 
 /**
  * Asks dohc for something.
@@ -107,7 +131,14 @@ export async function subscribe(method, params, listener) {
     throw new Error("Subscription listener must be a function.");
   }
 
-  const result = await request(method, params);
+  const finishPendingSubscribe = retainPendingSubscribe();
+  let result;
+  try {
+    result = await request(method, params);
+  } catch (error) {
+    finishPendingSubscribe();
+    throw error;
+  }
   if (
     !result ||
     typeof result !== "object" ||
@@ -115,11 +146,13 @@ export async function subscribe(method, params, listener) {
     typeof result.subscriptionId !== "string" ||
     result.subscriptionId.length === 0
   ) {
+    finishPendingSubscribe();
     throw new Error(`dohc returned an invalid subscription response for ${method}.`);
   }
 
   const { subscriptionId } = result;
   subscriptionListeners.set(subscriptionId, listener);
+  finishPendingSubscribe();
   for (const event of queuedSubscriptionEvents.get(subscriptionId) ?? []) {
     listener(event);
   }

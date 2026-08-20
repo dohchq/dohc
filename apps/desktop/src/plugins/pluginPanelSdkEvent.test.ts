@@ -1,17 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { isPluginPanelIdentityLive } from "./pluginPanelSdkEvent";
+import {
+  isPluginPanelPushLive,
+  isPluginPanelRequestLive,
+} from "./pluginPanelSdkEvent";
 
-describe("isPluginPanelIdentityLive", () => {
-  it("is live only when the grant's signal, sender, generation, and spawn all still match", () => {
+describe("isPluginPanelPushLive", () => {
+  it("requires the live granted panel but not the original plugin spawn", () => {
     const grant = { senderId: 1, generation: 2, spawnId: "spawn-1" };
     const currentPanel = { senderId: 1, generation: 2 };
     const live = new AbortController().signal;
 
     expect(
-      isPluginPanelIdentityLive({
+      isPluginPanelPushLive({
         signal: live,
         currentPanel,
-        currentSpawnId: "spawn-1",
         grant,
       }),
     ).toBe(true);
@@ -19,47 +21,91 @@ describe("isPluginPanelIdentityLive", () => {
     const aborted = new AbortController();
     aborted.abort();
     expect(
-      isPluginPanelIdentityLive({
+      isPluginPanelPushLive({
         signal: aborted.signal,
         currentPanel,
-        currentSpawnId: "spawn-1",
         grant,
       }),
     ).toBe(false);
 
     expect(
-      isPluginPanelIdentityLive({
+      isPluginPanelPushLive({
         signal: live,
         currentPanel: undefined,
-        currentSpawnId: "spawn-1",
         grant,
       }),
     ).toBe(false);
 
     expect(
-      isPluginPanelIdentityLive({
+      isPluginPanelPushLive({
         signal: live,
         currentPanel: { ...currentPanel, senderId: 2 },
-        currentSpawnId: "spawn-1",
         grant,
       }),
     ).toBe(false);
 
     expect(
-      isPluginPanelIdentityLive({
+      isPluginPanelPushLive({
         signal: live,
         currentPanel: { ...currentPanel, generation: 3 },
-        currentSpawnId: "spawn-1",
         grant,
       }),
     ).toBe(false);
 
+    const currentSpawnId = "spawn-2";
+    expect(currentSpawnId).not.toBe(grant.spawnId);
     expect(
-      isPluginPanelIdentityLive({
+      isPluginPanelPushLive({
         signal: live,
         currentPanel,
-        currentSpawnId: "spawn-2",
         grant,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("isPluginPanelRequestLive", () => {
+  it("requires the current panel and a live plugin spawn", () => {
+    const currentPanel = { senderId: 1, generation: 2 };
+
+    expect(
+      isPluginPanelRequestLive({
+        currentPanel,
+        senderId: 1,
+        generation: 2,
+        liveSpawnId: "spawn-2",
+      }),
+    ).toBe(true);
+    expect(
+      isPluginPanelRequestLive({
+        currentPanel: undefined,
+        senderId: 1,
+        generation: 2,
+        liveSpawnId: "spawn-2",
+      }),
+    ).toBe(false);
+    expect(
+      isPluginPanelRequestLive({
+        currentPanel,
+        senderId: 2,
+        generation: 2,
+        liveSpawnId: "spawn-2",
+      }),
+    ).toBe(false);
+    expect(
+      isPluginPanelRequestLive({
+        currentPanel,
+        senderId: 1,
+        generation: 3,
+        liveSpawnId: "spawn-2",
+      }),
+    ).toBe(false);
+    expect(
+      isPluginPanelRequestLive({
+        currentPanel,
+        senderId: 1,
+        generation: 2,
+        liveSpawnId: undefined,
       }),
     ).toBe(false);
   });

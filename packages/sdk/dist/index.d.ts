@@ -9,6 +9,7 @@ export declare const DohcSdkErrorCodes: {
     readonly aborted: "DOHC_ABORTED";
     readonly subscriptionsUnsupported: "DOHC_SUBSCRIPTIONS_UNSUPPORTED";
     readonly responseTruncated: "DOHC_RESPONSE_TRUNCATED";
+    readonly earlyEventBufferOverflow: "DOHC_EARLY_EVENT_BUFFER_OVERFLOW";
 };
 export type DohcSdkErrorCode = (typeof DohcSdkErrorCodes)[keyof typeof DohcSdkErrorCodes] | (string & {});
 /**

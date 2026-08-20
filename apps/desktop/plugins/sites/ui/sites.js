@@ -56,6 +56,12 @@
  * @property {string} [body]
  */
 
+/**
+ * @typedef {object} WatchSubscriptionState
+ * @property {boolean} failed
+ * @property {string | null} message
+ */
+
 const PACKAGE_SCRIPT_KEYS = ["dev", "start", "build"];
 
 /** Where a build writes its site, when nothing names somewhere else. */
@@ -66,6 +72,21 @@ const SHARE_MOUNT_PREFIX = "shared-with-me/";
 
 /** Files whose contents change what a path means, so the panel reads them. */
 export const SITE_SIGNAL_FILES = ["dohc.json", "package.json"];
+
+/** @returns {WatchSubscriptionState} */
+export function watchSubscriptionSucceeded() {
+  return { failed: false, message: null };
+}
+
+/** @param {string} message @returns {WatchSubscriptionState} */
+export function watchSubscriptionFailed(message) {
+  return { failed: true, message };
+}
+
+/** @param {WatchSubscriptionState} state @returns {boolean} */
+export function shouldRetryWatchSubscription(state) {
+  return state.failed;
+}
 
 // Mainstream web stacks with a recognizable dependency or official tooling.
 // Kept identical to the list dohc's own detection used, so a workspace that

@@ -11,6 +11,7 @@ export const DohcSdkErrorCodes = {
   aborted: "DOHC_ABORTED",
   subscriptionsUnsupported: "DOHC_SUBSCRIPTIONS_UNSUPPORTED",
   responseTruncated: "DOHC_RESPONSE_TRUNCATED",
+  earlyEventBufferOverflow: "DOHC_EARLY_EVENT_BUFFER_OVERFLOW",
 } as const;
 export type DohcSdkErrorCode =
   (typeof DohcSdkErrorCodes)[keyof typeof DohcSdkErrorCodes] | (string & {});
@@ -548,21 +549,57 @@ export function createPostMessageTransport(
     string,
     (event: DohcSubscriptionEvent<unknown>) => void
   >();
+  // A healthy burst during the millisecond-scale subscribe round-trip stays
+  // below 10 events. This limit leaves more than 20 times that headroom.
+  const MAX_EARLY_SUBSCRIPTION_EVENTS = 200;
+  const POISONED_EARLY_EVENT_QUEUE = Symbol("poisoned early-event queue");
   const queuedSubscriptionEvents = new Map<
     string,
-    DohcSubscriptionEvent<unknown>[]
+    DohcSubscriptionEvent<unknown>[] | typeof POISONED_EARLY_EVENT_QUEUE
   >();
   let activeSubscriptionCount = 0;
+  let pendingSubscribeCount = 0;
   let subscriptionMessageListener: ((event: MessageEvent) => void) | null = null;
+
+  const collectUnclaimedSubscriptionEvents = (): void => {
+    if (pendingSubscribeCount !== 0) return;
+    for (const subscriptionId of queuedSubscriptionEvents.keys()) {
+      if (!subscriptionListeners.has(subscriptionId)) {
+        queuedSubscriptionEvents.delete(subscriptionId);
+      }
+    }
+  };
+
+  const retainPendingSubscribe = (): (() => void) => {
+    let pending = true;
+    pendingSubscribeCount += 1;
+    return () => {
+      if (!pending) return;
+      pending = false;
+      pendingSubscribeCount -= 1;
+      collectUnclaimedSubscriptionEvents();
+    };
+  };
 
   const queueSubscriptionEvent = (
     subscriptionId: string,
     event: DohcSubscriptionEvent<unknown>,
   ): void => {
-    const queued = queuedSubscriptionEvents.get(subscriptionId) ?? [];
+    const existing = queuedSubscriptionEvents.get(subscriptionId);
+    if (existing === POISONED_EARLY_EVENT_QUEUE) return;
+    const queued = existing ?? [];
+    if (queued.length >= MAX_EARLY_SUBSCRIPTION_EVENTS) {
+      queuedSubscriptionEvents.set(subscriptionId, POISONED_EARLY_EVENT_QUEUE);
+      return;
+    }
     queued.push(event);
-    if (queued.length > 200) queued.shift();
     queuedSubscriptionEvents.set(subscriptionId, queued);
+  };
+
+  const closeRemoteSubscription = (subscriptionId: string): void => {
+    void transport
+      .request("subscriptions.unsubscribe", { subscriptionId })
+      .catch(() => undefined);
   };
 
   const retainSubscriptionMessageListener = (
@@ -596,11 +633,8 @@ export function createPostMessageTransport(
       if (activeSubscriptionCount === 0 && subscriptionMessageListener) {
         currentWindow.removeEventListener("message", subscriptionMessageListener);
         subscriptionMessageListener = null;
-        // No call is retaining the listener, so none can still be waiting on
-        // a queued id — clear orphans left by a subscribe that errored or
-        // aborted after its id's events had already started arriving.
-        queuedSubscriptionEvents.clear();
       }
+      collectUnclaimedSubscriptionEvents();
     };
   };
 
@@ -644,6 +678,7 @@ export function createPostMessageTransport(
       );
     }
 
+    const finishPendingSubscribe = retainPendingSubscribe();
     const releaseSubscriptionMessageListener = retainSubscriptionMessageListener(
       currentWindow,
       targetWindow,
@@ -653,6 +688,7 @@ export function createPostMessageTransport(
     try {
       result = await transport.request(method, params, requestOptions);
     } catch (error) {
+      finishPendingSubscribe();
       releaseSubscriptionMessageListener();
       throw error;
     }
@@ -661,6 +697,7 @@ export function createPostMessageTransport(
       typeof result.subscriptionId !== "string" ||
       result.subscriptionId.length === 0
     ) {
+      finishPendingSubscribe();
       releaseSubscriptionMessageListener();
       throw new DohcSdkError(
         DohcSdkErrorCodes.badResponse,
@@ -674,9 +711,30 @@ export function createPostMessageTransport(
     const untypedListener = listener as (
       event: DohcSubscriptionEvent<unknown>
     ) => void;
+    const queuedEvents = queuedSubscriptionEvents.get(subscriptionId);
+    if (queuedEvents === POISONED_EARLY_EVENT_QUEUE) {
+      queuedSubscriptionEvents.delete(subscriptionId);
+      finishPendingSubscribe();
+      releaseSubscriptionMessageListener();
+      closeRemoteSubscription(subscriptionId);
+      throw new DohcSdkError(
+        DohcSdkErrorCodes.earlyEventBufferOverflow,
+        "The early-event buffer exceeded its configured limit of 200 events " +
+          "per subscription. Resubscribe and reload the current view.",
+      );
+    }
     subscriptionListeners.set(subscriptionId, untypedListener);
-    for (const event of queuedSubscriptionEvents.get(subscriptionId) ?? []) {
-      untypedListener(event);
+    finishPendingSubscribe();
+    try {
+      for (const event of queuedEvents ?? []) {
+        untypedListener(event);
+      }
+    } catch (error) {
+      subscriptionListeners.delete(subscriptionId);
+      queuedSubscriptionEvents.delete(subscriptionId);
+      releaseSubscriptionMessageListener();
+      closeRemoteSubscription(subscriptionId);
+      throw error;
     }
     queuedSubscriptionEvents.delete(subscriptionId);
 

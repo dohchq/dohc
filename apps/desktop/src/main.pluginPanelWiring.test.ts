@@ -147,16 +147,32 @@ describe("plugin panel main-process wiring", () => {
     const authorizeAt = invoke.indexOf("pluginPanelSdkAuthorities.authorize({");
     const routeAt = invoke.indexOf("invokeWorkspacePluginSdk({");
     const router = functionSource("function invokeWorkspacePluginSdk");
+    const requestLiveAt = invoke.indexOf(
+      "const panelRunning = isPluginPanelRequestLive({",
+    );
+    const requestLiveEnd = invoke.indexOf("\n    });", requestLiveAt);
+    const requestLive = invoke.slice(requestLiveAt, requestLiveEnd);
+    const emitterAt = invoke.indexOf("createPluginPanelFileWatchEmitter({");
+    const emitterEnd = invoke.indexOf(
+      "send: notifyPluginPanelSdkEvent,",
+      emitterAt,
+    );
+    const emitter = invoke.slice(emitterAt, emitterEnd);
 
     expect(authorizeAt).toBeGreaterThan(-1);
     expect(routeAt).toBeGreaterThan(authorizeAt);
     expect(invoke).toContain("const liveSpawnId = host?.getSpawnId(input.pluginId);");
     expect(invoke).toContain("liveSpawnId,");
-    expect(invoke).toContain("createPluginPanelFileWatchEmitter({");
-    // What makes a grant "the exact panel running right now" is pinned
-    // directly, as a real test, in pluginPanelSdkEvent.test.ts — this only
-    // confirms main.ts wires that predicate in.
-    expect(invoke).toContain("isPluginPanelIdentityLive({");
+    expect(requestLiveAt).toBeGreaterThan(-1);
+    expect(requestLiveEnd).toBeGreaterThan(requestLiveAt);
+    expect(requestLive).toContain("liveSpawnId,");
+    expect(emitterAt).toBeGreaterThan(-1);
+    expect(emitterEnd).toBeGreaterThan(emitterAt);
+    // The pure tests pin each predicate's rules. These checks stop the invoke
+    // and push paths from silently swapping those rules.
+    expect(emitter).toContain("isPluginPanelPushLive({");
+    expect(emitter).not.toContain("isPluginPanelRequestLive({");
+    expect(emitter).not.toContain("spawnId");
     expect(invoke).toContain(
       "workspaceEvents.subscribe({ owner, emitEvent }, watchParams)",
     );

@@ -18,23 +18,31 @@ export function createPluginPanelFileWatchEmitter(input: {
   };
 }
 
-/**
- * Whether a panel's SDK authority grant still names the exact panel running
- * right now: the grant's own signal isn't aborted, and the running panel
- * still matches the sender, generation, and process spawn the grant was
- * issued for.
- */
-export function isPluginPanelIdentityLive(input: {
+/** Whether the authority grant still names the panel receiving a push. */
+export function isPluginPanelPushLive(input: {
   signal: AbortSignal;
   currentPanel: { senderId: number; generation: number } | undefined;
-  currentSpawnId: string | undefined;
-  grant: { senderId: number; generation: number; spawnId: string };
+  grant: { senderId: number; generation: number };
 }): boolean {
   return Boolean(
     !input.signal.aborted &&
       input.currentPanel &&
       input.currentPanel.senderId === input.grant.senderId &&
-      input.currentPanel.generation === input.grant.generation &&
-      input.currentSpawnId === input.grant.spawnId,
+      input.currentPanel.generation === input.grant.generation,
+  );
+}
+
+/** Whether a panel can make a new SDK request through a live plugin process. */
+export function isPluginPanelRequestLive(input: {
+  currentPanel: { senderId: number; generation: number } | undefined;
+  senderId: number;
+  generation: number;
+  liveSpawnId: string | undefined;
+}): boolean {
+  return Boolean(
+    input.currentPanel &&
+      input.currentPanel.senderId === input.senderId &&
+      input.currentPanel.generation === input.generation &&
+      input.liveSpawnId,
   );
 }
