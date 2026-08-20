@@ -103,10 +103,16 @@ async function seedFixtureDatabase(root: string): Promise<void> {
   }
 }
 
-async function fixtureManifest(): Promise<DohcPluginManifest> {
+async function fixtureManifest(
+  commandIds?: readonly string[],
+): Promise<DohcPluginManifest> {
   const result = await readPluginManifestFile(helloPluginRoot);
   if (!result.ok) throw new Error(result.diagnostics.join("; "));
-  return result.manifest;
+  if (commandIds === undefined) return result.manifest;
+  return {
+    ...result.manifest,
+    commands: commandIds.map((id) => ({ id, title: id })),
+  };
 }
 
 interface ProcessHarness {
@@ -132,7 +138,7 @@ function createCallbackHarness(): {
     return {
       request<T = unknown>(method: string): Promise<T> {
         const result = method === PLUGIN_HOST_METHODS.activate
-          ? { commands: [], drivers: [] }
+          ? { commands: ["hello.write"], drivers: [] }
           : {};
         return Promise.resolve(result as T);
       },
@@ -238,7 +244,7 @@ function createCrashAccountingHarness(): {
       return {
         request<T = unknown>(method: string): Promise<T> {
           const result = method === PLUGIN_HOST_METHODS.activate
-            ? { commands: [], drivers: [] }
+            ? { commands: ["hello.write"], drivers: [] }
             : {};
           if (method === PLUGIN_HOST_METHODS.activate && shouldCrash) {
             setTimeout(() => params.onExit({ code: 1, signal: null }), 0);
@@ -389,7 +395,10 @@ describe("PluginHost", () => {
         ),
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(
+      helloPluginRoot,
+      await fixtureManifest(["database.roundTrip", "ui.tryOpen"]),
+    );
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -445,7 +454,10 @@ describe("PluginHost", () => {
         ),
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(
+      helloPluginRoot,
+      await fixtureManifest(["database.roundTrip", "ui.tryOpen"]),
+    );
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -527,7 +539,7 @@ describe("PluginHost", () => {
     ).rejects.toThrow('Plugin "hello-plugin" is still starting.');
 
     expect(invokeCommandCalls).toBe(0);
-    resolveActivation?.({ commands: [], drivers: [] });
+    resolveActivation?.({ commands: ["hello.write"], drivers: [] });
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not finish activation.",
@@ -843,6 +855,75 @@ describe("PluginHost", () => {
     );
   });
 
+  it("refuses activation when a declared command is not registered", async () => {
+    const root = await workspaceRoot();
+    const statuses: PluginRuntimeStatus[] = [];
+    const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
+      request<T = unknown>(method: string): Promise<T> {
+        const result = method === PLUGIN_HOST_METHODS.activate
+          ? { commands: [], drivers: [] }
+          : {};
+        return Promise.resolve(result as T);
+      },
+      notify: () => undefined,
+      dispose: () => Promise.resolve(),
+    }));
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport,
+      routeSdkRequest: defaultRouter,
+      onStatusChange: (_pluginId, status) => statuses.push(status),
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => statuses.includes("failed") || statuses.includes("ready"),
+      "Command registration mismatch did not settle.",
+    );
+
+    expect(statuses).toContain("failed");
+    expect(statuses).not.toContain("ready");
+    expect(host.getStderrLog("hello-plugin")).toContain(
+      'Activation failed: Plugin "hello-plugin" activation did not register command id "hello.write" declared in its manifest.',
+    );
+  });
+
+  it("refuses activation when a registered command is not declared", async () => {
+    const root = await workspaceRoot();
+    const statuses: PluginRuntimeStatus[] = [];
+    const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
+      request<T = unknown>(method: string): Promise<T> {
+        const result = method === PLUGIN_HOST_METHODS.activate
+          ? { commands: ["hello.extra"], drivers: [] }
+          : {};
+        return Promise.resolve(result as T);
+      },
+      notify: () => undefined,
+      dispose: () => Promise.resolve(),
+    }));
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport,
+      routeSdkRequest: defaultRouter,
+      onStatusChange: (_pluginId, status) => statuses.push(status),
+    });
+    const manifest = { ...await fixtureManifest(), commands: [] };
+
+    await host.start(helloPluginRoot, manifest);
+    await waitFor(
+      () => statuses.includes("failed") || statuses.includes("ready"),
+      "Command registration mismatch did not settle.",
+    );
+
+    expect(statuses).toContain("failed");
+    expect(statuses).not.toContain("ready");
+    expect(host.getStderrLog("hello-plugin")).toContain(
+      'Activation failed: Plugin "hello-plugin" activation registered command id "hello.extra" that its manifest does not declare.',
+    );
+  });
+
   it("reports a post-activation asynchronous crash", async () => {
     const root = await workspaceRoot();
     const statuses: PluginRuntimeStatus[] = [];
@@ -857,7 +938,7 @@ describe("PluginHost", () => {
       onStatusChange: (_pluginId, status) => statuses.push(status),
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest(["noop"]));
     await waitFor(
       () => statuses.includes("ready"),
       "Plugin did not become ready before the asynchronous error.",
@@ -911,7 +992,7 @@ describe("PluginHost", () => {
         return {
           request<T = unknown>(method: string): Promise<T> {
             const result = method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [], drivers: [] }
+              ? { commands: ["hello.write"], drivers: [] }
               : {};
             return Promise.resolve(result as T);
           },
@@ -1045,7 +1126,7 @@ describe("PluginHost", () => {
         return {
           request<T = unknown>(method: string): Promise<T> {
             const result = method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [], drivers: [] }
+              ? { commands: ["hello.write"], drivers: [] }
               : {};
             return Promise.resolve(result as T);
           },
@@ -1101,7 +1182,7 @@ describe("PluginHost", () => {
       return {
         request<T = unknown>(method: string): Promise<T> {
           const result = method === PLUGIN_HOST_METHODS.activate
-            ? { commands: [], drivers: [] }
+            ? { commands: ["hello.write"], drivers: [] }
             : {};
           return Promise.resolve(result as T);
         },
@@ -1355,7 +1436,7 @@ describe("PluginHost", () => {
       (params) => ({
         request<T = unknown>(method: string): Promise<T> {
           const result = method === PLUGIN_HOST_METHODS.activate
-            ? { commands: [], drivers: [] }
+            ? { commands: ["hello.write"], drivers: [] }
             : {};
           return Promise.resolve(result as T).then((value) => {
             if (method === PLUGIN_HOST_METHODS.activate) {
@@ -1402,7 +1483,7 @@ describe("PluginHost", () => {
         return {
           request: async <T,>(method: string) =>
             (method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [], drivers: [] }
+              ? { commands: ["hello.write"], drivers: [] }
               : {}) as T,
           notify: () => undefined,
           dispose: async () => undefined,
@@ -1512,7 +1593,7 @@ describe("PluginHost", () => {
         return {
           request: async <T,>(method: string) =>
             (method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [], drivers: [] }
+              ? { commands: ["hello.write"], drivers: [] }
               : {}) as T,
           notify: () => undefined,
           dispose: async () => undefined,
@@ -1626,7 +1707,7 @@ describe("PluginHost", () => {
       spawnTransport: () => ({
         request: async <T,>(method: string) =>
           (method === PLUGIN_HOST_METHODS.activate
-            ? { commands: [], drivers: [] }
+            ? { commands: ["hello.write"], drivers: [] }
             : {}) as T,
         notify: () => undefined,
         dispose: async () => undefined,
@@ -1697,7 +1778,9 @@ describe("PluginHost", () => {
       workspaceRoot: root,
       spawnTransport: () => ({
         request: async <T,>(method: string) =>
-          (method === PLUGIN_HOST_METHODS.activate ? { commands: [], drivers: [] } : {}) as T,
+          (method === PLUGIN_HOST_METHODS.activate
+            ? { commands: ["hello.write"], drivers: [] }
+            : {}) as T,
         notify: () => undefined,
         dispose: async () => undefined,
       }),
@@ -1756,7 +1839,7 @@ describe("PluginHost", () => {
               await releaseStop.promise;
             }
             return (method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [], drivers: [] }
+              ? { commands: ["hello.write"], drivers: [] }
               : {}) as T;
           },
           notify: () => undefined,
@@ -1857,7 +1940,7 @@ describe("PluginHost", () => {
               deactivateRequests.push(params.pluginId);
             }
             const result = method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [], drivers: [] }
+              ? { commands: ["hello.write"], drivers: [] }
               : {};
             return Promise.resolve(result as T);
           },
@@ -1945,7 +2028,7 @@ describe("PluginHost", () => {
       request<T = unknown>(method: string): Promise<T> {
         if (method === PLUGIN_HOST_METHODS.invokeCommand) invokeCommandCalls += 1;
         const result = method === PLUGIN_HOST_METHODS.activate
-          ? { commands: [], drivers: [] }
+          ? { commands: ["hello.write"], drivers: [] }
           : {};
         return Promise.resolve(result as T);
       },
@@ -2132,7 +2215,7 @@ describe("PluginHost", () => {
     });
     const heartbeatPath = join(root, "grandchild-heartbeat.txt");
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, await fixtureManifest([]));
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Heartbeat plugin did not become ready.",
@@ -2291,9 +2374,11 @@ describe("PluginHost", () => {
 });
 
 describe("PluginHost web apps", () => {
-  async function webAppManifest(): Promise<DohcPluginManifest> {
+  async function webAppManifest(
+    commandIds: readonly string[] = [],
+  ): Promise<DohcPluginManifest> {
     return {
-      ...(await fixtureManifest()),
+      ...(await fixtureManifest(commandIds)),
       webApps: [{ id: "main-app", title: "Hello App", instanced: false }],
     };
   }
@@ -2313,7 +2398,10 @@ describe("PluginHost web apps", () => {
       routeSdkRequest: defaultRouter,
       webAppStartTimeoutMs: options.webAppStartTimeoutMs,
     });
-    await host.start(helloPluginRoot, await webAppManifest());
+    await host.start(
+      helloPluginRoot,
+      await webAppManifest(options.mode === "hello" ? ["hello.write"] : []),
+    );
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -2434,7 +2522,10 @@ describe("PluginHost web apps", () => {
       spawnTransport: harness.spawnTransport,
       routeSdkRequest: defaultRouter,
     });
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(
+      helloPluginRoot,
+      await fixtureManifest(["report.context"]),
+    );
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -2463,7 +2554,10 @@ describe("PluginHost web apps", () => {
       routeSdkRequest: defaultRouter,
       readPluginSettings: async () => ({ greeting: "Hei", shout: false }),
     });
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(
+      helloPluginRoot,
+      await fixtureManifest(["report.settings"]),
+    );
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -2531,7 +2625,7 @@ describe("PluginHost web apps", () => {
 describe("PluginHost instanced web apps", () => {
   async function instancedManifest(): Promise<DohcPluginManifest> {
     return {
-      ...(await fixtureManifest()),
+      ...(await fixtureManifest(["webapp.running"])),
       webApps: [
         { id: "preview", title: "Preview", instanced: true },
         { id: "main-app", title: "Hello App", instanced: false },

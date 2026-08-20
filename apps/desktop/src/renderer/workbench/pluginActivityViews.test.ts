@@ -32,6 +32,7 @@ function plugin(
     issues: null,
     license: null,
     settings: [],
+    commands: [],
     panels: [],
     webApps: [],
     diagnostics: [],

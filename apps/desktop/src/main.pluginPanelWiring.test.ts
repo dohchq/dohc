@@ -182,6 +182,19 @@ describe("plugin panel main-process wiring", () => {
     expect(router).toContain("return invokePluginSdkHost(");
   });
 
+  it("routes plugin commands through the declared-command guard", () => {
+    const invoke = handler("invokePluginCommand");
+    const currentAt = invoke.indexOf("activeWorkspaceIdBySender.get(");
+    const lookupAt = invoke.indexOf("registeredPlugin(");
+    const routeAt = invoke.indexOf("invokeRegisteredPluginCommand({");
+
+    expect(currentAt).toBeGreaterThan(-1);
+    expect(lookupAt).toBeGreaterThan(currentAt);
+    expect(routeAt).toBeGreaterThan(lookupAt);
+    expect(invoke).toContain("assertWritableWorkspace(workspace);");
+    expect(invoke).toContain("return ensurePluginStarted(workspace, registration);");
+  });
+
   it("wires the production authored-text writer with this invocation's own signal and pipeline (CERT779L D1)", () => {
     const router = functionSource("function invokeWorkspacePluginSdk");
     const writerAt = router.indexOf(

@@ -658,6 +658,7 @@ export const CHANNELS = {
   importToDatabase: "desktop:import-to-database",
   openPluginPanel: "desktop:open-plugin-panel",
   startPluginPanel: "desktop:start-plugin-panel",
+  invokePluginCommand: "desktop:invoke-plugin-command",
   stopPluginPanel: "desktop:stop-plugin-panel",
   invokePluginPanelSdk: "desktop:invoke-plugin-panel-sdk",
   openPluginWebApp: "desktop:open-plugin-web-app",

@@ -112,6 +112,8 @@ import {
   ImportToDatabaseResult,
   ImportWorkspaceFilesPayload,
   ImportWorkspaceFilesResult,
+  InvokePluginCommandPayload,
+  InvokePluginCommandResult,
   InvokePluginPanelSdkPayload,
   InvokePluginPanelSdkResult,
   ListPluginsPayload,
@@ -612,6 +614,7 @@ import {
   type StaticDirectoryPreview,
 } from "./security/staticDirectoryPreview";
 import { PluginHost } from "./plugins/PluginHost";
+import { invokeRegisteredPluginCommand } from "./plugins/pluginCommandInvocation";
 import {
   PluginPipeline,
   type PluginPipelineStatusEvent,
@@ -6739,6 +6742,47 @@ function registerIpcHandlers(
           title: panel.title,
         });
       },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.invokePluginCommand, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = InvokePluginCommandPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const sender = event.sender;
+    const generation = rendererGeneration(sender.id);
+    const isCurrent = () =>
+      !sender.isDestroyed() &&
+      rendererGeneration(sender.id) === generation &&
+      activeWorkspaceIdBySender.get(sender.id) === workspace.workspaceId;
+    if (!isCurrent()) {
+      throw new Error(
+        "The plugin command request does not target the active workspace. Open the workspace and try again.",
+      );
+    }
+    await activePluginPipelineFor(event, input.workspaceId);
+    assertWritableWorkspace(workspace);
+    const plugin = registeredPlugin(workspace.workspaceId, input.pluginId);
+    if (!plugin) {
+      return InvokePluginCommandResult.parse({
+        status: "plugin-not-found",
+        message: `This workspace has no plugin "${input.pluginId}".`,
+      });
+    }
+    return InvokePluginCommandResult.parse(
+      await invokeRegisteredPluginCommand({
+        input,
+        plugin,
+        ensureStarted: async (registration) => {
+          if (!isCurrent()) {
+            throw new Error(
+              "The plugin command request was cancelled because the renderer changed.",
+            );
+          }
+          assertWritableWorkspace(workspace);
+          return ensurePluginStarted(workspace, registration);
+        },
+      }),
     );
   });
 

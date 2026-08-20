@@ -290,6 +290,7 @@ describe("discoverInstalledPlugins", () => {
         icon: record.iconPath,
         settings: record.manifest?.settings ?? [],
         panels: [],
+        commands: [],
         webApps: [],
         diagnostics: record.diagnostics,
         warnings: [],

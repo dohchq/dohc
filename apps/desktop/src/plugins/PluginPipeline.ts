@@ -104,6 +104,11 @@ export interface PluginPanelContribution {
   icon: string | null;
 }
 
+export interface PluginCommandContribution {
+  id: string;
+  title: string;
+}
+
 export interface PluginPipelinePluginStatus extends PluginMetadata {
   id: string;
   directoryName: string;
@@ -121,6 +126,9 @@ export interface PluginPipelinePluginStatus extends PluginMetadata {
   /** The manifest's declared panels, so the workbench can put the ones placed
    * in the view rail there without a second manifest read. */
   panels: PluginPanelContribution[];
+  /** The manifest's declared commands, so the workbench can list them
+   * without a second manifest read. */
+  commands: PluginCommandContribution[];
   /** The manifest's declared settings, so the details page can render the
    * controls without a second manifest read. Values live per workspace and
    * travel separately. */
@@ -323,6 +331,7 @@ function cloneStatus(status: PluginPipelinePluginStatus): PluginPipelinePluginSt
     settings: status.settings.map((setting) => ({ ...setting })),
     webApps: status.webApps.map((webApp) => ({ ...webApp })),
     panels: status.panels.map((panel) => ({ ...panel })),
+    commands: status.commands.map((command) => ({ ...command })),
     diagnostics: [...status.diagnostics],
     warnings: [...status.warnings],
     error: cloneError(status.error),
@@ -361,6 +370,17 @@ function manifestPanels(
     title: panel.title,
     placement: panel.placement,
     icon: panel.icon ?? null,
+  }));
+}
+
+function manifestCommands(
+  manifest: {
+    commands?: { id: string; title: string }[];
+  } | null,
+): PluginCommandContribution[] {
+  return (manifest?.commands ?? []).map((command) => ({
+    id: command.id,
+    title: command.title,
   }));
 }
 
@@ -611,6 +631,7 @@ export class PluginPipeline {
           settings: manifestSettings(candidate.manifest),
           webApps: manifestWebApps(candidate.manifest),
           panels: manifestPanels(candidate.manifest),
+          commands: manifestCommands(candidate.manifest),
           diagnostics: boundedStatusLines(candidate.diagnostics),
           warnings: [],
           error: invalidPluginError(candidate),
@@ -2306,6 +2327,7 @@ export class PluginPipeline {
       settings: manifestSettings(candidate.manifest),
       webApps: manifestWebApps(candidate.manifest),
       panels: manifestPanels(candidate.manifest),
+      commands: manifestCommands(candidate.manifest),
       diagnostics: boundedStatusLines(candidate.diagnostics),
       warnings: [],
       error: null,
@@ -2343,6 +2365,7 @@ export class PluginPipeline {
         : current.settings,
       webApps: patch.webApps ?? manifestWebApps(candidate.manifest),
       panels: patch.panels ?? manifestPanels(candidate.manifest),
+      commands: patch.commands ?? manifestCommands(candidate.manifest),
       diagnostics: boundedStatusLines(patch.diagnostics ?? current.diagnostics),
       warnings: boundedStatusLines(patch.warnings ?? current.warnings),
       error: patch.error === undefined ? cloneError(current.error) : cloneError(patch.error),

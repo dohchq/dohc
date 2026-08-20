@@ -2167,6 +2167,34 @@ export const StartPluginPanelResult = z.discriminatedUnion("status", [
 ]);
 export type StartPluginPanelResult = z.infer<typeof StartPluginPanelResult>;
 
+export const InvokePluginCommandPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  commandId: z.string().min(1).max(120),
+}).strict();
+export type InvokePluginCommandPayload = z.infer<
+  typeof InvokePluginCommandPayload
+>;
+
+export const InvokePluginCommandResult = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("ok"), result: z.unknown() }).strict(),
+  z.object({
+    status: z.literal("plugin-not-found"),
+    message: z.string(),
+  }).strict(),
+  z.object({
+    status: z.literal("command-not-declared"),
+    message: z.string(),
+  }).strict(),
+  z.object({
+    status: z.literal("command-failed"),
+    message: z.string(),
+  }).strict(),
+]);
+export type InvokePluginCommandResult = z.infer<
+  typeof InvokePluginCommandResult
+>;
+
 // Stopping names the running panel, which is keyed by workspace, plugin, and
 // panel alone. It carries no placement: a panel must stop wherever it runs.
 export const StopPluginPanelPayload = z.object({
@@ -2352,6 +2380,12 @@ export const PluginStatusRecord = z.object({
       icon: z.string().min(1).max(1024).nullable(),
     }).strict(),
   ).max(100),
+  commands: z.array(
+    z.object({
+      id: z.string().min(1).max(120),
+      title: z.string().min(1).max(120),
+    }).strict(),
+  ).max(200),
   webApps: z.array(
     z.object({
       id: z.string().min(1).max(120),
@@ -4181,6 +4215,9 @@ export interface DohcDesktopBridge {
     listener: (event: PluginPanelOpenedEvent) => void,
   ): () => void;
   startPluginPanel(payload: StartPluginPanelPayload): Promise<StartPluginPanelResult>;
+  invokePluginCommand(
+    payload: InvokePluginCommandPayload,
+  ): Promise<InvokePluginCommandResult>;
   stopPluginPanel(payload: StopPluginPanelPayload): Promise<StopPluginPanelResult>;
   invokePluginPanelSdk(
     payload: InvokePluginPanelSdkPayload,

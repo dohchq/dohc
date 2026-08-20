@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
+  InvokePluginCommandPayload,
   InvokePluginPanelSdkPayload,
   MenuCommand,
   PluginPanelOpenedEvent,
@@ -24,6 +25,7 @@ import type {
 } from "./ipc/bridgeContract";
 import {
   ListPluginsResult,
+  InvokePluginCommandResult,
   OpenPluginPanelResult,
   OpenPluginWebAppResult,
   PluginActionResult,
@@ -171,6 +173,9 @@ const bridge: DohcDesktopBridge = {
     StartPluginPanelResult.parse(
       await ipcRenderer.invoke(CHANNELS.startPluginPanel, payload),
     ),
+  invokePluginCommand: (payload: InvokePluginCommandPayload) =>
+    ipcRenderer.invoke(CHANNELS.invokePluginCommand, payload)
+      .then((result) => InvokePluginCommandResult.parse(result)),
   stopPluginPanel: (payload: StopPluginPanelPayload) =>
     ipcRenderer.invoke(CHANNELS.stopPluginPanel, payload),
   invokePluginPanelSdk: (payload: InvokePluginPanelSdkPayload) =>

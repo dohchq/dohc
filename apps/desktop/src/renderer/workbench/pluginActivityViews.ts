@@ -1,5 +1,5 @@
 import type { PluginStatusRecord } from "../../ipc/bridgeContract";
-import { canServeSurfaces } from "./pluginCatalog";
+import { canServeSurfaces, pluginTitle } from "./pluginCatalog";
 import { pluginViewId, type PluginViewId } from "./workbenchState";
 
 // Which plugin views the activity bar shows, and what the side panel does
@@ -13,6 +13,14 @@ export interface PluginActivityView {
   title: string;
   /** The panel's own icon, or null to fall back to the plugin's. */
   icon: string | null;
+  plugin: PluginStatusRecord;
+}
+
+export interface PluginCommandEntry {
+  pluginId: string;
+  commandId: string;
+  title: string;
+  pluginTitle: string;
   plugin: PluginStatusRecord;
 }
 
@@ -36,6 +44,25 @@ export function pluginActivityViews(
     }
   }
   return views;
+}
+
+export function pluginCommandEntries(
+  plugins: readonly PluginStatusRecord[],
+): PluginCommandEntry[] {
+  const entries: PluginCommandEntry[] = [];
+  for (const plugin of plugins) {
+    if (!canServeSurfaces(plugin)) continue;
+    for (const command of plugin.commands) {
+      entries.push({
+        pluginId: plugin.id,
+        commandId: command.id,
+        title: command.title,
+        pluginTitle: pluginTitle(plugin),
+        plugin,
+      });
+    }
+  }
+  return entries;
 }
 
 /**

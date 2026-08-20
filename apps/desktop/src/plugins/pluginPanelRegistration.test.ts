@@ -526,6 +526,7 @@ describe("plugin panel registration", () => {
           license: null,
           icon: null,
           settings: [],
+          commands: [],
           panels: [],
           webApps: [],
           sourceHash: null,

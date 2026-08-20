@@ -178,6 +178,24 @@ function findDuplicateId(ids: readonly string[]): string | undefined {
   return undefined;
 }
 
+function commandRegistrationMismatch(
+  pluginId: string,
+  declared: readonly string[],
+  registered: readonly string[],
+): string | undefined {
+  const declaredIds = new Set(declared);
+  const registeredIds = new Set(registered);
+  const missing = declared.find((id) => !registeredIds.has(id));
+  if (missing !== undefined) {
+    return `Plugin "${pluginId}" activation did not register command id "${missing}" declared in its manifest.`;
+  }
+  const extra = registered.find((id) => !declaredIds.has(id));
+  if (extra !== undefined) {
+    return `Plugin "${pluginId}" activation registered command id "${extra}" that its manifest does not declare.`;
+  }
+  return undefined;
+}
+
 /**
  * A plugin's manifest is what dohc shows before the plugin runs, so a declared
  * driver that never registers would be a probe row nothing can answer, and a
@@ -668,6 +686,15 @@ export class PluginHost {
           `Plugin activation returned duplicate driver id "${duplicateDriverId}". Driver ids must be unique.`,
         ),
       );
+      return;
+    }
+    const commandMismatch = commandRegistrationMismatch(
+      record.pluginId,
+      (record.manifest.commands ?? []).map((command) => command.id),
+      result.commands,
+    );
+    if (commandMismatch !== undefined) {
+      void this.handleActivationFailure(record, spawn, new Error(commandMismatch));
       return;
     }
     const declaredDrivers = record.manifest.drivers ?? [];

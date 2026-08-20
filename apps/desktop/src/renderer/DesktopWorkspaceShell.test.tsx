@@ -1119,7 +1119,9 @@ describe("plugin activity-bar views", () => {
 
   function withViewPlugin(
     bridge: ReturnType<typeof makeBridge>,
-    overrides: Partial<PluginStatusRecord> = {},
+    overrides: Partial<PluginStatusRecord> & {
+      commands?: { id: string; title: string }[];
+    } = {},
   ) {
     bridge.listPlugins = vi.fn(async () => ({
       ok: true as const,
@@ -1144,6 +1146,7 @@ describe("plugin activity-bar views", () => {
           license: null,
           icon: null,
           settings: [],
+          commands: [],
           panels: [
             { id: "main", title: "Hello", placement: "editor", icon: null },
             viewPanel,
@@ -1158,6 +1161,36 @@ describe("plugin activity-bar views", () => {
     }));
     return bridge;
   }
+
+  it("invokes a plugin command from the command palette", async () => {
+    const invokePluginCommand = vi.fn(async () => ({
+      status: "ok" as const,
+      result: null,
+    }));
+    const bridge = Object.assign(
+      withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)), {
+        commands: [{ id: "hello.write", title: "Write hello note" }],
+      }),
+      { invokePluginCommand },
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "Hello Plugin: Write hello note",
+      ),
+    );
+
+    await waitFor(() =>
+      expect(invokePluginCommand).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        pluginId: "hello-plugin",
+        commandId: "hello.write",
+      }),
+    );
+  });
 
   it("lists contributed views after the workspace opens", async () => {
     const workspaceOpen = deferred<SyncStatusResult>();
@@ -1299,6 +1332,7 @@ describe("plugin details tabs", () => {
           license: null,
           icon: null,
           settings: [],
+          commands: [],
           panels: [],
           webApps: [],
           diagnostics: [],

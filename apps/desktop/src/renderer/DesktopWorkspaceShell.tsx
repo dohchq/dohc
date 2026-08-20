@@ -104,6 +104,7 @@ import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 import { PluginsView } from "./workbench/PluginsView";
 import {
   pluginActivityViews,
+  pluginCommandEntries,
   resolvePluginView,
 } from "./workbench/pluginActivityViews";
 import { usePluginCatalog } from "./workbench/pluginCatalog";
@@ -1655,6 +1656,8 @@ export function DesktopWorkspaceShell(props: {
   }, [flushStableDrafts]);
 
   const workspaceId = props.workspace.workspaceId;
+  const workspaceIdRef = useRef(workspaceId);
+  workspaceIdRef.current = workspaceId;
   // Set-aside recovery markers (#567): every path holding a draft marks its
   // tab and Open Editors row — inactive tabs included, because the store is
   // knowable for all of them (#579 review, r4). Deliberately NOT part of
@@ -2018,6 +2021,13 @@ export function DesktopWorkspaceShell(props: {
     () =>
       pluginCatalogLoad.status === "ready"
         ? pluginActivityViews(pluginCatalogLoad.plugins)
+        : [],
+    [pluginCatalogLoad],
+  );
+  const pluginCommandItems = useMemo(
+    () =>
+      pluginCatalogLoad.status === "ready"
+        ? pluginCommandEntries(pluginCatalogLoad.plugins)
         : [],
     [pluginCatalogLoad],
   );
@@ -4411,6 +4421,32 @@ export function DesktopWorkspaceShell(props: {
         label: `View: ${view.title}`,
         run: () => mutateWb((state) => setView(state, view.viewId)),
       })),
+      ...pluginCommandItems.map((entry) => ({
+        id: `plugin-command-${entry.pluginId}-${entry.commandId}`,
+        label: `${entry.pluginTitle}: ${entry.title}`,
+        run: () => {
+          const requestedWorkspaceId = workspaceId;
+          void bridge()
+            .invokePluginCommand({
+              workspaceId: requestedWorkspaceId,
+              pluginId: entry.pluginId,
+              commandId: entry.commandId,
+            })
+            .then((outcome) => {
+              if (workspaceIdRef.current !== requestedWorkspaceId) return;
+              if (outcome.status !== "ok") {
+                reportShellError(outcome.message, null);
+              }
+            })
+            .catch((error) => {
+              if (workspaceIdRef.current !== requestedWorkspaceId) return;
+              reportShellError(
+                `Could not run plugin command "${entry.title}".`,
+                error,
+              );
+            });
+        },
+      })),
       {
         id: "connect-cloud",
         label: "Connect dohc Cloud",
@@ -4450,6 +4486,7 @@ export function DesktopWorkspaceShell(props: {
     [
       activeDocumentPath,
       railPluginViews,
+      pluginCommandItems,
       createUntitledDrawing,
       openWorkspaceFolder,
       closeActiveTab,
