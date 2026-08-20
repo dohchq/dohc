@@ -28,6 +28,7 @@ import {
   isVersionCompareTabPath,
   parseVersionCompareTabPath,
   versionCompareTabPath,
+  isSiteTabPath,
   isPluginDetailsTabPath,
   isPluginPanelTabPath,
   isPluginWebAppTabPath,
@@ -41,6 +42,7 @@ import {
   moveTab,
   openTab,
   parseHistoryDiffTabPath,
+  parseSiteTabPath,
   parsePluginPanelTabPath,
   parsePluginViewId,
   parsePluginWebAppTabPath,
@@ -70,6 +72,7 @@ import {
   remapWorkbenchPaths,
   resizeEditorGroups,
   setFolderExpanded,
+  siteTabPath,
   moveTabToGroup,
   pluginPanelTabPath,
   pluginWebAppTabPath,
@@ -336,6 +339,7 @@ describe("tabs", () => {
   });
 
   it.each([
+    ["site preview", siteTabPath("client-portal"), "dohc://site/%63lient-portal"],
     [
       "plugin panel",
       pluginPanelTabPath("hello-plugin", "main"),
@@ -590,6 +594,19 @@ describe("tabs", () => {
     expect(parseVersionCompareTabPath("dohc://versions/compare/%ZZ")).toBeNull();
     expect(parseVersionCompareTabPath("notes/today.md")).toBeNull();
     expect(parseVersionCompareTabPath(null)).toBeNull();
+  });
+
+  it("recognizes site previews as virtual tabs with encoded site roots", () => {
+    const path = siteTabPath("clients/acme website");
+    expect(isSiteTabPath(path)).toBe(true);
+    expect(isVirtualTabPath(path)).toBe(true);
+    expect(parseSiteTabPath(path)).toBe("clients/acme website");
+    expect(parseSiteTabPath("dohc://site/")).toBeNull();
+    expect(parseSiteTabPath(null)).toBeNull();
+    expect(parseSiteTabPath("not-a-site-path")).toBeNull();
+
+    const reservedRoot = "clients/site/nested?view=main#summary";
+    expect(parseSiteTabPath(siteTabPath(reservedRoot))).toBe(reservedRoot);
   });
 
   it("recognizes plugin web apps as singleton virtual tabs with two encoded identities", () => {
@@ -987,39 +1004,40 @@ describe("rail widths", () => {
 });
 
 describe("ui-state persistence round-trip", () => {
-  // Sites was a built-in view and a `dohc://site/<root>` tab until it became
-  // a plugin. A workspace last opened before that still has both on disk.
-  it("drops a tab left behind by a removed surface instead of restoring it as a file", () => {
+  it("restores Sites tabs and drops tabs from genuinely removed surfaces", () => {
+    const sitePath = siteTabPath("client-portal");
+    const removedPath = "dohc://retired-dashboard/client-portal";
     const restored = parseUiState({
       ...serializeUiState(withTabs("notes/a.md")),
       editorGroups: [
         {
           id: DEFAULT_EDITOR_GROUP_ID,
-          tabs: ["notes/a.md", "dohc://site/client-portal"],
-          activeTab: "dohc://site/client-portal",
+          tabs: ["notes/a.md", sitePath, removedPath],
+          activeTab: sitePath,
           size: 1,
         },
       ],
     });
 
-    // MUTATION (removed surface): stop dropping it and the tab survives as a
-    // plain path, opening an editor for a workspace file that does not exist.
-    expect(allTabs(restored).map((tab) => tab.path)).toEqual(["notes/a.md"]);
-    expect(restored.editorGroups[0]!.activeTab).toBe("notes/a.md");
-    expect(isRemovedVirtualTabPath("dohc://site/client-portal")).toBe(true);
-    // A tab dohc still renders is NOT removed, and neither is a real file.
+    expect(allTabs(restored).map((tab) => tab.path)).toEqual([
+      "notes/a.md",
+      sitePath,
+    ]);
+    expect(restored.editorGroups[0]!.activeTab).toBe(sitePath);
+    expect(isRemovedVirtualTabPath(sitePath)).toBe(false);
+    expect(isRemovedVirtualTabPath(removedPath)).toBe(true);
     expect(isRemovedVirtualTabPath(GRAPH_TAB_PATH)).toBe(false);
     expect(isRemovedVirtualTabPath("notes/dohc://site/a.md")).toBe(false);
     expect(isRemovedVirtualTabPath("notes/a.md")).toBe(false);
   });
 
-  it("falls back to the explorer for the removed sites view", () => {
+  it("restores the built-in Sites view", () => {
     expect(
       parseUiState({
         ...serializeUiState(defaultWorkbenchState()),
         activeView: "sites",
       }).activeView,
-    ).toBe("explorer");
+    ).toBe("sites");
   });
 
   it("serialize → parse restores the workbench state", () => {
@@ -1150,6 +1168,7 @@ describe("ui-state persistence round-trip", () => {
   });
 
   it.each([
+    ["site preview", siteTabPath("client-portal"), "dohc://site/%63lient-portal"],
     [
       "plugin panel",
       pluginPanelTabPath("hello-plugin", "main"),
