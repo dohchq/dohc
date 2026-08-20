@@ -428,3 +428,56 @@ describe("hardenGuestSession", () => {
     expect(granted).toEqual([false, false]);
   });
 });
+
+// Two instances of one plugin's web app. The guest module keys nothing on the
+// web app id or the instance — it is handed one start URL and builds one view
+// — so these are the two facts the instanced surface depends on it keeping.
+describe("createPluginWebAppGuest across instances of one web app", () => {
+  const SECOND_INSTANCE_URL = "http://127.0.0.1:52836/pair#token=second";
+
+  // MUTATION (harden every guest against the first instance's origin, or
+  // against a partition-wide origin): one preview could navigate itself into
+  // another preview's server, which is a different site's content.
+  it("locks each instance to its own origin, not its sibling's", () => {
+    const first = createGuest();
+    const second = createGuest({ url: SECOND_INSTANCE_URL });
+
+    expect(first.guest.origin).toBe("http://127.0.0.1:52835");
+    expect(second.guest.origin).toBe("http://127.0.0.1:52836");
+
+    // Each view refuses the other instance's origin. `navigate` returns
+    // whether the lock called preventDefault, so true means refused.
+    expect(first.created[0]!.view.navigate("http://127.0.0.1:52836/")).toBe(
+      true,
+    );
+    expect(second.created[0]!.view.navigate("http://127.0.0.1:52835/")).toBe(
+      true,
+    );
+    // ...and still allows its own.
+    expect(first.created[0]!.view.navigate("http://127.0.0.1:52835/x")).toBe(
+      false,
+    );
+    expect(second.created[0]!.view.navigate("http://127.0.0.1:52836/x")).toBe(
+      false,
+    );
+  });
+
+  // The deliberate decision, pinned so a later change has to argue with it:
+  // instances of one plugin SHARE that plugin's partition. The partition
+  // exists to keep plugins out of each other's cookie jar, and every instance
+  // here is the same plugin's own server under the same plugin's authority.
+  // Uninstall clears that one partition and therefore clears every instance.
+  it("puts every instance of one plugin in that plugin's own partition", () => {
+    const hardenedPartitions = new Set<string>();
+    const first = createGuest({ hardenedPartitions });
+    const second = createGuest({ url: SECOND_INSTANCE_URL, hardenedPartitions });
+
+    expect(second.guest.partition).toBe(first.guest.partition);
+    expect(first.guest.partition).toBe(
+      pluginWebAppPartition(WORKSPACE_ROOT, PLUGIN_ID),
+    );
+    // One partition means one session to harden, and it was hardened once.
+    expect(hardenedPartitions.size).toBe(1);
+    expect(second.created[0]!.view.permissionHandlerSet).toBe(0);
+  });
+});

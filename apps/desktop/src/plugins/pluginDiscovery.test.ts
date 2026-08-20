@@ -289,6 +289,7 @@ describe("discoverInstalledPlugins", () => {
         license: record.manifest?.license ?? null,
         icon: record.iconPath,
         settings: record.manifest?.settings ?? [],
+        panels: [],
         webApps: [],
         diagnostics: record.diagnostics,
         warnings: [],

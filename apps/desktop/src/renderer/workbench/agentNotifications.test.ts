@@ -299,3 +299,53 @@ describe("deriveAgentActivity", () => {
     expect(activity?.addressedToUser).toBe(false);
   });
 });
+
+describe("a login the agent's harness asks for", () => {
+  it("raises its own notice, with the harness's own instruction", () => {
+    const raised = reduce(
+      [],
+      input({
+        status: "running",
+        loginRequired: true,
+        loginNotice: "The login expired. Run `fixture-harness login`.",
+      }),
+    );
+
+    // MUTATION (login-required does not outrank the run's own state): a
+    // running session raises nothing, and the failure that follows says the
+    // agent hit a problem instead of naming the sign-in it needs.
+    expect(raised).toHaveLength(1);
+    expect(raised[0]?.kind).toBe("login-required");
+    expect(raised[0]?.title).toBe("Your agent needs you to sign in");
+    expect(raised[0]?.body).toBe("The login expired. Run `fixture-harness login`.");
+  });
+
+  it("tells the user what to do when the harness said nothing", () => {
+    const raised = reduce([], input({ status: "failed", loginRequired: true }));
+    expect(raised[0]?.body)
+      .toBe("Sign in with the provider CLI, then start the agent again.");
+  });
+
+  it("outranks the failure the expired login caused", () => {
+    const raised = reduce(
+      [],
+      input({ status: "failed", lastError: "the agent stopped", loginRequired: true }),
+    );
+    expect(raised.map((notice) => notice.kind)).toEqual(["login-required"]);
+  });
+
+  it("carries the harness's latest notice out of the session snapshot", () => {
+    const activity = deriveAgentActivity({
+      workspaceId: "ws-a",
+      workspaceName: "Personal",
+      agentName: "You's agent",
+      userCandidates,
+      session: session({
+        loginRequired: true,
+        authNotices: ["rate-limits", "The login expired."],
+      }),
+    });
+    expect(activity?.loginRequired).toBe(true);
+    expect(activity?.loginNotice).toBe("The login expired.");
+  });
+});

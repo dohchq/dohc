@@ -94,6 +94,16 @@ export interface PluginPipelineSizes {
   dataBytes: number | null;
 }
 
+/** One declared panel, and where the workbench shows it. */
+export interface PluginPanelContribution {
+  id: string;
+  title: string;
+  placement: "editor" | "view";
+  /** The rail button's icon, plugin-root-relative, or null to fall back to
+   * the plugin's own icon. */
+  icon: string | null;
+}
+
 export interface PluginPipelinePluginStatus extends PluginMetadata {
   id: string;
   directoryName: string;
@@ -107,7 +117,10 @@ export interface PluginPipelinePluginStatus extends PluginMetadata {
   installedBaselineHash: string | null;
   /** The manifest's declared web apps, so the settings surface can offer an
    * Open control without a second manifest read. */
-  webApps: { id: string; title: string }[];
+  webApps: { id: string; title: string; instanced: boolean }[];
+  /** The manifest's declared panels, so the workbench can put the ones placed
+   * in the view rail there without a second manifest read. */
+  panels: PluginPanelContribution[];
   /** The manifest's declared settings, so the details page can render the
    * controls without a second manifest read. Values live per workspace and
    * travel separately. */
@@ -309,6 +322,7 @@ function cloneStatus(status: PluginPipelinePluginStatus): PluginPipelinePluginSt
     ...status,
     settings: status.settings.map((setting) => ({ ...setting })),
     webApps: status.webApps.map((webApp) => ({ ...webApp })),
+    panels: status.panels.map((panel) => ({ ...panel })),
     diagnostics: [...status.diagnostics],
     warnings: [...status.warnings],
     error: cloneError(status.error),
@@ -316,11 +330,37 @@ function cloneStatus(status: PluginPipelinePluginStatus): PluginPipelinePluginSt
 }
 
 function manifestWebApps(
-  manifest: { webApps?: { id: string; title: string }[] } | null,
-): { id: string; title: string }[] {
+  manifest: {
+    webApps?: { id: string; title: string; instanced: boolean }[];
+  } | null,
+): { id: string; title: string; instanced: boolean }[] {
   return (manifest?.webApps ?? []).map((webApp) => ({
     id: webApp.id,
     title: webApp.title,
+    instanced: webApp.instanced,
+  }));
+}
+
+/**
+ * The panels a plugin declares, with where each one shows. The entry path
+ * stays behind in main: the renderer never loads a panel by path — it asks
+ * for one by id, and main re-reads the manifest to answer.
+ */
+function manifestPanels(
+  manifest: {
+    panels?: {
+      id: string;
+      title: string;
+      placement: "editor" | "view";
+      icon?: string;
+    }[];
+  } | null,
+): PluginPanelContribution[] {
+  return (manifest?.panels ?? []).map((panel) => ({
+    id: panel.id,
+    title: panel.title,
+    placement: panel.placement,
+    icon: panel.icon ?? null,
   }));
 }
 
@@ -570,6 +610,7 @@ export class PluginPipeline {
           ...manifestMetadata(candidate),
           settings: manifestSettings(candidate.manifest),
           webApps: manifestWebApps(candidate.manifest),
+          panels: manifestPanels(candidate.manifest),
           diagnostics: boundedStatusLines(candidate.diagnostics),
           warnings: [],
           error: invalidPluginError(candidate),
@@ -588,6 +629,25 @@ export class PluginPipeline {
       left.directoryName.localeCompare(right.directoryName) ||
       left.id.localeCompare(right.id)
     );
+  }
+
+  /**
+   * The root and manifest of a discovered plugin, in the shape main serves
+   * panels from.
+   *
+   * main also keeps a registration map, but that map is filled only when a
+   * tab opens a panel or a web app. A view in the activity bar opens no tab,
+   * so nothing fills it for a view-only plugin, and the panel it declares
+   * could never start. This is where the manifest actually lives.
+   */
+  pluginRegistration(
+    pluginId: string,
+  ): { pluginRoot: string; manifest: DohcPluginManifest } | null {
+    for (const candidate of this.discovery) {
+      if (candidate.id !== pluginId || !candidate.manifest) continue;
+      return { pluginRoot: candidate.rootPath, manifest: candidate.manifest };
+    }
+    return null;
   }
 
   /**
@@ -2245,6 +2305,7 @@ export class PluginPipeline {
       ...manifestMetadata(candidate),
       settings: manifestSettings(candidate.manifest),
       webApps: manifestWebApps(candidate.manifest),
+      panels: manifestPanels(candidate.manifest),
       diagnostics: boundedStatusLines(candidate.diagnostics),
       warnings: [],
       error: null,
@@ -2281,6 +2342,7 @@ export class PluginPipeline {
         ? manifestSettings(candidate.manifest)
         : current.settings,
       webApps: patch.webApps ?? manifestWebApps(candidate.manifest),
+      panels: patch.panels ?? manifestPanels(candidate.manifest),
       diagnostics: boundedStatusLines(patch.diagnostics ?? current.diagnostics),
       warnings: boundedStatusLines(patch.warnings ?? current.warnings),
       error: patch.error === undefined ? cloneError(current.error) : cloneError(patch.error),

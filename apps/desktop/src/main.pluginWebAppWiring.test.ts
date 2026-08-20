@@ -16,6 +16,12 @@ function handler(channel: string): string {
   return mainSource.slice(start, mainSource.indexOf("\n  });", start));
 }
 
+/**
+ * Source with every run of whitespace removed, so an assertion can name a
+ * whole call — arguments, order, and all — without pinning how it wraps.
+ */
+const squeeze = (source: string): string => source.replace(/\s+/g, "");
+
 function functionSource(signature: string): string {
   const start = mainSource.indexOf(signature);
   expect(start).toBeGreaterThan(-1);
@@ -42,8 +48,13 @@ describe("plugin web app main-process wiring", () => {
 
   it("builds the guest only after readiness and both post-start rechecks", () => {
     const start = handler("startPluginWebApp");
-    const startWebAppAt = start.indexOf(
-      "await host.startWebApp(input.pluginId, input.webAppId)",
+    const startWebAppAt = start.indexOf("await host.startWebApp(");
+    // MUTATION (pass null, or the manifest id, instead of the request's own
+    // key): every instance would start under one identity, so two preview
+    // tabs would share one origin. PluginHost.test.ts pins that the host
+    // sends whatever key it is given; only this pins WHICH key main gives it.
+    expect(squeeze(start)).toContain(
+      "awaithost.startWebApp(input.pluginId,input.webAppId,input.instanceKey,)",
     );
     const spawnRecheckAt = start.indexOf(
       "host.getSpawnId(input.pluginId) !== spawnId",
@@ -75,8 +86,11 @@ describe("plugin web app main-process wiring", () => {
     // behavior in pluginWebAppRecovery.test.ts; that the start hands it the
     // PLUGIN's unpair — not just the view stop — is this handler's own claim.
     expect(start).toContain("recoverConsumedWebAppCredential({");
-    expect(start).toContain(
-      "unpair: () => host.stopWebApp(input.pluginId, input.webAppId),",
+    // The unpair must BE the host call — not merely be followed by one — and
+    // it must name the instance the failed start paired, or the recovery
+    // would retire a sibling instance's session instead of this one's.
+    expect(squeeze(start)).toContain(
+      "unpair:()=>host.stopWebApp(input.pluginId,input.webAppId,input.instanceKey,)",
     );
     expect(start).toContain("notifyFailed: () =>");
     expect(start).toContain("onLoadFailure: () => {");
@@ -117,6 +131,33 @@ describe("plugin web app main-process wiring", () => {
     expect(dropAt).toBeGreaterThan(authorizeAt);
     expect(applyAt).toBeGreaterThan(dropAt);
     expect(bounds).toContain("generation: rendererGeneration(event.sender.id),");
+  });
+
+  // Every identity-keyed path in these handlers carries the request's own
+  // instance. MUTATION (any one of them dropping it): that path would act on
+  // whichever instance sorts first under the keyless identity, so one
+  // preview's resize, stop, or failure would land on another preview.
+  it("keys every web app path by the instance the request named", () => {
+    const start = squeeze(handler("startPluginWebApp"));
+    expect(start).toContain(
+      "stopView:()=>stopPluginWebAppUnderStartLock(workspace.workspaceId,input.pluginId,input.webAppId,input.instanceKey,)",
+    );
+    expect(start).toContain(
+      "assertInstanceBudget(input.pluginId,input.webAppId,pluginWebAppViews.countOtherInstances(identity),)",
+    );
+    expect(squeeze(handler("openPluginWebApp"))).toContain(
+      "requireDeclaredWebApp(input.pluginId,plugin.manifest.webApps,input.webAppId,input.instanceKey,)",
+    );
+    expect(squeeze(handler("setPluginWebAppBounds"))).toContain(
+      "authorizeBounds({workspaceId:input.workspaceId,pluginId:input.pluginId,webAppId:input.webAppId,instanceKey:input.instanceKey,",
+    );
+    const stop = squeeze(handler("stopPluginWebApp"));
+    expect(stop).toContain(
+      "pluginWebAppViews.get({workspaceId:workspace.workspaceId,pluginId:input.pluginId,webAppId:input.webAppId,instanceKey:input.instanceKey,})",
+    );
+    expect(stop).toContain(
+      "awaitstopPluginWebApp(workspace.workspaceId,input.pluginId,input.webAppId,input.instanceKey,)",
+    );
   });
 
   it("shares the host claim accounting between panels and web apps", () => {

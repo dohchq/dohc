@@ -27,7 +27,12 @@ import {
   type PluginTransport,
   type SdkRequestParams,
 } from "./pluginHostProtocol";
+import {
+  MAX_PLUGIN_WEB_APP_TITLE_CHARS,
+  requireDeclaredWebApp,
+} from "./pluginWebAppInstances";
 import type { PluginSettingValue } from "./pluginManifestSchema";
+import { raceWithTimeout } from "./pluginShared";
 
 const DEACTIVATION_TIMEOUT_MS = 5_000;
 
@@ -62,6 +67,19 @@ export interface PluginHostOptions {
   readPluginSettings?: (
     pluginId: string,
   ) => Promise<Record<string, PluginSettingValue>>;
+  /**
+   * Offers this spawn's manifest-declared drivers to the workspace's driver
+   * registry, during activation. Throwing refuses the activation, which is
+   * what a colliding driver id has to do: dohc must never list two drivers
+   * under one id.
+   */
+  onDriversRegistered?: (
+    pluginId: string,
+    spawnId: string,
+    drivers: ReadonlyArray<{ id: string; displayName: string }>,
+  ) => void;
+  /** One event a plugin's driver reported, from the spawn that reported it. */
+  onDriverEvent?: (pluginId: string, spawnId: string, params: unknown) => void;
   /** Releases resources that the SDK router owns for one spawn. */
   onSpawnEnd?: (pluginId: string, spawnId: string) => Promise<void>;
   /** Releases router resources that are not attached to a live host record. */
@@ -106,21 +124,8 @@ interface PluginRecord {
   status: PluginRuntimeStatus;
   stderr: string[];
   commands?: string[];
+  drivers?: string[];
   current?: PluginSpawn;
-}
-
-function raceWithTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  message: string,
-): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-  });
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer) clearTimeout(timer);
-  });
 }
 
 function isSdkRequestParams(params: unknown): params is SdkRequestParams {
@@ -146,23 +151,52 @@ function isPluginLogParams(params: unknown): params is PluginLogParams {
   );
 }
 
+function isIdList(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((entry) => typeof entry === "string" && entry.length > 0)
+  );
+}
+
 function isPluginActivateResult(value: unknown): value is PluginActivateResult {
   return (
     typeof value === "object" &&
     value !== null &&
     "commands" in value &&
-    Array.isArray(value.commands) &&
-    value.commands.every(
-      (command) => typeof command === "string" && command.length > 0,
-    )
+    isIdList(value.commands) &&
+    "drivers" in value &&
+    isIdList(value.drivers)
   );
 }
 
-function findDuplicateCommandId(commands: readonly string[]): string | undefined {
-  const commandIds = new Set<string>();
-  for (const commandId of commands) {
-    if (commandIds.has(commandId)) return commandId;
-    commandIds.add(commandId);
+function findDuplicateId(ids: readonly string[]): string | undefined {
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (seen.has(id)) return id;
+    seen.add(id);
+  }
+  return undefined;
+}
+
+/**
+ * A plugin's manifest is what dohc shows before the plugin runs, so a declared
+ * driver that never registers would be a probe row nothing can answer, and a
+ * registered driver nothing declared would be a driver no reader was told
+ * about. The two sets must match exactly.
+ */
+function driverRegistrationMismatch(
+  declared: readonly string[],
+  registered: readonly string[],
+): string | undefined {
+  const declaredIds = new Set(declared);
+  const registeredIds = new Set(registered);
+  const missing = declared.filter((id) => !registeredIds.has(id));
+  if (missing.length > 0) {
+    return `Plugin activation did not register the driver ids its manifest declares: ${missing.join(", ")}.`;
+  }
+  const extra = registered.filter((id) => !declaredIds.has(id));
+  if (extra.length > 0) {
+    return `Plugin activation registered driver ids its manifest does not declare: ${extra.join(", ")}.`;
   }
   return undefined;
 }
@@ -274,6 +308,37 @@ export class PluginHost {
   }
 
   /**
+   * Sends one `driver.*` request to a running plugin and returns its result.
+   *
+   * `spawnId` is the spawn the caller's driver belongs to: a plugin that
+   * crashed and came back is a new spawn with no memory of that driver's
+   * sessions, so a request aimed at the old one must fail rather than land on
+   * the new one.
+   */
+  async requestDriver<T = unknown>(
+    pluginId: string,
+    spawnId: string,
+    method: string,
+    params: unknown,
+  ): Promise<T> {
+    const record = this.plugins.get(pluginId);
+    const spawn = record?.current;
+    if (!record || !spawn?.transport) {
+      throw new Error(`Plugin "${pluginId}" is not running.`);
+    }
+    if (spawn.spawnId !== spawnId) {
+      throw new Error(`Plugin "${pluginId}" restarted; this driver session ended with it.`);
+    }
+    if (spawn.stopping) {
+      throw new Error(`Plugin "${pluginId}" is stopping.`);
+    }
+    if (record.status === "starting") {
+      throw new Error(`Plugin "${pluginId}" is still starting.`);
+    }
+    return spawn.transport.request<T>(method, params);
+  }
+
+  /**
    * Asks the running plugin to start (or reuse) a manifest-declared web app
    * and returns the loopback URL its guest view must load. The URL may carry
    * a one-time credential in its fragment: callers keep it in memory and
@@ -282,6 +347,7 @@ export class PluginHost {
   async startWebApp(
     pluginId: string,
     webAppId: string,
+    instanceKey: string | null,
   ): Promise<PluginStartWebAppResult> {
     const record = this.plugins.get(pluginId);
     const spawn = record?.current;
@@ -294,16 +360,18 @@ export class PluginHost {
     if (record.status === "starting") {
       throw new Error(`Plugin "${pluginId}" is still starting.`);
     }
-    if (!record.manifest.webApps?.some((webApp) => webApp.id === webAppId)) {
-      throw new Error(
-        `Plugin "${pluginId}" does not declare web app "${webAppId}".`,
-      );
-    }
+    requireDeclaredWebApp(
+      pluginId,
+      record.manifest.webApps,
+      webAppId,
+      instanceKey,
+    );
     const timeoutMs =
       this.options.webAppStartTimeoutMs ?? PLUGIN_WEB_APP_START_TIMEOUT_MS;
     const result = await raceWithTimeout(
       spawn.transport.request(PLUGIN_HOST_METHODS.startWebApp, {
         webAppId,
+        instanceKey,
       } satisfies PluginStartWebAppParams),
       timeoutMs,
       `Plugin "${pluginId}" web app "${webAppId}" did not start within ${timeoutMs} ms.`,
@@ -319,7 +387,20 @@ export class PluginHost {
         `Plugin "${pluginId}" web app "${webAppId}" returned an invalid start result: "url" must be a non-empty string.`,
       );
     }
-    return { url: result.url };
+    const title = "title" in result ? result.title : undefined;
+    if (title !== undefined) {
+      if (typeof title !== "string" || title.length === 0) {
+        throw new Error(
+          `Plugin "${pluginId}" web app "${webAppId}" returned an invalid start result: "title" must be a non-empty string when present.`,
+        );
+      }
+      if (title.length > MAX_PLUGIN_WEB_APP_TITLE_CHARS) {
+        throw new Error(
+          `Plugin "${pluginId}" web app "${webAppId}" returned a ${title.length}-character title, past the limit of ${MAX_PLUGIN_WEB_APP_TITLE_CHARS} characters for a web app title.`,
+        );
+      }
+    }
+    return { url: result.url, ...(title === undefined ? {} : { title }) };
   }
 
   /**
@@ -332,18 +413,24 @@ export class PluginHost {
    * wrapper's whole process tree down with the spawn, so its server and the
    * session are already gone.
    */
-  async stopWebApp(pluginId: string, webAppId: string): Promise<void> {
+  async stopWebApp(
+    pluginId: string,
+    webAppId: string,
+    instanceKey: string | null,
+  ): Promise<void> {
     const record = this.plugins.get(pluginId);
     const spawn = record?.current;
     if (!record || !spawn?.transport || spawn.stopping) return;
-    if (!record.manifest.webApps?.some((webApp) => webApp.id === webAppId)) {
-      throw new Error(
-        `Plugin "${pluginId}" does not declare web app "${webAppId}".`,
-      );
-    }
+    requireDeclaredWebApp(
+      pluginId,
+      record.manifest.webApps,
+      webAppId,
+      instanceKey,
+    );
     await raceWithTimeout(
       spawn.transport.request(PLUGIN_HOST_METHODS.stopWebApp, {
         webAppId,
+        instanceKey,
       } satisfies PluginStopWebAppParams),
       PLUGIN_WEB_APP_STOP_TIMEOUT_MS,
       `Plugin "${pluginId}" web app "${webAppId}" did not stop within ${PLUGIN_WEB_APP_STOP_TIMEOUT_MS} ms.`,
@@ -420,6 +507,11 @@ export class PluginHost {
     return commands ? [...commands] : undefined;
   }
 
+  getRegisteredDrivers(pluginId: string): string[] | undefined {
+    const drivers = this.plugins.get(pluginId)?.drivers;
+    return drivers ? [...drivers] : undefined;
+  }
+
   getSpawnId(pluginId: string): string | undefined {
     return this.plugins.get(pluginId)?.current?.spawnId;
   }
@@ -494,7 +586,7 @@ export class PluginHost {
         onRequest: (method, params) =>
           this.handleRequest(record, spawn, method, params),
         onNotification: (method, params) =>
-          this.handleNotification(record, method, params),
+          this.handleNotification(record, spawn, method, params),
         onExit: () => this.handleExit(record, spawn),
       });
 
@@ -551,12 +643,12 @@ export class PluginHost {
         record,
         spawn,
         new Error(
-          'Plugin activation returned an invalid result: "commands" must be an array of non-empty strings.',
+          'Plugin activation returned an invalid result: "commands" and "drivers" must be arrays of non-empty strings.',
         ),
       );
       return;
     }
-    const duplicateCommandId = findDuplicateCommandId(result.commands);
+    const duplicateCommandId = findDuplicateId(result.commands);
     if (duplicateCommandId !== undefined) {
       void this.handleActivationFailure(
         record,
@@ -567,7 +659,37 @@ export class PluginHost {
       );
       return;
     }
+    const duplicateDriverId = findDuplicateId(result.drivers);
+    if (duplicateDriverId !== undefined) {
+      void this.handleActivationFailure(
+        record,
+        spawn,
+        new Error(
+          `Plugin activation returned duplicate driver id "${duplicateDriverId}". Driver ids must be unique.`,
+        ),
+      );
+      return;
+    }
+    const declaredDrivers = record.manifest.drivers ?? [];
+    const mismatch = driverRegistrationMismatch(
+      declaredDrivers.map((driver) => driver.id),
+      result.drivers,
+    );
+    if (mismatch !== undefined) {
+      void this.handleActivationFailure(record, spawn, new Error(mismatch));
+      return;
+    }
+    try {
+      // The registry decides whether these drivers can join it — a colliding
+      // id or a full workspace refuses here, while the plugin is still
+      // starting, rather than after it is listed as ready.
+      this.options.onDriversRegistered?.(record.pluginId, spawn.spawnId, declaredDrivers);
+    } catch (error) {
+      void this.handleActivationFailure(record, spawn, error);
+      return;
+    }
     record.commands = [...result.commands];
+    record.drivers = [...result.drivers];
     this.setStatus(record, "ready");
     spawn.resolveActivated();
   }
@@ -730,9 +852,18 @@ export class PluginHost {
 
   private handleNotification(
     record: PluginRecord,
+    spawn: PluginSpawn,
     method: string,
     params: unknown,
   ): void {
+    if (method === PLUGIN_HOST_METHODS.driverEvent) {
+      // A spawn that is stopping, replaced, or already failed has no live
+      // session left to report about, and its late events must not reach a
+      // registry that has moved on.
+      if (!this.isLive(record, spawn)) return;
+      this.options.onDriverEvent?.(record.pluginId, spawn.spawnId, params);
+      return;
+    }
     if (method !== PLUGIN_HOST_METHODS.log) return;
     if (!isPluginLogParams(params)) {
       let renderedParams = "[unserializable params]";

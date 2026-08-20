@@ -1,0 +1,28 @@
+# cargo-nextest settings for the Rust workspace.
+#
+# The gate (`tools/rust-engine-program/run-rust-checks.mjs`) runs
+# `cargo nextest run` without `--profile`, so `default` is the profile every
+# gate test step uses.
+
+[profile.default]
+# Bound every test, so a hang FAILS the gate loudly instead of stalling it
+# silently (#809). Until this file existed there was no nextest config at all,
+# so a test that never returned held the gate open forever, and the log
+# staleness watchdog was the only thing that noticed.
+#
+# The kill threshold is period x terminate-after = 25 minutes. A terminated
+# test reports as TIMEOUT and fails the run, which makes the gate's
+# `test --workspace` row FAIL.
+#
+# MEASURED HEALTHY WORK, full gate run on commit 7ac22086 (win32/x64, jobs 8,
+# test-threads 8): the slowest test in the workspace is
+# `a_lineage_too_large_to_originate_still_accepts_the_edit` at 313.9s, the next
+# slowest is 73.5s, and the whole `test --workspace` step is 390.6s. 25 minutes
+# is 4.8x the slowest measured test and 3.8x the entire step, so a loaded
+# machine keeps plenty of room to run slow without being killed. It also fires
+# before the 30 minutes at which the rust-gate skill tells a reader to suspect
+# a deadlocked step.
+#
+# `period` keeps nextest's default of 60s, so the SLOW warnings the gate log
+# already prints stay exactly as they are. Only the kill is new.
+slow-timeout = { period = "60s", terminate-after = 25 }

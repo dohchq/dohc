@@ -1,4 +1,13 @@
-export type AgentDriverId = "claude-acp" | "codex-app-server" | "generic-acp" | (string & {});
+export type AgentDriverId = "claude-acp" | "generic-acp" | (string & {});
+
+/**
+ * The driver ids dohc ships. A plugin may not take one, and the plugin driver
+ * registry refuses one that tries (pluginAgentDrivers.ts).
+ *
+ * Codex is not here: it left this process for `apps/desktop/plugins/codex`,
+ * and the id it holds now is a plugin's to take like any other.
+ */
+export const BUILT_IN_AGENT_DRIVER_IDS = ["claude-acp", "generic-acp"] as const;
 
 export interface PermissionOption {
   optionId: string;

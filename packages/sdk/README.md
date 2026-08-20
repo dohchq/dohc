@@ -76,13 +76,13 @@ instance, so it remains safe when the plugin carries its own dependencies.
 `createProcessTransport()` detects an Electron utility-process message channel
 or plain stdio. Plugin authors do not select the binding.
 
-Sites can use the typed APIs for common dohc operations:
+A plugin can use the typed APIs for common dohc operations:
 
 ```ts
 import { dohc } from "@dohc/sdk";
 
-const text = await dohc.files.read("site-data/status.txt");
-await dohc.files.write("site-data/status.txt", `${text}\nUpdated by my site.`);
+const text = await dohc.files.read("reports/status.txt");
+await dohc.files.write("reports/status.txt", `${text}\nUpdated by my plugin.`);
 const files = await dohc.files.list("notes");
 const matches = await dohc.workspace.search("next action");
 const database = await dohc.databases.read({ path: "data/tasks.sqlite" });
@@ -97,10 +97,52 @@ timeouts through `{ signal, timeoutMs }` request options.
 
 `files.read()` throws if the host had to return only a bounded prefix, which
 prevents an accidental partial read-modify-write from truncating a large file.
-Use `files.readInfo()` when a site intentionally wants to inspect
+Use `files.readInfo()` when a plugin intentionally wants to inspect
 `{ text, truncated }` itself. Raw `files.write()` is for ordinary source and
 text artifacts; canonical Markdown documents require dohc's document-editing
 path so live Y.Doc state, locks, history, and collaboration remain coherent.
+
+## Theme tokens
+
+A plugin panel renders on its own origin, so dohc's stylesheet never reaches
+it. Ask for the tokens instead:
+
+```ts
+import { dohc } from "@dohc/sdk";
+
+await dohc.ui.applyTheme();
+```
+
+That one call writes dohc's design tokens onto this document's `<html>` and
+keeps writing them when the user changes theme, density, or reduced motion —
+no reload. Panel CSS then names colors the way dohc's own stylesheet does:
+
+```css
+body {
+  background: var(--dohc-bg);
+  color: var(--dohc-ink);
+  font-family: var(--font-sans);
+}
+```
+
+`applyTheme` also mirrors the three attributes dohc switches on, so a panel
+can write `[data-theme='dark']`, `[data-density='compact']`, and
+`[data-reduce-motion='true']` rules the same way. It returns a function that
+stops following.
+
+Use `dohc.ui.theme()` to read the tokens as data — for a canvas, a chart, or
+an SVG fill that CSS cannot reach:
+
+```ts
+const theme = await dohc.ui.theme();
+chart.setStroke(theme.tokens["--dohc-accent"]);
+```
+
+Theme is styling data. It grants no authority and gates on no capability. A
+panel that never asks for it behaves exactly as it did before.
+
+Panels only. A plugin's own Node process has no window to
+read a theme from, and both refuse these calls by name.
 
 ## Security Note: file:// Previews
 
@@ -115,6 +157,6 @@ tokens, or other sensitive data in `file://` request messages. Authorization
 and user identity validation must always happen in the dohc host/server layer;
 browser callers are untrusted. `file://` sandboxing is inherently weaker than
 an HTTP(S) origin, even though response validation still checks `event.source`
-and response data remains origin-checked. Production sites should be previewed
+and response data remains origin-checked. A production guest should be served
 over HTTP(S) for full origin isolation. Prefer normal dohc preview origins, or
 another restricted same-origin transport, when the app needs isolation.

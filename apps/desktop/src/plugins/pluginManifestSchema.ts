@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
 
 export const NPM_PACKAGE_NAME = /^(?:@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*$/;
 
@@ -111,6 +112,13 @@ const PluginIconPath = PluginPath.refine(
   `icon: must be a .${PLUGIN_ICON_EXTENSIONS.join(" or .")} file`,
 );
 
+// Where a panel shows. "editor" opens it as an editor tab; "view" gives it a
+// button in the activity bar and renders it in the side panel, beside the
+// explorer and the graph. The two are exclusive because a running panel is
+// keyed by (workspace, plugin, panel) and starting a second one stops the
+// first — so a panel that can be in both places at once cannot exist.
+const PluginPanelPlacement = z.enum(["editor", "view"]);
+
 const PluginPanel = z.object({
   id: z.string().min(1).max(120).refine(
     (value) => !value.includes("\0"),
@@ -118,7 +126,29 @@ const PluginPanel = z.object({
   ),
   title: z.string().min(1).max(120),
   entry: PluginPath,
+  placement: PluginPanelPlacement.default("editor"),
+  // The rail button's icon. Absent, the button falls back to the plugin's own
+  // icon, then to the glyph every plugin without one already shows — so a
+  // plugin that declares nothing still gets a usable button.
+  icon: PluginIconPath.optional(),
 }).strict();
+
+/**
+ * How many panels one plugin may place in the activity bar.
+ *
+ * Measured from the rail itself. An item is a 36px button on a 4px gap, so
+ * the pitch is 40px. At the smallest window dohc opens (620px tall, less the
+ * 40px title bar and the 28px status bar) the rail is 552px, and its own
+ * chrome — the 16px of padding plus the 89px Cloud/Settings cluster — leaves
+ * 447px, which is 11 buttons. Six of those are dohc's own views, so five are
+ * left for plugins at the smallest window.
+ *
+ * Four sits under that five: one plugin can never fill the rail on its own.
+ * It is also well past the measured healthy shape — a sites plugin wants one
+ * view, and a suite that ships two or three still fits. Nothing is rejected
+ * for lack of room: past what one window shows, the rail scrolls.
+ */
+export const MAX_PLUGIN_VIEW_PANELS = 4;
 
 const PluginCommand = z.object({
   id: z.string().min(1).max(120),
@@ -131,12 +161,60 @@ const PluginCommand = z.object({
 // webview tag, never a plain iframe. The URL comes from the running plugin
 // (PluginHandler.startWebApp), not the manifest, because it exists only once
 // the plugin's server is ready.
+// An instanced web app opens one tab per runtime instance instead of one tab
+// for the whole manifest id: a sites plugin previews each site in its own tab,
+// over its own loopback origin. dohc holds no opinion about what an instance
+// is — the plugin names it with an instance key, gets that key back in
+// startWebApp, and serves whatever origin that instance needs. The flag is
+// what tells dohc which of the two shapes an id uses, so an open that carries
+// no key (the plugin page's Open button) and an open that carries one are each
+// refused for the wrong id instead of quietly serving the wrong app.
 const PluginWebApp = z.object({
   id: z.string().min(1).max(120).refine(
     (value) => !value.includes("\0"),
     "web app id must not contain NUL bytes",
   ),
   title: z.string().min(1).max(120),
+  instanced: z.boolean().default(false),
+}).strict();
+
+// An agent driver this plugin contributes: one harness dohc can talk to,
+// registered beside the built-in drivers and shown in the same probe list.
+// Core ships three drivers for two harnesses, and a harness plugin declares
+// one — plus, at most, a variant or two of that same harness (an adapter
+// transport beside a native one). Eight leaves that measured shape room and
+// still reads as a list. The workspace-wide registration cap, not this one,
+// is what keeps the merged driver list inside the bound its IPC contract
+// carries (pluginAgentDrivers.ts).
+export const MAX_PLUGIN_DRIVERS = 8;
+
+// A driver id names its driver in the driver registry, in the Settings probe
+// list, and in `agents.defaultDriverId` — a workspace-settings string whose
+// own bound is this one. The charset is the settings key's, because an id a
+// person may type into a settings file should not need quoting.
+const PluginDriverId = z.string()
+  .min(1)
+  .max(
+    DEFAULT_DRIVER_ID_MAX_LENGTH,
+    `must be ${DEFAULT_DRIVER_ID_MAX_LENGTH} characters or fewer`,
+  )
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/,
+    "must start with a letter or digit and use only letters, digits, '.', '_', or '-'",
+  );
+
+// What a driver is called on screen. The same bound every other display name
+// in this manifest carries, named because the IPC contract that carries this
+// name to the renderer has to use the same one — a driver dohc lists must be
+// a driver dohc can describe.
+export const MAX_PLUGIN_DRIVER_NAME_CHARS = 120;
+
+const PluginDriver = z.object({
+  id: PluginDriverId,
+  displayName: z.string().min(1).max(
+    MAX_PLUGIN_DRIVER_NAME_CHARS,
+    `must be ${MAX_PLUGIN_DRIVER_NAME_CHARS} characters or fewer`,
+  ),
 }).strict();
 
 // A plugin's own settings, declared flat so dohc can render them without the
@@ -306,6 +384,12 @@ export const DohcPluginManifest = z.object({
   webApps: z.array(PluginWebApp)
     .max(100, "webApps: at most 100 entries allowed")
     .optional(),
+  drivers: z.array(PluginDriver)
+    .max(
+      MAX_PLUGIN_DRIVERS,
+      `drivers: at most ${MAX_PLUGIN_DRIVERS} entries allowed`,
+    )
+    .optional(),
   settings: z.array(PluginSetting)
     .max(
       MAX_PLUGIN_SETTINGS,
@@ -332,6 +416,18 @@ export const DohcPluginManifest = z.object({
     panelIds.add(panel.id);
   });
 
+  const viewPanels =
+    manifest.panels?.filter((panel) => panel.placement === "view").length ?? 0;
+  if (viewPanels > MAX_PLUGIN_VIEW_PANELS) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["panels"],
+      message:
+        `panels: at most ${MAX_PLUGIN_VIEW_PANELS} may set placement "view" ` +
+        `(observed ${viewPanels})`,
+    });
+  }
+
   const commandIds = new Set<string>();
   manifest.commands?.forEach((command, index) => {
     if (commandIds.has(command.id)) {
@@ -354,6 +450,18 @@ export const DohcPluginManifest = z.object({
       });
     }
     webAppIds.add(webApp.id);
+  });
+
+  const driverIds = new Set<string>();
+  manifest.drivers?.forEach((driver, index) => {
+    if (driverIds.has(driver.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["drivers", index, "id"],
+        message: `driver id "${driver.id}" must be unique within drivers`,
+      });
+    }
+    driverIds.add(driver.id);
   });
 
   const settingKeys = new Set<string>();

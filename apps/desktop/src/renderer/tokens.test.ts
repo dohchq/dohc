@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
 import indexHtml from "./index.html?raw";
 import stylesCss from "./styles.css?raw";
-import { palette, type ThemeTokens } from "./tokens";
+import { CSS_TOKEN_NAMES, fonts, palette, type ThemeTokens } from "./tokens";
 
 // THE duplication guard for the design tokens: styles.css (static, first
 // paint) and tokens.ts (window chrome) deliberately carry the same values;
 // this test parses the stylesheet and fails on any drift between them.
 
-function tokenBlock(selector: string): Record<string, string> {
+/** The declarations inside the first block matching `selector`. */
+function blockBody(selector: string): string {
   // Anchored at line start: "[data-theme='dark']" also appears inside the
   // @custom-variant directive, which must not match.
   const rule = new RegExp(
@@ -17,53 +18,45 @@ function tokenBlock(selector: string): Record<string, string> {
   const match = rule.exec(stylesCss);
   expect(match, `styles.css must contain a ${selector} block`).not.toBeNull();
   const open = stylesCss.indexOf("{", match!.index);
-  const close = stylesCss.indexOf("}", open);
-  const body = stylesCss.slice(open + 1, close);
-  const tokens: Record<string, string> = {};
-  for (const match of body.matchAll(/--dohc-([a-z0-9-]+):\s*([^;]+);/g)) {
-    tokens[match[1]] = match[2].trim();
-  }
-  return tokens;
+  return stylesCss.slice(open + 1, stylesCss.indexOf("}", open));
 }
 
-// tokens.ts key → the --dohc-* custom property name in styles.css.
-const CSS_NAME: Record<keyof ThemeTokens, string> = {
-  bg: "bg",
-  panel: "panel",
-  panel2: "panel-2",
-  line: "line",
-  ink: "ink",
-  muted: "muted",
-  subtle: "subtle",
-  accent: "accent",
-  agent: "agent",
-  match: "match",
-  success: "success",
-  warning: "warning",
-  danger: "danger",
-  selection: "selection",
-};
+/** Every custom property declared in a block, keyed by its full name. */
+function declarations(selector: string, pattern: RegExp): Record<string, string> {
+  const declared: Record<string, string> = {};
+  for (const match of blockBody(selector).matchAll(pattern)) {
+    declared[match[1]] = match[2].trim();
+  }
+  return declared;
+}
 
 describe("tokens.ts ⟷ styles.css sync", () => {
   const blocks = {
-    light: tokenBlock(":root"),
-    dark: tokenBlock("[data-theme='dark']"),
+    light: declarations(":root", /(--dohc-[a-z0-9-]+):\s*([^;]+);/g),
+    dark: declarations("[data-theme='dark']", /(--dohc-[a-z0-9-]+):\s*([^;]+);/g),
   } as const;
 
   for (const mode of ["light", "dark"] as const) {
     it(`${mode} values match styles.css exactly`, () => {
-      for (const key of Object.keys(CSS_NAME) as (keyof ThemeTokens)[]) {
-        expect(
-          blocks[mode][CSS_NAME[key]],
-          `--dohc-${CSS_NAME[key]} (${mode})`,
-        ).toBe(palette[mode][key]);
+      for (const key of Object.keys(CSS_TOKEN_NAMES) as (keyof ThemeTokens)[]) {
+        expect(blocks[mode][CSS_TOKEN_NAMES[key]], `${CSS_TOKEN_NAMES[key]} (${mode})`).toBe(
+          palette[mode][key],
+        );
       }
       // No stray CSS tokens that tokens.ts doesn't know about either.
       expect(Object.keys(blocks[mode]).sort()).toEqual(
-        Object.values(CSS_NAME).sort(),
+        Object.values(CSS_TOKEN_NAMES).sort(),
       );
     });
   }
+
+  // The plugin panel theme bridge sends these stacks to another origin, so
+  // they get the same guard the colors have.
+  it("font stacks match styles.css exactly", () => {
+    expect(declarations(":root", /(--font-[a-z]+):\s*([^;]+);/g)).toEqual({
+      ...fonts,
+    });
+  });
 });
 
 // index.html's inline first-paint block is the THIRD copy of bg/ink (it

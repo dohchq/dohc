@@ -193,17 +193,32 @@ export function canApprove(plugin: PluginStatusRecord): boolean {
   );
 }
 
-// An installed, non-disabled plugin can open its web apps. openPluginWebApp
-// re-reads and re-verifies the manifest in main, so this predicate only
-// decides whether the control is worth showing.
-export function canOpenWebApps(plugin: PluginStatusRecord): boolean {
+/** The web apps this page may offer a button for: the ones that open a single
+ * tab. A per-instance app needs an instance to open, and this page has none —
+ * the plugin's own panel opens those. */
+export function openableWebApps(
+  plugin: PluginStatusRecord,
+): PluginStatusRecord["webApps"] {
+  return plugin.webApps.filter((webApp) => !webApp.instanced);
+}
+
+/**
+ * Whether this plugin can serve its surfaces right now: installed, approved,
+ * and not on its way out. Main re-reads and re-verifies the manifest before
+ * it serves anything, so this only decides what is worth showing.
+ */
+export function canServeSurfaces(plugin: PluginStatusRecord): boolean {
   return (
     plugin.valid &&
     plugin.approvedHash !== null &&
-    plugin.webApps.length > 0 &&
     !plugin.status.startsWith("disabled") &&
     plugin.status !== "uninstalling"
   );
+}
+
+// An installed, non-disabled plugin can open its web apps.
+export function canOpenWebApps(plugin: PluginStatusRecord): boolean {
+  return canServeSurfaces(plugin) && openableWebApps(plugin).length > 0;
 }
 
 // Uninstall is the one action an installed plugin keeps once its manifest
@@ -265,7 +280,15 @@ export function webAppKey(pluginId: string, webAppId: string): string {
   return `${pluginId}\0${webAppId}`;
 }
 
-export function usePluginCatalog(workspaceId: string): PluginCatalog {
+// Callers may take the default only when their mount necessarily follows the
+// workspace-open invoke reaching main: PluginsView and PluginDetailsPage
+// mount after the async UI-state restore, and main registers the sender
+// synchronously at the open invoke. A mount that can race that invoke, like
+// the shell's rail, must pass its own readiness signal.
+export function usePluginCatalog(
+  workspaceId: string,
+  enabled: boolean = true,
+): PluginCatalog {
   const [load, setLoad] = useState<PluginLoadState>({ status: "loading" });
   const [busy, setBusy] = useState<Record<string, PluginAction | undefined>>({});
   const [openingWebApp, setOpeningWebApp] = useState<string | null>(null);
@@ -324,6 +347,7 @@ export function usePluginCatalog(workspaceId: string): PluginCatalog {
   }
 
   useEffect(() => {
+    if (!enabled) return;
     const epoch = workspaceEpoch.current;
     setBusy({});
     setErrors({});
@@ -360,9 +384,8 @@ export function usePluginCatalog(workspaceId: string): PluginCatalog {
       workspaceEpoch.current += 1;
       pendingStatusEvents.current.clear();
     };
-    // Each workspace gets one guarded list and one scoped status listener.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId]);
+  }, [workspaceId, enabled]);
 
   function replacePlugin(plugin: PluginStatusRecord) {
     setLoad((current) =>
@@ -441,6 +464,10 @@ export function usePluginCatalog(workspaceId: string): PluginCatalog {
         pluginRoot: plugin.rootPath,
         pluginId: plugin.id,
         webAppId,
+        // The plugin's page has no instance to name. Per-instance apps are
+        // opened by the plugin's own panel, which knows what its instances
+        // are, and this page offers no button for one.
+        instanceKey: null,
       });
     } catch (error) {
       if (epoch !== workspaceEpoch.current) return;

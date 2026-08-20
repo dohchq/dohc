@@ -78,5 +78,41 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
   },
 };
 
+/**
+ * tokens.ts key → the custom property name styles.css spells it with. One
+ * map, so the sync test and the plugin panel theme bridge name these tokens
+ * the same way and cannot drift apart.
+ */
+export const CSS_TOKEN_NAMES: Record<keyof ThemeTokens, string> = {
+  bg: "--dohc-bg",
+  panel: "--dohc-panel",
+  panel2: "--dohc-panel-2",
+  line: "--dohc-line",
+  ink: "--dohc-ink",
+  muted: "--dohc-muted",
+  subtle: "--dohc-subtle",
+  accent: "--dohc-accent",
+  agent: "--dohc-agent",
+  match: "--dohc-match",
+  success: "--dohc-success",
+  warning: "--dohc-warning",
+  danger: "--dohc-danger",
+  selection: "--dohc-selection",
+};
+
+/**
+ * The type stacks, which do not change with theme. Same duplication guard as
+ * the palette: tokens.test.ts asserts these against styles.css :root.
+ *
+ * Both stacks name bundled families first. A surface that cannot load dohc's
+ * fonts — a plugin panel on its own origin — falls through to the system
+ * families here rather than to the browser default.
+ */
+export const fonts = {
+  "--font-sans": '"InterVariable", system-ui, "Segoe UI", sans-serif',
+  "--font-mono":
+    '"IBM Plex Mono", ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace',
+} as const;
+
 // The custom titlebar strip and the OS titleBarOverlay must agree on height.
 export const TITLEBAR_HEIGHT_PX = 40;

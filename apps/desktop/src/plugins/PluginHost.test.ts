@@ -4,9 +4,11 @@ import {
   type Request,
 } from "@dohc/workspace-engine-client";
 import { existsSync } from "node:fs";
-import { mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { databaseOpLogPath } from "@dohc/workspace-core";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JsonRpcTransport } from "../agents/JsonRpcTransport";
@@ -84,6 +86,23 @@ async function stateDir(): Promise<string> {
   return scratch;
 }
 
+const requireModule = createRequire(import.meta.url);
+
+async function seedFixtureDatabase(root: string): Promise<void> {
+  const { DatabaseSync } = requireModule("node:sqlite") as {
+    DatabaseSync: new (path: string) => { exec(sql: string): void; close(): void };
+  };
+  await mkdir(join(root, "data"), { recursive: true });
+  const database = new DatabaseSync(join(root, "data", "app.sqlite"));
+  try {
+    database.exec(
+      "CREATE TABLE sentinel (id TEXT PRIMARY KEY, marker TEXT); INSERT INTO sentinel VALUES ('1', 'start');",
+    );
+  } finally {
+    database.close();
+  }
+}
+
 async function fixtureManifest(): Promise<DohcPluginManifest> {
   const result = await readPluginManifestFile(helloPluginRoot);
   if (!result.ok) throw new Error(result.diagnostics.join("; "));
@@ -113,7 +132,7 @@ function createCallbackHarness(): {
     return {
       request<T = unknown>(method: string): Promise<T> {
         const result = method === PLUGIN_HOST_METHODS.activate
-          ? { commands: [] }
+          ? { commands: [], drivers: [] }
           : {};
         return Promise.resolve(result as T);
       },
@@ -219,7 +238,7 @@ function createCrashAccountingHarness(): {
       return {
         request<T = unknown>(method: string): Promise<T> {
           const result = method === PLUGIN_HOST_METHODS.activate
-            ? { commands: [] }
+            ? { commands: [], drivers: [] }
             : {};
           if (method === PLUGIN_HOST_METHODS.activate && shouldCrash) {
             setTimeout(() => params.onExit({ code: 1, signal: null }), 0);
@@ -305,6 +324,7 @@ describe("PluginHost", () => {
             pluginId,
             workspaceRoot: root,
             spawnId,
+            requestPath: "plugin-process",
             isWritable: () => true,
             writeAvailable: async () => true,
             signal,
@@ -339,6 +359,104 @@ describe("PluginHost", () => {
         },
       },
     ]);
+  });
+
+  it("round-trips databases.read and a plugin-attributed databases.edit over the real protocol", async () => {
+    const root = await workspaceRoot();
+    await seedFixtureDatabase(root);
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "use-workspace" },
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: (pluginId, method, params, spawnId, signal) =>
+        invokePluginSdkHost(
+          {
+            pluginId,
+            workspaceRoot: root,
+            spawnId,
+            requestPath: "plugin-process",
+            isWritable: () => true,
+            writeAvailable: async () => true,
+            signal,
+            invokeChildProcess: async () => ({}),
+            writeAuthoredText: async (path) => ({ path }),
+          },
+          method,
+          params,
+        ),
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    // The snapshot really crossed the protocol.
+    expect(await host.invokeCommand("hello-plugin", "database.roundTrip")).toEqual({
+      tables: ["sentinel"],
+    });
+
+    // The edit landed, and the op log names the plugin as its author.
+    const log = await readFile(
+      join(root, databaseOpLogPath("data/app.sqlite")),
+      "utf8",
+    );
+    const ops = log
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { payload: unknown; author: unknown });
+    expect(ops).toHaveLength(1);
+    expect(ops[0]?.payload).toEqual({ marker: "edited-by-plugin" });
+    expect(ops[0]?.author).toEqual({
+      kind: "agent",
+      agentId: "plugin:hello-plugin",
+      onBehalfOf: "local",
+    });
+  });
+
+  it("tells a plugin's own process that ui.open needs a renderer", async () => {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "use-workspace" },
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: (pluginId, method, params, spawnId, signal) =>
+        invokePluginSdkHost(
+          {
+            pluginId,
+            workspaceRoot: root,
+            spawnId,
+            requestPath: "plugin-process",
+            isWritable: () => true,
+            writeAvailable: async () => true,
+            signal,
+            invokeChildProcess: async () => ({}),
+            writeAuthoredText: async (path) => ({ path }),
+          },
+          method,
+          params,
+        ),
+    });
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    const result = (await host.invokeCommand("hello-plugin", "ui.tryOpen")) as {
+      opened: boolean;
+      message: string | null;
+    };
+    expect(result.opened).toBe(false);
+    expect(result.message).toMatch(/ui\.open capability is disabled by this host/);
   });
 
   it("rejects invokeCommand for an unregistered command by name", async () => {
@@ -380,9 +498,9 @@ describe("PluginHost", () => {
     const root = await workspaceRoot();
     let invokeCommandCalls = 0;
     let resolveActivation:
-      | ((result: { commands: string[] }) => void)
+      | ((result: { commands: string[]; drivers: string[] }) => void)
       | undefined;
-    const activation = new Promise<{ commands: string[] }>((resolve) => {
+    const activation = new Promise<{ commands: string[]; drivers: string[] }>((resolve) => {
       resolveActivation = resolve;
     });
     const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
@@ -409,7 +527,7 @@ describe("PluginHost", () => {
     ).rejects.toThrow('Plugin "hello-plugin" is still starting.');
 
     expect(invokeCommandCalls).toBe(0);
-    resolveActivation?.({ commands: [] });
+    resolveActivation?.({ commands: [], drivers: [] });
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not finish activation.",
@@ -691,7 +809,7 @@ describe("PluginHost", () => {
       expect.soft(reachedFailed).toBe(true);
       expect(unhandledRejections).toEqual([]);
       expect(host.getStderrLog("hello-plugin")).toContain(
-        'Activation failed: Plugin activation returned an invalid result: "commands" must be an array of non-empty strings.',
+        'Activation failed: Plugin activation returned an invalid result: "commands" and "drivers" must be arrays of non-empty strings.',
       );
     } finally {
       process.off("unhandledRejection", onUnhandledRejection);
@@ -793,7 +911,7 @@ describe("PluginHost", () => {
         return {
           request<T = unknown>(method: string): Promise<T> {
             const result = method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [] }
+              ? { commands: [], drivers: [] }
               : {};
             return Promise.resolve(result as T);
           },
@@ -927,7 +1045,7 @@ describe("PluginHost", () => {
         return {
           request<T = unknown>(method: string): Promise<T> {
             const result = method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [] }
+              ? { commands: [], drivers: [] }
               : {};
             return Promise.resolve(result as T);
           },
@@ -983,7 +1101,7 @@ describe("PluginHost", () => {
       return {
         request<T = unknown>(method: string): Promise<T> {
           const result = method === PLUGIN_HOST_METHODS.activate
-            ? { commands: [] }
+            ? { commands: [], drivers: [] }
             : {};
           return Promise.resolve(result as T);
         },
@@ -1237,7 +1355,7 @@ describe("PluginHost", () => {
       (params) => ({
         request<T = unknown>(method: string): Promise<T> {
           const result = method === PLUGIN_HOST_METHODS.activate
-            ? { commands: [] }
+            ? { commands: [], drivers: [] }
             : {};
           return Promise.resolve(result as T).then((value) => {
             if (method === PLUGIN_HOST_METHODS.activate) {
@@ -1284,7 +1402,7 @@ describe("PluginHost", () => {
         return {
           request: async <T,>(method: string) =>
             (method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [] }
+              ? { commands: [], drivers: [] }
               : {}) as T,
           notify: () => undefined,
           dispose: async () => undefined,
@@ -1331,6 +1449,7 @@ describe("PluginHost", () => {
         pluginId: "hello-plugin",
         workspaceRoot: root,
         spawnId: authority.spawnId,
+        requestPath: "panel",
         isWritable: () => true,
         writeAvailable: async () => true,
         writeAuthoredText: async (path, _text, options) => {
@@ -1393,7 +1512,7 @@ describe("PluginHost", () => {
         return {
           request: async <T,>(method: string) =>
             (method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [] }
+              ? { commands: [], drivers: [] }
               : {}) as T,
           notify: () => undefined,
           dispose: async () => undefined,
@@ -1428,6 +1547,7 @@ describe("PluginHost", () => {
         pluginId: "hello-plugin",
         workspaceRoot: root,
         spawnId,
+        requestPath: "panel",
         isWritable: () => true,
         writeAvailable: async () => true,
         signal: grant.signal,
@@ -1506,7 +1626,7 @@ describe("PluginHost", () => {
       spawnTransport: () => ({
         request: async <T,>(method: string) =>
           (method === PLUGIN_HOST_METHODS.activate
-            ? { commands: [] }
+            ? { commands: [], drivers: [] }
             : {}) as T,
         notify: () => undefined,
         dispose: async () => undefined,
@@ -1526,6 +1646,7 @@ describe("PluginHost", () => {
         pluginId: "hello-plugin",
         workspaceRoot: root,
         spawnId,
+        requestPath: "panel",
         isWritable: () => true,
         writeAvailable: async () => true,
         signal: grant.signal,
@@ -1576,7 +1697,7 @@ describe("PluginHost", () => {
       workspaceRoot: root,
       spawnTransport: () => ({
         request: async <T,>(method: string) =>
-          (method === PLUGIN_HOST_METHODS.activate ? { commands: [] } : {}) as T,
+          (method === PLUGIN_HOST_METHODS.activate ? { commands: [], drivers: [] } : {}) as T,
         notify: () => undefined,
         dispose: async () => undefined,
       }),
@@ -1635,7 +1756,7 @@ describe("PluginHost", () => {
               await releaseStop.promise;
             }
             return (method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [] }
+              ? { commands: [], drivers: [] }
               : {}) as T;
           },
           notify: () => undefined,
@@ -1736,7 +1857,7 @@ describe("PluginHost", () => {
               deactivateRequests.push(params.pluginId);
             }
             const result = method === PLUGIN_HOST_METHODS.activate
-              ? { commands: [] }
+              ? { commands: [], drivers: [] }
               : {};
             return Promise.resolve(result as T);
           },
@@ -1824,7 +1945,7 @@ describe("PluginHost", () => {
       request<T = unknown>(method: string): Promise<T> {
         if (method === PLUGIN_HOST_METHODS.invokeCommand) invokeCommandCalls += 1;
         const result = method === PLUGIN_HOST_METHODS.activate
-          ? { commands: [] }
+          ? { commands: [], drivers: [] }
           : {};
         return Promise.resolve(result as T);
       },
@@ -2173,7 +2294,7 @@ describe("PluginHost web apps", () => {
   async function webAppManifest(): Promise<DohcPluginManifest> {
     return {
       ...(await fixtureManifest()),
-      webApps: [{ id: "main-app", title: "Hello App" }],
+      webApps: [{ id: "main-app", title: "Hello App", instanced: false }],
     };
   }
 
@@ -2202,28 +2323,28 @@ describe("PluginHost web apps", () => {
 
   it("routes startWebApp through the real plugin process and returns its URL in memory", async () => {
     const host = await startWebAppHost({ mode: "web-app" });
-    await expect(host.startWebApp("hello-plugin", "main-app")).resolves.toEqual({
+    await expect(host.startWebApp("hello-plugin", "main-app", null)).resolves.toEqual({
       url: "http://127.0.0.1:43210/pair#token=fixture-main-app",
     });
   });
 
   it("refuses a web app the manifest does not declare", async () => {
     const host = await startWebAppHost({ mode: "web-app" });
-    await expect(host.startWebApp("hello-plugin", "other")).rejects.toThrow(
+    await expect(host.startWebApp("hello-plugin", "other", null)).rejects.toThrow(
       'does not declare web app "other"',
     );
   });
 
   it("reports a handler that does not implement startWebApp", async () => {
     const host = await startWebAppHost({ mode: "hello" });
-    await expect(host.startWebApp("hello-plugin", "main-app")).rejects.toThrow(
+    await expect(host.startWebApp("hello-plugin", "main-app", null)).rejects.toThrow(
       "does not implement startWebApp",
     );
   });
 
   it("rejects an empty url from the plugin", async () => {
     const host = await startWebAppHost({ mode: "web-app-bad-result" });
-    await expect(host.startWebApp("hello-plugin", "main-app")).rejects.toThrow(
+    await expect(host.startWebApp("hello-plugin", "main-app", null)).rejects.toThrow(
       "non-empty string url",
     );
   });
@@ -2233,7 +2354,7 @@ describe("PluginHost web apps", () => {
       mode: "web-app-hang",
       webAppStartTimeoutMs: 200,
     });
-    await expect(host.startWebApp("hello-plugin", "main-app")).rejects.toThrow(
+    await expect(host.startWebApp("hello-plugin", "main-app", null)).rejects.toThrow(
       "did not start within 200 ms",
     );
   });
@@ -2246,41 +2367,41 @@ describe("PluginHost web apps", () => {
       spawnTransport: createProcessHarness().spawnTransport,
       routeSdkRequest: defaultRouter,
     });
-    await expect(host.startWebApp("hello-plugin", "main-app")).rejects.toThrow(
+    await expect(host.startWebApp("hello-plugin", "main-app", null)).rejects.toThrow(
       'Plugin "hello-plugin" is not running.',
     );
   });
 
   it("carries a stop to the plugin, so the next start pairs again", async () => {
     const host = await startWebAppHost({ mode: "web-app-pairing" });
-    const first = await host.startWebApp("hello-plugin", "main-app");
+    const first = await host.startWebApp("hello-plugin", "main-app", null);
     expect(first.url).toBe("http://127.0.0.1:43210/pair#token=fixture-1");
     // Paired: a second start rides the session the first one established.
-    await expect(host.startWebApp("hello-plugin", "main-app")).resolves.toEqual({
+    await expect(host.startWebApp("hello-plugin", "main-app", null)).resolves.toEqual({
       url: "http://127.0.0.1:43210/?app=main-app",
     });
 
-    await host.stopWebApp("hello-plugin", "main-app");
+    await host.stopWebApp("hello-plugin", "main-app", null);
 
     // MUTATION (drop the protocol stop dispatch, or the host method): the
     // plugin never learns the guest is gone, so this start returns the paired
     // URL into a guest with no session — the workspace-started host's whole
     // failure mode.
-    await expect(host.startWebApp("hello-plugin", "main-app")).resolves.toEqual({
+    await expect(host.startWebApp("hello-plugin", "main-app", null)).resolves.toEqual({
       url: "http://127.0.0.1:43210/pair#token=fixture-2",
     });
   });
 
   it("reports a handler that implements startWebApp without stopWebApp", async () => {
     const host = await startWebAppHost({ mode: "web-app" });
-    await expect(host.stopWebApp("hello-plugin", "main-app")).rejects.toThrow(
+    await expect(host.stopWebApp("hello-plugin", "main-app", null)).rejects.toThrow(
       "does not implement stopWebApp",
     );
   });
 
   it("refuses to stop a web app the manifest does not declare", async () => {
     const host = await startWebAppHost({ mode: "web-app-pairing" });
-    await expect(host.stopWebApp("hello-plugin", "other")).rejects.toThrow(
+    await expect(host.stopWebApp("hello-plugin", "other", null)).rejects.toThrow(
       'does not declare web app "other"',
     );
   });
@@ -2297,7 +2418,7 @@ describe("PluginHost web apps", () => {
     // a dead plugin's server and session are already gone. The recovery must
     // not turn that into a failure it reports.
     await expect(
-      host.stopWebApp("hello-plugin", "main-app"),
+      host.stopWebApp("hello-plugin", "main-app", null),
     ).resolves.toBeUndefined();
   });
 
@@ -2401,4 +2522,93 @@ describe("PluginHost web apps", () => {
       host.notifySettingsChanged("hello-plugin", { greeting: "Hello" }),
     ).resolves.toBeUndefined();
   });
+});
+
+// Two instances of one web app, served by the real fixture process over two
+// real loopback servers. These are the facts the whole per-instance surface
+// rests on: the plugin hears which instance it is asked for, and answers with
+// a different origin for each.
+describe("PluginHost instanced web apps", () => {
+  async function instancedManifest(): Promise<DohcPluginManifest> {
+    return {
+      ...(await fixtureManifest()),
+      webApps: [
+        { id: "preview", title: "Preview", instanced: true },
+        { id: "main-app", title: "Hello App", instanced: false },
+      ],
+    };
+  }
+
+  async function startInstancedHost(): Promise<PluginHost> {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "instanced-web-app" },
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+    await host.start(helloPluginRoot, await instancedManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+    return host;
+  }
+
+  // MUTATION (drop instanceKey from the start params): both instances would
+  // come back on one origin, and the two tabs would show the same app.
+  it("serves a different origin for each instance of one web app", async () => {
+    const host = await startInstancedHost();
+    const first = await host.startWebApp("hello-plugin", "preview", "sites/a");
+    const second = await host.startWebApp("hello-plugin", "preview", "sites/b");
+
+    expect(new URL(first.url).origin).not.toEqual(new URL(second.url).origin);
+    expect(new URL(first.url).hostname).toBe("127.0.0.1");
+    expect(new URL(second.url).hostname).toBe("127.0.0.1");
+  });
+
+  it("reuses one instance's own origin when it starts again", async () => {
+    const host = await startInstancedHost();
+    const first = await host.startWebApp("hello-plugin", "preview", "sites/a");
+    const again = await host.startWebApp("hello-plugin", "preview", "sites/a");
+    expect(again.url).toEqual(first.url);
+  });
+
+  it("carries a per-instance title back from the plugin", async () => {
+    const host = await startInstancedHost();
+    const started = await host.startWebApp("hello-plugin", "preview", "sites/a");
+    expect(started.title).toBe("Preview sites/a");
+  });
+
+  // MUTATION (stop every instance, or ignore instanceKey in stopWebApp): one
+  // closed preview tab would take the plugin's other previews down with it.
+  it("stops one instance and leaves the others running", async () => {
+    const host = await startInstancedHost();
+    await host.startWebApp("hello-plugin", "preview", "sites/a");
+    const second = await host.startWebApp("hello-plugin", "preview", "sites/b");
+
+    await host.stopWebApp("hello-plugin", "preview", "sites/a");
+    expect(await host.invokeCommand("hello-plugin", "webapp.running")).toEqual([
+      "sites/b",
+    ]);
+
+    // The survivor is still the same live server, not a restarted one.
+    const stillSecond = await host.startWebApp(
+      "hello-plugin",
+      "preview",
+      "sites/b",
+    );
+    expect(stillSecond.url).toEqual(second.url);
+  });
+
+  it("refuses a per-instance web app started without an instance", async () => {
+    const host = await startInstancedHost();
+    await expect(
+      host.startWebApp("hello-plugin", "preview", null),
+    ).rejects.toThrow(/must name an instance/);
+  });
+
 });

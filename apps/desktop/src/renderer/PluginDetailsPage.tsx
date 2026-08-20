@@ -24,6 +24,7 @@ import {
   canEnable,
   canInstall,
   canOpenWebApps,
+  openableWebApps,
   canRetryInstall,
   isInstalled,
   isPipelineBusy,
@@ -781,7 +782,7 @@ function PluginDetailsHeader(props: {
           </PrimaryButton>
         ) : null}
         {canOpenWebApps(plugin)
-          ? plugin.webApps.map((webApp) => {
+          ? openableWebApps(plugin).map((webApp) => {
               const key = webAppKey(plugin.id, webApp.id);
               return (
                 <SecondaryButton

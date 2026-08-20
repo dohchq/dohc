@@ -282,6 +282,38 @@ describe("@dohc/sdk/node", () => {
     await unsubscribed;
   });
 
+  it("spawns a command child and writes to its standard input", async () => {
+    const harness = createStdioHarness();
+    const childProcesses = createPluginChildProcessClient(harness.transport);
+    const spawned = childProcesses.spawnCommand({
+      command: "claude",
+      args: ["--print"],
+      cwd: { workspaceRoot: true },
+    });
+    // The argv array crosses the wire as an array. There is no field a
+    // command line could ride in.
+    await expect(harness.nextLine()).resolves.toBe(
+      '{"jsonrpc":"2.0","id":1,"method":"sdk.request","params":{"method":"childProcesses.command.spawn","params":{"command":"claude","args":["--print"],"cwd":{"workspaceRoot":true}}}}\n',
+    );
+    harness.send({ jsonrpc: "2.0", id: 1, result: { childId: "child-9", pid: 77 } });
+    const child = await spawned;
+    expect(child.pid).toBe(77);
+
+    const written = child.write('{"jsonrpc":"2.0"}\n');
+    await expect(harness.nextLine()).resolves.toBe(
+      '{"jsonrpc":"2.0","id":2,"method":"sdk.request","params":{"method":"childProcesses.stdin.write","params":{"childId":"child-9","data":"{\\"jsonrpc\\":\\"2.0\\"}\\n"}}}\n',
+    );
+    harness.send({ jsonrpc: "2.0", id: 2, result: {} });
+    await written;
+
+    const ended = child.endInput();
+    await expect(harness.nextLine()).resolves.toBe(
+      '{"jsonrpc":"2.0","id":3,"method":"sdk.request","params":{"method":"childProcesses.stdin.end","params":{"childId":"child-9"}}}\n',
+    );
+    harness.send({ jsonrpc: "2.0", id: 3, result: {} });
+    await ended;
+  });
+
   it("propagates spawn cancellation returned by the host transport", async () => {
     const harness = createStdioHarness();
     const childProcesses = createPluginChildProcessClient(harness.transport);

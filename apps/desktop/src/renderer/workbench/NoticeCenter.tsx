@@ -7,6 +7,7 @@ import {
   CloudOff,
   Download,
   GitPullRequestArrow,
+  LogIn,
   MessageSquare,
   X,
 } from "lucide-react";
@@ -62,6 +63,7 @@ const AGENT_NOTICE_ICON: Record<AgentNotificationKind, typeof Bell> = {
   "needs-input": Bot,
   asked: MessageSquare,
   error: AlertTriangle,
+  "login-required": LogIn,
 };
 
 const AGENT_NOTICE_TONE: Record<AgentNotificationKind, Notice["tone"]> = {
@@ -69,6 +71,7 @@ const AGENT_NOTICE_TONE: Record<AgentNotificationKind, Notice["tone"]> = {
   "needs-input": "warning",
   asked: "neutral",
   error: "danger",
+  "login-required": "warning",
 };
 
 function toneClass(tone: Notice["tone"]): string {

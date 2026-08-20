@@ -102,6 +102,11 @@ import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 // user clicked to open the panel — queries arrived with their first letters
 // missing. The view carries no dependency the shell does not already load.
 import { PluginsView } from "./workbench/PluginsView";
+import {
+  pluginActivityViews,
+  resolvePluginView,
+} from "./workbench/pluginActivityViews";
+import { usePluginCatalog } from "./workbench/pluginCatalog";
 import { SearchView } from "./workbench/SearchView";
 import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
@@ -167,7 +172,7 @@ import {
   isPluginPanelTabPath,
   isPluginWebAppTabPath,
   isSingletonEditorTabPath,
-  isSiteTabPath,
+  isViewId,
   isVirtualTabPath,
   MAX_OPEN_TABS,
   moveTab,
@@ -178,11 +183,12 @@ import {
   parseHistoryDiffTabPath,
   parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
+  parsePluginViewId,
   parsePluginWebAppTabPath,
+  clearPluginView,
   pluginDetailsTabPath,
   pluginPanelTabPath,
   pluginWebAppTabPath,
-  parseSiteTabPath,
   parseUiState,
   pruneMissingRestoredTabs,
   recordRecentFile,
@@ -672,12 +678,6 @@ function scheduleMarkdownEditorPreload(): () => void {
 }
 const LazyGraphView = lazy(() =>
   import("./workbench/GraphView").then((mod) => ({ default: mod.GraphView })),
-);
-const LazySitesView = lazy(() =>
-  import("./workbench/SitesView").then((mod) => ({ default: mod.SitesView })),
-);
-const LazySitePreviewPage = lazy(() =>
-  import("./SitePreviewPage").then((mod) => ({ default: mod.SitePreviewPage })),
 );
 const LazyPluginPanelPage = lazy(() =>
   import("./PluginPanelPage").then((mod) => ({ default: mod.PluginPanelPage })),
@@ -1342,24 +1342,6 @@ function PanelLoading({ label }: { label: string }) {
   );
 }
 
-function InvalidSitePathFallback({
-  activeTab,
-  onClose,
-}: {
-  activeTab: string | null;
-  onClose: () => void;
-}) {
-  useEffect(() => {
-    console.error("[desktop] invalid site tab path", {
-      activeTab,
-      detail: "active tab matched site tab format but activeSiteRoot parsed to null",
-    });
-    onClose();
-  }, [activeTab, onClose]);
-
-  return null;
-}
-
 export function DesktopWorkspaceShell(props: {
   workspace: Workspace;
   workspaces: Workspace[];
@@ -1416,7 +1398,6 @@ export function DesktopWorkspaceShell(props: {
   // identifiable and filtered out of "others". Lazily minted ONCE — a fresh id
   // per render would churn the presence channel.
   const [presenceClientId] = useState(() => crypto.randomUUID());
-  const [sitesRefreshKey, setSitesRefreshKey] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
@@ -1427,8 +1408,6 @@ export function DesktopWorkspaceShell(props: {
   // Relay-share dialog target (PR 18): a path (file/folder) or a version.
   const [shareTarget, setShareTarget] = useState<{
     path?: string;
-    paths?: string[];
-    label?: string;
     versionId?: string;
     versionName?: string;
   } | null>(null);
@@ -1876,8 +1855,16 @@ export function DesktopWorkspaceShell(props: {
     [workspaceId],
   );
   const rememberWebAppTitle = useCallback(
-    (pluginId: string, webAppId: string, title: string) =>
-      rememberPluginTabTitle(pluginWebAppTabPath(pluginId, webAppId), title),
+    (
+      pluginId: string,
+      webAppId: string,
+      instanceKey: string | null,
+      title: string,
+    ) =>
+      rememberPluginTabTitle(
+        pluginWebAppTabPath(pluginId, webAppId, instanceKey),
+        title,
+      ),
     [rememberPluginTabTitle],
   );
   const rememberPluginDetailsTitle = useCallback(
@@ -2018,6 +2005,45 @@ export function DesktopWorkspaceShell(props: {
     },
     [],
   );
+
+  // Plugin-contributed views (P6). The catalog is the same guarded data layer
+  // the Plugins panel uses, so the rail follows an install, an enable, and an
+  // uninstall without its own listener.
+  const pluginCatalog = usePluginCatalog(
+    workspaceId,
+    captureDecidedFor === workspaceId,
+  );
+  const pluginCatalogLoad = pluginCatalog.load;
+  const railPluginViews = useMemo(
+    () =>
+      pluginCatalogLoad.status === "ready"
+        ? pluginActivityViews(pluginCatalogLoad.plugins)
+        : [],
+    [pluginCatalogLoad],
+  );
+  const selectedPluginView = parsePluginViewId(wb.activeView);
+  const selectedPluginViewState =
+    selectedPluginView === null || pluginCatalogLoad.status !== "ready"
+      ? null
+      : resolvePluginView(pluginCatalogLoad.plugins, selectedPluginView);
+
+  // The panel's header names dohc's own view, or the plugin panel behind a
+  // contributed one — including while its plugin is off, so the header keeps
+  // saying which view the user is looking at.
+  const sidePanelTitle = isViewId(wb.activeView)
+    ? activityViewLabel(wb.activeView)
+    : (selectedPluginViewState?.status === "ready" ||
+        selectedPluginViewState?.status === "off"
+      ? selectedPluginViewState.title
+      : "Plugin view");
+
+  // An uninstalled plugin leaves no selection behind. Only a LOADED list can
+  // say a plugin is gone — before it lands, the selection stands, so a restart
+  // never loses the view the user left open.
+  useEffect(() => {
+    if (selectedPluginViewState?.status !== "absent") return;
+    mutateWb(clearPluginView);
+  }, [selectedPluginViewState?.status, mutateWb]);
 
   useEffect(
     () =>
@@ -2264,13 +2290,6 @@ export function DesktopWorkspaceShell(props: {
     },
     [],
   );
-
-  const refreshSites = useCallback(() => {
-    setSitesRefreshKey((key) => key + 1);
-    void refreshFiles().catch((error) =>
-      reportShellError("Could not refresh workspace files.", error),
-    );
-  }, [refreshFiles, reportShellError]);
 
   // Workspace-engine alpha (PR 0M-4/0M-5): versions surface, ENGINE history
   // source, and the linked Chats rail all key off this one per-workspace
@@ -3092,9 +3111,21 @@ export function DesktopWorkspaceShell(props: {
     () =>
       bridge().onPluginWebAppOpened((event) => {
         if (event.workspaceId !== workspaceId) return;
-        openVirtualTab(pluginWebAppTabPath(event.pluginId, event.webAppId));
+        openVirtualTab(
+          pluginWebAppTabPath(event.pluginId, event.webAppId, event.instanceKey),
+        );
       }),
     [openVirtualTab, workspaceId],
+  );
+  // A plugin panel asked for one instance of its own web app. The tab takes
+  // the same path a manifest-id app's tab takes, MAX_OPEN_TABS refusal
+  // included; the instance is what makes it its own tab rather than a
+  // re-activation of the last one.
+  const openPluginWebAppInstanceTab = useCallback(
+    (pluginId: string, webAppId: string, instanceKey: string) => {
+      openVirtualTab(pluginWebAppTabPath(pluginId, webAppId, instanceKey));
+    },
+    [openVirtualTab],
   );
   const openVersionCompareTab = useCallback(
     (versionId: string) => {
@@ -4372,6 +4403,14 @@ export function DesktopWorkspaceShell(props: {
         label: `View: ${activityViewLabel(view)}`,
         run: () => mutateWb((state) => setView(state, view)),
       })),
+      // A contributed view is a view like any other, so the palette offers it
+      // the same way. The list follows the rail: a plugin that is gone or off
+      // contributes no command either.
+      ...railPluginViews.map((view) => ({
+        id: `show-${view.viewId}`,
+        label: `View: ${view.title}`,
+        run: () => mutateWb((state) => setView(state, view.viewId)),
+      })),
       {
         id: "connect-cloud",
         label: "Connect dohc Cloud",
@@ -4410,6 +4449,7 @@ export function DesktopWorkspaceShell(props: {
     ],
     [
       activeDocumentPath,
+      railPluginViews,
       createUntitledDrawing,
       openWorkspaceFolder,
       closeActiveTab,
@@ -5124,7 +5164,9 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       <div className="flex min-h-0 flex-1">
         <ActivityBar
+          workspaceId={workspaceId}
           activeView={wb.activeView}
+          pluginViews={railPluginViews}
           sidebarVisible={wb.sidebarVisible}
           hasConflict={syncStatus?.state === "conflict"}
           searchResultCount={
@@ -5138,7 +5180,7 @@ export function DesktopWorkspaceShell(props: {
         {/* Side panel (Ctrl+B / activity bar toggle; hidden ⇒ unmounted) */}
         {wb.sidebarVisible ? (
           <SidePanel
-            title={activityViewLabel(wb.activeView)}
+            title={sidePanelTitle}
             width={wb.sidebarWidth}
             onWidthChange={(width) => mutateWb((state) => setSidebarWidth(state, width))}
             actions={
@@ -5164,17 +5206,6 @@ export function DesktopWorkspaceShell(props: {
                 >
                   <Maximize2 size={13} aria-hidden />
                 </button>
-              ) : wb.activeView === "sites" ? (
-                <button
-                  type="button"
-                  data-testid="sites-refresh"
-                  aria-label="Refresh sites"
-                  title="Refresh sites"
-                  onClick={refreshSites}
-                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
-                >
-                  <RefreshCw size={13} aria-hidden />
-                </button>
               ) : undefined
             }
           >
@@ -5199,15 +5230,6 @@ export function DesktopWorkspaceShell(props: {
                   variant="panel"
                 />
               </Suspense>
-            ) : wb.activeView === "sites" ? (
-              <Suspense fallback={<PanelLoading label="sites" />}>
-                <LazySitesView
-                  workspaceId={workspaceId}
-                  files={files}
-                  refreshKey={sitesRefreshKey}
-                  onOpenPath={openPathWithHeading}
-                />
-              </Suspense>
             ) : wb.activeView === "history" ? (
               historyTimeline
             ) : wb.activeView === "plugins" ? (
@@ -5216,7 +5238,52 @@ export function DesktopWorkspaceShell(props: {
                 activePluginId={activePluginDetailsId}
                 onOpenDetails={openPluginDetailsTab}
               />
-            ) : null}
+            ) : selectedPluginViewState?.status === "ready" ? (
+              <Suspense fallback={<PanelLoading label="plugin panel" />}>
+                <LazyPluginPanelPage
+                  workspaceId={workspaceId}
+                  pluginId={selectedPluginViewState.pluginId}
+                  panelId={selectedPluginViewState.panelId}
+                  placement="view"
+                  onOpenPath={openPathWithHeading}
+                  onOpenWebApp={openPluginWebAppInstanceTab}
+                />
+              </Suspense>
+            ) : selectedPluginViewState?.status === "off" ? (
+              <div
+                data-testid="plugin-view-off"
+                className="flex min-h-0 flex-1 flex-col items-center justify-center gap-1 px-6 text-center"
+              >
+                <span className="text-sm text-ink">
+                  {selectedPluginViewState.title} is off
+                </span>
+                <span className="text-xs text-muted">
+                  {selectedPluginViewState.pluginTitle} is turned off.
+                </span>
+                <button
+                  type="button"
+                  data-testid="plugin-view-off-open-plugins"
+                  onClick={() => mutateWb((state) => setView(state, "plugins"))}
+                  className="text-xs text-accent hover:underline"
+                >
+                  Open Plugins
+                </button>
+              </div>
+            ) : selectedPluginView === null ? null : pluginCatalogLoad.status ===
+              "error" ? (
+              // A failed plugin list cannot say whether this view still
+              // exists, and a spinner that never ends would claim it is
+              // still coming.
+              <div
+                data-testid="plugin-view-unknown"
+                className="flex min-h-0 flex-1 flex-col items-center justify-center gap-1 px-6 text-center"
+              >
+                <span className="text-sm text-ink">Could not load plugins</span>
+                <span className="text-xs text-muted">{pluginCatalogLoad.message}</span>
+              </div>
+            ) : (
+              <PanelLoading label="plugin panel" />
+            )}
             </ErrorBoundary>
           </SidePanel>
         ) : null}
@@ -5275,8 +5342,6 @@ export function DesktopWorkspaceShell(props: {
               const editorCallbacks = tab
                 ? callbacksForEditor(editorGroup.id, tab)
                 : null;
-              const groupDocumentPath = isVirtualTabPath(tabPath) ? null : tabPath;
-              const groupSiteRoot = parseSiteTabPath(tabPath);
               const groupPluginPanel = parsePluginPanelTabPath(tabPath);
               const groupPluginWebApp = parsePluginWebAppTabPath(tabPath);
               const groupPluginDetailsId = parsePluginDetailsTabPath(tabPath);
@@ -5338,7 +5403,7 @@ export function DesktopWorkspaceShell(props: {
               <Suspense fallback={<PanelLoading label="graph" />}>
                 <LazyGraphView
                   workspaceId={workspaceId}
-                  activePath={groupDocumentPath}
+                  activePath={activeDocumentPath}
                   refreshKey={graphKey}
                   onOpenPath={openPathWithHeading}
                   onOpenChatThread={openGraphChatThread}
@@ -5508,6 +5573,9 @@ export function DesktopWorkspaceShell(props: {
                     workspaceId={workspaceId}
                     pluginId={groupPluginPanel.pluginId}
                     panelId={groupPluginPanel.panelId}
+                    placement="editor"
+                    onOpenPath={openPathWithHeading}
+                    onOpenWebApp={openPluginWebAppInstanceTab}
                   />
                 </Suspense>
               ) : (
@@ -5531,6 +5599,7 @@ export function DesktopWorkspaceShell(props: {
                     workspaceId={workspaceId}
                     pluginId={groupPluginWebApp.pluginId}
                     webAppId={groupPluginWebApp.webAppId}
+                    instanceKey={groupPluginWebApp.instanceKey}
                     hiddenByOverlay={overlayOpen}
                     onTitle={rememberWebAppTitle}
                   />
@@ -5575,27 +5644,6 @@ export function DesktopWorkspaceShell(props: {
                     Close tab
                   </button>
                 </div>
-              )
-            ) : isSiteTabPath(tabPath) ? (
-              groupSiteRoot ? (
-                <Suspense fallback={<PanelLoading label="site" />}>
-                  <LazySitePreviewPage
-                    workspaceId={workspaceId}
-                    siteRoot={groupSiteRoot}
-                    sharedView={!!shareView}
-                    onOpenPath={openFile}
-                    {...(shareView
-                      ? {}
-                      : { onShareSite: setShareTarget })}
-                  />
-                </Suspense>
-              ) : (
-                <InvalidSitePathFallback
-                  activeTab={tabPath}
-                  onClose={() => {
-                    if (tabPath) closeFileTab(editorGroup.id, tabPath);
-                  }}
-                />
               )
             ) : tabPath && tab && editorCallbacks ? (
               <FileInspector

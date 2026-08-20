@@ -11,6 +11,51 @@ export const DohcSdkErrorCodes = {
     subscriptionsUnsupported: "DOHC_SUBSCRIPTIONS_UNSUPPORTED",
     responseTruncated: "DOHC_RESPONSE_TRUNCATED",
 };
+/**
+ * The envelope dohc pushes when its appearance changes. Theme is styling
+ * data: it carries no authority, gates on no capability, and a panel that
+ * ignores these messages behaves exactly as it did before.
+ */
+export const DOHC_THEME_PROTOCOL = "dohc:theme:v1";
+export function isDohcTheme(value) {
+    if (!value || typeof value !== "object")
+        return false;
+    const theme = value;
+    if (theme.mode !== "light" && theme.mode !== "dark")
+        return false;
+    if (theme.density !== "comfortable" && theme.density !== "compact")
+        return false;
+    if (typeof theme.reduceMotion !== "boolean")
+        return false;
+    if (!theme.tokens || typeof theme.tokens !== "object")
+        return false;
+    // A token whose name is not a custom property would be written straight
+    // into a style attribute, so the shape is checked, not trusted.
+    return Object.entries(theme.tokens).every(([name, tokenValue]) => typeof tokenValue === "string" && /^--[A-Za-z0-9-]+$/.test(name));
+}
+export function isDohcThemeMessage(value) {
+    if (!value || typeof value !== "object")
+        return false;
+    const message = value;
+    return message.protocol === DOHC_THEME_PROTOCOL && isDohcTheme(message.theme);
+}
+/**
+ * Writes one theme onto an element, normally the guest document's <html>:
+ * every token as a custom property, plus the three attributes dohc's own
+ * stylesheet switches on, so a panel can write `[data-theme='dark']` rules
+ * the same way dohc does.
+ */
+export function applyDohcTheme(theme, root) {
+    if (!isDohcTheme(theme)) {
+        throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "applyDohcTheme needs a dohc theme payload.");
+    }
+    for (const [name, value] of Object.entries(theme.tokens)) {
+        root.style.setProperty(name, value);
+    }
+    root.dataset.theme = theme.mode;
+    root.dataset.density = theme.density;
+    root.dataset.reduceMotion = String(theme.reduceMotion);
+}
 export class DohcSdkError extends Error {
     code;
     constructor(code, message) {
@@ -340,6 +385,20 @@ function assertUiTarget(target) {
         throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, `UI target must be a non-empty string of ${MAX_QUERY_LENGTH} characters or fewer with no control characters.`);
     }
 }
+/** Matches the host's own bound on an instance key, so a plugin reads the
+ * limit here instead of learning it from a rejected open. */
+const MAX_WEB_APP_INSTANCE_KEY_LENGTH = 512;
+function assertWebAppInstance(webAppId, instanceKey) {
+    if (typeof webAppId !== "string" || webAppId.trim().length === 0) {
+        throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Web app id must be a non-empty string.");
+    }
+    if (typeof instanceKey !== "string" ||
+        instanceKey.length === 0 ||
+        instanceKey.length > MAX_WEB_APP_INSTANCE_KEY_LENGTH ||
+        hasControlCharacter(instanceKey)) {
+        throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, `Web app instance key must be a non-empty string of ${MAX_WEB_APP_INSTANCE_KEY_LENGTH} characters or fewer with no control characters.`);
+    }
+}
 function assertOptionalWorkspacePath(path, label = "File path") {
     if (path !== undefined)
         assertWorkspacePath(path, label);
@@ -454,6 +513,21 @@ export function createDohcClient(options = {}) {
             throw new DohcSdkError(DohcSdkErrorCodes.capabilityDisabled, `dohc ${namespace}.${capability} capability is disabled by this host.`);
         }
     };
+    /**
+     * dohc's design tokens as they are on screen right now. Read this to color
+     * something CSS cannot reach — a canvas, a chart, an SVG fill. To style a
+     * panel, prefer `applyTheme`.
+     *
+     * Theme is styling data, so this gates on no capability.
+     */
+    const readTheme = async (requestOptions) => {
+        assertRequestOptions(requestOptions);
+        const result = await request("ui.theme", undefined, requestOptions);
+        if (!isDohcTheme(result)) {
+            throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned an invalid theme response.");
+        }
+        return result;
+    };
     const listCollection = async (name, params = {}, requestOptions) => {
         assertRequestOptions(requestOptions);
         assertCollectionName(name);
@@ -522,6 +596,15 @@ export function createDohcClient(options = {}) {
                 // able to replace the path/text that were just validated above.
                 return request("files.write", { ...options, path, text }, requestOptions);
             },
+            /**
+             * Reports settled changes at or below `path`, which is a prefix: a file
+             * to watch on its own, a folder to watch with everything under it, or
+             * "." for the whole workspace. Changes outside it never arrive.
+             *
+             * Returns a function that stops the subscription. A subscription also
+             * ends on its own when the plugin stops, so a plugin that watches for
+             * its whole life needs no teardown.
+             */
             watch: async (path, listener, requestOptions) => {
                 assertRequestOptions(requestOptions);
                 assertWorkspacePath(path);
@@ -578,6 +661,80 @@ export function createDohcClient(options = {}) {
                 assertUiTarget(target);
                 await requireCapability("ui", "open", requestOptions);
                 return request("ui.open", { ...options, target }, requestOptions);
+            },
+            /**
+             * Opens one instance of this plugin's own per-instance web app in its
+             * own tab. `instanceKey` names the thing the tab shows — a site root,
+             * a record id, whatever the plugin serves — and comes back to the
+             * plugin's `startWebApp`, which returns the origin for that instance.
+             *
+             * Only a panel may call this: opening a tab needs a renderer. The web
+             * app must be declared in the manifest with `"instanced": true`.
+             */
+            openWebApp: async (webAppId, instanceKey, requestOptions) => {
+                assertRequestOptions(requestOptions);
+                assertWebAppInstance(webAppId, instanceKey);
+                await requireCapability("ui", "open", requestOptions);
+                return request("ui.openWebApp", { webAppId, instanceKey }, requestOptions);
+            },
+            /**
+             * dohc's design tokens as they are on screen right now. Read this to
+             * color something CSS cannot reach — a canvas, a chart, an SVG fill.
+             * To style a panel, prefer `applyTheme`.
+             *
+             * Theme is styling data, so this gates on no capability.
+             */
+            theme: readTheme,
+            /**
+             * The one line that makes a panel look native: it writes dohc's tokens
+             * onto this document and keeps writing them when the user changes
+             * theme, density, or reduced motion. Panel CSS then uses the same
+             * names dohc uses — `color: var(--dohc-ink)`.
+             *
+             * Returns a function that stops following. A panel that never calls
+             * this is unaffected; the host's messages are simply ignored.
+             */
+            applyTheme: async (applyOptions = {}) => {
+                const currentWindow = options.currentWindow ??
+                    (typeof window === "undefined" ? undefined : window);
+                if (!currentWindow) {
+                    throw new DohcSdkError(DohcSdkErrorCodes.hostUnavailable, "dohc SDK is not running in a browser window.");
+                }
+                const root = applyOptions.root ?? currentWindow.document.documentElement;
+                const hostOrigin = options.targetOrigin ?? targetOriginFromLocation(currentWindow);
+                if (!hostOrigin) {
+                    throw new DohcSdkError(DohcSdkErrorCodes.hostMissingOrigin, "No dohc host origin is available for this panel.");
+                }
+                const hostWindow = options.targetWindow ??
+                    (currentWindow.parent && currentWindow.parent !== currentWindow
+                        ? currentWindow.parent
+                        : undefined);
+                // The listener goes on before the first read, so a theme change that
+                // lands mid-read is applied rather than lost — and, once one has
+                // landed, the older read result is not allowed to overwrite it.
+                let pushed = false;
+                const onMessage = (event) => {
+                    if (hostWindow && event.source !== hostWindow)
+                        return;
+                    if (!responseOriginMatches(event.origin, hostOrigin))
+                        return;
+                    if (!isDohcThemeMessage(event.data))
+                        return;
+                    pushed = true;
+                    applyDohcTheme(event.data.theme, root);
+                };
+                currentWindow.addEventListener("message", onMessage);
+                const stop = () => currentWindow.removeEventListener("message", onMessage);
+                try {
+                    const theme = await readTheme(applyOptions);
+                    if (!pushed)
+                        applyDohcTheme(theme, root);
+                }
+                catch (error) {
+                    stop();
+                    throw error;
+                }
+                return stop;
             },
         },
         collections: {

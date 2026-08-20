@@ -1,5 +1,7 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { databaseOpLogPath } from "@dohc/workspace-core";
 import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -17,6 +19,27 @@ interface AuthoredWrite {
   options: { overwrite: boolean; author: MomentAuthor };
 }
 
+const requireModule = createRequire(import.meta.url);
+const { DatabaseSync } = requireModule("node:sqlite") as {
+  DatabaseSync: new (path: string) => { exec(sql: string): void; close(): void };
+};
+
+async function seedDatabase(
+  root: string,
+  path: string,
+  marker: string,
+): Promise<void> {
+  await mkdir(join(root, dirname(path)), { recursive: true });
+  const database = new DatabaseSync(join(root, path));
+  try {
+    database.exec(
+      `CREATE TABLE sentinel (id TEXT PRIMARY KEY, marker TEXT); INSERT INTO sentinel VALUES ('1', '${marker}');`,
+    );
+  } finally {
+    database.close();
+  }
+}
+
 async function workspaceRoot(): Promise<string> {
   const root = await createTestScratch("dohc-plugin-sdk-host-");
   roots.push(root);
@@ -29,6 +52,7 @@ function context(root: string, writes: AuthoredWrite[] = []): PluginSdkHostConte
     pluginId: "hello-plugin",
     workspaceRoot: root,
     spawnId: "spawn-123",
+    requestPath: "plugin-process",
     isWritable: () => true,
     writeAvailable: async () => true,
     signal: controller.signal,
@@ -55,9 +79,24 @@ describe("invokePluginSdkHost", () => {
     await expect(invokePluginSdkHost(context(root), "capabilities")).resolves.toEqual({
       files: { read: true, list: true, write: true, watch: false },
       workspace: { search: true },
+      databases: { read: true, edit: true },
+      // The plugin's own process has no renderer to open a tab in.
+      ui: { open: false },
       childProcesses: { spawn: true, output: true, send: true, terminate: true },
       collections: { read: false },
       provenance: { record: false },
+    });
+  });
+
+  it("reports databases.edit on workspace authority alone, without an engine capture", async () => {
+    const root = await workspaceRoot();
+    const unavailable = { ...context(root), writeAvailable: async () => false };
+
+    await expect(
+      invokePluginSdkHost(unavailable, "capabilities"),
+    ).resolves.toMatchObject({
+      files: { write: false },
+      databases: { read: true, edit: true },
     });
   });
 
@@ -222,10 +261,240 @@ describe("invokePluginSdkHost", () => {
     const root = await workspaceRoot();
 
     await expect(
+      invokePluginSdkHost(context(root), "collections.list", { name: "people" }),
+    ).rejects.toThrow("Unsupported dohc SDK method: collections.list");
+  });
+
+  it("reads a database snapshot through the site host", async () => {
+    const root = await workspaceRoot();
+    await seedDatabase(root, "data/app.sqlite", "start");
+
+    await expect(
       invokePluginSdkHost(context(root), "databases.read", {
-        path: "data/plugin.sqlite",
+        path: "data/app.sqlite",
       }),
-    ).rejects.toThrow("Unsupported dohc SDK method: databases.read");
+    ).resolves.toMatchObject({
+      tables: [expect.objectContaining({ name: "sentinel" })],
+    });
+  });
+
+  it("records the plugin, not the user, as the author of a database edit", async () => {
+    const root = await workspaceRoot();
+    await seedDatabase(root, "data/app.sqlite", "start");
+
+    await invokePluginSdkHost(context(root), "databases.edit", {
+      path: "data/app.sqlite",
+      edit: {
+        table: "sentinel",
+        op: "update",
+        pkColumn: "id",
+        rowId: "1",
+        payload: { marker: "edited-by-plugin" },
+      },
+    });
+
+    const log = await readFile(
+      join(root, databaseOpLogPath("data/app.sqlite")),
+      "utf8",
+    );
+    const ops = log
+      .trim()
+      .split("\n")
+      .map((line: string) => JSON.parse(line) as { author: unknown });
+    expect(ops).toHaveLength(1);
+    expect(ops[0]?.author).toEqual({
+      kind: "agent",
+      agentId: "plugin:hello-plugin",
+      onBehalfOf: "local",
+    });
+  });
+
+  it("refuses database edits from a read-only workspace authority", async () => {
+    const root = await workspaceRoot();
+    await seedDatabase(root, "data/app.sqlite", "start");
+    const readOnly = { ...context(root), isWritable: () => false };
+
+    await expect(
+      invokePluginSdkHost(readOnly, "capabilities"),
+    ).resolves.toMatchObject({ databases: { read: true, edit: false } });
+    await expect(
+      invokePluginSdkHost(readOnly, "databases.edit", {
+        path: "data/app.sqlite",
+        edit: {
+          table: "sentinel",
+          op: "update",
+          pkColumn: "id",
+          rowId: "1",
+          payload: { marker: "must-not-land" },
+        },
+      }),
+    ).rejects.toThrow(/read-only workspace authority/);
+    // A shared view still reads.
+    await expect(
+      invokePluginSdkHost(readOnly, "databases.read", { path: "data/app.sqlite" }),
+    ).resolves.toMatchObject({ tables: [expect.objectContaining({ name: "sentinel" })] });
+    await expect(
+      readFile(join(root, databaseOpLogPath("data/app.sqlite")), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("validates a ui.open target and serves it only to a panel request path", async () => {
+    const root = await workspaceRoot();
+    const panel: PluginSdkHostContext = {
+      ...context(root),
+      requestPath: "panel",
+    };
+
+    await expect(
+      invokePluginSdkHost(panel, "capabilities"),
+    ).resolves.toMatchObject({ ui: { open: true } });
+    await expect(
+      invokePluginSdkHost(panel, "ui.open", { target: "notes/today.md" }),
+    ).resolves.toEqual({ target: "notes/today.md" });
+    // The target is a workspace path, never an escape from it.
+    await expect(
+      invokePluginSdkHost(panel, "ui.open", { target: "../secret.txt" }),
+    ).rejects.toThrow(/Invalid read path/);
+
+    // The plugin's own process has no renderer, so it is told so by name.
+    await expect(
+      invokePluginSdkHost(context(root), "ui.open", { target: "notes/today.md" }),
+    ).rejects.toThrow(/ui.open is unavailable for this request path/);
+  });
+
+  // The renderer answers ui.theme for a panel before it reaches main, so
+  // BOTH paths refuse here — and say why rather than "unsupported method".
+  it("refuses ui.theme by name on either request path", async () => {
+    const root = await workspaceRoot();
+    const paths: PluginSdkHostContext[] = [
+      context(root),
+      { ...context(root), requestPath: "panel" },
+    ];
+    for (const ctx of paths) {
+      await expect(invokePluginSdkHost(ctx, "ui.theme", undefined)).rejects.toThrow(
+        /ui.theme is unavailable for this request path/,
+      );
+    }
+  });
+
+  // ui.openWebApp is the only way an instance key ever enters dohc: the
+  // plugin's page in dohc knows manifest ids and nothing about instances.
+  describe("ui.openWebApp", () => {
+    async function panelWithWebApps(): Promise<PluginSdkHostContext> {
+      return {
+        ...context(await workspaceRoot()),
+        requestPath: "panel",
+        declaredWebApps: [
+          { id: "preview", instanced: true },
+          { id: "app", instanced: false },
+        ],
+      };
+    }
+
+    it("returns the web app and instance a panel asked to open", async () => {
+      await expect(
+        invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
+          webAppId: "preview",
+          instanceKey: "sites/marketing",
+        }),
+      ).resolves.toEqual({
+        webAppId: "preview",
+        instanceKey: "sites/marketing",
+      });
+    });
+
+    // MUTATION (serve this from the plugin-process path too): a plugin with
+    // no renderer would ask for a tab nothing can open.
+    it("refuses the request path with no renderer behind it", async () => {
+      const root = await workspaceRoot();
+      await expect(
+        invokePluginSdkHost(
+          {
+            ...context(root),
+            declaredWebApps: [{ id: "preview", instanced: true }],
+          },
+          "ui.openWebApp",
+          { webAppId: "preview", instanceKey: "sites/a" },
+        ),
+      ).rejects.toThrow(/ui.openWebApp is unavailable for this request path/);
+    });
+
+    // MUTATION (read the declared web apps from the request instead of the
+    // registration): a panel could open a web app its manifest never declared
+    // — approval covers the manifest, so this is the line approval sits on.
+    it("refuses a web app this plugin's manifest never declared", async () => {
+      await expect(
+        invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
+          webAppId: "ghost",
+          instanceKey: "sites/a",
+        }),
+      ).rejects.toThrow(/does not declare web app "ghost"/);
+    });
+
+    it("refuses an instance on a web app that opens a single tab", async () => {
+      await expect(
+        invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
+          webAppId: "app",
+          instanceKey: "sites/a",
+        }),
+      ).rejects.toThrow(/must not name an instance/);
+    });
+
+    it("refuses an open with no instance to name", async () => {
+      await expect(
+        invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
+          webAppId: "preview",
+        }),
+      ).rejects.toThrow(/instanceKey must be a non-empty string/);
+    });
+
+    // MUTATION (drop the length bound): the key rides in a tab path that
+    // restore rejects past 4096 characters, so an unbounded key would open a
+    // tab that never comes back.
+    it("names the limit when an instance key is too long", async () => {
+      await expect(
+        invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
+          webAppId: "preview",
+          instanceKey: "s".repeat(513),
+        }),
+      ).rejects.toThrow(/513 characters, past the limit of 512 characters/);
+    });
+
+    // MUTATION (check only for NUL, or lean on the SDK's own check): the SDK
+    // check is the caller's copy and a caller can skip it, so this side is
+    // what keeps a control character out of a tab path and a tab label.
+    it.each([
+      ["a NUL byte", "sites/a\u0000b"],
+      ["a newline", "sites/a\nb"],
+      ["a unit separator", "sites/a\u001fb"],
+      ["a delete character", "sites/a\u007fb"],
+    ])("refuses %s in an instance key", async (_label, instanceKey) => {
+      await expect(
+        invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
+          webAppId: "preview",
+          instanceKey,
+        }),
+      ).rejects.toThrow(/must not contain control characters/);
+    });
+
+    it("names the control-character range it refused", async () => {
+      await expect(
+        invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
+          webAppId: "preview",
+          instanceKey: "sites/a\nb",
+        }),
+      ).rejects.toThrow(/U\+0000 to U\+001F, or U\+007F/);
+    });
+
+    it("keeps ordinary punctuation and spaces in an instance key", async () => {
+      const instanceKey = "sites/My Site (draft) v2";
+      await expect(
+        invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
+          webAppId: "preview",
+          instanceKey,
+        }),
+      ).resolves.toEqual({ webAppId: "preview", instanceKey });
+    });
   });
 
   it("refuses writes from a read-only or stopped panel authority", async () => {
@@ -371,7 +640,10 @@ describe("invokePluginSdkHost", () => {
     // plugin's own routeSdkRequest path may broker child processes on its
     // behalf.
     const root = await workspaceRoot();
-    const panelContext = context(root);
+    const panelContext: PluginSdkHostContext = {
+      ...context(root),
+      requestPath: "panel",
+    };
     delete panelContext.invokeChildProcess;
 
     await expect(

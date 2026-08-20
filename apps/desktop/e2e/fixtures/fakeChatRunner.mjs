@@ -3,13 +3,26 @@ import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Dispatch spawns the runner with the mode on argv and the prompt on stdin,
+// never argv (chatDispatchService.ts spawnConfiguredRunner). Read stdin the way
+// a real harness does, before branching on the mode, so both modes pin the
+// delivery.
 const mode = process.argv[2];
-const prompt = process.argv.at(-1);
 const threadId = process.env.DOHC_CHAT_THREAD;
 const runId = process.env.DOHC_RUN_ID;
 
-if (!threadId || !runId || !prompt || prompt === mode || prompt.trim().length === 0) {
-  console.error("fake chat runner requires thread, run, and non-empty prompt context");
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const prompt = Buffer.concat(chunks).toString("utf8");
+
+if (!threadId || !runId || prompt.trim().length === 0) {
+  console.error(
+    "fake chat runner: expected a non-empty prompt on stdin, plus " +
+      "DOHC_CHAT_THREAD and DOHC_RUN_ID in the environment. Got " +
+      `${prompt.length} prompt bytes on stdin, ` +
+      `DOHC_CHAT_THREAD=${threadId ?? "unset"}, ` +
+      `DOHC_RUN_ID=${runId ?? "unset"}.`,
+  );
   process.exit(2);
 }
 

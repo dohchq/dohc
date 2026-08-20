@@ -327,7 +327,7 @@ async function doorWrite(
 function fakeSpawnTransport(): PluginHostOptions["spawnTransport"] {
   return vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
     request: async <T = unknown>(method: string): Promise<T> => (
-      method === "plugin.activate" ? { commands: [] } : {}
+      method === "plugin.activate" ? { commands: [], drivers: [] } : {}
     ) as T,
     notify: () => undefined,
     dispose: async () => undefined,
@@ -2678,7 +2678,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         request: async <T = unknown>(method: string): Promise<T> => {
           if (method !== "plugin.activate") return {} as T;
           await activationGate.promise;
-          return { commands: [] } as T;
+          return { commands: [], drivers: [] } as T;
         },
         notify: () => undefined,
         dispose: async () => undefined,
@@ -4191,6 +4191,64 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.dispose();
     }
   }, 180_000);
+
+  it("carries every declared contribution across the bridge, so a plugin's views and web apps reach the renderer", async () => {
+    const fixture = await createPluginWorkspace();
+    await writeFile(join(fixture.pluginRoot, "dohc-plugin.json"), `${JSON.stringify({
+      version: 1,
+      name: "example-plugin",
+      entry: "src/index.ts",
+      panels: [
+        { id: "main", title: "Main", entry: "panel/index.html" },
+        {
+          id: "sites",
+          title: "Sites",
+          entry: "panel/sites.html",
+          placement: "view",
+          icon: "icon.svg",
+        },
+      ],
+      webApps: [{ id: "preview", title: "Preview", instanced: true }],
+    }, null, 2)}\n`);
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      const listed = pipeline.list();
+
+      // The production oracle: main.ts's listPlugins handler parses exactly
+      // this. A contribution the pipeline drops fails the whole list here,
+      // taking every plugin's row down with it.
+      const parsed = ListPluginsResult.safeParse({ ok: true, plugins: listed });
+      expect(parsed.success, parsed.error?.message).toBe(true);
+
+      expect(listed[0]?.panels).toEqual([
+        { id: "main", title: "Main", placement: "editor", icon: null },
+        { id: "sites", title: "Sites", placement: "view", icon: "icon.svg" },
+      ]);
+      expect(listed[0]?.webApps).toEqual([
+        { id: "preview", title: "Preview", instanced: true },
+      ]);
+    } finally {
+      await pipeline.dispose();
+    }
+  });
 
   it("bounds an enormous manifest diagnostic so the whole plugin list still crosses the bridge (#779 round 15 A2)", async () => {
     const fixture = await createPluginWorkspace();

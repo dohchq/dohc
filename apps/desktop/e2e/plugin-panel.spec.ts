@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+import { palette } from "../src/renderer/tokens";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -69,6 +70,85 @@ function readPluginWriteMoment(
     database.close();
   }
 }
+
+// A rail view never opens a tab, so nothing calls openPluginPanel for it —
+// the side panel mounts the panel and asks startPluginPanel directly. A
+// view-ONLY plugin has no tab path at all, so if starting a panel needs a
+// tab to have registered the plugin first, its view can never run.
+test("a view-placed panel starts without a tab ever registering its plugin", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await seedWorkspaceManifest(temp, "plugin-view-e2e");
+    await seedWorkspaceSettings(temp, {
+      experimental: { workspaceEngineAlpha: true },
+    });
+    await seedPluginSource(temp, { fixtureRoot, pluginId: "hello-plugin" });
+
+    desktop = await launchDesktopApp({ workspace: temp });
+    const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
+
+    const started = await desktop.page.evaluate(
+      async ({ workspaceId }) => {
+        const api = (window as unknown as {
+          dohcDesktop: {
+            startPluginPanel(payload: {
+              workspaceId: string;
+              pluginId: string;
+              panelId: string;
+              placement: "editor" | "view";
+            }): Promise<{ status: string; url?: string; title?: string }>;
+          };
+        }).dohcDesktop;
+        return api.startPluginPanel({
+          workspaceId,
+          pluginId: "hello-plugin",
+          panelId: "hello-view",
+          placement: "view",
+        });
+      },
+      { workspaceId: workspace.workspaceId },
+    );
+
+    expect(started.status).toBe("ok");
+    expect(started.title).toBe("Hello view");
+    expect(started.url).toMatch(/^http:\/\/127\.0\.0\.1:/);
+
+    // The same panel refuses to mount as a tab: one panel runs once per
+    // workspace, so a tab restored from before an update cannot take the
+    // running view's place.
+    const asTab = await desktop.page.evaluate(
+      async ({ workspaceId }) => {
+        const api = (window as unknown as {
+          dohcDesktop: {
+            startPluginPanel(payload: {
+              workspaceId: string;
+              pluginId: string;
+              panelId: string;
+              placement: "editor" | "view";
+            }): Promise<unknown>;
+          };
+        }).dohcDesktop;
+        try {
+          await api.startPluginPanel({
+            workspaceId,
+            pluginId: "hello-plugin",
+            panelId: "hello-view",
+            placement: "editor",
+          });
+          return "started";
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      },
+      { workspaceId: workspace.workspaceId },
+    );
+    expect(asTab).toContain('placement "view"');
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
 
 test("plugin panel crosses the utility process, iframe SDK, and attributed write boundaries", async () => {
   const temp = await createTempWorkspace();
@@ -146,6 +226,24 @@ test("plugin panel crosses the utility process, iframe SDK, and attributed write
     );
     await expect(panel.getByTestId("sdk-error")).toHaveCount(1);
     await expect(panel.getByTestId("sdk-error")).toBeHidden();
+
+    // dohc's tokens reach the panel's own origin, and a theme the user
+    // changes afterwards reaches the panel already on screen — no reload,
+    // and the values are the app's, not the panel's guess at them.
+    await expect(panel.getByTestId("theme-mode")).toHaveText("light");
+    await expect(panel.getByTestId("theme-ink")).toHaveText(palette.light.ink);
+
+    await page.getByTestId("activity-settings").click();
+    await page.getByTestId("settings-nav-appearance").click();
+    await page
+      .getByRole("radiogroup", { name: "Theme" })
+      .getByRole("radio", { name: "Dark" })
+      .click();
+    await page.keyboard.press("Escape");
+
+    await expect(panel.getByTestId("theme-mode")).toHaveText("dark");
+    await expect(panel.getByTestId("theme-ink")).toHaveText(palette.dark.ink);
+    await expect(tab).toHaveAttribute("data-active", "true");
 
     await expect
       .poll(() =>

@@ -11,6 +11,7 @@ function record(
     workspaceId: "ws-1",
     pluginId: "t3-code",
     webAppId: "app",
+    instanceKey: null,
     senderId: 7,
     generation: 1,
     origin: "http://127.0.0.1:52835",
@@ -101,5 +102,94 @@ describe("PluginWebAppViewRegistry", () => {
     expect(registry.hasForPlugin("ws-1", "other")).toBe(false);
     registry.remove(record());
     expect(registry.hasForPlugin("ws-1", "t3-code")).toBe(false);
+  });
+});
+
+// Two instances of one web app are two records under two keys. Everything the
+// registry decides — which view a bounds update moves, which one a stop
+// removes, how many are live — has to tell them apart.
+describe("PluginWebAppViewRegistry across instances", () => {
+  const first = record({ instanceKey: "sites/a", view: "view-a" });
+  const second = record({ instanceKey: "sites/b", view: "view-b" });
+
+  function twoInstances(): PluginWebAppViewRegistry<string> {
+    const registry = new PluginWebAppViewRegistry<string>();
+    registry.register(first);
+    registry.register(second);
+    return registry;
+  }
+
+  // MUTATION (leave instanceKey out of viewKey): the second instance would
+  // displace the first, so opening a second preview would destroy the first
+  // one's view and both tabs would fight over one guest.
+  it("holds two instances of one web app at once", () => {
+    const registry = new PluginWebAppViewRegistry<string>();
+    expect(registry.register(first)).toBeNull();
+    expect(registry.register(second)).toBeNull();
+    expect(registry.get(first)?.view).toBe("view-a");
+    expect(registry.get(second)?.view).toBe("view-b");
+  });
+
+  // MUTATION (ignore instanceKey when authorizing bounds): one tab's resize
+  // would move a sibling instance's guest over the wrong tab.
+  it("never moves one instance's view for another instance's bounds", () => {
+    const registry = twoInstances();
+    expect(
+      registry.authorizeBounds({ ...first, senderId: 7, generation: 1 })?.view,
+    ).toBe("view-a");
+    expect(
+      registry.authorizeBounds({ ...second, senderId: 7, generation: 1 })?.view,
+    ).toBe("view-b");
+  });
+
+  it("never confuses an instance with the single-tab app of the same id", () => {
+    const registry = twoInstances();
+    registry.register(record({ instanceKey: null, view: "view-single" }));
+    expect(registry.get(record({ instanceKey: null }))?.view).toBe(
+      "view-single",
+    );
+    expect(registry.get(first)?.view).toBe("view-a");
+  });
+
+  // MUTATION (remove by web app id): closing one preview tab would take every
+  // other preview of the same plugin down with it.
+  it("removes one instance and leaves its siblings running", () => {
+    const registry = twoInstances();
+    expect(registry.remove(first)?.view).toBe("view-a");
+    expect(registry.get(first)).toBeNull();
+    expect(registry.get(second)?.view).toBe("view-b");
+  });
+
+  it("still tears every instance down for a plugin, workspace, or sender", () => {
+    expect(twoInstances().removeForPlugin("ws-1", "t3-code")).toHaveLength(2);
+    expect(twoInstances().removeForWorkspace("ws-1")).toHaveLength(2);
+    expect(twoInstances().removeForSender(7)).toHaveLength(2);
+    expect(twoInstances().hasForPlugin("ws-1", "t3-code")).toBe(true);
+  });
+
+  describe("countOtherInstances", () => {
+    it("counts the live siblings of an instance that is not open yet", () => {
+      const registry = twoInstances();
+      expect(
+        registry.countOtherInstances(record({ instanceKey: "sites/c" })),
+      ).toBe(2);
+    });
+
+    // MUTATION (count every record, this one included): reopening an instance
+    // that is already open would spend a budget slot it already holds, so the
+    // last allowed instance could never restart.
+    it("does not count the instance that is about to replace itself", () => {
+      expect(twoInstances().countOtherInstances(first)).toBe(1);
+    });
+
+    it("counts only the same web app, in the same workspace and plugin", () => {
+      const registry = twoInstances();
+      registry.register(record({ webAppId: "other", instanceKey: "sites/a" }));
+      registry.register(record({ workspaceId: "ws-2", instanceKey: "sites/a" }));
+      registry.register(record({ pluginId: "other", instanceKey: "sites/a" }));
+      expect(
+        registry.countOtherInstances(record({ instanceKey: "sites/c" })),
+      ).toBe(2);
+    });
   });
 });

@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
@@ -9,6 +9,7 @@ import {
   type PluginChildProcessStream,
 } from "@dohc/sdk/node";
 import { killProcessTreePosix } from "../process/posixSpawn";
+import { resolveSpawnCommand } from "../process/windowsSpawn";
 import { errorMessage, isInside } from "./pluginShared";
 import { pluginIdToSafePath } from "./pluginSourceSnapshot";
 import { PLUGIN_PROCESS_LOG_LIMIT } from "./pluginHostProtocol";
@@ -54,24 +55,44 @@ export interface PluginChildProcessForkOptions {
   stdio: ["ignore", "pipe", "pipe"];
 }
 
+export interface PluginCommandSpawnOptions {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  /** The name the plugin asked for, before Windows shim resolution. Failures
+   * report this, because it is the name the plugin's agent has to correct. */
+  requestedCommand: string;
+  windowsVerbatimArguments?: boolean;
+}
+
+/** What a module child (`utilityProcess.fork`) and a command child (an
+ * executable) both give the broker. Two members differ by kind, because the
+ * two child kinds carry input over different channels: a module child has the
+ * utility-process message channel, a command child has a stdin pipe. The
+ * broker refuses the wrong one by name rather than dropping a write. */
 export interface PluginChildProcessHandle {
-  readonly pid: number | undefined;
+  readonly pid?: number | undefined;
   readonly stdout: NodeJS.ReadableStream | null;
   readonly stderr: NodeJS.ReadableStream | null;
-  postMessage(message: unknown): void;
+  /** Module children only. */
+  postMessage?(message: unknown): void;
+  /** Command children only. */
+  readonly stdin?: NodeJS.WritableStream | null;
   kill(): boolean;
 }
 
 /**
- * The exit and error listeners a fork implementation must attach in the same
+ * The exit and error listeners a spawn implementation must attach in the same
  * turn it starts the child. The broker receives its handle one await later,
  * so a listener it attached itself would miss a child that exited first —
  * the record would then never finish, `wait()` would time out, and the
  * retained handle would never be cleaned up (#779 round 10 B4).
+ *
+ * `code` is null for a child a signal ended, which is how a POSIX command
+ * child reports being killed.
  */
 export interface PluginChildProcessLifecycle {
-  onExit(code: number): void;
-  onError(type: string, location: string, report: string): void;
+  onExit(code: number | null): void;
+  onError(message: string): void;
 }
 
 export interface PluginChildProcessBrokerOptions {
@@ -80,14 +101,21 @@ export interface PluginChildProcessBrokerOptions {
    * A brokered child's cwd/modulePath must resolve inside
    * <dohcDir>/plugins/<safeId>. */
   dohcDir: string;
-  /** The workspace root this broker serves. The one cwd a spawn may use
+  /** The workspace root this broker serves. The one tree a spawn may run in
    * outside the plugin's built root, and only through the explicit
-   * `{ workspaceRoot: true }` request form — never a path string. */
+   * `{ workspaceRoot: true }` request form — never a bare path string, which
+   * always means the plugin's own root. */
   workspaceRoot: string;
   forkProcess?: (
     modulePath: string,
     args: string[],
     options: PluginChildProcessForkOptions,
+    lifecycle: PluginChildProcessLifecycle,
+  ) => Promise<PluginChildProcessHandle> | PluginChildProcessHandle;
+  spawnCommandProcess?: (
+    command: string,
+    args: string[],
+    options: PluginCommandSpawnOptions,
     lifecycle: PluginChildProcessLifecycle,
   ) => Promise<PluginChildProcessHandle> | PluginChildProcessHandle;
   platform?: NodeJS.Platform;
@@ -110,14 +138,32 @@ export interface PluginChildProcessBrokerContext {
   emitEvent: (subscriptionId: string, event: string, data: unknown) => void;
 }
 
-interface SpawnRequest {
-  modulePath: string;
+/** The workspace root, or one directory inside it. */
+interface WorkspaceCwd {
+  workspaceRoot: true;
+  path?: string;
+}
+
+interface CommonSpawnRequest {
   args: string[];
-  cwd?: string | { workspaceRoot: true };
+  cwd?: string | WorkspaceCwd;
   env: Record<string, string>;
 }
 
+interface SpawnRequest extends CommonSpawnRequest {
+  modulePath: string;
+}
+
+interface CommandSpawnRequest extends CommonSpawnRequest {
+  command: string;
+}
+
+/** A module child runs a JavaScript file inside the plugin's built root. A
+ * command child runs any executable the machine has. */
+type ChildKind = "module" | "command";
+
 interface SpawnRecord {
+  readonly kind: ChildKind;
   readonly pluginId: string;
   readonly spawnId: string;
   readonly childId: string;
@@ -142,51 +188,113 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-// Exactly `{ workspaceRoot: true }` — an extra key or another value is a
-// malformed request, not a fallback to plugin-relative resolution.
-function isWorkspaceRootCwd(value: unknown): value is { workspaceRoot: true } {
-  return (
-    isRecord(value) &&
-    value.workspaceRoot === true &&
-    Object.keys(value).length === 1
-  );
+// `{ workspaceRoot: true }`, optionally naming one directory inside it. Shape
+// only: whether a `path` is a usable relative path is decided by the same
+// check a plugin-relative cwd gets, so a bad path is reported as a bad path
+// rather than as the wrong request form.
+function isWorkspaceCwd(value: unknown): value is { workspaceRoot: true; path?: unknown } {
+  if (!isRecord(value) || value.workspaceRoot !== true) return false;
+  const keys = Object.keys(value);
+  return keys.length === 1 || (keys.length === 2 && "path" in value);
 }
 
-function assertRelativePluginPath(value: unknown, label: string): string {
+function assertRelativePath(value: unknown, label: string, root: string): string {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
     value.includes("\0") ||
     isAbsolute(value)
   ) {
-    throw new Error(
-      `${label} must be a non-empty path relative to the plugin's built directory.`,
-    );
+    throw new Error(`${label} must be a non-empty path relative to the ${root}.`);
   }
   return value;
 }
 
 function parseSpawnCwd(
   value: unknown,
-): string | { workspaceRoot: true } | undefined {
+  method: string,
+): string | WorkspaceCwd | undefined {
   if (value === undefined) return undefined;
-  if (isWorkspaceRootCwd(value)) return value;
+  if (isWorkspaceCwd(value)) {
+    if (value.path === undefined) return { workspaceRoot: true };
+    return {
+      workspaceRoot: true,
+      path: assertRelativePath(value.path, `${method} cwd path`, "workspace root"),
+    };
+  }
   if (isRecord(value)) {
     throw new Error(
-      "childProcesses.spawn cwd object form must be exactly { workspaceRoot: true }.",
+      `${method} cwd object form must be { workspaceRoot: true } for the workspace root, or { workspaceRoot: true, path } for a relative directory inside it.`,
     );
   }
-  return assertRelativePluginPath(value, "childProcesses.spawn cwd");
+  return assertRelativePath(value, `${method} cwd`, "plugin's built directory");
+}
+
+/**
+ * The executable a command child runs.
+ *
+ * FULL TRUST, BY DECISION: dohc runs whatever executable an installed plugin
+ * names. There is no approval prompt and no allowlist, because a plugin runs
+ * as trusted code in this app's own process tree and could spawn the same
+ * program unsupervised. The broker is a leash, not a wall — its value is that
+ * dohc owns the resulting process tree and can always kill it.
+ *
+ * What IS enforced is the shape: an argv array, never a command line. The
+ * plugin names a file, dohc runs that file, and every argument stays one argv
+ * entry no shell ever reads. A name with a path separator is refused so it
+ * cannot silently mean "relative to the cwd"; an absolute path runs as given
+ * and a bare name is looked up on the child environment's PATH, which is
+ * where harness CLIs live.
+ */
+function assertCommandName(value: unknown, method: string): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_CHILD_ARG_LENGTH ||
+    value.includes("\0")
+  ) {
+    throw new Error(
+      `${method} command must be a string of 1-${MAX_CHILD_ARG_LENGTH} characters with no null character.`,
+    );
+  }
+  if (!isAbsolute(value) && (value.includes("/") || value.includes("\\"))) {
+    throw new Error(
+      `${method} command "${value}" must be an absolute path to an executable, or a name with no path separator. dohc looks a bare name up on the child environment's PATH and never runs a command through a shell.`,
+    );
+  }
+  return value;
+}
+
+function parseCommandSpawnRequest(value: unknown): CommandSpawnRequest {
+  const method = PLUGIN_CHILD_PROCESS_METHODS.spawnCommand;
+  if (!isRecord(value)) {
+    throw new Error(`${method} input must be an object.`);
+  }
+  return {
+    command: assertCommandName(value.command, method),
+    ...parseCommonSpawnFields(value, method),
+  };
 }
 
 function parseSpawnRequest(value: unknown): SpawnRequest {
+  const method = PLUGIN_CHILD_PROCESS_METHODS.spawn;
   if (!isRecord(value)) {
-    throw new Error("childProcesses.spawn input must be an object.");
+    throw new Error(`${method} input must be an object.`);
   }
-  const modulePath = assertRelativePluginPath(
-    value.modulePath,
-    "childProcesses.spawn modulePath",
-  );
+  return {
+    modulePath: assertRelativePath(
+      value.modulePath,
+      `${method} modulePath`,
+      "plugin's built directory",
+    ),
+    ...parseCommonSpawnFields(value, method),
+  };
+}
+
+function parseCommonSpawnFields(
+  value: Record<string, unknown>,
+  method: string,
+): CommonSpawnRequest {
   const args = value.args ?? [];
   if (
     !Array.isArray(args) ||
@@ -197,18 +305,18 @@ function parseSpawnRequest(value: unknown): SpawnRequest {
     )
   ) {
     throw new Error(
-      `childProcesses.spawn args must contain at most ${MAX_CHILD_ARGS} strings of ${MAX_CHILD_ARG_LENGTH} characters or fewer.`,
+      `${method} args must contain at most ${MAX_CHILD_ARGS} strings of ${MAX_CHILD_ARG_LENGTH} characters or fewer.`,
     );
   }
-  const cwd = parseSpawnCwd(value.cwd);
+  const cwd = parseSpawnCwd(value.cwd, method);
   const envValue = value.env ?? {};
   if (!isRecord(envValue)) {
-    throw new Error("childProcesses.spawn env must be an object of strings.");
+    throw new Error(`${method} env must be an object of strings.`);
   }
   const entries = Object.entries(envValue);
   if (entries.length > MAX_CHILD_ENV_ENTRIES) {
     throw new Error(
-      `childProcesses.spawn env has ${entries.length} entries; the configured limit is ${MAX_CHILD_ENV_ENTRIES} entries.`,
+      `${method} env has ${entries.length} entries; the configured limit is ${MAX_CHILD_ENV_ENTRIES} entries.`,
     );
   }
   let envBytes = 0;
@@ -221,7 +329,7 @@ function parseSpawnRequest(value: unknown): SpawnRequest {
       key.includes("\0")
     ) {
       throw new Error(
-        `childProcesses.spawn env key must contain 1-${MAX_CHILD_ENV_KEY_LENGTH} characters with no equals sign or null character.`,
+        `${method} env key must contain 1-${MAX_CHILD_ENV_KEY_LENGTH} characters with no equals sign or null character.`,
       );
     }
     if (
@@ -230,7 +338,7 @@ function parseSpawnRequest(value: unknown): SpawnRequest {
       entry.includes("\0")
     ) {
       throw new Error(
-        `childProcesses.spawn env value for "${key}" must be a string of ${MAX_CHILD_ENV_VALUE_LENGTH} characters or fewer with no null character.`,
+        `${method} env value for "${key}" must be a string of ${MAX_CHILD_ENV_VALUE_LENGTH} characters or fewer with no null character.`,
       );
     }
     envBytes += Buffer.byteLength(key) + Buffer.byteLength(entry) + 2;
@@ -238,10 +346,10 @@ function parseSpawnRequest(value: unknown): SpawnRequest {
   }
   if (envBytes > MAX_CHILD_ENV_BYTES) {
     throw new Error(
-      `childProcesses.spawn env uses ${envBytes} bytes; the configured limit is ${MAX_CHILD_ENV_BYTES} bytes.`,
+      `${method} env uses ${envBytes} bytes; the configured limit is ${MAX_CHILD_ENV_BYTES} bytes.`,
     );
   }
-  return { modulePath, args: [...args], cwd, env };
+  return { args: [...args], cwd, env };
 }
 
 function childIdFromParams(params: unknown, method: string): string {
@@ -265,7 +373,7 @@ export async function forkElectronUtilityProcess(
   const child = utilityProcess.fork(modulePath, args, options);
   child.once("exit", (code) => lifecycle.onExit(code));
   child.once("error", (type, location, report) =>
-    lifecycle.onError(type, location, report));
+    lifecycle.onError(`Utility process error ${type} at ${location}: ${report}`));
   // Electron leaves `pid` undefined until the child spawns, so returning here
   // hands every caller a live child with no pid: this broker's Windows tree
   // kill skips it, and a plugin that records the pid to recognise its own
@@ -276,6 +384,65 @@ export async function forkElectronUtilityProcess(
     child.once("exit", () => settle());
     child.once("error", () => settle());
   });
+  return child;
+}
+
+function environmentPath(env: NodeJS.ProcessEnv): string | undefined {
+  return env.Path ?? env.PATH;
+}
+
+/**
+ * Runs an executable as a supervised child, with the same contract a module
+ * child has: the lifecycle listeners attach in this turn, and the call
+ * settles only once the child spawned or ended.
+ *
+ * `shell` is never set. The plugin hands over an argv array and this runs that
+ * file, so no command line exists for a shell to reinterpret. Windows is the
+ * one place a command line is unavoidable — an npm-installed CLI there is a
+ * .cmd shim that only cmd.exe can start — and `resolveSpawnCommand` builds
+ * that single line itself under its own quoting rules, which refuse any
+ * argument cmd.exe could reparse.
+ */
+export async function spawnCommandChildProcess(
+  command: string,
+  args: string[],
+  options: PluginCommandSpawnOptions,
+  lifecycle: PluginChildProcessLifecycle,
+): Promise<PluginChildProcessHandle> {
+  const child = spawn(command, args, {
+    cwd: options.cwd,
+    env: options.env,
+    shell: false,
+    windowsHide: true,
+    windowsVerbatimArguments: options.windowsVerbatimArguments,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let startFailure: unknown;
+  child.once("exit", (code) => lifecycle.onExit(code));
+  child.once("error", (error) => {
+    lifecycle.onError(`Command child process error: ${errorMessage(error)}`);
+  });
+  await new Promise<void>((settle) => {
+    child.once("spawn", () => settle());
+    child.once("exit", () => settle());
+    child.once("error", (error) => {
+      startFailure = error;
+      settle();
+    });
+  });
+  // A child that never started has no pid, no streams to read, and no exit to
+  // wait for, so the plugin gets the failure as its spawn call's error rather
+  // than as a record it would have to poll to discover was born dead.
+  if (startFailure !== undefined && child.pid === undefined) {
+    const requested = options.requestedCommand;
+    throw new Error(
+      `${PLUGIN_CHILD_PROCESS_METHODS.spawnCommand} could not start "${requested}". ` +
+        (isAbsolute(requested)
+          ? "No executable exists at that path."
+          : `It was looked up on the child environment's PATH (${environmentPath(options.env) ?? "unset"}).`) +
+        ` ${errorMessage(startFailure)}`,
+    );
+  }
   return child;
 }
 
@@ -329,6 +496,7 @@ export class PluginChildProcessBroker {
   private readonly spawnTeardowns = new Map<string, Promise<void>>();
   private readonly evictedExitedChildren = new Map<string, number>();
   private readonly forkProcess: NonNullable<PluginChildProcessBrokerOptions["forkProcess"]>;
+  private readonly spawnCommandProcess: NonNullable<PluginChildProcessBrokerOptions["spawnCommandProcess"]>;
   private readonly platform: NodeJS.Platform;
   private readonly killProcessTreePosix: NonNullable<PluginChildProcessBrokerOptions["killProcessTreePosix"]>;
   private readonly killWindowsTree: NonNullable<PluginChildProcessBrokerOptions["killWindowsTree"]>;
@@ -337,6 +505,8 @@ export class PluginChildProcessBroker {
 
   constructor(private readonly options: PluginChildProcessBrokerOptions) {
     this.forkProcess = options.forkProcess ?? forkElectronUtilityProcess;
+    this.spawnCommandProcess =
+      options.spawnCommandProcess ?? spawnCommandChildProcess;
     this.platform = options.platform ?? process.platform;
     // Signals the child's own pid and every descendant pid read from the
     // process table, never the negated "-pid" process-group form (CodeRabbit
@@ -364,18 +534,47 @@ export class PluginChildProcessBroker {
     switch (method) {
       case PLUGIN_CHILD_PROCESS_METHODS.spawn:
         return this.spawn(context, parseSpawnRequest(params));
+      case PLUGIN_CHILD_PROCESS_METHODS.spawnCommand:
+        return this.spawnCommand(context, parseCommandSpawnRequest(params));
       case PLUGIN_CHILD_PROCESS_METHODS.subscribeOutput:
         return this.subscribe(context, childIdFromParams(params, method));
       case PLUGIN_CHILD_PROCESS_METHODS.send: {
-        const child = this.ownedChild(
+        const record = this.ownedChild(
           context,
           childIdFromParams(params, method),
         );
         if (!isRecord(params) || !("message" in params)) {
           throw new Error(`${method} message is required.`);
         }
-        this.assertLive(context, child);
-        child.child.postMessage(params.message);
+        this.assertLive(context, record);
+        const child = record.child;
+        if (record.kind !== "module" || typeof child.postMessage !== "function") {
+          throw new Error(
+            `${method} needs a module child. Child process "${record.childId}" runs a command and has no message channel; write to its standard input with ${PLUGIN_CHILD_PROCESS_METHODS.write}.`,
+          );
+        }
+        child.postMessage(params.message);
+        return {};
+      }
+      case PLUGIN_CHILD_PROCESS_METHODS.write: {
+        const record = this.ownedChild(
+          context,
+          childIdFromParams(params, method),
+        );
+        if (!isRecord(params) || typeof params.data !== "string") {
+          throw new Error(`${method} data must be a string.`);
+        }
+        this.assertLive(context, record);
+        this.childInput(record, method).write(params.data);
+        return {};
+      }
+      case PLUGIN_CHILD_PROCESS_METHODS.endInput: {
+        const record = this.ownedChild(
+          context,
+          childIdFromParams(params, method),
+        );
+        this.assertLive(context, record);
+        this.childInput(record, method).end();
         return {};
       }
       case PLUGIN_CHILD_PROCESS_METHODS.logs:
@@ -465,19 +664,118 @@ export class PluginChildProcessBroker {
     context: PluginChildProcessBrokerContext,
     request: SpawnRequest,
   ): Promise<{ childId: string; pid: number | null }> {
+    const method = PLUGIN_CHILD_PROCESS_METHODS.spawn;
     const pluginRoot = await this.pluginRoot(context.pluginId);
     const modulePath = await this.containedFile(
       pluginRoot,
       request.modulePath,
       "modulePath",
+      method,
     );
-    const cwd = isWorkspaceRootCwd(request.cwd)
-      ? await this.canonicalWorkspaceRoot()
-      : await this.containedDirectory(pluginRoot, request.cwd ?? ".", "cwd");
+    const cwd = await this.spawnCwd(pluginRoot, request.cwd, method);
     if (context.signal.aborted) throw new Error("The plugin spawn has ended.");
 
+    return this.startChild(context, "module", request.env, (env, lifecycle) =>
+      this.forkProcess(
+        modulePath,
+        request.args,
+        {
+          cwd,
+          env,
+          serviceName: `dohc.plugin.${context.pluginId}.child`,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+        lifecycle,
+      ),
+    );
+  }
+
+  /**
+   * Runs an executable under the same supervision a module child gets: the
+   * same cwd containment, the same pid and exit contract, the same tree kill
+   * on teardown. The executable itself is not contained — a command child
+   * exists to run the tools a machine already has, and the plugin naming one
+   * is trusted code (see assertCommandName).
+   */
+  private async spawnCommand(
+    context: PluginChildProcessBrokerContext,
+    request: CommandSpawnRequest,
+  ): Promise<{ childId: string; pid: number | null }> {
+    const method = PLUGIN_CHILD_PROCESS_METHODS.spawnCommand;
+    const pluginRoot = await this.pluginRoot(context.pluginId);
+    const cwd = await this.spawnCwd(pluginRoot, request.cwd, method);
+    if (context.signal.aborted) throw new Error("The plugin spawn has ended.");
+
+    return this.startChild(context, "command", request.env, (env, lifecycle) => {
+      const resolved = resolveSpawnCommand(request.command, request.args, {
+        env,
+        cwd,
+        platform: this.platform,
+      });
+      return this.spawnCommandProcess(
+        resolved.command,
+        resolved.args,
+        {
+          cwd,
+          env,
+          requestedCommand: request.command,
+          windowsVerbatimArguments: resolved.windowsVerbatimArguments,
+        },
+        lifecycle,
+      );
+    });
+  }
+
+  /** The cwd both spawn kinds share: inside the plugin's built root, or inside
+   * the workspace through the one explicit request form. A workspace path is
+   * contained the same way a plugin path is, so the directory a child runs in
+   * is always one of those two trees. */
+  private async spawnCwd(
+    pluginRoot: string,
+    requested: string | WorkspaceCwd | undefined,
+    method: string,
+  ): Promise<string> {
+    if (!isWorkspaceCwd(requested)) {
+      return this.containedDirectory(
+        pluginRoot,
+        requested ?? ".",
+        "cwd",
+        method,
+        "plugin directory",
+      );
+    }
+    const workspaceRoot = await this.canonicalWorkspaceRoot(method);
+    if (requested.path === undefined) return workspaceRoot;
+    return this.containedDirectory(
+      workspaceRoot,
+      requested.path,
+      "cwd",
+      method,
+      "workspace",
+    );
+  }
+
+  /**
+   * Everything a started child needs regardless of what it runs: the merged
+   * environment, the record, the output capture, and the abort race.
+   *
+   * The child inherits this app's whole environment with the plugin's string
+   * overrides merged on top. That is deliberate and it is what makes a
+   * harness CLI usable: it finds its own stored login through HOME/USERPROFILE
+   * and its own installation through PATH, exactly as it would in the user's
+   * terminal. dohc adds no credential of its own here.
+   */
+  private async startChild(
+    context: PluginChildProcessBrokerContext,
+    kind: ChildKind,
+    requestEnv: Record<string, string>,
+    launch: (
+      env: NodeJS.ProcessEnv,
+      lifecycle: PluginChildProcessLifecycle,
+    ) => Promise<PluginChildProcessHandle> | PluginChildProcessHandle,
+  ): Promise<{ childId: string; pid: number | null }> {
     const childId = randomUUID();
-    const env = { ...process.env, ...request.env };
+    const env = { ...process.env, ...requestEnv };
     const envCodeUnits = Object.entries(env).reduce(
       (total, [key, value]) =>
         value === undefined ? total : total + key.length + value.length + 2,
@@ -488,40 +786,28 @@ export class PluginChildProcessBroker {
         `childProcesses.spawn merged env uses ${envCodeUnits} UTF-16 code units; the configured limit is ${MAX_MERGED_CHILD_ENV_CODE_UNITS} UTF-16 code units.`,
       );
     }
-    // The fork attaches these in the same turn it starts the child, so an
+    // The launcher attaches these in the same turn it starts the child, so an
     // exit or error that lands before the record exists is buffered here
     // rather than lost (#779 round 10 B4).
     let record: SpawnRecord | null = null;
-    let exitedWith: number | null = null;
+    let exitedWith: number | null | undefined;
     const pendingErrors: string[] = [];
-    const errorText = (type: string, location: string, report: string): string =>
-      `Utility process error ${type} at ${location}: ${report}`;
-    const child = await this.forkProcess(
-      modulePath,
-      request.args,
-      {
-        cwd,
-        env,
-        serviceName: `dohc.plugin.${context.pluginId}.child`,
-        stdio: ["ignore", "pipe", "pipe"],
+    const child = await launch(env, {
+      onExit: (code) => {
+        if (record) this.finishExit(record, code);
+        else exitedWith = code;
       },
-      {
-        onExit: (code) => {
-          if (record) this.finishExit(record, code);
-          else exitedWith = code;
-        },
-        onError: (type, location, report) => {
-          const text = errorText(type, location, report);
-          if (record) this.appendOutput(record, "stderr", text);
-          else pendingErrors.push(text);
-        },
+      onError: (message) => {
+        if (record) this.appendOutput(record, "stderr", message);
+        else pendingErrors.push(message);
       },
-    );
+    });
     let resolveExit: (result: PluginChildProcessExit) => void = () => undefined;
     const exit = new Promise<PluginChildProcessExit>((resolveResult) => {
       resolveExit = resolveResult;
     });
     record = {
+      kind,
       pluginId: context.pluginId,
       spawnId: context.spawnId,
       childId,
@@ -541,8 +827,22 @@ export class PluginChildProcessBroker {
 
     this.captureStream(record, "stdout", child.stdout);
     this.captureStream(record, "stderr", child.stderr);
+    // A child that closes its own standard input turns the next write into an
+    // EPIPE the plugin never asked for. Report it as the child's output
+    // instead of letting it reach this process as an unhandled stream error.
+    const input = child.stdin;
+    if (input) {
+      const inputRecord = record;
+      input.on("error", (error: unknown) => {
+        this.appendOutput(
+          inputRecord,
+          "stderr",
+          `Child standard input failed: ${errorMessage(error)}`,
+        );
+      });
+    }
     for (const text of pendingErrors) this.appendOutput(record, "stderr", text);
-    if (exitedWith !== null) this.finishExit(record, exitedWith);
+    if (exitedWith !== undefined) this.finishExit(record, exitedWith);
 
     if (context.signal.aborted) {
       try {
@@ -559,16 +859,16 @@ export class PluginChildProcessBroker {
 
   /** The canonical (realpath) workspace root, resolved per spawn so a root
    * that is currently unavailable fails the spawn with its own error. */
-  private async canonicalWorkspaceRoot(): Promise<string> {
+  private async canonicalWorkspaceRoot(method: string): Promise<string> {
     const root = resolve(this.options.workspaceRoot);
     const canonical = await realpath(root).catch((error: unknown) => {
       throw new Error(
-        `childProcesses.spawn cwd workspace root is unavailable at ${root}: ${errorMessage(error)}`,
+        `${method} cwd workspace root is unavailable at ${root}: ${errorMessage(error)}`,
       );
     });
     if (!(await stat(canonical)).isDirectory()) {
       throw new Error(
-        `childProcesses.spawn cwd workspace root is not a directory: ${canonical}`,
+        `${method} cwd workspace root is not a directory: ${canonical}`,
       );
     }
     return canonical;
@@ -656,6 +956,24 @@ export class PluginChildProcessBroker {
     return child;
   }
 
+  /** The write half of a command child's stdio. Long-lived harness CLIs speak
+   * a protocol over it, so the broker keeps it open until the plugin ends it
+   * or the child goes. */
+  private childInput(record: SpawnRecord, method: string): NodeJS.WritableStream {
+    if (record.kind !== "command") {
+      throw new Error(
+        `${method} needs a command child. Child process "${record.childId}" runs a module and has no standard input; post it a message with ${PLUGIN_CHILD_PROCESS_METHODS.send}.`,
+      );
+    }
+    const input = record.child.stdin;
+    if (!input || !input.writable) {
+      throw new Error(
+        `Child process "${record.childId}" standard input is closed.`,
+      );
+    }
+    return input;
+  }
+
   private assertLive(
     context: PluginChildProcessBrokerContext,
     child: SpawnRecord,
@@ -700,7 +1018,7 @@ export class PluginChildProcessBroker {
     }
   }
 
-  private finishExit(record: SpawnRecord, code: number): void {
+  private finishExit(record: SpawnRecord, code: number | null): void {
     if (record.exited) return;
     record.exited = true;
     record.exitResult = {
@@ -888,28 +1206,21 @@ export class PluginChildProcessBroker {
   }
 
   private async containedDirectory(
-    pluginRoot: string,
+    root: string,
     requested: string,
     label: string,
+    method: string,
+    rootLabel: string,
   ): Promise<string> {
-    const candidate = resolve(pluginRoot, requested);
-    if (!isInside(pluginRoot, candidate)) {
-      throw new Error(
-        `childProcesses.spawn ${label} "${requested}" escapes plugin directory "${pluginRoot}".`,
-      );
-    }
-    const contained = await realpath(candidate).catch((error: unknown) => {
-      throw new Error(
-        `childProcesses.spawn ${label} "${requested}" is unavailable: ${errorMessage(error)}`,
-      );
-    });
-    if (!isInside(pluginRoot, contained)) {
-      throw new Error(
-        `childProcesses.spawn ${label} "${requested}" resolves outside plugin directory "${pluginRoot}" to "${contained}".`,
-      );
-    }
+    const contained = await this.containedPath(
+      root,
+      requested,
+      label,
+      method,
+      rootLabel,
+    );
     if (!(await stat(contained)).isDirectory()) {
-      throw new Error(`childProcesses.spawn ${label} "${requested}" is not a directory.`);
+      throw new Error(`${method} ${label} "${requested}" is not a directory.`);
     }
     return contained;
   }
@@ -918,25 +1229,43 @@ export class PluginChildProcessBroker {
     pluginRoot: string,
     requested: string,
     label: string,
+    method: string,
   ): Promise<string> {
-    const candidate = resolve(pluginRoot, requested);
-    if (!isInside(pluginRoot, candidate)) {
+    const contained = await this.containedPath(
+      pluginRoot,
+      requested,
+      label,
+      method,
+      "plugin directory",
+    );
+    if (!(await stat(contained)).isFile()) {
+      throw new Error(`${method} ${label} "${requested}" is not a file.`);
+    }
+    return contained;
+  }
+
+  private async containedPath(
+    root: string,
+    requested: string,
+    label: string,
+    method: string,
+    rootLabel: string,
+  ): Promise<string> {
+    const candidate = resolve(root, requested);
+    if (!isInside(root, candidate)) {
       throw new Error(
-        `childProcesses.spawn ${label} "${requested}" escapes plugin directory "${pluginRoot}".`,
+        `${method} ${label} "${requested}" escapes ${rootLabel} "${root}".`,
       );
     }
     const contained = await realpath(candidate).catch((error: unknown) => {
       throw new Error(
-        `childProcesses.spawn ${label} "${requested}" is unavailable: ${errorMessage(error)}`,
+        `${method} ${label} "${requested}" is unavailable: ${errorMessage(error)}`,
       );
     });
-    if (!isInside(pluginRoot, contained)) {
+    if (!isInside(root, contained)) {
       throw new Error(
-        `childProcesses.spawn ${label} "${requested}" resolves outside plugin directory "${pluginRoot}" to "${contained}".`,
+        `${method} ${label} "${requested}" resolves outside ${rootLabel} "${root}" to "${contained}".`,
       );
-    }
-    if (!(await stat(contained)).isFile()) {
-      throw new Error(`childProcesses.spawn ${label} "${requested}" is not a file.`);
     }
     return contained;
   }

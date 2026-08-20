@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { createDesktopAgentDrivers } from "./AgentProcessDrivers";
 import {
+  BUILT_IN_AGENT_DRIVER_IDS,
   createAgentDriverRegistry,
   selectPermissionOption,
   type AgentDriver,
@@ -30,16 +32,26 @@ function driver(id: string, probe: AgentDriver["probe"] = async () => authentica
   };
 }
 
+describe("the drivers dohc ships", () => {
+  it("are exactly the ids a plugin may not take", () => {
+    // The plugin driver registry refuses these ids by name, so a driver added
+    // to the app without joining this list would be one a plugin could
+    // shadow.
+    expect(createDesktopAgentDrivers({}).map((driver) => driver.id).sort())
+      .toEqual([...BUILT_IN_AGENT_DRIVER_IDS].sort());
+  });
+});
+
 describe("AgentDriverRegistry", () => {
   it("keeps drivers lookup-only and rejects duplicate ids", () => {
-    const one = driver("codex-app-server");
+    const one = driver("generic-acp");
     const two = driver("claude-acp");
     const registry = createAgentDriverRegistry([one, two]);
 
     expect(registry.list()).toEqual([one, two]);
-    expect(registry.get("codex-app-server")).toBe(one);
+    expect(registry.get("generic-acp")).toBe(one);
     expect(registry.get("missing")).toBeNull();
-    expect(() => createAgentDriverRegistry([one, driver("codex-app-server")])).toThrow(
+    expect(() => createAgentDriverRegistry([one, driver("generic-acp")])).toThrow(
       /Duplicate agent driver id/,
     );
   });
@@ -50,7 +62,7 @@ describe("AgentDriverRegistry", () => {
     const brokenProbe = vi.fn(async () => {
       throw new Error("claude not found");
     });
-    const ok = driver("codex-app-server", okProbe);
+    const ok = driver("generic-acp", okProbe);
     const broken = driver("claude-acp", brokenProbe);
     const registry = createAgentDriverRegistry([ok, broken]);
 

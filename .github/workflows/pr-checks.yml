@@ -111,9 +111,7 @@ jobs:
               - '.github/workflows/pr-checks.yml'
             # services/ are pnpm workspace members (sync-relay, workspace-api
             # are live product); tsconfig.base.json is extended by every
-            # package; the root suite asserts on the rust-engine plan docs
-            # (scripts/rust-engine-decisions.test.mjs), so a docs-only PR can
-            # break it; Cargo files rebuild the daemon binary the desktop
+            # package; Cargo files rebuild the daemon binary the desktop
             # e2e drives -- same rationale as crates/**; .gitignore is read by
             # scripts/rust-gate-artifact.test.mjs through git, which is how it
             # sees the probe file that test writes into the repo root, so an

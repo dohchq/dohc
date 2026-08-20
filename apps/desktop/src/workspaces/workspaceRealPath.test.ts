@@ -11,7 +11,7 @@ import {
 import { importToDatabase } from "./workspaceDatabase";
 import { createDefaultDiskWriter } from "./workspaceEngineCapture";
 import { materializeSharedViewPaths } from "./sharedView";
-import { startStaticSitePreview } from "./siteRunner";
+import { startStaticDirectoryPreview } from "../security/staticDirectoryPreview";
 import { createTestScratch } from "./testTemp";
 
 // ONE fact, tested per surface: every desktop guard used to read a path as
@@ -188,27 +188,36 @@ describe("workspaceDatabase through an in-workspace alias", () => {
   });
 });
 
-describe("siteRunner through an in-workspace alias", () => {
-  it("refuses a site root that resolves into .dohc", async () => {
+describe("the static directory preview through an in-workspace alias", () => {
+  it("refuses a served root that resolves into .dohc", async () => {
     // The entry exists, so before the resolved-path decision this preview
-    // started and served the workspace's control plane over HTTP.
+    // started and served the workspace's control plane over HTTP. The alias
+    // spells an ordinary folder; only the RESOLVED root gives it away.
     await writeFile(join(root, ".dohc", "index.html"), "<h1>state</h1>");
-    await expect(startStaticSitePreview(root, "meta")).rejects.toThrow(
-      /Site path leads to a reserved area/,
-    );
+    await expect(
+      startStaticDirectoryPreview(join(root, "meta"), {
+        containmentRoot: root,
+        entry: "index.html",
+        entryLabel: "panel entry",
+      }),
+    ).rejects.toThrow(/reserved metadata path/);
   });
 
-  it("never serves .dohc bytes through an alias directory inside the site", async () => {
-    // Site root IS the workspace root, so the alias target stays inside the
-    // served tree and containment answers "yes".
-    await writeFile(join(root, "index.html"), "<h1>site</h1>");
-    const preview = await startStaticSitePreview(root, ".");
+  it("never serves .dohc bytes through an alias directory inside the served root", async () => {
+    // The served root IS the workspace root, so the alias target stays inside
+    // the served tree and containment answers "yes".
+    await writeFile(join(root, "index.html"), "<h1>page</h1>");
+    const preview = await startStaticDirectoryPreview(root, {
+      containmentRoot: root,
+      entry: "index.html",
+      entryLabel: "panel entry",
+    });
     try {
       const denied = await fetch(new URL("/meta/settings.json", preview.url));
       expect(denied.status).toBe(403);
       expect(await denied.text()).not.toContain("engine");
       // The ordinary page still serves.
-      await expect(fetch(preview.url).then((res) => res.text())).resolves.toContain("site");
+      await expect(fetch(preview.url).then((res) => res.text())).resolves.toContain("page");
     } finally {
       await preview.stop();
     }
@@ -220,11 +229,15 @@ describe("siteRunner through an in-workspace alias", () => {
     // test cannot open without a concurrent swap, so this does NOT pin the
     // window — it pins the part that IS observable: the guard's resolution is
     // a usable canonical path, and alias directories still serve through it.
-    await writeFile(join(root, "index.html"), "<h1>site</h1>");
+    await writeFile(join(root, "index.html"), "<h1>page</h1>");
     await mkdir(join(root, "pages"), { recursive: true });
     await writeFile(join(root, "pages", "real.html"), "<h1>real page</h1>");
     await symlink(join(root, "pages"), join(root, "alias"), "dir");
-    const preview = await startStaticSitePreview(root, ".");
+    const preview = await startStaticDirectoryPreview(root, {
+      containmentRoot: root,
+      entry: "index.html",
+      entryLabel: "panel entry",
+    });
     try {
       const served = await fetch(new URL("/alias/real.html", preview.url));
       expect(served.status).toBe(200);

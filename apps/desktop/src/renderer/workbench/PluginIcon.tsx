@@ -18,12 +18,16 @@ export function PluginIcon(props: {
   plugin: PluginStatusRecord;
   glyphSize: number;
   className: string;
+  /** A contribution's own icon, which stands in front of the plugin's. A
+   * plugin with two views in the rail needs two buttons a reader can tell
+   * apart, and only the contribution can say what they look like. */
+  icon?: string | null;
 }) {
   const { plugin } = props;
   // The failed file, not a flag: a plugin that points at a different icon
   // gets a fresh request instead of inheriting the last one's failure.
   const [failedSource, setFailedSource] = useState<string | null>(null);
-  const source = plugin.icon;
+  const source = props.icon ?? plugin.icon;
   const key = `${plugin.directoryName}/${source ?? ""}`;
 
   if (!source || failedSource === key) {

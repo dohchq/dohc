@@ -116,9 +116,25 @@ export type DohcFileWriteOptions = {
   [key: string]: unknown;
 };
 
+/**
+ * One settled change to one workspace file.
+ *
+ * `operation` has exactly two members because that is what the host can
+ * observe: it decides a path's operation by checking whether the file exists
+ * once the workspace goes quiet, so a new file and an edited file both arrive
+ * as `update`. There is no create, rename, or move.
+ *
+ * Events are settled, not raw: the host waits for a quiet window, folds the
+ * repeated saves of one editor keystroke burst into one event per path, and
+ * drops its own metadata writes. A burst of ten saves to one file is one
+ * event.
+ */
 export type DohcFileWatchEvent = {
   path: string;
-  kind?: "created" | "changed" | "deleted" | "renamed" | (string & {});
+  operation: "update" | "delete";
+  /** The file's content hash, when the host could read it. Absent on a
+   * delete, and on a file the host could not read at settle time. */
+  sha256?: string;
   [key: string]: unknown;
 };
 
@@ -164,6 +180,81 @@ export type DohcProvenanceRecord = {
   summary: string;
   [key: string]: unknown;
 };
+
+/**
+ * The envelope dohc pushes when its appearance changes. Theme is styling
+ * data: it carries no authority, gates on no capability, and a panel that
+ * ignores these messages behaves exactly as it did before.
+ */
+export const DOHC_THEME_PROTOCOL = "dohc:theme:v1";
+
+export type DohcThemeMode = "light" | "dark";
+export type DohcThemeDensity = "comfortable" | "compact";
+
+export type DohcTheme = {
+  /** Which palette is on screen. dohc's "system" mode is already resolved. */
+  mode: DohcThemeMode;
+  density: DohcThemeDensity;
+  reduceMotion: boolean;
+  /**
+   * CSS custom properties, spelled exactly as dohc's own stylesheet spells
+   * them ("--dohc-ink", "--font-sans"). Write `var(--dohc-ink)` in panel CSS
+   * and the panel matches the app.
+   */
+  tokens: Record<string, string>;
+};
+
+export type DohcThemeMessage = {
+  protocol: typeof DOHC_THEME_PROTOCOL;
+  theme: DohcTheme;
+};
+
+export type DohcApplyThemeOptions = DohcRequestOptions & {
+  /** Defaults to this document's <html>. */
+  root?: HTMLElement;
+};
+
+export function isDohcTheme(value: unknown): value is DohcTheme {
+  if (!value || typeof value !== "object") return false;
+  const theme = value as Partial<DohcTheme>;
+  if (theme.mode !== "light" && theme.mode !== "dark") return false;
+  if (theme.density !== "comfortable" && theme.density !== "compact") return false;
+  if (typeof theme.reduceMotion !== "boolean") return false;
+  if (!theme.tokens || typeof theme.tokens !== "object") return false;
+  // A token whose name is not a custom property would be written straight
+  // into a style attribute, so the shape is checked, not trusted.
+  return Object.entries(theme.tokens).every(
+    ([name, tokenValue]) =>
+      typeof tokenValue === "string" && /^--[A-Za-z0-9-]+$/.test(name),
+  );
+}
+
+export function isDohcThemeMessage(value: unknown): value is DohcThemeMessage {
+  if (!value || typeof value !== "object") return false;
+  const message = value as Partial<DohcThemeMessage>;
+  return message.protocol === DOHC_THEME_PROTOCOL && isDohcTheme(message.theme);
+}
+
+/**
+ * Writes one theme onto an element, normally the guest document's <html>:
+ * every token as a custom property, plus the three attributes dohc's own
+ * stylesheet switches on, so a panel can write `[data-theme='dark']` rules
+ * the same way dohc does.
+ */
+export function applyDohcTheme(theme: DohcTheme, root: HTMLElement): void {
+  if (!isDohcTheme(theme)) {
+    throw new DohcSdkError(
+      DohcSdkErrorCodes.invalidInput,
+      "applyDohcTheme needs a dohc theme payload.",
+    );
+  }
+  for (const [name, value] of Object.entries(theme.tokens)) {
+    root.style.setProperty(name, value);
+  }
+  root.dataset.theme = theme.mode;
+  root.dataset.density = theme.density;
+  root.dataset.reduceMotion = String(theme.reduceMotion);
+}
 
 export type CreateDohcClientOptions = {
   transport?: DohcTransport;
@@ -601,6 +692,30 @@ function assertUiTarget(target: unknown): asserts target is string {
   }
 }
 
+/** Matches the host's own bound on an instance key, so a plugin reads the
+ * limit here instead of learning it from a rejected open. */
+const MAX_WEB_APP_INSTANCE_KEY_LENGTH = 512;
+
+function assertWebAppInstance(webAppId: unknown, instanceKey: unknown): void {
+  if (typeof webAppId !== "string" || webAppId.trim().length === 0) {
+    throw new DohcSdkError(
+      DohcSdkErrorCodes.invalidInput,
+      "Web app id must be a non-empty string.",
+    );
+  }
+  if (
+    typeof instanceKey !== "string" ||
+    instanceKey.length === 0 ||
+    instanceKey.length > MAX_WEB_APP_INSTANCE_KEY_LENGTH ||
+    hasControlCharacter(instanceKey)
+  ) {
+    throw new DohcSdkError(
+      DohcSdkErrorCodes.invalidInput,
+      `Web app instance key must be a non-empty string of ${MAX_WEB_APP_INSTANCE_KEY_LENGTH} characters or fewer with no control characters.`,
+    );
+  }
+}
+
 function assertOptionalWorkspacePath(path: unknown, label = "File path"): asserts path is string | undefined {
   if (path !== undefined) assertWorkspacePath(path, label);
 }
@@ -772,6 +887,27 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
     }
   };
 
+  /**
+   * dohc's design tokens as they are on screen right now. Read this to color
+   * something CSS cannot reach — a canvas, a chart, an SVG fill. To style a
+   * panel, prefer `applyTheme`.
+   *
+   * Theme is styling data, so this gates on no capability.
+   */
+  const readTheme = async (
+    requestOptions?: DohcRequestOptions,
+  ): Promise<DohcTheme> => {
+    assertRequestOptions(requestOptions);
+    const result = await request("ui.theme", undefined, requestOptions);
+    if (!isDohcTheme(result)) {
+      throw new DohcSdkError(
+        DohcSdkErrorCodes.badResponse,
+        "dohc host returned an invalid theme response.",
+      );
+    }
+    return result;
+  };
+
   const listCollection = async (
     name: string,
     params: Record<string, unknown> = {},
@@ -888,6 +1024,15 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
         // able to replace the path/text that were just validated above.
         return request("files.write", { ...options, path, text }, requestOptions);
       },
+      /**
+       * Reports settled changes at or below `path`, which is a prefix: a file
+       * to watch on its own, a folder to watch with everything under it, or
+       * "." for the whole workspace. Changes outside it never arrive.
+       *
+       * Returns a function that stops the subscription. A subscription also
+       * ends on its own when the plugin stops, so a plugin that watches for
+       * its whole life needs no teardown.
+       */
       watch: async (
         path: string,
         listener: (event: DohcSubscriptionEvent<DohcFileWatchEvent>) => void,
@@ -969,6 +1114,90 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
         assertUiTarget(target);
         await requireCapability("ui", "open", requestOptions);
         return request("ui.open", { ...options, target }, requestOptions);
+      },
+      /**
+       * Opens one instance of this plugin's own per-instance web app in its
+       * own tab. `instanceKey` names the thing the tab shows — a site root,
+       * a record id, whatever the plugin serves — and comes back to the
+       * plugin's `startWebApp`, which returns the origin for that instance.
+       *
+       * Only a panel may call this: opening a tab needs a renderer. The web
+       * app must be declared in the manifest with `"instanced": true`.
+       */
+      openWebApp: async (
+        webAppId: string,
+        instanceKey: string,
+        requestOptions?: DohcRequestOptions,
+      ) => {
+        assertRequestOptions(requestOptions);
+        assertWebAppInstance(webAppId, instanceKey);
+        await requireCapability("ui", "open", requestOptions);
+        return request("ui.openWebApp", { webAppId, instanceKey }, requestOptions);
+      },
+      /**
+       * dohc's design tokens as they are on screen right now. Read this to
+       * color something CSS cannot reach — a canvas, a chart, an SVG fill.
+       * To style a panel, prefer `applyTheme`.
+       *
+       * Theme is styling data, so this gates on no capability.
+       */
+      theme: readTheme,
+      /**
+       * The one line that makes a panel look native: it writes dohc's tokens
+       * onto this document and keeps writing them when the user changes
+       * theme, density, or reduced motion. Panel CSS then uses the same
+       * names dohc uses — `color: var(--dohc-ink)`.
+       *
+       * Returns a function that stops following. A panel that never calls
+       * this is unaffected; the host's messages are simply ignored.
+       */
+      applyTheme: async (applyOptions: DohcApplyThemeOptions = {}) => {
+        const currentWindow =
+          options.currentWindow ??
+          (typeof window === "undefined" ? undefined : window);
+        if (!currentWindow) {
+          throw new DohcSdkError(
+            DohcSdkErrorCodes.hostUnavailable,
+            "dohc SDK is not running in a browser window.",
+          );
+        }
+        const root = applyOptions.root ?? currentWindow.document.documentElement;
+        const hostOrigin =
+          options.targetOrigin ?? targetOriginFromLocation(currentWindow);
+        if (!hostOrigin) {
+          throw new DohcSdkError(
+            DohcSdkErrorCodes.hostMissingOrigin,
+            "No dohc host origin is available for this panel.",
+          );
+        }
+        const hostWindow =
+          options.targetWindow ??
+          (currentWindow.parent && currentWindow.parent !== currentWindow
+            ? currentWindow.parent
+            : undefined);
+
+        // The listener goes on before the first read, so a theme change that
+        // lands mid-read is applied rather than lost — and, once one has
+        // landed, the older read result is not allowed to overwrite it.
+        let pushed = false;
+        const onMessage = (event: MessageEvent) => {
+          if (hostWindow && event.source !== hostWindow) return;
+          if (!responseOriginMatches(event.origin, hostOrigin)) return;
+          if (!isDohcThemeMessage(event.data)) return;
+          pushed = true;
+          applyDohcTheme(event.data.theme, root);
+        };
+        currentWindow.addEventListener("message", onMessage);
+        const stop = () => currentWindow.removeEventListener("message", onMessage);
+
+        try {
+          const theme = await readTheme(applyOptions);
+          if (!pushed) applyDohcTheme(theme, root);
+        } catch (error) {
+          stop();
+          throw error;
+        }
+        return stop;
       },
     },
     collections: {

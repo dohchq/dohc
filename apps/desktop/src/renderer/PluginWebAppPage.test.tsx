@@ -79,7 +79,12 @@ describe("PluginWebAppPage", () => {
     bridgeMock.startPluginWebApp.mockReturnValueOnce(start.promise);
 
     render(
-      <PluginWebAppPage workspaceId="ws-1" pluginId="t3-code" webAppId="app" />,
+      <PluginWebAppPage
+        workspaceId="ws-1"
+        pluginId="t3-code"
+        webAppId="app"
+        instanceKey={null}
+      />,
     );
 
     expect(screen.getByTestId("plugin-web-app-starting")).toBeTruthy();
@@ -87,6 +92,7 @@ describe("PluginWebAppPage", () => {
       workspaceId: "ws-1",
       pluginId: "t3-code",
       webAppId: "app",
+      instanceKey: null,
     });
 
     await act(async () => {
@@ -104,6 +110,7 @@ describe("PluginWebAppPage", () => {
       workspaceId: "ws-1",
       pluginId: "t3-code",
       webAppId: "app",
+      instanceKey: null,
       bounds: { x: 10, y: 20, width: 640, height: 480 },
       visible: true,
     });
@@ -116,7 +123,8 @@ describe("PluginWebAppPage", () => {
         workspaceId="ws-1"
         pluginId="t3-code"
         webAppId="app"
-        onTitle={(pluginId, webAppId, title) =>
+        instanceKey={null}
+        onTitle={(pluginId, webAppId, instanceKey, title) =>
           titles.push([pluginId, webAppId, title])}
       />,
     );
@@ -134,7 +142,8 @@ describe("PluginWebAppPage", () => {
         workspaceId="ws-1"
         pluginId="t3-code"
         webAppId="app"
-        onTitle={(_pluginId, _webAppId, title) => titles.push(title)}
+        instanceKey={null}
+        onTitle={(_pluginId, _webAppId, _instanceKey, title) => titles.push(title)}
       />,
     );
 
@@ -154,7 +163,12 @@ describe("PluginWebAppPage", () => {
     const lastReport = () =>
       bridgeMock.setPluginWebAppBounds.mock.calls.at(-1)?.[0];
     const view = render(
-      <PluginWebAppPage workspaceId="ws-1" pluginId="t3-code" webAppId="app" />,
+      <PluginWebAppPage
+        workspaceId="ws-1"
+        pluginId="t3-code"
+        webAppId="app"
+        instanceKey={null}
+      />,
     );
     await screen.findByTestId("plugin-web-app-frame");
     expect(lastReport()?.visible).toBe(true);
@@ -167,6 +181,7 @@ describe("PluginWebAppPage", () => {
           workspaceId="ws-1"
           pluginId="t3-code"
           webAppId="app"
+          instanceKey={null}
           hiddenByOverlay
         />,
       );
@@ -182,6 +197,7 @@ describe("PluginWebAppPage", () => {
           workspaceId="ws-1"
           pluginId="t3-code"
           webAppId="app"
+          instanceKey={null}
           hiddenByOverlay={false}
         />,
       );
@@ -222,7 +238,12 @@ describe("PluginWebAppPage", () => {
     const start = deferred<StartPluginWebAppResult>();
     bridgeMock.startPluginWebApp.mockReturnValueOnce(start.promise);
     const { unmount } = render(
-      <PluginWebAppPage workspaceId="ws-1" pluginId="t3-code" webAppId="app" />,
+      <PluginWebAppPage
+        workspaceId="ws-1"
+        pluginId="t3-code"
+        webAppId="app"
+        instanceKey={null}
+      />,
     );
 
     unmount();
@@ -240,6 +261,7 @@ describe("PluginWebAppPage", () => {
       workspaceId: "ws-1",
       pluginId: "t3-code",
       webAppId: "app",
+      instanceKey: null,
     });
   });
 
@@ -250,11 +272,21 @@ describe("PluginWebAppPage", () => {
       .mockReturnValueOnce(slowStart.promise)
       .mockReturnValueOnce(laterStart.promise);
     const view = render(
-      <PluginWebAppPage workspaceId="ws-1" pluginId="t3-code" webAppId="app" />,
+      <PluginWebAppPage
+        workspaceId="ws-1"
+        pluginId="t3-code"
+        webAppId="app"
+        instanceKey={null}
+      />,
     );
 
     view.rerender(
-      <PluginWebAppPage workspaceId="ws-2" pluginId="t3-code" webAppId="app" />,
+      <PluginWebAppPage
+        workspaceId="ws-2"
+        pluginId="t3-code"
+        webAppId="app"
+        instanceKey={null}
+      />,
     );
     await act(async () => {
       slowStart.resolve({
@@ -287,7 +319,12 @@ describe("PluginWebAppPage", () => {
       status: "not-registered",
     });
     render(
-      <PluginWebAppPage workspaceId="ws-1" pluginId="t3-code" webAppId="app" />,
+      <PluginWebAppPage
+        workspaceId="ws-1"
+        pluginId="t3-code"
+        webAppId="app"
+        instanceKey={null}
+      />,
     );
     await screen.findByTestId("plugin-web-app-unavailable");
     expect(bridgeMock.setPluginWebAppBounds).not.toHaveBeenCalled();
@@ -295,7 +332,12 @@ describe("PluginWebAppPage", () => {
 
   it("leaves the ready state when main reports the guest died after it opened", async () => {
     render(
-      <PluginWebAppPage workspaceId="ws-1" pluginId="t3-code" webAppId="app" />,
+      <PluginWebAppPage
+        workspaceId="ws-1"
+        pluginId="t3-code"
+        webAppId="app"
+        instanceKey={null}
+      />,
     );
     await screen.findByTestId("plugin-web-app-frame");
 
@@ -303,6 +345,7 @@ describe("PluginWebAppPage", () => {
       workspaceId: "ws-1",
       pluginId: "t3-code",
       webAppId: "app",
+      instanceKey: null,
     });
 
     // MUTATION (drop the notification, on either side): the page keeps its
@@ -319,7 +362,12 @@ describe("PluginWebAppPage", () => {
 
   it("ignores a failure reported for another workspace or app", async () => {
     render(
-      <PluginWebAppPage workspaceId="ws-1" pluginId="t3-code" webAppId="app" />,
+      <PluginWebAppPage
+        workspaceId="ws-1"
+        pluginId="t3-code"
+        webAppId="app"
+        instanceKey={null}
+      />,
     );
     await screen.findByTestId("plugin-web-app-frame");
 
@@ -327,11 +375,13 @@ describe("PluginWebAppPage", () => {
       workspaceId: "ws-2",
       pluginId: "t3-code",
       webAppId: "app",
+      instanceKey: null,
     });
     await reportFailed({
       workspaceId: "ws-1",
       pluginId: "t3-code",
       webAppId: "other",
+      instanceKey: null,
     });
 
     expect(screen.getByTestId("plugin-web-app-frame")).toBeTruthy();
@@ -343,7 +393,12 @@ describe("PluginWebAppPage", () => {
       new Error("The t3 server did not become ready within the 60000 ms readiness deadline."),
     );
     render(
-      <PluginWebAppPage workspaceId="ws-1" pluginId="t3-code" webAppId="app" />,
+      <PluginWebAppPage
+        workspaceId="ws-1"
+        pluginId="t3-code"
+        webAppId="app"
+        instanceKey={null}
+      />,
     );
     const error = await screen.findByTestId("plugin-web-app-error");
     expect(error.textContent).toContain("60000 ms");

@@ -5,22 +5,76 @@
 // editor's save state) and never lives here or on disk.
 
 import type { WorkspaceUiState } from "../../ipc/bridgeContract";
+import { MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS } from "../../plugins/pluginWebAppInstances";
 
 export const VIEW_IDS = [
   "explorer",
   "search",
   "graph",
-  "sites",
   "history",
   "plugins",
 ] as const;
 export type ViewId = (typeof VIEW_IDS)[number];
+
+// A plugin's view in the activity bar. dohc's own views are a fixed list, but
+// a plugin contributes one by placing a panel in the rail, so the selected
+// view is no longer only a member of that list.
+//
+// The id names the panel behind the view — (plugin, panel) is what the panel
+// machinery is already keyed by — and encodes both segments like every tab
+// path here, so an id containing a slash cannot split into a different view.
+export const PLUGIN_VIEW_ID_PREFIX = "plugin-view:";
+export type PluginViewId = `${typeof PLUGIN_VIEW_ID_PREFIX}${string}`;
+export type ActivityViewId = ViewId | PluginViewId;
+
+export function pluginViewId(pluginId: string, panelId: string): PluginViewId {
+  return `${PLUGIN_VIEW_ID_PREFIX}${encodeURIComponent(pluginId)}/${encodeURIComponent(panelId)}`;
+}
+
+export function parsePluginViewId(
+  value: string,
+): { pluginId: string; panelId: string } | null {
+  if (!value.startsWith(PLUGIN_VIEW_ID_PREFIX)) return null;
+  const parts = value.slice(PLUGIN_VIEW_ID_PREFIX.length).split("/");
+  if (parts.length !== 2 || parts.some((part) => part.length === 0)) return null;
+  try {
+    const pluginId = decodeURIComponent(parts[0]!);
+    const panelId = decodeURIComponent(parts[1]!);
+    return pluginId.length > 0 && panelId.length > 0
+      ? { pluginId, panelId }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function isViewId(value: unknown): value is ViewId {
+  return typeof value === "string" && (VIEW_IDS as readonly string[]).includes(value);
+}
+
+export function isActivityViewId(value: unknown): value is ActivityViewId {
+  if (typeof value !== "string") return false;
+  return isViewId(value) || parsePluginViewId(value) !== null;
+}
+
+/**
+ * Drops a plugin view once its plugin is gone, so an uninstall leaves no
+ * selection pointing at a view nothing contributes. Panel visibility is the
+ * user's and survives: an uninstall must not reopen a panel they collapsed.
+ */
+export function clearPluginView(state: WorkbenchState): WorkbenchState {
+  return parsePluginViewId(state.activeView) === null
+    ? state
+    : { ...state, activeView: defaultWorkbenchState().activeView };
+}
+// Reserved for dohc's own tabs. A workspace file path is never spelled this
+// way, so a persisted tab carrying it is always one of the kinds below.
+const DOHC_TAB_SCHEME = "dohc://";
 export const GRAPH_TAB_PATH = "dohc://graph";
 export const HISTORY_TAB_PATH = "dohc://history";
 // Chats expanded to a full editor tab (singleton, graph/history precedent).
 export const CHATS_TAB_PATH = "dohc://chats";
 export const HISTORY_DIFF_TAB_PREFIX = "dohc://history-diff/";
-export const SITE_TAB_PREFIX = "dohc://site/";
 export const PLUGIN_PANEL_TAB_PREFIX = "dohc://plugin-panel/";
 export const PLUGIN_WEB_APP_TAB_PREFIX = "dohc://plugin-web/";
 // One details page per plugin, keyed by the plugin id (version-compare
@@ -56,16 +110,24 @@ export function historyDiffTabPath(changeSetId: string, filePath: string): strin
   )}?file=${encodeURIComponent(filePath)}`;
 }
 
-export function siteTabPath(siteRoot: string): string {
-  return `${SITE_TAB_PREFIX}${encodeURIComponent(siteRoot)}`;
-}
-
 export function pluginPanelTabPath(pluginId: string, panelId: string): string {
   return `${PLUGIN_PANEL_TAB_PREFIX}${encodeURIComponent(pluginId)}/${encodeURIComponent(panelId)}`;
 }
 
-export function pluginWebAppTabPath(pluginId: string, webAppId: string): string {
-  return `${PLUGIN_WEB_APP_TAB_PREFIX}${encodeURIComponent(pluginId)}/${encodeURIComponent(webAppId)}`;
+/**
+ * One tab per web app, or — when the plugin names an instance — one tab per
+ * instance. The instance key is a runtime value the plugin chose, so it is
+ * encoded like every other segment and read back the same way. Keying the tab
+ * by it is what makes each instance its own singleton: identity is content
+ * rather than a manifest id.
+ */
+export function pluginWebAppTabPath(
+  pluginId: string,
+  webAppId: string,
+  instanceKey: string | null = null,
+): string {
+  const base = `${PLUGIN_WEB_APP_TAB_PREFIX}${encodeURIComponent(pluginId)}/${encodeURIComponent(webAppId)}`;
+  return instanceKey === null ? base : `${base}/${encodeURIComponent(instanceKey)}`;
 }
 
 export function pluginDetailsTabPath(pluginId: string): string {
@@ -102,10 +164,6 @@ export function isHistoryDiffTabPath(path: string | null): boolean {
   return typeof path === "string" && path.startsWith(HISTORY_DIFF_TAB_PREFIX);
 }
 
-export function isSiteTabPath(path: string | null): boolean {
-  return typeof path === "string" && path.startsWith(SITE_TAB_PREFIX);
-}
-
 export function isPluginPanelTabPath(path: string | null): boolean {
   return typeof path === "string" && path.startsWith(PLUGIN_PANEL_TAB_PREFIX);
 }
@@ -117,7 +175,6 @@ export function isPluginWebAppTabPath(path: string | null): boolean {
 export function isSingletonEditorTabPath(path: string | null): boolean {
   return (
     isChatsTabPath(path) ||
-    isSiteTabPath(path) ||
     isPluginPanelTabPath(path) ||
     isPluginWebAppTabPath(path)
   );
@@ -125,24 +182,12 @@ export function isSingletonEditorTabPath(path: string | null): boolean {
 
 export function canonicalSingletonEditorTabPath(path: string | null): string | null {
   if (isChatsTabPath(path)) return CHATS_TAB_PATH;
-  const siteRoot = parseSiteTabPath(path);
-  if (siteRoot !== null) return siteTabPath(siteRoot);
   const panel = parsePluginPanelTabPath(path);
   if (panel !== null) return pluginPanelTabPath(panel.pluginId, panel.panelId);
   const webApp = parsePluginWebAppTabPath(path);
   return webApp === null
     ? null
-    : pluginWebAppTabPath(webApp.pluginId, webApp.webAppId);
-}
-
-export function parseSiteTabPath(path: string | null): string | null {
-  if (typeof path !== "string" || !isSiteTabPath(path)) return null;
-  try {
-    const siteRoot = decodeURIComponent(path.slice(SITE_TAB_PREFIX.length));
-    return siteRoot.length > 0 ? siteRoot : null;
-  } catch {
-    return null;
-  }
+    : pluginWebAppTabPath(webApp.pluginId, webApp.webAppId, webApp.instanceKey);
 }
 
 export function parsePluginPanelTabPath(
@@ -164,16 +209,27 @@ export function parsePluginPanelTabPath(
 
 export function parsePluginWebAppTabPath(
   path: string | null,
-): { pluginId: string; webAppId: string } | null {
+): { pluginId: string; webAppId: string; instanceKey: string | null } | null {
   if (typeof path !== "string" || !isPluginWebAppTabPath(path)) return null;
   const parts = path.slice(PLUGIN_WEB_APP_TAB_PREFIX.length).split("/");
-  if (parts.length !== 2 || parts.some((part) => part.length === 0)) return null;
+  if (parts.length < 2 || parts.length > 3) return null;
+  if (parts.some((part) => part.length === 0)) return null;
   try {
     const pluginId = decodeURIComponent(parts[0]!);
     const webAppId = decodeURIComponent(parts[1]!);
-    return pluginId.length > 0 && webAppId.length > 0
-      ? { pluginId, webAppId }
-      : null;
+    const instanceKey = parts.length === 3 ? decodeURIComponent(parts[2]!) : null;
+    if (pluginId.length === 0 || webAppId.length === 0) return null;
+    // The same bound the IPC boundary enforces. Without it here, a persisted
+    // path with an over-long key would restore, mount, and only then be
+    // refused by the boundary — surfacing a raw schema error where the shell
+    // already has one sentence for a tab path that names no app.
+    if (
+      instanceKey !== null &&
+      instanceKey.length > MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS
+    ) {
+      return null;
+    }
+    return { pluginId, webAppId, instanceKey };
   } catch {
     return null;
   }
@@ -219,6 +275,22 @@ export function parseVersionCompareTabPath(path: string | null): string | null {
   }
 }
 
+/**
+ * `dohc://` is reserved for tabs dohc renders itself. A persisted tab on that
+ * scheme that no kind above recognizes is a tab from a REMOVED surface — a
+ * `dohc://site/...` tab written before Sites became a plugin, for one. It is
+ * not a workspace file and must never be restored as one: `dohc://site/blog`
+ * would otherwise open as a plain path and show an editor for a file that
+ * does not exist. Restore drops it instead.
+ */
+export function isRemovedVirtualTabPath(path: string | null): boolean {
+  return (
+    typeof path === "string" &&
+    path.startsWith(DOHC_TAB_SCHEME) &&
+    !isVirtualTabPath(path)
+  );
+}
+
 export function isVirtualTabPath(path: string | null): boolean {
   return (
     isGraphTabPath(path) ||
@@ -227,7 +299,6 @@ export function isVirtualTabPath(path: string | null): boolean {
     isHistoryDiffTabPath(path) ||
     isMomentDiffTabPath(path) ||
     isVersionCompareTabPath(path) ||
-    isSiteTabPath(path) ||
     isPluginPanelTabPath(path) ||
     isPluginWebAppTabPath(path) ||
     isPluginDetailsTabPath(path)
@@ -247,7 +318,7 @@ export interface EditorGroup {
 }
 
 export interface WorkbenchState {
-  activeView: ViewId;
+  activeView: ActivityViewId;
   sidebarVisible: boolean;
   sidebarWidth: number;
   // Editor groups appear in horizontal visual order. A path can be open once
@@ -760,7 +831,10 @@ export function closeEditorGroup(
 
 // Selecting the already-active view toggles the panel (the old explicit
 // collapse button); any other view switches AND reveals the panel.
-export function setView(state: WorkbenchState, view: ViewId): WorkbenchState {
+export function setView(
+  state: WorkbenchState,
+  view: ActivityViewId,
+): WorkbenchState {
   if (view === state.activeView) {
     return { ...state, sidebarVisible: !state.sidebarVisible };
   }
@@ -953,10 +1027,6 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
   };
 }
 
-function isViewId(value: unknown): value is ViewId {
-  return typeof value === "string" && (VIEW_IDS as readonly string[]).includes(value);
-}
-
 export function parseUiState(raw: unknown): WorkbenchState {
   const defaults = defaultWorkbenchState();
   if (typeof raw !== "object" || raw === null) return defaults;
@@ -1028,7 +1098,10 @@ export function parseUiState(raw: unknown): WorkbenchState {
           if (
             typeof tab !== "string" ||
             tab.length === 0 ||
-            tab.length > 4096
+            tab.length > 4096 ||
+            // A tab from a surface dohc no longer has. Dropped here, so it
+            // cannot survive as a workspace file path that does not exist.
+            isRemovedVirtualTabPath(tab)
           ) {
             continue;
           }
@@ -1096,7 +1169,7 @@ export function parseUiState(raw: unknown): WorkbenchState {
   const rawChatsWidth = own("chatsWidth");
   const rawOpenEditorsHeight = own("openEditorsHeight");
   return {
-    activeView: isViewId(rawView) ? rawView : defaults.activeView,
+    activeView: isActivityViewId(rawView) ? rawView : defaults.activeView,
     sidebarVisible:
       typeof rawSidebarVisible === "boolean"
         ? rawSidebarVisible

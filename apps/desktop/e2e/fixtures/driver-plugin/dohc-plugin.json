@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "driver-plugin",
+  "displayName": "Driver Plugin",
+  "description": "Contributes an agent driver backed by a real harness process, for the end-to-end driver tests.",
+  "publisher": "dohc test fixtures",
+  "entry": "plugin.mjs",
+  "drivers": [{ "id": "fixture-harness", "displayName": "Fixture Harness" }]
+}

@@ -276,7 +276,7 @@ export function AgentsMcpSettings(props: {
             </div>
             {drivers === null && !probeError ? (
               <p data-testid="agent-probes-loading" className="m-0 text-[11px] text-subtle">
-                Checking Codex, Claude, and ACP…
+                Checking local agents…
               </p>
             ) : probeError ? (
               <p data-testid="agent-probes-error" className="m-0 text-[11px] text-danger">
@@ -299,7 +299,9 @@ export function AgentsMcpSettings(props: {
                       {driver.installed
                         ? driver.auth.status === "authenticated"
                           ? "Installed · signed in"
-                          : "Installed · sign-in not verified"
+                          : driver.auth.status === "unauthenticated"
+                            ? "Installed · not signed in"
+                            : "Installed · sign-in not verified"
                         : "Not found"}
                     </span>
                   </li>

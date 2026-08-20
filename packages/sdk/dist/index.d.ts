@@ -107,9 +107,25 @@ export type DohcFileWriteOptions = {
     overwrite?: boolean;
     [key: string]: unknown;
 };
+/**
+ * One settled change to one workspace file.
+ *
+ * `operation` has exactly two members because that is what the host can
+ * observe: it decides a path's operation by checking whether the file exists
+ * once the workspace goes quiet, so a new file and an edited file both arrive
+ * as `update`. There is no create, rename, or move.
+ *
+ * Events are settled, not raw: the host waits for a quiet window, folds the
+ * repeated saves of one editor keystroke burst into one event per path, and
+ * drops its own metadata writes. A burst of ten saves to one file is one
+ * event.
+ */
 export type DohcFileWatchEvent = {
     path: string;
-    kind?: "created" | "changed" | "deleted" | "renamed" | (string & {});
+    operation: "update" | "delete";
+    /** The file's content hash, when the host could read it. Absent on a
+     * delete, and on a file the host could not read at settle time. */
+    sha256?: string;
     [key: string]: unknown;
 };
 export type DohcSearchOptions = {
@@ -147,6 +163,43 @@ export type DohcProvenanceRecord = {
     summary: string;
     [key: string]: unknown;
 };
+/**
+ * The envelope dohc pushes when its appearance changes. Theme is styling
+ * data: it carries no authority, gates on no capability, and a panel that
+ * ignores these messages behaves exactly as it did before.
+ */
+export declare const DOHC_THEME_PROTOCOL = "dohc:theme:v1";
+export type DohcThemeMode = "light" | "dark";
+export type DohcThemeDensity = "comfortable" | "compact";
+export type DohcTheme = {
+    /** Which palette is on screen. dohc's "system" mode is already resolved. */
+    mode: DohcThemeMode;
+    density: DohcThemeDensity;
+    reduceMotion: boolean;
+    /**
+     * CSS custom properties, spelled exactly as dohc's own stylesheet spells
+     * them ("--dohc-ink", "--font-sans"). Write `var(--dohc-ink)` in panel CSS
+     * and the panel matches the app.
+     */
+    tokens: Record<string, string>;
+};
+export type DohcThemeMessage = {
+    protocol: typeof DOHC_THEME_PROTOCOL;
+    theme: DohcTheme;
+};
+export type DohcApplyThemeOptions = DohcRequestOptions & {
+    /** Defaults to this document's <html>. */
+    root?: HTMLElement;
+};
+export declare function isDohcTheme(value: unknown): value is DohcTheme;
+export declare function isDohcThemeMessage(value: unknown): value is DohcThemeMessage;
+/**
+ * Writes one theme onto an element, normally the guest document's <html>:
+ * every token as a custom property, plus the three attributes dohc's own
+ * stylesheet switches on, so a panel can write `[data-theme='dark']` rules
+ * the same way dohc does.
+ */
+export declare function applyDohcTheme(theme: DohcTheme, root: HTMLElement): void;
 export type CreateDohcClientOptions = {
     transport?: DohcTransport;
     timeoutMs?: number;
@@ -172,6 +225,15 @@ export declare function createDohcClient(options?: CreateDohcClientOptions): {
         read: (path: string, requestOptions?: DohcRequestOptions) => Promise<string>;
         list: (path?: string, options?: DohcFileListOptions, requestOptions?: DohcRequestOptions) => Promise<DohcFileEntry[]>;
         write: (path: string, text: string, options?: DohcFileWriteOptions, requestOptions?: DohcRequestOptions) => Promise<unknown>;
+        /**
+         * Reports settled changes at or below `path`, which is a prefix: a file
+         * to watch on its own, a folder to watch with everything under it, or
+         * "." for the whole workspace. Changes outside it never arrive.
+         *
+         * Returns a function that stops the subscription. A subscription also
+         * ends on its own when the plugin stops, so a plugin that watches for
+         * its whole life needs no teardown.
+         */
         watch: (path: string, listener: (event: DohcSubscriptionEvent<DohcFileWatchEvent>) => void, requestOptions?: DohcRequestOptions) => Promise<DohcUnsubscribe>;
     };
     workspace: {
@@ -183,6 +245,34 @@ export declare function createDohcClient(options?: CreateDohcClientOptions): {
     };
     ui: {
         open: (target: string, options?: DohcUiOpenOptions, requestOptions?: DohcRequestOptions) => Promise<unknown>;
+        /**
+         * Opens one instance of this plugin's own per-instance web app in its
+         * own tab. `instanceKey` names the thing the tab shows — a site root,
+         * a record id, whatever the plugin serves — and comes back to the
+         * plugin's `startWebApp`, which returns the origin for that instance.
+         *
+         * Only a panel may call this: opening a tab needs a renderer. The web
+         * app must be declared in the manifest with `"instanced": true`.
+         */
+        openWebApp: (webAppId: string, instanceKey: string, requestOptions?: DohcRequestOptions) => Promise<unknown>;
+        /**
+         * dohc's design tokens as they are on screen right now. Read this to
+         * color something CSS cannot reach — a canvas, a chart, an SVG fill.
+         * To style a panel, prefer `applyTheme`.
+         *
+         * Theme is styling data, so this gates on no capability.
+         */
+        theme: (requestOptions?: DohcRequestOptions) => Promise<DohcTheme>;
+        /**
+         * The one line that makes a panel look native: it writes dohc's tokens
+         * onto this document and keeps writing them when the user changes
+         * theme, density, or reduced motion. Panel CSS then uses the same
+         * names dohc uses — `color: var(--dohc-ink)`.
+         *
+         * Returns a function that stops following. A panel that never calls
+         * this is unaffected; the host's messages are simply ignored.
+         */
+        applyTheme: (applyOptions?: DohcApplyThemeOptions) => Promise<() => void>;
     };
     collections: {
         list: (name: string, params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
@@ -208,6 +298,15 @@ export declare const dohc: {
         read: (path: string, requestOptions?: DohcRequestOptions) => Promise<string>;
         list: (path?: string, options?: DohcFileListOptions, requestOptions?: DohcRequestOptions) => Promise<DohcFileEntry[]>;
         write: (path: string, text: string, options?: DohcFileWriteOptions, requestOptions?: DohcRequestOptions) => Promise<unknown>;
+        /**
+         * Reports settled changes at or below `path`, which is a prefix: a file
+         * to watch on its own, a folder to watch with everything under it, or
+         * "." for the whole workspace. Changes outside it never arrive.
+         *
+         * Returns a function that stops the subscription. A subscription also
+         * ends on its own when the plugin stops, so a plugin that watches for
+         * its whole life needs no teardown.
+         */
         watch: (path: string, listener: (event: DohcSubscriptionEvent<DohcFileWatchEvent>) => void, requestOptions?: DohcRequestOptions) => Promise<DohcUnsubscribe>;
     };
     workspace: {
@@ -219,6 +318,34 @@ export declare const dohc: {
     };
     ui: {
         open: (target: string, options?: DohcUiOpenOptions, requestOptions?: DohcRequestOptions) => Promise<unknown>;
+        /**
+         * Opens one instance of this plugin's own per-instance web app in its
+         * own tab. `instanceKey` names the thing the tab shows — a site root,
+         * a record id, whatever the plugin serves — and comes back to the
+         * plugin's `startWebApp`, which returns the origin for that instance.
+         *
+         * Only a panel may call this: opening a tab needs a renderer. The web
+         * app must be declared in the manifest with `"instanced": true`.
+         */
+        openWebApp: (webAppId: string, instanceKey: string, requestOptions?: DohcRequestOptions) => Promise<unknown>;
+        /**
+         * dohc's design tokens as they are on screen right now. Read this to
+         * color something CSS cannot reach — a canvas, a chart, an SVG fill.
+         * To style a panel, prefer `applyTheme`.
+         *
+         * Theme is styling data, so this gates on no capability.
+         */
+        theme: (requestOptions?: DohcRequestOptions) => Promise<DohcTheme>;
+        /**
+         * The one line that makes a panel look native: it writes dohc's tokens
+         * onto this document and keeps writing them when the user changes
+         * theme, density, or reduced motion. Panel CSS then uses the same
+         * names dohc uses — `color: var(--dohc-ink)`.
+         *
+         * Returns a function that stops following. A panel that never calls
+         * this is unaffected; the host's messages are simply ignored.
+         */
+        applyTheme: (applyOptions?: DohcApplyThemeOptions) => Promise<() => void>;
     };
     collections: {
         list: (name: string, params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;

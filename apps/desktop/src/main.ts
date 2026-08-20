@@ -112,8 +112,6 @@ import {
   ImportToDatabaseResult,
   ImportWorkspaceFilesPayload,
   ImportWorkspaceFilesResult,
-  InvokeSiteSdkPayload,
-  InvokeSiteSdkResult,
   InvokePluginPanelSdkPayload,
   InvokePluginPanelSdkResult,
   ListPluginsPayload,
@@ -128,13 +126,6 @@ import {
   PluginStatusChangedEvent,
   DesktopMarksResult,
   LaunchMarksResult,
-  ListSitesPayload,
-  ListSitesResult,
-  SitePackagePayload,
-  SitePackageResult,
-  StartSitePreviewPayload,
-  StartSitePreviewResult,
-  StopSitePreviewPayload,
   OpenPluginPanelPayload,
   OpenPluginPanelResult,
   StartPluginPanelPayload,
@@ -616,23 +607,9 @@ import {
   type LiveAgentDispatchStoreHandle,
 } from "./agents/liveAgentDispatchStore";
 import {
-  buildOutputSiteRoot,
-  staticPreviewTargetForSite,
-  getSitePackage,
-  listSitePackages,
-  type SitePackageInfo,
-} from "./workspaces/sitePackage";
-import {
-  buildSite,
-  packageManagerCommand,
-  splitCommandLine,
-  startSiteDevServer,
   startStaticDirectoryPreview,
-  startStaticSitePreview,
-  type StaticSitePreview,
-  type SiteLogEntry,
-} from "./workspaces/siteRunner";
-import { invokeSiteSdkHost } from "./workspaces/siteSdkHost";
+  type StaticDirectoryPreview,
+} from "./security/staticDirectoryPreview";
 import { PluginHost } from "./plugins/PluginHost";
 import {
   PluginPipeline,
@@ -642,9 +619,14 @@ import { createPluginAuthoredTextWriter } from "./plugins/pluginAuthoredWrite";
 import { invokePluginSdkHost } from "./plugins/pluginSdkHost";
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
+import { PluginWorkspaceEvents } from "./plugins/pluginWorkspaceEvents";
+import {
+  createPluginAgentDrivers,
+  type PluginAgentDrivers,
+} from "./plugins/pluginAgentDrivers";
+import { BUILT_IN_AGENT_DRIVER_IDS } from "./agents/AgentDriver";
 import { pluginDataDir } from "./plugins/pluginLocalState";
 import { pluginIdToSafePath } from "./plugins/pluginSourceSnapshot";
-import { createSitePreviewSdkAuthorityRegistry } from "./workspaces/sitePreviewSdkAuthority";
 import { stopPluginPanelPreview } from "./plugins/pluginPanelLifecycle";
 import {
   assertPluginPanelRequestCurrent,
@@ -676,16 +658,15 @@ import {
 } from "./plugins/pluginWebAppGuest";
 import { recoverConsumedWebAppCredential } from "./plugins/pluginWebAppRecovery";
 import {
+  assertInstanceBudget,
+  requireDeclaredWebApp,
+} from "./plugins/pluginWebAppInstances";
+import {
   PluginWebAppViewRegistry,
+  webAppInstanceKey,
   type PluginWebAppViewRecord,
 } from "./plugins/pluginWebAppViews";
 import type { DohcPluginManifest } from "./plugins/pluginManifestSchema";
-import {
-  assertActiveWorkspaceForSitePreviewStop,
-  createSitePreviewLifecycle,
-  stopSitePreviewForActiveWorkspace,
-  type SitePreviewHandle,
-} from "./workspaces/sitePreviewLifecycle";
 import {
   mediaTypeForExtension,
   readWorkspaceAsset,
@@ -802,7 +783,7 @@ function requireWorkspace(workspaceId: string) {
 
 // PR 18 read-only shared views: a shared view is a read-only local workspace.
 // `sharedViewOf` is the ONE authoritative predicate; every mutation surface
-// (file writes, agent runs, code-executing site previews, and the MCP config)
+// (file writes, agent runs, and the MCP config)
 // routes through it so a shared view can never be changed, only read. The
 // renderer also hides its edit affordances; this main-process layer is the
 // enforcement that cannot be skipped.
@@ -852,32 +833,13 @@ function assertAgentRunnableWorkspace(workspaceId: string): void {
   }
 }
 
-// dev/build/preview site modes execute the folder's own code. A shared view
-// holds someone else's code, so only the static (already-materialized)
-// preview is allowed; the code-executing modes are refused.
-function assertSitePreviewMode(
-  workspaceId: string,
-  mode: "static" | "dev" | "build",
-): void {
-  if (mode !== "static" && sharedViewOf(workspaceId)) {
-    throw new Error(
-      "Live and built site previews run the site's own code, so they're disabled in a shared view. Use the static preview.",
-    );
-  }
-}
-
-const sitePreviewSdkAuthorities = createSitePreviewSdkAuthorityRegistry();
-const sitePreviews = createSitePreviewLifecycle({
-  allowOrigin: allowLoopbackFrameOrigin,
-  revokePreview: sitePreviewSdkAuthorities.revokePreview,
-});
 const pluginPipelines = new Map<string, PluginPipeline>();
 const pluginPipelineDisposals = new Map<string, Promise<void>>();
-const sitePreviewStartLocks = new Map<string, Promise<void>>();
-const sitePreviewStartControllersBySender = new Map<
-  number,
-  Set<AbortController>
->();
+// One per workspace, alive for as long as that workspace's plugin pipeline is.
+const pluginAgentDriversByWorkspace = new Map<string, PluginAgentDrivers>();
+// Also one per workspace, so one workspace's settled batch can only ever
+// reach the plugins running in that workspace.
+const pluginWorkspaceEventsByWorkspace = new Map<string, PluginWorkspaceEvents>();
 let autoUpdateController: AutoUpdateController | null = null;
 let applicationMenuCanInstallUpdate: boolean | null = null;
 
@@ -934,6 +896,26 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     dohcDir,
     workspaceRoot: workspace.rootPath,
   });
+  // This workspace's plugin-contributed agent drivers. They join the driver
+  // registry the agent session manager builds, so a plugin driver is chosen,
+  // probed, and stopped exactly like one dohc ships.
+  let pluginHostRef: PluginHost | null = null;
+  const pluginDrivers = createPluginAgentDrivers({
+    host: {
+      requestDriver: (pluginId, spawnId, method, params) => {
+        if (!pluginHostRef) {
+          throw new Error(`Plugin "${pluginId}" is not running.`);
+        }
+        return pluginHostRef.requestDriver(pluginId, spawnId, method, params);
+      },
+    },
+    reservedDriverIds: BUILT_IN_AGENT_DRIVER_IDS,
+  });
+  pluginAgentDriversByWorkspace.set(workspace.workspaceId, pluginDrivers);
+  // This workspace's plugin file subscriptions, fed by the settled watcher
+  // batch (see onWatcherBatch) — the same feed the pipeline reads.
+  const workspaceEvents = new PluginWorkspaceEvents();
+  pluginWorkspaceEventsByWorkspace.set(workspace.workspaceId, workspaceEvents);
   const pluginHost = new PluginHost({
     stateDir: stateDir(),
     workspaceRoot: workspace.rootPath,
@@ -960,6 +942,7 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
         workspaceId: workspace.workspaceId,
         pluginId,
         spawnId,
+        requestPath: "plugin-process",
         isWritable: () => !sharedViewOf(workspace.workspaceId),
         signal,
         invokeChildProcess: (childMethod, childParams) =>
@@ -968,6 +951,10 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
             childMethod,
             childParams,
           ),
+        subscribeFileWatch: (watchParams) =>
+          workspaceEvents.subscribe({ pluginId, spawnId, emitEvent }, watchParams),
+        unsubscribeFileWatch: (watchParams) =>
+          workspaceEvents.unsubscribe({ pluginId, spawnId }, watchParams),
         method,
         params,
       }),
@@ -975,9 +962,21 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     // without them and never has to ask.
     readPluginSettings: async (pluginId) =>
       (await pipeline?.getPluginSettings(pluginId)) ?? {},
-    onSpawnEnd: (pluginId, spawnId) =>
-      childProcessBroker.disposeSpawn(pluginId, spawnId),
-    onDispose: () => childProcessBroker.dispose(),
+    onDriversRegistered: (pluginId, spawnId, drivers) =>
+      pluginDrivers.register(pluginId, spawnId, drivers),
+    onDriverEvent: (pluginId, spawnId, params) =>
+      pluginDrivers.handleEvent(pluginId, spawnId, params),
+    // One seam ends a spawn: the driver's sessions fail here, and the broker
+    // takes the harness's whole process tree down. Neither asks the plugin.
+    onSpawnEnd: (pluginId, spawnId) => {
+      pluginDrivers.endSpawn(pluginId, spawnId);
+      workspaceEvents.disposeSpawn(pluginId, spawnId);
+      return childProcessBroker.disposeSpawn(pluginId, spawnId);
+    },
+    onDispose: () => {
+      workspaceEvents.dispose();
+      return childProcessBroker.dispose();
+    },
     onStatusChange: (pluginId, status) => {
       pipeline?.noteRuntimeStatus(pluginId, status);
       revokePluginPanelAuthoritiesForStatus({
@@ -994,6 +993,7 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
       }
     },
   });
+  pluginHostRef = pluginHost;
   pipeline = new PluginPipeline({
     workspaceRoot: workspace.rootPath,
     stateDir: stateDir(),
@@ -1018,8 +1018,23 @@ async function ensurePluginPipeline(
     workspaceId: workspace.workspaceId,
     create: () => createPluginPipeline(workspace),
     start: (pipeline) => pipeline.start(),
-    dispose: (pipeline) => pipeline.dispose(),
+    dispose: (pipeline) => disposePluginPipeline(workspace.workspaceId, pipeline),
   });
+}
+
+// Stopping the pipeline stops its plugins, which fails their driver sessions
+// through onSpawnEnd. This drops the registry the workspace no longer has.
+async function disposePluginPipeline(
+  workspaceId: string,
+  pipeline: PluginPipeline,
+): Promise<void> {
+  try {
+    await pipeline.dispose();
+  } finally {
+    pluginAgentDriversByWorkspace.delete(workspaceId);
+    pluginWorkspaceEventsByWorkspace.get(workspaceId)?.dispose();
+    pluginWorkspaceEventsByWorkspace.delete(workspaceId);
+  }
 }
 
 async function stopPluginPipelineForWorkspace(workspaceId: string): Promise<void> {
@@ -1027,7 +1042,7 @@ async function stopPluginPipelineForWorkspace(workspaceId: string): Promise<void
     live: pluginPipelines,
     disposals: pluginPipelineDisposals,
     workspaceId,
-    dispose: (pipeline) => pipeline.dispose(),
+    dispose: (pipeline) => disposePluginPipeline(workspaceId, pipeline),
   });
 }
 
@@ -1045,40 +1060,6 @@ function rendererGeneration(senderId: number): number {
 
 function advanceRendererGeneration(senderId: number): void {
   rendererGenerationBySender.set(senderId, rendererGeneration(senderId) + 1);
-}
-
-function beginSitePreviewStart(senderId: number): {
-  controller: AbortController;
-  finish: () => void;
-} {
-  const controller = new AbortController();
-  const controllers =
-    sitePreviewStartControllersBySender.get(senderId) ??
-    new Set<AbortController>();
-  controllers.add(controller);
-  sitePreviewStartControllersBySender.set(senderId, controllers);
-  return {
-    controller,
-    finish: () => {
-      controllers.delete(controller);
-      if (
-        controllers.size === 0 &&
-        sitePreviewStartControllersBySender.get(senderId) === controllers
-      ) {
-        sitePreviewStartControllersBySender.delete(senderId);
-      }
-    },
-  };
-}
-
-function abortSitePreviewStartsForSender(senderId: number): void {
-  const controllers = sitePreviewStartControllersBySender.get(senderId);
-  sitePreviewStartControllersBySender.delete(senderId);
-  for (const controller of controllers ?? []) controller.abort();
-}
-
-function sitePreviewKey(workspaceId: string, siteRoot: string): string {
-  return `${workspaceId}\0${siteRoot}`;
 }
 
 async function withKeyedStartLock<T>(
@@ -1101,233 +1082,6 @@ async function withKeyedStartLock<T>(
     release();
     if (locks.get(key) === queued) locks.delete(key);
   }
-}
-
-const withSitePreviewStartLock = <T>(key: string, operation: () => Promise<T>) =>
-  withKeyedStartLock(sitePreviewStartLocks, key, operation);
-
-function stopSitePreviewsForQuit(): void {
-  // Called once, from the will-quit teardown — the first moment a quit can no
-  // longer be cancelled (#579 review, r19). It used to run at
-  // before-quit AND on electron-updater's before-quit-for-update, both of
-  // which happen BEFORE the renderer's beforeunload can veto the exit. A user
-  // who clicked "Go back" to keep working got their site previews revoked and
-  // their servers stopped anyway. Idempotent regardless.
-  sitePreviewSdkAuthorities.revokeAll();
-  sitePreviews.stopAll();
-}
-
-async function stopSitePreviewsForWorkspace(workspaceId: string): Promise<void> {
-  await Promise.all(
-    sitePreviews.previewsForWorkspace(workspaceId).map(({ siteRoot, handle }) =>
-      withSitePreviewStartLock(
-        sitePreviewKey(workspaceId, siteRoot),
-        () => sitePreviews.stop(workspaceId, siteRoot, handle),
-      ).catch((error) => {
-        console.warn("[desktop] failed to stop site preview during workspace switch", error);
-      }),
-    ),
-  );
-}
-
-function commandForSiteScript(
-  site: SitePackageInfo,
-  script: keyof SitePackageInfo["scripts"],
-): { command: string; args: string[] } {
-  const configuredCommand = site.configuredScripts?.[script];
-  if (configuredCommand) return splitCommandLine(configuredCommand);
-  const configured = site.scripts[script];
-  if (!configured) throw new Error(`Site has no ${script} script: ${site.root}`);
-  if (site.packagePath) {
-    return packageManagerCommand(site.packageManager ?? "npm", script);
-  }
-  return splitCommandLine(configured);
-}
-
-function relativeWorkspacePath(workspaceRoot: string, absolutePath: string): string {
-  const rel = relative(workspaceRoot, absolutePath).replaceAll("\\", "/");
-  if (rel === "" || rel.startsWith("../") || rel === ".." || isAbsolute(rel)) {
-    throw new Error(`Build output escaped the workspace: ${absolutePath}`);
-  }
-  return rel;
-}
-
-function buildOutputRelativeToSite(siteRoot: string, workspaceRelativeOutput: string): string {
-  if (siteRoot === ".") return workspaceRelativeOutput;
-  if (workspaceRelativeOutput === siteRoot) return ".";
-  if (!workspaceRelativeOutput.startsWith(`${siteRoot}/`)) {
-    throw new Error(
-      `Build output must be within the site directory: ${workspaceRelativeOutput}`,
-    );
-  }
-  return workspaceRelativeOutput.slice(siteRoot.length + 1);
-}
-
-function recentSiteBuildLogText(logs: SiteLogEntry[]): string {
-  const text = logs
-    .slice(-3)
-    .map((log) => log.text)
-    .join("\n")
-    .trim();
-  return text.length > 2000 ? `[truncated]\n${text.slice(-2000)}` : text;
-}
-
-type SitePreviewStartInput = {
-  workspaceId: string;
-  workspaceRoot: string;
-  site: SitePackageInfo;
-  mode: "static" | "dev" | "build";
-  isCurrent: () => boolean;
-  signal: AbortSignal;
-  sdkScopeRoot: string | null;
-  sharedView: boolean;
-};
-
-async function rememberCurrentSitePreviewHandle(
-  input: SitePreviewStartInput,
-  handle: SitePreviewHandle,
-): Promise<void> {
-  if (!input.isCurrent()) {
-    await handle.stop().catch(() => undefined);
-    throw new Error("Site preview start was cancelled because the renderer restarted.");
-  }
-  sitePreviews.remember(input.workspaceId, input.site.root, handle);
-}
-
-type StartedSitePreview = StartSitePreviewResult & {
-  handle: SitePreviewHandle;
-};
-
-async function startPreviewForSite(
-  input: SitePreviewStartInput,
-): Promise<StartedSitePreview> {
-  const key = sitePreviewKey(input.workspaceId, input.site.root);
-  return withSitePreviewStartLock(key, async () => startPreviewForSiteUnlocked(input));
-}
-
-async function startPreviewForSiteUnlocked(
-  input: SitePreviewStartInput,
-): Promise<StartedSitePreview> {
-  if (!input.isCurrent()) {
-    throw new Error("Site preview start was cancelled because the renderer restarted.");
-  }
-  try {
-    await sitePreviews.stop(input.workspaceId, input.site.root);
-  } catch (error) {
-    console.warn("[desktop] failed to stop previous site preview", error);
-  }
-  if (!input.isCurrent()) {
-    throw new Error("Site preview start was cancelled because the renderer restarted.");
-  }
-
-  if (input.mode === "static") {
-    const target = staticPreviewTargetForSite(input.site, {
-      sharedView: input.sharedView,
-    });
-    const entry = target.entry ?? undefined;
-    if ((input.sharedView || input.site.authority.kind === "share") && !entry) {
-      throw new Error(
-        "This shared package does not include a built site artifact. Ask the owner to build and share it again.",
-      );
-    }
-    const handle = await startStaticSitePreview(input.workspaceRoot, target.root, {
-      entry,
-    });
-    await rememberCurrentSitePreviewHandle(input, handle);
-    return {
-      handle,
-      siteRoot: input.site.root,
-      mode: input.mode,
-      url: handle.url,
-      logs: [],
-      sdkScopeRoot: input.sdkScopeRoot,
-    };
-  }
-
-  if (input.mode === "dev") {
-    if (!input.site.scripts.dev && !input.site.scripts.start) {
-      throw new Error(`Site has no dev or start script: ${input.site.root}`);
-    }
-    const script = input.site.scripts.dev ? "dev" : "start";
-    const command = commandForSiteScript(input.site, script);
-    const handle = await startSiteDevServer({
-      workspaceRoot: input.workspaceRoot,
-      siteRoot: input.site.root,
-      command: command.command,
-      args: command.args,
-      signal: input.signal,
-    });
-    await rememberCurrentSitePreviewHandle(input, handle);
-    return {
-      handle,
-      siteRoot: input.site.root,
-      mode: input.mode,
-      url: handle.url,
-      logs: handle.logs(),
-      sdkScopeRoot: input.sdkScopeRoot,
-    };
-  }
-
-  let logs: SiteLogEntry[] = [];
-  let build:
-    | {
-        ok: boolean;
-        command: string;
-        args: string[];
-        outputPath: string | null;
-        exitCode: number | null;
-      }
-    | undefined;
-  let outputRoot = input.site.buildOutputs[0] ?? null;
-  if (input.site.scripts.build) {
-    const command = commandForSiteScript(input.site, "build");
-    const result = await buildSite({
-      workspaceRoot: input.workspaceRoot,
-      siteRoot: input.site.root,
-      command: command.command,
-      args: command.args,
-      output: outputRoot ?? undefined,
-      signal: input.signal,
-    });
-    logs = result.logs;
-    build = {
-      ok: result.ok,
-      command: result.command,
-      args: result.args,
-      outputPath: result.outputPath,
-      exitCode: result.exitCode,
-    };
-    if (!result.ok || !result.outputPath) {
-      const recentLogs = recentSiteBuildLogText(result.logs);
-      throw new Error(
-        `Site build failed or did not produce a static output folder.${
-          recentLogs ? `\n\nRecent output:\n${recentLogs}` : ""
-        }`,
-      );
-    }
-    outputRoot = buildOutputRelativeToSite(
-      input.site.root,
-      relativeWorkspacePath(input.workspaceRoot, result.outputPath),
-    );
-  }
-  if (!input.isCurrent()) {
-    throw new Error("Site preview start was cancelled because the renderer restarted.");
-  }
-  if (!outputRoot) throw new Error(`Site has no build output to preview: ${input.site.root}`);
-  const handle = await startStaticSitePreview(
-    input.workspaceRoot,
-    buildOutputSiteRoot(input.site, outputRoot),
-  );
-  await rememberCurrentSitePreviewHandle(input, handle);
-  return {
-    handle,
-    siteRoot: input.site.root,
-    mode: input.mode,
-    url: handle.url,
-    logs,
-    sdkScopeRoot: input.sdkScopeRoot,
-    ...(build ? { build } : {}),
-  };
 }
 
 // Native dialogs cannot be driven by Playwright, so every dialog-backed IPC
@@ -2179,8 +1933,13 @@ const activity = createWorkspaceActivity(notifyRenderer, {
       hooks,
       requireEngineSessions(),
     ),
+  // One settled batch, two readers: the approval pipeline, and the plugins
+  // that subscribed to a prefix of it. Neither changes the batch.
   onWatcherBatch: (workspace, events) => {
     pluginPipelines.get(workspace.workspaceId)?.handleWatcherEvents(events);
+    pluginWorkspaceEventsByWorkspace
+      .get(workspace.workspaceId)
+      ?.handleWatcherEvents(events);
   },
 });
 const panelAgentRunSlots = new Map<string, string>();
@@ -2273,6 +2032,23 @@ const tryInVersionSessions = createTryInVersionSessions({
   },
   onStateChanged: () => notifyRenderer(),
 });
+/**
+ * The workspace's own `agents.*` settings: which driver it prefers, and which
+ * model that driver should start with. Unreadable settings answer with the
+ * defaults, which is "no preference" — the same thing an unset file says.
+ */
+async function workspaceAgentDefaults(
+  workspaceId: string,
+): Promise<{ defaultDriverId: string | null; defaultModel: string | null }> {
+  const workspace = findWorkspace(workspaceId);
+  if (!workspace) return { defaultDriverId: null, defaultModel: null };
+  const { settings } = await readWorkspaceSettingsFile(workspace.rootPath);
+  return {
+    defaultDriverId: settings.agents.defaultDriverId,
+    defaultModel: settings.agents.defaultModel,
+  };
+}
+
 let cachedAgentSessions: AgentSessionManager | null = null;
 async function agentSessionManager(): Promise<AgentSessionManager> {
   if (!cachedAgentSessions) {
@@ -2284,6 +2060,10 @@ async function agentSessionManager(): Promise<AgentSessionManager> {
       ]);
     cachedAgentSessions = createAgentSessionManager({
       registry: createAgentDriverRegistry(createDesktopAgentDrivers(process.env)),
+      // A workspace's plugin drivers join its registry beside the built-ins.
+      pluginDriversFor: (workspaceId) =>
+        pluginAgentDriversByWorkspace.get(workspaceId)?.list() ?? [],
+      agentDefaultsFor: workspaceAgentDefaults,
       integration: agentIntegration,
       rootFor: (workspaceId) => findWorkspace(workspaceId)?.rootPath ?? null,
       mcpFor: mcpRuntimeConfigFor,
@@ -2862,7 +2642,7 @@ async function openWorkspaceActivity(
 }
 
 interface RunningPluginPanel {
-  handle: StaticSitePreview;
+  handle: StaticDirectoryPreview;
   releaseOrigin: () => void;
   workspaceId: string;
   pluginId: string;
@@ -2909,12 +2689,16 @@ const hardenedGuestPartitions = new Set<string>();
 const withPluginWebAppStartLock = <T>(key: string, operation: () => Promise<T>) =>
   withKeyedStartLock(pluginWebAppStartLocks, key, operation);
 
+// The start lock serializes one instance's own starts and teardowns. Two
+// instances of one web app are two servers behind two views, so they take two
+// locks and start side by side.
 function pluginWebAppKey(
   workspaceId: string,
   pluginId: string,
   webAppId: string,
+  instanceKey: string | null,
 ): string {
-  return `${workspaceId}\0${pluginId}\0${webAppId}`;
+  return webAppInstanceKey({ workspaceId, pluginId, webAppId, instanceKey });
 }
 
 function destroyPluginWebAppViews(
@@ -2976,9 +2760,12 @@ function invokeWorkspacePluginSdk(input: {
   workspaceId: string;
   pluginId: string;
   spawnId: string;
+  requestPath: "panel" | "plugin-process";
   isWritable: () => boolean;
   signal?: AbortSignal;
   invokeChildProcess?: (method: string, params?: unknown) => Promise<unknown>;
+  subscribeFileWatch?: (params: unknown) => { subscriptionId: string };
+  unsubscribeFileWatch?: (params: unknown) => boolean;
   method: string;
   params?: unknown;
 }): Promise<unknown> {
@@ -2988,6 +2775,11 @@ function invokeWorkspacePluginSdk(input: {
       pluginId: input.pluginId,
       workspaceRoot: workspace.rootPath,
       spawnId: input.spawnId,
+      requestPath: input.requestPath,
+      // Read from the registration main holds, never from the request: what a
+      // plugin may open is what its approved manifest declares.
+      declaredWebApps: registeredPlugin(input.workspaceId, input.pluginId)
+        ?.manifest.webApps,
       isWritable: input.isWritable,
       writeAvailable: async () => {
         try {
@@ -3000,6 +2792,8 @@ function invokeWorkspacePluginSdk(input: {
       },
       signal: input.signal,
       invokeChildProcess: input.invokeChildProcess,
+      subscribeFileWatch: input.subscribeFileWatch,
+      unsubscribeFileWatch: input.unsubscribeFileWatch,
       writeAuthoredText: createPluginAuthoredTextWriter({
         signal: input.signal,
         requireWritableCapture: async () => {
@@ -3016,11 +2810,20 @@ function invokeWorkspacePluginSdk(input: {
   );
 }
 
+// A plugin this workspace can serve panels for. The registration map only
+// remembers plugins a tab opened, and a view in the activity bar opens no
+// tab, so the pipeline's own discovery — where the manifest actually lives —
+// answers for the rest. Approval is unaffected either way: ensurePluginStarted
+// still hash-verifies before it executes anything, and panels still serve from
+// the approved snapshot rather than from pluginRoot.
 function registeredPlugin(
   workspaceId: string,
   pluginId: string,
 ): RegisteredPlugin | undefined {
-  return pluginRegistrations.get(workspaceId)?.get(pluginId);
+  const remembered = pluginRegistrations.get(workspaceId)?.get(pluginId);
+  if (remembered) return remembered;
+  return pluginPipelines.get(workspaceId)?.pluginRegistration(pluginId) ??
+    undefined;
 }
 
 // Panels serve from the approved, hash-verified snapshot — never from
@@ -3065,7 +2868,7 @@ async function ensurePluginStarted(
 }
 
 async function stopRunningPluginPanelPreview(input: {
-  handle: StaticSitePreview;
+  handle: StaticDirectoryPreview;
   releaseOrigin: () => void;
 }): Promise<void> {
   await stopPluginPanelPreview(
@@ -3147,10 +2950,17 @@ async function stopPluginWebApp(
   workspaceId: string,
   pluginId: string,
   webAppId: string,
+  instanceKey: string | null,
 ): Promise<void> {
   await withPluginWebAppStartLock(
-    pluginWebAppKey(workspaceId, pluginId, webAppId),
-    () => stopPluginWebAppUnderStartLock(workspaceId, pluginId, webAppId),
+    pluginWebAppKey(workspaceId, pluginId, webAppId, instanceKey),
+    () =>
+      stopPluginWebAppUnderStartLock(
+        workspaceId,
+        pluginId,
+        webAppId,
+        instanceKey,
+      ),
   );
 }
 
@@ -3161,11 +2971,17 @@ async function stopPluginWebAppUnderStartLock(
   workspaceId: string,
   pluginId: string,
   webAppId: string,
+  instanceKey: string | null,
 ): Promise<void> {
   await withPluginHostLifecycleLock(
     pluginLifecycleKey(workspaceId, pluginId),
     async () => {
-      const removed = pluginWebAppViews.remove({ workspaceId, pluginId, webAppId });
+      const removed = pluginWebAppViews.remove({
+        workspaceId,
+        pluginId,
+        webAppId,
+        instanceKey,
+      });
       if (removed) destroyPluginWebAppViews([removed]);
       await stopPluginHostIfUnclaimed(workspaceId, pluginId);
     },
@@ -3598,8 +3414,6 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
     activeWorkspaceIdBySender.get(senderId) ?? preferredWorkspaceId;
   if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
   advanceRendererGeneration(senderId);
-  abortSitePreviewStartsForSender(senderId);
-  sitePreviewSdkAuthorities.revokeSender(senderId);
   pluginPanelSdkAuthorities.revokeSender(senderId);
   destroyPluginWebAppViews(pluginWebAppViews.removeForSender(senderId));
   searchRegistry.disposeOwner(senderId);
@@ -3607,9 +3421,6 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
   await Promise.all([
     closeEngineYDocSessionsForSender(senderId),
     waitForPendingEngineYDocOpens(senderId),
-    activeWorkspaceId
-      ? stopSitePreviewsForWorkspace(activeWorkspaceId)
-      : Promise.resolve(),
     activeWorkspaceId
       ? stopPluginWorkspace(activeWorkspaceId)
       : Promise.resolve(),
@@ -3864,7 +3675,6 @@ app.on("will-quit", (event) => {
   // has had its chance to veto and this quit is now certain (#579 review,
   // r19). Fire-and-forget — skip locks and do not await async stops so
   // termination stays quick; child.unref() and the OS finish the cleanup.
-  stopSitePreviewsForQuit();
   pluginPanelSdkAuthorities.revokeAll();
   const pluginStop = stopAllPluginWorkspaces();
   const agentSessionStop = cachedAgentSessions?.stopAll() ?? Promise.resolve();
@@ -4723,7 +4533,7 @@ function registerIpcHandlers(
     return ImportWorkspaceFilesResult.parse(await importInto(result.filePaths, null));
   });
 
-  // Site preview SDK reads use the combined helper to make the main-process
+  // Plugin SDK reads use the combined helper to make the main-process
   // workspace authorization boundary explicit. Older workspace handlers keep
   // the equivalent assertTrustedSender + requireWorkspace steps separate.
   ipcMain.handle(CHANNELS.readWorkspaceText, async (event, payload) => {
@@ -6731,141 +6541,6 @@ function registerIpcHandlers(
     );
   });
 
-  ipcMain.handle(CHANNELS.listSites, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListSitesPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    return ListSitesResult.parse({ sites: await listSitePackages(workspace.rootPath) });
-  });
-
-  ipcMain.handle(CHANNELS.getSitePackage, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = SitePackagePayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    return SitePackageResult.parse(
-      await getSitePackage(workspace.rootPath, input.path),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.startSitePreview, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = StartSitePreviewPayload.parse(payload);
-    const sender = event.sender;
-    const generation = rendererGeneration(sender.id);
-    const pendingStart = beginSitePreviewStart(sender.id);
-    const isCurrent = () =>
-      !pendingStart.controller.signal.aborted &&
-      !sender.isDestroyed() &&
-      rendererGeneration(sender.id) === generation;
-    try {
-      const workspace = requireWorkspace(input.workspaceId);
-      if (
-        activeWorkspaceIdBySender.get(sender.id) !== workspace.workspaceId
-      ) {
-        throw new Error(
-          "The Site preview request does not target the active workspace. Open the workspace and start the preview again.",
-        );
-      }
-      const sharedView = sharedViewOf(workspace.workspaceId);
-      assertSitePreviewMode(workspace.workspaceId, input.mode);
-      // A mounted share may provide a ready browser artifact, but must never
-      // cause package/configured commands from somebody else to execute.
-      if (isSharedWithMePath(input.siteRoot) && input.mode !== "static") {
-        throw new Error(
-          "Sites opened from shared-with-me use the static preview. Copy it into your own files to run dev or build commands.",
-        );
-      }
-      const site = await getSitePackage(workspace.rootPath, input.siteRoot);
-      if (!site) throw new Error(`Not a detected site: ${input.siteRoot}`);
-      const scopeRoot =
-        site.authority.kind === "share"
-          ? site.authority.mountRoot
-          : sharedView
-            ? "."
-            : null;
-      const started = await startPreviewForSite({
-        workspaceId: input.workspaceId,
-        workspaceRoot: workspace.rootPath,
-        site,
-        mode: input.mode,
-        isCurrent,
-        signal: pendingStart.controller.signal,
-        sharedView: !!sharedView,
-        sdkScopeRoot: scopeRoot,
-      });
-      const result = StartSitePreviewResult.parse(started);
-      if (!isCurrent()) {
-        await sitePreviews.stop(input.workspaceId, site.root, started.handle);
-        throw new Error("Site preview start was cancelled because the renderer restarted.");
-      }
-      if (!sitePreviews.isCurrent(input.workspaceId, site.root, started.handle)) {
-        if (sitePreviews.isRunning(input.workspaceId, site.root)) {
-          throw new Error("A newer site preview replaced this start.");
-        }
-        throw new Error(
-          "The site preview stopped before it opened. Start the preview again.",
-        );
-      }
-      sitePreviewSdkAuthorities.register({
-        senderId: sender.id,
-        generation,
-        workspaceId: input.workspaceId,
-        siteRoot: site.root,
-        workspaceRoot: workspace.rootPath,
-        scopeRoot,
-        writable: !sharedView && site.authority.kind === "workspace",
-      });
-      return result;
-    } finally {
-      pendingStart.finish();
-    }
-  });
-
-  ipcMain.handle(CHANNELS.stopSitePreview, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = StopSitePreviewPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const senderId = event.sender.id;
-    assertActiveWorkspaceForSitePreviewStop(
-      activeWorkspaceIdBySender.get(senderId),
-      workspace.workspaceId,
-    );
-    await withSitePreviewStartLock(
-      sitePreviewKey(workspace.workspaceId, input.siteRoot),
-      () =>
-        stopSitePreviewForActiveWorkspace({
-          activeWorkspaceId: () => activeWorkspaceIdBySender.get(senderId),
-          workspaceId: workspace.workspaceId,
-          stop: () => sitePreviews.stop(workspace.workspaceId, input.siteRoot),
-        }),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.invokeSiteSdk, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = InvokeSiteSdkPayload.parse(payload);
-    const sender = event.sender;
-    const authority = sitePreviewSdkAuthorities.authorize({
-      senderId: sender.id,
-      generation: rendererGeneration(sender.id),
-      activeWorkspaceId: activeWorkspaceIdBySender.get(sender.id),
-      workspaceId: input.workspaceId,
-      siteRoot: input.siteRoot,
-      previewRunning: sitePreviews.isRunning(input.workspaceId, input.siteRoot),
-    });
-    const result = await invokeSiteSdkHost(
-      {
-        workspaceRoot: authority.workspaceRoot,
-        scopeRoot: authority.scopeRoot,
-        writable: authority.writable,
-        signal: authority.signal,
-      },
-      input.method,
-      input.params,
-    );
-    return InvokeSiteSdkResult.parse({ result });
-  });
-
   ipcMain.handle(CHANNELS.openPluginPanel, async (event, payload) => {
     assertTrustedSender(event);
     const input = OpenPluginPanelPayload.parse(payload);
@@ -6938,6 +6613,16 @@ function registerIpcHandlers(
     if (!panel) {
       throw new Error(
         `Plugin "${input.pluginId}" does not declare panel "${input.panelId}".`,
+      );
+    }
+    // One panel runs once per workspace, so it belongs in one place. A tab
+    // restored from before an update can still name a panel the plugin has
+    // since moved to the view rail.
+    if (panel.placement !== input.placement) {
+      throw new Error(
+        `Plugin "${input.pluginId}" panel "${input.panelId}" has placement ` +
+          `"${panel.placement}", so it cannot open with placement ` +
+          `"${input.placement}".`,
       );
     }
     const key = pluginPanelKey(
@@ -7070,6 +6755,7 @@ function registerIpcHandlers(
       workspaceId: authority.workspaceId,
       pluginId: authority.pluginId,
       spawnId: authority.spawnId,
+      requestPath: "panel",
       isWritable: () => !sharedViewOf(authority.workspaceId),
       signal: authority.signal,
       method: input.method,
@@ -7106,8 +6792,22 @@ function registerIpcHandlers(
       workspace.workspaceId,
       registration,
     );
+    // The open's shape must match the id it names before a tab appears for
+    // it: a keyless open of a per-instance app would otherwise reach start
+    // and fail there, after the user already has an empty tab.
+    requireDeclaredWebApp(
+      input.pluginId,
+      plugin.manifest.webApps,
+      input.webAppId,
+      input.instanceKey,
+    );
     await withPluginWebAppStartLock(
-      pluginWebAppKey(workspace.workspaceId, input.pluginId, input.webAppId),
+      pluginWebAppKey(
+        workspace.workspaceId,
+        input.pluginId,
+        input.webAppId,
+        input.instanceKey,
+      ),
       () =>
         withPluginHostLifecycleLock(
           pluginLifecycleKey(workspace.workspaceId, input.pluginId),
@@ -7121,6 +6821,7 @@ function registerIpcHandlers(
     return OpenPluginWebAppResult.parse({
       pluginId: input.pluginId,
       webAppId: input.webAppId,
+      instanceKey: input.instanceKey,
     });
   });
 
@@ -7140,17 +6841,34 @@ function registerIpcHandlers(
     if (!plugin) {
       return StartPluginWebAppResult.parse({ status: "not-registered" });
     }
-    const webApp = plugin.manifest.webApps?.find(
-      (candidate) => candidate.id === input.webAppId,
+    const webApp = requireDeclaredWebApp(
+      input.pluginId,
+      plugin.manifest.webApps,
+      input.webAppId,
+      input.instanceKey,
     );
-    if (!webApp) {
-      throw new Error(
-        `Plugin "${input.pluginId}" does not declare web app "${input.webAppId}".`,
-      );
-    }
+    const identity = {
+      workspaceId: workspace.workspaceId,
+      pluginId: input.pluginId,
+      webAppId: input.webAppId,
+      instanceKey: input.instanceKey,
+    };
     return withPluginWebAppStartLock(
-      pluginWebAppKey(workspace.workspaceId, input.pluginId, input.webAppId),
+      pluginWebAppKey(
+        workspace.workspaceId,
+        input.pluginId,
+        input.webAppId,
+        input.instanceKey,
+      ),
       async () => {
+        // The budget is read inside the lock, against the live views: a
+        // restore that reopens more instances than the budget allows is
+        // refused here, which is the only place that sees them all.
+        assertInstanceBudget(
+          input.pluginId,
+          input.webAppId,
+          pluginWebAppViews.countOtherInstances(identity),
+        );
         const host = await withPluginHostLifecycleLock(
           pluginLifecycleKey(workspace.workspaceId, input.pluginId),
           () => {
@@ -7167,7 +6885,11 @@ function registerIpcHandlers(
         // The returned URL can carry a one-time credential in its fragment;
         // it goes into loadURL below and nowhere else — never a log, never
         // the renderer.
-        const started = await host.startWebApp(input.pluginId, input.webAppId);
+        const started = await host.startWebApp(
+          input.pluginId,
+          input.webAppId,
+          input.instanceKey,
+        );
         if (host.getSpawnId(input.pluginId) !== spawnId) {
           throw new Error(
             `Plugin "${input.pluginId}" restarted while its web app was starting. Try again.`,
@@ -7189,27 +6911,29 @@ function registerIpcHandlers(
         // hold that section open waiting for the handler it runs inside.
         const recoverConsumedCredential = (): void => {
           void recoverConsumedWebAppCredential({
-            notifyFailed: () =>
-              notifyPluginWebAppFailed(sender, {
-                workspaceId: workspace.workspaceId,
-                pluginId: input.pluginId,
-                webAppId: input.webAppId,
-              }),
+            notifyFailed: () => notifyPluginWebAppFailed(sender, identity),
             withTeardownLock: (teardown) =>
               withPluginWebAppStartLock(
                 pluginWebAppKey(
                   workspace.workspaceId,
                   input.pluginId,
                   input.webAppId,
+                  input.instanceKey,
                 ),
                 teardown,
               ),
-            unpair: () => host.stopWebApp(input.pluginId, input.webAppId),
+            unpair: () =>
+              host.stopWebApp(
+                input.pluginId,
+                input.webAppId,
+                input.instanceKey,
+              ),
             stopView: () =>
               stopPluginWebAppUnderStartLock(
                 workspace.workspaceId,
                 input.pluginId,
                 input.webAppId,
+                input.instanceKey,
               ),
             onError: (stage, error) => {
               console.warn(
@@ -7234,9 +6958,7 @@ function registerIpcHandlers(
             attach: (view, { origin, partition }) => {
               win.contentView.addChildView(view);
               const displaced = pluginWebAppViews.register({
-                workspaceId: workspace.workspaceId,
-                pluginId: input.pluginId,
-                webAppId: input.webAppId,
+                ...identity,
                 senderId: sender.id,
                 generation,
                 origin,
@@ -7254,9 +6976,12 @@ function registerIpcHandlers(
               recoverConsumedCredential();
             },
           });
+          // Every instance of one id shares the manifest title, which would
+          // label twenty preview tabs "Preview". A plugin that knows what its
+          // instance is may name it; the manifest title is the fallback.
           return StartPluginWebAppResult.parse({
             status: "ok",
-            title: webApp.title,
+            title: started.title ?? webApp.title,
             origin: guest.origin,
           });
         } catch (error) {
@@ -7277,6 +7002,7 @@ function registerIpcHandlers(
       workspaceId: input.workspaceId,
       pluginId: input.pluginId,
       webAppId: input.webAppId,
+      instanceKey: input.instanceKey,
       senderId: event.sender.id,
       generation: rendererGeneration(event.sender.id),
     });
@@ -7298,6 +7024,7 @@ function registerIpcHandlers(
       workspaceId: workspace.workspaceId,
       pluginId: input.pluginId,
       webAppId: input.webAppId,
+      instanceKey: input.instanceKey,
     });
     if (
       record &&
@@ -7312,6 +7039,7 @@ function registerIpcHandlers(
       workspace.workspaceId,
       input.pluginId,
       input.webAppId,
+      input.instanceKey,
     );
   });
 
@@ -7531,20 +7259,15 @@ function registerIpcHandlers(
       activeWorkspaceCleanupHooked.add(event.sender);
       event.sender.once("destroyed", () => {
         const activeWorkspaceId = activeWorkspaceIdBySender.get(senderId);
-        abortSitePreviewStartsForSender(senderId);
-        sitePreviewSdkAuthorities.revokeSender(senderId);
         pluginPanelSdkAuthorities.revokeSender(senderId);
         activeWorkspaceIdBySender.delete(senderId);
         rendererGenerationBySender.delete(senderId);
         if (activeWorkspaceId) {
-          void stopSitePreviewsForWorkspace(activeWorkspaceId);
           void stopPluginWorkspace(activeWorkspaceId);
         }
       });
     }
     if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {
-      abortSitePreviewStartsForSender(senderId);
-      await stopSitePreviewsForWorkspace(previousWorkspaceId);
       await stopPluginWorkspace(previousWorkspaceId);
     }
     refreshNativeWorkspaceSurfaces();
@@ -9893,7 +9616,7 @@ function registerIpcHandlers(
     const input = AgentRunPayload.parse(payload);
     requireWorkspace(input.workspaceId);
     const sessions = await agentSessionManager();
-    await sessions.probeDrivers();
+    await sessions.probeDrivers(input.workspaceId);
     return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));
   });
 

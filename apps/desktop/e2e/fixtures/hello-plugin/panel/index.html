@@ -4,11 +4,30 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Hello Plugin</title>
+    <!-- dohc's tokens arrive as custom properties on <html>, so panel CSS
+         names them the same way dohc's own stylesheet does. -->
+    <style>
+      body {
+        background: var(--dohc-bg);
+        color: var(--dohc-ink);
+        font-family: var(--font-sans);
+      }
+      [data-testid="theme-swatch"] {
+        background: var(--dohc-panel);
+        border: 1px solid var(--dohc-line);
+        color: var(--dohc-muted);
+        padding: 8px;
+      }
+    </style>
   </head>
   <body>
     <h1>Hello Plugin</h1>
     <p data-testid="sdk-capabilities">Checking plugin capabilities...</p>
     <p data-testid="sdk-write-result">Waiting to write the panel output...</p>
+    <p data-testid="theme-swatch">
+      Theme <span data-testid="theme-mode">unknown</span>, ink
+      <span data-testid="theme-ink">unknown</span>
+    </p>
     <pre data-testid="sdk-error" hidden></pre>
     <script type="module" src="./index.js"></script>
   </body>

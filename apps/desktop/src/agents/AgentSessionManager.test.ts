@@ -7,7 +7,11 @@ import type {
 } from "./AgentDriver";
 import { createAgentDriverRegistry } from "./AgentDriver";
 import type { AgentIntegration } from "./AgentIntegration";
-import { createAgentSessionManager } from "./AgentSessionManager";
+import {
+  createAgentSessionManager,
+  type AgentWorkspaceDefaults,
+} from "./AgentSessionManager";
+import { AgentPanelSnapshotResult } from "../ipc/bridgeContract";
 
 class FakeSession implements AgentSession {
   readonly sessionId = "fake-session";
@@ -40,6 +44,8 @@ function harness(
     mcpFor?: (
       rootPath: string,
     ) => AgentSessionStartInput["mcp"] | Promise<AgentSessionStartInput["mcp"]>;
+    pluginDrivers?: AgentDriver[];
+    agentDefaults?: AgentWorkspaceDefaults;
   } = {},
 ) {
   const eventHandlers: Array<(event: AgentEvent) => void> = [];
@@ -74,8 +80,23 @@ function harness(
     getAgentRunStatus: vi.fn(),
     stopAll: vi.fn(),
   } as unknown as AgentIntegration;
+  const startInputs: AgentSessionStartInput[] = [];
+  const recordingDriver: AgentDriver = {
+    ...driver,
+    startSession: async (input) => {
+      startInputs.push(input);
+      return driver.startSession(input);
+    },
+  };
   const manager = createAgentSessionManager({
-    registry: createAgentDriverRegistry([driver]),
+    registry: createAgentDriverRegistry([recordingDriver]),
+    ...(options.pluginDrivers
+      ? { pluginDriversFor: (workspaceId: string) =>
+          workspaceId === "workspace-1" ? options.pluginDrivers ?? [] : [] }
+      : {}),
+    ...(options.agentDefaults
+      ? { agentDefaultsFor: () => options.agentDefaults as AgentWorkspaceDefaults }
+      : {}),
     integration,
     rootFor: () => "/tmp/workspace",
     mcpFor: options.mcpFor ?? (() => ({ command: "dohc-mcp", args: [] })),
@@ -84,6 +105,7 @@ function harness(
   return {
     manager,
     integration,
+    startInputs,
     endAgentRun,
     emit(event: AgentEvent, index = eventHandlers.length - 1) {
       const onEvent = eventHandlers[index];
@@ -257,7 +279,7 @@ describe("AgentSessionManager", () => {
         },
       });
 
-      await manager.probeDrivers();
+      await manager.probeDrivers("workspace-1");
 
       expect(captured[0]).toMatchObject({ DOHC_AGENT_FAKE_COMMAND: "fake-agent" });
       expect(captured[0]).not.toHaveProperty("DOHC_TEST_SECRET_TOKEN");
@@ -498,5 +520,135 @@ describe("AgentSessionManager", () => {
     expect(session?.messages.at(-1)?.text).toHaveLength(10_000);
     expect(session?.authNotices.at(-1)).toHaveLength(300);
     expect(session?.lastError).toHaveLength(500);
+  });
+});
+
+describe("the workspace's own agent settings", () => {
+  const pluginDriver = (id: string, installed = true): AgentDriver => ({
+    id,
+    displayName: `Plugin ${id}`,
+    probe: async () => ({ installed, auth: { status: "unknown" }, models: [] }),
+    startSession: async () => new FakeSession(),
+  });
+
+  it("lists a workspace's plugin drivers beside the drivers dohc ships", async () => {
+    const { manager } = harness({ pluginDrivers: [pluginDriver("fixture-harness")] });
+
+    const drivers = await manager.probeDrivers("workspace-1");
+    expect(drivers.map((driver) => driver.id))
+      .toEqual(["fake-driver", "fixture-harness"]);
+    // MUTATION (plugin drivers are global): another workspace, which has no
+    // driver plugin, is offered one anyway.
+    expect((await manager.probeDrivers("workspace-2")).map((driver) => driver.id))
+      .toEqual(["fake-driver"]);
+  });
+
+  it("chooses the default driver the workspace names", async () => {
+    const { manager } = harness({
+      pluginDrivers: [pluginDriver("fixture-harness")],
+      agentDefaults: { defaultDriverId: "fixture-harness", defaultModel: null },
+    });
+
+    await manager.probeDrivers("workspace-1");
+    // MUTATION (defaultDriverId is never read): the first installed driver
+    // wins and the workspace's own choice does nothing.
+    expect(manager.panelSnapshot("workspace-1").selectedDriverId)
+      .toBe("fixture-harness");
+  });
+
+  it("falls back when the named default driver is not installed here", async () => {
+    const { manager } = harness({
+      pluginDrivers: [pluginDriver("fixture-harness", false)],
+      agentDefaults: { defaultDriverId: "fixture-harness", defaultModel: null },
+    });
+
+    await manager.probeDrivers("workspace-1");
+    expect(manager.panelSnapshot("workspace-1").selectedDriverId).toBe("fake-driver");
+  });
+
+  it("starts a session with the workspace's default model", async () => {
+    const { manager, startInputs } = harness({
+      agentDefaults: { defaultDriverId: null, defaultModel: "sonnet-5" },
+    });
+
+    await manager.startSession({
+      workspaceId: "workspace-1",
+      driverId: "fake-driver",
+      prompt: "tidy the notes",
+    });
+    // MUTATION (defaultModel is never read): the driver starts with no model
+    // and the setting promises behavior it does not have.
+    expect(startInputs[0]?.model).toBe("sonnet-5");
+  });
+
+  it("lets a caller's own model win over the workspace default", async () => {
+    const { manager, startInputs } = harness({
+      agentDefaults: { defaultDriverId: null, defaultModel: "sonnet-5" },
+    });
+
+    await manager.startSession({
+      workspaceId: "workspace-1",
+      driverId: "fake-driver",
+      prompt: "tidy the notes",
+      model: "opus-5",
+    });
+    expect(startInputs[0]?.model).toBe("opus-5");
+  });
+});
+
+describe("what a probe may tell the renderer", () => {
+  it("keeps a driver's account out of the panel the renderer receives", async () => {
+    const { manager } = harness({
+      probe: async () => ({
+        installed: true,
+        auth: {
+          status: "unauthenticated",
+          label: "CLI login",
+          email: "person@example.com",
+          loginHint: "Run `fixture-harness login`.",
+        },
+        models: [],
+      }),
+    });
+
+    await manager.probeDrivers("workspace-1");
+    const summarized = manager.panelSnapshot("workspace-1");
+    const panel = AgentPanelSnapshotResult.parse(summarized);
+
+    // The login state itself must survive — it is what the row shows.
+    expect(panel.drivers[0]?.auth).toEqual({
+      status: "unauthenticated",
+      label: "CLI login",
+    });
+    // MUTATION (the summary spreads the probe's auth object): the person's
+    // address is in the value main hands to the IPC layer. The contract
+    // strips it there too, so this pin reads the summary itself — the place
+    // the rule is stated (AgentDriver.ts:67) — not only what survives parsing.
+    expect(JSON.stringify(summarized)).not.toContain("person@example.com");
+    expect(JSON.stringify(summarized)).not.toContain("fixture-harness login");
+    expect(JSON.stringify(panel)).not.toContain("person@example.com");
+  });
+
+  it("reports a login the harness asks for part-way through a run", async () => {
+    const { manager, emit } = harness();
+    await manager.startSession({
+      workspaceId: "workspace-1",
+      driverId: "fake-driver",
+      prompt: "tidy the notes",
+    });
+
+    expect(manager.panelSnapshot("workspace-1").session?.loginRequired).toBe(false);
+    emit({
+      kind: "auth",
+      event: "login-required",
+      detail: "The login expired. Run `fixture-harness login`.",
+    });
+
+    // MUTATION (the auth event only appends a notice): the run reads as an
+    // ordinary failure and nothing says a login is what it needs.
+    const session = manager.panelSnapshot("workspace-1").session;
+    expect(session?.loginRequired).toBe(true);
+    expect(session?.authNotices.at(-1))
+      .toBe("The login expired. Run `fixture-harness login`.");
   });
 });

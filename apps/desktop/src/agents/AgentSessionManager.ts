@@ -1,13 +1,14 @@
-import type {
-  AgentDriver,
-  AgentDriverId,
-  AgentDriverRegistry,
-  AgentEvent,
-  AgentProbe,
-  AgentSession,
-  AgentSessionStartInput,
-  PermissionDecision,
-  PermissionOption,
+import {
+  createAgentDriverRegistry,
+  type AgentDriver,
+  type AgentDriverId,
+  type AgentDriverRegistry,
+  type AgentEvent,
+  type AgentProbe,
+  type AgentSession,
+  type AgentSessionStartInput,
+  type PermissionDecision,
+  type PermissionOption,
 } from "./AgentDriver";
 import type { AgentIntegration } from "./AgentIntegration";
 
@@ -68,15 +69,38 @@ export interface AgentSessionSnapshot {
   pendingPermissions: AgentPermissionRequestSnapshot[];
   usage?: { used: number; max?: number; input?: number; output?: number };
   authNotices: string[];
+  /** The harness asked for a login part-way through this session. Without
+   * this, an expired login reads as a run that failed for no stated reason. */
+  loginRequired: boolean;
 }
 
 export interface AgentPanelSnapshot {
   drivers: AgentDriverProbeSummary[];
   session: AgentSessionSnapshot | null;
+  /**
+   * The driver dohc uses for this workspace when a caller does not name one:
+   * the workspace's `agents.defaultDriverId` when that driver is installed
+   * here, and otherwise the first installed driver. Null until a probe has
+   * run, and when nothing is installed. The setting is a preference, so a
+   * configured driver that is not installed falls back rather than blocks.
+   */
+  selectedDriverId: AgentDriverId | null;
+}
+
+/** The workspace's `agents.*` settings, read when they are needed. */
+export interface AgentWorkspaceDefaults {
+  defaultDriverId: string | null;
+  defaultModel: string | null;
 }
 
 export interface AgentSessionManagerOptions {
+  /** The drivers dohc ships. */
   registry: AgentDriverRegistry;
+  /** The drivers this workspace's plugins contribute, if any. */
+  pluginDriversFor?: (workspaceId: string) => AgentDriver[];
+  agentDefaultsFor?: (
+    workspaceId: string,
+  ) => AgentWorkspaceDefaults | Promise<AgentWorkspaceDefaults>;
   integration: AgentIntegration;
   rootFor(workspaceId: string): string | null;
   mcpFor(
@@ -137,6 +161,7 @@ function snapshot(session: ManagedSession | null): AgentSessionSnapshot | null {
     })),
     usage: session.usage ? { ...session.usage } : undefined,
     authNotices: [...session.authNotices],
+    loginRequired: session.loginRequired,
   };
 }
 
@@ -183,7 +208,38 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
   // (each stopping the other's half-built session). This set marks a workspace
   // whose start is in flight; a second concurrent start is rejected outright.
   const startingWorkspaces = new Set<string>();
-  let cachedDrivers: AgentDriverProbeSummary[] | null = null;
+  // Per workspace, because a workspace's plugins decide which drivers it has.
+  const cachedDrivers = new Map<string, AgentDriverProbeSummary[]>();
+  const selectedDrivers = new Map<string, AgentDriverId | null>();
+
+  /**
+   * The drivers this workspace can use: the ones dohc ships plus the ones its
+   * plugins contribute. Built through the same registry constructor the
+   * built-in list uses, so a duplicate id is refused the same way here as it
+   * is there.
+   */
+  function registryFor(workspaceId: string): AgentDriverRegistry {
+    const contributed = options.pluginDriversFor?.(workspaceId) ?? [];
+    if (contributed.length === 0) return options.registry;
+    return createAgentDriverRegistry([
+      ...options.registry.list(),
+      ...contributed,
+    ]);
+  }
+
+  function selectDriver(
+    workspaceId: string,
+    drivers: AgentDriverProbeSummary[],
+    defaultDriverId: string | null,
+  ): AgentDriverId | null {
+    const configured = defaultDriverId === null
+      ? undefined
+      : drivers.find((driver) => driver.id === defaultDriverId && driver.installed);
+    const selected = configured ?? drivers.find((driver) => driver.installed);
+    const selectedId = selected?.id ?? null;
+    selectedDrivers.set(workspaceId, selectedId);
+    return selectedId;
+  }
 
   async function finalizeRun(
     workspaceId: string,
@@ -211,17 +267,23 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
     timer.unref?.();
   }
 
-  async function probeDrivers(): Promise<AgentDriverProbeSummary[]> {
-    const probes = await options.registry.probeAll(agentProbeEnvironment(process.env));
-    cachedDrivers = probes.map(({ driver, probe }) => summarizeProbe(driver.id, driver.displayName, probe));
-    return cachedDrivers;
+  async function probeDrivers(workspaceId: string): Promise<AgentDriverProbeSummary[]> {
+    const probes = await registryFor(workspaceId).probeAll(
+      agentProbeEnvironment(process.env),
+    );
+    const summaries = probes.map(({ driver, probe }) =>
+      summarizeProbe(driver.id, driver.displayName, probe));
+    cachedDrivers.set(workspaceId, summaries);
+    const defaults = await options.agentDefaultsFor?.(workspaceId);
+    selectDriver(workspaceId, summaries, defaults?.defaultDriverId ?? null);
+    return summaries;
   }
 
   function panelSnapshot(workspaceId: string): AgentPanelSnapshot {
     return {
       drivers:
-        cachedDrivers ??
-        options.registry.list().map((driver) => ({
+        cachedDrivers.get(workspaceId) ??
+        registryFor(workspaceId).list().map((driver) => ({
           id: driver.id,
           displayName: driver.displayName,
           installed: false,
@@ -229,6 +291,7 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
           models: [],
         })),
       session: snapshot(sessions.get(workspaceId) ?? null),
+      selectedDriverId: selectedDrivers.get(workspaceId) ?? null,
     };
   }
 
@@ -312,6 +375,10 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
     if (event.kind === "auth") {
       const notice = typeof event.detail === "string" ? event.detail : event.event;
       state.authNotices = [...state.authNotices, bounded(notice, 300) ?? event.event].slice(-5);
+      // A login that expires part-way through a run ends the run. Recording
+      // it here is what lets the surface say so, instead of reporting the
+      // silence that follows as an ordinary failure.
+      if (event.event === "login-required") state.loginRequired = true;
       return;
     }
     if (event.kind === "error") {
@@ -348,7 +415,7 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
   }): Promise<AgentPanelSnapshot> {
     const root = options.rootFor(input.workspaceId);
     if (!root) throw new Error(`Unknown workspace: ${input.workspaceId}`);
-    const driver = options.registry.get(input.driverId);
+    const driver = registryFor(input.workspaceId).get(input.driverId);
     if (!driver) throw new Error(`Unknown agent driver: ${input.driverId}`);
     // Reject a concurrent start for the same workspace (checked + claimed
     // synchronously, before the first await, so the race window is closed).
@@ -380,12 +447,17 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
       items: [],
       pendingPermissions: [],
       authNotices: [],
+      loginRequired: false,
       session: null,
       ended: false,
     };
     sessions.set(input.workspaceId, state);
     try {
       const mcp = await options.mcpFor(root);
+      // The workspace's own default model, for a caller that names none.
+      const model = input.model ??
+        (await options.agentDefaultsFor?.(input.workspaceId))?.defaultModel ??
+        undefined;
       // A stop can end or remove this provisional state while MCP setup waits.
       if (state.ended || sessions.get(input.workspaceId) !== state) {
         return panelSnapshot(input.workspaceId);
@@ -393,7 +465,7 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
       const session = await driver.startSession({
         workspaceRoot: root,
         mode: "approval-required",
-        model: input.model,
+        model,
         mcp,
         onEvent: (event) => applyEvent(input.workspaceId, state, event),
       });

@@ -125,76 +125,6 @@ async function runAcpPrompt(id, params) {
   respond(id, { stopReason: "end_turn" });
 }
 
-async function runCodexTurn(params) {
-  notify("account/rateLimits/updated", { accountId: "fake" });
-  try {
-    await request("account/chatgptAuthTokens/refresh", { reason: "unauthorized" });
-  } catch {
-    // dohc should reject this request with method-not-found in managed CLI mode.
-  }
-  try {
-    await request("item/tool/requestUserInput", {
-      threadId: params.threadId,
-      turnId: "fake-turn",
-      questions: [
-        {
-          id: "next-step",
-          header: "Question",
-          question: "What should the fake provider do next?",
-          options: [{ id: "continue", label: "Continue" }],
-        },
-      ],
-    });
-  } catch {
-    // Unsupported user-input prompts must be rejected, not silently answered.
-  }
-  notify("item/agentMessage/delta", {
-    threadId: params.threadId,
-    itemId: "assistant-1",
-    delta: "Codex fake is preparing a file.\n",
-  });
-  notify("item/started", {
-    threadId: params.threadId,
-    item: {
-      id: "cmd-1",
-      type: "command",
-      title: "Write notes/codex-output.md",
-      status: "in_progress",
-    },
-  });
-  const approval = await request("item/commandExecution/requestApproval", {
-    threadId: params.threadId,
-    turnId: "fake-turn",
-    itemId: "cmd-1",
-    approvalId: "fake-codex-approval",
-    command: "write notes/codex-output.md",
-    reason: "The fake Codex harness needs to create the requested note.",
-  });
-  if (approval?.decision === "accept" || approval?.decision === "acceptForSession") {
-    await writeWorkspaceFile(
-      "notes/codex-output.md",
-      "# Codex output\n\nFake Codex wrote this through the agent harness.\n",
-    );
-  }
-  notify("item/completed", {
-    threadId: params.threadId,
-    item: {
-      id: "cmd-1",
-      type: "command",
-      title: "Write notes/codex-output.md",
-      status: "completed",
-    },
-  });
-  notify("thread/tokenUsage/updated", {
-    threadId: params.threadId,
-    usage: { total: { inputTokens: 11, outputTokens: 7, totalTokens: 18 } },
-  });
-  notify("turn/completed", {
-    threadId: params.threadId,
-    turn: { id: "fake-turn", status: "completed" },
-  });
-}
-
 input.on("line", (line) => {
   void (async () => {
     let message;
@@ -245,52 +175,7 @@ input.on("line", (line) => {
       else if (hasMessageId(message)) respond(message.id, {});
       return;
     }
-    if (message.method === "initialize") {
-      respond(message.id, { userAgent: "fake-codex/1.0.0" });
-    } else if (message.method === "thread/start") {
-      if (protocolMode === "codex-fail-thread") {
-        respondError(message.id, "fake Codex thread failed");
-        return;
-      }
-      if (
-        requireMcpEnv &&
-        message.params?.config?.mcp_servers?.dohc?.env?.DOHC_MCP_CLOUD_USER_ID !== "user-1"
-      ) {
-        respondError(message.id, "missing MCP env");
-        return;
-      }
-      if (
-        message.params?.approvalPolicy !== "untrusted" ||
-        message.params?.sandbox !== "read-only"
-      ) {
-        respondError(message.id, "unsafe fake Codex thread policy");
-        return;
-      }
-      notify("thread/started", { thread: { id: "fake-codex-thread" } });
-      respond(message.id, { thread: { id: "fake-codex-thread" } });
-    } else if (message.method === "turn/start") {
-      if (
-        message.params?.threadId !== "fake-codex-thread" ||
-        message.params?.approvalPolicy !== "untrusted" ||
-        message.params?.sandboxPolicy?.type !== "readOnly"
-      ) {
-        respondError(message.id, "unsafe fake Codex turn policy");
-        return;
-      }
-      respond(message.id, { turn: { id: "fake-turn" } });
-      await runCodexTurn(message.params);
-    } else if (message.method === "turn/interrupt") {
-      if (
-        message.params?.threadId !== "fake-codex-thread" ||
-        message.params?.turnId !== "fake-turn"
-      ) {
-        respondError(message.id, "invalid fake Codex interrupt");
-        return;
-      }
-      respond(message.id, {});
-    } else if (hasMessageId(message)) {
-      respond(message.id, {});
-    }
+    if (hasMessageId(message)) respond(message.id, {});
   })().catch((error) => {
     if (typeof error === "object" && error && "message" in error) {
       console.error(error.message);
