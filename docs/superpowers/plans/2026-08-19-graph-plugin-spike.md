@@ -286,7 +286,7 @@ wrong-shaped.
 
 | # | Graph capability | Status | Detail |
 | --- | --- | --- | --- |
-| 1 | Enumerate workspace files | HAS | `files.list`, 10,000-entry cap (`workspaceSdkHost.ts:54`), well above `MAX_GRAPH_FILES` of 2,000. |
+| 1 | Enumerate workspace files | HAS at or below 10,000; LACKS above | `files.list` stops after the first 10,000 listed entries (`workspaceSdkHost.ts:54,133-151`). The core loader classifies the complete listing, then selects the first 2,000 tracked graph paths (`workspaceGraph.ts:859-875`). Above the SDK cap, a fallback can miss tracked files that the built-in includes and cannot reproduce `omittedFileCount`. G1 is mandatory there unless the fallback gains pagination or server-side filtering with the same selection rules. |
 | 2 | Read every markdown body | AWKWARD | `files.read` is one call per file. The route uses only `path`, so a raw request cannot ask for the graph's 512 KiB prefix (`workspaceSdkHost.ts:271-276`). `readWorkspaceText` returns up to 2 MiB (`workspaceTextLimits.ts:1`, `workspaceAssets.ts:416-435`). With files at least that large, a faithful sequential port transfers 65 × 2 MiB, about 130 MiB, before the 65th 512 KiB graph slice crosses the graph's 32 MiB total (`workspaceGraph.ts:65-69`). That makes G1 more valuable, not less. A full graph is still up to 2,000 round trips. No batch read exists, and the panel's default request timeout is 10 s per call (`packages/sdk/src/index.ts:428`). **No round-trip cost has ever been measured** — no benchmark, no budget entry, no timing in `PluginPanelPage.tsx` or `pluginSdkHost.ts`. AGENTS.md says to measure before setting a limit that rejects healthy work; this fan-out is the same question in reverse and is unmeasured. |
 | 3 | Link extraction and resolution | AWKWARD | The logic is TypeScript, but `workspaceGraph.ts` imports `posix` from `node:path` and calls `extname`, `basename`, `normalize`, `join`, and `dirname` (`workspaceGraph.ts:1,111-125,377-482`). An unbundled browser panel cannot copy it unchanged. The fallback needs a browser-path port or a build step. Either choice still forks the resolver backlinks uses, so an edge and a backlink can drift apart — the exact property `:914-917` exists to hold. |
 | 4 | Node titles | HAS | Needs each file's first H1 (`:120-127`), which comes with row 2's reads. |
@@ -310,7 +310,7 @@ wrong-shaped.
 
 | Primitive | Closes | Size | Why this size |
 | --- | --- | --- | --- |
-| **G1. `workspace.links`** — an SDK capability returning the full bounded files-only `WorkspaceGraph`: `nodes`, `edges`, `unresolvedLinks`, `scannedFileCount`, `omittedFileCount`, and `truncatedFileCount` (`workspaceGraph.ts:28-35`; `bridgeContract.ts:674-684`) | 2, 3, 5 | **S** | `readWorkspaceGraph` is written and bounded (`workspaceGraph.ts:904-912`). The plumbing spans a `workspaceSdkHost.ts` case, an explicit `pluginSdkHost.ts` forwarding case because its default rejects unknown methods (`pluginSdkHost.ts:184-203,323-344`), capability and SDK exposure, and host/SDK tests. It stays S by the sites spike's P1 SDK-parity precedent, which routed `databases.*` and `ui.open` through the same layers (`2026-08-17-sites-plugin-spike.md:254-256`). G1 saves the per-file bridge calls, keeps one link resolver, and applies the core loader's secret floor. The panel must receive `unresolvedLinks`, `omittedFileCount`, and `truncatedFileCount` unchanged so it can keep the built-in incompleteness notices (`GraphView.tsx:427-438`). G1 must also revise the request deadline for `workspace.links`. The panel transport defaults to 10 seconds and accepts a per-call `timeoutMs` override (`packages/sdk/src/index.ts:69-72,428,499`), while the current graph IPC call has no deadline (`preload.ts:134-135`). One call can read up to 2,000 files sequentially (`workspaceGraph.ts:65-69,853-912`), so the default can reject a healthy workspace on slow storage. Measure the whole derivation on representative workspaces before setting either an evidence-based transport deadline or a per-call override. |
+| **G1. `workspace.links`** — an SDK capability returning the full bounded files-only `WorkspaceGraph`: `nodes`, `edges`, `unresolvedLinks`, `scannedFileCount`, `omittedFileCount`, and `truncatedFileCount` (`workspaceGraph.ts:28-35`; `bridgeContract.ts:674-684`) | 1, 2, 3, 5 | **S** | `readWorkspaceGraph` is written and bounded (`workspaceGraph.ts:904-912`). The plumbing spans a `workspaceSdkHost.ts` case, an explicit `pluginSdkHost.ts` forwarding case because its default rejects unknown methods (`pluginSdkHost.ts:184-203,323-344`), capability and SDK exposure, and host/SDK tests. It stays S by the sites spike's P1 SDK-parity precedent, which routed `databases.*` and `ui.open` through the same layers (`2026-08-17-sites-plugin-spike.md:254-256`). G1 preserves the core loader's full-list classification above the 10,000-entry SDK cap, saves the per-file bridge calls, keeps one link resolver, and applies the secret floor. The panel must receive `unresolvedLinks`, `omittedFileCount`, and `truncatedFileCount` unchanged so it can keep the built-in incompleteness notices (`GraphView.tsx:427-438`). G1 must also revise the request deadline for `workspace.links`. The panel transport defaults to 10 seconds and accepts a per-call `timeoutMs` override (`packages/sdk/src/index.ts:69-72,428,499`), while the current graph IPC call has no deadline (`preload.ts:134-135`). One call can read up to 2,000 files sequentially (`workspaceGraph.ts:65-69,853-912`), so the default can reject a healthy workspace on slow storage. Measure the whole derivation on representative workspaces before setting either an evidence-based transport deadline or a per-call override. |
 | **G2. Active-document push** — the renderer sends the active workspace path to every mounted graph panel | 12 | **S** | Same channel and shape as the theme push (`PluginPanelPage.tsx:231-234`); the renderer already passes `activeDocumentPath` to the rail (`DesktopWorkspaceShell.tsx:5222`). Since the [#842](https://github.com/dohc-ai/dohc/issues/842) fix (PR #844), both built-in mounts receive `activeDocumentPath`, so G2 pushes to every mounted graph panel the plugin keeps — a rail-only push would reintroduce #842 in the editor panel. Needs the workspace/generation guard the panel's SDK responses already carry. |
 | **G3. Panel subscriptions** — a guarded relay from the workspace event feed to the panel that asked | 10, 11 | **M** | Named by the sites build as the next primitive (`2026-08-17-sites-plugin-spike.md:406-410`) and by issue #838. The feed exists and caps each plugin spawn at 16 open subscriptions (`plugins/pluginWorkspaceEvents.ts:5-14,88-95`), and the push direction exists; new work is per-panel subscriptions under the same guards, and a decision on whether a settled moment is visible at all. One settled batch emits one subscription event per changed path (`pluginWorkspaceEvents.ts:150-170`). A checkout can therefore deliver hundreds of callbacks, and each immediate `workspace.links` refresh can reread up to 2,000 files (`workspaceGraph.ts:65-69,853-912`). Before G3 can count as preserved push refresh, the graph panel must debounce the event burst into one scan or keep one scan in flight and set a dirty flag for one follow-up scan. The Sites panel is the precedent: issue #838's implementation clears and rearms a 300 ms timer before `load()` (`apps/desktop/plugins/sites/ui/index.js`, panel-watch commit `5aa04300`). |
 | **G4. `ui.openPanel`** — a panel asks dohc to open another of its own panels as a tab | 7b | **S** | The same shape as `ui.openWebApp` (`pluginSdkHost.ts:246-280`): the plugin id comes from the grant, never the request, and the renderer performs the open. The tab path already exists (`workbenchState.ts:78`) and is already a singleton. Without it, graph loses its maximize button. |
@@ -322,6 +322,11 @@ every graph-shaped plugin a user's agent writes would otherwise re-read the
 whole workspace. Two facts push back: it is a richer contract to keep stable,
 and the sites rule was "convert the surfaces, keep the authority" — link
 derivation is neither surface nor authority, so the rule does not decide it.
+
+That argument has a hard boundary. A no-G1 fallback can match the built-in only
+while the requested listing has at most 10,000 entries. Above that cap, G1 is
+mandatory unless `files.list` gains pagination or server-side filtering that
+preserves the core loader's classify-then-select order and omission counts.
 
 G1 does not expand the panel's raw-file read authority. It is safer than the
 no-G1 fallback. The panel can already list and read `.env.local.md`, because
@@ -390,8 +395,17 @@ a panel origin they fall through to system families
 | `channels.ts:649` + `preload.ts:134-135` | 3 |
 | `workbenchState.ts:13,73,151-153,296` — `VIEW_IDS` entry, `GRAPH_TAB_PATH`, `isGraphTabPath`, and the `isVirtualTabPath` registration that keeps a persisted `dohc://graph` tab alive | ~7 |
 | `ActivityBar.tsx:24,32` — rail icon and label, both entries in `Record<ViewId, …>` maps | 2 |
+| `renderer/workbench/EditorTabs.tsx:4-52` — `isGraphTabPath` import plus the `fileName` and `tabTitle` branches that label `dohc://graph` | 3 |
+| `renderer/workbench/Explorer.tsx:40-186` — `isGraphTabPath` import plus the `editorTitle` branch that labels the open editor | 2 |
 | `DesktopWorkspaceShell.tsx` — `graphChatOpenTarget` `:531-574`, lazy import `:679-681`, `graphRefreshKey` `:1811-1818`, `openGraphTab` `:3141-3143`, `openGraphChatThread` `:3298-3316`, `graphKey` `:4799-4801`, maximize button `:5195-5205`, two mounts `:5218-5229,5400-5411` | ~115 |
 | `workspaces/chatMentionGraphOverlay.ts` + test | 322 + 288 |
+
+**Updated for the Rust rewrite**
+
+| Record | Conversion update |
+| --- | --- |
+| `docs/superpowers/plans/rust-engine/BEHAVIOR_DELTA.md:300-320,327-339` | Remove `chatMentionGraphOverlay.ts` from the stay-in-TS cutover table and `chatMentionGraphOverlay.test.ts` from the TS-native oracle baseline. |
+| `docs/superpowers/plans/rust-engine/BEHAVIOR_INVENTORY.tsv:207` | Remove `chatMentionGraphOverlay.ts` from the `chats-list-file-mentions` caller field. |
 
 About 2,180 lines are deleted or moved in total. The chat overlay goes with the
 graph handler, its only production importer (`main.ts:694,4759`), and its test
@@ -477,7 +491,9 @@ A `graph` plugin on today's SDK plus G1–G4:
   `classifyEngineFilePathForRead` or it leaks markdown-named secrets. The
   extractor and resolver also import `node:path`; an unbundled panel needs a
   browser-path port or a build step. Both copies carry the drift cost in rows 3
-  and 5.
+  and 5. This fallback is complete only while the requested listing has at most
+  10,000 entries. Above that cap it also needs pagination or server-side
+  filtering with the core loader's selection rules.
 
 **What the recommended G1-G4 design still loses or changes:**
 
@@ -518,6 +534,12 @@ A `graph` plugin on today's SDK plus G1–G4:
   host's panel-title and plugin-id header (`PluginPanelPage.tsx:249-260`) above
   Graph's own count-and-refresh header. The map loses 40 px of height. Removing
   the band needs the S panel-layout change in row 7c; G1-G4 do not cover it.
+- **Graph moves down the activity rail.** The built-in sits between Search and
+  History in `VIEW_IDS` (`workbenchState.ts:10-16`). `ActivityBar` renders every
+  built-in before `pluginViews`, so the converted Graph appears after Plugins
+  and may also follow other plugin views (`ActivityBar.tsx:123-125,138-169`).
+  This plan accepts the visible navigation change. Keeping the current position
+  would need a separate ordering contribution.
 - **The native editor context menu is gone.** Right-clicks on the built-in page
   graph bubble to the editor wrapper and call `showWorkbenchMenu("editor", ...)`
   (`DesktopWorkspaceShell.tsx:5384-5390`). Events inside the panel iframe do not
@@ -536,6 +558,10 @@ A `graph` plugin on today's SDK plus G1–G4:
 - **Link resolution forks.** Two copies of a four-map path index and a code
   stripper, one serving backlinks and one serving graph, can disagree. The
   property at `workspaceGraph.ts:914-917` exists to prevent this.
+- **Enumeration becomes incomplete above 10,000 entries.** `files.list` stops
+  before graph eligibility is known. The fallback can miss tracked paths the
+  built-in selects and cannot report the same omission count unless the SDK
+  gains pagination or server-side filtering.
 - **Data cost rises to 2,000 round trips.** Each SDK read can return 2 MiB while
   Graph counts only a 512 KiB prefix. A faithful sequential port can transfer
   about 130 MiB before crossing Graph's 32 MiB accounting
@@ -559,11 +585,18 @@ add an S host layout change. Use separate entry wrappers, or add the optional
 G5 (S) panel identity context.** Ice's roadmap assumption survives, but its
 three supporting claims do not:
 
+For a workspace whose requested listing exceeds 10,000 entries, G1 is
+mandatory unless the fallback first gains pagination or server-side filtering
+with the core loader's selection rules. Below that boundary, G1 remains the
+recommended way to keep one resolver and the built-in omission counts.
+
 1. **The engine does not index links.** Graph is not a thin view over indexed
    data; it is a 924-line derivation over a full workspace read, and that
    derivation has a second consumer. Any plan that assumed a plugin could just
    ask for the links must now choose: expose the derivation (G1), or let every
-   graph plugin re-read the workspace and fork the resolver.
+   graph plugin re-read the workspace and fork the resolver. The fallback is
+   not complete above 10,000 listed entries without pagination or equivalent
+   server-side filtering.
 2. **Graph is not the purest app of the four.** Its contract is over half chat:
    two of three node kinds and three of five edge kinds come from the chat
    store through the engine capture. The files-only graph converts cleanly.
@@ -578,13 +611,15 @@ here is S except one.
 
 - **Recommended G1-G4 design:** Graph loses the chat-mentions mode, exact
   typography, the native editor context menu, and availability in every
-  non-writable shared view. The editor tab gains a 40 px host title band unless
-  an S panel-layout change removes it. The L port's panel stylesheet preserves
-  keyboard-focus visibility, hover feedback, and entrance animations, and
-  copies the attribute-based reduced-motion reset. Moment-level refresh parity
-  still needs measurement. G3 keeps push refresh only after the panel
-  coalesces its per-path events. G4 keeps the maximize gesture. Separate entry
-  wrappers distinguish the two layouts; sharing one entry instead adds G5 (S).
+  non-writable shared view. Graph moves from between Search and History to after
+  Plugins and may follow other contributed views. The editor tab gains a 40 px
+  host title band unless an S panel-layout change removes it. The L port's panel
+  stylesheet preserves keyboard-focus visibility, hover feedback, and entrance
+  animations, and copies the attribute-based reduced-motion reset. Moment-level
+  refresh parity still needs measurement. G3 keeps push refresh only after the
+  panel coalesces its per-path events. G4 keeps the maximize gesture. Separate
+  entry wrappers distinguish the two layouts; sharing one entry instead adds
+  G5 (S).
 - **Today's SDK baseline:** Graph loses those features or changes plus push
   refresh and the maximize gesture because panels lack subscriptions and a way
   to open another panel.
