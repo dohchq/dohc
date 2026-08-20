@@ -7477,6 +7477,36 @@ describe("file tree drag preview", () => {
 });
 
 describe("graph view", () => {
+  it("highlights the focused document in a full graph from another editor group", async () => {
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-graph"));
+    await user.click(await screen.findByTestId("graph-open-tab"));
+    await user.click(screen.getByTestId("tab-b.md"));
+
+    const pageGraph = (await screen.findAllByTestId("graph-view")).find(
+      (view) => view.dataset.variant === "page",
+    )!;
+    const graphNodes = await within(pageGraph).findAllByTestId("graph-node");
+    expect(
+      graphNodes.find((node) => node.dataset.path === "b.md")?.dataset.active,
+    ).toBe("true");
+    expect(
+      graphNodes.find((node) => node.dataset.path === "a.md")?.dataset.active,
+    ).toBe("false");
+  });
+
   it("opens as a side panel first, then opens the full graph in an editor tab", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
