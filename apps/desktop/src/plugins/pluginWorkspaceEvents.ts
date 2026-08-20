@@ -3,15 +3,17 @@ import { randomUUID } from "node:crypto";
 import { isAtOrBelow, sdkWorkspacePath } from "../workspaces/workspaceSdkHost";
 
 /**
- * How many workspace file subscriptions one plugin spawn may hold.
+ * How many workspace file subscriptions one owner may hold.
  *
  * Measured against the plugins this repo has: the codex and claude-code
  * drivers watch nothing, and the sites conversion this primitive exists for
  * watches one prefix — the workspace root — in place of its refresh button.
- * 16 leaves sixteen times the largest measured healthy use. A plugin that
- * needs more is a measurement to redo, not a number to guess at.
+ * 16 leaves more than five times the largest measured healthy use of three.
+ * A plugin process and each panel have separate budgets of 16, so neither
+ * owner can starve another. An owner that needs more is a measurement to
+ * redo, not a number to guess at.
  */
-export const MAX_PLUGIN_FILE_WATCHES_PER_SPAWN = 16;
+export const MAX_PLUGIN_FILE_WATCHES_PER_OWNER = 16;
 
 export const PLUGIN_FILE_WATCH_METHOD = "files.watch";
 
@@ -25,20 +27,37 @@ export interface PluginFileWatchEvent {
   sha256?: string;
 }
 
+export type PluginWorkspaceEventsOwner =
+  | { kind: "process"; pluginId: string; spawnId: string }
+  | {
+      kind: "panel";
+      workspaceId: string;
+      pluginId: string;
+      panelId: string;
+    };
+
 export interface PluginWorkspaceEventsContext {
-  pluginId: string;
-  /** The spawn making the request. Subscriptions belong to a spawn, not to a
-   * plugin: a crashed plugin's respawn starts with none. */
-  spawnId: string;
+  owner: PluginWorkspaceEventsOwner;
   emitEvent: (subscriptionId: string, event: string, data: unknown) => void;
 }
 
 interface WatchRecord {
-  pluginId: string;
-  spawnId: string;
+  owner: PluginWorkspaceEventsOwner;
   /** "." for the whole workspace, otherwise a contained workspace path. */
   prefix: string;
   emitEvent: PluginWorkspaceEventsContext["emitEvent"];
+}
+
+function ownerKey(owner: PluginWorkspaceEventsOwner): string {
+  return owner.kind === "process"
+    ? `${owner.kind}\0${owner.pluginId}\0${owner.spawnId}`
+    : `${owner.kind}\0${owner.workspaceId}\0${owner.pluginId}\0${owner.panelId}`;
+}
+
+function ownerLabel(owner: PluginWorkspaceEventsOwner): string {
+  return owner.kind === "process"
+    ? `Plugin "${owner.pluginId}" spawn "${owner.spawnId}"`
+    : `Plugin "${owner.pluginId}" panel "${owner.panelId}"`;
 }
 
 function watchPrefix(value: unknown): string {
@@ -59,20 +78,8 @@ function watchPrefix(value: unknown): string {
  * and never dohc's own metadata writes, which the watcher drops before a
  * batch exists.
  *
- * Delivery is unbuffered on purpose, matching the child-process broker: an
- * event goes to the spawn's transport as it settles and is never held here.
- * The real buffer is the spawn's MessagePort queue, which has no high water
- * mark — while a plugin's event loop is blocked, undelivered events pile up
- * on the main side until it drains or exits. @dohc/sdk's 200-event cap does
- * not bound that: it lives in the child and bounds a listener that attaches
- * late or reads slowly while the loop still turns.
- *
- * That is the SDK event transport's property, not this feed's — child process
- * output and driver events ride the same path — and it is smaller here,
- * because the quiet window collapses a burst into one event per path. A
- * plugin that blocks its own host's loop grows the main process's memory and
- * nothing else: plugins run at full trust, so this is self-harm, not a
- * privilege or isolation boundary.
+ * Delivery is unbuffered: an event goes to the owner's transport as it
+ * settles and is never held here. Each transport owns its own buffering.
  */
 export class PluginWorkspaceEvents {
   private readonly subscriptions = new Map<string, WatchRecord>();
@@ -85,20 +92,19 @@ export class PluginWorkspaceEvents {
       throw new Error(`${PLUGIN_FILE_WATCH_METHOD} parameters must be an object.`);
     }
     const prefix = watchPrefix((params as { path?: unknown }).path);
-    const open = this.countForSpawn(context.pluginId, context.spawnId);
-    if (open >= MAX_PLUGIN_FILE_WATCHES_PER_SPAWN) {
+    const open = this.countForOwner(context.owner);
+    if (open >= MAX_PLUGIN_FILE_WATCHES_PER_OWNER) {
       throw new Error(
-        `Plugin "${context.pluginId}" already holds ${open} workspace file ` +
-          `subscriptions. dohc allows at most ` +
-          `${MAX_PLUGIN_FILE_WATCHES_PER_SPAWN} open ${PLUGIN_FILE_WATCH_METHOD} ` +
-          "subscriptions per plugin spawn. Unsubscribe one before watching " +
+        `${ownerLabel(context.owner)} already holds ${open} workspace file ` +
+          "subscriptions. MAX_PLUGIN_FILE_WATCHES_PER_OWNER allows at most " +
+          `${MAX_PLUGIN_FILE_WATCHES_PER_OWNER} open ${PLUGIN_FILE_WATCH_METHOD} ` +
+          "subscriptions per owner. Unsubscribe one before watching " +
           "another, or watch a shared parent prefix instead.",
       );
     }
     const subscriptionId = randomUUID();
     this.subscriptions.set(subscriptionId, {
-      pluginId: context.pluginId,
-      spawnId: context.spawnId,
+      owner: context.owner,
       prefix,
       emitEvent: context.emitEvent,
     });
@@ -112,7 +118,7 @@ export class PluginWorkspaceEvents {
    * failing here.
    */
   unsubscribe(
-    context: Pick<PluginWorkspaceEventsContext, "pluginId" | "spawnId">,
+    context: Pick<PluginWorkspaceEventsContext, "owner">,
     params: unknown,
   ): boolean {
     if (!params || typeof params !== "object" || Array.isArray(params)) return false;
@@ -120,25 +126,29 @@ export class PluginWorkspaceEvents {
     if (typeof subscriptionId !== "string" || subscriptionId.length === 0) return false;
     const subscription = this.subscriptions.get(subscriptionId);
     if (!subscription) return false;
-    if (
-      subscription.pluginId !== context.pluginId ||
-      subscription.spawnId !== context.spawnId
-    ) {
+    if (ownerKey(subscription.owner) !== ownerKey(context.owner)) {
       throw new Error(
-        `Plugin "${context.pluginId}" cannot control subscription "${subscriptionId}" because another plugin spawn owns it.`,
+        `${ownerLabel(context.owner)} cannot control subscription ` +
+          `"${subscriptionId}" because another owner owns it.`,
       );
     }
     this.subscriptions.delete(subscriptionId);
     return true;
   }
 
-  /** Drops every subscription one spawn holds. Called when the spawn ends. */
-  disposeSpawn(pluginId: string, spawnId: string): void {
+  /** Drops every subscription the exact owner holds. */
+  disposeOwner(owner: PluginWorkspaceEventsOwner): void {
+    const key = ownerKey(owner);
     for (const [subscriptionId, subscription] of this.subscriptions) {
-      if (subscription.pluginId === pluginId && subscription.spawnId === spawnId) {
+      if (ownerKey(subscription.owner) === key) {
         this.subscriptions.delete(subscriptionId);
       }
     }
+  }
+
+  /** Drops every subscription one spawn holds. Called when the spawn ends. */
+  disposeSpawn(pluginId: string, spawnId: string): void {
+    this.disposeOwner({ kind: "process", pluginId, spawnId });
   }
 
   /** Drops every subscription in this workspace. Called when it closes. */
@@ -170,12 +180,11 @@ export class PluginWorkspaceEvents {
     }
   }
 
-  private countForSpawn(pluginId: string, spawnId: string): number {
+  private countForOwner(owner: PluginWorkspaceEventsOwner): number {
     let count = 0;
+    const key = ownerKey(owner);
     for (const subscription of this.subscriptions.values()) {
-      if (subscription.pluginId === pluginId && subscription.spawnId === spawnId) {
-        count += 1;
-      }
+      if (ownerKey(subscription.owner) === key) count += 1;
     }
     return count;
   }

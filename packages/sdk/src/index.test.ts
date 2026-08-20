@@ -886,6 +886,453 @@ describe("@dohc/sdk", () => {
     expect(harness.listeners.size).toBe(0);
   });
 
+  it("delivers subscription events that arrive before the subscribe response", async () => {
+    const harness = createWindowHarness();
+    const transport = createPostMessageTransport({
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      timeoutMs: 1000,
+    });
+    const events: unknown[] = [];
+    const pendingSubscription = transport.subscribe!(
+      "files.watch",
+      { path: "notes" },
+      (event) => events.push(event),
+    );
+    const subscribeRequest = harness.messages[0] as { id: string };
+
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      type: "event",
+      subscriptionId: "sub_race",
+      event: "changed",
+      data: { path: "notes/early.md" },
+    });
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: subscribeRequest.id,
+      ok: true,
+      result: { subscriptionId: "sub_race" },
+    });
+    const unsubscribe = await pendingSubscription;
+
+    expect(events).toEqual([{
+      event: "changed",
+      data: { path: "notes/early.md" },
+    }]);
+
+    const pendingUnsubscribe = unsubscribe();
+    const unsubscribeRequest = harness.messages.at(-1) as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: unsubscribeRequest.id,
+      ok: true,
+      result: { ok: true },
+    });
+    await pendingUnsubscribe;
+  });
+
+  it("delivers exactly 200 early subscription events in order", async () => {
+    const harness = createWindowHarness();
+    const transport = createPostMessageTransport({
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      timeoutMs: 1000,
+    });
+    const events: number[] = [];
+    const pendingSubscription = transport.subscribe!(
+      "files.watch",
+      { path: "notes" },
+      (event) => events.push(event.data as number),
+    );
+    const subscribeRequest = harness.messages[0] as { id: string };
+
+    for (let index = 0; index < 200; index += 1) {
+      harness.dispatch({
+        protocol: DOHC_SDK_PROTOCOL,
+        type: "event",
+        subscriptionId: "sub_boundary",
+        event: "changed",
+        data: index,
+      });
+    }
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: subscribeRequest.id,
+      ok: true,
+      result: { subscriptionId: "sub_boundary" },
+    });
+    const unsubscribe = await pendingSubscription;
+
+    expect(events).toEqual(Array.from({ length: 200 }, (_, index) => index));
+
+    const pendingUnsubscribe = unsubscribe();
+    const unsubscribeRequest = harness.messages.at(-1) as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: unsubscribeRequest.id,
+      ok: true,
+      result: { ok: true },
+    });
+    await pendingUnsubscribe;
+  });
+
+  it("rejects and closes a subscription when its early-event buffer exceeds 200 events", async () => {
+    const harness = createWindowHarness();
+    const transport = createPostMessageTransport({
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      timeoutMs: 1000,
+    });
+    const listener = vi.fn();
+    const pendingSubscription = transport.subscribe!(
+      "files.watch",
+      { path: "notes" },
+      listener,
+    );
+    const subscribeRequest = harness.messages[0] as { id: string };
+
+    for (let index = 0; index < 201; index += 1) {
+      harness.dispatch({
+        protocol: DOHC_SDK_PROTOCOL,
+        type: "event",
+        subscriptionId: "sub_overflow",
+        event: "changed",
+        data: index,
+      });
+    }
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: subscribeRequest.id,
+      ok: true,
+      result: { subscriptionId: "sub_overflow" },
+    });
+
+    await expect(pendingSubscription).rejects.toMatchObject({
+      name: "DohcSdkError",
+      code: DohcSdkErrorCodes.earlyEventBufferOverflow,
+      message: expect.stringMatching(/200 events per subscription/),
+    });
+    expect(listener).not.toHaveBeenCalled();
+    const unsubscribeRequest = harness.messages.at(-1) as {
+      id: string;
+      method: string;
+      params: unknown;
+    };
+    expect(unsubscribeRequest).toMatchObject({
+      method: "subscriptions.unsubscribe",
+      params: { subscriptionId: "sub_overflow" },
+    });
+
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      type: "event",
+      subscriptionId: "sub_overflow",
+      event: "changed",
+      data: 202,
+    });
+    expect(listener).not.toHaveBeenCalled();
+
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: unsubscribeRequest.id,
+      ok: true,
+      result: { ok: true },
+    });
+    expect(harness.listeners.size).toBe(0);
+  });
+
+  it("closes a subscription when its listener throws during early-event replay", async () => {
+    const harness = createWindowHarness();
+    const transport = createPostMessageTransport({
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      timeoutMs: 1000,
+    });
+    const listenerError = new Error("listener rejected the replay");
+    const listener = vi.fn(() => {
+      throw listenerError;
+    });
+    const pendingSubscription = transport.subscribe!(
+      "files.watch",
+      { path: "notes" },
+      listener,
+    );
+    const subscribeRequest = harness.messages[0] as { id: string };
+
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      type: "event",
+      subscriptionId: "sub_throw",
+      event: "changed",
+      data: { path: "notes/early.md" },
+    });
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: subscribeRequest.id,
+      ok: true,
+      result: { subscriptionId: "sub_throw" },
+    });
+
+    await expect(pendingSubscription).rejects.toBe(listenerError);
+    expect(listener).toHaveBeenCalledOnce();
+    const unsubscribeRequest = harness.messages.at(-1) as {
+      id: string;
+      method: string;
+      params: unknown;
+    };
+    expect(unsubscribeRequest).toMatchObject({
+      method: "subscriptions.unsubscribe",
+      params: { subscriptionId: "sub_throw" },
+    });
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: unsubscribeRequest.id,
+      ok: true,
+      result: { ok: true },
+    });
+
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      type: "event",
+      subscriptionId: "sub_throw",
+      event: "changed",
+      data: { path: "notes/late.md" },
+    });
+    expect(listener).toHaveBeenCalledOnce();
+
+    const laterEvents: unknown[] = [];
+    const laterSubscription = transport.subscribe!(
+      "files.watch",
+      { path: "notes" },
+      (event) => laterEvents.push(event),
+    );
+    const laterRequest = harness.messages.at(-1) as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: laterRequest.id,
+      ok: true,
+      result: { subscriptionId: "sub_throw" },
+    });
+    const laterUnsubscribe = await laterSubscription;
+    expect(laterEvents).toEqual([]);
+
+    const pendingLaterUnsubscribe = laterUnsubscribe();
+    const laterUnsubscribeRequest = harness.messages.at(-1) as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: laterUnsubscribeRequest.id,
+      ok: true,
+      result: { ok: true },
+    });
+    await pendingLaterUnsubscribe;
+  });
+
+  it("does not replay an orphaned subscription event once nothing is retaining the listener", async () => {
+    const harness = createWindowHarness();
+    const transport = createPostMessageTransport({
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      timeoutMs: 1000,
+    });
+
+    // The host's event for "sub_orphan" arrives before this call's own
+    // subscribe request settles, then that request fails — so this call
+    // never learns "sub_orphan" and its early-arrived event is orphaned in
+    // the queue once this call releases.
+    const firstEvents: unknown[] = [];
+    const firstSubscription = transport.subscribe!(
+      "files.watch",
+      { path: "notes" },
+      (event) => firstEvents.push(event),
+    );
+    const firstRequest = harness.messages[0] as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      type: "event",
+      subscriptionId: "sub_orphan",
+      event: "changed",
+      data: { path: "notes/orphan.md" },
+    });
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: firstRequest.id,
+      ok: false,
+      error: { code: "TIMEOUT", message: "no answer" },
+    });
+    await expect(firstSubscription).rejects.toMatchObject({ code: "TIMEOUT" });
+
+    // A second, unrelated subscribe is assigned the same id. If the orphaned
+    // queue leaked past the point where nothing was retaining the listener,
+    // registering "sub_orphan" here would replay the stale event immediately.
+    const secondEvents: unknown[] = [];
+    const secondSubscription = transport.subscribe!(
+      "files.watch",
+      { path: "notes" },
+      (event) => secondEvents.push(event),
+    );
+    const secondRequest = harness.messages.at(-1) as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: secondRequest.id,
+      ok: true,
+      result: { subscriptionId: "sub_orphan" },
+    });
+    await secondSubscription;
+
+    expect(secondEvents).toEqual([]);
+  });
+
+  it("collects an orphaned queue while another subscription stays active", async () => {
+    const harness = createWindowHarness();
+    const transport = createPostMessageTransport({
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      timeoutMs: 1000,
+    });
+    const activeEvents: unknown[] = [];
+    const activeSubscription = transport.subscribe!(
+      "files.watch",
+      { path: "active" },
+      (event) => activeEvents.push(event),
+    );
+    const activeRequest = harness.messages[0] as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: activeRequest.id,
+      ok: true,
+      result: { subscriptionId: "sub_active" },
+    });
+    const unsubscribeActive = await activeSubscription;
+
+    const failedSubscription = transport.subscribe!(
+      "files.watch",
+      { path: "failed" },
+      () => undefined,
+    );
+    const failedRequest = harness.messages.at(-1) as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      type: "event",
+      subscriptionId: "sub_reused",
+      event: "changed",
+      data: { path: "failed/orphan.md" },
+    });
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: failedRequest.id,
+      ok: false,
+      error: { code: "TIMEOUT", message: "no answer" },
+    });
+    await expect(failedSubscription).rejects.toMatchObject({ code: "TIMEOUT" });
+
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      type: "event",
+      subscriptionId: "sub_active",
+      event: "changed",
+      data: { path: "active/still-watched.md" },
+    });
+    expect(activeEvents).toEqual([{
+      event: "changed",
+      data: { path: "active/still-watched.md" },
+    }]);
+
+    const reusedEvents: unknown[] = [];
+    const reusedSubscription = transport.subscribe!(
+      "files.watch",
+      { path: "reused" },
+      (event) => reusedEvents.push(event),
+    );
+    const reusedRequest = harness.messages.at(-1) as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: reusedRequest.id,
+      ok: true,
+      result: { subscriptionId: "sub_reused" },
+    });
+    const unsubscribeReused = await reusedSubscription;
+
+    expect(reusedEvents).toEqual([]);
+
+    const pendingActiveUnsubscribe = unsubscribeActive();
+    const activeUnsubscribeRequest = harness.messages.at(-1) as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: activeUnsubscribeRequest.id,
+      ok: true,
+      result: { ok: true },
+    });
+    await pendingActiveUnsubscribe;
+
+    const pendingReusedUnsubscribe = unsubscribeReused();
+    const reusedUnsubscribeRequest = harness.messages.at(-1) as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: reusedUnsubscribeRequest.id,
+      ok: true,
+      result: { ok: true },
+    });
+    await pendingReusedUnsubscribe;
+  });
+
+  it("delivers an early event and a following burst to one listener in order", async () => {
+    const harness = createWindowHarness();
+    const transport = createPostMessageTransport({
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      timeoutMs: 1000,
+    });
+    const events: unknown[] = [];
+    const pendingSubscription = transport.subscribe!(
+      "files.watch",
+      { path: "." },
+      (event) => events.push(event.data),
+    );
+    const subscribeRequest = harness.messages[0] as { id: string };
+
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      type: "event",
+      subscriptionId: "sub_refresh",
+      event: "changed",
+      data: { path: "early.md" },
+    });
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: subscribeRequest.id,
+      ok: true,
+      result: { subscriptionId: "sub_refresh" },
+    });
+    const unsubscribe = await pendingSubscription;
+
+    for (const path of ["one.md", "two.md"]) {
+      harness.dispatch({
+        protocol: DOHC_SDK_PROTOCOL,
+        type: "event",
+        subscriptionId: "sub_refresh",
+        event: "changed",
+        data: { path },
+      });
+    }
+
+    expect(events).toEqual([
+      { path: "early.md" },
+      { path: "one.md" },
+      { path: "two.md" },
+    ]);
+
+    const pendingUnsubscribe = unsubscribe();
+    const unsubscribeRequest = harness.messages.at(-1) as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: unsubscribeRequest.id,
+      ok: true,
+      result: { ok: true },
+    });
+    await pendingUnsubscribe;
+  });
+
   it("retries a failed remote unsubscribe while detaching locally only once", async () => {
     const harness = createWindowHarness();
     const transport = createPostMessageTransport({

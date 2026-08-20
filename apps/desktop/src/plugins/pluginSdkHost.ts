@@ -216,7 +216,7 @@ export async function invokePluginSdkHost(
           'files.watch is unavailable for this request path (requestPath "panel"). A subscription needs a channel to push events on, and only a plugin\'s own process has one.',
         );
       }
-      // A subscription outlives the call that opens it, so an ended spawn
+      // A subscription outlives the call that opens it, so an ended owner
       // must be refused here rather than left holding one until teardown.
       if (context.signal?.aborted) throw abortError();
       return context.subscribeFileWatch(params);

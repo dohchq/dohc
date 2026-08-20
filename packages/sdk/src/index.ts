@@ -11,6 +11,7 @@ export const DohcSdkErrorCodes = {
   aborted: "DOHC_ABORTED",
   subscriptionsUnsupported: "DOHC_SUBSCRIPTIONS_UNSUPPORTED",
   responseTruncated: "DOHC_RESPONSE_TRUNCATED",
+  earlyEventBufferOverflow: "DOHC_EARLY_EVENT_BUFFER_OVERFLOW",
 } as const;
 export type DohcSdkErrorCode =
   (typeof DohcSdkErrorCodes)[keyof typeof DohcSdkErrorCodes] | (string & {});
@@ -544,6 +545,99 @@ export function createPostMessageTransport(
     },
   };
 
+  const subscriptionListeners = new Map<
+    string,
+    (event: DohcSubscriptionEvent<unknown>) => void
+  >();
+  // A healthy burst during the millisecond-scale subscribe round-trip stays
+  // below 10 events. This limit leaves more than 20 times that headroom.
+  const MAX_EARLY_SUBSCRIPTION_EVENTS = 200;
+  const POISONED_EARLY_EVENT_QUEUE = Symbol("poisoned early-event queue");
+  const queuedSubscriptionEvents = new Map<
+    string,
+    DohcSubscriptionEvent<unknown>[] | typeof POISONED_EARLY_EVENT_QUEUE
+  >();
+  let activeSubscriptionCount = 0;
+  let pendingSubscribeCount = 0;
+  let subscriptionMessageListener: ((event: MessageEvent) => void) | null = null;
+
+  const collectUnclaimedSubscriptionEvents = (): void => {
+    if (pendingSubscribeCount !== 0) return;
+    for (const subscriptionId of queuedSubscriptionEvents.keys()) {
+      if (!subscriptionListeners.has(subscriptionId)) {
+        queuedSubscriptionEvents.delete(subscriptionId);
+      }
+    }
+  };
+
+  const retainPendingSubscribe = (): (() => void) => {
+    let pending = true;
+    pendingSubscribeCount += 1;
+    return () => {
+      if (!pending) return;
+      pending = false;
+      pendingSubscribeCount -= 1;
+      collectUnclaimedSubscriptionEvents();
+    };
+  };
+
+  const queueSubscriptionEvent = (
+    subscriptionId: string,
+    event: DohcSubscriptionEvent<unknown>,
+  ): void => {
+    const existing = queuedSubscriptionEvents.get(subscriptionId);
+    if (existing === POISONED_EARLY_EVENT_QUEUE) return;
+    const queued = existing ?? [];
+    if (queued.length >= MAX_EARLY_SUBSCRIPTION_EVENTS) {
+      queuedSubscriptionEvents.set(subscriptionId, POISONED_EARLY_EVENT_QUEUE);
+      return;
+    }
+    queued.push(event);
+    queuedSubscriptionEvents.set(subscriptionId, queued);
+  };
+
+  const closeRemoteSubscription = (subscriptionId: string): void => {
+    void transport
+      .request("subscriptions.unsubscribe", { subscriptionId })
+      .catch(() => undefined);
+  };
+
+  const retainSubscriptionMessageListener = (
+    currentWindow: Window,
+    targetWindow: Window,
+    targetOrigin: string,
+  ): (() => void) => {
+    let retained = true;
+    activeSubscriptionCount += 1;
+    if (activeSubscriptionCount === 1) {
+      subscriptionMessageListener = (event) => {
+        if (event.source !== targetWindow) return;
+        if (!responseOriginMatches(event.origin, targetOrigin)) return;
+        if (!isDohcSdkEvent(event.data)) return;
+
+        const subscriptionEvent = {
+          event: event.data.event,
+          data: event.data.data,
+        };
+        const listener = subscriptionListeners.get(event.data.subscriptionId);
+        if (listener) listener(subscriptionEvent);
+        else queueSubscriptionEvent(event.data.subscriptionId, subscriptionEvent);
+      };
+      currentWindow.addEventListener("message", subscriptionMessageListener);
+    }
+
+    return () => {
+      if (!retained) return;
+      retained = false;
+      activeSubscriptionCount -= 1;
+      if (activeSubscriptionCount === 0 && subscriptionMessageListener) {
+        currentWindow.removeEventListener("message", subscriptionMessageListener);
+        subscriptionMessageListener = null;
+      }
+      collectUnclaimedSubscriptionEvents();
+    };
+  };
+
   transport.subscribe = async <T>(
     method: string,
     params: unknown,
@@ -584,12 +678,27 @@ export function createPostMessageTransport(
       );
     }
 
-    const result = await transport.request(method, params, requestOptions);
+    const finishPendingSubscribe = retainPendingSubscribe();
+    const releaseSubscriptionMessageListener = retainSubscriptionMessageListener(
+      currentWindow,
+      targetWindow,
+      targetOrigin,
+    );
+    let result: unknown;
+    try {
+      result = await transport.request(method, params, requestOptions);
+    } catch (error) {
+      finishPendingSubscribe();
+      releaseSubscriptionMessageListener();
+      throw error;
+    }
     if (
       !isPlainRecord(result) ||
       typeof result.subscriptionId !== "string" ||
       result.subscriptionId.length === 0
     ) {
+      finishPendingSubscribe();
+      releaseSubscriptionMessageListener();
       throw new DohcSdkError(
         DohcSdkErrorCodes.badResponse,
         `dohc host returned an invalid subscription response for ${method}.`,
@@ -599,20 +708,42 @@ export function createPostMessageTransport(
     let localActive = true;
     let remoteClosed = false;
     let pendingRemoteClose: Promise<void> | null = null;
-
-    const onMessage = (event: MessageEvent) => {
-      if (!localActive || event.source !== targetWindow) return;
-      if (!responseOriginMatches(event.origin, targetOrigin)) return;
-      if (!isDohcSdkEvent(event.data)) return;
-      if (event.data.subscriptionId !== subscriptionId) return;
-      listener({ event: event.data.event, data: event.data.data as T });
-    };
-    currentWindow.addEventListener("message", onMessage);
+    const untypedListener = listener as (
+      event: DohcSubscriptionEvent<unknown>
+    ) => void;
+    const queuedEvents = queuedSubscriptionEvents.get(subscriptionId);
+    if (queuedEvents === POISONED_EARLY_EVENT_QUEUE) {
+      queuedSubscriptionEvents.delete(subscriptionId);
+      finishPendingSubscribe();
+      releaseSubscriptionMessageListener();
+      closeRemoteSubscription(subscriptionId);
+      throw new DohcSdkError(
+        DohcSdkErrorCodes.earlyEventBufferOverflow,
+        "The early-event buffer exceeded its configured limit of 200 events " +
+          "per subscription. Resubscribe and reload the current view.",
+      );
+    }
+    subscriptionListeners.set(subscriptionId, untypedListener);
+    finishPendingSubscribe();
+    try {
+      for (const event of queuedEvents ?? []) {
+        untypedListener(event);
+      }
+    } catch (error) {
+      subscriptionListeners.delete(subscriptionId);
+      queuedSubscriptionEvents.delete(subscriptionId);
+      releaseSubscriptionMessageListener();
+      closeRemoteSubscription(subscriptionId);
+      throw error;
+    }
+    queuedSubscriptionEvents.delete(subscriptionId);
 
     const unsubscribe: DohcUnsubscribe = async () => {
       if (localActive) {
         localActive = false;
-        currentWindow.removeEventListener("message", onMessage);
+        subscriptionListeners.delete(subscriptionId);
+        queuedSubscriptionEvents.delete(subscriptionId);
+        releaseSubscriptionMessageListener();
         requestOptions?.signal?.removeEventListener("abort", onAbort);
       }
       if (remoteClosed) return;
@@ -1030,8 +1161,9 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
        * "." for the whole workspace. Changes outside it never arrive.
        *
        * Returns a function that stops the subscription. A subscription also
-       * ends on its own when the plugin stops, so a plugin that watches for
-       * its whole life needs no teardown.
+       * ends when its plugin stops, or when the panel that opened it closes or
+       * changes its workspace, plugin, or panel identity. Same-origin in-frame
+       * navigation inside an already-open panel does not end it today.
        */
       watch: async (
         path: string,

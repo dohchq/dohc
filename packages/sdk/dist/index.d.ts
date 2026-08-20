@@ -9,6 +9,7 @@ export declare const DohcSdkErrorCodes: {
     readonly aborted: "DOHC_ABORTED";
     readonly subscriptionsUnsupported: "DOHC_SUBSCRIPTIONS_UNSUPPORTED";
     readonly responseTruncated: "DOHC_RESPONSE_TRUNCATED";
+    readonly earlyEventBufferOverflow: "DOHC_EARLY_EVENT_BUFFER_OVERFLOW";
 };
 export type DohcSdkErrorCode = (typeof DohcSdkErrorCodes)[keyof typeof DohcSdkErrorCodes] | (string & {});
 /**
@@ -231,8 +232,9 @@ export declare function createDohcClient(options?: CreateDohcClientOptions): {
          * "." for the whole workspace. Changes outside it never arrive.
          *
          * Returns a function that stops the subscription. A subscription also
-         * ends on its own when the plugin stops, so a plugin that watches for
-         * its whole life needs no teardown.
+         * ends when its plugin stops, or when the panel that opened it closes or
+         * changes its workspace, plugin, or panel identity. Same-origin in-frame
+         * navigation inside an already-open panel does not end it today.
          */
         watch: (path: string, listener: (event: DohcSubscriptionEvent<DohcFileWatchEvent>) => void, requestOptions?: DohcRequestOptions) => Promise<DohcUnsubscribe>;
     };
@@ -304,8 +306,9 @@ export declare const dohc: {
          * "." for the whole workspace. Changes outside it never arrive.
          *
          * Returns a function that stops the subscription. A subscription also
-         * ends on its own when the plugin stops, so a plugin that watches for
-         * its whole life needs no teardown.
+         * ends when its plugin stops, or when the panel that opened it closes or
+         * changes its workspace, plugin, or panel identity. Same-origin in-frame
+         * navigation inside an already-open panel does not end it today.
          */
         watch: (path: string, listener: (event: DohcSubscriptionEvent<DohcFileWatchEvent>) => void, requestOptions?: DohcRequestOptions) => Promise<DohcUnsubscribe>;
     };

@@ -123,6 +123,7 @@ import {
   PluginSizesResult,
   PluginUninstallPreflightResult,
   UninstallPluginPayload,
+  PluginPanelSdkEvent,
   PluginStatusChangedEvent,
   DesktopMarksResult,
   LaunchMarksResult,
@@ -621,6 +622,11 @@ import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
 import { PluginWorkspaceEvents } from "./plugins/pluginWorkspaceEvents";
 import {
+  createPluginPanelFileWatchEmitter,
+  isPluginPanelPushLive,
+  isPluginPanelRequestLive,
+} from "./plugins/pluginPanelSdkEvent";
+import {
   createPluginAgentDrivers,
   type PluginAgentDrivers,
 } from "./plugins/pluginAgentDrivers";
@@ -889,6 +895,26 @@ function notifyPluginStatusChanged(
   }
 }
 
+function notifyPluginPanelSdkEvent(event: unknown): void {
+  const payload = PluginPanelSdkEvent.safeParse(event);
+  if (!payload.success) {
+    console.error(
+      "[desktop] dropped a plugin panel SDK event that failed the IPC " +
+        `schema: ${payload.error.message}`,
+    );
+    return;
+  }
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (
+      activeWorkspaceIdBySender.get(win.webContents.id) !==
+      payload.data.workspaceId
+    ) {
+      continue;
+    }
+    win.webContents.send(CHANNELS.pluginPanelSdkEvent, payload.data);
+  }
+}
+
 function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
   let pipeline: PluginPipeline | null = null;
   const dohcDir = pluginDataDir(stateDir(), workspace.rootPath);
@@ -952,9 +978,18 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
             childParams,
           ),
         subscribeFileWatch: (watchParams) =>
-          workspaceEvents.subscribe({ pluginId, spawnId, emitEvent }, watchParams),
+          workspaceEvents.subscribe(
+            {
+              owner: { kind: "process", pluginId, spawnId },
+              emitEvent,
+            },
+            watchParams,
+          ),
         unsubscribeFileWatch: (watchParams) =>
-          workspaceEvents.unsubscribe({ pluginId, spawnId }, watchParams),
+          workspaceEvents.unsubscribe(
+            { owner: { kind: "process", pluginId, spawnId } },
+            watchParams,
+          ),
         method,
         params,
       }),
@@ -6678,13 +6713,26 @@ function registerIpcHandlers(
           senderId: sender.id,
           generation,
         });
-        pluginPanelSdkAuthorities.register({
+        const grant = pluginPanelSdkAuthorities.register({
           senderId: sender.id,
           generation,
           workspaceId: workspace.workspaceId,
           pluginId: input.pluginId,
           panelId: input.panelId,
         });
+        grant.signal.addEventListener(
+          "abort",
+          () =>
+            pluginWorkspaceEventsByWorkspace
+              .get(workspace.workspaceId)
+              ?.disposeOwner({
+                kind: "panel",
+                workspaceId: workspace.workspaceId,
+                pluginId: input.pluginId,
+                panelId: input.panelId,
+              }),
+          { once: true },
+        );
         return StartPluginPanelResult.parse({
           status: "ok",
           url: handle.url,
@@ -6733,14 +6781,15 @@ function registerIpcHandlers(
     );
     const panel = runningPluginPanels.get(key);
     const host = pluginPipelines.get(input.workspaceId)?.host;
+    const workspaceEvents = pluginWorkspaceEventsByWorkspace.get(input.workspaceId);
     const liveSpawnId = host?.getSpawnId(input.pluginId);
     const generation = rendererGeneration(sender.id);
-    const panelRunning = Boolean(
-      panel &&
-        panel.senderId === sender.id &&
-        panel.generation === generation &&
-        Boolean(liveSpawnId),
-    );
+    const panelRunning = isPluginPanelRequestLive({
+      currentPanel: panel,
+      senderId: sender.id,
+      generation,
+      liveSpawnId,
+    });
     const authority = pluginPanelSdkAuthorities.authorize({
       senderId: sender.id,
       generation,
@@ -6751,6 +6800,32 @@ function registerIpcHandlers(
       panelRunning,
       liveSpawnId,
     });
+    // Absent when the workspace's registry isn't up (pipeline still starting,
+    // or already torn down) — files.watch then degrades to watch:false and
+    // its own named refusal, callback-driven like every other SDK capability.
+    const owner = {
+      kind: "panel" as const,
+      workspaceId: authority.workspaceId,
+      pluginId: authority.pluginId,
+      panelId: authority.panelId,
+    };
+    const emitEvent = workspaceEvents
+      ? createPluginPanelFileWatchEmitter({
+          workspaceId: authority.workspaceId,
+          pluginId: authority.pluginId,
+          panelId: authority.panelId,
+          isPanelRunning: () =>
+            isPluginPanelPushLive({
+              signal: authority.signal,
+              currentPanel: runningPluginPanels.get(key),
+              grant: {
+                senderId: authority.senderId,
+                generation: authority.generation,
+              },
+            }),
+          send: notifyPluginPanelSdkEvent,
+        })
+      : undefined;
     const result = await invokeWorkspacePluginSdk({
       workspaceId: authority.workspaceId,
       pluginId: authority.pluginId,
@@ -6758,6 +6833,14 @@ function registerIpcHandlers(
       requestPath: "panel",
       isWritable: () => !sharedViewOf(authority.workspaceId),
       signal: authority.signal,
+      subscribeFileWatch:
+        workspaceEvents && emitEvent
+          ? (watchParams) =>
+              workspaceEvents.subscribe({ owner, emitEvent }, watchParams)
+          : undefined,
+      unsubscribeFileWatch: workspaceEvents
+        ? (watchParams) => workspaceEvents.unsubscribe({ owner }, watchParams)
+        : undefined,
       method: input.method,
       params: input.params,
     });

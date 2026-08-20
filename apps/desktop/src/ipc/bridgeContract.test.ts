@@ -30,6 +30,7 @@ import {
   ExportDocumentFilePayload,
   ExportDocumentFileResult,
   InvokePluginPanelSdkPayload,
+  PluginPanelSdkEvent,
   ListEngineMomentsPayload,
   ListEngineMomentsResult,
   WorkspaceSummary,
@@ -82,6 +83,7 @@ import {
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
   parseInvokePluginPanelSdkPayloadForIpc,
+  parsePluginPanelSdkEventForIpc,
   CloudJoinWorkspacePayload,
   ReadShareProposalFileContentPayload,
   ReadShareProposalFileContentResult,
@@ -1175,6 +1177,34 @@ describe("plugin guest SDK IPC contract", () => {
     expect(
       InvokePluginPanelSdkPayload.safeParse({ ...payload, extra: true }).success,
     ).toBe(false);
+  });
+
+  it("accepts a strict plugin-panel SDK event and rejects excess data or an empty event name", () => {
+    const event = {
+      workspaceId: "ws-plugins",
+      pluginId: "hello-plugin",
+      panelId: "main",
+      subscriptionId: "subscription-1",
+      event: "change",
+      data: {
+        path: "docs/index.md",
+        operation: "update" as const,
+        sha256: "aaa",
+      },
+    };
+
+    expect(PluginPanelSdkEvent.parse(event)).toEqual(event);
+    expect(parsePluginPanelSdkEventForIpc(event)).toEqual(event);
+    expect(parsePluginPanelSdkEventForIpc({ ...event, extra: true })).toBeNull();
+    expect(
+      parsePluginPanelSdkEventForIpc({
+        ...event,
+        data: { ...event.data, extra: true },
+      }),
+    ).toBeNull();
+    expect(
+      parsePluginPanelSdkEventForIpc({ ...event, event: "" }),
+    ).toBeNull();
   });
 });
 

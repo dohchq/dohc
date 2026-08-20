@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { createPluginPanelFileWatchEmitter } from "./plugins/pluginPanelSdkEvent";
 
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
 
@@ -25,6 +26,48 @@ const stopPluginHostIfUnclaimedSource = () =>
   functionSource("async function stopPluginHostIfUnclaimed(");
 
 describe("plugin panel main-process wiring", () => {
+  it("drops file-watch events after the exact panel stops running", () => {
+    let panelRunning = true;
+    const send = vi.fn();
+    const emitEvent = createPluginPanelFileWatchEmitter({
+      workspaceId: "ws-plugins",
+      pluginId: "sites",
+      panelId: "main",
+      isPanelRunning: () => panelRunning,
+      send,
+    });
+    const data = { path: "docs/index.md", operation: "update" as const };
+
+    emitEvent("subscription-1", "change", data);
+    panelRunning = false;
+    emitEvent("subscription-1", "change", data);
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({
+      workspaceId: "ws-plugins",
+      pluginId: "sites",
+      panelId: "main",
+      subscriptionId: "subscription-1",
+      event: "change",
+      data,
+    });
+  });
+
+  it("validates panel SDK events and sends them only to the active workspace", () => {
+    const notify = functionSource("function notifyPluginPanelSdkEvent(");
+    const parseAt = notify.indexOf("PluginPanelSdkEvent.safeParse(event)");
+    const filterAt = notify.indexOf("activeWorkspaceIdBySender.get(");
+    const sendAt = notify.indexOf(
+      "win.webContents.send(CHANNELS.pluginPanelSdkEvent, payload.data)",
+    );
+
+    expect(parseAt).toBeGreaterThan(-1);
+    expect(filterAt).toBeGreaterThan(parseAt);
+    expect(sendAt).toBeGreaterThan(filterAt);
+    expect(notify).toContain("if (!payload.success)");
+    expect(notify).toContain("console.error(");
+  });
+
   it("validates a contained plugin registration before starting its host", () => {
     const open = handler("openPluginPanel");
     const loadAt = open.indexOf(
@@ -53,11 +96,14 @@ describe("plugin panel main-process wiring", () => {
     const allowAt = start.indexOf("allowLoopbackFrameOrigin(handle.url)");
     const rememberAt = start.indexOf("runningPluginPanels.set(key");
     const grantAt = start.indexOf("pluginPanelSdkAuthorities.register({");
+    const disposeAt = start.indexOf(".disposeOwner({", grantAt);
 
     expect(serveAt).toBeGreaterThan(-1);
     expect(allowAt).toBeGreaterThan(serveAt);
     expect(rememberAt).toBeGreaterThan(allowAt);
     expect(grantAt).toBeGreaterThan(rememberAt);
+    expect(disposeAt).toBeGreaterThan(grantAt);
+    expect(start).toContain("grant.signal.addEventListener(");
     expect(start).toContain("startPluginPanelWithLock(");
     expect(start).toContain("withPluginHostLifecycleLock,");
     expect(start).toContain("() => ensurePluginStarted(workspace, plugin)");
@@ -101,11 +147,38 @@ describe("plugin panel main-process wiring", () => {
     const authorizeAt = invoke.indexOf("pluginPanelSdkAuthorities.authorize({");
     const routeAt = invoke.indexOf("invokeWorkspacePluginSdk({");
     const router = functionSource("function invokeWorkspacePluginSdk");
+    const requestLiveAt = invoke.indexOf(
+      "const panelRunning = isPluginPanelRequestLive({",
+    );
+    const requestLiveEnd = invoke.indexOf("\n    });", requestLiveAt);
+    const requestLive = invoke.slice(requestLiveAt, requestLiveEnd);
+    const emitterAt = invoke.indexOf("createPluginPanelFileWatchEmitter({");
+    const emitterEnd = invoke.indexOf(
+      "send: notifyPluginPanelSdkEvent,",
+      emitterAt,
+    );
+    const emitter = invoke.slice(emitterAt, emitterEnd);
 
     expect(authorizeAt).toBeGreaterThan(-1);
     expect(routeAt).toBeGreaterThan(authorizeAt);
     expect(invoke).toContain("const liveSpawnId = host?.getSpawnId(input.pluginId);");
     expect(invoke).toContain("liveSpawnId,");
+    expect(requestLiveAt).toBeGreaterThan(-1);
+    expect(requestLiveEnd).toBeGreaterThan(requestLiveAt);
+    expect(requestLive).toContain("liveSpawnId,");
+    expect(emitterAt).toBeGreaterThan(-1);
+    expect(emitterEnd).toBeGreaterThan(emitterAt);
+    // The pure tests pin each predicate's rules. These checks stop the invoke
+    // and push paths from silently swapping those rules.
+    expect(emitter).toContain("isPluginPanelPushLive({");
+    expect(emitter).not.toContain("isPluginPanelRequestLive({");
+    expect(emitter).not.toContain("spawnId");
+    expect(invoke).toContain(
+      "workspaceEvents.subscribe({ owner, emitEvent }, watchParams)",
+    );
+    expect(invoke).toContain(
+      "workspaceEvents.unsubscribe({ owner }, watchParams)",
+    );
     expect(router).toContain("return invokePluginSdkHost(");
   });
 

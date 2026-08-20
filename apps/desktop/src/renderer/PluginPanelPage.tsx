@@ -1,11 +1,12 @@
 import {
   DOHC_SDK_PROTOCOL,
   DOHC_THEME_PROTOCOL,
+  type DohcSdkEventMessage,
   type DohcSdkResponseMessage,
   type DohcThemeMessage,
 } from "@dohc/sdk";
 import { AlertTriangle, Plug } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { StartPluginPanelResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { THEME_ATTRIBUTES, readDohcTheme } from "./pluginPanelTheme";
@@ -219,6 +220,37 @@ export function PluginPanelPage(props: {
   const panelOrigin =
     panel && panelUrlAllowed ? new URL(panel.url).origin : null;
 
+  // The one gate every unsolicited push to the panel goes through: dropped
+  // while the panel is stopping or already gone, sent to the exact panel
+  // origin, never a wildcard.
+  const postToPanel = useCallback(
+    (message: DohcSdkEventMessage<unknown> | DohcThemeMessage) => {
+      if (!panelOrigin || stoppingRef.current || !panelRef.current) return;
+      iframeRef.current?.contentWindow?.postMessage(message, panelOrigin);
+    },
+    [panelOrigin],
+  );
+
+  useEffect(() => {
+    if (!panelOrigin) return;
+    return bridge().onPluginPanelSdkEvent((event) => {
+      if (
+        event.workspaceId !== props.workspaceId ||
+        event.pluginId !== props.pluginId ||
+        event.panelId !== props.panelId
+      ) {
+        return;
+      }
+      postToPanel({
+        protocol: DOHC_SDK_PROTOCOL,
+        type: "event",
+        subscriptionId: event.subscriptionId,
+        event: event.event,
+        data: event.data,
+      } satisfies DohcSdkEventMessage<typeof event.data>);
+    });
+  }, [panelOrigin, postToPanel, props.panelId, props.pluginId, props.workspaceId]);
+
   // Theme changes reach a mounted panel without a reload. The app's own
   // appearance state is these three attributes, so watching them covers every
   // way a user changes it — settings, the command palette, or the OS flipping
@@ -226,20 +258,15 @@ export function PluginPanelPage(props: {
   useEffect(() => {
     if (!panelOrigin) return;
     const root = document.documentElement;
-    const push = () => {
-      if (stoppingRef.current || !panelRef.current) return;
-      iframeRef.current?.contentWindow?.postMessage(
-        {
-          protocol: DOHC_THEME_PROTOCOL,
-          theme: readDohcTheme(root),
-        } satisfies DohcThemeMessage,
-        panelOrigin,
-      );
-    };
+    const push = () =>
+      postToPanel({
+        protocol: DOHC_THEME_PROTOCOL,
+        theme: readDohcTheme(root),
+      } satisfies DohcThemeMessage);
     const observer = new MutationObserver(push);
     observer.observe(root, { attributeFilter: [...THEME_ATTRIBUTES] });
     return () => observer.disconnect();
-  }, [panelOrigin]);
+  }, [panelOrigin, postToPanel]);
 
   return (
     <div

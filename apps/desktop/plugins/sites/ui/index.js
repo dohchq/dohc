@@ -5,12 +5,15 @@
 // tab per site. Opening a tab is the only thing it asks dohc to do that a
 // plugin's own process cannot.
 
-import { applyTheme, request } from "./dohc.js";
+import { applyTheme, request, subscribe } from "./dohc.js";
 import {
   availableModes,
   discoverSites,
   previewInstanceKey,
+  shouldRetryWatchSubscription,
   SITE_SIGNAL_FILES,
+  watchSubscriptionFailed,
+  watchSubscriptionSucceeded,
 } from "./sites.js";
 
 const countOutput = /** @type {HTMLElement} */ (document.getElementById("count"));
@@ -21,16 +24,37 @@ const refreshButton = /** @type {HTMLButtonElement} */ (document.getElementById(
 
 /** Raised for every load, so a slow answer never repaints a later one. */
 let loadToken = 0;
+let refreshTimeout = null;
+let watchRetryPending = false;
+let watchSubscriptionState = watchSubscriptionSucceeded();
+let requestErrorMessage = null;
+
+function renderError() {
+  const message = watchSubscriptionState.message ?? requestErrorMessage;
+  errorOutput.textContent = message ?? "";
+  errorOutput.hidden = message === null;
+}
 
 /** @param {string} message */
 function showError(message) {
-  errorOutput.textContent = message;
-  errorOutput.hidden = false;
+  requestErrorMessage = message;
+  renderError();
 }
 
 function clearError() {
-  errorOutput.textContent = "";
-  errorOutput.hidden = true;
+  requestErrorMessage = null;
+  renderError();
+}
+
+/** @param {string} message */
+function showWatchError(message) {
+  watchSubscriptionState = watchSubscriptionFailed(message);
+  renderError();
+}
+
+function clearWatchError() {
+  watchSubscriptionState = watchSubscriptionSucceeded();
+  renderError();
 }
 
 /**
@@ -223,15 +247,52 @@ async function load() {
   }
 }
 
-refreshButton.addEventListener("click", () => void load());
+function handleFileWatch() {
+  if (refreshTimeout !== null) window.clearTimeout(refreshTimeout);
+  refreshTimeout = window.setTimeout(() => {
+    refreshTimeout = null;
+    void load();
+  }, 300);
+}
+
+async function startFileWatch() {
+  try {
+    await subscribe("files.watch", { path: "." }, handleFileWatch);
+    clearWatchError();
+  } catch (error) {
+    showWatchError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+function retryFileWatchIfFailed() {
+  if (
+    watchRetryPending ||
+    !shouldRetryWatchSubscription(watchSubscriptionState)
+  ) {
+    return;
+  }
+  watchRetryPending = true;
+  void startFileWatch().finally(() => {
+    watchRetryPending = false;
+  });
+}
+
+refreshButton.addEventListener("click", () => {
+  retryFileWatchIfFailed();
+  void load();
+});
 
 // dohc serves a panel a workspace at a time and starts it again when the user
 // comes back to the view, so this list is read fresh every time it is shown.
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") void load();
+  if (document.visibilityState === "visible") {
+    retryFileWatchIfFailed();
+    void load();
+  }
 });
 
 void applyTheme().catch((error) => {
   showError(error instanceof Error ? error.message : String(error));
 });
+void startFileWatch();
 void load();

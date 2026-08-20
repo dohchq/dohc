@@ -10,6 +10,7 @@ export const DohcSdkErrorCodes = {
     aborted: "DOHC_ABORTED",
     subscriptionsUnsupported: "DOHC_SUBSCRIPTIONS_UNSUPPORTED",
     responseTruncated: "DOHC_RESPONSE_TRUNCATED",
+    earlyEventBufferOverflow: "DOHC_EARLY_EVENT_BUFFER_OVERFLOW",
 };
 /**
  * The envelope dohc pushes when its appearance changes. Theme is styling
@@ -280,6 +281,87 @@ export function createPostMessageTransport(options = {}) {
             });
         },
     };
+    const subscriptionListeners = new Map();
+    // A healthy burst during the millisecond-scale subscribe round-trip stays
+    // below 10 events. This limit leaves more than 20 times that headroom.
+    const MAX_EARLY_SUBSCRIPTION_EVENTS = 200;
+    const POISONED_EARLY_EVENT_QUEUE = Symbol("poisoned early-event queue");
+    const queuedSubscriptionEvents = new Map();
+    let activeSubscriptionCount = 0;
+    let pendingSubscribeCount = 0;
+    let subscriptionMessageListener = null;
+    const collectUnclaimedSubscriptionEvents = () => {
+        if (pendingSubscribeCount !== 0)
+            return;
+        for (const subscriptionId of queuedSubscriptionEvents.keys()) {
+            if (!subscriptionListeners.has(subscriptionId)) {
+                queuedSubscriptionEvents.delete(subscriptionId);
+            }
+        }
+    };
+    const retainPendingSubscribe = () => {
+        let pending = true;
+        pendingSubscribeCount += 1;
+        return () => {
+            if (!pending)
+                return;
+            pending = false;
+            pendingSubscribeCount -= 1;
+            collectUnclaimedSubscriptionEvents();
+        };
+    };
+    const queueSubscriptionEvent = (subscriptionId, event) => {
+        const existing = queuedSubscriptionEvents.get(subscriptionId);
+        if (existing === POISONED_EARLY_EVENT_QUEUE)
+            return;
+        const queued = existing ?? [];
+        if (queued.length >= MAX_EARLY_SUBSCRIPTION_EVENTS) {
+            queuedSubscriptionEvents.set(subscriptionId, POISONED_EARLY_EVENT_QUEUE);
+            return;
+        }
+        queued.push(event);
+        queuedSubscriptionEvents.set(subscriptionId, queued);
+    };
+    const closeRemoteSubscription = (subscriptionId) => {
+        void transport
+            .request("subscriptions.unsubscribe", { subscriptionId })
+            .catch(() => undefined);
+    };
+    const retainSubscriptionMessageListener = (currentWindow, targetWindow, targetOrigin) => {
+        let retained = true;
+        activeSubscriptionCount += 1;
+        if (activeSubscriptionCount === 1) {
+            subscriptionMessageListener = (event) => {
+                if (event.source !== targetWindow)
+                    return;
+                if (!responseOriginMatches(event.origin, targetOrigin))
+                    return;
+                if (!isDohcSdkEvent(event.data))
+                    return;
+                const subscriptionEvent = {
+                    event: event.data.event,
+                    data: event.data.data,
+                };
+                const listener = subscriptionListeners.get(event.data.subscriptionId);
+                if (listener)
+                    listener(subscriptionEvent);
+                else
+                    queueSubscriptionEvent(event.data.subscriptionId, subscriptionEvent);
+            };
+            currentWindow.addEventListener("message", subscriptionMessageListener);
+        }
+        return () => {
+            if (!retained)
+                return;
+            retained = false;
+            activeSubscriptionCount -= 1;
+            if (activeSubscriptionCount === 0 && subscriptionMessageListener) {
+                currentWindow.removeEventListener("message", subscriptionMessageListener);
+                subscriptionMessageListener = null;
+            }
+            collectUnclaimedSubscriptionEvents();
+        };
+    };
     transport.subscribe = async (method, params, listener, requestOptions) => {
         assertMethod(method);
         if (typeof listener !== "function") {
@@ -302,32 +384,59 @@ export function createPostMessageTransport(options = {}) {
                 ? "No dohc host window is available for this site."
                 : "No dohc host origin is available for this site.");
         }
-        const result = await transport.request(method, params, requestOptions);
+        const finishPendingSubscribe = retainPendingSubscribe();
+        const releaseSubscriptionMessageListener = retainSubscriptionMessageListener(currentWindow, targetWindow, targetOrigin);
+        let result;
+        try {
+            result = await transport.request(method, params, requestOptions);
+        }
+        catch (error) {
+            finishPendingSubscribe();
+            releaseSubscriptionMessageListener();
+            throw error;
+        }
         if (!isPlainRecord(result) ||
             typeof result.subscriptionId !== "string" ||
             result.subscriptionId.length === 0) {
+            finishPendingSubscribe();
+            releaseSubscriptionMessageListener();
             throw new DohcSdkError(DohcSdkErrorCodes.badResponse, `dohc host returned an invalid subscription response for ${method}.`);
         }
         const subscriptionId = result.subscriptionId;
         let localActive = true;
         let remoteClosed = false;
         let pendingRemoteClose = null;
-        const onMessage = (event) => {
-            if (!localActive || event.source !== targetWindow)
-                return;
-            if (!responseOriginMatches(event.origin, targetOrigin))
-                return;
-            if (!isDohcSdkEvent(event.data))
-                return;
-            if (event.data.subscriptionId !== subscriptionId)
-                return;
-            listener({ event: event.data.event, data: event.data.data });
-        };
-        currentWindow.addEventListener("message", onMessage);
+        const untypedListener = listener;
+        const queuedEvents = queuedSubscriptionEvents.get(subscriptionId);
+        if (queuedEvents === POISONED_EARLY_EVENT_QUEUE) {
+            queuedSubscriptionEvents.delete(subscriptionId);
+            finishPendingSubscribe();
+            releaseSubscriptionMessageListener();
+            closeRemoteSubscription(subscriptionId);
+            throw new DohcSdkError(DohcSdkErrorCodes.earlyEventBufferOverflow, "The early-event buffer exceeded its configured limit of 200 events " +
+                "per subscription. Resubscribe and reload the current view.");
+        }
+        subscriptionListeners.set(subscriptionId, untypedListener);
+        finishPendingSubscribe();
+        try {
+            for (const event of queuedEvents ?? []) {
+                untypedListener(event);
+            }
+        }
+        catch (error) {
+            subscriptionListeners.delete(subscriptionId);
+            queuedSubscriptionEvents.delete(subscriptionId);
+            releaseSubscriptionMessageListener();
+            closeRemoteSubscription(subscriptionId);
+            throw error;
+        }
+        queuedSubscriptionEvents.delete(subscriptionId);
         const unsubscribe = async () => {
             if (localActive) {
                 localActive = false;
-                currentWindow.removeEventListener("message", onMessage);
+                subscriptionListeners.delete(subscriptionId);
+                queuedSubscriptionEvents.delete(subscriptionId);
+                releaseSubscriptionMessageListener();
                 requestOptions?.signal?.removeEventListener("abort", onAbort);
             }
             if (remoteClosed)
@@ -602,8 +711,9 @@ export function createDohcClient(options = {}) {
              * "." for the whole workspace. Changes outside it never arrive.
              *
              * Returns a function that stops the subscription. A subscription also
-             * ends on its own when the plugin stops, so a plugin that watches for
-             * its whole life needs no teardown.
+             * ends when its plugin stops, or when the panel that opened it closes or
+             * changes its workspace, plugin, or panel identity. Same-origin in-frame
+             * navigation inside an already-open panel does not end it today.
              */
             watch: async (path, listener, requestOptions) => {
                 assertRequestOptions(requestOptions);

@@ -14,9 +14,10 @@ import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import { readPluginManifestFile } from "./pluginManifest";
 import { invokePluginSdkHost, type PluginSdkHostContext } from "./pluginSdkHost";
 import {
-  MAX_PLUGIN_FILE_WATCHES_PER_SPAWN,
+  MAX_PLUGIN_FILE_WATCHES_PER_OWNER,
   PluginWorkspaceEvents,
   type PluginFileWatchEvent,
+  type PluginWorkspaceEventsOwner,
 } from "./pluginWorkspaceEvents";
 
 interface Emitted {
@@ -44,12 +45,49 @@ function paths(emitted: Emitted[]): string[] {
   return emitted.map((entry) => (entry.data as PluginFileWatchEvent).path);
 }
 
+function processOwner(
+  pluginId: string,
+  spawnId: string,
+): PluginWorkspaceEventsOwner {
+  return { kind: "process", pluginId, spawnId };
+}
+
 describe("PluginWorkspaceEvents", () => {
+  it("applies prefix containment to a panel owner's subscription", () => {
+    const events = new PluginWorkspaceEvents();
+    const sink = collector();
+    const { subscriptionId } = events.subscribe(
+      {
+        owner: {
+          kind: "panel",
+          workspaceId: "ws-plugins",
+          pluginId: "sites",
+          panelId: "main",
+        },
+        emitEvent: sink.emitEvent,
+      },
+      { path: "docs" },
+    );
+
+    events.handleWatcherEvents([
+      update("docs/index.md", "aaa"),
+      update("elsewhere/index.md", "bbb"),
+    ]);
+
+    expect(sink.emitted).toEqual([
+      {
+        subscriptionId,
+        event: "change",
+        data: { path: "docs/index.md", operation: "update", sha256: "aaa" },
+      },
+    ]);
+  });
+
   it("delivers a settled change under the prefix and nothing outside it", () => {
     const events = new PluginWorkspaceEvents();
     const sink = collector();
     const { subscriptionId } = events.subscribe(
-      { pluginId: "sites", spawnId: "spawn-1", emitEvent: sink.emitEvent },
+      { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
       { path: "docs" },
     );
 
@@ -74,7 +112,7 @@ describe("PluginWorkspaceEvents", () => {
     const events = new PluginWorkspaceEvents();
     const sink = collector();
     events.subscribe(
-      { pluginId: "sites", spawnId: "spawn-1", emitEvent: sink.emitEvent },
+      { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
       { path: "." },
     );
 
@@ -87,7 +125,7 @@ describe("PluginWorkspaceEvents", () => {
     const events = new PluginWorkspaceEvents();
     const sink = collector();
     events.subscribe(
-      { pluginId: "sites", spawnId: "spawn-1", emitEvent: sink.emitEvent },
+      { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
       { path: "docs" },
     );
 
@@ -110,8 +148,7 @@ describe("PluginWorkspaceEvents", () => {
     const events = new PluginWorkspaceEvents();
     const sink = collector();
     const context = {
-      pluginId: "sites",
-      spawnId: "spawn-1",
+      owner: processOwner("sites", "spawn-1"),
       emitEvent: sink.emitEvent,
     };
 
@@ -130,34 +167,42 @@ describe("PluginWorkspaceEvents", () => {
     expect(sink.emitted).toEqual([]);
   });
 
-  it("names the per-spawn subscription cap when a plugin reaches it", () => {
+  it("names the per-owner subscription cap and keeps owner budgets separate", () => {
     const events = new PluginWorkspaceEvents();
     const sink = collector();
     const context = {
-      pluginId: "sites",
-      spawnId: "spawn-1",
+      owner: {
+        kind: "panel" as const,
+        workspaceId: "ws-plugins",
+        pluginId: "sites",
+        panelId: "main",
+      },
       emitEvent: sink.emitEvent,
     };
 
-    for (let index = 0; index < MAX_PLUGIN_FILE_WATCHES_PER_SPAWN; index += 1) {
+    for (let index = 0; index < MAX_PLUGIN_FILE_WATCHES_PER_OWNER; index += 1) {
       events.subscribe(context, { path: `docs/${index}` });
     }
 
     expect(() => events.subscribe(context, { path: "docs/overflow" })).toThrow(
-      `Plugin "sites" already holds ${MAX_PLUGIN_FILE_WATCHES_PER_SPAWN} workspace file subscriptions. dohc allows at most ${MAX_PLUGIN_FILE_WATCHES_PER_SPAWN} open files.watch subscriptions per plugin spawn.`,
+      `Plugin "sites" panel "main" already holds ${MAX_PLUGIN_FILE_WATCHES_PER_OWNER} workspace file subscriptions. MAX_PLUGIN_FILE_WATCHES_PER_OWNER allows at most ${MAX_PLUGIN_FILE_WATCHES_PER_OWNER} open files.watch subscriptions per owner.`,
     );
-    // A different spawn of the same plugin has its own budget.
-    expect(() =>
-      events.subscribe({ ...context, spawnId: "spawn-2" }, { path: "docs/next" }),
-    ).not.toThrow();
+    const secondOwner = {
+      ...context,
+      owner: { ...context.owner, panelId: "secondary" },
+    };
+    for (let index = 0; index < MAX_PLUGIN_FILE_WATCHES_PER_OWNER; index += 1) {
+      expect(() =>
+        events.subscribe(secondOwner, { path: `other/${index}` }),
+      ).not.toThrow();
+    }
   });
 
   it("stops delivering after unsubscribe, and reports ids it does not own", () => {
     const events = new PluginWorkspaceEvents();
     const sink = collector();
     const context = {
-      pluginId: "sites",
-      spawnId: "spawn-1",
+      owner: processOwner("sites", "spawn-1"),
       emitEvent: sink.emitEvent,
     };
     const { subscriptionId } = events.subscribe(context, { path: "docs" });
@@ -177,16 +222,22 @@ describe("PluginWorkspaceEvents", () => {
     const events = new PluginWorkspaceEvents();
     const sink = collector();
     const { subscriptionId } = events.subscribe(
-      { pluginId: "sites", spawnId: "spawn-1", emitEvent: sink.emitEvent },
+      { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
       { path: "docs" },
     );
 
     expect(() =>
-      events.unsubscribe({ pluginId: "sites", spawnId: "spawn-2" }, { subscriptionId }),
-    ).toThrow('another plugin spawn owns it');
+      events.unsubscribe(
+        { owner: processOwner("sites", "spawn-2") },
+        { subscriptionId },
+      ),
+    ).toThrow("another owner owns it");
     expect(() =>
-      events.unsubscribe({ pluginId: "other", spawnId: "spawn-1" }, { subscriptionId }),
-    ).toThrow('another plugin spawn owns it');
+      events.unsubscribe(
+        { owner: processOwner("other", "spawn-1") },
+        { subscriptionId },
+      ),
+    ).toThrow("another owner owns it");
 
     events.handleWatcherEvents([update("docs/still.md")]);
     expect(paths(sink.emitted)).toEqual(["docs/still.md"]);
@@ -196,12 +247,28 @@ describe("PluginWorkspaceEvents", () => {
     const events = new PluginWorkspaceEvents();
     const ending = collector();
     const surviving = collector();
+    const panel = collector();
     events.subscribe(
-      { pluginId: "sites", spawnId: "spawn-1", emitEvent: ending.emitEvent },
+      { owner: processOwner("sites", "spawn-1"), emitEvent: ending.emitEvent },
       { path: "docs" },
     );
     events.subscribe(
-      { pluginId: "sites", spawnId: "spawn-2", emitEvent: surviving.emitEvent },
+      {
+        owner: processOwner("sites", "spawn-2"),
+        emitEvent: surviving.emitEvent,
+      },
+      { path: "docs" },
+    );
+    events.subscribe(
+      {
+        owner: {
+          kind: "panel",
+          workspaceId: "ws-plugins",
+          pluginId: "sites",
+          panelId: "main",
+        },
+        emitEvent: panel.emitEvent,
+      },
       { path: "docs" },
     );
 
@@ -210,6 +277,57 @@ describe("PluginWorkspaceEvents", () => {
 
     expect(ending.emitted).toEqual([]);
     expect(paths(surviving.emitted)).toEqual(["docs/after.md"]);
+    expect(paths(panel.emitted)).toEqual(["docs/after.md"]);
+  });
+
+  it("disposes only the exact panel owner", () => {
+    const events = new PluginWorkspaceEvents();
+    const process = collector();
+    const panelA = collector();
+    const panelB = collector();
+    events.subscribe(
+      {
+        owner: { kind: "process", pluginId: "p", spawnId: "s" },
+        emitEvent: process.emitEvent,
+      },
+      { path: "docs" },
+    );
+    events.subscribe(
+      {
+        owner: {
+          kind: "panel",
+          workspaceId: "ws-plugins",
+          pluginId: "p",
+          panelId: "a",
+        },
+        emitEvent: panelA.emitEvent,
+      },
+      { path: "docs" },
+    );
+    events.subscribe(
+      {
+        owner: {
+          kind: "panel",
+          workspaceId: "ws-plugins",
+          pluginId: "p",
+          panelId: "b",
+        },
+        emitEvent: panelB.emitEvent,
+      },
+      { path: "docs" },
+    );
+
+    events.disposeOwner({
+      kind: "panel",
+      workspaceId: "ws-plugins",
+      pluginId: "p",
+      panelId: "a",
+    });
+    events.handleWatcherEvents([update("docs/after.md")]);
+
+    expect(panelA.emitted).toEqual([]);
+    expect(paths(process.emitted)).toEqual(["docs/after.md"]);
+    expect(paths(panelB.emitted)).toEqual(["docs/after.md"]);
   });
 
   it("delivers nothing to another workspace's plugins", () => {
@@ -218,11 +336,11 @@ describe("PluginWorkspaceEvents", () => {
     const inA = collector();
     const inB = collector();
     workspaceA.subscribe(
-      { pluginId: "sites", spawnId: "spawn-1", emitEvent: inA.emitEvent },
+      { owner: processOwner("sites", "spawn-1"), emitEvent: inA.emitEvent },
       { path: "docs" },
     );
     workspaceB.subscribe(
-      { pluginId: "sites", spawnId: "spawn-1", emitEvent: inB.emitEvent },
+      { owner: processOwner("sites", "spawn-1"), emitEvent: inB.emitEvent },
       { path: "docs" },
     );
 
@@ -236,7 +354,7 @@ describe("PluginWorkspaceEvents", () => {
     const events = new PluginWorkspaceEvents();
     const sink = collector();
     events.subscribe(
-      { pluginId: "sites", spawnId: "spawn-1", emitEvent: sink.emitEvent },
+      { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
       { path: "docs" },
     );
 
@@ -250,7 +368,7 @@ describe("PluginWorkspaceEvents", () => {
     const events = new PluginWorkspaceEvents();
     const sink = collector();
     events.subscribe(
-      { pluginId: "sites", spawnId: "spawn-1", emitEvent: sink.emitEvent },
+      { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
       { path: "plugins/sites" },
     );
 
@@ -269,7 +387,7 @@ describe("PluginWorkspaceEvents", () => {
     const events = new PluginWorkspaceEvents();
     const sink = collector();
     events.subscribe(
-      { pluginId: "sites", spawnId: "spawn-1", emitEvent: sink.emitEvent },
+      { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
       { path: "." },
     );
     const batch: WatcherEvent[] = [
@@ -290,7 +408,7 @@ describe("PluginWorkspaceEvents", () => {
     const events = new PluginWorkspaceEvents();
     const sink = collector();
     events.subscribe(
-      { pluginId: "sites", spawnId: "spawn-1", emitEvent: sink.emitEvent },
+      { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
       { path: "docs" },
     );
 
@@ -327,7 +445,10 @@ describe("the plugin SDK host's files.watch route", () => {
       signal: ended.signal,
       subscribeFileWatch: (params) =>
         events.subscribe(
-          { pluginId: "sites", spawnId: "spawn-1", emitEvent: sink.emitEvent },
+          {
+            owner: processOwner("sites", "spawn-1"),
+            emitEvent: sink.emitEvent,
+          },
           params,
         ),
     });
@@ -342,16 +463,43 @@ describe("the plugin SDK host's files.watch route", () => {
     expect(sink.emitted).toEqual([]);
   });
 
-  it("refuses files.watch on the panel path, and does not advertise it there", async () => {
-    const panel = hostContext({ requestPath: "panel" });
+  it("opens and advertises files.watch on the panel path", async () => {
+    const events = new PluginWorkspaceEvents();
+    const sink = collector();
+    const owner: PluginWorkspaceEventsOwner = {
+      kind: "panel",
+      workspaceId: "ws-plugins",
+      pluginId: "sites",
+      panelId: "main",
+    };
+    const panel = hostContext({
+      requestPath: "panel",
+      subscribeFileWatch: (params) =>
+        events.subscribe({ owner, emitEvent: sink.emitEvent }, params),
+      unsubscribeFileWatch: (params) => events.unsubscribe({ owner }, params),
+    });
 
-    await expect(
-      invokePluginSdkHost(panel, "files.watch", { path: "docs" }),
-    ).rejects.toThrow("files.watch is unavailable for this request path");
     const capabilities = (await invokePluginSdkHost(panel, "capabilities")) as {
       files: { watch: boolean };
     };
-    expect(capabilities.files.watch).toBe(false);
+    expect(capabilities.files.watch).toBe(true);
+
+    const opened = (await invokePluginSdkHost(panel, "files.watch", {
+      path: "docs",
+    })) as { subscriptionId: string };
+    expect(opened.subscriptionId.length).toBeGreaterThan(0);
+
+    events.handleWatcherEvents([
+      update("docs/index.md", "aaa"),
+      update("elsewhere/index.md", "bbb"),
+    ]);
+    expect(sink.emitted).toEqual([
+      {
+        subscriptionId: opened.subscriptionId,
+        event: "change",
+        data: { path: "docs/index.md", operation: "update", sha256: "aaa" },
+      },
+    ]);
   });
 
   it("advertises files.watch on the plugin's own process path", async () => {
@@ -361,7 +509,10 @@ describe("the plugin SDK host's files.watch route", () => {
       hostContext({
         subscribeFileWatch: (params) =>
           events.subscribe(
-            { pluginId: "sites", spawnId: "spawn-1", emitEvent: sink.emitEvent },
+            {
+              owner: processOwner("sites", "spawn-1"),
+              emitEvent: sink.emitEvent,
+            },
             params,
           ),
       }),
@@ -377,11 +528,14 @@ describe("the plugin SDK host's files.watch route", () => {
     const context = hostContext({
       subscribeFileWatch: (params) =>
         events.subscribe(
-          { pluginId: "sites", spawnId: "spawn-1", emitEvent: sink.emitEvent },
+          {
+            owner: processOwner("sites", "spawn-1"),
+            emitEvent: sink.emitEvent,
+          },
           params,
         ),
       unsubscribeFileWatch: (params) =>
-        events.unsubscribe({ pluginId: "sites", spawnId: "spawn-1" }, params),
+        events.unsubscribe({ owner: processOwner("sites", "spawn-1") }, params),
       // A broker that would answer any id, so a file subscription left to it
       // would look closed while it kept delivering.
       invokeChildProcess: async () => ({}),
@@ -503,8 +657,7 @@ async function startWatchingPlugin(prefix: string): Promise<WatchingPlugin> {
           subscribeFileWatch: (watchParams) =>
             events.subscribe(
               {
-                pluginId,
-                spawnId,
+                owner: processOwner(pluginId, spawnId),
                 emitEvent: (subscriptionId, event, data) => {
                   delivered.push({ subscriptionId, event, data });
                   emitEvent(subscriptionId, event, data);
@@ -513,7 +666,7 @@ async function startWatchingPlugin(prefix: string): Promise<WatchingPlugin> {
               watchParams,
             ),
           unsubscribeFileWatch: (watchParams) =>
-            events.unsubscribe({ pluginId, spawnId }, watchParams),
+            events.unsubscribe({ owner: processOwner(pluginId, spawnId) }, watchParams),
           writeAuthoredText: async (path) => ({ path }),
         },
         method,
@@ -621,7 +774,10 @@ describe("a plugin watching workspace files over the real host protocol", () => 
     // the dead spawn's silence is teardown rather than a stopped feed.
     const sink = collector();
     plugin.events.subscribe(
-      { pluginId: "probe", spawnId: "probe-spawn", emitEvent: sink.emitEvent },
+      {
+        owner: processOwner("probe", "probe-spawn"),
+        emitEvent: sink.emitEvent,
+      },
       { path: "notes" },
     );
     await writeFile(join(plugin.workspaceRoot, "notes", "probe.md"), "probe\n");

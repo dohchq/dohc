@@ -4,11 +4,14 @@ import { DOHC_SDK_PROTOCOL, DOHC_THEME_PROTOCOL } from "@dohc/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   InvokePluginPanelSdkResult,
+  PluginPanelSdkEvent,
   StartPluginPanelResult,
 } from "../ipc/bridgeContract";
 import { PluginPanelPage } from "./PluginPanelPage";
 import { THEME_ATTRIBUTES } from "./pluginPanelTheme";
 import { palette } from "./tokens";
+
+let panelSdkEventListener: ((event: PluginPanelSdkEvent) => void) | null = null;
 
 const bridgeMock = {
   startPluginPanel: vi.fn(async (): Promise<StartPluginPanelResult> => ({
@@ -21,6 +24,14 @@ const bridgeMock = {
     async (): Promise<InvokePluginPanelSdkResult> => ({
       result: { text: "Plugin data" },
     }),
+  ),
+  onPluginPanelSdkEvent: vi.fn(
+    (listener: (event: PluginPanelSdkEvent) => void) => {
+      panelSdkEventListener = listener;
+      return () => {
+        if (panelSdkEventListener === listener) panelSdkEventListener = null;
+      };
+    },
   ),
 };
 
@@ -58,6 +69,7 @@ function uiOpenMessage(source: Window, origin = "http://127.0.0.1:49160") {
 
 describe("PluginPanelPage", () => {
   beforeEach(() => {
+    panelSdkEventListener = null;
     vi.stubGlobal("dohcDesktop", bridgeMock);
   });
 
@@ -109,6 +121,119 @@ describe("PluginPanelPage", () => {
       pluginId: "hello-plugin",
       panelId: "main",
     });
+  });
+
+  it("forwards SDK events to the exact panel origin", async () => {
+    render(
+      <PluginPanelPage
+        workspaceId="ws-plugins"
+        pluginId="hello-plugin"
+        placement="editor"
+        panelId="main"
+      />,
+    );
+    const frame = (await screen.findByTestId(
+      "plugin-panel-frame",
+    )) as HTMLIFrameElement;
+    const postMessage = vi.fn();
+    Object.defineProperty(frame, "contentWindow", {
+      configurable: true,
+      value: { postMessage } as unknown as Window,
+    });
+    await vi.waitFor(() => expect(panelSdkEventListener).not.toBeNull());
+
+    act(() => {
+      panelSdkEventListener?.({
+        workspaceId: "other-workspace",
+        pluginId: "hello-plugin",
+        panelId: "main",
+        subscriptionId: "subscription-1",
+        event: "files.watch",
+        data: { path: "docs/index.md", operation: "update" },
+      });
+      panelSdkEventListener?.({
+        workspaceId: "ws-plugins",
+        pluginId: "other-plugin",
+        panelId: "main",
+        subscriptionId: "subscription-1",
+        event: "files.watch",
+        data: { path: "docs/index.md", operation: "update" },
+      });
+      panelSdkEventListener?.({
+        workspaceId: "ws-plugins",
+        pluginId: "hello-plugin",
+        panelId: "other-panel",
+        subscriptionId: "subscription-1",
+        event: "files.watch",
+        data: { path: "docs/index.md", operation: "update" },
+      });
+    });
+    expect(postMessage).not.toHaveBeenCalled();
+
+    act(() => {
+      panelSdkEventListener?.({
+        workspaceId: "ws-plugins",
+        pluginId: "hello-plugin",
+        panelId: "main",
+        subscriptionId: "subscription-1",
+        event: "files.watch",
+        data: { path: "docs/index.md", operation: "update", sha256: "aaa" },
+      });
+    });
+
+    expect(postMessage).toHaveBeenCalledWith(
+      {
+        protocol: DOHC_SDK_PROTOCOL,
+        type: "event",
+        subscriptionId: "subscription-1",
+        event: "files.watch",
+        data: { path: "docs/index.md", operation: "update", sha256: "aaa" },
+      },
+      "http://127.0.0.1:49160",
+    );
+    expect(postMessage.mock.calls[0]?.[1]).not.toBe("*");
+  });
+
+  it("does not forward an SDK event while the panel stops", async () => {
+    const view = render(
+      <PluginPanelPage
+        workspaceId="ws-plugins"
+        pluginId="hello-plugin"
+        placement="editor"
+        panelId="main"
+      />,
+    );
+    const frame = (await screen.findByTestId(
+      "plugin-panel-frame",
+    )) as HTMLIFrameElement;
+    const postMessage = vi.fn();
+    Object.defineProperty(frame, "contentWindow", {
+      configurable: true,
+      value: { postMessage } as unknown as Window,
+    });
+    await vi.waitFor(() => expect(panelSdkEventListener).not.toBeNull());
+    const emit = panelSdkEventListener;
+    bridgeMock.stopPluginPanel.mockImplementationOnce(async () => {
+      emit?.({
+        workspaceId: "ws-plugins",
+        pluginId: "hello-plugin",
+        panelId: "main",
+        subscriptionId: "subscription-1",
+        event: "files.watch",
+        data: { path: "docs/index.md", operation: "update" },
+      });
+    });
+
+    view.rerender(
+      <PluginPanelPage
+        workspaceId="ws-plugins"
+        pluginId="hello-plugin"
+        placement="editor"
+        panelId="replacement"
+      />,
+    );
+
+    expect(postMessage).not.toHaveBeenCalled();
   });
 
   it("answers SDK requests only from the active frame and exact origin", async () => {

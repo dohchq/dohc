@@ -676,6 +676,7 @@ export const CHANNELS = {
   getPluginSettings: "desktop:get-plugin-settings",
   setPluginSettings: "desktop:set-plugin-settings",
   pluginStatusChanged: "desktop:plugin-status-changed",
+  pluginPanelSdkEvent: "desktop:plugin-panel-sdk-event",
   openExternalUrl: "desktop:open-external-url",
   cloudLoginStart: "desktop:cloud-login-start",
   cloudLoginPoll: "desktop:cloud-login-poll",
