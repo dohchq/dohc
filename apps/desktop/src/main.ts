@@ -476,10 +476,9 @@ import {
   relayUrlsMatch,
 } from "./workspaces/syncCode";
 import {
-  captureSharedViewLocalDivergence,
   SharePinInvalidError,
   recordedShareSelector,
-  refreshSharedViewOnce,
+  refreshStandaloneShareViewOnce,
   shareViewIdentitySelector,
 } from "./workspaces/sharedView";
 import { assertShareChatWritable } from "./workspaces/shareChatGate";
@@ -6047,12 +6046,7 @@ function registerIpcHandlers(
         },
       );
       const store = sharedViewStoreFor(created);
-      await captureSharedViewLocalDivergence(
-        created.rootPath,
-        created.workspaceId,
-        store,
-      );
-      const outcome = await refreshSharedViewOnce({
+      const outcome = await refreshStandaloneShareViewOnce({
         rootDir: created.rootPath,
         workspaceId: created.workspaceId,
         relay,
@@ -6167,12 +6161,7 @@ function registerIpcHandlers(
     });
     try {
       const store = sharedViewStoreFor(workspace);
-      await captureSharedViewLocalDivergence(
-        workspace.rootPath,
-        workspace.workspaceId,
-        store,
-      );
-      outcome = await refreshSharedViewOnce({
+      outcome = await refreshStandaloneShareViewOnce({
         rootDir: workspace.rootPath,
         workspaceId: workspace.workspaceId,
         relay,

@@ -9,7 +9,7 @@ import {
   SharedFileReadOnlyError,
   type ShareViewChangedPath,
 } from "@dohc/workspace-contracts/relay";
-import { materializeSharedViewPaths } from "./sharedView";
+import { materializeSharedViewPaths, writeDiskContentToStore } from "./sharedView";
 import {
   shareViewTakesLocalWrites,
   type ShareViewWriteScope,
@@ -546,23 +546,13 @@ async function shareViewImport(
       }
       claimed.add(name.toLowerCase());
       const path = relDir === "" ? name : `${relDir}/${name}`;
-      if (content.kind === "text") {
-        await store.writeTextFile({
-          workspaceId: input.workspaceId,
-          versionId: main.id,
-          path,
-          text: content.text,
-          metadata: { origin: "local-file" },
-        });
-      } else {
-        await store.writeBinaryFile({
-          workspaceId: input.workspaceId,
-          versionId: main.id,
-          path,
-          bytes: content.bytes,
-          metadata: { origin: "local-file" },
-        });
-      }
+      await writeDiskContentToStore({
+        store,
+        workspaceId: input.workspaceId,
+        versionId: main.id,
+        path,
+        content,
+      });
       imported.push(path);
       changed.push({ path, operation: "write", contentKind: content.kind });
     }

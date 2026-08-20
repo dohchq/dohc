@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -12,7 +13,10 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
-import { materializeSharedViewPaths } from "./sharedView";
+import {
+  captureSharedViewLocalDivergence,
+  materializeSharedViewPaths,
+} from "./sharedView";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
@@ -22,6 +26,7 @@ import {
   routeWorkspacePathDelete,
   routeWorkspacePathMove,
 } from "./workspaceFileOps";
+import { routeWorkspaceTextWrite } from "./workspaceTextWrite";
 
 // The four remaining writes a share view admits (#802), driven the way
 // `shareViewTextWrite.e2e.test.ts` drives the text save.
@@ -211,6 +216,45 @@ async function exists(path: string): Promise<boolean> {
 
 
 describe("share-view file operations through the real store", () => {
+  it.skipIf(engine.missing)(
+    "journals out-of-app and in-app edits for the same submit lane",
+    async () => {
+      const view = await harness("dohc-share-outside-edit-", "edit");
+      const outsidePath = "docs/outside.md";
+      const inAppPath = "docs/in-app.md";
+      await seedSharedFiles(view, [
+        { path: outsidePath, text: "outside before\n" },
+        { path: inAppPath, text: "in-app before\n" },
+      ]);
+      await writeFile(join(view.rootPath, outsidePath), "outside after\n", "utf8");
+
+      const beforeOutside = replicationLogRows(view.rootPath);
+      await expect(
+        captureSharedViewLocalDivergence(
+          view.rootPath,
+          view.workspaceId,
+          view.store,
+        ),
+      ).resolves.toEqual({ capturedPaths: 1 });
+      const afterOutside = replicationLogRows(view.rootPath);
+      const outsideRows = afterOutside - beforeOutside;
+      expect(outsideRows).toBeGreaterThan(0);
+
+      const result = await routeWorkspaceTextWrite({
+        ...scope(view),
+        relativePath: inAppPath,
+        text: "in-app after\n",
+        expectedContentHash: createHash("sha256")
+          .update("in-app before\n")
+          .digest("hex"),
+      });
+      expect(result.status).toBe("written");
+      const inAppRows = replicationLogRows(view.rootPath) - afterOutside;
+      expect(inAppRows).toBe(outsideRows);
+    },
+    60_000,
+  );
+
   it.skipIf(engine.missing)(
     "makes a recipient's new file a proposable moment, not just a file",
     async () => {

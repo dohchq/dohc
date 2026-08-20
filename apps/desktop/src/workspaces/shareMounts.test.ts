@@ -471,6 +471,7 @@ describe("refreshShareMountOnce", () => {
     const momentIdsBefore = (
       await storeBefore.listMoments({ workspaceId: target.workspaceId, limit: 100 })
     ).moments.map((moment) => moment.id);
+    expect(momentIdsBefore.length).toBeGreaterThan(0);
     await storeBefore.close();
 
     // A rogue tool edits the mounted file directly; the relay is unchanged.
@@ -491,6 +492,15 @@ describe("refreshShareMountOnce", () => {
     await storeAfter.close();
 
     // Deleting the file locally is repaired the same way.
+    const storeBeforeDelete = harness.openStore(target);
+    const momentIdsBeforeDelete = (
+      await storeBeforeDelete.listMoments({
+        workspaceId: target.workspaceId,
+        limit: 100,
+      })
+    ).moments.map((moment) => moment.id);
+    expect(momentIdsBeforeDelete.length).toBeGreaterThan(0);
+    await storeBeforeDelete.close();
     await rm(mounted);
     const restored = await refreshShareMountOnce(harness, {
       hostRoot: host,
@@ -499,6 +509,16 @@ describe("refreshShareMountOnce", () => {
     expect(restored.status).toBe("updated");
     expect(restored.changedPaths).toBe(1);
     expect(await readFile(mounted, "utf8")).toBe("authoritative");
+    const storeAfterDelete = harness.openStore(target);
+    expect(
+      (
+        await storeAfterDelete.listMoments({
+          workspaceId: target.workspaceId,
+          limit: 100,
+        })
+      ).moments.map((moment) => moment.id),
+    ).toEqual(momentIdsBeforeDelete);
+    await storeAfterDelete.close();
 
     // An untouched projection stays "unchanged" — no busy repainting.
     const quiet = await refreshShareMountOnce(harness, {

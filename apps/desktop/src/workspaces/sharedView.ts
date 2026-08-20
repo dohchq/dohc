@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
-import { validateUserMaterializePath } from "@dohc/workspace-core";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
@@ -18,7 +17,8 @@ import {
   type ShareViewRefusal,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
-import { readDiskContent } from "./workspaceEngineCapture";
+import { shareViewTakesLocalWrites } from "./shareWriteGate";
+import { readDiskContent, type DiskTextState } from "./workspaceEngineCapture";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 // The receive side of a relay share (PR 18): a shared view is a local
@@ -271,11 +271,71 @@ export async function materializeSharedViewPaths(
   }
 }
 
-// Pull-time reconciliation for #807, for standalone share views only. Comparing
-// disk with the engine head makes this echo-free: in-app edits and the previous
-// materialization already match the store, so only out-of-app divergence is
-// captured. Mounts keep pure-overwrite semantics through
-// repairSharedViewProjection and must never call this function.
+export async function writeDiskContentToStore(input: {
+  store: CaptureVersionedTextStore;
+  workspaceId: string;
+  versionId: string;
+  path: string;
+  content: DiskTextState & { kind: "text" | "binary" };
+}): Promise<void> {
+  if (input.content.kind === "text") {
+    await input.store.writeTextFile({
+      workspaceId: input.workspaceId,
+      versionId: input.versionId,
+      path: input.path,
+      text: input.content.text,
+      metadata: { origin: "local-file" },
+    });
+  } else {
+    await input.store.writeBinaryFile({
+      workspaceId: input.workspaceId,
+      versionId: input.versionId,
+      path: input.path,
+      bytes: input.content.bytes,
+      metadata: { origin: "local-file" },
+    });
+  }
+}
+
+const CAPTURE_IGNORED_DIRS = new Set([".dohc", "node_modules", ".git"]);
+
+async function captureDiskPaths(rootDir: string): Promise<Set<string>> {
+  const found = new Set<string>();
+  async function walk(dir: string, relativeDir: string): Promise<void> {
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const path = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (!CAPTURE_IGNORED_DIRS.has(entry.name)) {
+          await walk(join(dir, entry.name), path);
+        }
+      } else if (entry.isFile()) {
+        found.add(path);
+      }
+    }
+  }
+  await walk(rootDir, "");
+  return found;
+}
+
+async function pathConfirmedAbsentOnDisk(
+  rootDir: string,
+  path: string,
+): Promise<boolean> {
+  try {
+    await lstat(join(rootDir, path));
+    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR";
+  }
+}
+
+// Capture out-of-app modifications and deletes for paths the standalone share
+// view already tracks. A hand-placed file belongs to the recipient and stays
+// outside the journal. Comparing disk with the engine head avoids echoing
+// in-app writes and prior materialization.
 export async function captureSharedViewLocalDivergence(
   rootDir: string,
   workspaceId: string,
@@ -285,101 +345,65 @@ export async function captureSharedViewLocalDivergence(
   if (realRoot === null) return { capturedPaths: 0 };
 
   const main = await store.ensureMainVersion({ workspaceId });
-  const snapshots = await store.listTextFiles({
+  if (!store.listTextFileMetadata) {
+    throw new Error("Shared view reconciliation requires file metadata listing support.");
+  }
+  const tracked = await store.listTextFileMetadata({
     workspaceId,
     versionId: main.id,
   });
-  const tracked = new Map(snapshots.map((snapshot) => [snapshot.path, snapshot]));
-  const diskPaths = new Set<string>();
-  const ignoredTopLevelDirectories = new Set([".dohc", "node_modules", ".git"]);
-
-  async function walk(dir: string, relativeDir: string): Promise<void> {
-    const entries = await readdir(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (
-        relativeDir.length === 0 &&
-        entry.isDirectory() &&
-        ignoredTopLevelDirectories.has(entry.name)
-      ) {
-        continue;
-      }
-      const path = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) {
-        await walk(join(dir, entry.name), path);
-      } else {
-        diskPaths.add(path);
-      }
-    }
-  }
-  await walk(realRoot, "");
+  const diskPaths = await captureDiskPaths(realRoot);
 
   let capturedPaths = 0;
-  for (const snapshot of snapshots) {
-    if (classifyEngineFilePath(snapshot.path).kind === "secret") continue;
-    if (!diskPaths.has(snapshot.path)) {
+  for (const entry of tracked) {
+    if (classifyEngineFilePath(entry.path).kind === "secret") continue;
+    if (!diskPaths.has(entry.path)) {
+      if (!(await pathConfirmedAbsentOnDisk(realRoot, entry.path))) continue;
       await store.deleteTextFile({
         workspaceId,
         versionId: main.id,
-        path: snapshot.path,
+        path: entry.path,
         metadata: { origin: "local-file" },
       });
       capturedPaths += 1;
       continue;
     }
 
-    const disk = await readDiskContent(resolve(realRoot, snapshot.path));
-    if (disk.kind === "text") {
-      const changed =
-        snapshot.contentKind === "binary" ||
-        (typeof snapshot.sha256 === "string" && snapshot.sha256.length > 0
-          ? snapshot.sha256 !== disk.sha256
-          : snapshot.text !== disk.text);
-      if (changed) {
-        await store.writeTextFile({
+    const disk = await readDiskContent(resolve(realRoot, entry.path));
+    if (disk.kind === "absent") {
+      if (await pathConfirmedAbsentOnDisk(realRoot, entry.path)) {
+        await store.deleteTextFile({
           workspaceId,
           versionId: main.id,
-          path: snapshot.path,
-          text: disk.text,
+          path: entry.path,
           metadata: { origin: "local-file" },
+        });
+        capturedPaths += 1;
+      }
+      continue;
+    }
+    if (disk.kind === "text") {
+      const changed = entry.contentKind !== "text" || entry.sha256 !== disk.sha256;
+      if (changed) {
+        await writeDiskContentToStore({
+          store,
+          workspaceId,
+          versionId: main.id,
+          path: entry.path,
+          content: disk,
         });
         capturedPaths += 1;
       }
     } else if (
       disk.kind === "binary" &&
-      (snapshot.sha256 !== disk.sha256 || snapshot.contentKind !== "binary")
+      (entry.contentKind !== "binary" || entry.sha256 !== disk.sha256)
     ) {
-      await store.writeBinaryFile({
+      await writeDiskContentToStore({
+        store,
         workspaceId,
         versionId: main.id,
-        path: snapshot.path,
-        bytes: disk.bytes,
-        metadata: { origin: "local-file" },
-      });
-      capturedPaths += 1;
-    }
-  }
-
-  for (const path of diskPaths) {
-    if (tracked.has(path) || classifyEngineFilePath(path).kind === "secret") continue;
-    const validated = validateUserMaterializePath(path);
-    if (!validated.ok) continue;
-    const disk = await readDiskContent(resolve(realRoot, validated.normalized));
-    if (disk.kind === "text") {
-      await store.writeTextFile({
-        workspaceId,
-        versionId: main.id,
-        path: validated.normalized,
-        text: disk.text,
-        metadata: { origin: "local-file" },
-      });
-      capturedPaths += 1;
-    } else if (disk.kind === "binary") {
-      await store.writeBinaryFile({
-        workspaceId,
-        versionId: main.id,
-        path: validated.normalized,
-        bytes: disk.bytes,
-        metadata: { origin: "local-file" },
+        path: entry.path,
+        content: disk,
       });
       capturedPaths += 1;
     }
@@ -552,4 +576,19 @@ export async function refreshSharedViewOnce(input: {
     refusedOps: pull.refusalCount,
     refusedDetail: pull.refusals[0]?.detail ?? null,
   };
+}
+
+export async function refreshStandaloneShareViewOnce(
+  input: Parameters<typeof refreshSharedViewOnce>[0],
+): Promise<RefreshSharedViewOutcome> {
+  const grantedSelector = recordedShareSelector(input.pinnedSelector);
+  if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
+  if (shareViewTakesLocalWrites({ access: grantedSelector.access, ended: false })) {
+    await captureSharedViewLocalDivergence(
+      input.rootDir,
+      input.workspaceId,
+      input.store,
+    );
+  }
+  return refreshSharedViewOnce(input);
 }
