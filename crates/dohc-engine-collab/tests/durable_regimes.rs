@@ -1313,6 +1313,65 @@ fn forced_compaction_with_nothing_pending_still_validates_the_snapshot() {
     );
 }
 
+#[test]
+fn forced_close_on_a_compacted_lineage_skips_without_reminting() {
+    // #851 certification: the counterweight to the test above. Guards against
+    // over-correcting the threshold==0 fix — forced compaction must still
+    // SUCCEED cleanly on a healthy, already-compacted lineage by reporting
+    // Skipped { 0 }, never re-minting a snapshot it does not need (a wasted
+    // blob write) and never erroring. Two mutations would silently drop
+    // this: removing `below_threshold`'s `|| pending <= 0` arm, or removing
+    // `maybe_compact`'s second (authoritative, post-`load_persisted`)
+    // `below_threshold` check. Either lets the compaction write path run
+    // unconditionally at threshold == 0, turning every forced close on a
+    // healthy lineage into Compacted { pruned_updates: 0, .. }.
+    let mut ts = fresh_store("forced-close-healthy-compacted");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::Replicated,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let doc = Ydoc::wire();
+    for i in 0..2u32 {
+        let update = doc.plaintext_insert(i, "x");
+        committed(
+            record_local_update(&mut ts.store, &key, &update, &NoFaults, 1_001 + i64::from(i))
+                .expect("rec"),
+        );
+    }
+    committed(maybe_compact(&mut ts.store, &key, 0, &NoFaults, 1_010).expect("compact"));
+    assert_eq!(
+        count(&ts.store, "ydoc_updates", &key),
+        0,
+        "folded to just the snapshot"
+    );
+
+    // Nothing pending, healthy snapshot: close must be clean and idempotent —
+    // Skipped, never a re-mint — across repeated calls.
+    for now in [1_011i64, 1_012] {
+        let closed = close_session(&mut ts.store, &key, false, None, &NoFaults, now).expect("close");
+        match closed {
+            TxnOutcome::Committed(CloseOutcome::Compacted(CompactOutcome::Skipped { pending })) => {
+                assert_eq!(pending, 0, "a healthy compacted lineage has nothing pending");
+            }
+            other => panic!("expected a clean Skipped close, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        count(&ts.store, "ydoc_snapshots", &key),
+        1,
+        "close on a healthy lineage must not mint a second snapshot"
+    );
+}
+
 // ---- base-once --------------------------------------------------------------
 
 #[test]
