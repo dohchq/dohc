@@ -223,6 +223,9 @@ class FakeShareRelay {
   ops: Array<Record<string, unknown>> = [];
   blobs = new Map<string, Buffer>();
   ended = false;
+  pageSize: number | null = null;
+  logRequests = 0;
+  beforeLogRequest?: (requestNumber: number) => Promise<void>;
   // The share metadata route is the ONLY route a re-pin could use. Counted so
   // a test can prove that a refresh never reaches it.
   metadataRequests = 0;
@@ -306,14 +309,18 @@ class FakeShareRelay {
       return notFound();
     }
     if (parts.length === 4 && parts[3] === "log") {
+      this.logRequests += 1;
+      await this.beforeLogRequest?.(this.logRequests);
       const since = Number(parsed.searchParams.get("since") ?? 0);
-      const rows = this.ops.filter((op) => Number(op.relaySeq) > since);
+      const remaining = this.ops.filter((op) => Number(op.relaySeq) > since);
+      const rows =
+        this.pageSize === null ? remaining : remaining.slice(0, this.pageSize);
       const last = rows[rows.length - 1];
       return Response.json({
         ok: true,
         ops: rows,
         nextCursor: Number(last?.relaySeq ?? since),
-        hasMore: false,
+        hasMore: rows.length < remaining.length,
       });
     }
     if (parts.length === 5 && parts[3] === "blobs") {
@@ -563,6 +570,7 @@ describe("shared view refresh", () => {
         WORKSPACE,
         store,
         true,
+        SHARE_ID,
         {
           async beforeCaptureWrite(hookPath) {
             markCaptureBlocked();
@@ -690,6 +698,7 @@ describe("shared view refresh", () => {
         WORKSPACE,
         captureStore,
         true,
+        SHARE_ID,
       );
       pendingOperations.push(capturing);
       for (let turn = 0; turn < 200 && !captureDeleteStarted; turn += 1) {
@@ -757,6 +766,7 @@ describe("shared view refresh", () => {
         WORKSPACE,
         captureStore,
         true,
+        SHARE_ID,
       );
       await snapshotRead;
       await expect(
@@ -854,6 +864,7 @@ describe("shared view refresh", () => {
         WORKSPACE,
         repairStore,
         true,
+        SHARE_ID,
       );
       for (let turn = 0; turn < 20 && !repairMaterializationStarted; turn += 1) {
         await new Promise<void>((resolve) => setImmediate(resolve));
@@ -899,7 +910,7 @@ describe("shared view refresh", () => {
     };
     try {
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, racingStore, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, racingStore, true, SHARE_ID),
       ).resolves.toMatchObject({ capturedPaths: 2 });
     } finally {
       await store.close();
@@ -1037,7 +1048,7 @@ describe("shared view refresh", () => {
     const store = harness.openStore(target);
     try {
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
         repairedPaths: 0,
@@ -1197,7 +1208,7 @@ describe("shared view refresh", () => {
       await writeFile(join(rootDir, path), "moment A", "utf8");
 
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 1,
         repairedPaths: 0,
@@ -1240,7 +1251,7 @@ describe("shared view refresh", () => {
       const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
 
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
         repairedPaths: 1,
@@ -1312,7 +1323,7 @@ describe("shared view refresh", () => {
       };
 
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, captureStore, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, captureStore, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
         repairedPaths: 1,
@@ -1499,7 +1510,7 @@ describe("shared view refresh", () => {
       const before = await momentIds(store);
 
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({ capturedPaths: 0, repairedPaths: 1, unjournalablePaths: [] });
       expect(await readFile(join(rootDir, path), "utf8")).toBe("moment two");
       expect(await momentIds(store)).toEqual(before);
@@ -1537,7 +1548,7 @@ describe("shared view refresh", () => {
       const before = await momentIds(store);
 
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
         repairedPaths: 1,
@@ -1575,7 +1586,7 @@ describe("shared view refresh", () => {
       denied = true;
 
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
         repairedPaths: 0,
@@ -1613,7 +1624,7 @@ describe("shared view refresh", () => {
       await writeFile(join(rootDir, path), "moment three", "utf8");
 
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({ capturedPaths: 1, repairedPaths: 0, unjournalablePaths: [] });
       await expect(
         store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path }),
@@ -1650,6 +1661,7 @@ describe("shared view refresh", () => {
         WORKSPACE,
         store,
         true,
+        SHARE_ID,
       );
       const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
       const head = await store.readTextFile({
@@ -1710,7 +1722,7 @@ describe("shared view refresh", () => {
 
       await writeFile(join(rootDir, path), "recipient edit two", "utf8");
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toMatchObject({ capturedPaths: 1, repairedPaths: 0 });
       expect(await readFile(join(rootDir, path), "utf8")).toBe(
         "recipient edit two",
@@ -2105,7 +2117,7 @@ describe("shared view refresh", () => {
         recordRefusals: async () => undefined,
         ended: false,
       });
-      await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
         new Set([path]),
       );
       const before = await momentIds(store);
@@ -2161,7 +2173,7 @@ describe("shared view refresh", () => {
         recordRefusals: async () => undefined,
         ended: false,
       });
-      await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
         new Set([path]),
       );
       relay.addDelete(path);
@@ -2184,6 +2196,126 @@ describe("shared view refresh", () => {
       });
 
       expect(await readFile(join(rootDir, path), "utf8")).toBe("recipient data");
+      await rm(join(rootDir, path));
+      await refreshStandaloneShareViewOnceWithPull({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: harness.relay,
+        shareId: SHARE_ID,
+        store,
+        pull: harness.pullFor(target),
+        pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+        recordRefusals: async () => undefined,
+        ended: false,
+      });
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(new Set());
+
+      relay.addWrite(path, "granter re-add");
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({ excludedPaths: [], unjournalablePaths: [] });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("granter re-add");
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("does not process a collision-recorded pending path twice", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/collision-pending.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "moment one");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    relay.addWrite(path, "moment two");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), "moment one", "utf8");
+    await recordCollisionPaths(rootDir, SHARE_ID, [path]);
+    await writePendingMaterializationPaths(rootDir, [path]);
+
+    const store = harness.openStore(target);
+    try {
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 0,
+        unjournalablePaths: [{ path, reason: "local-collision" }],
+      });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("moment one");
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
+        new Set([path]),
+      );
+      await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
+        new Set([path]),
+      );
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("records a non-final pull page collision before fetching the next page", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    relay.pageSize = 1;
+    const harness = daemonHarness(relay);
+    const path = "docs/page-one-collision.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    await mkdir(join(rootDir, "docs"), { recursive: true });
+    await writeFile(join(rootDir, path), "recipient data", "utf8");
+    relay.addWrite(path, "granter file");
+    relay.addWrite("docs/page-two.md", "second page");
+    let observedBeforeSecondPage = false;
+    relay.beforeLogRequest = async (requestNumber) => {
+      if (requestNumber !== 2) return;
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
+        new Set([path]),
+      );
+      observedBeforeSecondPage = true;
+    };
+
+    const store = harness.openStore(target);
+    try {
+      await refreshStandaloneShareViewOnceWithPull({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: harness.relay,
+        shareId: SHARE_ID,
+        store,
+        pull: harness.pullFor(target),
+        pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+        recordRefusals: async () => undefined,
+        ended: false,
+      });
+
+      expect(observedBeforeSecondPage).toBe(true);
+      expect(relay.logRequests).toBe(2);
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
+        new Set([path]),
+      );
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("recipient data");
+      expect(await readFile(join(rootDir, "docs/page-two.md"), "utf8")).toBe(
+        "second page",
+      );
     } finally {
       await store.close();
     }
@@ -2217,7 +2349,7 @@ describe("shared view refresh", () => {
         recordRefusals: async () => undefined,
         ended: false,
       });
-      await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
         new Set([path]),
       );
       await rm(join(rootDir, path));
@@ -2235,10 +2367,76 @@ describe("shared view refresh", () => {
         ended: false,
       });
 
-      await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(new Set());
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(new Set());
       expect(await readFile(join(rootDir, path), "utf8")).toBe("granter file");
       expect(await momentIds(store)).toEqual(before);
+
+      // Simulate a crash after materialization succeeded but before capture
+      // cleared the collision record.
+      await recordCollisionPaths(rootDir, SHARE_ID, [path]);
+      const beforeCrashRecovery = await momentIds(store);
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(new Set());
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("granter file");
+      expect(await momentIds(store)).toEqual(beforeCrashRecovery);
     } finally {
+      await store.close();
+    }
+  });
+
+  it("keeps a collision record when the store loses the tracked path", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/lost-collision-path.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "granter file");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    const store = harness.openStore(target);
+    const inconsistentStore: typeof store = {
+      ...store,
+      async readTextFile(input) {
+        if (input.path === path) return null;
+        return await store.readTextFile(input);
+      },
+    };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await recordCollisionPaths(rootDir, SHARE_ID, [path]);
+      await rm(join(rootDir, path));
+
+      await expect(
+        captureSharedViewLocalDivergence(
+          rootDir,
+          WORKSPACE,
+          inconsistentStore,
+          true,
+          SHARE_ID,
+        ),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 0,
+        unjournalablePaths: [],
+      });
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
+        new Set([path]),
+      );
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("shared view store lost tracked path"),
+      );
+    } finally {
+      errorLog.mockRestore();
       await store.close();
     }
   });
@@ -2273,7 +2471,7 @@ describe("shared view refresh", () => {
           recordRefusals: async () => undefined,
           ended: false,
         });
-        await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(
+        await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
           new Set([path]),
         );
         if (operation === "write") {
@@ -2311,17 +2509,33 @@ describe("shared view refresh", () => {
     const rootDir = await tempRoot();
     const paths = ["docs/b.md", "docs/a.md"];
 
-    await recordCollisionPaths(rootDir, paths);
+    await recordCollisionPaths(rootDir, SHARE_ID, paths);
 
-    await expect(
-      readFile(join(rootDir, ".dohc", "share-collision-record.json"), "utf8"),
-    ).resolves.toBe(JSON.stringify({ paths: [...paths].sort() }));
-    await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(new Set(paths));
+    await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(new Set(paths));
     expect(
       (await readdir(join(rootDir, ".dohc"))).filter((name) =>
         /^\.share-collision-record\.json\..+\.tmp$/.test(name),
       ),
     ).toEqual([]);
+  });
+
+  it("ignores a stale collision-record temp file beside the intact target", async () => {
+    const rootDir = await tempRoot();
+    const paths = ["docs/a.md", "docs/b.md"];
+    await recordCollisionPaths(rootDir, SHARE_ID, paths);
+    await writeFile(
+      join(
+        rootDir,
+        ".dohc",
+        ".share-collision-record.json.999.00000000-0000-0000-0000-000000000000.tmp",
+      ),
+      "not json",
+      "utf8",
+    );
+
+    await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
+      new Set(paths),
+    );
   });
 
   it("quarantines a corrupt collision record and accepts a clean write", async () => {
@@ -2357,12 +2571,12 @@ describe("shared view refresh", () => {
         recordRefusals: async () => undefined,
         ended: false,
       });
-      await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
         new Set([path]),
       );
       await writeFile(collisionPath, "not json", "utf8");
 
-      await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(new Set());
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(new Set());
       expect(
         (await readdir(join(rootDir, ".dohc"))).some((name) =>
           /^share-collision-record\.json\.invalid-\d+$/.test(name),
@@ -2371,9 +2585,196 @@ describe("shared view refresh", () => {
       await expect(lstat(collisionPath)).rejects.toMatchObject({ code: "ENOENT" });
       expect(errorLog).toHaveBeenCalledWith(expect.stringContaining(collisionPath));
 
-      await recordCollisionPaths(rootDir, ["docs/fresh.md"]);
-      await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(
+      await recordCollisionPaths(rootDir, SHARE_ID, ["docs/fresh.md"]);
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
         new Set(["docs/fresh.md"]),
+      );
+    } finally {
+      errorLog.mockRestore();
+      await store.close();
+    }
+  });
+
+  it("repairs a view-share path after quarantining its collision record", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/view-quarantined-collision.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), "recipient data", "utf8");
+    relay.addWrite(path, "granter file");
+
+    const store = harness.openStore(target);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await refreshStandaloneShareViewOnceWithPull({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: harness.relay,
+        shareId: SHARE_ID,
+        store,
+        pull: harness.pullFor(target),
+        pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+        recordRefusals: async () => undefined,
+        ended: false,
+      });
+      await writeFile(
+        join(rootDir, ".dohc", "share-collision-record.json"),
+        "not json",
+        "utf8",
+      );
+
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "view" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({ status: "updated", unjournalablePaths: [] });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("granter file");
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(new Set());
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("ordinary capture rules"),
+      );
+    } finally {
+      errorLog.mockRestore();
+      await store.close();
+    }
+  });
+
+  it("keeps an intact collision ahead of corrupt pending verification", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/pending-quarantine-collision.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), "recipient data", "utf8");
+    relay.addWrite(path, "granter file");
+
+    const store = harness.openStore(target);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await refreshStandaloneShareViewOnceWithPull({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: harness.relay,
+        shareId: SHARE_ID,
+        store,
+        pull: harness.pullFor(target),
+        pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+        recordRefusals: async () => undefined,
+        ended: false,
+      });
+      await writeFile(
+        join(rootDir, ".dohc", "pending-materialization.json"),
+        "not json",
+        "utf8",
+      );
+      const before = await momentIds(store);
+
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({
+        unjournalablePaths: [{ path, reason: "local-collision" }],
+      });
+      expect(await momentIds(store)).toEqual(before);
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("recipient data");
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
+        new Set([path]),
+      );
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("verifying every tracked path"),
+      );
+    } finally {
+      errorLog.mockRestore();
+      await store.close();
+    }
+  });
+
+  it("quarantines another share's collision record before recording fresh collisions", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const stalePath = "docs/stale-share-path.md";
+    const collisionPath = "docs/new-share-collision.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await recordCollisionPaths(rootDir, "share-old", [stalePath]);
+    await writeFile(join(rootDir, collisionPath), "recipient data", "utf8");
+    relay.addWrite(stalePath, "new share file");
+    relay.addWrite(collisionPath, "granter file");
+
+    const store = harness.openStore(target);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({
+        excludedPaths: [collisionPath],
+        unjournalablePaths: [
+          { path: collisionPath, reason: "local-collision" },
+        ],
+      });
+
+      expect(await readFile(join(rootDir, stalePath), "utf8")).toBe(
+        "new share file",
+      );
+      expect(await readFile(join(rootDir, collisionPath), "utf8")).toBe(
+        "recipient data",
+      );
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
+        new Set([collisionPath]),
+      );
+      expect(
+        (await readdir(join(rootDir, ".dohc"))).some((name) =>
+          /^share-collision-record\.json\.invalid-\d+$/.test(name),
+        ),
+      ).toBe(true);
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("not share-1"),
       );
     } finally {
       errorLog.mockRestore();
@@ -2476,6 +2877,7 @@ describe("shared view refresh", () => {
         WORKSPACE,
         store,
         true,
+        SHARE_ID,
       );
       const after = (
         await store.listMoments({ workspaceId: WORKSPACE, limit: 200 })
@@ -2540,7 +2942,7 @@ describe("shared view refresh", () => {
       const beforeIds = await momentIds(store);
 
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 1,
         repairedPaths: 0,
@@ -2597,6 +2999,7 @@ describe("shared view refresh", () => {
           WORKSPACE,
           store,
           shareViewTakesLocalWrites({ access: "view", ended: false }),
+          SHARE_ID,
         ),
       ).resolves.toEqual({
         capturedPaths: 0,
@@ -2832,7 +3235,7 @@ describe("shared view refresh", () => {
       const before = await momentIds(store);
 
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({ capturedPaths: 0, repairedPaths: 1, unjournalablePaths: [] });
       await expect(stat(join(rootDir, path))).rejects.toMatchObject({ code: "ENOENT" });
       expect(await momentIds(store)).toEqual(before);
@@ -2967,7 +3370,7 @@ describe("shared view refresh", () => {
         denied = true;
 
         await expect(
-          captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+          captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
         ).resolves.toEqual({
           capturedPaths: 0,
           repairedPaths: 0,
@@ -3034,7 +3437,7 @@ describe("shared view refresh", () => {
       const before = await momentIds(store);
 
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, pagingStore, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, pagingStore, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
         repairedPaths: 1,
@@ -3114,7 +3517,7 @@ describe("shared view refresh", () => {
       const beforeIds = await momentIds(store);
 
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
         repairedPaths: 0,
@@ -3164,6 +3567,7 @@ describe("shared view refresh", () => {
           WORKSPACE,
           inconsistentStore,
           true,
+          SHARE_ID,
         ),
       ).resolves.toEqual({ capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [] });
       expect(error).toHaveBeenCalledWith(
@@ -3636,7 +4040,7 @@ describe("shared view refresh", () => {
       expect(commitCursor).not.toHaveBeenCalled();
 
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
         repairedPaths: 1,
@@ -3762,7 +4166,7 @@ describe("shared view refresh", () => {
     try {
       readdirCalls = [];
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
         repairedPaths: 0,
@@ -3792,7 +4196,7 @@ describe("shared view refresh", () => {
       const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
       const beforeIds = new Set(before.moments.map((moment) => moment.id));
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 1,
         repairedPaths: 0,
@@ -3835,7 +4239,7 @@ describe("shared view refresh", () => {
         await denyRead(parent, "dir");
         try {
           await expect(
-            captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+            captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
           ).resolves.toEqual({
             capturedPaths: 0,
             repairedPaths: 0,
@@ -3847,7 +4251,7 @@ describe("shared view refresh", () => {
 
         await rm(parent, { recursive: true });
         await expect(
-          captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+          captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
         ).resolves.toEqual({
           capturedPaths: 1,
           repairedPaths: 0,
@@ -4187,7 +4591,7 @@ describe("shared view refresh", () => {
     try {
       const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
         repairedPaths: 0,
@@ -4245,7 +4649,7 @@ describe("shared view refresh", () => {
     try {
       const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
       await expect(
-        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
         repairedPaths: 0,

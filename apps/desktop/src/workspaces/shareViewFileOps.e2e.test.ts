@@ -39,6 +39,7 @@ import { routeWorkspaceTextWrite } from "./workspaceTextWrite";
 // and the projection, never the return value alone.
 
 const engine = requireEngineBinaryOrSkip();
+const SHARE_ID = "share-e2e";
 
 const requireModule = createRequire(import.meta.url);
 
@@ -237,6 +238,7 @@ describe("share-view file operations through the real store", () => {
           view.workspaceId,
           view.store,
           true,
+          SHARE_ID,
         ),
       ).resolves.toEqual({
         capturedPaths: 1,
@@ -345,6 +347,7 @@ describe("share-view file operations through the real store", () => {
           view.workspaceId,
           view.store,
           true,
+          SHARE_ID,
         ),
       ).resolves.toEqual({
         capturedPaths: 0,
@@ -462,6 +465,7 @@ describe("share-view file operations through the real store", () => {
           view.workspaceId,
           view.store,
           true,
+          SHARE_ID,
         );
       });
       for (let turn = 0; turn < 20 && !captureEnteredGap; turn += 1) {
@@ -1396,6 +1400,7 @@ describe("share-view file operations through the real store", () => {
           view.workspaceId,
           view.store,
           true,
+          SHARE_ID,
         ),
       ).resolves.toEqual({
         capturedPaths: 0,

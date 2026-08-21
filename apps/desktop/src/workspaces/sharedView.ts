@@ -10,6 +10,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { existingAncestor } from "./workspaceFiles";
@@ -488,6 +489,8 @@ export async function writeDiskContentToStore(input: {
 const PENDING_MATERIALIZATION_FILE = "pending-materialization.json";
 const PULL_IN_FLIGHT_FILE = "pull-in-flight.marker";
 const REFRESH_LIFECYCLE_LOCK = "refresh-lifecycle";
+// Refresh and Send changes both run the same capture path. Either action can
+// resolve a collision and clear this record after the recipient moves its file.
 const COLLISION_RECORD_FILE = "share-collision-record.json";
 
 function pendingMaterializationPath(rootDir: string): string {
@@ -555,16 +558,21 @@ async function syncMetadataDirectory(metadataDir: string): Promise<void> {
   }
 }
 
-async function writePullInFlightMarker(rootDir: string): Promise<void> {
+async function writeSidecarAtomically(
+  rootDir: string,
+  fileName: string,
+  writeContent: (handle: FileHandle) => Promise<void>,
+): Promise<void> {
   const metadataDir = await ensureRealMetadataDirectory(rootDir);
-  const target = pullInFlightPath(rootDir);
+  const target = join(metadataDir, fileName);
   const temp = join(
     metadataDir,
-    `.${PULL_IN_FLIGHT_FILE}.${process.pid}.${randomUUID()}.tmp`,
+    `.${fileName}.${process.pid}.${randomUUID()}.tmp`,
   );
   try {
     const handle = await open(temp, "w");
     try {
+      await writeContent(handle);
       await handle.sync();
     } finally {
       await handle.close();
@@ -574,6 +582,26 @@ async function writePullInFlightMarker(rootDir: string): Promise<void> {
   } finally {
     await rm(temp, { force: true });
   }
+}
+
+async function quarantineSidecar(
+  target: string,
+  context: string,
+): Promise<boolean> {
+  const quarantine = `${target}.invalid-${Date.now()}`;
+  try {
+    await rename(target, quarantine);
+    return true;
+  } catch (quarantineError) {
+    console.error(
+      `[desktop] could not quarantine ${context} at ${target}: ${String(quarantineError)}`,
+    );
+    return false;
+  }
+}
+
+async function writePullInFlightMarker(rootDir: string): Promise<void> {
+  await writeSidecarAtomically(rootDir, PULL_IN_FLIGHT_FILE, async () => {});
 }
 
 export async function clearPullInFlightMarker(rootDir: string): Promise<void> {
@@ -646,25 +674,15 @@ async function readPendingMaterializationPathsForCapture(
           "quarantining it and verifying every tracked path. Pending paths " +
           `that are no longer tracked cannot be recovered: ${String(error)}`,
       );
-      const quarantine = `${target}.invalid-${Date.now()}`;
-      try {
-        await rename(target, quarantine);
-        return {
-          paths: new Set(trackedPaths),
-          recordedPaths: new Set(),
-          canClearRecord: true,
-        };
-      } catch (quarantineError) {
-        console.error(
-          `[desktop] could not quarantine pending materialization record at ` +
-            `${target}: ${String(quarantineError)}`,
-        );
-        return {
-          paths: new Set(trackedPaths),
-          recordedPaths: new Set(),
-          canClearRecord: false,
-        };
-      }
+      const quarantined = await quarantineSidecar(
+        target,
+        "pending materialization record",
+      );
+      return {
+        paths: new Set(trackedPaths),
+        recordedPaths: new Set(),
+        canClearRecord: quarantined,
+      };
     }
   });
 }
@@ -724,27 +742,15 @@ async function writePendingFileUnlocked(
   rootDir: string,
   counts: Readonly<PendingMaterializationCounts>,
 ): Promise<void> {
-  const metadataDir = await ensureRealMetadataDirectory(rootDir);
-  const target = pendingMaterializationPath(rootDir);
-  const temp = join(
-    metadataDir,
-    `.${PENDING_MATERIALIZATION_FILE}.${process.pid}.${randomUUID()}.tmp`,
-  );
-  try {
-    // Flush before publish so a host crash cannot lose the marker and make an
-    // interrupted materialization look like a user edit.
-    const handle = await open(temp, "w");
-    try {
+  // Flush before publish so a host crash cannot lose the marker and make an
+  // interrupted materialization look like a user edit.
+  await writeSidecarAtomically(
+    rootDir,
+    PENDING_MATERIALIZATION_FILE,
+    async (handle) => {
       await handle.writeFile(JSON.stringify({ counts }), "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(temp, target);
-    await syncMetadataDirectory(metadataDir);
-  } finally {
-    await rm(temp, { force: true });
-  }
+    },
+  );
 }
 
 export async function writePendingMaterializationPaths(
@@ -792,13 +798,18 @@ export async function clearPendingMaterializationPaths(
 
 const INVALID_COLLISION_RECORD = "Invalid share collision record.";
 
-async function readCollisionRecordUnlocked(rootDir: string): Promise<Set<string>> {
+async function readCollisionRecordUnlocked(
+  rootDir: string,
+  shareId: string,
+): Promise<{ shareId: string; paths: Set<string> }> {
   let serialized: string;
   try {
     serialized = await readFile(collisionRecordPath(rootDir), "utf8");
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") return new Set();
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return { shareId, paths: new Set() };
+    }
     throw error;
   }
   let parsed: unknown;
@@ -811,6 +822,9 @@ async function readCollisionRecordUnlocked(rootDir: string): Promise<Set<string>
     parsed === null ||
     typeof parsed !== "object" ||
     Array.isArray(parsed) ||
+    !("shareId" in parsed) ||
+    typeof parsed.shareId !== "string" ||
+    parsed.shareId.length === 0 ||
     !("paths" in parsed) ||
     !Array.isArray(parsed.paths) ||
     !parsed.paths.every(
@@ -820,11 +834,15 @@ async function readCollisionRecordUnlocked(rootDir: string): Promise<Set<string>
   ) {
     throw new Error(INVALID_COLLISION_RECORD);
   }
-  return new Set(parsed.paths as string[]);
+  return {
+    shareId: parsed.shareId,
+    paths: new Set(parsed.paths as string[]),
+  };
 }
 
 async function writeCollisionRecordUnlocked(
   rootDir: string,
+  shareId: string,
   paths: ReadonlySet<string>,
 ): Promise<void> {
   const metadataDir = await ensureRealMetadataDirectory(rootDir);
@@ -834,82 +852,97 @@ async function writeCollisionRecordUnlocked(
     await syncMetadataDirectory(metadataDir);
     return;
   }
-  const temp = join(
-    metadataDir,
-    `.${COLLISION_RECORD_FILE}.${process.pid}.${randomUUID()}.tmp`,
+  await writeSidecarAtomically(
+    rootDir,
+    COLLISION_RECORD_FILE,
+    async (handle) => {
+      await handle.writeFile(
+        JSON.stringify({ shareId, paths: [...paths].sort() }),
+        "utf8",
+      );
+    },
   );
-  try {
-    const handle = await open(temp, "w");
-    try {
-      await handle.writeFile(JSON.stringify({ paths: [...paths].sort() }), "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(temp, target);
-    await syncMetadataDirectory(metadataDir);
-  } finally {
-    await rm(temp, { force: true });
-  }
 }
 
 // Called while already holding the collision-record lock. Quarantines a
 // corrupt record and starts fresh rather than guessing which paths were
-// excluded: a lost record cannot be reconstructed, and the fallback (ordinary
-// capture adopts the recipient's local content as an edit moment) is exactly
-// this file's own established "journal rather than discard" floor — the same
-// severity #854 was parked at before this record existed, never data loss.
-async function readCollisionRecordLocked(rootDir: string): Promise<Set<string>> {
+// excluded. A lost record cannot be reconstructed. What happens to a
+// previously protected path next depends on the share's access level, and
+// neither outcome is silent. For a view or comment share, the next capture
+// repairs every diverged tracked path unconditionally. The projection is
+// canonical for non-edit shares, as #862 established, so this overwrites a
+// previously protected local file with the granter's version by design. For
+// an edit share, the next capture adopts a diverged tracked path as the
+// recipient's edit. The bytes stay on disk, but the next Send changes can
+// propose content the recipient did not mean to share unless they review it
+// out first.
+async function readCollisionRecordLocked(
+  rootDir: string,
+  shareId: string,
+): Promise<Set<string>> {
   const target = collisionRecordPath(rootDir);
+  let record: { shareId: string; paths: Set<string> };
   try {
-    return await readCollisionRecordUnlocked(rootDir);
+    record = await readCollisionRecordUnlocked(rootDir, shareId);
   } catch (error) {
     console.error(
       `[desktop] share collision record at ${target} is unreadable; quarantining it. ` +
-        "A previously-excluded local file may be journaled as an edit on the next " +
-        `capture instead of staying protected: ${String(error)}`,
+        "A previously-excluded path will follow this share's ordinary capture " +
+        `rules on the next capture: ${String(error)}`,
     );
-    const quarantine = `${target}.invalid-${Date.now()}`;
-    try {
-      await rename(target, quarantine);
-    } catch (quarantineError) {
-      console.error(
-        `[desktop] could not quarantine share collision record at ${target}: ` +
-          `${String(quarantineError)}`,
-      );
-    }
+    await quarantineSidecar(target, "share collision record");
     return new Set<string>();
   }
+  if (record.shareId !== shareId) {
+    console.error(
+      `[desktop] share collision record at ${target} belongs to share ` +
+        `${record.shareId}, not ${shareId}; quarantining the stale record.`,
+    );
+    await quarantineSidecar(target, "stale share collision record");
+    return new Set<string>();
+  }
+  return record.paths;
 }
 
-export async function readCollisionRecordPaths(rootDir: string): Promise<Set<string>> {
+export async function readCollisionRecordPaths(
+  rootDir: string,
+  shareId: string,
+): Promise<Set<string>> {
   return withExclusiveWorkspaceOperation(collisionRecordPath(rootDir), () =>
-    readCollisionRecordLocked(rootDir),
+    readCollisionRecordLocked(rootDir, shareId),
   );
 }
 
-export async function recordCollisionPaths(
+async function mutateCollisionRecord(
   rootDir: string,
+  shareId: string,
   paths: readonly string[],
+  mutate: (current: Set<string>, path: string) => void,
 ): Promise<void> {
   if (paths.length === 0) return;
   await withExclusiveWorkspaceOperation(collisionRecordPath(rootDir), async () => {
-    const current = await readCollisionRecordLocked(rootDir);
-    for (const path of paths) current.add(path);
-    await writeCollisionRecordUnlocked(rootDir, current);
+    const current = await readCollisionRecordLocked(rootDir, shareId);
+    for (const path of paths) mutate(current, path);
+    await writeCollisionRecordUnlocked(rootDir, shareId, current);
   });
 }
 
-export async function clearCollisionRecordPaths(
+export function recordCollisionPaths(
   rootDir: string,
+  shareId: string,
   paths: readonly string[],
 ): Promise<void> {
-  if (paths.length === 0) return;
-  await withExclusiveWorkspaceOperation(collisionRecordPath(rootDir), async () => {
-    const current = await readCollisionRecordLocked(rootDir);
-    for (const path of paths) current.delete(path);
-    await writeCollisionRecordUnlocked(rootDir, current);
-  });
+  return mutateCollisionRecord(rootDir, shareId, paths, (set, path) => set.add(path));
+}
+
+export function clearCollisionRecordPaths(
+  rootDir: string,
+  shareId: string,
+  paths: readonly string[],
+): Promise<void> {
+  return mutateCollisionRecord(rootDir, shareId, paths, (set, path) =>
+    set.delete(path),
+  );
 }
 
 async function pathConfirmedAbsentOnDisk(resolvedTarget: string): Promise<boolean> {
@@ -976,6 +1009,7 @@ export async function captureSharedViewLocalDivergence(
   workspaceId: string,
   store: CaptureVersionedTextStore,
   allowLocalJournaling: boolean,
+  shareId: string,
   testHooks?: { beforeCaptureWrite?: (path: string) => Promise<void> },
 ): Promise<CaptureSharedViewLocalDivergenceOutcome> {
   const realRoot = await realpath(rootDir).catch(() => null);
@@ -996,7 +1030,8 @@ export async function captureSharedViewLocalDivergence(
     tracked.map((entry) => entry.path),
   );
   const pendingPaths = pendingState.paths;
-  const collisionRecordedPaths = await readCollisionRecordPaths(rootDir);
+  const collisionRecordedPaths = await readCollisionRecordPaths(rootDir, shareId);
+  const trackedPathSet = new Set(tracked.map((entry) => entry.path));
 
   let capturedPaths = 0;
   let repairedPaths = 0;
@@ -1081,38 +1116,45 @@ export async function captureSharedViewLocalDivergence(
     if (classifyEngineFilePath(entry.path).kind === "secret") continue;
 
     if (collisionRecordedPaths.has(entry.path)) {
+      visitedPendingPaths.add(entry.path);
       const result = await withCaptureMutationLock(
         rootDir,
         entry.path,
         async (resolvedTarget): Promise<
           | { kind: "repaired" }
+          | { kind: "unchanged" }
           | { kind: "unjournalable"; path: UnjournalablePath }
         > => {
-          let stillOccupied: boolean;
-          try {
-            stillOccupied = !(await pathConfirmedAbsentOnDisk(resolvedTarget));
-          } catch {
+          const disk = await readDiskContent(resolvedTarget);
+          if (disk.kind === "unreadable") {
             return {
               kind: "unjournalable",
               path: { path: entry.path, reason: "unreadable" },
             };
           }
-          if (stillOccupied) {
-            return {
-              kind: "unjournalable",
-              path: { path: entry.path, reason: "local-collision" },
-            };
-          }
-          // Resolution: the recipient's own entry no longer occupies the path
-          // (they moved or removed it, exactly what the local-collision message
-          // tells them to do). Materialize the granter's current stored version
-          // and journal nothing — this is a repair, not an edit.
           const current = await store.readTextFile({
             workspaceId,
             versionId: main.id,
             path: entry.path,
           });
-          if (current !== null) {
+          if (current === null) {
+            console.error(
+              `[desktop] shared view store lost tracked path ${entry.path} ` +
+                `in workspace ${workspaceId} version ${main.id}`,
+            );
+            return { kind: "unchanged" };
+          }
+          const alreadyMatchesGranter = diskMatchesSnapshot(disk, {
+            contentKind: current.contentKind === "binary" ? "binary" : "text",
+            sha256: current.sha256 ?? null,
+          });
+          if (disk.kind !== "absent" && !alreadyMatchesGranter) {
+            return {
+              kind: "unjournalable",
+              path: { path: entry.path, reason: "local-collision" },
+            };
+          }
+          if (!alreadyMatchesGranter) {
             await materializeSharedViewPaths(
               rootDir,
               workspaceId,
@@ -1131,8 +1173,8 @@ export async function captureSharedViewLocalDivergence(
       );
       if (result.kind === "repaired") {
         repairedPaths += 1;
-        await clearCollisionRecordPaths(rootDir, [entry.path]);
-      } else {
+        await clearCollisionRecordPaths(rootDir, shareId, [entry.path]);
+      } else if (result.kind === "unjournalable") {
         unjournalablePaths.push(result.path);
       }
       continue;
@@ -1510,6 +1552,42 @@ export async function captureSharedViewLocalDivergence(
     }
   }
 
+  for (const path of collisionRecordedPaths) {
+    if (trackedPathSet.has(path)) continue;
+    const result = await withCaptureMutationLock(
+      rootDir,
+      path,
+      async (resolvedTarget): Promise<
+        | { kind: "repaired" }
+        | { kind: "unjournalable"; path: UnjournalablePath }
+      > => {
+        const disk = await readDiskContent(resolvedTarget);
+        if (disk.kind === "unreadable") {
+          return {
+            kind: "unjournalable",
+            path: { path, reason: "unreadable" },
+          };
+        }
+        if (disk.kind !== "absent") {
+          return {
+            kind: "unjournalable",
+            path: { path, reason: "local-collision" },
+          };
+        }
+        // The granter deleted the path while the collision was unresolved,
+        // and the recipient's entry is now gone too. A later re-add must not
+        // inherit this stale exclusion.
+        return { kind: "repaired" };
+      },
+    );
+    if (result.kind === "repaired") {
+      repairedPaths += 1;
+      await clearCollisionRecordPaths(rootDir, shareId, [path]);
+    } else {
+      unjournalablePaths.push(result.path);
+    }
+  }
+
   return { capturedPaths, repairedPaths, unjournalablePaths };
 }
 
@@ -1532,6 +1610,7 @@ export async function captureStandaloneShareViewDivergence(input: {
     input.workspaceId,
     input.store,
     allowLocalJournaling,
+    input.shareId,
   );
 }
 
@@ -1641,6 +1720,7 @@ export async function refreshSharedViewOnce(input: {
     shareId: string;
     grantedSelector: ShareViewSelector;
     recordRefusals: (refusals: ShareViewRefusal[]) => Promise<void>;
+    recordCollisions?: (paths: readonly string[]) => Promise<void>;
   }) => Promise<PullShareViewResult>;
   // Required at the factory boundary for the same reason: every rooted caller
   // must explicitly select its store implementation.
@@ -1672,6 +1752,34 @@ export async function refreshSharedViewOnce(input: {
       shareId: input.shareId,
       grantedSelector,
       recordRefusals: input.recordRefusals,
+      recordCollisions:
+        input.preTrackedPaths === undefined
+          ? undefined
+          : async (paths: readonly string[]) => {
+              const newlyColliding: string[] = [];
+              for (const path of paths) {
+                if (input.preTrackedPaths!.has(path)) continue;
+                const target = await resolvedShareViewTarget(input.rootDir, path);
+                let targetStat;
+                try {
+                  targetStat = await lstat(target);
+                } catch (error) {
+                  const code = (error as NodeJS.ErrnoException).code;
+                  if (code === "ENOENT" || code === "ENOTDIR") continue;
+                  throw error;
+                }
+                if (!targetStat.isSymbolicLink() && targetStat.isFile()) {
+                  newlyColliding.push(path);
+                }
+              }
+              if (newlyColliding.length > 0) {
+                await recordCollisionPaths(
+                  input.rootDir,
+                  input.shareId,
+                  newlyColliding,
+                );
+              }
+            },
     });
   } catch (error) {
     if (error instanceof ShareUnavailableError) {
@@ -1694,7 +1802,10 @@ export async function refreshSharedViewOnce(input: {
   );
   const unjournalablePaths = [...(input.unjournalablePaths ?? [])];
   if (input.preTrackedPaths !== undefined) {
-    const collisionRecordedPaths = await readCollisionRecordPaths(input.rootDir);
+    const collisionRecordedPaths = await readCollisionRecordPaths(
+      input.rootDir,
+      input.shareId,
+    );
     const newlyCollidingPaths: string[] = [];
     for (const change of pull.changedPaths) {
       if (materializationExclusions.has(change.path)) continue;
@@ -1728,7 +1839,11 @@ export async function refreshSharedViewOnce(input: {
       if (reason === "local-collision") newlyCollidingPaths.push(change.path);
     }
     if (newlyCollidingPaths.length > 0) {
-      await recordCollisionPaths(input.rootDir, newlyCollidingPaths);
+      await recordCollisionPaths(
+        input.rootDir,
+        input.shareId,
+        newlyCollidingPaths,
+      );
     }
   }
   const excludedPaths = pull.changedPaths
