@@ -117,6 +117,7 @@ describe("shared view refresh IPC contract", () => {
         excludedPaths: ["docs/pull-excluded.md"],
         unjournalablePaths: [
           { path: "docs/oversized.md", reason: "oversized-text" },
+          { path: "docs/local.md", reason: "local-collision" },
         ],
         refusedOps: 0,
         refusedDetail: null,
@@ -124,6 +125,7 @@ describe("shared view refresh IPC contract", () => {
     expect(parsed.excludedPaths).toEqual(["docs/pull-excluded.md"]);
     expect(parsed.unjournalablePaths).toEqual([
       { path: "docs/oversized.md", reason: "oversized-text" },
+      { path: "docs/local.md", reason: "local-collision" },
     ]);
   });
 });

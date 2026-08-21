@@ -68,6 +68,7 @@ export interface UnjournalablePath {
     | "oversized-binary"
     | "non-utf8"
     | "non-file-replacement"
+    | "local-collision"
     | "unreadable";
 }
 
@@ -97,6 +98,7 @@ export function unjournalablePathMessages(
     "oversized-binary",
     "non-utf8",
     "non-file-replacement",
+    "local-collision",
     "unreadable",
   ] as const) {
     const group = groups.get(reason);
@@ -122,6 +124,11 @@ export function unjournalablePathMessages(
       messages.push(
         `${names} ${one ? "replaces a tracked file" : "replace tracked files"} with a folder or another entry. ` +
           `Restore ${one ? "the file" : "the files"} or move ${one ? "the conflicting entry" : "the conflicting entries"}.`,
+      );
+    } else if (reason === "local-collision") {
+      messages.push(
+        `${names} ${one ? "already has a file" : "already have files"} from this machine. ` +
+          `Move or remove ${one ? "this file" : "these files"} to receive the shared ${one ? "file" : "files"}.`,
       );
     } else {
       messages.push(
@@ -414,9 +421,59 @@ export async function writeDiskContentToStore(input: {
 
 const CAPTURE_IGNORED_DIRS = new Set([".dohc", "node_modules", ".git"]);
 const PENDING_MATERIALIZATION_FILE = "pending-materialization.json";
+const PULL_IN_FLIGHT_FILE = "pull-in-flight.marker";
 
 function pendingMaterializationPath(rootDir: string): string {
   return join(rootDir, ".dohc", PENDING_MATERIALIZATION_FILE);
+}
+
+function pullInFlightPath(rootDir: string): string {
+  return join(rootDir, ".dohc", PULL_IN_FLIGHT_FILE);
+}
+
+async function syncMetadataDirectory(metadataDir: string): Promise<void> {
+  const dir = await open(metadataDir, "r");
+  try {
+    await dir.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (process.platform !== "win32" || code !== "EPERM") throw error;
+  } finally {
+    await dir.close();
+  }
+}
+
+async function writePullInFlightMarker(rootDir: string): Promise<void> {
+  const metadataDir = join(rootDir, ".dohc");
+  await mkdir(metadataDir, { recursive: true });
+  const handle = await open(pullInFlightPath(rootDir), "w");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await syncMetadataDirectory(metadataDir);
+}
+
+async function clearPullInFlightMarker(rootDir: string): Promise<void> {
+  await rm(pullInFlightPath(rootDir), { force: true });
+  await syncMetadataDirectory(join(rootDir, ".dohc"));
+}
+
+async function pullMayBeInFlight(rootDir: string): Promise<boolean> {
+  const target = pullInFlightPath(rootDir);
+  try {
+    await lstat(target);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return false;
+    console.error(
+      `[desktop] pull-in-flight marker at ${target} could not be read; ` +
+        `verifying every tracked path: ${String(error)}`,
+    );
+    return true;
+  }
 }
 
 export async function readPendingMaterializationPaths(
@@ -431,12 +488,25 @@ export async function readPendingMaterializationPaths(
 async function readPendingMaterializationPathsForCapture(
   rootDir: string,
   trackedPaths: readonly string[],
-): Promise<{ paths: Set<string>; canClearRecord: boolean }> {
+): Promise<{
+  paths: Set<string>;
+  recordedPaths: Set<string>;
+  canClearRecord: boolean;
+}> {
+  const verifyEveryTrackedPath = await pullMayBeInFlight(rootDir);
   const target = pendingMaterializationPath(rootDir);
   return withExclusiveWorkspaceOperation(target, async () => {
     try {
+      const recordedPaths = new Set(
+        Object.keys(await readPendingFileUnlocked(rootDir)),
+      );
+      const paths = new Set(recordedPaths);
+      if (verifyEveryTrackedPath) {
+        for (const path of trackedPaths) paths.add(path);
+      }
       return {
-        paths: new Set(Object.keys(await readPendingFileUnlocked(rootDir))),
+        paths,
+        recordedPaths,
         canClearRecord: true,
       };
     } catch (error) {
@@ -448,13 +518,21 @@ async function readPendingMaterializationPathsForCapture(
       const quarantine = `${target}.invalid-${Date.now()}`;
       try {
         await rename(target, quarantine);
-        return { paths: new Set(trackedPaths), canClearRecord: true };
+        return {
+          paths: new Set(trackedPaths),
+          recordedPaths: new Set(),
+          canClearRecord: true,
+        };
       } catch (quarantineError) {
         console.error(
           `[desktop] could not quarantine pending materialization record at ` +
             `${target}: ${String(quarantineError)}`,
         );
-        return { paths: new Set(trackedPaths), canClearRecord: false };
+        return {
+          paths: new Set(trackedPaths),
+          recordedPaths: new Set(),
+          canClearRecord: false,
+        };
       }
     }
   });
@@ -495,9 +573,12 @@ async function readPendingFileUnlocked(
     parsed.counts === null ||
     typeof parsed.counts !== "object" ||
     Array.isArray(parsed.counts) ||
-    !Object.values(parsed.counts).every(
-      (count) =>
-        typeof count === "number" && Number.isInteger(count) && count > 0,
+    !Object.entries(parsed.counts).every(
+      ([path, count]) =>
+        classifyEngineFilePath(path).kind === "tracked" &&
+        typeof count === "number" &&
+        Number.isInteger(count) &&
+        count > 0,
     )
   ) {
     throw new Error(INVALID_PENDING_MATERIALIZATION_RECORD);
@@ -530,15 +611,7 @@ async function writePendingFileUnlocked(
       await handle.close();
     }
     await rename(temp, target);
-    const dir = await open(metadataDir, "r");
-    try {
-      await dir.sync();
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (process.platform !== "win32" || code !== "EPERM") throw error;
-    } finally {
-      await dir.close();
-    }
+    await syncMetadataDirectory(metadataDir);
   } finally {
     await rm(temp, { force: true });
   }
@@ -754,7 +827,11 @@ export async function captureSharedViewLocalDivergence(
               })
             ).find((candidate) => candidate.path === entry.path) ?? entry;
           if (diskMatchesSnapshot(disk, currentEntry)) {
-            return { kind: "repaired" };
+            return {
+              kind: pendingState.recordedPaths.has(entry.path)
+                ? "repaired"
+                : "unchanged",
+            };
           }
 
           const latestMoment = await store.getMoment({
@@ -821,7 +898,11 @@ export async function captureSharedViewLocalDivergence(
       );
       // The marker is the only record that a materialization was in flight.
       // An unjournalable path is not yet resolved, so the marker stays.
-      if (result.kind !== "unjournalable" && pendingState.canClearRecord) {
+      if (
+        result.kind !== "unjournalable" &&
+        pendingState.canClearRecord &&
+        pendingState.recordedPaths.has(entry.path)
+      ) {
         await clearPendingMaterializationPaths(rootDir, [entry.path]);
       }
       if (result.kind === "captured") capturedPaths += 1;
@@ -1157,9 +1238,13 @@ export async function refreshSharedViewOnce(input: {
   excludeFromMaterialization?: ReadonlySet<string>;
   unjournalablePaths?: readonly UnjournalablePath[];
   trackPendingMaterialization?: boolean;
+  preTrackedPaths?: ReadonlySet<string>;
 }): Promise<RefreshSharedViewOutcome> {
   const grantedSelector = recordedShareSelector(input.pinnedSelector);
   if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
+  if (input.trackPendingMaterialization) {
+    await writePullInFlightMarker(input.rootDir);
+  }
   let pull;
   try {
     pull = await input.pull({
@@ -1183,11 +1268,43 @@ export async function refreshSharedViewOnce(input: {
     }
     throw error;
   }
+  const materializationExclusions = new Set(
+    input.excludeFromMaterialization ?? [],
+  );
+  const unjournalablePaths = [...(input.unjournalablePaths ?? [])];
+  if (input.preTrackedPaths !== undefined) {
+    for (const change of pull.changedPaths) {
+      if (
+        change.operation !== "write" ||
+        materializationExclusions.has(change.path) ||
+        input.preTrackedPaths.has(change.path)
+      ) {
+        continue;
+      }
+      const target = await resolvedShareViewTarget(input.rootDir, change.path);
+      let targetStat;
+      try {
+        targetStat = await lstat(target);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT" || code === "ENOTDIR") continue;
+        throw error;
+      }
+      materializationExclusions.add(change.path);
+      unjournalablePaths.push({
+        path: change.path,
+        reason:
+          targetStat.isSymbolicLink() || !targetStat.isFile()
+            ? "non-file-replacement"
+            : "local-collision",
+      });
+    }
+  }
   const excludedPaths = pull.changedPaths
-    .filter((change) => input.excludeFromMaterialization?.has(change.path))
+    .filter((change) => materializationExclusions.has(change.path))
     .map((change) => change.path);
   const pathsToMaterialize = pull.changedPaths.filter(
-    (change) => !input.excludeFromMaterialization?.has(change.path),
+    (change) => !materializationExclusions.has(change.path),
   );
   const pendingMaterializationPaths = pathsToMaterialize.map(
     (change) => change.path,
@@ -1209,6 +1326,7 @@ export async function refreshSharedViewOnce(input: {
       input.rootDir,
       pendingMaterializationPaths,
     );
+    await clearPullInFlightMarker(input.rootDir);
   }
   await pull.commitCursor();
   // Logged one line per refusal, because the count alone cannot be diagnosed.
@@ -1224,7 +1342,7 @@ export async function refreshSharedViewOnce(input: {
     status: pull.changedPaths.length > 0 ? "updated" : "unchanged",
     changedPaths: pull.changedPaths.length,
     excludedPaths,
-    unjournalablePaths: [...(input.unjournalablePaths ?? [])],
+    unjournalablePaths,
     refusedOps: pull.refusalCount,
     refusedDetail: pull.refusals[0]?.detail ?? null,
   };
@@ -1234,6 +1352,20 @@ export async function refreshStandaloneShareViewOnce(
   input: Parameters<typeof refreshSharedViewOnce>[0] & { ended: boolean },
 ): Promise<RefreshSharedViewOutcome> {
   const captured = await captureStandaloneShareViewDivergence(input);
+  const main = await input.store.ensureMainVersion({
+    workspaceId: input.workspaceId,
+  });
+  if (!input.store.listTextFileMetadata) {
+    throw new Error("Shared view reconciliation requires file metadata listing support.");
+  }
+  const preTrackedPaths = new Set(
+    (
+      await input.store.listTextFileMetadata({
+        workspaceId: input.workspaceId,
+        versionId: main.id,
+      })
+    ).map((entry) => entry.path),
+  );
   const outcome = await refreshSharedViewOnce({
     ...input,
     excludeFromMaterialization: new Set(
@@ -1241,6 +1373,7 @@ export async function refreshStandaloneShareViewOnce(
     ),
     unjournalablePaths: captured.unjournalablePaths,
     trackPendingMaterialization: true,
+    preTrackedPaths,
   });
   const totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
   return {

@@ -1373,6 +1373,7 @@ function shareUnjournalableNotice(
     "oversized-binary",
     "non-utf8",
     "non-file-replacement",
+    "local-collision",
     "unreadable",
   ] as const) {
     const group = groups.get(reason);
@@ -1402,6 +1403,12 @@ function shareUnjournalableNotice(
         `dohc could not track changes in ${names}. ` +
           `${one ? "A folder or another entry replaces this file" : "Folders or other entries replace these files"}. ` +
           `Restore ${one ? "the file" : "the files"} or move ${one ? "the conflicting entry" : "the conflicting entries"}, then refresh.`,
+      );
+    } else if (reason === "local-collision") {
+      lines.push(
+        `dohc could not receive ${names}. ` +
+          `${one ? "A file from this machine already uses this path" : "Files from this machine already use these paths"}. ` +
+          `Move or remove ${one ? "the file" : "the files"}, then refresh.`,
       );
     } else {
       lines.push(

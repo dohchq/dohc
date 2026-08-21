@@ -3609,6 +3609,10 @@ describe("ui-state merge-on-load", () => {
             path: "docs/replaced.md",
             reason: "non-file-replacement" as const,
           },
+          {
+            path: "docs/local.md",
+            reason: "local-collision" as const,
+          },
           { path: "docs/locked.md", reason: "unreadable" as const },
         ],
         refusedOps: 0,
@@ -3651,6 +3655,15 @@ describe("ui-state merge-on-load", () => {
     );
     expect(notice.textContent).toContain(
       "Restore the file or move the conflicting entry, then refresh.",
+    );
+    expect(notice.textContent).toContain(
+      "dohc could not receive docs/local.md.",
+    );
+    expect(notice.textContent).toContain(
+      "A file from this machine already uses this path.",
+    );
+    expect(notice.textContent).toContain(
+      "Move or remove the file, then refresh.",
     );
     expect(notice.textContent).toContain("dohc could not read docs/locked.md.");
     expect(notice.textContent).toContain(

@@ -1559,6 +1559,141 @@ describe("shared view refresh", () => {
     }
   });
 
+  it.each(["../outside", ".dohc/whatever"])(
+    "quarantines a pending record with the invalid path %s",
+    async (invalidPath) => {
+      const rootDir = await tempRoot();
+      const relay = new FakeShareRelay();
+      const harness = daemonHarness(relay);
+      const path = "docs/valid-sidecar-neighbor.md";
+      const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+      relay.addWrite(path, "tracked body");
+      await refreshSharedViewOnce(harness, {
+        rootDir,
+        workspaceId: WORKSPACE,
+        shareId: SHARE_ID,
+      });
+
+      const store = harness.openStore(target);
+      const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        const before = await momentIds(store);
+        await writeFile(
+          join(rootDir, ".dohc", "pending-materialization.json"),
+          JSON.stringify({ counts: { [invalidPath]: 1 } }),
+          "utf8",
+        );
+
+        await expect(
+          refreshStandaloneShareViewOnceWithPull({
+            rootDir,
+            workspaceId: WORKSPACE,
+            relay: harness.relay,
+            shareId: SHARE_ID,
+            store,
+            pull: harness.pullFor(target),
+            pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+            recordRefusals: async () => undefined,
+            ended: false,
+          }),
+        ).resolves.toMatchObject({ status: "unchanged", changedPaths: 0 });
+
+        expect(await momentIds(store)).toEqual(before);
+        expect(
+          (await readdir(join(rootDir, ".dohc"))).some((name) =>
+            /^pending-materialization\.json\.invalid-\d+$/.test(name),
+          ),
+        ).toBe(true);
+      } finally {
+        errorLog.mockRestore();
+        await store.close();
+      }
+    },
+  );
+
+  it("preserves an untracked directory when the granter adds a file at its path", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/recipient-directory.md";
+    const childPath = join(rootDir, path, "kept.txt");
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await mkdir(join(rootDir, path), { recursive: true });
+    await writeFile(childPath, "recipient data", "utf8");
+    relay.addWrite(path, "granter file");
+
+    const store = harness.openStore(target);
+    try {
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({
+        excludedPaths: [path],
+        unjournalablePaths: [
+          { path, reason: "non-file-replacement" },
+        ],
+      });
+      expect((await stat(join(rootDir, path))).isDirectory()).toBe(true);
+      expect(await readFile(childPath, "utf8")).toBe("recipient data");
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("reports an untracked file that blocks a newly shared path", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/recipient-file.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), "recipient data", "utf8");
+    relay.addWrite(path, "granter file");
+
+    const store = harness.openStore(target);
+    try {
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({
+        excludedPaths: [path],
+        unjournalablePaths: [{ path, reason: "local-collision" }],
+      });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("recipient data");
+    } finally {
+      await store.close();
+    }
+  });
+
   it("repairs a share-view create whose projection fails without journaling a delete", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
@@ -1892,6 +2027,189 @@ describe("shared view refresh", () => {
           ended: false,
         }),
       ).resolves.toMatchObject({ status: "ended", changedPaths: 0 });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("repairs every tracked path after a pull stops before per-path markers", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/pull-window.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "moment A");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    const store = harness.openStore(target);
+    try {
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      const preTrackedPaths = new Set([path]);
+      vi.spyOn(preTrackedPaths, "has").mockImplementation(() => {
+        throw new Error("simulated crash after pull");
+      });
+      const interruptedInput = {
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: harness.relay,
+        shareId: SHARE_ID,
+        store,
+        pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+        recordRefusals: async () => undefined,
+        trackPendingMaterialization: true,
+        preTrackedPaths,
+        pull: async (): Promise<PullShareViewResult> => {
+          await store.writeTextFile({
+            workspaceId: WORKSPACE,
+            versionId: main.id,
+            path,
+            text: "moment B",
+            metadata: { origin: "sync" },
+          });
+          return {
+            fetched: 1,
+            applied: 1,
+            skipped: 0,
+            nextCursor: 2,
+            refusalCount: 0,
+            refusals: [],
+            changedPaths: [{ path, operation: "write", contentKind: "text" }],
+            commitCursor: async () => undefined,
+          };
+        },
+      };
+
+      await expect(
+        refreshSharedViewOnceWithPull(
+          interruptedInput as Parameters<typeof refreshSharedViewOnceWithPull>[0],
+        ),
+      ).rejects.toThrow("simulated crash after pull");
+      await expect(
+        readFile(join(rootDir, ".dohc", "pending-materialization.json"), "utf8"),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      const beforeRecovery = await momentIds(store);
+
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({ status: "updated", changedPaths: 1 });
+
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("moment B");
+      expect(await momentIds(store)).toEqual(beforeRecovery);
+      await expect(
+        readFile(join(rootDir, ".dohc", "pull-in-flight.marker"), "utf8"),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("still journals a genuine edit while recovering an interrupted pull", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const stalePath = "docs/stale-projection.md";
+    const editedPath = "docs/real-edit.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(stalePath, "moment A");
+    relay.addWrite(editedPath, "original edit body");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, editedPath), "recipient edit", "utf8");
+
+    const store = harness.openStore(target);
+    try {
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      const preTrackedPaths = new Set([stalePath, editedPath]);
+      vi.spyOn(preTrackedPaths, "has").mockImplementation(() => {
+        throw new Error("simulated crash after pull");
+      });
+      const interruptedInput = {
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: harness.relay,
+        shareId: SHARE_ID,
+        store,
+        pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+        recordRefusals: async () => undefined,
+        trackPendingMaterialization: true,
+        preTrackedPaths,
+        pull: async (): Promise<PullShareViewResult> => {
+          await store.writeTextFile({
+            workspaceId: WORKSPACE,
+            versionId: main.id,
+            path: stalePath,
+            text: "moment B",
+            metadata: { origin: "sync" },
+          });
+          return {
+            fetched: 1,
+            applied: 1,
+            skipped: 0,
+            nextCursor: 3,
+            refusalCount: 0,
+            refusals: [],
+            changedPaths: [
+              { path: stalePath, operation: "write", contentKind: "text" },
+            ],
+            commitCursor: async () => undefined,
+          };
+        },
+      };
+
+      await expect(
+        refreshSharedViewOnceWithPull(
+          interruptedInput as Parameters<typeof refreshSharedViewOnceWithPull>[0],
+        ),
+      ).rejects.toThrow("simulated crash after pull");
+      const beforeRecovery = new Set(await momentIds(store));
+
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({ status: "updated", changedPaths: 2 });
+
+      expect(await readFile(join(rootDir, stalePath), "utf8")).toBe("moment B");
+      await expect(
+        store.readTextFile({
+          workspaceId: WORKSPACE,
+          versionId: main.id,
+          path: editedPath,
+        }),
+      ).resolves.toMatchObject({ text: "recipient edit" });
+      const addedMoments = (
+        await store.listMoments({ workspaceId: WORKSPACE, limit: 200 })
+      ).moments.filter((moment) => !beforeRecovery.has(moment.id));
+      expect(addedMoments).toHaveLength(1);
+      expect(addedMoments[0]).toMatchObject({
+        path: editedPath,
+        metadata: { origin: "local-file" },
+      });
     } finally {
       await store.close();
     }
