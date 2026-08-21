@@ -147,6 +147,10 @@ const PACKAGE_SCRIPT_KEYS = [
   "build",
 ] as const;
 const BUILD_OUTPUT_DIRS = ["dist", "build", "out"];
+// Matches the bridge contract's SitePackageInfo.title bound (z.string().max(200))
+// — a title over this length must never reach discoverSites' output, or the
+// whole listSites response fails to parse over one site's config value.
+const SITE_TITLE_MAX_LENGTH = 200;
 
 // Framework/package signals are intentionally limited to mainstream web stacks
 // with recognizable package dependencies or official CLI/build tooling. Refresh
@@ -499,7 +503,19 @@ export function parseDohcSiteConfig(json: string, path = "dohc.json"): ParsedDoh
   }
   if (parsed.title !== undefined) {
     if (typeof parsed.title === "string" && parsed.title.trim() !== "") {
-      config.title = parsed.title;
+      if (parsed.title.length > SITE_TITLE_MAX_LENGTH) {
+        diagnostics.push(
+          diagnostic(
+            path,
+            "warning",
+            "title-too-long",
+            `dohc.json title exceeds the ${SITE_TITLE_MAX_LENGTH}-character limit and was truncated.`,
+          ),
+        );
+        config.title = parsed.title.slice(0, SITE_TITLE_MAX_LENGTH);
+      } else {
+        config.title = parsed.title;
+      }
     } else {
       diagnostics.push(
         diagnostic(path, "warning", "invalid-title", "dohc.json title must be a non-empty string."),

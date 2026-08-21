@@ -758,6 +758,150 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).not.toContain("shared-with-me/alex/photo.png");
   });
 
+  it("does not mint a reference from a hyphenated attribute name sharing a URL attribute's suffix", async () => {
+    await mkdir(join(root, "hyphen-attr"), { recursive: true });
+    await writeFile(
+      join(root, "hyphen-attr", "index.html"),
+      '<img data-src="private.txt"><img src="real.png">',
+    );
+    await writeFile(join(root, "hyphen-attr", "private.txt"), "private");
+    await writeFile(join(root, "hyphen-attr", "real.png"), "image");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "hyphen-attr",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("hyphen-attr/real.png");
+    expect(manifestOf(site)?.assets).not.toContain("hyphen-attr/private.txt");
+  });
+
+  it("decodes an HTML character reference in an event-handler attribute before the JS scan", async () => {
+    await mkdir(join(root, "handler-entity"), { recursive: true });
+    await writeFile(
+      join(root, "handler-entity", "index.html"),
+      '<button onclick="fetch(&quot;data.json&quot;)"></button>',
+    );
+    await writeFile(join(root, "handler-entity", "data.json"), "{}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "handler-entity",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("handler-entity/data.json");
+  });
+
+  it("resolves an importScripts() argument in a worker file script-relative to that file", async () => {
+    await mkdir(join(root, "worker-import", "workers"), { recursive: true });
+    await writeFile(
+      join(root, "worker-import", "index.html"),
+      '<script>new Worker("workers/job.js");</script>',
+    );
+    await writeFile(
+      join(root, "worker-import", "workers", "job.js"),
+      'importScripts("helper.js");',
+    );
+    await writeFile(join(root, "worker-import", "workers", "helper.js"), "self.ready = true;");
+    await writeFile(join(root, "worker-import", "helper.js"), "wrong file");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "worker-import",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("worker-import/workers/helper.js");
+    expect(manifestOf(site)?.assets).not.toContain("worker-import/helper.js");
+  });
+
+  it("only trusts a proven consumption shape (property assignment, setAttribute) for a bare src/href-named identifier", async () => {
+    await mkdir(join(root, "prop-assign"), { recursive: true });
+    await writeFile(
+      join(root, "prop-assign", "index.html"),
+      '<script src="app.js"></script>',
+    );
+    await writeFile(
+      join(root, "prop-assign", "app.js"),
+      [
+        'el.src = "img.png";',
+        'el.setAttribute("href", "linked.html");',
+        'const href = "private.html";',
+      ].join("\n"),
+    );
+    await writeFile(join(root, "prop-assign", "img.png"), "image");
+    await writeFile(join(root, "prop-assign", "linked.html"), "<h1>Linked</h1>");
+    await writeFile(join(root, "prop-assign", "private.html"), "<h1>Private</h1>");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "prop-assign",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("prop-assign/img.png");
+    expect(manifestOf(site)?.assets).toContain("prop-assign/linked.html");
+    expect(manifestOf(site)?.assets).not.toContain("prop-assign/private.html");
+  });
+
+  it("shares the same artifact a configured static preview serves, not a leftover build output", async () => {
+    await mkdir(join(root, "static-share", "dist"), { recursive: true });
+    await writeFile(
+      join(root, "static-share", "dohc.json"),
+      JSON.stringify({
+        type: "site",
+        preview: { mode: "static", entry: "index.html" },
+        build: { output: "dist" },
+      }),
+    );
+    await writeFile(
+      join(root, "static-share", "index.html"),
+      '<script src="./app.js"></script>',
+    );
+    await writeFile(join(root, "static-share", "app.js"), "window.ready = true;");
+    // A leftover build output from an earlier build — must not be what gets
+    // shared while preview is pinned to the configured static entry.
+    await writeFile(
+      join(root, "static-share", "dist", "index.html"),
+      '<script src="./bundle.js"></script>',
+    );
+    await writeFile(join(root, "static-share", "dist", "bundle.js"), "window.built = true;");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "static-share",
+    );
+
+    expect(manifestOf(site)).toEqual({
+      entryPath: "static-share/index.html",
+      assets: ["static-share/app.js"],
+    });
+  });
+
+  it("still shares the built output when preview is not pinned to static", async () => {
+    await mkdir(join(root, "build-share", "dist"), { recursive: true });
+    await writeFile(
+      join(root, "build-share", "dohc.json"),
+      JSON.stringify({
+        type: "site",
+        preview: { mode: "build" },
+        build: { output: "dist" },
+      }),
+    );
+    await writeFile(
+      join(root, "build-share", "index.html"),
+      '<script src="./app.js"></script>',
+    );
+    await writeFile(join(root, "build-share", "app.js"), "window.ready = true;");
+    await writeFile(
+      join(root, "build-share", "dist", "index.html"),
+      '<script src="./bundle.js"></script>',
+    );
+    await writeFile(join(root, "build-share", "dist", "bundle.js"), "window.built = true;");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "build-share",
+    );
+
+    expect(manifestOf(site)).toEqual({
+      entryPath: "build-share/dist/index.html",
+      assets: ["build-share/dist/bundle.js"],
+    });
+  });
+
   it("emits exact approved static browser files instead of a recursive site root", async () => {
     await mkdir(join(root, "report", "assets"), { recursive: true });
     await mkdir(join(root, "report", "data"), { recursive: true });

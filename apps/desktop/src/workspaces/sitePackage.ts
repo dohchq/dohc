@@ -259,7 +259,7 @@ function openingHtmlTags(text: string): string[] {
 
 function styleAttributeValues(tags: readonly string[]): string[] {
   const values: string[] = [];
-  const attribute = /\bstyle\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})')/i;
+  const attribute = /\sstyle\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})')/i;
   for (const tag of tags) {
     const match = attribute.exec(tag);
     const value = match?.[1] ?? match?.[2];
@@ -269,10 +269,12 @@ function styleAttributeValues(tags: readonly string[]): string[] {
 }
 
 /** One opening tag's value for `name`, quoted or bare — every attribute read
- * in this file (type, href, on-handler presence, ...) shares this shape. */
+ * in this file (type, href, on-handler presence, ...) shares this shape. A
+ * real attribute name is always preceded by whitespace (or the tag name) —
+ * never `\b`, which also matches inside a hyphenated name like data-src. */
 function attributeValue(tag: string, name: string): string | undefined {
   const pattern = new RegExp(
-    `\\b${name}\\s*=\\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^\\s"'=<>\`]{1,2048}))`,
+    `\\s${name}\\s*=\\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^\\s"'=<>\`]{1,2048}))`,
     "i",
   );
   const match = pattern.exec(tag);
@@ -485,17 +487,44 @@ const JS_WORKER_PATTERN =
   /\b(?:Worker|SharedWorker)\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
 const JS_SERVICE_WORKER_PATTERN =
   /\bserviceWorker\.register\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
-const JS_ASSIGNMENT_SHAPED_PATTERN =
-  /\b(?:src|href|poster)\s*=\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
+const JS_IMPORT_SCRIPTS_CALL_PATTERN = /\bimportScripts\s*\(([^)]{0,4096})\)/g;
+const JS_IMPORT_SCRIPTS_ARGUMENT_PATTERN = /["'`]([^"'`\r\n]{1,2048})["'`]/g;
+// A property assignment (`.src = "..."`, `.href = "..."`, `.poster = "..."`)
+// or setAttribute("src"|"href"|"poster", "...") call PROVES the value is
+// consumed as a navigable URL. A bare `src`/`href`/`poster`-named variable
+// (`const href = "private.html"`) proves nothing — it's just a name.
+const JS_PROPERTY_ASSIGNMENT_PATTERN =
+  /\.(?:src|href|poster)\s*=\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
+const JS_SET_ATTRIBUTE_PATTERN =
+  /\bsetAttribute\s*\(\s*["'`](?:src|href|poster)["'`]\s*,\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
+
+/** Every quoted argument across all importScripts(...) calls in `text` — a
+ * worker's synchronous, comma-separated sibling to `import`, resolved the
+ * same script-relative way. */
+function importScriptsReferences(text: string): string[] {
+  const references: string[] = [];
+  for (const call of text.matchAll(JS_IMPORT_SCRIPTS_CALL_PATTERN)) {
+    const args = call[1] ?? "";
+    for (const argument of args.matchAll(JS_IMPORT_SCRIPTS_ARGUMENT_PATTERN)) {
+      const value = argument[1]?.trim();
+      if (value) references.push(value);
+    }
+  }
+  return references;
+}
 
 function eventHandlerAttributeValues(tags: readonly string[]): string[] {
   // Inline `on*` handler attributes (onclick, onload, ...) hold real JS the
   // browser executes, same as a <script> body.
   const values: string[] = [];
-  const attribute = /\bon[a-z]+\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})')/gi;
+  const attribute = /\son[a-z]+\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})')/gi;
   for (const tag of tags) {
     for (const match of tag.matchAll(attribute)) {
-      const value = match[1] ?? match[2];
+      // An attribute value can carry an HTML character reference
+      // (onclick="fetch(&quot;data.json&quot;)") that a browser decodes
+      // before parsing the handler as JS — the same decode every other
+      // attribute-extracted value in this file already gets.
+      const value = decodeHtmlEntities(match[1] ?? match[2] ?? "");
       if (value) values.push(value);
     }
   }
@@ -528,7 +557,9 @@ function referencesFromBrowserText(text: string, sourcePath: string): BrowserTex
   };
 
   if (isHtml) {
-    const attribute = /\b(src|href|poster|data|srcset)\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^\s"'=<>`]{1,2048}))/gi;
+    // A real attribute name starts at whitespace after the tag name — never
+    // `\b`, which also matches inside a hyphenated name like data-src.
+    const attribute = /\s(src|href|poster|data|srcset)\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^\s"'=<>`]{1,2048}))/gi;
     for (const tag of htmlTags) {
       const tagName = /^<([A-Za-z][A-Za-z0-9-]*)/.exec(tag)?.[1]?.toLowerCase();
       if (!tagName) continue;
@@ -583,6 +614,11 @@ function referencesFromBrowserText(text: string, sourcePath: string): BrowserTex
     addMatches(jsText, JS_FETCH_PATTERN, true);
     addMatches(jsText, JS_WORKER_PATTERN, true, true);
     addMatches(jsText, JS_SERVICE_WORKER_PATTERN, true, true);
+    addMatches(jsText, JS_PROPERTY_ASSIGNMENT_PATTERN, true);
+    addMatches(jsText, JS_SET_ATTRIBUTE_PATTERN, true);
+    for (const value of importScriptsReferences(jsText)) {
+      references.push({ value, documentRelative: false });
+    }
   } else if (/\.(?:js|mjs)$/i.test(sourcePath)) {
     addMatches(scanText, JS_STATIC_IMPORT_PATTERN, false);
     addMatches(scanText, JS_DYNAMIC_IMPORT_PATTERN, false);
@@ -590,7 +626,11 @@ function referencesFromBrowserText(text: string, sourcePath: string): BrowserTex
     addMatches(scanText, JS_FETCH_PATTERN, true);
     addMatches(scanText, JS_WORKER_PATTERN, true, true);
     addMatches(scanText, JS_SERVICE_WORKER_PATTERN, true, true);
-    addMatches(scanText, JS_ASSIGNMENT_SHAPED_PATTERN, true);
+    addMatches(scanText, JS_PROPERTY_ASSIGNMENT_PATTERN, true);
+    addMatches(scanText, JS_SET_ATTRIBUTE_PATTERN, true);
+    for (const value of importScriptsReferences(scanText)) {
+      references.push({ value, documentRelative: false });
+    }
   }
   return references;
 }
@@ -599,14 +639,22 @@ async function shareManifestForSite(
   rootPath: string,
   site: Omit<SitePackageInfo, "shareManifest">,
 ): Promise<SiteShareManifestResult> {
-  const output = presentBuildOutput(site);
+  // Share-what-you-previewed: an explicitly configured static preview must
+  // select the SAME artifact the static preview serves — the site's own
+  // configured entry — not a build output left over from an earlier build.
+  // Only when preview isn't pinned to "static" does a present build output
+  // take priority (Build-mode preview/share). The shared-view rule in
+  // staticPreviewTargetForSite (a recipient always gets a present build
+  // output) is a separate concern for the RECEIVING side and is unaffected.
+  const preferConfiguredStaticEntry = site.configuredPreviewMode === "static";
+  const output = preferConfiguredStaticEntry ? null : presentBuildOutput(site);
   let artifactRoot: string | null = null;
   let entryPath: string | null = null;
 
   if (output) {
     artifactRoot = joinSitePath(site.root, output);
     entryPath = `${artifactRoot}/index.html`;
-  } else if (!needsBuiltArtifact(site) && site.entryPath) {
+  } else if ((preferConfiguredStaticEntry || !needsBuiltArtifact(site)) && site.entryPath) {
     artifactRoot = ownedStaticEntryTarget(site).root;
     const entryRelative = pathRelativeToArtifact(artifactRoot, site.entryPath);
     if (!entryRelative || !/\.html?$/i.test(entryRelative)) {

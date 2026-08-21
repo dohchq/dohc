@@ -387,6 +387,20 @@ describe("discoverSites", () => {
       expect.objectContaining({ code: "unexpected_dohc_type" }),
     ]);
   });
+
+  it("does not let an over-length configured title escape as the site's own title", () => {
+    const longTitle = "x".repeat(250);
+    const [site] = discoverSites([
+      { path: "long/dohc.json", body: JSON.stringify({ type: "site", title: longTitle }) },
+      "long/index.html",
+    ]);
+
+    expect(site?.title).toHaveLength(200);
+    expect(site?.title).toBe(longTitle.slice(0, 200));
+    expect(site?.diagnostics).toEqual([
+      expect.objectContaining({ code: "title-too-long" }),
+    ]);
+  });
 });
 
 describe("parseDohcSiteConfig", () => {
@@ -438,6 +452,25 @@ describe("parseDohcSiteConfig", () => {
       "invalid-preview-command",
       "invalid-preview-entry",
       "invalid-build-output",
+    ]);
+  });
+
+  it("truncates a title over the 200-character contract limit and carries a diagnostic", () => {
+    const longTitle = "x".repeat(250);
+    const parsed = parseDohcSiteConfig(
+      JSON.stringify({ title: longTitle }),
+      "long-title/dohc.json",
+    );
+
+    expect(parsed.config?.title).toHaveLength(200);
+    expect(parsed.config?.title).toBe(longTitle.slice(0, 200));
+    expect(parsed.diagnostics).toEqual([
+      expect.objectContaining({
+        path: "long-title/dohc.json",
+        severity: "warning",
+        code: "title-too-long",
+        message: expect.stringContaining("200"),
+      }),
     ]);
   });
 
