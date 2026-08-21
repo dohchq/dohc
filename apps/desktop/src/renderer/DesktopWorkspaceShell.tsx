@@ -89,7 +89,7 @@ import {
   type SettingsSectionId,
 } from "./settings/settingsRegistry";
 import { Titlebar, workspaceName } from "./Titlebar";
-import { toggleTheme } from "./theme";
+import { stepZoom, toggleTheme } from "./theme";
 import { SectionLabel } from "./ui/controls";
 import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
@@ -4339,6 +4339,30 @@ export function DesktopWorkspaceShell(props: {
         }
         return;
       }
+      // Zoom routes on event.key, which already folds layout and numpad
+      // variants: Ctrl+= and Ctrl+Shift+= (the chord keyboards label "+")
+      // both zoom in, so it is handled before the shift gate below.
+      if (!event.altKey && (key === "=" || key === "+")) {
+        event.preventDefault();
+        void stepZoom("in").catch((error) =>
+          reportShellError("Could not change the window zoom.", error),
+        );
+        return;
+      }
+      if (!event.altKey && !event.shiftKey && key === "-") {
+        event.preventDefault();
+        void stepZoom("out").catch((error) =>
+          reportShellError("Could not change the window zoom.", error),
+        );
+        return;
+      }
+      if (!event.altKey && !event.shiftKey && key === "0") {
+        event.preventDefault();
+        void stepZoom("reset").catch((error) =>
+          reportShellError("Could not change the window zoom.", error),
+        );
+        return;
+      }
       // This handler owns main-frame shortcuts. On Windows/Linux the menu only
       // displays them. On macOS it is the unhandled fallback, so preventing a
       // claimed keydown also prevents a duplicate menu command. Shift and Caps
@@ -4526,6 +4550,30 @@ export function DesktopWorkspaceShell(props: {
         id: "toggle-theme",
         label: "Toggle light/dark theme",
         run: toggleTheme,
+      },
+      {
+        id: "zoom-in",
+        label: "Zoom in",
+        run: () =>
+          void stepZoom("in").catch((error) =>
+            reportShellError("Could not change the window zoom.", error),
+          ),
+      },
+      {
+        id: "zoom-out",
+        label: "Zoom out",
+        run: () =>
+          void stepZoom("out").catch((error) =>
+            reportShellError("Could not change the window zoom.", error),
+          ),
+      },
+      {
+        id: "zoom-reset",
+        label: "Reset zoom",
+        run: () =>
+          void stepZoom("reset").catch((error) =>
+            reportShellError("Could not change the window zoom.", error),
+          ),
       },
     ],
     [

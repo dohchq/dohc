@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
@@ -143,6 +143,7 @@ const bridge = {
   resetWorkspaceSettings: vi.fn(resetWorkspaceSettings),
   writeClipboardText: vi.fn(async (_payload: { text: string }) => undefined),
   setTitlebarTheme: vi.fn(async () => undefined),
+  setWindowZoom: vi.fn(async () => undefined),
 };
 
 const writeText = vi.fn(async () => {});
@@ -239,6 +240,31 @@ describe("DesktopSettings", () => {
     });
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(bridge.setTitlebarTheme).toHaveBeenCalledWith({ theme: "dark" });
+  });
+
+  it("shows the window zoom as a percentage and steps it through settings", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    const row = await screen.findByTestId("settings-row-zoom");
+    expect(row.textContent).toContain("100%");
+
+    await user.click(within(row).getByRole("button", { name: "Zoom in" }));
+    expect(bridge.setUserSettings).toHaveBeenCalledWith({
+      settings: expect.objectContaining({
+        appearance: expect.objectContaining({ zoomLevel: 1 }),
+      }),
+    });
+    // The optimistic paint applies the zoom and shows the new value at once.
+    expect(bridge.setWindowZoom).toHaveBeenCalledWith({ zoomLevel: 1 });
+    expect(row.textContent).toContain("120%");
   });
 
   it("saves a preferred name and previews agent attribution", async () => {

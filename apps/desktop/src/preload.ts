@@ -398,6 +398,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.writeClipboardText, payload),
   setTitlebarTheme: (payload) =>
     ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),
+  setWindowZoom: (payload) =>
+    ipcRenderer.invoke(CHANNELS.setWindowZoom, payload),
   getWorkspaceUiState: (payload) =>
     ipcRenderer.invoke(CHANNELS.getWorkspaceUiState, payload),
   setWorkspaceUiState: (payload) =>

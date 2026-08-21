@@ -258,6 +258,7 @@ import {
   PickImageFilesResult,
   WRITE_ASSET_MAX_BYTES,
   SetTitlebarThemePayload,
+  SetWindowZoomPayload,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
   SetWorkspaceUiStatePayload,
@@ -9893,6 +9894,14 @@ function registerIpcHandlers(
     } catch {
       // Platform without a title bar overlay: nothing to re-tint.
     }
+  });
+
+  // The renderer owns the zoom setting (appearance.zoomLevel) and mirrors it
+  // here; Chromium zoom is a webContents property only main can set.
+  ipcMain.handle(CHANNELS.setWindowZoom, (event, payload) => {
+    assertTrustedSender(event);
+    const input = SetWindowZoomPayload.parse(payload);
+    event.sender.setZoomLevel(input.zoomLevel);
   });
 
   // Per-workspace workbench UI state (.dohc/ui-state.json). The renderer

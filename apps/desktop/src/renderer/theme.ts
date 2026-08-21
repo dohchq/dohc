@@ -3,7 +3,11 @@ import type {
   DesktopUserSettingsResult,
   ThemeMode,
 } from "../settings/userSettings";
-import { effectiveThemeMode } from "../settings/userSettings";
+import {
+  DEFAULT_ZOOM_LEVEL,
+  clampZoomLevel,
+  effectiveThemeMode,
+} from "../settings/userSettings";
 
 const LEGACY_STORAGE_KEY = "dohc-theme";
 
@@ -14,6 +18,7 @@ let currentAppearance: AppearanceSettings = {
   themeMode: "system",
   density: "comfortable",
   reduceMotion: false,
+  zoomLevel: DEFAULT_ZOOM_LEVEL,
 };
 
 // The OS-drawn window controls (titleBarOverlay) can't read CSS — mirror
@@ -30,6 +35,10 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyTheme(effectiveThemeMode(appearance.themeMode, prefersDark));
   document.documentElement.dataset.density = appearance.density;
   document.documentElement.dataset.reduceMotion = String(appearance.reduceMotion);
+  // Chromium zoom is a webContents property only main can set. Best-effort,
+  // like the titlebar mirror above.
+  void window.dohcDesktop?.setWindowZoom?.({ zoomLevel: appearance.zoomLevel })
+    .catch(() => undefined);
 }
 
 // Follows the system theme unless the user explicitly toggled; never
@@ -84,6 +93,30 @@ export async function setThemeMode(themeMode: ThemeMode): Promise<void> {
   };
   applyAppearance(next.appearance);
   await window.dohcDesktop?.setUserSettings?.({ settings: next });
+}
+
+export type ZoomStep = "in" | "out" | "reset";
+
+// Keyboard zoom (Ctrl+= / Ctrl+- / Ctrl+0) writes through to the persisted
+// setting, so the Settings dialog always shows the level in effect and the
+// window reopens at the same zoom. Same read-modify-persist shape as
+// setThemeMode: apply first, then save.
+export async function stepZoom(step: ZoomStep): Promise<void> {
+  const result = await window.dohcDesktop?.getUserSettings?.();
+  const current = result?.settings.appearance ?? currentAppearance;
+  const zoomLevel =
+    step === "reset"
+      ? DEFAULT_ZOOM_LEVEL
+      : clampZoomLevel(current.zoomLevel + (step === "in" ? 1 : -1));
+  if (zoomLevel === current.zoomLevel) return;
+  applyAppearance({ ...current, zoomLevel });
+  if (!result) return;
+  await window.dohcDesktop?.setUserSettings?.({
+    settings: {
+      ...result.settings,
+      appearance: { ...result.settings.appearance, zoomLevel },
+    },
+  });
 }
 
 export function toggleTheme(): void {

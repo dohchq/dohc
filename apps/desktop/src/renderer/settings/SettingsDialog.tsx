@@ -2,6 +2,8 @@ import {
   AlertTriangle,
   CheckCircle2,
   Download,
+  Minus,
+  Plus,
   RefreshCw,
   Search,
   X,
@@ -16,8 +18,11 @@ import {
 import type { UpdateStateEvent } from "../../ipc/bridgeContract";
 import {
   DEFAULT_USER_SETTINGS,
+  MAX_ZOOM_LEVEL,
+  MIN_ZOOM_LEVEL,
   type DesktopUserSettings,
   type DesktopUserSettingsResult,
+  zoomPercent,
 } from "../../settings/userSettings";
 import {
   ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
@@ -585,6 +590,64 @@ export function SettingsDialog(props: {
                   })
                 }
               />
+            </SettingRow>
+            <SettingRow
+              title="Zoom"
+              description="Scales the whole window. Ctrl/Cmd+= zooms in, Ctrl/Cmd+- zooms out, Ctrl/Cmd+0 resets."
+              modified={isModified(
+                userSettings.appearance.zoomLevel,
+                DEFAULT_USER_SETTINGS.appearance.zoomLevel,
+              )}
+              onReset={() =>
+                void saveUserSettings({
+                  ...userSettings,
+                  appearance: {
+                    ...userSettings.appearance,
+                    zoomLevel: DEFAULT_USER_SETTINGS.appearance.zoomLevel,
+                  },
+                })
+              }
+              testId="settings-row-zoom"
+            >
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  aria-label="Zoom out"
+                  disabled={userSettings.appearance.zoomLevel <= MIN_ZOOM_LEVEL}
+                  onClick={() =>
+                    void saveUserSettings({
+                      ...userSettings,
+                      appearance: {
+                        ...userSettings.appearance,
+                        zoomLevel: userSettings.appearance.zoomLevel - 1,
+                      },
+                    })
+                  }
+                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
+                >
+                  <Minus size={14} strokeWidth={1.9} />
+                </button>
+                <span className="min-w-12 text-center font-mono text-[12px] text-ink">
+                  {zoomPercent(userSettings.appearance.zoomLevel)}%
+                </span>
+                <button
+                  type="button"
+                  aria-label="Zoom in"
+                  disabled={userSettings.appearance.zoomLevel >= MAX_ZOOM_LEVEL}
+                  onClick={() =>
+                    void saveUserSettings({
+                      ...userSettings,
+                      appearance: {
+                        ...userSettings.appearance,
+                        zoomLevel: userSettings.appearance.zoomLevel + 1,
+                      },
+                    })
+                  }
+                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
+                >
+                  <Plus size={14} strokeWidth={1.9} />
+                </button>
+              </div>
             </SettingRow>
           </div>
         );

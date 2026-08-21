@@ -73,6 +73,8 @@ import { isLoopbackHostname } from "../security/loopback";
 import {
   DesktopUserSettings as DesktopUserSettingsSchema,
   DesktopUserSettingsResult as DesktopUserSettingsResultSchema,
+  MAX_ZOOM_LEVEL,
+  MIN_ZOOM_LEVEL,
 } from "../settings/userSettings";
 import type {
   DesktopUserSettings as DesktopUserSettingsType,
@@ -3686,6 +3688,14 @@ export const SetTitlebarThemePayload = z.object({
 });
 export type SetTitlebarThemePayload = z.infer<typeof SetTitlebarThemePayload>;
 
+// The renderer mirrors the persisted appearance zoom level to main, which
+// applies it as the sender window's Chromium zoom. Same one-way, best-effort
+// shape as setTitlebarTheme; the settings schema owns the level bounds.
+export const SetWindowZoomPayload = z.object({
+  zoomLevel: z.number().int().min(MIN_ZOOM_LEVEL).max(MAX_ZOOM_LEVEL),
+}).strict();
+export type SetWindowZoomPayload = z.infer<typeof SetWindowZoomPayload>;
+
 // Application-menu commands. One closed set (channels.ts owns the tuple; the
 // sandboxed preload validates against it as a plain value): the menu sends
 // these names and the shell routes them through the SAME command registry the
@@ -4474,6 +4484,7 @@ export interface DohcDesktopBridge {
   ): Promise<WorkspaceSettingsResult>;
   writeClipboardText(payload: WriteClipboardTextPayload): Promise<void>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
+  setWindowZoom(payload: SetWindowZoomPayload): Promise<void>;
   // Per-workspace workbench UI state (.dohc/ui-state.json), main-owned.
   getWorkspaceUiState(
     payload: ListWorkspaceFilesPayload,

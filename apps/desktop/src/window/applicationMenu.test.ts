@@ -170,6 +170,27 @@ describe("application menu template", () => {
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "command-palette");
   });
 
+  it("zoom is renderer-owned and Zoom In shows the unshifted Ctrl+= chord", () => {
+    // Electron's zoomIn role only answers CommandOrControl+Plus, which needs
+    // Shift on most layouts — plain Ctrl+= (the key labeled "+") did nothing
+    // while Ctrl+- zoomed out, leaving no keyboard way back.
+    const { template, sendCommand } = build();
+    const viewItems = items(template, "View");
+    for (const [label, accelerator, commandId] of [
+      ["Reset Zoom", "CommandOrControl+0", "zoom-reset"],
+      ["Zoom In", "CommandOrControl+=", "zoom-in"],
+      ["Zoom Out", "CommandOrControl+-", "zoom-out"],
+    ] as const) {
+      const item = viewItems.find((entry) => entry.label === label);
+      expect(item?.accelerator, label).toBe(accelerator);
+      expect(item?.registerAccelerator, label).toBe(false);
+      const fakeWindow = { id: 9 };
+      (item?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+      expect(sendCommand).toHaveBeenCalledWith(fakeWindow, commandId);
+    }
+    expect(viewItems.some((entry) => entry.role === "zoomIn")).toBe(false);
+  });
+
   it("Edit menu is pure clipboard roles so copy/paste works everywhere", () => {
     const { template } = build();
     expect(items(template, "Edit").map((i) => i.role)).toEqual([

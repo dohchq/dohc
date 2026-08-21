@@ -120,9 +120,15 @@ export function buildMenuTemplate(options: {
         ),
         command("Toggle Theme", "toggle-theme"),
         { type: "separator" },
-        { role: "resetZoom" },
-        { role: "zoomIn" },
-        { role: "zoomOut" },
+        // Renderer-owned like the rest of the View menu, not the Electron
+        // zoom roles: the zoomIn role only answers CommandOrControl+Plus,
+        // which needs Shift on most layouts — plain Ctrl+= (the chord
+        // keyboards label "+") did nothing while Ctrl+- zoomed out. Routing
+        // through the command registry also writes the level through to the
+        // persisted appearance setting.
+        command("Reset Zoom", "zoom-reset", "CommandOrControl+0"),
+        command("Zoom In", "zoom-in", "CommandOrControl+="),
+        command("Zoom Out", "zoom-out", "CommandOrControl+-"),
         // Dev only: a packaged everyday-people app has no devtools menu item.
         ...(options.isDev
           ? [{ type: "separator" }, { role: "toggleDevTools" }] as const
