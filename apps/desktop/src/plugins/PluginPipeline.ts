@@ -1605,10 +1605,19 @@ export class PluginPipeline {
   private async stopOldRuntime(
     pluginId: string,
     onStopped?: () => void,
+    markStopped?: () => void,
   ): Promise<void> {
     await this.options.pluginHost.stop(pluginId);
     this.recoveredManifests.delete(pluginId);
-    onStopped?.();
+    // The stop already happened — mark it before running its consequences,
+    // so a throwing notification can never look like the stop never occurred.
+    markStopped?.();
+    try {
+      onStopped?.();
+    } catch (error) {
+      // Best-effort: a notification failure must never corrupt build state.
+      console.error(`[PluginPipeline] old-runtime-stopped notification failed for "${pluginId}".`, error);
+    }
   }
 
   /**
@@ -1786,8 +1795,11 @@ export class PluginPipeline {
       // before the new process starts — unapproved bytes running under the
       // approvedBundleHash just recorded for them (#779 round 12 A3).
       if (oldRuntime) {
-        await this.stopOldRuntime(candidate.id, input.onOldRuntimeStopped);
-        oldRuntimeStopped = true;
+        await this.stopOldRuntime(
+          candidate.id,
+          input.onOldRuntimeStopped,
+          () => { oldRuntimeStopped = true; },
+        );
       }
 
       // Both publishes happen only now, with the record that approves these

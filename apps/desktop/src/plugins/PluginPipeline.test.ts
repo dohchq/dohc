@@ -3188,6 +3188,39 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
+    it("survives a throwing old-runtime-stopped notification and still publishes the replacement", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        setup.failNextRecordWrite();
+        expect((await setup.pipeline.approve("example-plugin")).ok).toBe(false);
+        expect(setup.pipeline.list()[0]?.status).toBe("failed");
+        // The old runtime never stopped for this failure — it failed at the
+        // durable write, before the stop step. The retry below reuses the
+        // same, unchanged, durably-approved source, so it takes the ordinary
+        // success path (not approval-hold) and reaches its own stop, where
+        // the notification below throws.
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin", {
+          onOldRuntimeStopped: () => {
+            throw new Error("simulated notification failure");
+          },
+        });
+
+        expect(rebuilt).toMatchObject({
+          ok: true,
+          plugin: { status: "starting" },
+        });
+        await waitFor(
+          () => setup.pipeline.list()[0]?.status === "ready",
+          "Plugin did not reach ready after a throwing stop notification.",
+        );
+        expect(setup.pipeline.list()[0]?.status).toBe("ready");
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
     it("holds changed source for approval instead of approving it on rebuild", async () => {
       const setup = await setupEstablishedPlugin();
       try {
