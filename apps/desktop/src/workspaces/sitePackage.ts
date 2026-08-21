@@ -239,22 +239,32 @@ function html5TextContent(node: Html5Node): string {
     .join("");
 }
 
+// "module" is never a MIME type essence (no "type/subtype" shape) — the
+// spec matches it as an exact keyword on its OWN, never through MIME
+// parsing, so it's deliberately excluded from this list.
 const JS_SCRIPT_TYPE_PATTERN =
-  /^(?:text\/javascript|application\/javascript|text\/ecmascript|application\/ecmascript|text\/jscript|text\/x-javascript|text\/x-ecmascript|module)$/i;
+  /^(?:text\/javascript|application\/javascript|text\/ecmascript|application\/ecmascript|text\/jscript|text\/x-javascript|text\/x-ecmascript)$/i;
 
 /** A non-JavaScript `type` (`application/json`, `text/template`, ...) makes
  * a <script> a data block — its own `src` attribute never fires a request
  * (src only applies to classic and module scripts) and its body is data,
- * never code a browser executes. A missing type, `module`, and the classic
- * JS MIME types are all executable. */
+ * never code a browser executes. A missing type, the exact `module`
+ * keyword, and a classic JS MIME essence are all executable. */
 function isExecutableScriptType(attrs: ReadonlyMap<string, string>): boolean {
   const type = attrs.get("type");
   if (!type) return true;
-  // A `type` is a MIME type — only its ESSENCE (the type/subtype before any
-  // `;parameter=value`) is what a browser compares against the JS list.
-  // `text/javascript; charset=utf-8` is exactly as executable as
+  const trimmed = type.trim();
+  // The exact keyword check runs BEFORE MIME parsing, on the whole trimmed
+  // value — `type="module;foo"` is neither this keyword nor a MIME
+  // essence, so it's a data block, not a module (round-15 finding 3: a
+  // prior essence-first version wrongly reduced "module;foo" to essence
+  // "module" and matched it here).
+  if (trimmed.toLowerCase() === "module") return true;
+  // A `type` is otherwise a MIME type — only its ESSENCE (the type/subtype
+  // before any `;parameter=value`) is what a browser compares against the
+  // JS list. `text/javascript; charset=utf-8` is exactly as executable as
   // `text/javascript` alone.
-  const essence = type.split(";", 1)[0]?.trim() ?? "";
+  const essence = trimmed.split(";", 1)[0]?.trim() ?? "";
   return JS_SCRIPT_TYPE_PATTERN.test(essence);
 }
 
@@ -306,6 +316,12 @@ const URL_ATTRIBUTE_ELEMENTS: Readonly<Record<string, ReadonlySet<string>>> = {
   href: new Set(["a", "link", "area", "image", "use"]),
   poster: new Set(["video"]),
   data: new Set(["object"]),
+  // A default-GET form submission navigates to `action`; a submit control's
+  // own `formaction` overrides it for that one control. Both are literal
+  // navigation targets a real browser follows on submit, the same way
+  // clicking an `<a href>` follows that target.
+  action: new Set(["form"]),
+  formaction: new Set(["button", "input"]),
 };
 
 // A <link href> counts only when its `rel` names a token the browser
@@ -328,11 +344,23 @@ const LINK_REL_RESOURCE_TOKENS = new Set([
 ]);
 const LINK_REL_TOKENS_REQUIRING_AS = new Set(["preload"]);
 
-function isResourceConsumingLinkRel(relValue: string | undefined, hasAsAttribute: boolean): boolean {
+// Fetch's request-destination keywords — the only valid `as` values for
+// rel="preload". An invalid, unrecognized, or empty `as` gets no
+// destination state at all: the browser aborts preload processing and
+// makes no request, so the mere PRESENCE of the attribute isn't enough.
+const PRELOAD_AS_DESTINATIONS = new Set([
+  "audio", "audioworklet", "document", "embed", "fencedframe", "font",
+  "frame", "iframe", "image", "manifest", "object", "paintworklet",
+  "report", "script", "sharedworker", "style", "track", "video",
+  "webidentity", "worker", "xslt",
+]);
+
+function isResourceConsumingLinkRel(relValue: string | undefined, asValue: string | undefined): boolean {
   if (!relValue) return false;
+  const hasValidAs = !!asValue && PRELOAD_AS_DESTINATIONS.has(asValue.trim().toLowerCase());
   for (const token of relValue.toLowerCase().split(/\s+/).filter(Boolean)) {
     if (LINK_REL_RESOURCE_TOKENS.has(token)) return true;
-    if (LINK_REL_TOKENS_REQUIRING_AS.has(token) && hasAsAttribute) return true;
+    if (LINK_REL_TOKENS_REQUIRING_AS.has(token) && hasValidAs) return true;
   }
   return false;
 }
@@ -371,8 +399,15 @@ function htmlBaseDirectoryFromDocument(
 ): HtmlBaseResolution {
   // parse5 already decoded any HTML character reference in the href value —
   // only the URL-level percent-encoding below is still this function's job.
-  const href = firstBaseHref(document);
-  if (!href || href.startsWith("#")) return { kind: "none" };
+  const rawHref = firstBaseHref(document);
+  if (!rawHref || rawHref.startsWith("#")) return { kind: "none" };
+  // Same browser-URL-parser backslash normalization as
+  // resolveArtifactRelativePath, applied BEFORE the external-base check —
+  // a browser normalizes `\\host\...` to the network-path reference
+  // `//host/...` and resolves it against that external host. Checking for
+  // "//" on the raw, unnormalized href would instead let it fall through
+  // to the root-relative branch below and resolve as a local directory.
+  const href = rawHref.replaceAll("\\", "/");
   if (
     href.startsWith("//") ||
     URI_SCHEME_PATTERN.test(href)
@@ -380,9 +415,7 @@ function htmlBaseDirectoryFromDocument(
   if (contextBase.kind === "external") return { kind: "external" };
   let decoded: string;
   try {
-    // Same browser-URL-parser backslash normalization as
-    // resolveArtifactRelativePath — a <base href> is no less subject to it.
-    decoded = decodeURIComponent(href.split(/[?#]/, 1)[0] ?? "").replaceAll("\\", "/");
+    decoded = decodeURIComponent(href.split(/[?#]/, 1)[0] ?? "");
   } catch {
     return { kind: "external" };
   }
@@ -826,12 +859,63 @@ function domProducingTag(
  * file with a non-DOM-producing value (or with two DIFFERENT DOM tags) is
  * invalidated file-wide, never trusted again even where its OWN binding
  * really is DOM-producing. */
+/** Every identifier name a destructuring/parameter pattern binds, however
+ * nested — `{ img }`, `[img]`, `img = {}`, `...img` all still bind `img`. */
+function collectPatternNames(pattern: unknown, into: Set<string>): void {
+  if (!isAstNode(pattern)) return;
+  if (pattern.type === "Identifier") {
+    const name = astString(pattern, "name");
+    if (name) into.add(name);
+    return;
+  }
+  if (pattern.type === "AssignmentPattern") {
+    collectPatternNames(astChild(pattern, "left"), into);
+    return;
+  }
+  if (pattern.type === "RestElement") {
+    collectPatternNames(astChild(pattern, "argument"), into);
+    return;
+  }
+  if (pattern.type === "ObjectPattern") {
+    for (const prop of astChildren(pattern, "properties")) {
+      if (!isAstNode(prop)) continue;
+      collectPatternNames(
+        prop.type === "RestElement" ? astChild(prop, "argument") : astChild(prop, "value"),
+        into,
+      );
+    }
+    return;
+  }
+  if (pattern.type === "ArrayPattern") {
+    for (const element of astChildren(pattern, "elements")) collectPatternNames(element, into);
+  }
+}
+
+/** Every name bound by ANY function's parameter list in the file — a
+ * parameter's runtime value is never provable statically (the caller
+ * decides it, default value or not), so it can never be trusted as
+ * DOM-producing even where a SAME-named variable elsewhere in the file
+ * really is. */
+function collectFunctionParameterNames(program: AstNode): Set<string> {
+  const names = new Set<string>();
+  walkAst(program, (node) => {
+    if (
+      node.type === "FunctionDeclaration" ||
+      node.type === "FunctionExpression" ||
+      node.type === "ArrowFunctionExpression"
+    ) {
+      for (const param of astChildren(node, "params")) collectPatternNames(param, names);
+    }
+  });
+  return names;
+}
+
 function collectDomProducingTags(
   program: AstNode,
   shadowedGlobals: ReadonlySet<string>,
 ): Map<string, DomProducingTag> {
   const tags = new Map<string, DomProducingTag>();
-  const invalidated = new Set<string>();
+  const invalidated = new Set<string>(collectFunctionParameterNames(program));
   for (let pass = 0; pass < 3; pass += 1) {
     let changed = false;
     walkAst(program, (node) => {
@@ -1074,7 +1158,11 @@ function workerScriptKind(optionsNode: unknown): ScriptKind | undefined {
   for (const prop of astChildren(optionsNode, "properties")) {
     if (!isAstNode(prop) || prop.type !== "Property") continue;
     const key = astChild(prop, "key");
-    const keyName = isAstNode(key) && key.type === "Identifier" ? astString(key, "name") : undefined;
+    // `{ type: "module" }` and the equally valid `{ "type": "module" }`
+    // both name the same option — Acorn represents the quoted form as a
+    // string Literal key, not an Identifier.
+    const keyName =
+      isAstNode(key) && key.type === "Identifier" ? astString(key, "name") : stringLiteralValue(key);
     if (keyName !== "type") continue;
     return stringLiteralValue(astChild(prop, "value")) === "module" ? "module" : undefined;
   }
@@ -1190,6 +1278,16 @@ function jsReferencesFromCode(
             // its own script URL, same as Worker/SharedWorker.
             const { value, scriptRelative } = consumedValue(args[0]);
             addReference(value, !scriptRelative, true);
+          } else if (
+            propertyName === "fetch" &&
+            (isGlobalReceiver(object, "window", shadowedGlobals) ||
+              isGlobalReceiver(object, "globalThis", shadowedGlobals))
+          ) {
+            // `window.fetch`/`globalThis.fetch` request exactly like a bare
+            // `fetch(...)` call — the same unshadowed-global rule already
+            // governs `document`/`navigator` receivers.
+            const { value, scriptRelative } = consumedValue(args[0]);
+            addReference(value, !scriptRelative);
           } else if (propertyName === "setAttribute" && args.length >= 2) {
             const attributeName = stringLiteralValue(args[0]);
             if (attributeName) addUrlAttributeReference(object, attributeName, args[1]);
@@ -1379,7 +1477,7 @@ function htmlReferencesFromDocument(
         if (
           attributeName === "href" &&
           tagName === "link" &&
-          !isResourceConsumingLinkRel(attrs.get("rel"), attrs.has("as"))
+          !isResourceConsumingLinkRel(attrs.get("rel"), attrs.get("as"))
         ) continue;
         // A manifest linked as plain "manifest.json" is still a web app
         // manifest to the browser — the extension gate in the scan queue
@@ -1552,9 +1650,16 @@ async function shareManifestForSite(
   // claimed.
   const importMapKey = (importMap: ImportMapResolution | undefined): string => {
     if (!importMap) return "none";
-    const entries = (map: ReadonlyMap<string, string>) =>
-      [...map].map(([key, value]) => `${key}=${value}`).sort().join(",");
-    return `${entries(importMap.imports)}|${entries(importMap.urlLikeImports)}`;
+    // ONE structural serialization of BOTH maps together, not delimiter-
+    // joined text — `=`, `,`, and `|` are all legal in a resolved path or
+    // import-map key, so two DIFFERENT maps (e.g. one entry "a=/b,c=/d" vs.
+    // two entries "a"->"/b" and "c"->"/d") could otherwise fingerprint
+    // identically and collide in the scan key, silently dropping the
+    // second document's own scan. A single JSON.stringify call over both
+    // sorted entry lists has no delimiter of its own to collide on.
+    const sortedEntries = (map: ReadonlyMap<string, string>) =>
+      [...map].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return JSON.stringify([sortedEntries(importMap.imports), sortedEntries(importMap.urlLikeImports)]);
   };
   // Every file is scanned with its own referring document's base — an
   // external .js/.mjs file has no <base> of its own, but a reference the
@@ -1882,6 +1987,20 @@ async function packageScriptsForSite(
     const diagnostics: SiteDiagnostic[] = [];
     for (const [name, scriptBody] of Object.entries(scripts)) {
       if (typeof scriptBody !== "string") continue;
+      if (name.length === 0) {
+        // The bridge contract's SitePackageScripts schema requires every
+        // key to have at least one character — an empty name here would
+        // make the WHOLE ListSitesResult fail Zod parsing and hide every
+        // other site in the response, the same class of producer-consumer
+        // mismatch the oversized-script bound below already guards.
+        diagnostics.push({
+          path: packagePath,
+          severity: "warning",
+          code: "script-name-empty",
+          message: "package.json has a script with an empty name, which the bridge contract requires at least one character for, and was dropped.",
+        });
+        continue;
+      }
       if (name.length > MAX_SCRIPT_NAME_CHARS || scriptBody.length > MAX_SCRIPT_BODY_CHARS) {
         diagnostics.push({
           path: packagePath,

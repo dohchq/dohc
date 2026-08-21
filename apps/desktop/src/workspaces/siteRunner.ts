@@ -51,7 +51,16 @@ const MAX_LOG_ENTRIES = 500;
 const MAX_LOG_TEXT_CHARS = 10_000;
 const LOG_TRUNCATION_MARKER = "...[truncated]";
 const BUILD_TIMEOUT_MS = 120000;
-const BUILD_HARD_KILL_GRACE_MS = 5000;
+export const BUILD_HARD_KILL_GRACE_MS = 5000;
+// The will-quit teardown's own budget must cover this site-preview stop
+// path's worst case (SIGTERM, then this grace, then the SIGKILL
+// round-trip) or an unref'd preview process can survive with no kill
+// signal ever sent (round-15 finding 7). Computed HERE, not duplicated as
+// an independent literal in main.ts — a hard-coded, independently-drifting
+// duplicate is exactly how the two fell out of sync before. Never shorter
+// than the ORIGINAL 3 s budget the other, unrelated teardown tasks in
+// main.ts's will-quit handler were sized against.
+export const WILL_QUIT_BUDGET_MS = Math.max(3000, BUILD_HARD_KILL_GRACE_MS + 1000);
 const DEV_URL_RE =
   /(http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?![A-Za-z0-9.-])(?::\d+)?(?:\/[^\s]*)?)(?=$|[\s.)"'`,\]>])/i;
 const DEV_URL_TRAILING_PUNCTUATION_RE = /[.,)"'`,\]>]+$/;
@@ -233,8 +242,37 @@ function explicitHostBinds(args: string[]): string[] {
   return hosts;
 }
 
+// `splitCommandLine` has no concept of shell env-var assignments — a
+// leading `HOST=0.0.0.0 vite` tokenizes as command "HOST=0.0.0.0" with
+// args ["vite"], which the flag-based check above never sees. npm's own
+// script shell DOES honor a leading assignment, and a server that reads
+// process.env.HOST/HOSTNAME (the conventional names many frameworks and
+// custom servers use) binds every interface while still printing a
+// loopback URL that satisfies startup detection. A shell allows SEVERAL
+// leading assignments before the real command (`NODE_ENV=production
+// HOST=0.0.0.0 vite`) — HOST/HOSTNAME need not be first among them — so
+// this walks the whole leading run of ANY `VAR=value` token, collecting
+// only the host-named ones, and stops at the first token that isn't an
+// assignment at all (the real command).
+const ENV_ASSIGNMENT_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
+
+function explicitHostEnvironmentAssignments(command: string, args: string[]): string[] {
+  const hosts: string[] = [];
+  for (const token of [command, ...args]) {
+    const match = ENV_ASSIGNMENT_PATTERN.exec(token);
+    if (!match) break;
+    const [, name, value] = match;
+    if (name && /^host(name)?$/i.test(name)) hosts.push(value ?? "");
+  }
+  return hosts;
+}
+
 function assertDirectHostBinds(command: string, args: string[]): void {
-  for (const host of explicitHostBinds(args)) {
+  const hosts = [
+    ...explicitHostBinds(args),
+    ...explicitHostEnvironmentAssignments(command, args),
+  ];
+  for (const host of hosts) {
     if (host !== "" && isLoopbackHostname(host)) continue;
     const displayHost = host === "" ? "all interfaces" : host;
     throw new Error(

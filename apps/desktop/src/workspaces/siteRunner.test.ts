@@ -20,6 +20,7 @@ import { buildOutputSiteRoot } from "./sitePackage";
 import {
   assertLoopbackOnlyDevServerCommand,
   buildSite,
+  BUILD_HARD_KILL_GRACE_MS,
   detectBuildOutput,
   detectDevUrl,
   packageManagerCommand,
@@ -27,6 +28,7 @@ import {
   splitCommandLine,
   startSiteDevServer,
   startStaticSitePreview,
+  WILL_QUIT_BUDGET_MS,
 } from "./siteRunner";
 
 let root: string;
@@ -409,6 +411,43 @@ describe("package manager helpers", () => {
         "127.0.0.1",
       ]),
     ).not.toThrow();
+  });
+
+  it("gives the will-quit teardown enough budget to reach a site preview's own hard-kill deadline", () => {
+    // stopChild's POSIX/Windows path waits BUILD_HARD_KILL_GRACE_MS for a
+    // graceful exit before it can even issue SIGKILL — quit exiting before
+    // that deadline (plus headroom for the SIGKILL round-trip itself)
+    // leaves an unref'd preview process with no kill signal ever sent
+    // (round-15 finding 7).
+    expect(WILL_QUIT_BUDGET_MS).toBeGreaterThan(BUILD_HARD_KILL_GRACE_MS);
+  });
+
+  it("rejects a leading HOST/HOSTNAME environment assignment that binds outside loopback", () => {
+    // splitCommandLine has no concept of shell env assignments — "HOST=0.0.0.0
+    // node server.cjs" tokenizes as command "HOST=0.0.0.0" with args
+    // ["node", "server.cjs"], which the flag-based check alone never sees.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("HOST=0.0.0.0", ["node", "server.cjs"]),
+    ).toThrow(/loopback/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("HOSTNAME=0.0.0.0", ["node", "server.cjs"]),
+    ).toThrow(/loopback/);
+    // A loopback value, or a non-host assignment entirely, is unaffected.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("HOST=127.0.0.1", ["node", "server.cjs"]),
+    ).not.toThrow();
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("NODE_ENV=production", ["node", "server.cjs"]),
+    ).not.toThrow();
+    // Multiple leading assignments, and an assignment inside a lifecycle
+    // hook's own command string, are covered too.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("NODE_ENV=production", [
+        "HOST=0.0.0.0",
+        "node",
+        "server.cjs",
+      ]),
+    ).toThrow(/loopback/);
   });
 });
 

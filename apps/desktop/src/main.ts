@@ -629,6 +629,7 @@ import {
   buildSite,
   startSiteDevServer,
   startStaticSitePreview,
+  WILL_QUIT_BUDGET_MS,
   type SiteLogEntry,
 } from "./workspaces/siteRunner";
 import { commandForSiteScript } from "./workspaces/siteScriptCommand";
@@ -4036,7 +4037,7 @@ app.on("will-quit", (event) => {
       dispatchStoreStop,
       rustEngineStop,
     ]).then(() => undefined),
-    new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+    new Promise<void>((resolve) => setTimeout(resolve, WILL_QUIT_BUDGET_MS)),
   ]).finally(() => app.exit(0));
 });
 

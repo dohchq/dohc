@@ -315,7 +315,11 @@ function getCandidate(candidates: Map<string, Candidate>, root: string): Candida
   return candidate;
 }
 
-function safeRelativeConfigPath(value: string): string | undefined {
+// Exported so MCP's own site detector can apply the SAME safe-relative-path
+// rule to a configured build.output — the two detectors reporting different
+// values for the identical dohc.json is a contract violation, not just an
+// inconsistency (round-15 finding 12).
+export function safeRelativeConfigPath(value: string): string | undefined {
   if (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\")) {
     return undefined;
   }

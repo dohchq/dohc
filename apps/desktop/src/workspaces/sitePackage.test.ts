@@ -1444,6 +1444,211 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("backslash-ref/assets/app.js");
   });
 
+  it("classifies a network-path <base href> (normalized from a leading double backslash) as external", async () => {
+    await mkdir(join(root, "network-base"), { recursive: true });
+    await writeFile(
+      join(root, "network-base", "index.html"),
+      [
+        '<base href="\\\\host\\dir\\">',
+        '<script src="app.js"></script>',
+      ].join(""),
+    );
+    // A decoy at the LOCAL path the old (unnormalized) check would have
+    // resolved "app.js" against — a browser never requests this file, it
+    // requests it from the external host "host" instead.
+    await mkdir(join(root, "network-base", "host", "dir"), { recursive: true });
+    await writeFile(join(root, "network-base", "host", "dir", "app.js"), "decoy");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "network-base",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("network-base/host/dir/app.js");
+  });
+
+  it("does not treat type=\"module;foo\" as executable — it is neither the exact module keyword nor a JS MIME essence", async () => {
+    await mkdir(join(root, "module-param"), { recursive: true });
+    await writeFile(
+      join(root, "module-param", "index.html"),
+      '<script type="module;foo" src="private.js"></script>',
+    );
+    await writeFile(join(root, "module-param", "private.js"), "");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "module-param",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("module-param/private.js");
+  });
+
+  it("invalidates DOM provenance for a function parameter bound to the same name as a proven DOM variable", async () => {
+    await mkdir(join(root, "dom-parameter"), { recursive: true });
+    await writeFile(
+      join(root, "dom-parameter", "index.html"),
+      '<script src="app.js"></script>',
+    );
+    await writeFile(
+      join(root, "dom-parameter", "app.js"),
+      [
+        'const img = document.createElement("img");',
+        'img.src = "real.png";',
+        "function f(img = {}) {",
+        '  img.src = "private.png";',
+        "}",
+      ].join("\n"),
+    );
+    await writeFile(join(root, "dom-parameter", "real.png"), "image");
+    await writeFile(join(root, "dom-parameter", "private.png"), "image");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "dom-parameter",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("dom-parameter/real.png");
+    expect(manifestOf(site)?.assets).not.toContain("dom-parameter/private.png");
+  });
+
+  it("recognizes a quoted worker option key (new Worker(lit, { \"type\": \"module\" }))", async () => {
+    await mkdir(join(root, "worker-quoted-key"), { recursive: true });
+    await writeFile(
+      join(root, "worker-quoted-key", "index.html"),
+      '<script>new Worker("worker.js", { "type": "module" });</script>',
+    );
+    await writeFile(
+      join(root, "worker-quoted-key", "worker.js"),
+      'export {};\nfetch("target.txt");',
+    );
+    await writeFile(join(root, "worker-quoted-key", "target.txt"), "data");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "worker-quoted-key",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("worker-quoted-key/target.txt");
+  });
+
+  it("does not collide two different import maps into the same fingerprint via unescaped delimiters", async () => {
+    // {"a": "/b,c=/d"} (one entry, value contains "," and "=") and
+    // {"a": "/b", "c": "/d"} (two entries) both fingerprint as the literal
+    // text "a=/b,c=/d" under the old delimiter-joined scheme. Both pages,
+    // shared.js, and the ambiguous targets sit in the SAME directory so
+    // only the import map differs between the two scans.
+    await mkdir(join(root, "import-map-fingerprint"), { recursive: true });
+    await writeFile(
+      join(root, "import-map-fingerprint", "page-one-entry.html"),
+      [
+        '<script type="importmap">{"imports": {"a": "./b,c=/d"}}</script>',
+        '<script type="module" src="shared.js"></script>',
+      ].join(""),
+    );
+    await writeFile(
+      join(root, "import-map-fingerprint", "page-two-entries.html"),
+      [
+        '<script type="importmap">{"imports": {"a": "./b", "c": "./d"}}</script>',
+        '<script type="module" src="shared.js"></script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "import-map-fingerprint", "shared.js"), 'import "c";');
+    // page-one's own map has no "c" key at all (its only mapping, "a", is
+    // never imported), so its scan of shared.js correctly mints nothing —
+    // this file exists only to prove page-two's DIFFERENT scan (mapping
+    // "c" -> "./d") still runs and resolves it, rather than being deduped
+    // away by the fingerprint collision.
+    await writeFile(join(root, "import-map-fingerprint", "d"), "");
+    await writeFile(
+      join(root, "import-map-fingerprint", "index.html"),
+      [
+        '<iframe src="page-one-entry.html"></iframe>',
+        '<iframe src="page-two-entries.html"></iframe>',
+      ].join(""),
+    );
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "import-map-fingerprint",
+    );
+
+    // The two-entries page's "c" -> "./d" mapping must survive its own
+    // scan even though the one-entry page's map fingerprinted identically
+    // under the old scheme.
+    expect(manifestOf(site)?.assets).toContain("import-map-fingerprint/d");
+  });
+
+  it("does not fetch a preload link with an empty or invalid as destination", async () => {
+    await mkdir(join(root, "preload-as"), { recursive: true });
+    await writeFile(
+      join(root, "preload-as", "index.html"),
+      [
+        '<link rel="preload" as="" href="empty-as.txt">',
+        '<link rel="preload" as="not-a-real-destination" href="invalid-as.txt">',
+        '<link rel="preload" as="script" href="valid-as.js">',
+      ].join(""),
+    );
+    await writeFile(join(root, "preload-as", "empty-as.txt"), "private");
+    await writeFile(join(root, "preload-as", "invalid-as.txt"), "private");
+    await writeFile(join(root, "preload-as", "valid-as.js"), "");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "preload-as",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("preload-as/empty-as.txt");
+    expect(manifestOf(site)?.assets).not.toContain("preload-as/invalid-as.txt");
+    expect(manifestOf(site)?.assets).toContain("preload-as/valid-as.js");
+  });
+
+  it("recognizes window.fetch and globalThis.fetch the same way as a bare fetch() call", async () => {
+    await mkdir(join(root, "qualified-fetch"), { recursive: true });
+    await writeFile(
+      join(root, "qualified-fetch", "index.html"),
+      '<script>window.fetch("a.json"); globalThis.fetch("b.json");</script>',
+    );
+    await writeFile(join(root, "qualified-fetch", "a.json"), "{}");
+    await writeFile(join(root, "qualified-fetch", "b.json"), "{}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "qualified-fetch",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("qualified-fetch/a.json");
+    expect(manifestOf(site)?.assets).toContain("qualified-fetch/b.json");
+  });
+
+  it("drops an empty package script name before it reaches the bridge, which requires a non-empty key", async () => {
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({ scripts: { dev: "vite", "": "echo ignored" } }),
+    );
+    await writeFile(join(root, "index.html"), "<h1>Empty script name</h1>");
+
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === ".");
+
+    expect(site?.scripts).toEqual({ dev: "vite" });
+    expect(site?.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "script-name-empty" }),
+    );
+  });
+
+  it("follows a form's action and a submit control's formaction as navigation dependencies", async () => {
+    await mkdir(join(root, "form-action"), { recursive: true });
+    await writeFile(
+      join(root, "form-action", "index.html"),
+      [
+        '<form action="thanks.html"><button type="submit">Go</button></form>',
+        '<form><button type="submit" formaction="override.html">Go</button></form>',
+      ].join(""),
+    );
+    await writeFile(join(root, "form-action", "thanks.html"), "<h1>Thanks</h1>");
+    await writeFile(join(root, "form-action", "override.html"), "<h1>Override</h1>");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "form-action",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("form-action/thanks.html");
+    expect(manifestOf(site)?.assets).toContain("form-action/override.html");
+  });
+
   it("parses an iframe's srcdoc as a nested document, resolved against the embedding document's base", async () => {
     await mkdir(join(root, "srcdoc"), { recursive: true });
     await writeFile(

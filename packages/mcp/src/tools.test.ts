@@ -1645,19 +1645,65 @@ describe("mcp tools operate on allowed paths", () => {
         join(ctx.root, "workflow-claims-build/dohc.json"),
         JSON.stringify({ type: "workflow", build: { output: "dist" } }),
       );
-      // A sibling with the SAME non-site type but a REAL build directory on
-      // disk still counts, proving the detected-vs-configured distinction
-      // (not a blanket refusal of every build.output claim).
+      // A sibling with the SAME non-site type but a REAL build artifact on
+      // disk (an actual dist/index.html, not just an empty dist/) still
+      // counts, proving the detected-vs-configured distinction (not a
+      // blanket refusal of every build.output claim).
       await mkdir(join(ctx.root, "workflow-real-build/dist"), { recursive: true });
+      await writeFile(join(ctx.root, "workflow-real-build/dist/index.html"), "<h1>Built</h1>");
       await writeFile(
         join(ctx.root, "workflow-real-build/dohc.json"),
         JSON.stringify({ type: "workflow" }),
       );
 
       const result = await detectSites(ctx);
-      expect(result).toMatchObject({ ok: true, count: 1 });
+      expect(result).toMatchObject({ ok: true });
       if (!result.ok) return;
-      expect(result.sites.map((site) => site.root)).toEqual(["workflow-real-build"]);
+      const roots = result.sites.map((site) => site.root);
+      // The recursive walk also finds "workflow-real-build/dist" as its
+      // own bare-index.html site — real, unrelated to this fixture's own
+      // point (a claimed-but-unbuilt output vs. a real one at the SAME
+      // root), so this only asserts what that point actually is.
+      expect(roots).toContain("workflow-real-build");
+      expect(roots).not.toContain("workflow-claims-build");
+    });
+  });
+
+  it("detect_sites drops an unsafe configured build.output (traversal) with the same diagnostic workspace-core would emit", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "site-unsafe-output"), { recursive: true });
+      await writeFile(join(ctx.root, "site-unsafe-output/index.html"), "<h1>Site</h1>");
+      await writeFile(
+        join(ctx.root, "site-unsafe-output/dohc.json"),
+        JSON.stringify({ type: "site", build: { output: "../../outside" } }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "site-unsafe-output");
+      expect(site?.buildOutputs).toEqual([]);
+      expect(site?.diagnostics).toContainEqual(
+        expect.objectContaining({ code: "invalid-build-output" }),
+      );
+    });
+  });
+
+  it("detect_sites does not count a bare, empty build-output directory as a detected build", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "workflow-empty-dist/dist"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "workflow-empty-dist/dohc.json"),
+        JSON.stringify({ type: "workflow" }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      // No index.html inside dist/, no other website signal, and an
+      // explicit non-site type — workspace-core would refuse this
+      // candidate for the same reason.
+      expect(result.sites.map((site) => site.root)).not.toContain("workflow-empty-dist");
     });
   });
 

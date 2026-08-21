@@ -101,7 +101,14 @@ function validatedPackageManagerRun(
       post: site.scripts[`post${run.script}`],
     },
   );
-  const extraArgs = [...run.options, ...run.forwardedArgs];
+  // Forwarded args need the `--` separator PRESERVED, not just appended —
+  // without it npm treats them as its OWN options (`npm run dev --port
+  // 3000` lets npm's CLI consume --port instead of forwarding it to the
+  // script), so the args the user meant for the script silently vanish.
+  const extraArgs = [
+    ...run.options,
+    ...(run.forwardedArgs.length > 0 ? ["--", ...run.forwardedArgs] : []),
+  ];
   if (extraArgs.length === 0) return validated;
   // Recognized options and forwarded args both have to land on the command
   // dohc actually spawns — dropping `--ignore-scripts` here would run

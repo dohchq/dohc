@@ -41,6 +41,7 @@ import {
   type SiteScripts,
   type WorkspaceSite,
   isSharedWithMePath,
+  safeRelativeConfigPath,
 } from "@dohc/workspace-core";
 import {
   DohcCliError,
@@ -1918,12 +1919,40 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
   // former as the independent signal that overrides an explicit non-site
   // type declaration; its own doc comment explains why (an explicitly
   // non-site config's own build.output claim can't override its own type).
-  // Both detectors have to agree on that rule for the SAME input.
-  const detectedBuildOutputs = SITE_BUILD_OUTPUT_NAMES.filter((name) => directories.has(name));
-  const buildOutputs = [
-    configString(config?.build, "output"),
-    ...detectedBuildOutputs,
-  ].filter((output): output is string => typeof output === "string" && output.length > 0);
+  // Both detectors have to agree on that rule for the SAME input. A bare
+  // directory presence isn't enough EITHER: workspace-core only counts a
+  // build output as DETECTED when it holds a real <output>/index.html
+  // artifact, the same check builtEntry (below) needs — one pass computes
+  // both instead of two separate stat sweeps.
+  const detectedBuildOutputs: string[] = [];
+  let builtEntry: string | undefined;
+  for (const name of SITE_BUILD_OUTPUT_NAMES) {
+    if (!directories.has(name)) continue;
+    const candidate = join(absolute, name, "index.html");
+    if (!(await stat(candidate).catch(() => null))) continue;
+    detectedBuildOutputs.push(name);
+    if (builtEntry === undefined) builtEntry = relativeJoin(relativeJoin(root, name), "index.html");
+  }
+  // Same safe-relative-path validation as workspace-core's parseBuild — an
+  // absolute path, a traversal, or a Windows-alias traversal in
+  // build.output gets the SAME invalid-build-output diagnostic and is
+  // dropped, not returned as an unsafe planned output for build_site/
+  // test_site to act on.
+  const rawConfiguredBuildOutput = configString(config?.build, "output");
+  const configuredBuildOutput = rawConfiguredBuildOutput
+    ? safeRelativeConfigPath(rawConfiguredBuildOutput)
+    : undefined;
+  if (rawConfiguredBuildOutput && !configuredBuildOutput) {
+    diagnostics.push({
+      severity: "warning",
+      code: "invalid-build-output",
+      path: configPath ?? relativeJoin(root, "dohc.json"),
+      message: "dohc.json build.output must be a relative workspace path, not '.', './', or an empty path.",
+    });
+  }
+  const buildOutputs = [configuredBuildOutput, ...detectedBuildOutputs].filter(
+    (output): output is string => typeof output === "string" && output.length > 0,
+  );
   const uniqueBuildOutputs = [...new Set(buildOutputs)];
   const explicitNonSite = config?.type !== undefined && config.type !== "site";
 
@@ -1960,15 +1989,6 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
           : "low";
   const configuredTitle = typeof config?.title === "string" && config.title.trim() ? config.title : undefined;
   const packageTitle = typeof pkg?.name === "string" && pkg.name.trim() ? pkg.name : undefined;
-  let builtEntry: string | undefined;
-  for (const name of SITE_BUILD_OUTPUT_NAMES) {
-    if (!directories.has(name)) continue;
-    const candidate = join(absolute, name, "index.html");
-    if (await stat(candidate).catch(() => null)) {
-      builtEntry = relativeJoin(relativeJoin(root, name), "index.html");
-      break;
-    }
-  }
   const entry = configuredEntry
     ? siteEntryPathFor(root, configuredEntry)
     : hasIndex
