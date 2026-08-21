@@ -1,8 +1,8 @@
-import { realpathSync } from "node:fs";
+import { symlinkSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
 import {
   createPluginAuthoredTextWriter,
@@ -202,6 +202,64 @@ describe("createPluginAuthoredTextWriter", () => {
     }
   });
 
+  it.skipIf(process.platform !== "win32")(
+    "keeps a junction workspace root lexical while recovering casing below it",
+    async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "dohc-authored-junction-"));
+      const targetRoot = join(tempRoot, "physical-target");
+      const workspaceDirectory = join(tempRoot, "registered-workspaces");
+      const workspaceRoot = join(workspaceDirectory, "LinkedWorkspace");
+      const canonicalPluginRoot = join(workspaceRoot, "plugins", "owned");
+      const canonicalPath = join(canonicalPluginRoot, "src", "index.ts");
+      const doorWrites: {
+        pluginId: string;
+        write: { absolutePath: string; text: string };
+      }[] = [];
+
+      try {
+        await mkdir(join(targetRoot, "plugins", "owned", "src"), {
+          recursive: true,
+        });
+        await mkdir(workspaceDirectory, { recursive: true });
+        symlinkSync(targetRoot, workspaceRoot, "junction");
+        const { capture } = recordingCapture({ landWrite: true });
+        const write = createPluginAuthoredTextWriter(writerInput({
+          capture,
+          platform: "win32",
+          workspaceRoot,
+          pipeline: {
+            pluginIdForPath: (absolutePath) =>
+              absolutePath.startsWith(canonicalPluginRoot)
+                ? "owned-plugin"
+                : null,
+            handleDoorWrittenSourceChange: (pluginId, doorWrite) => {
+              doorWrites.push({ pluginId, write: doorWrite });
+            },
+          },
+        }));
+
+        await write(join("PLUGINS", "owned", "SRC", "index.ts"), "text\n", {
+          overwrite: true,
+          author,
+        });
+
+        expect(doorWrites).toEqual([{
+          pluginId: "owned-plugin",
+          write: { absolutePath: canonicalPath, text: "text\n" },
+        }]);
+        expect(doorWrites[0]?.write.absolutePath.startsWith(workspaceRoot))
+          .toBe(true);
+        expect(doorWrites[0]?.write.absolutePath.startsWith(targetRoot))
+          .toBe(false);
+      } finally {
+        await rm(workspaceRoot, { force: true });
+        await rm(targetRoot, { recursive: true, force: true });
+        await rm(workspaceDirectory, { recursive: true, force: true });
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("does not report a door write when the capture refused the write", async () => {
     const doorWrites: string[] = [];
     const write = createPluginAuthoredTextWriter(writerInput({
@@ -226,15 +284,7 @@ describe("createPluginAuthoredTextWriter", () => {
   it("canonicalizes the reported path when darwin is injected", async () => {
     const { capture } = recordingCapture();
     const reportedPaths: string[] = [];
-    const workspaceRoot = join(tmpdir(), "workspace");
-    const callerSpelledPath = join(
-      workspaceRoot,
-      "plugins",
-      "owned",
-      "SRC",
-      "NewDir",
-      "a.ts",
-    );
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-authored-darwin-"));
     const canonicalPath = join(
       workspaceRoot,
       "plugins",
@@ -243,14 +293,10 @@ describe("createPluginAuthoredTextWriter", () => {
       "newdir",
       "a.ts",
     );
-    const realpath = vi
-      .spyOn(realpathSync, "native")
-      .mockReturnValue(canonicalPath);
-    const hostPlatform = vi
-      .spyOn(process, "platform", "get")
-      .mockReturnValue("linux");
 
     try {
+      await mkdir(dirname(canonicalPath), { recursive: true });
+      await writeFile(canonicalPath, "before\n");
       const write = createPluginAuthoredTextWriter(writerInput({
         capture,
         platform: "darwin",
@@ -268,12 +314,9 @@ describe("createPluginAuthoredTextWriter", () => {
         author,
       });
 
-      expect(realpath).toHaveBeenCalledOnce();
-      expect(realpath).toHaveBeenCalledWith(callerSpelledPath);
       expect(reportedPaths).toEqual([canonicalPath]);
     } finally {
-      hostPlatform.mockRestore();
-      realpath.mockRestore();
+      await rm(workspaceRoot, { recursive: true, force: true });
     }
   });
 
@@ -284,21 +327,13 @@ describe("createPluginAuthoredTextWriter", () => {
       pluginId: string;
       write: { absolutePath: string; text: string };
     }[] = [];
-    const workspaceRoot = join(tmpdir(), "workspace");
-    const callerSpelledPath = join(
-      workspaceRoot,
-      "PLUGINS",
-      "OWNED",
-      "src",
-      "a.ts",
-    );
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-authored-owner-"));
     const canonicalPluginRoot = join(workspaceRoot, "plugins", "owned");
     const canonicalPath = join(canonicalPluginRoot, "src", "a.ts");
-    const realpath = vi
-      .spyOn(realpathSync, "native")
-      .mockReturnValue(canonicalPath);
 
     try {
+      await mkdir(dirname(canonicalPath), { recursive: true });
+      await writeFile(canonicalPath, "before\n");
       const write = createPluginAuthoredTextWriter(writerInput({
         capture,
         platform: "darwin",
@@ -326,10 +361,69 @@ describe("createPluginAuthoredTextWriter", () => {
         write: { absolutePath: canonicalPath, text: "text\n" },
       }]);
       expect(ownerPaths).toEqual([canonicalPath]);
-      expect(realpath).toHaveBeenCalledOnce();
-      expect(realpath).toHaveBeenCalledWith(callerSpelledPath);
     } finally {
-      realpath.mockRestore();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps recovered parent casing when a landed path vanishes before reporting", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-authored-vanished-"));
+    const canonicalPluginRoot = join(workspaceRoot, "plugins", "owned");
+    const vanishedDirectory = join(canonicalPluginRoot, "src", "Vanished");
+    const callerPath = join(
+      workspaceRoot,
+      "PLUGINS",
+      "OWNED",
+      "SRC",
+      "Vanished",
+      "a.ts",
+    );
+    const recoveredPath = join(
+      canonicalPluginRoot,
+      "src",
+      "Vanished",
+      "a.ts",
+    );
+    const doorWrites: {
+      pluginId: string;
+      write: { absolutePath: string; text: string };
+    }[] = [];
+
+    try {
+      await mkdir(vanishedDirectory, { recursive: true });
+      const write = createPluginAuthoredTextWriter(writerInput({
+        platform: "darwin",
+        workspaceRoot,
+        capture: {
+          writeAuthoredTextFile: async (absolutePath, text, writeAuthor) => {
+            expect(absolutePath).toBe(callerPath);
+            expect(writeAuthor).toEqual(author);
+            await writeFile(join(vanishedDirectory, "a.ts"), text);
+            await rm(vanishedDirectory, { recursive: true });
+          },
+        },
+        pipeline: {
+          pluginIdForPath: (absolutePath) =>
+            absolutePath.startsWith(canonicalPluginRoot)
+              ? "owned-plugin"
+              : null,
+          handleDoorWrittenSourceChange: (pluginId, doorWrite) => {
+            doorWrites.push({ pluginId, write: doorWrite });
+          },
+        },
+      }));
+
+      await write(join("PLUGINS", "OWNED", "SRC", "Vanished", "a.ts"), "text\n", {
+        overwrite: true,
+        author,
+      });
+
+      expect(doorWrites).toEqual([{
+        pluginId: "owned-plugin",
+        write: { absolutePath: recoveredPath, text: "text\n" },
+      }]);
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
     }
   });
 
@@ -337,9 +431,6 @@ describe("createPluginAuthoredTextWriter", () => {
     const { capture } = recordingCapture();
     const reportedPaths: string[] = [];
     const workspaceRoot = join("/tmp", "workspace");
-    const realpath = vi
-      .spyOn(realpathSync, "native")
-      .mockReturnValue(join(workspaceRoot, "canonical", "a.ts"));
     const write = createPluginAuthoredTextWriter(writerInput({
       capture,
       platform: "linux",
@@ -352,18 +443,13 @@ describe("createPluginAuthoredTextWriter", () => {
       },
     }));
 
-    try {
-      await write(join("plugins", "owned", "SRC", "NewDir", "a.ts"), "text\n", {
-        overwrite: true,
-        author,
-      });
+    await write(join("plugins", "owned", "SRC", "NewDir", "a.ts"), "text\n", {
+      overwrite: true,
+      author,
+    });
 
-      expect(realpath).not.toHaveBeenCalled();
-      expect(reportedPaths).toEqual([
-        join(workspaceRoot, "plugins", "owned", "SRC", "NewDir", "a.ts"),
-      ]);
-    } finally {
-      realpath.mockRestore();
-    }
+    expect(reportedPaths).toEqual([
+      join(workspaceRoot, "plugins", "owned", "SRC", "NewDir", "a.ts"),
+    ]);
   });
 });

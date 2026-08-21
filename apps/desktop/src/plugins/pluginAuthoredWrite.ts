@@ -1,6 +1,40 @@
-import { realpathSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
+
+function recoverOnDiskCasing(root: string, relativePath: string): string {
+  const segments = relativePath.split(/[\\/]+/).filter(Boolean);
+  const recovered: string[] = [];
+  let currentDir = root;
+  let folding = true;
+
+  for (const segment of segments) {
+    if (folding) {
+      let entries: string[] = [];
+      let readable = true;
+      try {
+        entries = readdirSync(currentDir);
+      } catch {
+        readable = false;
+      }
+      const match = readable
+        ? entries.find((entry) => entry === segment) ??
+          entries.find(
+            (entry) => entry.toLowerCase() === segment.toLowerCase(),
+          )
+        : undefined;
+      if (match !== undefined) {
+        recovered.push(match);
+        currentDir = join(currentDir, match);
+        continue;
+      }
+      folding = false;
+    }
+    recovered.push(segment);
+  }
+
+  return join(root, ...recovered);
+}
 
 /** The one slice of a workspace engine capture an authored plugin write uses. */
 export interface PluginAuthoredWriteCapture {
@@ -72,13 +106,7 @@ export function createPluginAuthoredTextWriter(
     });
     let canonicalPath = absolutePath;
     if (platform === "win32" || platform === "darwin") {
-      try {
-        canonicalPath = realpathSync.native(absolutePath);
-      } catch {
-        // The file vanished between the write and this report (for example a
-        // concurrent uninstall). The write itself succeeded; report the
-        // caller's spelling rather than failing a landed write.
-      }
+      canonicalPath = recoverOnDiskCasing(workspaceRoot, path);
     }
     const pipeline = input.pipeline();
     const ownerId = pipeline?.pluginIdForPath(canonicalPath);
