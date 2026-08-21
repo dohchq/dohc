@@ -6575,6 +6575,14 @@ describe("shared view editing", () => {
     const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(["a.md"])));
     renderShell(bridge, { ...SHARE_VIEW, shareView });
     const toggle = await screen.findByTestId("markdown-edit-toggle");
+    // The toggle mounts disabled while the file is still opening (its own
+    // `opening ? "..." : undefined` title, cleared only once opening
+    // settles) — a moment `findByTestId` does not wait out, since the
+    // element already exists then. Reading `disabled` before that moment
+    // reports the transient "opening" lock, not the grant's real level, and
+    // only the tests that expect an unlocked editor can tell the difference
+    // (the read-only ones read `true` regardless of which lock they hit).
+    await waitFor(() => expect(toggle.hasAttribute("title")).toBe(false));
     return toggle.hasAttribute("disabled");
   }
 
