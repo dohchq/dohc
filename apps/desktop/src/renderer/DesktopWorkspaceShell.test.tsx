@@ -499,6 +499,7 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     ),
     submitShareChanges: vi.fn(
       async (): Promise<SubmitShareChangesResult> => ({
+        ok: true,
         submitted: 2,
         capturedLocalChanges: 0,
         skippedOutsideShare: 0,
@@ -3743,6 +3744,10 @@ describe("ui-state merge-on-load", () => {
     });
     expect(listCallsWhenEnded).toBeGreaterThan(listCallsBeforeEnd);
     expect(readCallsWhenEnded).toBeGreaterThan(readCallsBeforeEnd);
+    expect(
+      screen.queryByTestId("share-changes-send"),
+      "MUTATION: an ended share still offers changes it can no longer send",
+    ).toBeNull();
   });
 
   it("keeps an ended share read-only when its changed-file listing fails", async () => {
@@ -3814,11 +3819,18 @@ describe("ui-state merge-on-load", () => {
       ).toBe(false),
     );
 
+    const registryReadsBeforeClick = bridge.getWorkspaceRegistry.mock.calls.length;
     const registryRead = deferred<{ workspaces: unknown[] }>();
     bridge.getWorkspaceRegistry.mockImplementationOnce(() => registryRead.promise);
     try {
       await userEvent.click(screen.getByTestId("shared-view-refresh"));
       await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2));
+      await waitFor(() =>
+        expect(
+          bridge.getWorkspaceRegistry.mock.calls.length,
+          "MUTATION: refresh dropped the durable skip-marker read",
+        ).toBeGreaterThan(registryReadsBeforeClick),
+      );
       await waitFor(() =>
         expect(
           (screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled,
@@ -6696,6 +6708,7 @@ describe("shared view send changes", () => {
     const user = userEvent.setup();
     const bridge = makeShareBridge();
     bridge.submitShareChanges.mockResolvedValue({
+      ok: true,
       submitted: 1,
       capturedLocalChanges: 0,
       skippedOutsideShare: 2,
@@ -6738,6 +6751,7 @@ describe("shared view send changes", () => {
       Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),
     );
     bridge.submitShareChanges.mockResolvedValue({
+      ok: true,
       submitted: 1,
       skippedOutsideShare: 0,
       morePending: false,
@@ -6764,11 +6778,73 @@ describe("shared view send changes", () => {
     );
   });
 
+  it("keeps a successful submit successful when its repaint fails", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.submitShareChanges.mockResolvedValue({
+      ok: true,
+      submitted: 1,
+      skippedOutsideShare: 0,
+      morePending: false,
+      capturedLocalChanges: 1,
+    });
+    renderShell(bridge, EDIT_SHARE);
+
+    await screen.findByTestId("shared-view-banner");
+    await waitFor(() => expect(bridge.listMyShareChanges).toHaveBeenCalled());
+    const proposalReadsBeforeSubmit = bridge.listMyShareChanges.mock.calls.length;
+    bridge.listMyShareChanges.mockResolvedValue({
+      proposals: [
+        { proposalId: "proposal-1", state: "open", createdAtMs: 10, files: 1 },
+      ],
+    });
+    bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("listing failed"));
+
+    await user.click(screen.getByTestId("share-changes-send"));
+
+    await waitFor(() =>
+      expect(bridge.listMyShareChanges.mock.calls.length).toBeGreaterThan(
+        proposalReadsBeforeSubmit,
+      ),
+    );
+    expect((await screen.findByTestId("share-changes-state")).dataset.state).toBe(
+      "open",
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("repaints captured changes and reports the relay failure when send fails", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.submitShareChanges.mockResolvedValue({
+      ok: false,
+      capturedLocalChanges: 1,
+      errorMessage: "relay failed",
+    });
+    renderShell(bridge, EDIT_SHARE);
+
+    await screen.findByTestId("shared-view-banner");
+    const listCallsBeforeSubmit = bridge.listWorkspaceFiles.mock.calls.length;
+    bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("listing failed"));
+
+    await user.click(screen.getByTestId("share-changes-send"));
+
+    await waitFor(() =>
+      expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(
+        listCallsBeforeSubmit,
+      ),
+    );
+    const error = await screen.findByTestId("workspace-shell-error");
+    expect(error.textContent).toContain("relay failed");
+    expect(error.textContent).not.toContain("listing failed");
+  });
+
   // Taking the changes back retires what the last submit said about them.
   it("clears the last submit's lines when the changes are taken back", async () => {
     const user = userEvent.setup();
     const bridge = makeShareBridge();
     bridge.submitShareChanges.mockResolvedValue({
+      ok: true,
       submitted: 1,
       capturedLocalChanges: 0,
       skippedOutsideShare: 2,
@@ -6801,6 +6877,7 @@ describe("shared view send changes", () => {
     const user = userEvent.setup();
     const bridge = makeShareBridge();
     bridge.submitShareChanges.mockResolvedValue({
+      ok: true,
       submitted: 500,
       capturedLocalChanges: 0,
       skippedOutsideShare: 3,
@@ -6823,6 +6900,7 @@ describe("shared view send changes", () => {
     const user = userEvent.setup();
     const bridge = makeShareBridge();
     bridge.submitShareChanges.mockResolvedValue({
+      ok: true,
       submitted: 500,
       capturedLocalChanges: 0,
       skippedOutsideShare: 0,
@@ -6877,6 +6955,7 @@ describe("shared view send changes", () => {
     const user = userEvent.setup();
     const bridge = makeShareBridge();
     bridge.submitShareChanges.mockResolvedValue({
+      ok: true,
       submitted: 0,
       capturedLocalChanges: 0,
       skippedOutsideShare: 0,

@@ -96,6 +96,7 @@ import {
   SettleShareProposalPayload,
   SubmitShareChangesPayload,
   SubmitShareChangesResult,
+  resolveSubmitShareChangesResult,
   WithdrawShareChangesPayload,
   WithdrawShareChangesResult,
 } from "./bridgeContract";
@@ -2170,6 +2171,7 @@ describe("share changes IPC contract (#646 PR3a)", () => {
   // Zero is the honest answer for "nothing was pending", not an error.
   it("carries an empty submit", () => {
     const empty = {
+      ok: true as const,
       submitted: 0,
       capturedLocalChanges: 0,
       skippedOutsideShare: 0,
@@ -2187,11 +2189,24 @@ describe("share changes IPC contract (#646 PR3a)", () => {
     ).toThrow();
     expect(() =>
       SubmitShareChangesResult.parse({
+        ok: true,
         submitted: 0,
         skippedOutsideShare: 0,
         morePending: false,
       }),
     ).toThrow();
+  });
+
+  it("carries captured local changes when the relay submit fails", async () => {
+    const result = await resolveSubmitShareChangesResult(3, async () => {
+      throw new Error("relay failed");
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      capturedLocalChanges: 3,
+      errorMessage: "relay failed",
+    });
   });
 
   // The bound that decides whether a review can be read at all. `incomingText`
@@ -2233,12 +2248,14 @@ describe("share changes IPC contract (#646 PR3a)", () => {
   it("refuses a submit result that does not say what it left behind", () => {
     expect(() =>
       SubmitShareChangesResult.parse({
+        ok: true,
         submitted: 1,
         morePending: false,
       }),
     ).toThrow();
     expect(() =>
       SubmitShareChangesResult.parse({
+        ok: true,
         submitted: 1,
         skippedOutsideShare: 0,
       }),

@@ -92,7 +92,7 @@ import {
   SettleShareProposalPayload,
   SettleShareProposalResult,
   SubmitShareChangesPayload,
-  SubmitShareChangesResult,
+  resolveSubmitShareChangesResult,
   ListMyShareChangesPayload,
   ListMyShareChangesResult,
   WithdrawShareChangesPayload,
@@ -5873,23 +5873,23 @@ function registerIpcHandlers(
     assertShareChangesJournalable(captured.unjournalablePaths);
     // The engine owns the submit: it reads this replica's own journal, so it
     // has to be the process holding the store.
-    const result = await relayClientForWorkspace({
-      workspaceId: scope.workspace.workspaceId,
-      rootPath: scope.workspace.rootPath,
-      relay: scope.relay,
-    }).submitShareProposal({
-      shareId: scope.shareId,
-      grantedSelector: scope.grant,
-      // PR3a mints a fresh key per submit. It makes the relay's idempotency
-      // hold for a retry INSIDE one submit (blobs, then the POST), not for a
-      // second press: a second press sends whatever is pending then, which is
-      // a second set of changes and a second proposal.
-      submitId: randomUUID(),
-    });
-    return SubmitShareChangesResult.parse({
-      ...result,
-      capturedLocalChanges: captured.capturedPaths + captured.repairedPaths,
-    });
+    return resolveSubmitShareChangesResult(
+      captured.capturedPaths + captured.repairedPaths,
+      () =>
+        relayClientForWorkspace({
+          workspaceId: scope.workspace.workspaceId,
+          rootPath: scope.workspace.rootPath,
+          relay: scope.relay,
+        }).submitShareProposal({
+          shareId: scope.shareId,
+          grantedSelector: scope.grant,
+          // PR3a mints a fresh key per submit. It makes the relay's idempotency
+          // hold for a retry INSIDE one submit (blobs, then the POST), not for
+          // a second press: a second press sends whatever is pending then,
+          // which is a second set of changes and a second proposal.
+          submitId: randomUUID(),
+        }),
+    );
   });
 
   ipcMain.handle(CHANNELS.listMyShareChanges, async (event, payload) => {

@@ -3031,10 +3031,11 @@ export const SubmitShareChangesPayload = z.object({
 });
 export type SubmitShareChangesPayload = z.infer<typeof SubmitShareChangesPayload>;
 
-// What a submit did. The new proposal's id is NOT among these facts: the
-// surface re-reads its own sent changes right after, and an id that arrived by
-// two routes would be two answers to one question.
-export const SubmitShareChangesResult = z.object({
+// What a successful submit did. The new proposal's id is NOT among these
+// facts: the surface re-reads its own sent changes right after, and an id that
+// arrived by two routes would be two answers to one question.
+const SubmitShareChangesSuccessResult = z.object({
+  ok: z.literal(true),
   submitted: z.number().int().nonnegative(),
   // Local changes the submit's capture pass journaled or repaired. Repairs can
   // change the projection, so the renderer uses this count to repaint files.
@@ -3049,7 +3050,45 @@ export const SubmitShareChangesResult = z.object({
   // count: the scan stops AT the bound, so it never measures the remainder.
   morePending: z.boolean(),
 });
+
+// Capture happens before the relay submit. A relay failure can therefore
+// leave local repair or materialization changes that the renderer still has
+// to repaint. Electron does not preserve custom Error properties across
+// ipcMain.handle/ipcRenderer.invoke, so the failure is an ordinary result.
+const SubmitShareChangesFailureResult = z.object({
+  ok: z.literal(false),
+  capturedLocalChanges: z.number().int().nonnegative(),
+  errorMessage: z.string(),
+});
+
+export const SubmitShareChangesResult = z.discriminatedUnion("ok", [
+  SubmitShareChangesSuccessResult,
+  SubmitShareChangesFailureResult,
+]);
 export type SubmitShareChangesResult = z.infer<typeof SubmitShareChangesResult>;
+
+export async function resolveSubmitShareChangesResult(
+  capturedLocalChanges: number,
+  submit: () => Promise<{
+    submitted: number;
+    skippedOutsideShare: number;
+    morePending: boolean;
+  }>,
+): Promise<SubmitShareChangesResult> {
+  try {
+    return SubmitShareChangesResult.parse({
+      ok: true,
+      ...(await submit()),
+      capturedLocalChanges,
+    });
+  } catch (error) {
+    return SubmitShareChangesResult.parse({
+      ok: false,
+      capturedLocalChanges,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
 
 export const ListMyShareChangesPayload = z.object({
   workspaceId: WORKSPACE_ID,

@@ -297,10 +297,12 @@ async function resolvedShareViewTarget(
 async function withCaptureMutationLock<T>(
   rootDir: string,
   path: string,
-  operation: () => Promise<T>,
+  operation: (resolvedTarget: string) => Promise<T>,
 ): Promise<T> {
   const resolvedTarget = await resolvedShareViewTarget(rootDir, path);
-  return withOrderedWorkspaceTargetPath(rootDir, resolvedTarget, operation);
+  return withOrderedWorkspaceTargetPath(rootDir, resolvedTarget, () =>
+    operation(resolvedTarget),
+  );
 }
 
 export async function materializeSharedViewPaths(
@@ -769,12 +771,9 @@ async function captureDiskPaths(rootDir: string): Promise<{
   return { filePaths, directoryPaths, unreadableDirs };
 }
 
-async function pathConfirmedAbsentOnDisk(
-  rootDir: string,
-  path: string,
-): Promise<boolean> {
+async function pathConfirmedAbsentOnDisk(resolvedTarget: string): Promise<boolean> {
   try {
-    await lstat(join(rootDir, path));
+    await lstat(resolvedTarget);
     return false;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -898,11 +897,10 @@ export async function captureSharedViewLocalDivergence(
 
     if (pendingPaths.has(entry.path)) {
       visitedPendingPaths.add(entry.path);
-      const resolvedTarget = await resolvedShareViewTarget(rootDir, entry.path);
       const result = await withCaptureMutationLock(
         rootDir,
         entry.path,
-        async (): Promise<
+        async (resolvedTarget): Promise<
           | { kind: "captured" }
           | { kind: "repaired" }
           | { kind: "unjournalable"; path: UnjournalablePath }
@@ -1070,11 +1068,11 @@ export async function captureSharedViewLocalDivergence(
       const deleted = await withCaptureMutationLock(
         rootDir,
         entry.path,
-        async (): Promise<
+        async (resolvedTarget): Promise<
           boolean | { kind: "unjournalable"; path: UnjournalablePath }
         > => {
           try {
-            if (!(await pathConfirmedAbsentOnDisk(realRoot, entry.path))) {
+            if (!(await pathConfirmedAbsentOnDisk(resolvedTarget))) {
               return false;
             }
           } catch {
@@ -1103,11 +1101,11 @@ export async function captureSharedViewLocalDivergence(
     const result = await withCaptureMutationLock(
       rootDir,
       entry.path,
-      async () => {
-        const disk = await readDiskContent(resolve(realRoot, entry.path));
+      async (resolvedTarget) => {
+        const disk = await readDiskContent(resolvedTarget);
         if (disk.kind === "absent") {
           try {
-            if (!(await pathConfirmedAbsentOnDisk(realRoot, entry.path))) {
+            if (!(await pathConfirmedAbsentOnDisk(resolvedTarget))) {
               return "unchanged" as const;
             }
           } catch {
@@ -1166,11 +1164,11 @@ export async function captureSharedViewLocalDivergence(
       const deleted = await withCaptureMutationLock(
         rootDir,
         entry.path,
-        async (): Promise<
+        async (resolvedTarget): Promise<
           boolean | { kind: "unjournalable"; path: UnjournalablePath }
         > => {
           try {
-            if (!(await pathConfirmedAbsentOnDisk(realRoot, entry.path))) {
+            if (!(await pathConfirmedAbsentOnDisk(resolvedTarget))) {
               return false;
             }
           } catch {
@@ -1203,17 +1201,16 @@ export async function captureSharedViewLocalDivergence(
 
   for (const path of pendingPaths) {
     if (visitedPendingPaths.has(path)) continue;
-    const resolvedTarget = await resolvedShareViewTarget(rootDir, path);
     const result = await withCaptureMutationLock(
       rootDir,
       path,
-      async (): Promise<
+      async (resolvedTarget): Promise<
         | { kind: "repaired" }
         | { kind: "unchanged" }
         | { kind: "unjournalable"; path: UnjournalablePath }
       > => {
         try {
-          if (await pathConfirmedAbsentOnDisk(realRoot, path)) {
+          if (await pathConfirmedAbsentOnDisk(resolvedTarget)) {
             return { kind: "repaired" };
           }
         } catch {

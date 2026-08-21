@@ -4716,13 +4716,26 @@ export function DesktopWorkspaceShell(props: {
     // reading "Sending…" for ever.
     let owned = token;
     setShareChangesSubmitting(true);
+    const bestEffortRepaint = async () => {
+      try {
+        await refreshFiles();
+        setVersionEpoch((epoch) => epoch + 1);
+      } catch (repaintError) {
+        console.error("[desktop] repaint after send changes failed:", repaintError);
+      }
+    };
     try {
       const result = await bridge().submitShareChanges({ workspaceId });
       if (token !== myShareChangeToken.current) return;
-      if (result.capturedLocalChanges > 0) {
-        await refreshFiles();
-        setVersionEpoch((epoch) => epoch + 1);
+      if (!result.ok) {
+        if (result.capturedLocalChanges > 0) await bestEffortRepaint();
+        reportShellError(
+          "Couldn't send your changes.",
+          new Error(result.errorMessage),
+        );
+        return;
       }
+      if (result.capturedLocalChanges > 0) await bestEffortRepaint();
       setShareChangesEmpty(result.submitted === 0);
       setShareChangesSkipped(
         result.skippedOutsideShare > 0 || result.morePending
