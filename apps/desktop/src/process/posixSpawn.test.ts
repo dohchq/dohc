@@ -4,41 +4,52 @@ import {
   killProcessTreePosix,
   parseProcessTable,
   processTreePids,
+  stopProcessTreePosix,
 } from "./posixSpawn";
 
 // The live test spawns a real tree and polls for its death.
 vi.setConfig({ testTimeout: 20_000 });
 
+const TEST_STARTED_AT = "Fri Aug 21 10:00:00 2026";
+
+function psRow(pid: number, ppid: number, startedAt = TEST_STARTED_AT): string {
+  return `${pid} ${ppid} ${startedAt}`;
+}
+
+function tableEntry(pid: number, ppid: number) {
+  return { pid, ppid, startedAt: TEST_STARTED_AT };
+}
+
 // The real `ps` path cannot run on a Windows host, so the parser and the sweep
 // are proven here against captured output and injected fakes.
 describe("parseProcessTable", () => {
-  it("reads `ps -A -o pid=,ppid=` output", () => {
+  it("reads `ps -A -o pid=,ppid=,lstart=` output", () => {
     const output = [
-      "    1     0",
-      "  842     1",
-      " 1099   842",
+      `    ${psRow(1, 0)}`,
+      `  ${psRow(842, 1)}`,
+      ` ${psRow(1099, 842)}`,
       "",
     ].join("\n");
 
     expect(parseProcessTable(output)).toEqual([
-      { pid: 1, ppid: 0 },
-      { pid: 842, ppid: 1 },
-      { pid: 1099, ppid: 842 },
+      tableEntry(1, 0),
+      tableEntry(842, 1),
+      tableEntry(1099, 842),
     ]);
   });
 
   it("ignores lines it cannot read rather than failing the sweep", () => {
     const output = [
-      "  842     1",
+      psRow(842, 1),
       "ps: some transient warning",
       "  not a row",
-      " 1099   842   extra",
-      " 1200   842",
+      " 1099   842",
+      psRow(1200, 842),
     ].join("\n");
 
     expect(parseProcessTable(output)).toEqual([
-      { pid: 842, ppid: 1 },
-      { pid: 1200, ppid: 842 },
+      tableEntry(842, 1),
+      tableEntry(1200, 842),
     ]);
   });
 });
@@ -46,12 +57,12 @@ describe("parseProcessTable", () => {
 describe("processTreePids", () => {
   it("collects the transitive closure, children before their parents", () => {
     const table = [
-      { pid: 1, ppid: 0 },
-      { pid: 100, ppid: 1 },
-      { pid: 200, ppid: 100 },
-      { pid: 300, ppid: 200 },
-      { pid: 400, ppid: 100 },
-      { pid: 999, ppid: 1 },
+      tableEntry(1, 0),
+      tableEntry(100, 1),
+      tableEntry(200, 100),
+      tableEntry(300, 200),
+      tableEntry(400, 100),
+      tableEntry(999, 1),
     ];
 
     const pids = processTreePids(table, 100);
@@ -62,7 +73,7 @@ describe("processTreePids", () => {
   });
 
   it("returns the root alone when it has no children", () => {
-    expect(processTreePids([{ pid: 100, ppid: 1 }], 100)).toEqual([100]);
+    expect(processTreePids([tableEntry(100, 1)], 100)).toEqual([100]);
   });
 
   it("returns the root even when the table does not list it", () => {
@@ -71,9 +82,9 @@ describe("processTreePids", () => {
 
   it("terminates on a parent cycle", () => {
     const table = [
-      { pid: 100, ppid: 300 },
-      { pid: 200, ppid: 100 },
-      { pid: 300, ppid: 200 },
+      tableEntry(100, 300),
+      tableEntry(200, 100),
+      tableEntry(300, 200),
     ];
 
     expect(processTreePids(table, 100)).toEqual([300, 200, 100]);
@@ -85,7 +96,11 @@ describe("killProcessTreePosix", () => {
     const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
 
     await killProcessTreePosix(100, "SIGTERM", {
-      readProcessTable: async () => "  100     1\n  200   100\n  300   200\n",
+      readProcessTable: async () => [
+        psRow(100, 1),
+        psRow(200, 100),
+        psRow(300, 200),
+      ].join("\n"),
       sendSignal: (pid, signal) => signalled.push({ pid, signal }),
     });
 
@@ -111,7 +126,11 @@ describe("killProcessTreePosix", () => {
     const signalled: number[] = [];
 
     await killProcessTreePosix(100, "SIGTERM", {
-      readProcessTable: async () => "  100     1\n  200   100\n  300   100\n",
+      readProcessTable: async () => [
+        psRow(100, 1),
+        psRow(200, 100),
+        psRow(300, 100),
+      ].join("\n"),
       sendSignal: (pid) => {
         if (pid === 300) {
           throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
@@ -126,7 +145,7 @@ describe("killProcessTreePosix", () => {
   it("reports a root signal failure that is not ESRCH", async () => {
     await expect(
       killProcessTreePosix(100, "SIGTERM", {
-        readProcessTable: async () => "  100     1\n",
+        readProcessTable: async () => psRow(100, 1),
         sendSignal: () => {
           throw Object.assign(new Error("operation not permitted"), {
             code: "EPERM",
@@ -144,7 +163,7 @@ describe("killProcessTreePosix", () => {
 
     await expect(
       killProcessTreePosix(100, "SIGKILL", {
-        readProcessTable: async () => "  200     1\n",
+        readProcessTable: async () => psRow(200, 1),
         alsoSignal: [200],
         sendSignal: (pid) => {
           if (pid === 100) {
@@ -165,7 +184,7 @@ describe("killProcessTreePosix", () => {
     const signalled: number[] = [];
 
     const pids = await killProcessTreePosix(100, "SIGKILL", {
-      readProcessTable: async () => "  200     1\n  300   200\n",
+      readProcessTable: async () => [psRow(200, 1), psRow(300, 200)].join("\n"),
       alsoSignal: [200],
       sendSignal: (pid) => signalled.push(pid),
     });
@@ -176,7 +195,7 @@ describe("killProcessTreePosix", () => {
 
   it("returns the pids a round signalled so the next round can reuse them", async () => {
     const pids = await killProcessTreePosix(100, "SIGTERM", {
-      readProcessTable: async () => "  100     1\n  200   100\n",
+      readProcessTable: async () => [psRow(100, 1), psRow(200, 100)].join("\n"),
       sendSignal: () => undefined,
     });
 
@@ -186,7 +205,7 @@ describe("killProcessTreePosix", () => {
   it("stays silent when only a descendant signal fails", async () => {
     await expect(
       killProcessTreePosix(100, "SIGTERM", {
-        readProcessTable: async () => "  100     1\n  200   100\n",
+        readProcessTable: async () => [psRow(100, 1), psRow(200, 100)].join("\n"),
         sendSignal: (pid) => {
           if (pid === 200) {
             throw Object.assign(new Error("operation not permitted"), {
@@ -196,6 +215,70 @@ describe("killProcessTreePosix", () => {
         },
       }),
     ).resolves.toEqual([200, 100]);
+  });
+});
+
+describe("stopProcessTreePosix", () => {
+  it("skips a captured pid reused by a different process", async () => {
+    const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let readCount = 0;
+
+    await stopProcessTreePosix(
+      100,
+      Promise.resolve(),
+      0,
+      undefined,
+      {
+        readProcessTable: async () => {
+          readCount += 1;
+          return readCount === 1
+            ? [
+                psRow(100, 1),
+                psRow(200, 100, "Fri Aug 21 09:59:00 2026"),
+              ].join("\n")
+            : [
+                psRow(100, 1),
+                psRow(200, 1, "Fri Aug 21 10:00:05 2026"),
+              ].join("\n");
+        },
+        sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+      },
+    );
+
+    expect(signalled).toEqual([
+      { pid: 200, signal: "SIGTERM" },
+      { pid: 100, signal: "SIGTERM" },
+      { pid: 100, signal: "SIGKILL" },
+    ]);
+  });
+
+  it("still signals a captured pid with the same process identity", async () => {
+    const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const startedAt = "Fri Aug 21 10:00:05 2026";
+    let readCount = 0;
+
+    await stopProcessTreePosix(
+      100,
+      Promise.resolve(),
+      0,
+      undefined,
+      {
+        readProcessTable: async () => {
+          readCount += 1;
+          return readCount === 1
+            ? [psRow(100, 1), psRow(200, 100, startedAt)].join("\n")
+            : [psRow(100, 1), psRow(200, 1, startedAt)].join("\n");
+        },
+        sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+      },
+    );
+
+    expect(signalled).toEqual([
+      { pid: 200, signal: "SIGTERM" },
+      { pid: 100, signal: "SIGTERM" },
+      { pid: 100, signal: "SIGKILL" },
+      { pid: 200, signal: "SIGKILL" },
+    ]);
   });
 });
 

@@ -19,18 +19,26 @@ function unrefDelay(ms: number): Promise<void> {
 export interface ProcessTableEntry {
   pid: number;
   ppid: number;
+  startedAt: string;
 }
 
-/** Parses `ps -A -o pid=,ppid=` output. Ignores lines it cannot read. */
+export interface ProcessIdentity {
+  pid: number;
+  startedAt: string;
+}
+
+/** Parses `ps -A -o pid=,ppid=,lstart=` output. Ignores unreadable lines. */
 export function parseProcessTable(output: string): ProcessTableEntry[] {
   const entries: ProcessTableEntry[] = [];
   for (const line of output.split("\n")) {
-    const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
-    if (!match?.[1] || !match[2]) continue;
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S(?:.*\S)?)\s*$/.exec(
+      line,
+    );
+    if (!match?.[1] || !match[2] || !match[3]) continue;
     const pid = Number(match[1]);
     const ppid = Number(match[2]);
     if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid)) continue;
-    entries.push({ pid, ppid });
+    entries.push({ pid, ppid, startedAt: match[3] });
   }
   return entries;
 }
@@ -41,7 +49,7 @@ export function parseProcessTable(output: string): ProcessTableEntry[] {
  * enumeration would no longer link to this tree.
  */
 export function processTreePids(
-  table: readonly ProcessTableEntry[],
+  table: readonly Pick<ProcessTableEntry, "pid" | "ppid">[],
   rootPid: number,
 ): number[] {
   const childrenByParent = new Map<number, number[]>();
@@ -70,48 +78,67 @@ export interface KillProcessTreePosixOptions {
   readProcessTable?: () => Promise<string>;
   sendSignal?: (pid: number, signal: NodeJS.Signals) => void;
   /**
-   * Pids an earlier round already enumerated. Each one is signalled and its
-   * own subtree is enumerated again, so a descendant whose parent has since
-   * exited — leaving it linked to init rather than to `rootPid` — is still
-   * reachable in this round.
+   * Pids an earlier round already enumerated. The next round enumerates each
+   * surviving pid's subtree, including descendants reparented to init.
    */
   alsoSignal?: readonly number[];
+  /** When present, a fresh process-table row must match before reuse. */
+  alsoSignalIdentities?: readonly ProcessIdentity[];
 }
+
+type StopProcessTreePosixOptions = Pick<
+  KillProcessTreePosixOptions,
+  "readProcessTable" | "sendSignal"
+>;
 
 function readProcessTableWithPs(): Promise<string> {
   return new Promise((resolveOutput, reject) => {
-    execFile("ps", ["-A", "-o", "pid=,ppid="], (error, stdout) => {
+    execFile("ps", ["-A", "-o", "pid=,ppid=,lstart="], (error, stdout) => {
       if (error) reject(error);
       else resolveOutput(stdout);
     });
   });
 }
 
-/**
- * Signals `rootPid`, every pid in `options.alsoSignal`, and every descendant
- * of them. Enumerates the process table on every call, so a child started
- * after an earlier round still gets signalled. An unreadable process table
- * degrades to signalling those pids alone. Rejects only when the root pid
- * itself could not be signalled. Returns every pid it signalled, which the
- * next round takes as its `alsoSignal` set.
- */
-export async function killProcessTreePosix(
+interface ProcessTreeSignalResult {
+  pids: number[];
+  identities: ProcessIdentity[];
+}
+
+async function signalProcessTreePosix(
   rootPid: number,
   signal: NodeJS.Signals,
-  options: KillProcessTreePosixOptions = {},
-): Promise<number[]> {
+  options: KillProcessTreePosixOptions,
+): Promise<ProcessTreeSignalResult> {
   const readProcessTable = options.readProcessTable ?? readProcessTableWithPs;
   const sendSignal = options.sendSignal ??
     ((pid, pidSignal) => process.kill(pid, pidSignal));
-  const roots = [rootPid, ...(options.alsoSignal ?? [])];
+  const capturedIdentities = new Map(
+    options.alsoSignalIdentities?.map((identity) => [identity.pid, identity]),
+  );
+  const unverifiedRoots = (options.alsoSignal ?? []).filter(
+    (pid) => !capturedIdentities.has(pid),
+  );
 
-  let pids = [...new Set(roots)];
+  let pids = [...new Set([rootPid, ...unverifiedRoots])];
+  let identities: ProcessIdentity[] = [];
   try {
     const table = parseProcessTable(await readProcessTable());
+    const entriesByPid = new Map(table.map((entry) => [entry.pid, entry]));
+    const verifiedRoots = (options.alsoSignal ?? []).filter((pid) => {
+      const captured = capturedIdentities.get(pid);
+      return captured === undefined ||
+        entriesByPid.get(pid)?.startedAt === captured.startedAt;
+    });
+    const roots = [rootPid, ...verifiedRoots];
     pids = [...new Set(roots.flatMap((pid) => processTreePids(table, pid)))];
+    identities = pids.flatMap((pid) => {
+      const entry = entriesByPid.get(pid);
+      return entry ? [{ pid, startedAt: entry.startedAt }] : [];
+    });
   } catch {
-    // The process table is unavailable. The known pids are still worth
-    // signalling.
+    // The process table is unavailable. Signal only roots that do not need an
+    // identity check; a captured pid is unsafe without a fresh table row.
   }
 
   let rootFailure: unknown;
@@ -127,33 +154,55 @@ export async function killProcessTreePosix(
     }
   }
   if (rootFailure !== undefined) throw rootFailure;
-  return pids;
+  return { pids, identities };
+}
+
+/**
+ * Signals `rootPid`, eligible `alsoSignal` pids, and their descendants. A pid
+ * with a captured identity is eligible only when the fresh table row matches.
+ * Without a process table, the function skips identity-bound pids. It rejects
+ * only when signalling `rootPid` fails, and returns every pid it signalled.
+ */
+export async function killProcessTreePosix(
+  rootPid: number,
+  signal: NodeJS.Signals,
+  options: KillProcessTreePosixOptions = {},
+): Promise<number[]> {
+  return (await signalProcessTreePosix(rootPid, signal, options)).pids;
 }
 
 /**
  * SIGTERM the whole POSIX process tree rooted at `pid`, wait up to
  * `settleMs` for `settled` to resolve (or the grace period to elapse,
- * whichever comes first), then SIGKILL the tree again, reusing the pids
- * captured on the SIGTERM round so a descendant reparented to init
- * between rounds is still reached. Returns once the SIGKILL round has
- * been sent — callers still need their own bound on actual process exit.
+ * whichever comes first), then SIGKILL the tree again. The force round reuses
+ * a captured pid only when its start time still matches, so it reaches a
+ * reparented descendant without signalling a process that reused the pid.
+ * Returns after sending SIGKILL. Callers still need to bound process exit.
  */
 export async function stopProcessTreePosix(
   pid: number,
   settled: Promise<unknown> | (() => Promise<unknown>),
   settleMs = 2_000,
   onTreeKillFailure?: () => void,
+  options: StopProcessTreePosixOptions = {},
 ): Promise<void> {
   let captured: readonly number[] = [];
+  let capturedIdentities: readonly ProcessIdentity[] = [];
   try {
-    captured = await killProcessTreePosix(pid, "SIGTERM");
+    const result = await signalProcessTreePosix(pid, "SIGTERM", options);
+    captured = result.pids;
+    capturedIdentities = result.identities;
   } catch {
     onTreeKillFailure?.();
   }
   const settledPromise = typeof settled === "function" ? settled() : settled;
   await Promise.race([settledPromise, unrefDelay(settleMs)]);
   try {
-    await killProcessTreePosix(pid, "SIGKILL", { alsoSignal: captured });
+    await signalProcessTreePosix(pid, "SIGKILL", {
+      ...options,
+      alsoSignal: captured,
+      alsoSignalIdentities: capturedIdentities,
+    });
   } catch {
     onTreeKillFailure?.();
   }

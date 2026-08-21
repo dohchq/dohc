@@ -149,7 +149,6 @@ export function createPluginUtilityTransport(
       close(new Error("Plugin utility transport disposed."));
       const pid = child.pid;
       if (pid === undefined) return;
-      const capped = unrefDelay(5_000).then(() => "capped" as const);
       if (process.platform === "win32") {
         await killProcessTreeWin32(pid, () => child.pid === undefined);
         if (child.pid === undefined) return;
@@ -157,6 +156,7 @@ export function createPluginUtilityTransport(
       } else {
         await stopProcessTreePosix(pid, exited, 2_000, () => child.kill());
       }
+      const capped = unrefDelay(5_000).then(() => "capped" as const);
       const outcome = await Promise.race([
         exited.then(() => "exited" as const),
         capped,

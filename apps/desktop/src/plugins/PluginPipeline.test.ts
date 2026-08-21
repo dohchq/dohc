@@ -399,6 +399,32 @@ describe("overlayDoorWrittenSourceDeltas", () => {
       { relPath: "src/index.ts", sha256: "bbb" },
     ]);
   });
+
+  it("uses an existing Windows directory's casing for a new file", () => {
+    const files = overlayDoorWrittenSourceDeltas(
+      [{ relPath: "src/index.ts", sha256: "aaa" }],
+      new Map([["SRC/new.ts", { sha256: "bbb", seq: 1 }]]),
+      "win32",
+    );
+
+    expect(files).toEqual([
+      { relPath: "src/index.ts", sha256: "aaa" },
+      { relPath: "src/new.ts", sha256: "bbb" },
+    ]);
+  });
+
+  it("keeps a new file under a case-distinct POSIX directory separate", () => {
+    const files = overlayDoorWrittenSourceDeltas(
+      [{ relPath: "src/index.ts", sha256: "aaa" }],
+      new Map([["SRC/new.ts", { sha256: "bbb", seq: 1 }]]),
+      "linux",
+    );
+
+    expect(files).toEqual([
+      { relPath: "src/index.ts", sha256: "aaa" },
+      { relPath: "SRC/new.ts", sha256: "bbb" },
+    ]);
+  });
 });
 
 describe("PluginPipeline real filesystem lifecycle", () => {

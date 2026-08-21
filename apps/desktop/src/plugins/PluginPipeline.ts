@@ -464,11 +464,37 @@ export function overlayDoorWrittenSourceDeltas(
   const byLowerCase = platform === "win32"
     ? new Map([...files.keys()].map((relPath) => [relPath.toLowerCase(), relPath]))
     : undefined;
+  const byLowerCaseDirectory = platform === "win32"
+    ? (() => {
+        const directories = new Map<string, string>();
+        for (const relPath of files.keys()) {
+          const segments = relPath.split("/");
+          for (let depth = 1; depth < segments.length; depth += 1) {
+            const directory = segments.slice(0, depth).join("/");
+            directories.set(directory.toLowerCase(), directory);
+          }
+        }
+        return directories;
+      })()
+    : undefined;
   for (
     const [relPath, delta] of [...deltas].sort((a, b) => a[1].seq - b[1].seq)
   ) {
     const lower = relPath.toLowerCase();
-    const target = byLowerCase?.get(lower) ?? relPath;
+    let target = byLowerCase?.get(lower);
+    if (target === undefined && byLowerCaseDirectory) {
+      const segments = relPath.split("/");
+      for (let depth = segments.length - 1; depth > 0; depth -= 1) {
+        const directory = segments.slice(0, depth).join("/");
+        const canonicalDirectory = byLowerCaseDirectory.get(
+          directory.toLowerCase(),
+        );
+        if (canonicalDirectory === undefined) continue;
+        target = [canonicalDirectory, ...segments.slice(depth)].join("/");
+        break;
+      }
+    }
+    target ??= relPath;
     files.set(target, delta.sha256);
     byLowerCase?.set(lower, target);
   }
