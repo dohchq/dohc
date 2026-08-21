@@ -6704,6 +6704,13 @@ describe("shared view editing", () => {
     const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(["a.md"])));
     renderShell(bridge, { ...SHARE_VIEW, shareView });
     const toggle = await screen.findByTestId("markdown-edit-toggle");
+    // The toggle mounts disabled while the file is still opening, a moment
+    // `findByTestId` does not wait out. Wait for the open to settle before
+    // reading `disabled` (the read-only cases below can't tell the
+    // difference either way).
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
     return toggle.hasAttribute("disabled");
   }
 
