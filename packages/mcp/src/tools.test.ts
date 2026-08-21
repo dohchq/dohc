@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   chmod,
   lstat,
@@ -40,7 +41,13 @@ import {
   readHistoryRecording,
   type ToolContext,
 } from "./tools";
-import { DOHC_METADATA_GUARD, notARealFolderRefusal } from "@dohc/workspace-core";
+import {
+  DOHC_METADATA_GUARD,
+  entryCharBudget,
+  nameUnitFor,
+  notARealFolderRefusal,
+  trashEntryPlan,
+} from "@dohc/workspace-core";
 import { DEFAULT_WORKSPACE_SETTINGS } from "@dohc/workspace-contracts/workspace-settings";
 
 // The trash destination carries a uuid, so a test that needs to pre-create it
@@ -71,10 +78,17 @@ const lstatOverride = vi.hoisted(() => ({
 // inside the rename call, which is the race itself. `replaceWith` names an
 // entry to move ON TOP of the path -- a real second file, so the replacement
 // carries its own inode and no test depends on a deleted one not being reused.
-// Without it the path is simply removed.
+// Without it the path is simply removed. `failWith` names an errno code the
+// mock throws INSTEAD of calling the real rename -- for a failure a real
+// filesystem will not reproduce on demand, such as a length rejection whose
+// exact errno depends on what the host decides to say. The ladder then sees a
+// rename that moved nothing, exactly as the real failure it stands in for
+// would leave it. Each armed entry is a one-shot: `path` is nulled the moment
+// it matches, which is also how a test proves the race actually ran.
 const renameRace = vi.hoisted(() => ({
   path: null as string | null,
   replaceWith: null as string | null,
+  failWith: null as string | null,
 }));
 // realpath can fail where the lstat just before it succeeded: a permission
 // change, or another process moving the path in the gap between the two calls.
@@ -117,10 +131,13 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ) => {
       if (renameRace.path === String(from)) {
         const replaceWith = renameRace.replaceWith;
+        const failWith = renameRace.failWith;
         renameRace.path = null;
         renameRace.replaceWith = null;
+        renameRace.failWith = null;
         if (replaceWith) await actual.rename(replaceWith, from);
         else await actual.rm(from);
+        if (failWith) throw errnoError(failWith);
       }
       return actual.rename(from, to);
     },
@@ -630,16 +647,30 @@ describe("mcp tool path containment", () => {
   // is done.
   it("refuses rather than trashing a file that replaced the source mid-ladder", async () => {
     await withWorkspace(async (ctx) => {
-      // Long enough that the first rung cannot fit and a second is tried.
+      // Long enough that the plan below must yield more than one rung; the
+      // errno thrown when the race fires, below, is synthetic and stands in
+      // for whatever a real over-long rename would report, not a prediction
+      // of what this name's length does on its own.
       const name = `${"a".repeat(226)}.txt`;
+      // Precondition, not assumption: rung > 0 is what runs the retry loop,
+      // and the identity guard inside it is the thing this test is for.
+      const plan = trashEntryPlan(name, `${Date.now()}-${randomUUID()}-`, {
+        unit: nameUnitFor(process.platform),
+        maxEntryChars: entryCharBudget(join(ctx.root, ".dohc", "trash"), process.platform),
+      });
+      expect(plan.candidates.length).toBeGreaterThan(1);
       await writeFile(join(ctx.root, name), "the entry the agent asked about");
       await writeFile(join(ctx.root, "replacement.md"), "a different entry entirely");
-      // The race lands inside the first rename, which then fails for length.
       renameRace.path = join(ctx.root, name);
       renameRace.replaceWith = join(ctx.root, "replacement.md");
+      renameRace.failWith = "ENAMETOOLONG";
       try {
         const result = await deleteWorkspacePath(ctx, { path: name });
 
+        // The mock nulls renameRace.path the moment the one-shot fires; null
+        // here proves the race actually ran instead of the ladder simply
+        // succeeding against the untouched real file.
+        expect(renameRace.path).toBeNull();
         expect(result).toMatchObject({ ok: false });
         expect(refusalReason(result)).toContain("something replaced it while dohc worked");
         // The point: the replacement is still where it was, NOT in the trash.
@@ -651,6 +682,7 @@ describe("mcp tool path containment", () => {
       } finally {
         renameRace.path = null;
         renameRace.replaceWith = null;
+        renameRace.failWith = null;
       }
     });
   });

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Codex Chat</title>
+    <link rel="stylesheet" href="/chat.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="toolbar">
+        <div>
+          <h1>Codex Chat</h1>
+          <p>Approval required</p>
+        </div>
+        <div class="toolbar-actions">
+          <span id="session-state" class="state-pill">Closed</span>
+          <button id="stop" class="secondary-button" type="button" disabled>Stop</button>
+        </div>
+      </header>
+
+      <main id="transcript" class="transcript">
+        <div id="empty-state" class="empty-state">
+          <p>Send a message to start a Codex session.</p>
+        </div>
+      </main>
+      <div id="status" class="visually-hidden" role="status" aria-live="polite"></div>
+
+      <form id="composer" class="composer">
+        <label for="message">Message Codex</label>
+        <textarea
+          id="message"
+          rows="3"
+          placeholder="Ask Codex to work in this workspace"
+          required
+        ></textarea>
+        <div class="composer-footer">
+          <span>Enter to send · Shift+Enter for a new line</span>
+          <button id="send" class="primary-button" type="submit">Send</button>
+        </div>
+      </form>
+    </div>
+    <script type="module" src="/chat.js"></script>
+  </body>
+</html>

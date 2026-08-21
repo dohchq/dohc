@@ -1,20 +1,43 @@
 import type { PluginActivateContext, PluginHandler } from "@dohc/sdk/node";
+import { join } from "node:path";
+import { createChatWebApp, type ChatWebApp } from "./chatWebApp.ts";
 import { claudeCommandSpec, createClaudeDriver, readyTimeoutMs } from "./claudeDriver.ts";
 
-// Thin wiring only. Activation registers the driver and returns: dohc decides
-// when to probe Claude Code and when to start it, so nothing here starts a
-// process.
+let chatWebApp: ChatWebApp | null = null;
+
+function requireChatWebApp(): ChatWebApp {
+  if (!chatWebApp) throw new Error("The Claude Code plugin is not active.");
+  return chatWebApp;
+}
 
 const handler: PluginHandler = {
   activate(ctx: PluginActivateContext): void {
+    const driver = createClaudeDriver(
+      (input, options) => ctx.childProcesses.spawnCommand(input, options),
+      claudeCommandSpec(process.env),
+      readyTimeoutMs(process.env),
+    );
     ctx.drivers.register(
       "claude-code",
-      createClaudeDriver(
-        (input, options) => ctx.childProcesses.spawnCommand(input, options),
-        claudeCommandSpec(process.env),
-        readyTimeoutMs(process.env),
-      ),
+      driver,
     );
+    // Static plugin assets live in the built root's snapshot subdirectory, not beside the bundle.
+    chatWebApp = createChatWebApp(
+      driver,
+      ctx.workspaceRoot,
+      join(ctx.pluginRoot, "snapshot", "ui"),
+    );
+  },
+  startWebApp(webAppId, instanceKey) {
+    return requireChatWebApp().startWebApp(webAppId, instanceKey);
+  },
+  stopWebApp(webAppId, instanceKey) {
+    return requireChatWebApp().stopWebApp(webAppId, instanceKey);
+  },
+  async deactivate() {
+    const app = chatWebApp;
+    chatWebApp = null;
+    await app?.deactivate();
   },
 };
 

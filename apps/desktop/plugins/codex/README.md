@@ -55,6 +55,26 @@ Two environment variables, read once when the plugin activates:
   plugin's own (`app-server`, `--version`). A value that is not JSON is split
   on spaces.
 
+## Its own chat
+
+The plugin also serves a singleton web app (`chat`): a dedicated Codex chat UI
+on the plugin's own loopback HTTP server, separate from dohc's built-in
+workspace chat. It reuses the same `createCodexDriver` instance the `codex`
+driver above registers — dohc's own chat and this one are still two
+independent sessions at runtime.
+
+**MCP is credential-free and local-only here.** dohc's built-in chat spawns
+`dohc-mcp` with `--home` pointed at the desktop's own state directory, SDK
+package metadata, and — when cached — cloud credentials
+(`mcpRuntimeConfigFor` in `apps/desktop/src/main.ts`). All of that is
+main-process-only state a plugin has no SDK seam to reach, and a plugin must
+not be handed it to fetch it: that would route host credentials into
+full-trust plugin code. Without `--home`, `dohc-mcp` resolves its home to the
+OS default instead, so registry-backed MCP tools this chat's session reaches
+read that default registry rather than the desktop's, and cloud-aware tools
+have no runtime environment. Shared views are unaffected either way: they are
+already refused before a plugin web app starts (`assertWritableWorkspace`).
+
 ## Proofs
 
 - `src/*.test.ts` — the mapping rules and the JSON-RPC framing, in isolation.

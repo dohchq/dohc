@@ -903,6 +903,13 @@ pub(crate) fn self_bound_log(
     Ok(())
 }
 
+// Below `threshold` (or nothing pending) means compaction cannot fire.
+// Shared by `maybe_compact`'s cheap pre-check and its authoritative check so
+// the two can never drift apart.
+fn below_threshold(pending: i64, threshold: u32) -> bool {
+    pending < i64::from(threshold) || pending <= 0
+}
+
 /// Fold the update log into a fresh full-state snapshot once the pending count
 /// reaches `threshold`, prune the folded updates and superseded nonzero
 /// snapshots, and advance `head_snapshot_seq`. Seq 0 remains as the permanent
@@ -919,12 +926,26 @@ pub fn maybe_compact(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<CompactOutcome>, CollabError> {
+    // A stale cheap read only ever costs an extra full reconstruction below,
+    // never a wrong compaction. Forced compaction (`threshold == 0`, used by
+    // replicated/persisted close) never takes this shortcut: it must always
+    // reach `load_persisted`'s torn-lineage and blob-integrity checks, even
+    // when nothing is pending, so a corrupt or missing snapshot at close
+    // surfaces as `Corrupt` instead of a falsely clean `Skipped { 0 }`.
+    let marker = read_marker(store, key)?.ok_or(CollabError::NoMarker)?;
+    let cheap_pending = marker.head_update_seq - marker.head_snapshot_seq;
+    if threshold > 0 && below_threshold(cheap_pending, threshold) {
+        return Ok(TxnOutcome::Committed(CompactOutcome::Skipped {
+            pending: cheap_pending,
+        }));
+    }
+
     let persisted = match load_persisted(store, key)? {
         Some(p) => p,
         None => return Err(CollabError::NoMarker),
     };
     let pending = persisted.marker.head_update_seq - persisted.marker.head_snapshot_seq;
-    if pending < i64::from(threshold) || pending <= 0 {
+    if below_threshold(pending, threshold) {
         return Ok(TxnOutcome::Committed(CompactOutcome::Skipped { pending }));
     }
     if persisted.doc.has_missing_updates() {
