@@ -528,6 +528,107 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   });
 
+  it("confirms a recovered plugin root by exact on-disk spelling", async () => {
+    const actualPath = await vi.importActual<typeof import("node:path")>(
+      "node:path",
+    );
+    vi.resetModules();
+    // Model a case-sensitive volume even when this test runs on Windows.
+    vi.doMock("node:path", () => ({
+      ...actualPath,
+      basename: actualPath.posix.basename,
+      dirname: actualPath.posix.dirname,
+      isAbsolute: actualPath.posix.isAbsolute,
+      join: actualPath.posix.join,
+      relative: actualPath.posix.relative,
+      resolve: actualPath.posix.resolve,
+      sep: actualPath.posix.sep,
+    }));
+
+    try {
+      const { PluginPipeline: PluginPipelineWithPosixPaths } =
+        await import("./PluginPipeline");
+      const { PluginHost: PluginHostWithPosixPaths } =
+        await import("./PluginHost");
+      let pipeline: InstanceType<typeof PluginPipelineWithPosixPaths>;
+      const host = new PluginHostWithPosixPaths({
+        stateDir: "/state",
+        workspaceRoot: "/workspace",
+        spawnTransport: fakeSpawnTransport(),
+        routeSdkRequest: async () => ({}),
+        onStatusChange: (pluginId, status) => {
+          pipeline.noteRuntimeStatus(pluginId, status);
+        },
+      });
+      pipeline = new PluginPipelineWithPosixPaths({
+        workspaceRoot: "/workspace",
+        stateDir: "/state",
+        pluginHost: host,
+        platform: "darwin",
+        pnpmRunnerEntry: "/runner",
+      });
+      const pipelineState = pipeline as unknown as {
+        discovery: InstalledPluginRecord[];
+        enqueueSourceRefresh(
+          pluginId: string,
+          run: () => Promise<void>,
+        ): void;
+      };
+      pipelineState.discovery = [{
+        id: "owned",
+        directoryName: "owned",
+        rootPath: "/workspace/plugins/owned",
+        manifest: { version: 1, name: "owned", entry: "src/index.ts" },
+        iconPath: null,
+        diagnostics: [],
+        valid: true,
+      }];
+      pipelineState.enqueueSourceRefresh = () => undefined;
+
+      const recoveredPath = "/workspace/plugins/OWNED/src/index.ts";
+      pipeline.handleDoorWrittenSourceChange("owned", {
+        absolutePath: recoveredPath,
+        text: "distinct root\n",
+      });
+      pipeline.rekeyDoorWrittenSourceChange(
+        "owned",
+        { absolutePath: recoveredPath },
+        { absolutePath: recoveredPath },
+      );
+
+      expect(
+        (pipeline as unknown as { doorWrittenDeltas: DoorWrittenDeltas })
+          .doorWrittenDeltas.get("owned"),
+      ).toEqual(new Map());
+      pipeline.handleDoorWrittenSourceChange("owned", {
+        absolutePath: recoveredPath,
+        text: "confirmed root\n",
+      });
+      pipeline.rekeyDoorWrittenSourceChange(
+        "owned",
+        { absolutePath: recoveredPath },
+        { absolutePath: "/workspace/plugins/owned/src/index.ts" },
+      );
+
+      expect(
+        (pipeline as unknown as { doorWrittenDeltas: DoorWrittenDeltas })
+          .doorWrittenDeltas.get("owned"),
+      )
+        .toEqual(new Map([[
+          "src/index.ts",
+          {
+            sha256: createHash("sha256")
+              .update("confirmed root\n", "utf8")
+              .digest("hex"),
+            seq: 2,
+          },
+        ]]));
+    } finally {
+      vi.doUnmock("node:path");
+      vi.resetModules();
+    }
+  });
+
   for (const scenario of [
     { name: "an empty directory", excludedOnly: false },
     { name: "a directory with only excluded content", excludedOnly: true },
@@ -706,6 +807,96 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(transientFailures).toBe(1);
       expect(pipeline.list()[0]?.disabledReason).toBeNull();
     } finally {
+      await pipeline.dispose();
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  }, 120_000);
+
+  it("does not let stale provisional recovery replace a newer same-path write", async () => {
+    const fixture = await createPluginWorkspace();
+    const recoveryStarted = deferred();
+    const releaseRecovery = deferred();
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    let blockRecovery = false;
+    let blocked = false;
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      if (
+        blockRecovery &&
+        !blocked &&
+        resolve(String(args[0])) === resolve(fixture.pluginRoot)
+      ) {
+        blocked = true;
+        recoveryStarted.resolve();
+        await releaseRecovery.promise;
+      }
+      return actualFs.readdir(...args);
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+
+    const { PluginPipeline: PluginPipelineWithDelayedRecovery } =
+      await import("./PluginPipeline");
+    const { PluginHost: PluginHostWithDelayedRecovery } =
+      await import("./PluginHost");
+    let pipeline: InstanceType<typeof PluginPipelineWithDelayedRecovery>;
+    const host = new PluginHostWithDelayedRecovery({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipelineWithDelayedRecovery({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      const oldText = "old bytes\n";
+      const deltas = new Map([[
+        "src/index.ts",
+        {
+          sha256: createHash("sha256").update(oldText, "utf8").digest("hex"),
+          seq: 1,
+          provisional: true,
+        },
+      ]]);
+      doorWrittenDeltasOf(pipeline).set("example-plugin", deltas);
+      (pipeline as unknown as { doorWriteSeq: number }).doorWriteSeq = 1;
+
+      blockRecovery = true;
+      const pendingRecovery = (pipeline as unknown as {
+        retryProvisionalDeltaRecovery(pluginId: string): Promise<void>;
+      }).retryProvisionalDeltaRecovery("example-plugin");
+      await recoveryStarted.promise;
+
+      const newText = "new bytes\n";
+      pipeline.handleDoorWrittenSourceChange("example-plugin", {
+        absolutePath: fixture.entryPath,
+        text: newText,
+      });
+      releaseRecovery.resolve();
+      await pendingRecovery;
+
+      expect(deltas.get("src/index.ts")).toMatchObject({
+        sha256: createHash("sha256").update(newText, "utf8").digest("hex"),
+        seq: 2,
+      });
+    } finally {
+      releaseRecovery.resolve();
       await pipeline.dispose();
       vi.doUnmock("node:fs/promises");
       vi.resetModules();

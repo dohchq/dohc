@@ -709,17 +709,26 @@ export class PluginPipeline {
     return null;
   }
 
-  private sourceRelPath(
+  private sourceRelPathExact(
     candidate: InstalledPluginRecord,
     absolutePath: string,
   ): string | null {
     const root = resolve(candidate.rootPath);
     const target = resolve(absolutePath);
     if (target === root) return null;
-    if (isInside(root, target)) {
-      return relative(root, target).replaceAll("\\", "/");
-    }
+    if (!isInside(root, target)) return null;
+    return relative(root, target).replaceAll("\\", "/");
+  }
+
+  private sourceRelPath(
+    candidate: InstalledPluginRecord,
+    absolutePath: string,
+  ): string | null {
+    const exact = this.sourceRelPathExact(candidate, absolutePath);
+    if (exact !== null) return exact;
     if (this.platform !== "win32" && this.platform !== "darwin") return null;
+    const root = resolve(candidate.rootPath);
+    const target = resolve(absolutePath);
     const lowerRoot = root.toLowerCase();
     const lowerTarget = target.toLowerCase();
     if (lowerTarget === lowerRoot || !isInside(lowerRoot, lowerTarget)) return null;
@@ -934,11 +943,24 @@ export class PluginPipeline {
     const candidate = this.validCandidate(pluginId);
     if (!candidate) return;
     const fromRelPath = this.sourceRelPath(candidate, from.absolutePath);
-    const toRelPath = this.sourceRelPath(candidate, to.absolutePath);
-    if (fromRelPath === null || toRelPath === null) return;
+    if (fromRelPath === null) return;
     const deltas = this.doorWrittenDeltas.get(pluginId);
     const delta = deltas?.get(fromRelPath);
     if (!deltas || !delta) return;
+
+    const toRelPath = this.sourceRelPathExact(candidate, to.absolutePath);
+    if (toRelPath === null) {
+      // Recovery resolved the write's true on-disk path, and it is not
+      // under the plugin's real root: the landing-time fold guessed
+      // ownership from spelling alone, and a case-sensitive volume just
+      // proved that guess wrong. Drop the provisional attribution — this
+      // is an ordinary out-of-band change to a distinct, real directory,
+      // not this plugin's own source.
+      deltas.delete(fromRelPath);
+      this.enqueueSourceRefresh(pluginId, () =>
+        this.reconcileApprovedCandidate(pluginId, true));
+      return;
+    }
 
     if (this.isExcludedRelPath(toRelPath)) {
       deltas.delete(fromRelPath);
@@ -1647,6 +1669,8 @@ export class PluginPipeline {
         relPath,
         undefined,
       );
+      const current = deltas.get(relPath);
+      if (!current || current.seq !== delta.seq) continue;
       if (!fullyRecovered) continue;
       const recoveredRelPath = segments.join("/");
       if (this.isExcludedRelPath(recoveredRelPath)) {
