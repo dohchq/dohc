@@ -811,7 +811,7 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).not.toContain("worker-import/helper.js");
   });
 
-  it("only trusts a proven consumption shape (property assignment, setAttribute) for a bare src/href-named identifier", async () => {
+  it("only trusts a proven consumption shape (property assignment, setAttribute) for a provably DOM-producing receiver", async () => {
     await mkdir(join(root, "prop-assign"), { recursive: true });
     await writeFile(
       join(root, "prop-assign", "index.html"),
@@ -820,13 +820,22 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "prop-assign", "app.js"),
       [
-        'el.src = "img.png";',
-        'el.setAttribute("href", "linked.html");',
+        // Provable: assigned straight from document.createElement.
+        'const img = document.createElement("img");',
+        'img.src = "img.png";',
+        // Provable: assigned from document.querySelector.
+        'const link = document.querySelector("a");',
+        'link.setAttribute("href", "linked.html");',
+        // Not provable: no traceable DOM-producing origin at all.
+        'const el = getElementFromSomewhere();',
+        'el.src = "unproven.png";',
+        // Not provable: a bare src/href-named variable is just a name.
         'const href = "private.html";',
       ].join("\n"),
     );
     await writeFile(join(root, "prop-assign", "img.png"), "image");
     await writeFile(join(root, "prop-assign", "linked.html"), "<h1>Linked</h1>");
+    await writeFile(join(root, "prop-assign", "unproven.png"), "image");
     await writeFile(join(root, "prop-assign", "private.html"), "<h1>Private</h1>");
 
     const site = (await listSitePackages(root)).find(
@@ -835,6 +844,7 @@ describe("listSitePackages", () => {
 
     expect(manifestOf(site)?.assets).toContain("prop-assign/img.png");
     expect(manifestOf(site)?.assets).toContain("prop-assign/linked.html");
+    expect(manifestOf(site)?.assets).not.toContain("prop-assign/unproven.png");
     expect(manifestOf(site)?.assets).not.toContain("prop-assign/private.html");
   });
 
@@ -899,6 +909,94 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)).toEqual({
       entryPath: "build-share/dist/index.html",
       assets: ["build-share/dist/bundle.js"],
+    });
+  });
+
+  it("only mints a <link href> reference for a rel value the browser actually fetches for", async () => {
+    await mkdir(join(root, "link-rel"), { recursive: true });
+    await writeFile(
+      join(root, "link-rel", "index.html"),
+      [
+        '<link rel="stylesheet" href="style.css">',
+        '<link rel="preload" href="preload-no-as.js">',
+        '<link rel="preload" href="preload-with-as.js" as="script">',
+        '<link rel="alternate" href="feed.xml">',
+      ].join(""),
+    );
+    await writeFile(join(root, "link-rel", "style.css"), "body{}");
+    await writeFile(join(root, "link-rel", "preload-no-as.js"), "window.a = true;");
+    await writeFile(join(root, "link-rel", "preload-with-as.js"), "window.b = true;");
+    await writeFile(join(root, "link-rel", "feed.xml"), "<rss></rss>");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "link-rel",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("link-rel/style.css");
+    expect(manifestOf(site)?.assets).toContain("link-rel/preload-with-as.js");
+    expect(manifestOf(site)?.assets).not.toContain("link-rel/preload-no-as.js");
+    expect(manifestOf(site)?.assets).not.toContain("link-rel/feed.xml");
+  });
+
+  it("does not scan an importScripts() call outside a worker's own context", async () => {
+    await mkdir(join(root, "not-a-worker"), { recursive: true });
+    await writeFile(
+      join(root, "not-a-worker", "index.html"),
+      '<script src="app.js"></script>',
+    );
+    await writeFile(
+      join(root, "not-a-worker", "app.js"),
+      'importScripts("helper.js");',
+    );
+    await writeFile(join(root, "not-a-worker", "helper.js"), "window.ready = true;");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "not-a-worker",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("not-a-worker/helper.js");
+  });
+
+  it("bounds a metadata file read and records a diagnostic instead of reading it unbounded", async () => {
+    await mkdir(join(root, "huge-meta"), { recursive: true });
+    await writeFile(join(root, "huge-meta", "index.html"), "<h1>Huge</h1>");
+    await writeFile(
+      join(root, "huge-meta", "package.json"),
+      JSON.stringify({
+        name: "huge",
+        scripts: { dev: "vite" },
+        padding: "x".repeat(2 * 1024 * 1024),
+      }),
+    );
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "huge-meta",
+    );
+
+    expect(site?.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "metadata-too-large" })]),
+    );
+    expect(site?.scripts).toEqual({});
+  });
+
+  it("refuses to share a manifest whose path exceeds the relay selector's character bound", async () => {
+    const segment = "a".repeat(250);
+    const nestedDir = join(root, "long-path", segment, segment, segment, segment, segment);
+    await mkdir(nestedDir, { recursive: true });
+    await writeFile(
+      join(root, "long-path", "index.html"),
+      `<script src="./${segment}/${segment}/${segment}/${segment}/${segment}/x.js"></script>`,
+    );
+    await writeFile(join(nestedDir, "x.js"), "window.ready = true;");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "long-path",
+    );
+
+    expect(site?.shareManifest).toMatchObject({
+      ok: false,
+      reason: "path-too-long",
+      limitChars: 1024,
     });
   });
 

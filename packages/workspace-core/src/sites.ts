@@ -80,6 +80,11 @@ export interface WorkspaceSite {
 export interface WorkspaceSiteSource {
   path: string;
   body?: string | null;
+  // Diagnostics the CALLER already knows about this source before discovery
+  // runs (e.g. desktop's own metadata-file size bound refusing to read the
+  // body at all) — merged into whichever site candidate this path's
+  // directory becomes, the same way a config parse diagnostic is.
+  diagnostics?: readonly SiteDiagnostic[];
 }
 
 export interface DohcSiteConfig {
@@ -744,9 +749,29 @@ function finalizeSite(candidate: Candidate): WorkspaceSite {
 
   const configPath = candidate.dohcConfigPath ?? candidate.frameworkConfigPath;
   const entry = config?.preview?.entry ?? candidate.entry;
+  // config?.title is already bounded at config parse time (its own
+  // title-too-long diagnostic there), but a package.json name or a folder
+  // name can still be arbitrarily long and neither goes through that parse
+  // path — bound the title this site ACTUALLY carries, whichever source won.
+  const diagnostics = [...candidate.diagnostics];
+  const rawTitle = config?.title ?? packageTitle(candidate.packageJson) ?? titleFromRoot(candidate.root);
+  const title =
+    rawTitle.length > SITE_TITLE_MAX_LENGTH
+      ? (() => {
+          diagnostics.push(
+            diagnostic(
+              configPath ?? candidate.root,
+              "warning",
+              "title-too-long",
+              `Site title exceeds the ${SITE_TITLE_MAX_LENGTH}-character limit and was truncated.`,
+            ),
+          );
+          return rawTitle.slice(0, SITE_TITLE_MAX_LENGTH);
+        })()
+      : rawTitle;
   return {
     root: candidate.root,
-    title: config?.title ?? packageTitle(candidate.packageJson) ?? titleFromRoot(candidate.root),
+    title,
     kind: siteKind(candidate),
     confidence: siteConfidence(candidate),
     ...(entry ? { entry } : {}),
@@ -758,7 +783,7 @@ function finalizeSite(candidate: Candidate): WorkspaceSite {
     ...(config?.build?.output ? { configuredBuildOutput: config.build.output } : {}),
     buildOutputs: [...candidate.buildOutputs].sort(),
     ...(configPath ? { configPath } : {}),
-    diagnostics: [...candidate.diagnostics],
+    diagnostics,
   };
 }
 
@@ -775,7 +800,11 @@ export function discoverSites(sources: readonly (string | WorkspaceSiteSource)[]
   const candidates = new Map<string, Candidate>();
   const normalizedPaths: string[] = [];
   const fileNamesByRoot = new Map<string, Set<string>>();
-  const normalizedSources: Array<{ path: string; body?: string }> = [];
+  const normalizedSources: Array<{
+    path: string;
+    body?: string;
+    diagnostics?: readonly SiteDiagnostic[];
+  }> = [];
 
   for (const source of sources) {
     const path = normalizeWorkspacePath(sourcePath(source));
@@ -786,13 +815,19 @@ export function discoverSites(sources: readonly (string | WorkspaceSiteSource)[]
     names.add(fileName(path));
     fileNamesByRoot.set(root, names);
     const body = sourceBody(source);
-    normalizedSources.push({ path, ...(body !== undefined ? { body } : {}) });
+    const diagnostics = typeof source === "string" ? undefined : source.diagnostics;
+    normalizedSources.push({
+      path,
+      ...(body !== undefined ? { body } : {}),
+      ...(diagnostics?.length ? { diagnostics } : {}),
+    });
   }
 
   for (const source of normalizedSources) {
     const name = fileName(source.path);
     const root = parentPath(source.path);
     const candidate = getCandidate(candidates, root);
+    if (source.diagnostics?.length) candidate.diagnostics.push(...source.diagnostics);
 
     if (name === "index.html") {
       // Build output folders are artifacts of a parent site; do not promote

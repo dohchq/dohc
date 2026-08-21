@@ -1576,6 +1576,65 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("detect_sites honors a configured preview.entry over the bare index.html fallback", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "docs/public"), { recursive: true });
+      await writeFile(join(ctx.root, "docs/index.html"), "<h1>Fallback</h1>");
+      await writeFile(join(ctx.root, "docs/public/index.html"), "<h1>Configured entry</h1>");
+      await writeFile(
+        join(ctx.root, "docs/dohc.json"),
+        JSON.stringify({ type: "site", preview: { mode: "static", entry: "public/index.html" } }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "docs");
+      expect(site).toMatchObject({
+        root: "docs",
+        entry: "docs/public/index.html",
+        configuredPreviewMode: "static",
+      });
+
+      await expect(testSite(ctx, { siteRoot: "docs" })).resolves.toMatchObject({
+        ok: true,
+        checks: expect.arrayContaining([
+          expect.objectContaining({ name: "entry-file", ok: true, path: "docs/public/index.html" }),
+        ]),
+      });
+
+      await expect(previewSite(ctx, { siteRoot: "docs" })).resolves.toMatchObject({
+        ok: true,
+        modes: expect.arrayContaining([
+          expect.objectContaining({ mode: "static", entry: "docs/public/index.html" }),
+        ]),
+      });
+    });
+  });
+
+  it("detect_sites reports an invalid configured preview.entry and falls back to index.html", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "escape"), { recursive: true });
+      await writeFile(join(ctx.root, "escape/index.html"), "<h1>Fallback</h1>");
+      await writeFile(
+        join(ctx.root, "escape/dohc.json"),
+        JSON.stringify({ type: "site", preview: { entry: "../outside/index.html" } }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "escape");
+      expect(site).toMatchObject({
+        root: "escape",
+        entry: "escape/index.html",
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: "invalid-preview-entry", severity: "warning" }),
+        ]),
+      });
+    });
+  });
+
   it("test_site validates entries and refuses legacy app SDK imports", async () => {
     await withWorkspace(async (ctx) => {
       await createSite(ctx, { path: "todo" });

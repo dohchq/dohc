@@ -1728,6 +1728,79 @@ function configString(value: unknown, key: string): string | undefined {
   return typeof found === "string" && found.trim() ? found : undefined;
 }
 
+// Mirrors workspace-core's safeRelativeConfigPath (packages/workspace-core/src/sites.ts):
+// a configured dohc.json path must be relative, not escape its own segments
+// with "..", and not embed a NUL byte. The two detectors read the same
+// dohc.json field, so an invalid value must be rejected the same way in both
+// (#853 round-10 finding 10) — even though safeResolve is the real boundary
+// once the value is joined with the site root and read from disk.
+// Windows silently drops a segment's trailing dots/spaces, so "foo/.. " reads
+// as "foo/..". Compare the alias, not the literal, or that spelling would
+// pass this check yet still walk out of the site root once resolved.
+function stripConfigPathAliasSuffix(segment: string): string {
+  return segment.replace(/[. ]+$/, "");
+}
+
+function isSafeRelativeConfigPath(value: string): boolean {
+  if (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\")) {
+    return false;
+  }
+  if (value.includes("\0")) return false;
+  const segments = value
+    .replaceAll("\\", "/")
+    .replace(/^\/+/, "")
+    .split("/")
+    .filter((segment) => segment !== "" && segment !== ".");
+  if (segments.length === 0) return false;
+  const aliasSegments = segments.map(stripConfigPathAliasSuffix);
+  return !aliasSegments.some((segment) => segment === "" || segment === "." || segment === "..");
+}
+
+function normalizedConfigPath(value: string): string {
+  return value
+    .replaceAll("\\", "/")
+    .replace(/^\/+/, "")
+    .split("/")
+    .filter((segment) => segment !== "" && segment !== ".")
+    .join("/");
+}
+
+// Reads and validates config.preview.entry the same way workspace-core's
+// parsePreview does, so a site with a configured entry is detected with the
+// same value regardless of which detector runs.
+function configuredPreviewEntry(
+  config: RawDohcSiteConfig | null,
+  path: string,
+  diagnostics: SiteDiagnostic[],
+): string | undefined {
+  const preview = config?.preview;
+  if (!isRecord(preview) || preview.entry === undefined) return undefined;
+  const raw = preview.entry;
+  const valid = typeof raw === "string" && raw.trim() !== "" && isSafeRelativeConfigPath(raw);
+  if (!valid) {
+    diagnostics.push({
+      severity: "warning",
+      code: "invalid-preview-entry",
+      path,
+      message:
+        typeof raw === "string" && raw.trim() !== ""
+          ? "dohc.json preview.entry must be a relative workspace path, not '.', './', or an empty path."
+          : "dohc.json preview.entry must be a non-empty string.",
+    });
+    return undefined;
+  }
+  return normalizedConfigPath(raw);
+}
+
+// Joins a configured entry under the site root, mirroring desktop's
+// entryPathFor (apps/desktop/src/workspaces/sitePackage.ts): a value the
+// author already spelled starting with the site root is used as-is instead
+// of being prefixed twice.
+function siteEntryPathFor(root: string, entry: string): string {
+  if (root && (entry === root || entry.startsWith(`${root}/`))) return entry;
+  return relativeJoin(root, entry);
+}
+
 async function readJsonDetailed<T>(
   absolute: string,
 ): Promise<{ ok: true; value: T } | { ok: false; reason: string }> {
@@ -1807,6 +1880,11 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
   }
   const configBuildCommand = configString(config?.build, "command");
   if (configBuildCommand) scripts.build = configBuildCommand;
+  const configuredEntry = configuredPreviewEntry(
+    config,
+    configPath ?? relativeJoin(root, "dohc.json"),
+    diagnostics,
+  );
 
   const frameworkConfig = frameworkConfigName(files);
   const hasIndex = files.has("index.html");
@@ -1862,7 +1940,11 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
       break;
     }
   }
-  const entry = hasIndex ? relativeJoin(root, "index.html") : builtEntry;
+  const entry = configuredEntry
+    ? siteEntryPathFor(root, configuredEntry)
+    : hasIndex
+      ? relativeJoin(root, "index.html")
+      : builtEntry;
   const packageManager = packageManagerFromFiles(allNames, pkg);
 
   return {

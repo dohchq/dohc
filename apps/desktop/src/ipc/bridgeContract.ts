@@ -2168,6 +2168,13 @@ const SiteShareManifestResult = z.union([
   }),
   z.object({
     ok: z.literal(false),
+    reason: z.literal("path-too-long"),
+    limitChars: z.number().int().positive(),
+    observedChars: z.number().int().positive(),
+    path: SiteSharePath,
+  }),
+  z.object({
+    ok: z.literal(false),
     reason: z.literal("unreadable"),
     path: SiteSharePath,
   }),

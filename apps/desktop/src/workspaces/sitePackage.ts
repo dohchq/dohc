@@ -11,8 +11,11 @@ import {
   type WorkspaceSite,
   type WorkspaceSiteSource,
 } from "@dohc/workspace-core";
+import { MAX_SHARE_PATH_CHARS } from "@dohc/security-contract";
+import * as acorn from "acorn";
 import { readFile, stat } from "node:fs/promises";
 import { join, posix } from "node:path";
+import { parse as parseHtml } from "parse5";
 import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 import {
   assertLoopbackOnlyDevServerCommand,
@@ -64,6 +67,13 @@ export type SiteShareManifestResult =
       reason: "file-count";
       limitFiles: number;
       observedFiles: number;
+    }
+  | {
+      ok: false;
+      reason: "path-too-long";
+      limitChars: number;
+      observedChars: number;
+      path: string;
     }
   | { ok: false; reason: "unreadable"; path: string }
   | { ok: false; reason: "non-file-reference"; path: string };
@@ -161,124 +171,38 @@ type HtmlBaseResolution =
   | { kind: "external" }
   | { kind: "none" };
 
-function blankPreservingLines(text: string): string {
-  return text.replace(/[^\x0d\x0a]/g, " ");
+// A structural view of the exact shape parse5's real tree nodes satisfy
+// (Document/DocumentFragment/Element/Template/CommentNode/TextNode/
+// DocumentType) — loose enough to avoid fighting parse5's own discriminated
+// union export names, precise enough to stay type-safe (no `any`).
+interface Html5Attribute {
+  name: string;
+  value: string;
+}
+interface Html5Node {
+  nodeName: string;
+  tagName?: string;
+  attrs?: Html5Attribute[];
+  value?: string;
+  childNodes?: Html5Node[];
+  content?: { childNodes: Html5Node[] };
 }
 
-function blankHtmlComments(text: string): string {
-  return text.replace(/<!--[\s\S]*?(?:-->|$)/g, (comment) =>
-    blankPreservingLines(comment),
-  );
+function isHtml5Element(node: Html5Node): node is Html5Node & { tagName: string; attrs: Html5Attribute[] } {
+  return typeof node.tagName === "string";
 }
 
-/**
- * The index of the `>` that really ends an opening tag starting at
- * `searchStart` (the position right after the tag name), tracking quote
- * state so a `>` inside a quoted attribute value (`<script data-label=">">`)
- * doesn't end the tag early. Returns null when the tag never closes. The
- * one boundary rule every opening-tag consumer in this file shares.
- */
-function findOpeningTagEnd(text: string, searchStart: number): number | null {
-  let quote: "\"" | "'" | null = null;
-  for (let position = searchStart; position < text.length; position += 1) {
-    const character = text[position]!;
-    if (quote) {
-      if (character === quote) quote = null;
-      continue;
-    }
-    if (character === "\"" || character === "'") {
-      quote = character;
-      continue;
-    }
-    if (character === ">") return position;
-  }
-  return null;
+// A <template>'s markup children live in `.content` (an inert document
+// fragment per the HTML spec) — its own `.childNodes` is always empty.
+function html5ChildNodes(node: Html5Node): Html5Node[] {
+  return node.content ? node.content.childNodes : (node.childNodes ?? []);
 }
 
-interface HtmlRawTextExtraction {
-  // The text with every <script>/<style> element's own content (not its
-  // tags) replaced by whitespace, for scanning markup attributes — a
-  // browser never parses raw-text element content as nested elements.
-  blanked: string;
-  // The real (unblanked) content of every <script> element, for scanning
-  // real inline module/import syntax — this is code, not markup.
-  scriptContents: string[];
-  // The real (unblanked) content of every <style> element, for scanning
-  // real inline CSS syntax.
-  styleContents: string[];
-}
-
-function extractHtmlRawText(text: string): HtmlRawTextExtraction {
-  const tagStart = /<(script|style)\b/gi;
-  let blanked = "";
-  let cursor = 0;
-  const scriptContents: string[] = [];
-  const styleContents: string[] = [];
-  for (const match of text.matchAll(tagStart)) {
-    const elementStart = match.index ?? 0;
-    if (elementStart < cursor) continue;
-    const tagName = match[1]!.toLowerCase();
-    const openEnd = findOpeningTagEnd(text, elementStart + match[0].length);
-    if (openEnd === null) continue;
-    const afterOpen = openEnd + 1;
-    const openingTag = text.slice(elementStart, afterOpen);
-    const closeMatch = new RegExp(`</${tagName}\\s*>`, "i").exec(text.slice(afterOpen));
-    const contentEnd = closeMatch ? afterOpen + closeMatch.index : text.length;
-    const closeTagEnd = closeMatch
-      ? afterOpen + closeMatch.index + closeMatch[0].length
-      : text.length;
-    const content = text.slice(afterOpen, contentEnd);
-    if (tagName === "script") {
-      if (isExecutableScriptTag(openingTag)) scriptContents.push(content);
-    } else {
-      styleContents.push(content);
-    }
-    blanked += text.slice(cursor, afterOpen);
-    blanked += blankPreservingLines(content);
-    blanked += text.slice(contentEnd, closeTagEnd);
-    cursor = closeTagEnd;
-  }
-  blanked += text.slice(cursor);
-  return { blanked, scriptContents, styleContents };
-}
-
-function blankHtmlRawTextContents(text: string): string {
-  return extractHtmlRawText(text).blanked;
-}
-
-function openingHtmlTags(text: string): string[] {
-  const tags: string[] = [];
-  const start = /<[A-Za-z][A-Za-z0-9-]*\b/g;
-  for (const match of text.matchAll(start)) {
-    const tagStart = match.index ?? 0;
-    const end = findOpeningTagEnd(text, tagStart + match[0].length);
-    if (end !== null) tags.push(text.slice(tagStart, end + 1));
-  }
-  return tags;
-}
-
-function styleAttributeValues(tags: readonly string[]): string[] {
-  const values: string[] = [];
-  const attribute = /\sstyle\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})')/i;
-  for (const tag of tags) {
-    const match = attribute.exec(tag);
-    const value = match?.[1] ?? match?.[2];
-    if (value) values.push(value);
-  }
-  return values;
-}
-
-/** One opening tag's value for `name`, quoted or bare — every attribute read
- * in this file (type, href, on-handler presence, ...) shares this shape. A
- * real attribute name is always preceded by whitespace (or the tag name) —
- * never `\b`, which also matches inside a hyphenated name like data-src. */
-function attributeValue(tag: string, name: string): string | undefined {
-  const pattern = new RegExp(
-    `\\s${name}\\s*=\\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^\\s"'=<>\`]{1,2048}))`,
-    "i",
-  );
-  const match = pattern.exec(tag);
-  return (match?.[1] ?? match?.[2] ?? match?.[3])?.trim();
+function html5TextContent(node: Html5Node): string {
+  return html5ChildNodes(node)
+    .filter((child) => child.nodeName === "#text")
+    .map((child) => child.value ?? "")
+    .join("");
 }
 
 const JS_SCRIPT_TYPE_PATTERN =
@@ -292,15 +216,15 @@ const JS_SCRIPT_TYPE_PATTERN =
  * code a browser ever executes. A missing type, `module`, and the classic JS
  * MIME types are all executable.
  */
-function isExecutableScriptTag(openingTag: string): boolean {
-  if (attributeValue(openingTag, "src") !== undefined) return false;
-  const type = attributeValue(openingTag, "type");
+function isExecutableScriptElement(attrs: ReadonlyMap<string, string>): boolean {
+  if (attrs.has("src")) return false;
+  const type = attrs.get("type");
   return !type || JS_SCRIPT_TYPE_PATTERN.test(type);
 }
 
 /** `<input src="...">` only fetches an image when it renders as one. */
-function isImageInputTag(openingTag: string): boolean {
-  return attributeValue(openingTag, "type")?.toLowerCase() === "image";
+function isImageInputElement(attrs: ReadonlyMap<string, string>): boolean {
+  return attrs.get("type")?.toLowerCase() === "image";
 }
 
 // Which elements a URL-bearing attribute actually fires a request from, per
@@ -324,40 +248,62 @@ const URL_ATTRIBUTE_ELEMENTS: Readonly<Record<string, ReadonlySet<string>>> = {
   data: new Set(["object"]),
 };
 
-function decodeHtmlEntities(value: string): string {
-  const named: Record<string, string> = {
-    amp: "&",
-    lt: "<",
-    gt: ">",
-    quot: '"',
-    apos: "'",
-  };
-  return value.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (match, entity: string) => {
-    if (entity[0] === "#") {
-      const codePoint =
-        entity[1]?.toLowerCase() === "x"
-          ? Number.parseInt(entity.slice(2), 16)
-          : Number.parseInt(entity.slice(1), 10);
-      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : match;
-    }
-    return named[entity.toLowerCase()] ?? match;
-  });
+// A <link href> counts only when its `rel` names a token the browser
+// actually fetches for — an alternate/canonical/author/search/etc. link
+// never triggers a request the way a stylesheet or icon does. `rel` is a
+// space-separated token list; preload/modulepreload only fetch when paired
+// with `as` (it names WHAT is being preloaded, and without it the browser
+// treats the link as inert).
+const LINK_REL_RESOURCE_TOKENS = new Set([
+  "stylesheet",
+  "icon",
+  "shortcut",
+  "apple-touch-icon",
+  "apple-touch-icon-precomposed",
+  "mask-icon",
+  "manifest",
+  "prefetch",
+]);
+const LINK_REL_PRELOAD_TOKENS = new Set(["preload", "modulepreload"]);
+
+function isResourceConsumingLinkRel(relValue: string | undefined, hasAsAttribute: boolean): boolean {
+  if (!relValue) return false;
+  for (const token of relValue.toLowerCase().split(/\s+/).filter(Boolean)) {
+    if (LINK_REL_RESOURCE_TOKENS.has(token)) return true;
+    if (LINK_REL_PRELOAD_TOKENS.has(token) && hasAsAttribute) return true;
+  }
+  return false;
 }
 
-function htmlBaseDirectory(
-  text: string,
+/** The first <base> element's href in document order — the only one that
+ * counts per the HTML spec. */
+function firstBaseHref(document: Html5Node): string | undefined {
+  let found: string | undefined;
+  const visit = (node: Html5Node): void => {
+    if (found !== undefined) return;
+    if (isHtml5Element(node)) {
+      if (node.tagName === "base") {
+        const href = node.attrs.find((attr) => attr.name === "href")?.value;
+        if (href !== undefined) {
+          found = href;
+          return;
+        }
+      }
+    }
+    for (const child of html5ChildNodes(node)) visit(child);
+  };
+  visit(document);
+  return found;
+}
+
+function htmlBaseDirectoryFromDocument(
+  document: Html5Node,
   fromPath: string,
   artifactRoot: string,
 ): HtmlBaseResolution {
-  const rawText = blankHtmlRawTextContents(blankHtmlComments(text));
-  const startMatch = /<base\b/i.exec(rawText);
-  const baseTag = (() => {
-    if (!startMatch) return undefined;
-    const end = findOpeningTagEnd(rawText, startMatch.index + startMatch[0].length);
-    return end === null ? undefined : rawText.slice(startMatch.index, end + 1);
-  })();
-  if (!baseTag) return { kind: "none" };
-  const href = attributeValue(baseTag, "href");
+  // parse5 already decoded any HTML character reference in the href value —
+  // only the URL-level percent-encoding below is still this function's job.
+  const href = firstBaseHref(document);
   if (!href || href.startsWith("#")) return { kind: "none" };
   if (
     href.startsWith("//") ||
@@ -456,16 +402,17 @@ function referencesFromSrcset(value: string): string[] {
 export interface BrowserTextReference {
   value: string;
   // True for a reference the browser resolves against the DOCUMENT's base
-  // URL at runtime (fetch/Worker/SharedWorker/serviceWorker.register, and an
-  // assignment-shaped src/href/poster). False for a reference ES modules
-  // resolve against the SCRIPT's own module URL (import/export, dynamic
-  // import, new URL(...,import.meta.url)) or CSS resolves against the
-  // stylesheet's own location (url()/@import). An HTML file's own markup
-  // (attributes, inline CSS, inline modules) already resolves uniformly
-  // against that file's own <base>-aware directory regardless of this flag —
-  // it only changes resolution for a reference read out of a separate
-  // external .js/.mjs file, where the script's own location and the
-  // document's location can genuinely differ.
+  // URL at runtime (fetch/Worker/SharedWorker/serviceWorker.register, and a
+  // real DOM property assignment or setAttribute call for src/href/poster).
+  // False for a reference ES modules resolve against the SCRIPT's own module
+  // URL (import/export, dynamic import, new URL(...,import.meta.url),
+  // importScripts) or CSS resolves against the stylesheet's own location
+  // (url()/@import). An HTML file's own markup (attributes, inline CSS,
+  // inline modules) already resolves uniformly against that file's own
+  // <base>-aware directory regardless of this flag — it only changes
+  // resolution for a reference read out of a separate external .js/.mjs
+  // file, where the script's own location and the document's location can
+  // genuinely differ.
   documentRelative: boolean;
   // True only for a Worker/SharedWorker/serviceWorker.register target: that
   // script runs in its OWN global scope with its own location, so anything
@@ -474,165 +421,370 @@ export interface BrowserTextReference {
   entersOwnContext?: boolean;
 }
 
+// CSS still isn't parsed with a real parser (out of this round's scope) —
+// url()/@import stay pattern-matched, but only over text a browser's CSS
+// parser would actually read: a real <style> element's content, a style=""
+// attribute value, or an entire external .css file.
 const CSS_URL_PATTERN =
   /url\(\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^"')\s][^)]{0,2047}))\s*\)/gi;
 const CSS_IMPORT_PATTERN = /@import\s+(?:url\(\s*)?["']([^"']{1,2048})["']/gi;
-const JS_STATIC_IMPORT_PATTERN =
-  /\b(?:import|export)\s+(?:[^"'`\r\n]{0,2048}?\s+from\s+)?["'`]([^"'`\r\n]{1,2048})["'`]/g;
-const JS_DYNAMIC_IMPORT_PATTERN = /\bimport\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
-const JS_NEW_URL_PATTERN =
-  /\bnew\s+URL\(\s*["'`]([^"'`\r\n]{1,2048})["'`]\s*,\s*import\.meta\.url/g;
-const JS_FETCH_PATTERN = /\bfetch\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
-const JS_WORKER_PATTERN =
-  /\b(?:Worker|SharedWorker)\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
-const JS_SERVICE_WORKER_PATTERN =
-  /\bserviceWorker\.register\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
-const JS_IMPORT_SCRIPTS_CALL_PATTERN = /\bimportScripts\s*\(([^)]{0,4096})\)/g;
-const JS_IMPORT_SCRIPTS_ARGUMENT_PATTERN = /["'`]([^"'`\r\n]{1,2048})["'`]/g;
-// A property assignment (`.src = "..."`, `.href = "..."`, `.poster = "..."`)
-// or setAttribute("src"|"href"|"poster", "...") call PROVES the value is
-// consumed as a navigable URL. A bare `src`/`href`/`poster`-named variable
-// (`const href = "private.html"`) proves nothing — it's just a name.
-const JS_PROPERTY_ASSIGNMENT_PATTERN =
-  /\.(?:src|href|poster)\s*=\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
-const JS_SET_ATTRIBUTE_PATTERN =
-  /\bsetAttribute\s*\(\s*["'`](?:src|href|poster)["'`]\s*,\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
 
-/** Every quoted argument across all importScripts(...) calls in `text` — a
- * worker's synchronous, comma-separated sibling to `import`, resolved the
- * same script-relative way. */
-function importScriptsReferences(text: string): string[] {
-  const references: string[] = [];
-  for (const call of text.matchAll(JS_IMPORT_SCRIPTS_CALL_PATTERN)) {
-    const args = call[1] ?? "";
-    for (const argument of args.matchAll(JS_IMPORT_SCRIPTS_ARGUMENT_PATTERN)) {
-      const value = argument[1]?.trim();
-      if (value) references.push(value);
-    }
+function cssReferences(cssText: string): BrowserTextReference[] {
+  const references: BrowserTextReference[] = [];
+  for (const match of cssText.matchAll(CSS_URL_PATTERN)) {
+    const value = (match[1] ?? match[2] ?? match[3])?.trim();
+    if (value) references.push({ value, documentRelative: false });
+  }
+  for (const match of cssText.matchAll(CSS_IMPORT_PATTERN)) {
+    const value = match[1]?.trim();
+    if (value) references.push({ value, documentRelative: false });
   }
   return references;
 }
 
-function eventHandlerAttributeValues(tags: readonly string[]): string[] {
-  // Inline `on*` handler attributes (onclick, onload, ...) hold real JS the
-  // browser executes, same as a <script> body.
-  const values: string[] = [];
-  const attribute = /\son[a-z]+\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})')/gi;
-  for (const tag of tags) {
-    for (const match of tag.matchAll(attribute)) {
-      // An attribute value can carry an HTML character reference
-      // (onclick="fetch(&quot;data.json&quot;)") that a browser decodes
-      // before parsing the handler as JS — the same decode every other
-      // attribute-extracted value in this file already gets.
-      const value = decodeHtmlEntities(match[1] ?? match[2] ?? "");
-      if (value) values.push(value);
-    }
-  }
-  return values;
+// ---- JS: parse and walk the real AST (acorn) instead of pattern-matching
+// source text — comments and string prose stop being code definitionally.
+
+type AstNode = Record<string, unknown> & { type: string };
+
+function isAstNode(value: unknown): value is AstNode {
+  return !!value && typeof value === "object" && typeof (value as Record<string, unknown>).type === "string";
 }
 
-function referencesFromBrowserText(text: string, sourcePath: string): BrowserTextReference[] {
+function astString(node: AstNode, key: string): string | undefined {
+  const value = node[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function astChild(node: AstNode, key: string): unknown {
+  return node[key];
+}
+
+function astChildren(node: AstNode, key: string): unknown[] {
+  const value = node[key];
+  return Array.isArray(value) ? value : [];
+}
+
+/** Visits every node in the tree, generically — acorn's AST has no single
+ * base visitor shape worth importing a walker library for; every node's own
+ * properties already say which of its values are child nodes or arrays of
+ * them (anything object-shaped that isn't loc/range/start/end). */
+function walkAst(node: unknown, visit: (node: AstNode) => void): void {
+  if (!node || typeof node !== "object") return;
+  const record = node as Record<string, unknown>;
+  if (typeof record.type === "string") visit(record as AstNode);
+  for (const [key, value] of Object.entries(record)) {
+    if (key === "type" || key === "loc" || key === "range" || key === "start" || key === "end") continue;
+    if (Array.isArray(value)) {
+      for (const item of value) walkAst(item, visit);
+    } else if (value && typeof value === "object") {
+      walkAst(value, visit);
+    }
+  }
+}
+
+function stringLiteralValue(node: unknown): string | undefined {
+  if (!isAstNode(node) || node.type !== "Literal") return undefined;
+  const value = node.value;
+  return typeof value === "string" ? value : undefined;
+}
+
+/** `import.meta.url` — acorn represents `import.meta` as a MetaProperty. */
+function isImportMetaUrl(node: unknown): boolean {
+  if (!isAstNode(node) || node.type !== "MemberExpression") return false;
+  const object = astChild(node, "object");
+  const property = astChild(node, "property");
+  if (!isAstNode(object) || object.type !== "MetaProperty") return false;
+  return isAstNode(property) && property.type === "Identifier" && astString(property, "name") === "url";
+}
+
+/** Whether `node` is the identifier `name`, or a member expression ending in
+ * `.name` — covers both `serviceWorker.register(...)` and
+ * `navigator.serviceWorker.register(...)`. */
+function endsWithProperty(node: unknown, name: string): boolean {
+  if (!isAstNode(node)) return false;
+  if (node.type === "Identifier") return astString(node, "name") === name;
+  if (node.type === "MemberExpression") {
+    const property = astChild(node, "property");
+    return isAstNode(property) && property.type === "Identifier" && astString(property, "name") === name;
+  }
+  return false;
+}
+
+// Finding 3's stance: a property assignment (`X.src = lit`) or
+// `X.setAttribute("src", lit)` only counts as a real browser-consumed
+// reference when X is PROVABLY a DOM element — the result of
+// document.createElement/querySelector/getElementById/body/head, or a
+// variable assigned from one. An unprovable receiver (`el.src = lit` where
+// `el` came from nowhere traceable, or any other object entirely) is
+// excluded. For a share manifest, under-inclusion breaks a share visibly (a
+// missing asset 404s in the open tab); over-inclusion discloses a file
+// silently. Unprovable consumption stays out.
+const DOM_PRODUCING_CALL_NAMES = new Set(["createElement", "querySelector", "getElementById"]);
+const DOM_PRODUCING_MEMBER_NAMES = new Set(["body", "head"]);
+const URL_RECEIVER_PROPERTIES = new Set(["src", "href", "poster"]);
+
+function isDocumentReceiver(node: unknown): boolean {
+  if (!isAstNode(node)) return false;
+  if (node.type === "Identifier") return astString(node, "name") === "document";
+  if (node.type === "MemberExpression") {
+    const property = astChild(node, "property");
+    return isAstNode(property) && property.type === "Identifier" && astString(property, "name") === "document";
+  }
+  return false;
+}
+
+function isDomProducingExpression(node: unknown, provenNames: ReadonlySet<string>): boolean {
+  if (!isAstNode(node)) return false;
+  if (node.type === "CallExpression") {
+    const callee = astChild(node, "callee");
+    if (!isAstNode(callee) || callee.type !== "MemberExpression") return false;
+    const object = astChild(callee, "object");
+    const property = astChild(callee, "property");
+    return (
+      isDocumentReceiver(object) &&
+      isAstNode(property) &&
+      property.type === "Identifier" &&
+      DOM_PRODUCING_CALL_NAMES.has(astString(property, "name") ?? "")
+    );
+  }
+  if (node.type === "MemberExpression") {
+    const object = astChild(node, "object");
+    const property = astChild(node, "property");
+    return (
+      isDocumentReceiver(object) &&
+      isAstNode(property) &&
+      property.type === "Identifier" &&
+      DOM_PRODUCING_MEMBER_NAMES.has(astString(property, "name") ?? "")
+    );
+  }
+  if (node.type === "Identifier") {
+    return provenNames.has(astString(node, "name") ?? "");
+  }
+  return false;
+}
+
+/** Every identifier PROVABLY bound to a DOM-producing expression somewhere
+ * in the file — a small fixed-point pass (not real lexical scoping) so a
+ * chain like `const a = document.createElement("img"); const b = a;` still
+ * resolves, without building a full scope resolver for a heuristic scanner. */
+function collectDomProducingNames(program: AstNode): Set<string> {
+  const names = new Set<string>();
+  for (let pass = 0; pass < 3; pass += 1) {
+    let changed = false;
+    walkAst(program, (node) => {
+      let target: unknown;
+      let source: unknown;
+      if (node.type === "VariableDeclarator") {
+        target = astChild(node, "id");
+        source = astChild(node, "init");
+      } else if (node.type === "AssignmentExpression" && node.operator === "=") {
+        target = astChild(node, "left");
+        source = astChild(node, "right");
+      } else {
+        return;
+      }
+      if (!isAstNode(target) || target.type !== "Identifier") return;
+      const name = astString(target, "name");
+      if (!name || names.has(name)) return;
+      if (isDomProducingExpression(source, names)) {
+        names.add(name);
+        changed = true;
+      }
+    });
+    if (!changed) break;
+  }
+  return names;
+}
+
+// A worker script (reached via Worker/SharedWorker/serviceWorker.register)
+// runs in its own global scope where importScripts exists; an ordinary
+// document-linked script never has it. Finding 4: importScripts only counts
+// in that context.
+type JsScanContext = "document" | "worker";
+
+function parseJavaScript(code: string): AstNode | null {
+  const acornOptions = { ecmaVersion: "latest" as const };
+  try {
+    return acorn.parse(code, { ...acornOptions, sourceType: "module" }) as unknown as AstNode;
+  } catch {
+    try {
+      return acorn.parse(code, { ...acornOptions, sourceType: "script" }) as unknown as AstNode;
+    } catch {
+      // Not parseable JS — scan nothing rather than guess. The old
+      // regex-based scanner would still match patterns in garbage text; a
+      // real parser correctly finds no code to have references at all.
+      return null;
+    }
+  }
+}
+
+function jsReferencesFromCode(code: string, context: JsScanContext): BrowserTextReference[] {
+  const program = parseJavaScript(code);
+  if (!program) return [];
+  const provenDomNames = collectDomProducingNames(program);
+  const references: BrowserTextReference[] = [];
+  const addReference = (value: string | undefined, documentRelative: boolean, entersOwnContext = false) => {
+    const trimmed = value?.trim();
+    if (trimmed) references.push({ value: trimmed, documentRelative, entersOwnContext });
+  };
+
+  walkAst(program, (node) => {
+    switch (node.type) {
+      case "ImportDeclaration":
+      case "ExportNamedDeclaration":
+      case "ExportAllDeclaration": {
+        addReference(stringLiteralValue(astChild(node, "source")), false);
+        break;
+      }
+      case "ImportExpression": {
+        addReference(stringLiteralValue(astChild(node, "source")), false);
+        break;
+      }
+      case "NewExpression": {
+        const callee = astChild(node, "callee");
+        const args = astChildren(node, "arguments");
+        if (!isAstNode(callee) || callee.type !== "Identifier") break;
+        const calleeName = astString(callee, "name");
+        if (calleeName === "URL" && args.length >= 2) {
+          const first = stringLiteralValue(args[0]);
+          if (first && isImportMetaUrl(args[1])) addReference(first, false);
+        } else if (calleeName === "Worker" || calleeName === "SharedWorker") {
+          addReference(stringLiteralValue(args[0]), true, true);
+        }
+        break;
+      }
+      case "CallExpression": {
+        const callee = astChild(node, "callee");
+        const args = astChildren(node, "arguments");
+        if (!isAstNode(callee)) break;
+        if (callee.type === "Identifier") {
+          const calleeName = astString(callee, "name");
+          if (calleeName === "fetch") {
+            addReference(stringLiteralValue(args[0]), true);
+          } else if (calleeName === "importScripts" && context === "worker") {
+            for (const argument of args) addReference(stringLiteralValue(argument), false);
+          }
+        } else if (callee.type === "MemberExpression") {
+          const property = astChild(callee, "property");
+          const object = astChild(callee, "object");
+          const propertyName =
+            isAstNode(property) && property.type === "Identifier" ? astString(property, "name") : undefined;
+          if (propertyName === "register" && endsWithProperty(object, "serviceWorker")) {
+            addReference(stringLiteralValue(args[0]), true);
+          } else if (propertyName === "setAttribute" && args.length >= 2) {
+            const attributeName = stringLiteralValue(args[0]);
+            if (
+              attributeName &&
+              URL_RECEIVER_PROPERTIES.has(attributeName) &&
+              isDomProducingExpression(object, provenDomNames)
+            ) {
+              addReference(stringLiteralValue(args[1]), true);
+            }
+          }
+        }
+        break;
+      }
+      case "AssignmentExpression": {
+        if (node.operator !== "=") break;
+        const left = astChild(node, "left");
+        if (!isAstNode(left) || left.type !== "MemberExpression") break;
+        const property = astChild(left, "property");
+        const object = astChild(left, "object");
+        const propertyName =
+          isAstNode(property) && property.type === "Identifier" ? astString(property, "name") : undefined;
+        if (
+          propertyName &&
+          URL_RECEIVER_PROPERTIES.has(propertyName) &&
+          isDomProducingExpression(object, provenDomNames)
+        ) {
+          addReference(stringLiteralValue(astChild(node, "right")), true);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  });
+  return references;
+}
+
+// ---- HTML: parse once with parse5 and walk the real tree.
+
+function htmlReferencesFromDocument(document: Html5Node, context: JsScanContext): BrowserTextReference[] {
+  const attributeReferences: BrowserTextReference[] = [];
+  const cssTexts: string[] = [];
+  const jsTexts: string[] = [];
+
+  const visit = (node: Html5Node): void => {
+    if (isHtml5Element(node)) {
+      const tagName = node.tagName;
+      const attrs = new Map(node.attrs.map((attribute) => [attribute.name, attribute.value]));
+      // A <script>/<style>'s own URL attributes (src, ...) still count — this
+      // runs for every element, script and style included — but their raw
+      // text content is code or CSS, never markup, so it's collected
+      // separately below and neither recurses into its (raw-text) children.
+      const styleAttribute = attrs.get("style");
+      if (styleAttribute) cssTexts.push(styleAttribute);
+      for (const attribute of node.attrs) {
+        // Inline on* handlers hold real JS the browser executes, same as a
+        // <script> body — parse5 already decoded any entity in the value.
+        if (/^on[a-z]+$/i.test(attribute.name)) jsTexts.push(attribute.value);
+      }
+      for (const attribute of node.attrs) {
+        const attributeName = attribute.name;
+        if (!URL_ATTRIBUTE_ELEMENTS[attributeName]?.has(tagName)) continue;
+        if (attributeName === "src" && tagName === "input" && !isImageInputElement(attrs)) continue;
+        if (
+          attributeName === "href" &&
+          tagName === "link" &&
+          !isResourceConsumingLinkRel(attrs.get("rel"), attrs.has("as"))
+        ) continue;
+        if (attributeName !== "srcset") {
+          attributeReferences.push({ value: attribute.value, documentRelative: true });
+          continue;
+        }
+        for (const srcsetValue of referencesFromSrcset(attribute.value)) {
+          attributeReferences.push({ value: srcsetValue, documentRelative: true });
+        }
+      }
+      if (tagName === "script") {
+        if (isExecutableScriptElement(attrs)) jsTexts.push(html5TextContent(node));
+        return;
+      }
+      if (tagName === "style") {
+        cssTexts.push(html5TextContent(node));
+        return;
+      }
+    }
+    for (const child of html5ChildNodes(node)) visit(child);
+  };
+  visit(document);
+
+  return [
+    ...attributeReferences,
+    ...cssReferences(cssTexts.join("\n")),
+    ...jsReferencesFromCode(jsTexts.join("\n"), context),
+  ];
+}
+
+/** Every reference in a non-HTML file — HTML is scanned from its already-
+ * parsed tree instead (htmlReferencesFromDocument), so shareManifestForSite
+ * only parses each HTML document once. */
+function referencesFromNonHtmlFile(
+  text: string,
+  sourcePath: string,
+  context: JsScanContext,
+): BrowserTextReference[] {
   if (/\.webmanifest$/i.test(sourcePath)) {
     // A web app manifest's URLs (icons, start_url, ...) resolve relative to
     // the MANIFEST file itself, not the document that links it — the same
     // rule CSS's url()/@import already follow. Not document-relative.
     return referencesFromWebManifest(text).map((value) => ({ value, documentRelative: false }));
   }
-  const references: BrowserTextReference[] = [];
-  const isHtml = /\.html?$/i.test(sourcePath);
-  const scanText = isHtml ? blankHtmlComments(text) : text;
-  const rawText = isHtml ? extractHtmlRawText(scanText) : null;
-  const attributeText = rawText ? rawText.blanked.replace(/<base\b[^>]*>/gi, "") : scanText;
-  const htmlTags = isHtml ? openingHtmlTags(attributeText) : [];
-  const addMatches = (
-    input: string,
-    pattern: RegExp,
-    documentRelative: boolean,
-    entersOwnContext = false,
-  ) => {
-    for (const match of input.matchAll(pattern)) {
-      const value = (match[1] ?? match[2] ?? match[3])?.trim();
-      if (value) references.push({ value, documentRelative, entersOwnContext });
-    }
-  };
-
-  if (isHtml) {
-    // A real attribute name starts at whitespace after the tag name — never
-    // `\b`, which also matches inside a hyphenated name like data-src.
-    const attribute = /\s(src|href|poster|data|srcset)\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^\s"'=<>`]{1,2048}))/gi;
-    for (const tag of htmlTags) {
-      const tagName = /^<([A-Za-z][A-Za-z0-9-]*)/.exec(tag)?.[1]?.toLowerCase();
-      if (!tagName) continue;
-      for (const match of tag.matchAll(attribute)) {
-        const attributeName = match[1]!.toLowerCase();
-        // A URL attribute means a request only on the elements the HTML spec
-        // actually fires it from — a <div data="..."> never fetches "data".
-        if (!URL_ATTRIBUTE_ELEMENTS[attributeName]?.has(tagName)) continue;
-        if (attributeName === "src" && tagName === "input" && !isImageInputTag(tag)) continue;
-        const rawValue = (match[2] ?? match[3] ?? match[4])?.trim();
-        if (!rawValue) continue;
-        const value = decodeHtmlEntities(rawValue);
-        if (attributeName !== "srcset") {
-          references.push({ value, documentRelative: true });
-          continue;
-        }
-        for (const srcsetValue of referencesFromSrcset(value)) {
-          references.push({ value: srcsetValue, documentRelative: true });
-        }
-      }
-    }
-  }
-
-  if (isHtml) {
-    // CSS syntax only means something inside a real <style> element or a
-    // style="" attribute — the same way a browser's CSS parser never reads
-    // the rest of the document. An external .css file below is entirely CSS
-    // by definition, so it keeps scanning its whole text.
-    const cssText = [
-      ...(rawText?.styleContents ?? []),
-      ...styleAttributeValues(htmlTags),
-    ].join("\n");
-    addMatches(cssText, CSS_URL_PATTERN, false);
-    addMatches(cssText, CSS_IMPORT_PATTERN, false);
-  } else if (/\.css$/i.test(sourcePath)) {
-    addMatches(scanText, CSS_URL_PATTERN, false);
-    addMatches(scanText, CSS_IMPORT_PATTERN, false);
-  }
-
-  if (isHtml) {
-    // Likewise, JS syntax only means something inside a real <script>
-    // element the browser executes, or an inline on* event-handler
-    // attribute — plain document text that happens to look like an import
-    // statement is not code a browser ever executes.
-    const jsText = [
-      ...(rawText?.scriptContents ?? []),
-      ...eventHandlerAttributeValues(htmlTags),
-    ].join("\n");
-    addMatches(jsText, JS_STATIC_IMPORT_PATTERN, false);
-    addMatches(jsText, JS_DYNAMIC_IMPORT_PATTERN, false);
-    addMatches(jsText, JS_NEW_URL_PATTERN, false);
-    addMatches(jsText, JS_FETCH_PATTERN, true);
-    addMatches(jsText, JS_WORKER_PATTERN, true, true);
-    addMatches(jsText, JS_SERVICE_WORKER_PATTERN, true, true);
-    addMatches(jsText, JS_PROPERTY_ASSIGNMENT_PATTERN, true);
-    addMatches(jsText, JS_SET_ATTRIBUTE_PATTERN, true);
-    for (const value of importScriptsReferences(jsText)) {
-      references.push({ value, documentRelative: false });
-    }
-  } else if (/\.(?:js|mjs)$/i.test(sourcePath)) {
-    addMatches(scanText, JS_STATIC_IMPORT_PATTERN, false);
-    addMatches(scanText, JS_DYNAMIC_IMPORT_PATTERN, false);
-    addMatches(scanText, JS_NEW_URL_PATTERN, false);
-    addMatches(scanText, JS_FETCH_PATTERN, true);
-    addMatches(scanText, JS_WORKER_PATTERN, true, true);
-    addMatches(scanText, JS_SERVICE_WORKER_PATTERN, true, true);
-    addMatches(scanText, JS_PROPERTY_ASSIGNMENT_PATTERN, true);
-    addMatches(scanText, JS_SET_ATTRIBUTE_PATTERN, true);
-    for (const value of importScriptsReferences(scanText)) {
-      references.push({ value, documentRelative: false });
-    }
-  }
-  return references;
+  if (/\.css$/i.test(sourcePath)) return cssReferences(text);
+  if (/\.(?:js|mjs)$/i.test(sourcePath)) return jsReferencesFromCode(text, context);
+  return [];
 }
 
 async function shareManifestForSite(
@@ -698,14 +850,17 @@ async function shareManifestForSite(
   // external .js/.mjs file has no <base> of its own, but a reference the
   // browser resolves against the DOCUMENT's base (fetch, an assignment-
   // shaped src/href) must still use the document that linked it, including
-  // that document's own <base href> (not a blanket artifact root).
-  const queue: Array<{ path: string; documentBase: HtmlBaseResolution }> = [
-    { path: entryPath, documentBase: { kind: "none" } },
+  // that document's own <base href> (not a blanket artifact root). context
+  // carries whether the file being scanned runs as an ordinary document
+  // script or as a worker's own global scope (importScripts only exists,
+  // and only counts, in the latter).
+  const queue: Array<{ path: string; documentBase: HtmlBaseResolution; context: JsScanContext }> = [
+    { path: entryPath, documentBase: { kind: "none" }, context: "document" },
   ];
   let scannedBytes = 0;
   while (queue.length > 0) {
-    const { path: current, documentBase: inheritedDocumentBase } = queue.shift()!;
-    const scanKey = `${current}::${documentBaseKey(inheritedDocumentBase)}`;
+    const { path: current, documentBase: inheritedDocumentBase, context } = queue.shift()!;
+    const scanKey = `${current}::${documentBaseKey(inheritedDocumentBase)}::${context}`;
     if (scanned.has(scanKey) || !/\.(?:html?|css|js|mjs|webmanifest)$/i.test(current)) continue;
     scanned.add(scanKey);
     try {
@@ -724,8 +879,11 @@ async function shareManifestForSite(
       }
       const text = await readFile(join(rootPath, current), "utf8");
       const isHtmlFile = /\.html?$/i.test(current);
-      const base = isHtmlFile
-        ? htmlBaseDirectory(text, current, artifactRoot)
+      // Parse each HTML file exactly once — both its <base> and its
+      // reference scan read the same tree.
+      const htmlDocument = isHtmlFile ? parseHtml(text) : null;
+      const base = htmlDocument
+        ? htmlBaseDirectoryFromDocument(htmlDocument, current, artifactRoot)
         : { kind: "none" as const };
       // A non-HTML file has no <base> of its own to declare, so it keeps the
       // document base of whichever HTML page referred to it. "none" means
@@ -733,12 +891,15 @@ async function shareManifestForSite(
       // correct while that referring file IS the document being scanned —
       // normalize it to this document's own directory before it can outlive
       // that scan and get applied to a different (script) file's fromPath.
-      const documentBase: HtmlBaseResolution = isHtmlFile
+      const documentBase: HtmlBaseResolution = htmlDocument
         ? base.kind === "none"
           ? { kind: "local", directory: posix.dirname(current) }
           : base
         : inheritedDocumentBase;
-      for (const reference of referencesFromBrowserText(text, current)) {
+      const references = htmlDocument
+        ? htmlReferencesFromDocument(htmlDocument, context)
+        : referencesFromNonHtmlFile(text, current, context);
+      for (const reference of references) {
         const referenceBase = reference.documentRelative ? documentBase : base;
         for (const target of localReferenceCandidates(
           reference.value,
@@ -750,11 +911,13 @@ async function shareManifestForSite(
           approved.add(target);
           // A Worker/service-worker target runs in its own global scope with
           // its own location, so what IT references resolves against ITS OWN
-          // directory, not the document that launched it.
+          // directory, not the document that launched it — and it, and
+          // everything it further references, scans in worker context.
           const propagatedDocumentBase: HtmlBaseResolution = reference.entersOwnContext
             ? { kind: "local", directory: posix.dirname(target) }
             : documentBase;
-          queue.push({ path: target, documentBase: propagatedDocumentBase });
+          const propagatedContext: JsScanContext = reference.entersOwnContext ? "worker" : context;
+          queue.push({ path: target, documentBase: propagatedDocumentBase, context: propagatedContext });
         }
       }
     } catch {
@@ -772,6 +935,21 @@ async function shareManifestForSite(
       reason: "file-count",
       limitFiles: MAX_SHARE_MANIFEST_FILES,
       observedFiles: files.length,
+    };
+  }
+  // The relay's own selector refuses any path over this bound at share-create
+  // time (packages/security-contract's shareSelector, the same rule
+  // isShareablePath enforces reading it back) — catching it here turns what
+  // would otherwise be a failed share OPERATION into an ordinary per-site
+  // refusal, the same shape every other manifest limit already returns.
+  const overLongPath = files.find((path) => path.length > MAX_SHARE_PATH_CHARS);
+  if (overLongPath) {
+    return {
+      ok: false,
+      reason: "path-too-long",
+      limitChars: MAX_SHARE_PATH_CHARS,
+      observedChars: overLongPath.length,
+      path: overLongPath,
     };
   }
   return {
@@ -882,15 +1060,28 @@ async function mapWorkspaceSite(
   };
 }
 
+/**
+ * A metadata file's content, bounded the same way sourceForFile bounds it at
+ * detection time — this is a SEPARATE read of the same file (scripts are
+ * derived independently from site detection), so it needs its own guard.
+ * `sourceForFile` already recorded the site's metadata-too-large diagnostic;
+ * this one just silently declines to read rather than duplicating it.
+ */
+async function readBoundedMetadataFile(absolutePath: string): Promise<string | null> {
+  const info = await stat(absolutePath);
+  if (info.size > MAX_METADATA_FILE_BYTES) return null;
+  return readFile(absolutePath, "utf8");
+}
+
 async function packageScriptsForSite(
   rootPath: string,
   packagePath: string | null,
 ): Promise<Record<string, string>> {
   if (!packagePath) return {};
   try {
-    const parsed: unknown = JSON.parse(
-      await readFile(join(rootPath, packagePath), "utf8"),
-    );
+    const body = await readBoundedMetadataFile(join(rootPath, packagePath));
+    if (body === null) return {};
+    const parsed: unknown = JSON.parse(body);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const scripts = (parsed as Record<string, unknown>).scripts;
     if (!scripts || typeof scripts !== "object" || Array.isArray(scripts)) return {};
@@ -915,10 +1106,9 @@ async function configuredScriptsForSite(rootPath: string, site: WorkspaceSite): 
     return {};
   }
   try {
-    const parsed = parseDohcSiteConfig(
-      await readFile(join(rootPath, site.configPath), "utf8"),
-      site.configPath,
-    );
+    const body = await readBoundedMetadataFile(join(rootPath, site.configPath));
+    if (body === null) return {};
+    const parsed = parseDohcSiteConfig(body, site.configPath);
     const scripts: SiteScripts = {};
     const preview = parsed.config?.preview;
     if (preview?.command) {
@@ -942,11 +1132,36 @@ function hasTraversalSegment(relativePath: string): boolean {
   return relativePath.replaceAll("\\", "/").split("/").includes("..");
 }
 
+// A healthy package.json or dohc.json — even a large monorepo root listing
+// hundreds of dependencies — measures in the tens of kilobytes. 1 MiB stays
+// generous well past that while bounding how much a single metadata file can
+// cost to read and parse. The number of such files in a workspace is bounded
+// by the number of real projects a user has (not attacker-controlled fan-out
+// the way file CONTENT is), so a concurrency cap on top of this byte bound
+// would be machinery without a matching cost to bound.
+const MAX_METADATA_FILE_BYTES = 1024 * 1024;
+
 async function sourceForFile(rootPath: string, path: string): Promise<string | WorkspaceSiteSource> {
   const name = posix.basename(path);
   if (name !== "package.json" && name !== "dohc.json") return path;
+  const absolute = join(rootPath, path);
   try {
-    return { path, body: await readFile(join(rootPath, path), "utf8") };
+    const info = await stat(absolute);
+    if (info.size > MAX_METADATA_FILE_BYTES) {
+      return {
+        path,
+        body: null,
+        diagnostics: [
+          {
+            path,
+            severity: "warning",
+            code: "metadata-too-large",
+            message: `${name} exceeds the ${MAX_METADATA_FILE_BYTES / (1024 * 1024)} MiB metadata read limit (${info.size} bytes observed) and was not read.`,
+          },
+        ],
+      };
+    }
+    return { path, body: await readFile(absolute, "utf8") };
   } catch {
     return { path, body: null };
   }

@@ -401,6 +401,22 @@ describe("discoverSites", () => {
       expect.objectContaining({ code: "title-too-long" }),
     ]);
   });
+
+  it("does not let an over-length package.json-derived title escape as the site's own title", () => {
+    const longName = "x".repeat(250);
+    const [site] = discoverSites([
+      {
+        path: "pkg/package.json",
+        body: JSON.stringify({ name: longName, dependencies: { vite: "1.0.0" } }),
+      },
+      "pkg/index.html",
+    ]);
+
+    expect(site?.title).toHaveLength(200);
+    expect(site?.diagnostics).toEqual([
+      expect.objectContaining({ code: "title-too-long" }),
+    ]);
+  });
 });
 
 describe("parseDohcSiteConfig", () => {

@@ -158,6 +158,9 @@ function shareRefusalMessage(
   if (result.reason === "file-count") {
     return `dohc found ${result.observedFiles} files for sharing. The configured limit is ${result.limitFiles} files. Remove referenced files and try again.`;
   }
+  if (result.reason === "path-too-long") {
+    return `dohc found a shared path ${result.observedChars} characters long: ${result.path}. The configured limit is ${result.limitChars} characters. Move the file to a shorter path and try again.`;
+  }
   if (result.reason === "unreadable") {
     return `dohc could not read ${result.path}. Check that the file is readable, then try again.`;
   }
