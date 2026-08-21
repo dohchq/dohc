@@ -455,27 +455,22 @@ function candidateKey(candidate: InstalledPluginRecord): string {
 
 export function overlayDoorWrittenSourceDeltas(
   baselineFiles: readonly PluginSourceFileDigest[],
-  deltas: ReadonlyMap<string, { sha256: string; seq: number }>,
+  deltas: Iterable<readonly [string, { sha256: string; seq: number }]>,
   platform: NodeJS.Platform = process.platform,
 ): PluginSourceFileDigest[] {
-  const normalize = platform === "win32"
-    ? (relPath: string): string => relPath.toLowerCase()
-    : (relPath: string): string => relPath;
   const files = new Map(
     baselineFiles.map((file) => [file.relPath, file.sha256]),
   );
-  const keyIndex = new Map(
-    [...files.keys()].map((relPath) => [normalize(relPath), relPath]),
-  );
-  for (const [relPath, delta] of deltas) {
-    const normalized = normalize(relPath);
-    const existingRelPath = keyIndex.get(normalized);
-    if (existingRelPath !== undefined) {
-      files.set(existingRelPath, delta.sha256);
-    } else {
-      files.set(relPath, delta.sha256);
-      keyIndex.set(normalized, relPath);
-    }
+  const byLowerCase = platform === "win32"
+    ? new Map([...files.keys()].map((relPath) => [relPath.toLowerCase(), relPath]))
+    : undefined;
+  for (
+    const [relPath, delta] of [...deltas].sort((a, b) => a[1].seq - b[1].seq)
+  ) {
+    const lower = relPath.toLowerCase();
+    const target = byLowerCase?.get(lower) ?? relPath;
+    files.set(target, delta.sha256);
+    byLowerCase?.set(lower, target);
   }
   return [...files].map(([relPath, sha256]) => ({ relPath, sha256 }));
 }
@@ -1561,8 +1556,7 @@ export class PluginPipeline {
     return canonicalPluginSourceHash(
       overlayDoorWrittenSourceDeltas(
         baseline.files,
-        this.doorWrittenDeltas.get(pluginId) ??
-          new Map<string, { sha256: string; seq: number }>(),
+        this.doorWrittenDeltas.get(pluginId) ?? [],
         this.options.platform,
       ),
     );

@@ -9,6 +9,13 @@
 // from the process table instead and signal each pid.
 import { execFile } from "node:child_process";
 
+function unrefDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
 export interface ProcessTableEntry {
   pid: number;
   ppid: number;
@@ -121,4 +128,33 @@ export async function killProcessTreePosix(
   }
   if (rootFailure !== undefined) throw rootFailure;
   return pids;
+}
+
+/**
+ * SIGTERM the whole POSIX process tree rooted at `pid`, wait up to
+ * `settleMs` for `settled` to resolve (or the grace period to elapse,
+ * whichever comes first), then SIGKILL the tree again, reusing the pids
+ * captured on the SIGTERM round so a descendant reparented to init
+ * between rounds is still reached. Returns once the SIGKILL round has
+ * been sent — callers still need their own bound on actual process exit.
+ */
+export async function stopProcessTreePosix(
+  pid: number,
+  settled: Promise<unknown> | (() => Promise<unknown>),
+  settleMs = 2_000,
+  onTreeKillFailure?: () => void,
+): Promise<void> {
+  let captured: readonly number[] = [];
+  try {
+    captured = await killProcessTreePosix(pid, "SIGTERM");
+  } catch {
+    onTreeKillFailure?.();
+  }
+  const settledPromise = typeof settled === "function" ? settled() : settled;
+  await Promise.race([settledPromise, unrefDelay(settleMs)]);
+  try {
+    await killProcessTreePosix(pid, "SIGKILL", { alsoSignal: captured });
+  } catch {
+    onTreeKillFailure?.();
+  }
 }

@@ -369,6 +369,21 @@ describe("overlayDoorWrittenSourceDeltas", () => {
     expect(files).toEqual([{ relPath: "src/index.ts", sha256: "bbb" }]);
   });
 
+  it("applies case-colliding Windows deltas in write order", () => {
+    const deltas = new Map<string, { sha256: string; seq: number }>();
+    deltas.set("SRC/index.ts", { sha256: "first", seq: 1 });
+    deltas.set("src/index.ts", { sha256: "second", seq: 2 });
+    deltas.set("SRC/index.ts", { sha256: "third", seq: 3 });
+
+    const files = overlayDoorWrittenSourceDeltas(
+      [{ relPath: "src/index.ts", sha256: "baseline" }],
+      deltas,
+      "win32",
+    );
+
+    expect(files).toEqual([{ relPath: "src/index.ts", sha256: "third" }]);
+  });
+
   it("keeps case-distinct POSIX paths separate", () => {
     const files = overlayDoorWrittenSourceDeltas(
       [

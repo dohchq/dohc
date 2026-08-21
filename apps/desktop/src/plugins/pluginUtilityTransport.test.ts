@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createPluginUtilityTransport } from "./pluginUtilityTransport";
 
 vi.mock("../process/posixSpawn", () => ({
-  killProcessTreePosix: vi.fn(async () => []),
+  stopProcessTreePosix: vi.fn(async () => undefined),
 }));
 
 vi.mock("../process/windowsSpawn", () => ({
