@@ -915,6 +915,8 @@ describe("EngineRelayClient", () => {
     expect(outcome).toEqual({
       status: "unchanged",
       changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     });
@@ -1200,6 +1202,8 @@ describe("EngineRelayClient", () => {
     ).resolves.toEqual({
       status: "updated",
       changedPaths: 1,
+      excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     });
@@ -1237,6 +1241,8 @@ describe("EngineRelayClient", () => {
     ).resolves.toEqual({
       status: "unchanged",
       changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     });
@@ -1316,6 +1322,8 @@ describe("EngineRelayClient", () => {
     ).resolves.toEqual({
       status: "ended",
       changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     });

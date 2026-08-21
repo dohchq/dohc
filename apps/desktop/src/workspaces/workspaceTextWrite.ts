@@ -7,7 +7,11 @@ import {
   type WorkspaceTextReadResult,
   type WorkspaceTextWriteResult,
 } from "./workspaceAssets";
-import { materializeSharedViewPaths } from "./sharedView";
+import {
+  clearPendingMaterializationPaths,
+  materializeSharedViewPaths,
+  writePendingMaterializationPaths,
+} from "./sharedView";
 import {
   shareViewTakesLocalWrites,
   type ShareViewWriteScope,
@@ -104,12 +108,14 @@ async function writeShareViewText(input: {
     // share's pull uses: a share view's disk writes keep the realpath
     // containment that module owns, and the bytes on disk come from the store
     // rather than from a second copy of the text.
+    await writePendingMaterializationPaths(input.rootPath, [path.normalized]);
     await materializeSharedViewPaths(
       input.rootPath,
       input.workspaceId,
       [{ path: path.normalized, operation: "write", contentKind: "text" }],
       store,
     );
+    await clearPendingMaterializationPaths(input.rootPath, [path.normalized]);
     return {
       status: "written",
       contentHash: createHash("sha256").update(input.text).digest("hex"),

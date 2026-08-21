@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -12,7 +13,11 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
-import { materializeSharedViewPaths } from "./sharedView";
+import {
+  captureSharedViewLocalDivergence,
+  materializeSharedViewPaths,
+  withShareViewRefreshLifecycleLock,
+} from "./sharedView";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
@@ -22,6 +27,7 @@ import {
   routeWorkspacePathDelete,
   routeWorkspacePathMove,
 } from "./workspaceFileOps";
+import { routeWorkspaceTextWrite } from "./workspaceTextWrite";
 
 // The four remaining writes a share view admits (#802), driven the way
 // `shareViewTextWrite.e2e.test.ts` drives the text save.
@@ -212,6 +218,77 @@ async function exists(path: string): Promise<boolean> {
 
 describe("share-view file operations through the real store", () => {
   it.skipIf(engine.missing)(
+    "journals out-of-app and in-app edits for the same submit lane",
+    async () => {
+      const view = await harness("dohc-share-outside-edit-", "edit");
+      const outsidePath = "docs/outside.md";
+      const inAppPath = "docs/in-app.md";
+      await seedSharedFiles(view, [
+        { path: outsidePath, text: "outside before\n" },
+        { path: inAppPath, text: "in-app before\n" },
+      ]);
+      await writeFile(join(view.rootPath, outsidePath), "outside after\n", "utf8");
+
+      const beforeOutside = replicationLogRows(view.rootPath);
+      await expect(
+        captureSharedViewLocalDivergence(
+          view.rootPath,
+          view.workspaceId,
+          view.store,
+        ),
+      ).resolves.toEqual({
+        capturedPaths: 1,
+        repairedPaths: 0,
+        unjournalablePaths: [],
+      });
+      const afterOutside = replicationLogRows(view.rootPath);
+      const outsideRows = afterOutside - beforeOutside;
+      expect(outsideRows).toBeGreaterThan(0);
+      const outsideSummary = (
+        await view.store.listMoments({ workspaceId: view.workspaceId, limit: 200 })
+      ).moments.find(
+        (moment) =>
+          moment.path === outsidePath && moment.metadata.origin === "local-file",
+      );
+      expect(outsideSummary?.metadata.origin).toBe("local-file");
+      const outsideMoment = outsideSummary
+        ? await view.store.getMoment({
+            workspaceId: view.workspaceId,
+            momentId: outsideSummary.id,
+          })
+        : null;
+      expect(outsideMoment?.payload.after.text).toBe("outside after\n");
+
+      const result = await routeWorkspaceTextWrite({
+        ...scope(view),
+        relativePath: inAppPath,
+        text: "in-app after\n",
+        expectedContentHash: createHash("sha256")
+          .update("in-app before\n")
+          .digest("hex"),
+      });
+      expect(result.status).toBe("written");
+      const inAppRows = replicationLogRows(view.rootPath) - afterOutside;
+      expect(inAppRows).toBe(outsideRows);
+      const inAppSummary = (
+        await view.store.listMoments({ workspaceId: view.workspaceId, limit: 200 })
+      ).moments.find(
+        (moment) =>
+          moment.path === inAppPath && moment.metadata.origin === "local-file",
+      );
+      expect(inAppSummary?.metadata.origin).toBe("local-file");
+      const inAppMoment = inAppSummary
+        ? await view.store.getMoment({
+            workspaceId: view.workspaceId,
+            momentId: inAppSummary.id,
+          })
+        : null;
+      expect(inAppMoment?.payload.after.text).toBe("in-app after\n");
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
     "makes a recipient's new file a proposable moment, not just a file",
     async () => {
       const view = await harness("dohc-share-create-", "edit");
@@ -286,6 +363,97 @@ describe("share-view file operations through the real store", () => {
         readFile(join(view.rootPath, "docs", "renamed.md"), "utf8"),
       ).resolves.toBe("granter\n");
       expect(await exists(join(view.rootPath, "docs", "note.md"))).toBe(false);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "keeps refresh capture outside a rename's store-to-projection gap",
+    async () => {
+      const view = await harness("dohc-share-rename-capture-race-", "edit");
+      const fromPath = "docs/note.md";
+      const toPath = "docs/renamed.md";
+      await seedSharedFiles(view, [{ path: fromPath, text: "granter\n" }]);
+
+      let signalStoreRenamed!: () => void;
+      const storeRenamed = new Promise<void>((resolve) => {
+        signalStoreRenamed = resolve;
+      });
+      let releaseRename!: () => void;
+      const holdRename = new Promise<void>((resolve) => {
+        releaseRename = resolve;
+      });
+      const pausedStore = new Proxy(view.store, {
+        get(target, property, receiver) {
+          const value = Reflect.get(target, property, receiver) as unknown;
+          if (property !== "renameTextFile" || typeof value !== "function") {
+            return value;
+          }
+          return async (...args: unknown[]) => {
+            const result = await (value as (...inner: unknown[]) => unknown).apply(
+              target,
+              args,
+            );
+            signalStoreRenamed();
+            await holdRename;
+            return result;
+          };
+        },
+      }) as CaptureVersionedTextStore;
+
+      const moving = routeWorkspacePathMove({
+        ...scope(view),
+        fromPath,
+        toPath,
+        shareViewStore: () => pausedStore,
+      });
+      await storeRenamed;
+
+      let captureEnteredGap = false;
+      const capturing = withShareViewRefreshLifecycleLock(view.rootPath, async () => {
+        captureEnteredGap = true;
+        return captureSharedViewLocalDivergence(
+          view.rootPath,
+          view.workspaceId,
+          view.store,
+        );
+      });
+      for (let turn = 0; turn < 20 && !captureEnteredGap; turn += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      const captureStartedBeforeProjection = captureEnteredGap;
+
+      releaseRename();
+      await moving;
+      const captured = await capturing;
+
+      expect(
+        captureStartedBeforeProjection,
+        "MUTATION: removing the mutation's lifecycle lock lets capture observe the renamed store before its projection",
+      ).toBe(false);
+      expect(captured).toEqual({
+        capturedPaths: 0,
+        repairedPaths: 0,
+        unjournalablePaths: [],
+      });
+      expect(await storePaths(view)).toEqual([toPath]);
+      expect(await exists(join(view.rootPath, fromPath))).toBe(false);
+      await expect(readFile(join(view.rootPath, toPath), "utf8")).resolves.toBe(
+        "granter\n",
+      );
+
+      const destinationMoments = (
+        await view.store.listMoments({ workspaceId: view.workspaceId, limit: 200 })
+      ).moments
+        .filter(
+          (moment) =>
+            moment.path === toPath && moment.metadata.origin === "local-file",
+        )
+        .map((moment) => moment.operation);
+      expect(
+        destinationMoments,
+        "MUTATION: capture in the rename gap journals a delete on top of the destination",
+      ).toEqual(["rename"]);
     },
     60_000,
   );
@@ -456,6 +624,49 @@ describe("share-view file operations through the real store", () => {
         readFile(join(view.rootPath, outcome.imported[0]!), "utf8"),
       ).resolves.toBe("imported\n");
       expect(await storePaths(view)).toContain("docs/Note.md");
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "reserves an absent projection's store name without regard to case",
+    async () => {
+      const view = await harness("dohc-share-import-store-case-", "edit");
+      const main = await view.store.ensureMainVersion({
+        workspaceId: view.workspaceId,
+      });
+      await view.store.writeTextFile({
+        workspaceId: view.workspaceId,
+        versionId: main.id,
+        path: "docs/Note.md",
+        text: "granter\n",
+        metadata: { origin: "sync" },
+      });
+      await mkdir(join(view.rootPath, "docs"), { recursive: true });
+      const sourceDir = await createTestScratch("dohc-share-import-store-case-src-");
+      roots.push(sourceDir);
+      const source = join(sourceDir, "note.md");
+      await writeFile(source, "imported\n", "utf8");
+
+      const outcome = await routeWorkspaceFileImport({
+        ...scope(view),
+        absolutePaths: [source],
+        screenAgainstRoots: null,
+        targetDir: "docs",
+      });
+
+      expect(
+        outcome,
+        "MUTATION: exact-case store lookup accepts a second engine path for the same physical name",
+      ).toEqual({ imported: ["docs/note (2).md"], skipped: 0 });
+      expect(await storePaths(view)).toEqual([
+        "docs/Note.md",
+        "docs/note (2).md",
+      ]);
+      expect(await exists(join(view.rootPath, "docs", "Note.md"))).toBe(false);
+      await expect(
+        readFile(join(view.rootPath, "docs", "note (2).md"), "utf8"),
+      ).resolves.toBe("imported\n");
     },
     60_000,
   );
@@ -921,6 +1132,51 @@ describe("share-view file operations through the real store", () => {
         readFile(join(view.rootPath, "docs", "picture.png")),
       ).resolves.toEqual(Buffer.from([0x89, 0x50, 0x00, 0x01]));
       expect(await exists(join(view.rootPath, "docs", "folder"))).toBe(false);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "repairs an import whose store write landed before materialization failed",
+    async () => {
+      const view = await harness("dohc-share-import-repair-", "edit");
+      const sourceDir = await createTestScratch("dohc-share-import-repair-src-");
+      roots.push(sourceDir);
+      const source = join(sourceDir, "interrupted.md");
+      await writeFile(source, "imported body\n", "utf8");
+      await mkdir(join(view.rootPath, "docs"), { recursive: true });
+      const failingStore: CaptureVersionedTextStore = {
+        ...view.store,
+        async readTextFile() {
+          throw new Error("projection materialization failed");
+        },
+      };
+
+      await expect(
+        routeWorkspaceFileImport({
+          ...scope(view),
+          shareViewStore: () => failingStore,
+          absolutePaths: [source],
+          screenAgainstRoots: null,
+          targetDir: "docs",
+        }),
+      ).rejects.toThrow("projection materialization failed");
+
+      await expect(
+        captureSharedViewLocalDivergence(
+          view.rootPath,
+          view.workspaceId,
+          view.store,
+        ),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
+      await expect(
+        readFile(join(view.rootPath, "docs", "interrupted.md"), "utf8"),
+      ).resolves.toBe("imported body\n");
+      expect(await storePaths(view)).toContain("docs/interrupted.md");
     },
     60_000,
   );

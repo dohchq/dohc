@@ -14,7 +14,6 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 // and the relay's shareFilter already read it from here.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
-  MAX_VERSIONED_BINARY_FILE_BYTES,
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
   type SecretFileComparePage,
@@ -79,6 +78,14 @@ import {
   type CaptureTextFileMetadata,
   type CaptureVersionedTextStore,
 } from "./workspaceEngineCaptureLiveStore";
+import {
+  MAX_ENGINE_CAPTURE_BINARY_BYTES,
+  MAX_ENGINE_CAPTURE_TEXT_BYTES,
+} from "./workspaceEngineCaptureLimits";
+export {
+  MAX_ENGINE_CAPTURE_BINARY_BYTES,
+  MAX_ENGINE_CAPTURE_TEXT_BYTES,
+} from "./workspaceEngineCaptureLimits";
 
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
 
@@ -175,9 +182,6 @@ export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
 // which a daemon that never fails never enters.
 export const YDOC_OPEN_RETRY_DEADLINE_MS =
   2 * (WORKSPACE_OPEN_DEADLINE_MS + TRANSPORT_REBIND_MAX_BACKOFF_MS);
-export const MAX_ENGINE_CAPTURE_TEXT_BYTES = 10 * 1024 * 1024;
-export const MAX_ENGINE_CAPTURE_BINARY_BYTES = MAX_VERSIONED_BINARY_FILE_BYTES;
-
 export interface ExpectedEngineEvent {
   path: string;
   operation: "write" | "delete";
@@ -1078,7 +1082,11 @@ export type DiskTextState =
   // text cap: a Y.Doc settle is not bounded by that cap, so its own
   // materialization can land here, and the self-write check needs the same
   // sha-precise identity every other branch uses.
-  | { kind: "untracked-content"; sha256?: string }
+  | {
+      kind: "untracked-content";
+      sha256?: string;
+      reason: "oversized-text" | "oversized-binary" | "non-utf8" | "non-file";
+    }
   // Transiently unreadable (EACCES/EBUSY/...): leave engine state alone.
   | { kind: "unreadable" };
 
@@ -1141,21 +1149,35 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
     // refuse symlinks; the live watcher can still emit the symlink path
     // itself, so this shared read refuses it too.
     const info = await lstat(absolute);
-    if (info.isSymbolicLink()) return { kind: "untracked-content" };
-    if (!info.isFile()) return { kind: "untracked-content" };
+    if (info.isSymbolicLink()) {
+      return { kind: "untracked-content", reason: "non-file" };
+    }
+    if (!info.isFile()) {
+      return { kind: "untracked-content", reason: "non-file" };
+    }
     if (!isTextMediaType(mediaTypeForPath(path), path)) {
-      if (info.size > MAX_ENGINE_CAPTURE_BINARY_BYTES) return { kind: "untracked-content" };
+      if (info.size > MAX_ENGINE_CAPTURE_BINARY_BYTES) {
+        return { kind: "untracked-content", reason: "oversized-binary" };
+      }
       const bytes = await readFile(absolute);
-      if (bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES) return { kind: "untracked-content" };
+      if (bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES) {
+        return { kind: "untracked-content", reason: "oversized-binary" };
+      }
       return { kind: "binary", bytes, sha256: sha256Bytes(bytes), byteLength: bytes.byteLength };
     }
-    if (info.size > MAX_ENGINE_CAPTURE_TEXT_BYTES) return { kind: "untracked-content" };
+    if (info.size > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
+      return { kind: "untracked-content", reason: "oversized-text" };
+    }
     const bytes = await readFile(absolute);
     if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
       // Bytes in hand: carry the sha so a settle's own oversized
       // materialization is recognizable as our write. The size-only early-out
       // above cannot because it deliberately refuses to load the file.
-      return { kind: "untracked-content", sha256: sha256Bytes(bytes) };
+      return {
+        kind: "untracked-content",
+        sha256: sha256Bytes(bytes),
+        reason: "oversized-text",
+      };
     }
     const text = bytes.toString("utf8");
     // The engine only stores text that round-trips through UTF-8; anything
@@ -1165,7 +1187,11 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
         liveDocumentKindForPath(path) === "scene" ||
         bytes.length > MAX_ENGINE_CAPTURE_BINARY_BYTES
       ) {
-        return { kind: "untracked-content", sha256: sha256Bytes(bytes) };
+        return {
+          kind: "untracked-content",
+          sha256: sha256Bytes(bytes),
+          reason: "non-utf8",
+        };
       }
       return { kind: "binary", bytes, sha256: sha256Bytes(bytes), byteLength: bytes.byteLength };
     }
@@ -1186,13 +1212,23 @@ async function readDiskSecretState(rootPath: string, path: string): Promise<Disk
   const absolute = join(rootPath, path);
   try {
     const info = await lstat(absolute);
-    if (info.isSymbolicLink()) return { kind: "untracked-content" };
-    if (!info.isFile()) return { kind: "untracked-content" };
-    if (info.size > MAX_ENGINE_CAPTURE_TEXT_BYTES) return { kind: "untracked-content" };
+    if (info.isSymbolicLink()) {
+      return { kind: "untracked-content", reason: "non-file" };
+    }
+    if (!info.isFile()) {
+      return { kind: "untracked-content", reason: "non-file" };
+    }
+    if (info.size > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
+      return { kind: "untracked-content", reason: "oversized-text" };
+    }
     const bytes = await readFile(absolute);
-    if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) return { kind: "untracked-content" };
+    if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
+      return { kind: "untracked-content", reason: "oversized-text" };
+    }
     const text = bytes.toString("utf8");
-    if (!Buffer.from(text, "utf8").equals(bytes)) return { kind: "untracked-content" };
+    if (!Buffer.from(text, "utf8").equals(bytes)) {
+      return { kind: "untracked-content", reason: "non-utf8" };
+    }
     return { kind: "text", text, sha256: sha256Utf8(text) };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;

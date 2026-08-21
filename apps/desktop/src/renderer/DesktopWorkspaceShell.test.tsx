@@ -499,7 +499,9 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     ),
     submitShareChanges: vi.fn(
       async (): Promise<SubmitShareChangesResult> => ({
+        ok: true,
         submitted: 2,
+        capturedLocalChanges: 0,
         skippedOutsideShare: 0,
         morePending: false,
       }),
@@ -519,6 +521,8 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       async (): Promise<RefreshSharedViewResult> => ({
         status: "unchanged",
         changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [],
         refusedOps: 0,
         refusedDetail: null,
       }),
@@ -3580,6 +3584,8 @@ describe("ui-state merge-on-load", () => {
       pull.resolve({
         status: "updated",
         changedPaths: 1,
+        excludedPaths: [],
+        unjournalablePaths: [],
         refusedOps: 0,
         refusedDetail: null,
       });
@@ -3590,6 +3596,374 @@ describe("ui-state merge-on-load", () => {
       expect(screen.queryByTestId("tab-shared-gone.md")).toBeNull();
     });
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+  });
+
+  it("groups unjournalable files by cause and clears the notice when the share ends", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    const outcomes = [
+      {
+        status: "unchanged" as const,
+        changedPaths: 0,
+        excludedPaths: ["docs/pull-skipped.md"],
+        unjournalablePaths: [
+          { path: "docs/oversized.md", reason: "oversized-text" as const },
+          {
+            path: "docs/replaced.md",
+            reason: "non-file-replacement" as const,
+          },
+          {
+            path: "docs/local.md",
+            reason: "local-collision" as const,
+          },
+          { path: "docs/locked.md", reason: "unreadable" as const },
+        ],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+      {
+        status: "ended" as const,
+        changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [
+          { path: "docs/stale-after-end.md", reason: "unreadable" as const },
+        ],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+    ];
+    bridge.refreshSharedView = vi.fn(async () => {
+      const outcome = outcomes.shift();
+      if (!outcome) throw new Error("No refresh outcome left.");
+      return outcome;
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "edit",
+      },
+    });
+
+    const notice = await screen.findByTestId("shared-view-excluded");
+    expect(notice.className).toContain("min-w-0");
+    expect(notice.className).toContain("max-w-[280px]");
+    expect(notice.className).toContain("shrink");
+    expect(notice.className).toContain("truncate");
+    expect(notice.className).not.toContain("shrink-0");
+    expect(notice.textContent).toContain(
+      "dohc could not track changes in docs/oversized.md.",
+    );
+    expect(notice.textContent).toContain("10.0 MB text limit");
+    expect(notice.textContent).toContain("Make the file smaller, then refresh.");
+    expect(notice.textContent).toContain(
+      "dohc could not track changes in docs/replaced.md.",
+    );
+    expect(notice.textContent).toContain(
+      "A folder or another entry replaces this file.",
+    );
+    expect(notice.textContent).toContain(
+      "Restore the file or move the conflicting entry, then refresh.",
+    );
+    expect(notice.textContent).toContain(
+      "dohc could not receive docs/local.md.",
+    );
+    expect(notice.textContent).toContain(
+      "A file from this machine already uses this path.",
+    );
+    expect(notice.textContent).toContain(
+      "Move or remove the file, then refresh.",
+    );
+    expect(notice.textContent).toContain("dohc could not read docs/locked.md.");
+    expect(notice.textContent).toContain(
+      "Close anything using the file, or wait, then refresh.",
+    );
+
+    await userEvent.click(screen.getByTestId("shared-view-refresh"));
+    await waitFor(() => {
+      expect(screen.queryByTestId("shared-view-excluded")).toBeNull();
+    });
+    expect(screen.getByTestId("shared-view-banner").dataset.ended).toBe("true");
+  });
+
+  it("repaints changed files before an ended share becomes read-only", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),
+    );
+    const outcomes = [
+      {
+        status: "unchanged" as const,
+        changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+      {
+        status: "ended" as const,
+        changedPaths: 1,
+        excludedPaths: [],
+        unjournalablePaths: [],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+    ];
+    bridge.refreshSharedView = vi.fn(async () => {
+      const outcome = outcomes.shift();
+      if (!outcome) throw new Error("No refresh outcome left.");
+      return outcome;
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "edit",
+      },
+    });
+
+    await screen.findByTestId("tab-b.md");
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
+    const listCallsBeforeEnd = bridge.listWorkspaceFiles.mock.calls.length;
+    const readCallsBeforeEnd = bridge.readWorkspaceText.mock.calls.length;
+
+    await userEvent.click(screen.getByTestId("shared-view-refresh"));
+
+    let listCallsWhenEnded = 0;
+    let readCallsWhenEnded = 0;
+    await waitFor(() => {
+      expect(screen.getByTestId("shared-view-banner").dataset.ended).toBe("true");
+      listCallsWhenEnded = bridge.listWorkspaceFiles.mock.calls.length;
+      readCallsWhenEnded = bridge.readWorkspaceText.mock.calls.length;
+    });
+    expect(listCallsWhenEnded).toBeGreaterThan(listCallsBeforeEnd);
+    expect(readCallsWhenEnded).toBeGreaterThan(readCallsBeforeEnd);
+    expect(
+      screen.queryByTestId("share-changes-send"),
+      "MUTATION: an ended share still offers changes it can no longer send",
+    ).toBeNull();
+  });
+
+  it("keeps an ended share read-only when its changed-file listing fails", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),
+    );
+    const outcomes = [
+      {
+        status: "unchanged" as const,
+        changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+      {
+        status: "ended" as const,
+        changedPaths: 1,
+        excludedPaths: [],
+        unjournalablePaths: [],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+    ];
+    bridge.refreshSharedView = vi.fn(async () => {
+      const outcome = outcomes.shift();
+      if (!outcome) throw new Error("No refresh outcome left.");
+      return outcome;
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "edit",
+      },
+    });
+
+    await screen.findByTestId("tab-b.md");
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
+    bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("listing failed"));
+
+    await userEvent.click(screen.getByTestId("shared-view-refresh"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("shared-view-banner").dataset.ended).toBe("true");
+    });
+  });
+
+  it("clears refresh loading before the durable skip-marker read settles", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
+    });
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
+
+    const registryReadsBeforeClick = bridge.getWorkspaceRegistry.mock.calls.length;
+    const registryRead = deferred<{ workspaces: unknown[] }>();
+    bridge.getWorkspaceRegistry.mockImplementationOnce(() => registryRead.promise);
+    try {
+      await userEvent.click(screen.getByTestId("shared-view-refresh"));
+      await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2));
+      await waitFor(() =>
+        expect(
+          bridge.getWorkspaceRegistry.mock.calls.length,
+          "MUTATION: refresh dropped the durable skip-marker read",
+        ).toBeGreaterThan(registryReadsBeforeClick),
+      );
+      await waitFor(() =>
+        expect(
+          (screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled,
+          "MUTATION: waiting for the skip-marker read leaves Refresh disabled",
+        ).toBe(false),
+      );
+    } finally {
+      registryRead.resolve({ workspaces: [] });
+    }
+  });
+
+  it("clears the unjournalable notice once an ordinary refresh recovers", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    const outcomes = [
+      {
+        status: "unchanged" as const,
+        changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [
+          { path: "docs/locked.md", reason: "unreadable" as const },
+        ],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+      {
+        status: "unchanged" as const,
+        changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+    ];
+    bridge.refreshSharedView = vi.fn(async () => {
+      const outcome = outcomes.shift();
+      if (!outcome) throw new Error("No refresh outcome left.");
+      return outcome;
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "edit",
+      },
+    });
+
+    await screen.findByTestId("shared-view-excluded");
+
+    await userEvent.click(screen.getByTestId("shared-view-refresh"));
+    await waitFor(() => {
+      expect(screen.queryByTestId("shared-view-excluded")).toBeNull();
+    });
+    expect(screen.getByTestId("shared-view-banner").dataset.ended).toBeUndefined();
+  });
+
+  it("keeps a late refresh from replacing the newer workspace notice", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    const first = deferred<RefreshSharedViewResult>();
+    const second = deferred<RefreshSharedViewResult>();
+    let refreshCall = 0;
+    bridge.refreshSharedView = vi.fn(() =>
+      refreshCall++ === 0 ? first.promise : second.promise,
+    );
+    const firstWorkspace: Workspace = {
+      ...WORKSPACE,
+      workspaceId: "ws-first",
+      shareView: {
+        shareId: "share-first",
+        granterEmail: "first@dohc.test",
+        access: "edit",
+      },
+    };
+    const secondWorkspace: Workspace = {
+      ...WORKSPACE,
+      workspaceId: "ws-second",
+      shareView: {
+        shareId: "share-second",
+        granterEmail: "second@dohc.test",
+        access: "edit",
+      },
+    };
+    const rendered = renderShell(bridge, firstWorkspace, [
+      firstWorkspace,
+      secondWorkspace,
+    ]);
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+
+    rendered.rerender(
+      <DesktopWorkspaceShell
+        workspace={secondWorkspace}
+        workspaces={[firstWorkspace, secondWorkspace]}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      second.resolve({
+        status: "unchanged",
+        changedPaths: 0,
+        excludedPaths: ["docs/new-pull.md"],
+        unjournalablePaths: [
+          { path: "docs/new-local.md", reason: "non-utf8" },
+        ],
+        refusedOps: 0,
+        refusedDetail: null,
+      });
+      await second.promise;
+    });
+    expect((await screen.findByTestId("shared-view-excluded")).textContent).toContain(
+      "docs/new-local.md",
+    );
+
+    await act(async () => {
+      first.resolve({
+        status: "unchanged",
+        changedPaths: 0,
+        excludedPaths: ["docs/stale-pull.md"],
+        unjournalablePaths: [
+          { path: "docs/stale-local.md", reason: "oversized-text" },
+        ],
+        refusedOps: 0,
+        refusedDetail: null,
+      });
+      await first.promise;
+    });
+    expect(screen.getByTestId("shared-view-excluded").textContent).toContain(
+      "docs/new-local.md",
+    );
+    expect(screen.getByTestId("shared-view-excluded").textContent).not.toContain(
+      "docs/stale-local.md",
+    );
   });
 
   // A refresh can record a refusal on an early page and then die on a later
@@ -3657,6 +4031,8 @@ describe("ui-state merge-on-load", () => {
       return {
         status: "unchanged" as const,
         changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [],
         refusedOps: 1,
         refusedDetail: "the share granted version main, the relay offered version other",
       };
@@ -3721,6 +4097,8 @@ describe("ui-state merge-on-load", () => {
     bridge.refreshSharedView = vi.fn(async () => ({
       status: "unchanged" as const,
       changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     }));
@@ -6330,7 +6708,9 @@ describe("shared view send changes", () => {
     const user = userEvent.setup();
     const bridge = makeShareBridge();
     bridge.submitShareChanges.mockResolvedValue({
+      ok: true,
       submitted: 1,
+      capturedLocalChanges: 0,
       skippedOutsideShare: 2,
       morePending: false,
     });
@@ -6365,12 +6745,108 @@ describe("shared view send changes", () => {
     expect(screen.getByTestId("share-changes-send").textContent).toContain("Send changes");
   });
 
+  it("repaints files changed by the submit capture", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge(
+      Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),
+    );
+    bridge.submitShareChanges.mockResolvedValue({
+      ok: true,
+      submitted: 1,
+      skippedOutsideShare: 0,
+      morePending: false,
+      capturedLocalChanges: 1,
+    });
+    renderShell(bridge, EDIT_SHARE);
+
+    await screen.findByTestId("tab-b.md");
+    await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalled());
+    const listCallsBeforeSubmit = bridge.listWorkspaceFiles.mock.calls.length;
+    const readCallsBeforeSubmit = bridge.readWorkspaceText.mock.calls.length;
+
+    await user.click(await screen.findByTestId("share-changes-send"));
+
+    await waitFor(() =>
+      expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(
+        listCallsBeforeSubmit,
+      ),
+    );
+    await waitFor(() =>
+      expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(
+        readCallsBeforeSubmit,
+      ),
+    );
+  });
+
+  it("keeps a successful submit successful when its repaint fails", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.submitShareChanges.mockResolvedValue({
+      ok: true,
+      submitted: 1,
+      skippedOutsideShare: 0,
+      morePending: false,
+      capturedLocalChanges: 1,
+    });
+    renderShell(bridge, EDIT_SHARE);
+
+    await screen.findByTestId("shared-view-banner");
+    await waitFor(() => expect(bridge.listMyShareChanges).toHaveBeenCalled());
+    const proposalReadsBeforeSubmit = bridge.listMyShareChanges.mock.calls.length;
+    bridge.listMyShareChanges.mockResolvedValue({
+      proposals: [
+        { proposalId: "proposal-1", state: "open", createdAtMs: 10, files: 1 },
+      ],
+    });
+    bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("listing failed"));
+
+    await user.click(screen.getByTestId("share-changes-send"));
+
+    await waitFor(() =>
+      expect(bridge.listMyShareChanges.mock.calls.length).toBeGreaterThan(
+        proposalReadsBeforeSubmit,
+      ),
+    );
+    expect((await screen.findByTestId("share-changes-state")).dataset.state).toBe(
+      "open",
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("repaints captured changes and reports the relay failure when send fails", async () => {
+    const user = userEvent.setup();
+    const bridge = makeShareBridge();
+    bridge.submitShareChanges.mockResolvedValue({
+      ok: false,
+      capturedLocalChanges: 1,
+      errorMessage: "relay failed",
+    });
+    renderShell(bridge, EDIT_SHARE);
+
+    await screen.findByTestId("shared-view-banner");
+    const listCallsBeforeSubmit = bridge.listWorkspaceFiles.mock.calls.length;
+    bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("listing failed"));
+
+    await user.click(screen.getByTestId("share-changes-send"));
+
+    await waitFor(() =>
+      expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(
+        listCallsBeforeSubmit,
+      ),
+    );
+    const error = await screen.findByTestId("workspace-shell-error");
+    expect(error.textContent).toContain("relay failed");
+    expect(error.textContent).not.toContain("listing failed");
+  });
+
   // Taking the changes back retires what the last submit said about them.
   it("clears the last submit's lines when the changes are taken back", async () => {
     const user = userEvent.setup();
     const bridge = makeShareBridge();
     bridge.submitShareChanges.mockResolvedValue({
+      ok: true,
       submitted: 1,
+      capturedLocalChanges: 0,
       skippedOutsideShare: 2,
       morePending: false,
     });
@@ -6401,7 +6877,9 @@ describe("shared view send changes", () => {
     const user = userEvent.setup();
     const bridge = makeShareBridge();
     bridge.submitShareChanges.mockResolvedValue({
+      ok: true,
       submitted: 500,
+      capturedLocalChanges: 0,
       skippedOutsideShare: 3,
       morePending: true,
     });
@@ -6422,7 +6900,9 @@ describe("shared view send changes", () => {
     const user = userEvent.setup();
     const bridge = makeShareBridge();
     bridge.submitShareChanges.mockResolvedValue({
+      ok: true,
       submitted: 500,
+      capturedLocalChanges: 0,
       skippedOutsideShare: 0,
       morePending: true,
     });
@@ -6475,7 +6955,9 @@ describe("shared view send changes", () => {
     const user = userEvent.setup();
     const bridge = makeShareBridge();
     bridge.submitShareChanges.mockResolvedValue({
+      ok: true,
       submitted: 0,
+      capturedLocalChanges: 0,
       skippedOutsideShare: 0,
       morePending: false,
     });
@@ -10859,6 +11341,8 @@ describe("shared view versions surface", () => {
     bridge.refreshSharedView = vi.fn(async () => ({
       status: "updated" as const,
       changedPaths: 1,
+      excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     }));

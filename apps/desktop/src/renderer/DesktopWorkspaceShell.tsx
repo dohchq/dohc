@@ -35,6 +35,7 @@ import type {
   EngineMomentDetailRecord,
   EngineMomentRecord,
   MyShareChangeRow,
+  RefreshSharedViewResult,
   ShareProposalRow,
   SyncStatusResult,
   TryInVersionRunState,
@@ -43,6 +44,11 @@ import type {
   WorkspaceFileEntry,
   WorkspaceSummary,
 } from "../ipc/bridgeContract";
+import { formatSize } from "../plugins/pluginFormat";
+import {
+  MAX_ENGINE_CAPTURE_BINARY_BYTES,
+  MAX_ENGINE_CAPTURE_TEXT_BYTES,
+} from "../workspaces/workspaceEngineCaptureLimits";
 import { DohcMark } from "@dohc/brand";
 import {
   hasUnacknowledgedShareSkips,
@@ -1340,6 +1346,78 @@ function PanelLoading({ label }: { label: string }) {
       Loading {label}...
     </div>
   );
+}
+
+type UnjournalableSharePath = RefreshSharedViewResult["unjournalablePaths"][number];
+
+function namedUnjournalablePaths(paths: readonly UnjournalableSharePath[]): string {
+  const named = paths.slice(0, 3).map((entry) => entry.path).join(", ");
+  return paths.length > 3 ? `${named}, and ${paths.length - 3} more` : named;
+}
+
+function shareUnjournalableNotice(
+  paths: readonly UnjournalableSharePath[],
+): string {
+  const groups = new Map<
+    UnjournalableSharePath["reason"],
+    UnjournalableSharePath[]
+  >();
+  for (const path of paths) {
+    const group = groups.get(path.reason) ?? [];
+    group.push(path);
+    groups.set(path.reason, group);
+  }
+  const lines: string[] = [];
+  for (const reason of [
+    "oversized-text",
+    "oversized-binary",
+    "non-utf8",
+    "non-file-replacement",
+    "local-collision",
+    "unreadable",
+  ] as const) {
+    const group = groups.get(reason);
+    if (!group || group.length === 0) continue;
+    const names = namedUnjournalablePaths(group);
+    const one = group.length === 1;
+    if (reason === "oversized-text") {
+      lines.push(
+        `dohc could not track changes in ${names}. ` +
+          `${one ? "This file is" : "These files are"} larger than the ${formatSize(MAX_ENGINE_CAPTURE_TEXT_BYTES)} text limit. ` +
+          `Make ${one ? "the file" : "the files"} smaller, then refresh.`,
+      );
+    } else if (reason === "oversized-binary") {
+      lines.push(
+        `dohc could not track changes in ${names}. ` +
+          `${one ? "This file is" : "These files are"} larger than the ${formatSize(MAX_ENGINE_CAPTURE_BINARY_BYTES)} binary limit. ` +
+          `Make ${one ? "the file" : "the files"} smaller, then refresh.`,
+      );
+    } else if (reason === "non-utf8") {
+      lines.push(
+        `dohc could not track changes in ${names}. ` +
+          `${one ? "This file is" : "These files are"} not readable as text. ` +
+          `Save ${one ? "the file" : "the files"} as UTF-8 text, then refresh.`,
+      );
+    } else if (reason === "non-file-replacement") {
+      lines.push(
+        `dohc could not track changes in ${names}. ` +
+          `${one ? "A folder or another entry replaces this file" : "Folders or other entries replace these files"}. ` +
+          `Restore ${one ? "the file" : "the files"} or move ${one ? "the conflicting entry" : "the conflicting entries"}, then refresh.`,
+      );
+    } else if (reason === "local-collision") {
+      lines.push(
+        `dohc could not receive ${names}. ` +
+          `${one ? "A file from this machine already uses this path" : "Files from this machine already use these paths"}. ` +
+          `Move or remove ${one ? "the file" : "the files"}, then refresh.`,
+      );
+    } else {
+      lines.push(
+        `dohc could not read ${names}. ` +
+          `Close anything using ${one ? "the file" : "the files"}, or wait, then refresh.`,
+      );
+    }
+  }
+  return lines.join(" ");
 }
 
 export function DesktopWorkspaceShell(props: {
@@ -4506,6 +4584,13 @@ export function DesktopWorkspaceShell(props: {
     !shareViewDamaged && !shareViewEnded && shareView?.access === "edit";
   const shareGranterName = shareView?.granterEmail ?? "another dohc user";
   const [shareRefreshing, setShareRefreshing] = useState(false);
+  const [shareExclusions, setShareExclusions] = useState<{
+    workspaceId: string;
+    paths: UnjournalableSharePath[];
+  } | null>(null);
+  const shareExcludedPaths =
+    shareExclusions?.workspaceId === workspaceId ? shareExclusions.paths : [];
+  const shareRefreshToken = useRef(0);
   // Ops this share's pulls skipped, read from the RECORD, not from the last
   // refresh. The skip is durable — the cursor committed past those ops — so a
   // later quiet refresh must not clear the warning while the content is still
@@ -4535,17 +4620,24 @@ export function DesktopWorkspaceShell(props: {
   }, [workspaceId]);
   const refreshShareView = useCallback(async () => {
     if (!shareView || shareViewEnded || shareViewDamaged) return;
+    const token = ++shareRefreshToken.current;
     setShareRefreshing(true);
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
+      if (token !== shareRefreshToken.current) return;
       if (outcome.status === "ended") {
+        setShareExclusions({ workspaceId, paths: [] });
         setShareViewEnded(true);
-        return;
+      } else {
+        setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
       }
       if (outcome.changedPaths > 0) {
         await refreshFiles();
         // Re-read open editors: the shared view's files changed on disk.
         setVersionEpoch((epoch) => epoch + 1);
+      }
+      if (outcome.status === "ended") {
+        return;
       }
     } catch (error) {
       reportShellError("Couldn't refresh the shared view.", error);
@@ -4554,10 +4646,10 @@ export function DesktopWorkspaceShell(props: {
       // recorded page by page before each cursor commit, so a refresh that
       // died on a later page still left durable evidence behind — reading it
       // only on the success path would keep that invisible until a lucky
-      // refresh or a remount. It runs after the listing because a stale file
-      // list is what the user is looking at, and this read must not delay it.
-      await reloadShareSkipped().catch(() => undefined);
-      setShareRefreshing(false);
+      // refresh or a remount. Start this after the listing, but do not let a
+      // slow registry read keep the Refresh control disabled.
+      if (token === shareRefreshToken.current) setShareRefreshing(false);
+      void reloadShareSkipped().catch(() => undefined);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shareView?.shareId, shareViewEnded, workspaceId, reloadShareSkipped]);
@@ -4624,9 +4716,26 @@ export function DesktopWorkspaceShell(props: {
     // reading "Sending…" for ever.
     let owned = token;
     setShareChangesSubmitting(true);
+    const bestEffortRepaint = async () => {
+      try {
+        await refreshFiles();
+        setVersionEpoch((epoch) => epoch + 1);
+      } catch (repaintError) {
+        console.error("[desktop] repaint after send changes failed:", repaintError);
+      }
+    };
     try {
       const result = await bridge().submitShareChanges({ workspaceId });
       if (token !== myShareChangeToken.current) return;
+      if (!result.ok) {
+        if (result.capturedLocalChanges > 0) await bestEffortRepaint();
+        reportShellError(
+          "Couldn't send your changes.",
+          new Error(result.errorMessage),
+        );
+        return;
+      }
+      if (result.capturedLocalChanges > 0) await bestEffortRepaint();
       setShareChangesEmpty(result.submitted === 0);
       setShareChangesSkipped(
         result.skippedOutsideShare > 0 || result.morePending
@@ -5001,6 +5110,15 @@ export function DesktopWorkspaceShell(props: {
                     ? `Shared view from ${shareGranterName}. You can chat about these files, not edit them.`
                     : `Shared view from ${shareGranterName} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
           </span>
+          {shareExcludedPaths.length > 0 ? (
+            <span
+              data-testid="shared-view-excluded"
+              title={shareExcludedPaths.map((entry) => entry.path).join("\n")}
+              className="flex min-w-0 max-w-[280px] shrink items-center gap-1.5 truncate rounded bg-warning/10 px-1.5 py-0.5 text-[11px] text-warning"
+            >
+              {shareUnjournalableNotice(shareExcludedPaths)}
+            </span>
+          ) : null}
           {shareSkipped
             ? shareSkipNoticeLines(shareSkipped, shareView.granterEmail).map(
                 (line) => (

@@ -92,7 +92,7 @@ import {
   SettleShareProposalPayload,
   SettleShareProposalResult,
   SubmitShareChangesPayload,
-  SubmitShareChangesResult,
+  resolveSubmitShareChangesResult,
   ListMyShareChangesPayload,
   ListMyShareChangesResult,
   WithdrawShareChangesPayload,
@@ -476,10 +476,13 @@ import {
   relayUrlsMatch,
 } from "./workspaces/syncCode";
 import {
+  assertShareChangesJournalable,
+  captureStandaloneShareViewDivergence,
   SharePinInvalidError,
   recordedShareSelector,
-  refreshSharedViewOnce,
+  refreshStandaloneShareViewOnce,
   shareViewIdentitySelector,
+  withShareViewRefreshLifecycleLock,
 } from "./workspaces/sharedView";
 import { assertShareChatWritable } from "./workspaces/shareChatGate";
 import {
@@ -5850,22 +5853,43 @@ function registerIpcHandlers(
       input.workspaceId,
       requireShareViewProposalScope,
     );
+    const store = sharedViewStoreFor(scope.workspace);
+    const captured = await withShareViewRefreshLifecycleLock(
+      scope.workspace.rootPath,
+      async () =>
+        captureStandaloneShareViewDivergence({
+          rootDir: scope.workspace.rootPath,
+          workspaceId: scope.workspace.workspaceId,
+          store,
+          pinnedSelector: isRecordValue(scope.workspace.shareView)
+            ? scope.workspace.shareView.grantedSelector
+            : null,
+          shareId: scope.shareId,
+          ended:
+            isRecordValue(scope.workspace.shareView) &&
+            scope.workspace.shareView.ended === true,
+        }),
+    );
+    assertShareChangesJournalable(captured.unjournalablePaths);
     // The engine owns the submit: it reads this replica's own journal, so it
     // has to be the process holding the store.
-    const result = await relayClientForWorkspace({
-      workspaceId: scope.workspace.workspaceId,
-      rootPath: scope.workspace.rootPath,
-      relay: scope.relay,
-    }).submitShareProposal({
-      shareId: scope.shareId,
-      grantedSelector: scope.grant,
-      // PR3a mints a fresh key per submit. It makes the relay's idempotency
-      // hold for a retry INSIDE one submit (blobs, then the POST), not for a
-      // second press: a second press sends whatever is pending then, which is
-      // a second set of changes and a second proposal.
-      submitId: randomUUID(),
-    });
-    return SubmitShareChangesResult.parse(result);
+    return resolveSubmitShareChangesResult(
+      captured.capturedPaths + captured.repairedPaths,
+      () =>
+        relayClientForWorkspace({
+          workspaceId: scope.workspace.workspaceId,
+          rootPath: scope.workspace.rootPath,
+          relay: scope.relay,
+        }).submitShareProposal({
+          shareId: scope.shareId,
+          grantedSelector: scope.grant,
+          // PR3a mints a fresh key per submit. It makes the relay's idempotency
+          // hold for a retry INSIDE one submit (blobs, then the POST), not for
+          // a second press: a second press sends whatever is pending then,
+          // which is a second set of changes and a second proposal.
+          submitId: randomUUID(),
+        }),
+    );
   });
 
   ipcMain.handle(CHANNELS.listMyShareChanges, async (event, payload) => {
@@ -6045,12 +6069,14 @@ function registerIpcHandlers(
           console.error("[desktop] share view identity:", error);
         },
       );
-      const outcome = await refreshSharedViewOnce({
+      const store = sharedViewStoreFor(created);
+      const outcome = await refreshStandaloneShareViewOnce({
         rootDir: created.rootPath,
         workspaceId: created.workspaceId,
         relay,
         shareId: parsed.shareId,
-        store: sharedViewStoreFor(created),
+        store,
+        ended: false,
         // Just pinned on the record above; the refresh reads it back through
         // the same defensive parse every later refresh uses.
         pinnedSelector: info.selector,
@@ -6115,6 +6141,8 @@ function registerIpcHandlers(
       return RefreshSharedViewResult.parse({
         status: "ended",
         changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [],
         refusedOps: 0,
         refusedDetail: null,
       });
@@ -6131,6 +6159,8 @@ function registerIpcHandlers(
       return RefreshSharedViewResult.parse({
         status: "unchanged",
         changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [],
         refusedOps: 0,
         refusedDetail: null,
       });
@@ -6159,12 +6189,14 @@ function registerIpcHandlers(
       console.error("[desktop] share view chat push (refresh backstop):", error);
     });
     try {
-      outcome = await refreshSharedViewOnce({
+      const store = sharedViewStoreFor(workspace);
+      outcome = await refreshStandaloneShareViewOnce({
         rootDir: workspace.rootPath,
         workspaceId: workspace.workspaceId,
         relay,
         shareId: shareView.shareId,
-        store: sharedViewStoreFor(workspace),
+        store,
+        ended: shareView.ended ?? false,
         pinnedSelector: shareView.grantedSelector,
         recordRefusals: recordShareViewRefusals(workspace.workspaceId),
         pull: async (input) =>

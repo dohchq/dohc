@@ -92,9 +92,11 @@ import {
   ListMyShareChangesPayload,
   ListMyShareChangesResult,
   ReadShareProposalChangesResult,
+  RefreshSharedViewResult,
   SettleShareProposalPayload,
   SubmitShareChangesPayload,
   SubmitShareChangesResult,
+  resolveSubmitShareChangesResult,
   WithdrawShareChangesPayload,
   WithdrawShareChangesResult,
 } from "./bridgeContract";
@@ -107,6 +109,27 @@ import {
 } from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
+
+describe("shared view refresh IPC contract", () => {
+  it("preserves pull exclusions and unjournalable paths independently", () => {
+    const parsed = RefreshSharedViewResult.parse({
+        status: "unchanged",
+        changedPaths: 0,
+        excludedPaths: ["docs/pull-excluded.md"],
+        unjournalablePaths: [
+          { path: "docs/oversized.md", reason: "oversized-text" },
+          { path: "docs/local.md", reason: "local-collision" },
+        ],
+        refusedOps: 0,
+        refusedDetail: null,
+      });
+    expect(parsed.excludedPaths).toEqual(["docs/pull-excluded.md"]);
+    expect(parsed.unjournalablePaths).toEqual([
+      { path: "docs/oversized.md", reason: "oversized-text" },
+      { path: "docs/local.md", reason: "local-collision" },
+    ]);
+  });
+});
 
 describe("workbench menu IPC contract", () => {
   it("carries a bounded editor group ID and the group-close capability", () => {
@@ -2147,11 +2170,43 @@ describe("share changes IPC contract (#646 PR3a)", () => {
 
   // Zero is the honest answer for "nothing was pending", not an error.
   it("carries an empty submit", () => {
-    const empty = { submitted: 0, skippedOutsideShare: 0, morePending: false };
-    expect(SubmitShareChangesResult.parse(empty).submitted).toBe(0);
+    const empty = {
+      ok: true as const,
+      submitted: 0,
+      capturedLocalChanges: 0,
+      skippedOutsideShare: 0,
+      morePending: false,
+    };
+    expect(SubmitShareChangesResult.parse(empty)).toMatchObject({
+      submitted: 0,
+      capturedLocalChanges: 0,
+    });
     expect(() =>
       SubmitShareChangesResult.parse({ ...empty, submitted: -1 }),
     ).toThrow();
+    expect(() =>
+      SubmitShareChangesResult.parse({ ...empty, capturedLocalChanges: -1 }),
+    ).toThrow();
+    expect(() =>
+      SubmitShareChangesResult.parse({
+        ok: true,
+        submitted: 0,
+        skippedOutsideShare: 0,
+        morePending: false,
+      }),
+    ).toThrow();
+  });
+
+  it("carries captured local changes when the relay submit fails", async () => {
+    const result = await resolveSubmitShareChangesResult(3, async () => {
+      throw new Error("relay failed");
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      capturedLocalChanges: 3,
+      errorMessage: "relay failed",
+    });
   });
 
   // The bound that decides whether a review can be read at all. `incomingText`
@@ -2193,12 +2248,14 @@ describe("share changes IPC contract (#646 PR3a)", () => {
   it("refuses a submit result that does not say what it left behind", () => {
     expect(() =>
       SubmitShareChangesResult.parse({
+        ok: true,
         submitted: 1,
         morePending: false,
       }),
     ).toThrow();
     expect(() =>
       SubmitShareChangesResult.parse({
+        ok: true,
         submitted: 1,
         skippedOutsideShare: 0,
       }),

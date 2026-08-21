@@ -870,7 +870,9 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
             ).dohcDesktop;
             const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
             try {
-              return (await api.submitShareChanges({ workspaceId })).submitted;
+              const result = await api.submitShareChanges({ workspaceId });
+              if (!result.ok) throw new Error(result.errorMessage);
+              return result.submitted;
             } catch (error) {
               return error instanceof Error ? error.message : String(error);
             }
@@ -1111,7 +1113,9 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
             ).dohcDesktop;
             const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
             try {
-              return (await api.submitShareChanges({ workspaceId })).submitted;
+              const result = await api.submitShareChanges({ workspaceId });
+              if (!result.ok) throw new Error(result.errorMessage);
+              return result.submitted;
             } catch (error) {
               return error instanceof Error ? error.message : String(error);
             }
