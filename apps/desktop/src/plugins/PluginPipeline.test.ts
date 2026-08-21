@@ -2708,6 +2708,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       let nextBuildGate: { entered: Deferred; release: Deferred } | null = null;
       let nextCommandDrainGate: { entered: Deferred; release: Deferred } | null =
         null;
+      let failNextStop = false;
+      let failNextDisposeAll = false;
       // A real instance, wired the same way main.ts wires
       // activeCommandClaims — so isDraining() reflects genuine barrier
       // state (round-11), not a simulation of it.
@@ -2717,22 +2719,50 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         .map((command) => command.id);
       const statuses: string[] = [];
       let pipeline: PluginPipeline;
+      const baseSpawnTransport = fakeSpawnTransport(
+        () => [...registeredCommands],
+        async (method) => {
+          const gate = nextStopGate;
+          if (method !== PLUGIN_HOST_METHODS.deactivate || !gate) return;
+          nextStopGate = null;
+          gate.entered.resolve();
+          await gate.release.promise;
+        },
+      );
       const host = new PluginHost({
         stateDir: fixture.stateDir,
         workspaceRoot: fixture.workspaceRoot,
-        spawnTransport: fakeSpawnTransport(
-          () => [...registeredCommands],
-          async (method) => {
-            const gate = nextStopGate;
-            if (method !== PLUGIN_HOST_METHODS.deactivate || !gate) return;
-            nextStopGate = null;
-            gate.entered.resolve();
-            await gate.release.promise;
-          },
-        ),
+        // Wraps the base transport's dispose() so a test can make
+        // PluginHost.stop() itself reject — shutdown() awaits dispose()
+        // outside any catch, unlike the deactivate RPC beside it, so this
+        // is the one seam that reaches stopOldRuntime's own stop() call
+        // as a genuine rejection (round-12 finding 3).
+        spawnTransport: (params) => {
+          const transport = baseSpawnTransport(params);
+          return {
+            ...transport,
+            dispose: async () => {
+              if (failNextStop) {
+                failNextStop = false;
+                throw new Error("simulated: PluginHost.stop() transport dispose failed");
+              }
+              return transport.dispose();
+            },
+          };
+        },
         routeSdkRequest: async () => ({}),
         onStatusChange: (pluginId, status) => {
           pipeline.noteRuntimeStatus(pluginId, status);
+        },
+        // stopAll() awaits this directly, outside any catch — the one
+        // seam that reaches PluginPipeline.dispose()'s own stopAll() call
+        // as a genuine rejection, since stopAll() itself only settles
+        // (never rejects on) each plugin's individual stop().
+        onDispose: async () => {
+          if (failNextDisposeAll) {
+            failNextDisposeAll = false;
+            throw new Error("simulated: PluginHost.stopAll() onDispose failed");
+          }
         },
       });
       pipeline = new PluginPipeline({
@@ -2744,6 +2774,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         onStatusChange: (event) => {
           if (event.kind === "changed") statuses.push(event.plugin.status);
         },
+        markCommandClaimsDraining: (pluginId) => {
+          commandClaims.markDraining(pluginId);
+        },
         awaitCommandClaimsDrained: async (pluginId) => {
           const gate = nextCommandDrainGate;
           const drained = commandClaims.drain(pluginId);
@@ -2753,7 +2786,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
             await gate.release.promise;
           }
           await drained;
-          return () => commandClaims.clearDrain(pluginId);
+        },
+        clearCommandClaimsBarrier: (pluginId) => {
+          commandClaims.clearDrain(pluginId);
         },
         operations: {
           install: (input) =>
@@ -2847,6 +2882,12 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           const gate = { entered: deferred(), release: deferred() };
           nextCommandDrainGate = gate;
           return gate;
+        },
+        failNextStop: () => {
+          failNextStop = true;
+        },
+        failNextDisposeAll: () => {
+          failNextDisposeAll = true;
         },
         commandClaims,
         setRegisteredCommands: (commands: string[]) => {
@@ -3487,6 +3528,132 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       } finally {
         await setup.pipeline.dispose();
       }
+    }, 60_000);
+
+    it("marks the drain barrier before a retry's own queued work runs, not only at its eventual stop (round-12 finding 1)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        await setup.failEstablishedBuild();
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        const buildGate = setup.gateNextBuild();
+        const rebuilding = setup.pipeline.rebuild("example-plugin");
+
+        // The barrier is up while the retry is still building — long
+        // before it could reach its own eventual stop of the old
+        // runtime, which the earlier failure left running. A command
+        // checking this (as main.ts's invokePluginCommand handler does
+        // before it ever takes a claim) refuses right here instead of
+        // enqueuing its own start behind this same job on the
+        // per-plugin queue — the exact enqueue that would deadlock this
+        // job's later wait for that claim to drain.
+        await buildGate.entered.promise;
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        buildGate.release.resolve();
+        const rebuilt = await rebuilding;
+
+        expect(rebuilt.ok).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("clears the drain barrier even when a retry is rejected before it ever reaches a stop (round-12 finding 1 and 3)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        // No failed build exists — rebuild()'s own early gate rejects
+        // before buildFromCurrentSource ever runs, so stopOldRuntime is
+        // never reached to clear the barrier the top of rebuild() raised.
+        const rejected = await setup.pipeline.rebuild("example-plugin");
+
+        expect(rejected.ok).toBe(false);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("clears the drain barrier even when the stop itself rejects (round-12 finding 3)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        await setup.failEstablishedBuild();
+        setup.failNextStop();
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+
+        // The stop's own rejection surfaces as the retry's own failure —
+        // this pin only cares that the barrier didn't leak because of it.
+        expect(rebuilt.ok).toBe(false);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        // A later invocation proceeds normally against whatever state is
+        // honest now, instead of refusing forever behind a barrier the
+        // failed stop left standing.
+        setup.commandClaims.claim(key);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        setup.commandClaims.release(key);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("clears the drain barrier via stopOldRuntime's own finally when nothing else wraps it (round-12 finding 3, isolated)", async () => {
+      // disable() calls stopOldRuntime directly, with no early
+      // markCommandClaimsDraining call and no outer finally of its own —
+      // unlike rebuild()'s own wider barrier, stopOldRuntime's own
+      // finally is the only thing standing between a rejecting stop and
+      // a barrier that never comes down.
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        setup.failNextStop();
+
+        const disabled = await setup.pipeline.disable("example-plugin");
+
+        expect(disabled.ok).toBe(false);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("waits for an in-flight command claim to drain before workspace disposal stops every host (round-12 finding 2)", async () => {
+      const setup = await setupEstablishedPlugin();
+      const key = "example-plugin";
+      setup.commandClaims.claim(key);
+
+      const disposing = setup.pipeline.dispose();
+
+      // The barrier marks and the wait begins as soon as disposal
+      // starts — a command arriving right now would refuse (isDraining),
+      // and the host is still up while the claim above hasn't released.
+      await waitFor(
+        () => setup.commandClaims.isDraining(key),
+        "Disposal never marked the drain barrier.",
+      );
+      expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+
+      setup.commandClaims.release(key);
+      await disposing;
+
+      expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
+    }, 60_000);
+
+    it("clears every plugin's drain barrier even when workspace disposal's own stop rejects (round-12 finding 3, dispose path)", async () => {
+      const setup = await setupEstablishedPlugin();
+      const key = "example-plugin";
+      setup.failNextDisposeAll();
+
+      await expect(setup.pipeline.dispose()).rejects.toThrow(
+        "simulated: PluginHost.stopAll() onDispose failed",
+      );
+
+      expect(setup.commandClaims.isDraining(key)).toBe(false);
     }, 60_000);
   });
 

@@ -81,7 +81,22 @@ export class PluginCommandHostClaims {
   }
 
   /**
-   * Marks a key draining — refusing new claims — and resolves once every
+   * Marks a key draining — refusing new claims — without waiting for
+   * anything. Idempotent, and callable well before any claims exist to
+   * wait on: a rebuild-class action needs the refusal up for its WHOLE
+   * run, including the queue wait and the build/snapshot steps before it
+   * ever reaches its own stop boundary — a command that raced in during
+   * that earlier window and got a claim could enqueue its own start
+   * behind the same per-plugin job this action is already running in,
+   * deadlocking that job's later wait for the exact claim it's now
+   * behind (round-12 finding 1).
+   */
+  markDraining(key: string): void {
+    this.draining.add(key);
+  }
+
+  /**
+   * Marks a key draining (see markDraining) and resolves once every
    * claim already outstanding for it has released, or immediately if
    * there are none. Marks even with zero claims outstanding: a rebuild
    * that finds nothing to wait for still has real work left (disposing
@@ -91,7 +106,7 @@ export class PluginCommandHostClaims {
    * resolving — call clearDrain() once that real work is actually done.
    */
   drain(key: string): Promise<void> {
-    this.draining.add(key);
+    this.markDraining(key);
     if (!this.counts.has(key)) return Promise.resolve();
     return new Promise((resolve) => {
       this.drainResolvers.set(key, resolve);
@@ -103,7 +118,11 @@ export class PluginCommandHostClaims {
    * — the host stop this barrier exists to protect — has actually
    * finished, not when drain()'s promise resolves: that only means every
    * claim that existed has released, and the stop it unblocks still has
-   * to run (round-11).
+   * to run (round-11). Idempotent and safe to call speculatively — every
+   * path that might have raised a barrier (a rebuild's early mark, a
+   * stop about to run, a workspace disposing) calls this in its own
+   * finally, so a rejection or an early return along any of them can
+   * never leave a key refused forever (round-12 finding 3).
    */
   clearDrain(key: string): void {
     this.draining.delete(key);

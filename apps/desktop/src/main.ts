@@ -1046,11 +1046,18 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
       notifyPluginStatusChanged(workspace.workspaceId, event),
     isEngineCaptureAvailable: () =>
       activity.engineCaptureFor(workspace.workspaceId) !== null,
-    awaitCommandClaimsDrained: async (pluginId) => {
-      const key = pluginLifecycleKey(workspace.workspaceId, pluginId);
-      await activeCommandClaims.drain(key);
-      return () => activeCommandClaims.clearDrain(key);
-    },
+    markCommandClaimsDraining: (pluginId) =>
+      activeCommandClaims.markDraining(
+        pluginLifecycleKey(workspace.workspaceId, pluginId),
+      ),
+    awaitCommandClaimsDrained: (pluginId) =>
+      activeCommandClaims.drain(
+        pluginLifecycleKey(workspace.workspaceId, pluginId),
+      ),
+    clearCommandClaimsBarrier: (pluginId) =>
+      activeCommandClaims.clearDrain(
+        pluginLifecycleKey(workspace.workspaceId, pluginId),
+      ),
   });
   return pipeline;
 }
@@ -6821,14 +6828,16 @@ function registerIpcHandlers(
       });
     }
     const claimKey = pluginLifecycleKey(workspace.workspaceId, input.pluginId);
-    // A rebuild's old-runtime stop is already draining this key's claims —
-    // joining now would extend a wait meant to be bounded by the claims
-    // that existed when it began, so this refuses instead (round-10
-    // finding 2).
+    // A rebuild or a workspace close is already draining this key's
+    // claims (round-10 finding 2; round-12 finding 2 for the workspace
+    // path) — joining now would extend a wait meant to be bounded by the
+    // claims that existed when it began, so this refuses instead. The
+    // status is named for the more common cause; the message stays
+    // accurate for both.
     if (activeCommandClaims.isDraining(claimKey)) {
       return InvokePluginCommandResult.parse({
         status: "plugin-rebuilding",
-        message: `Plugin "${input.pluginId}" is rebuilding. Try the command again once it finishes.`,
+        message: `Plugin "${input.pluginId}" isn't available right now. Try the command again in a moment.`,
       });
     }
     claimHostForCommand(claimKey);

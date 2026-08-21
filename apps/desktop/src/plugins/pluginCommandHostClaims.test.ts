@@ -96,6 +96,53 @@ describe("PluginCommandHostClaims", () => {
   // real work left after that, so the barrier stays up until the caller
   // explicitly calls clearDrain() — never merely because drain()
   // resolved.
+  // round-12 finding 1: a rebuild-class action's own barrier must cover
+  // its WHOLE run, not only the eventual stop inside it — a command that
+  // raced a claim before the barrier was up could enqueue its own start
+  // behind the same per-plugin job the action is already running, and
+  // that action's later wait for that exact claim to drain would then
+  // deadlock. markDraining() is the piece that lets a caller raise the
+  // barrier well before drain() has anything to wait on.
+  describe("markDraining", () => {
+    it("marks a key draining without touching the claim count or waiting on anything", () => {
+      const claims = new PluginCommandHostClaims();
+      const key = "workspace-1\0example-plugin";
+
+      claims.markDraining(key);
+
+      expect(claims.isDraining(key)).toBe(true);
+      expect(claims.has(key)).toBe(false);
+    });
+
+    it("is idempotent, and composes with a later drain() on the same key", async () => {
+      const claims = new PluginCommandHostClaims();
+      const key = "workspace-1\0example-plugin";
+
+      claims.markDraining(key);
+      claims.claim(key);
+      claims.markDraining(key);
+
+      expect(claims.isDraining(key)).toBe(true);
+
+      const drained = claims.drain(key);
+      let settled = false;
+      void drained.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      claims.release(key);
+      await drained;
+
+      expect(settled).toBe(true);
+      expect(claims.isDraining(key)).toBe(true);
+
+      claims.clearDrain(key);
+      expect(claims.isDraining(key)).toBe(false);
+    });
+  });
+
   describe("isDraining / drain / clearDrain", () => {
     it("marks a key draining even with zero claims outstanding, and resolves immediately", async () => {
       const claims = new PluginCommandHostClaims();
