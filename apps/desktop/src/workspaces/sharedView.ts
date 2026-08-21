@@ -436,6 +436,29 @@ function shareViewRefreshLifecycleLockKey(rootDir: string): string {
   return join(rootDir, ".dohc", REFRESH_LIFECYCLE_LOCK);
 }
 
+async function ensureRealMetadataDirectory(rootDir: string): Promise<string> {
+  const metadataDir = join(rootDir, ".dohc");
+  let stat;
+  try {
+    stat = await lstat(metadataDir);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      await mkdir(metadataDir, { recursive: true });
+      return metadataDir;
+    }
+    throw error;
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(
+      `[desktop] .dohc metadata path at ${metadataDir} is not a real directory ` +
+        `(found ${stat.isSymbolicLink() ? "a symlink" : "a non-directory"}); refusing to ` +
+        "write through it.",
+    );
+  }
+  return metadataDir;
+}
+
 // The refresh lifecycle lock is always the outermost lock for a view. Per-path
 // locks and the pending-materialization lock nest inside it as independent lock
 // domains. Never acquire this lock while holding either nested lock.
@@ -462,13 +485,12 @@ async function syncMetadataDirectory(metadataDir: string): Promise<void> {
 }
 
 async function writePullInFlightMarker(rootDir: string): Promise<void> {
-  const metadataDir = join(rootDir, ".dohc");
+  const metadataDir = await ensureRealMetadataDirectory(rootDir);
   const target = pullInFlightPath(rootDir);
   const temp = join(
     metadataDir,
     `.${PULL_IN_FLIGHT_FILE}.${process.pid}.${randomUUID()}.tmp`,
   );
-  await mkdir(metadataDir, { recursive: true });
   try {
     const handle = await open(temp, "w");
     try {
@@ -621,13 +643,12 @@ async function writePendingFileUnlocked(
   rootDir: string,
   counts: Readonly<PendingMaterializationCounts>,
 ): Promise<void> {
-  const metadataDir = join(rootDir, ".dohc");
+  const metadataDir = await ensureRealMetadataDirectory(rootDir);
   const target = pendingMaterializationPath(rootDir);
   const temp = join(
     metadataDir,
     `.${PENDING_MATERIALIZATION_FILE}.${process.pid}.${randomUUID()}.tmp`,
   );
-  await mkdir(metadataDir, { recursive: true });
   try {
     // Flush before publish so a host crash cannot lose the marker and make an
     // interrupted materialization look like a user edit.
@@ -690,11 +711,22 @@ export async function clearPendingMaterializationPaths(
 async function captureDiskPaths(rootDir: string): Promise<{
   filePaths: Set<string>;
   directoryPaths: Set<string>;
+  unreadableDirs: Set<string>;
 }> {
   const filePaths = new Set<string>();
   const directoryPaths = new Set<string>();
+  const unreadableDirs = new Set<string>();
   async function walk(dir: string, relativeDir: string): Promise<void> {
-    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        unreadableDirs.add(relativeDir);
+      }
+      return;
+    }
     for (const entry of entries) {
       if (entry.isSymbolicLink()) continue;
       const path = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
@@ -709,7 +741,7 @@ async function captureDiskPaths(rootDir: string): Promise<{
     }
   }
   await walk(rootDir, "");
-  return { filePaths, directoryPaths };
+  return { filePaths, directoryPaths, unreadableDirs };
 }
 
 async function pathConfirmedAbsentOnDisk(
@@ -721,7 +753,8 @@ async function pathConfirmedAbsentOnDisk(
     return false;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    return code === "ENOENT" || code === "ENOTDIR";
+    if (code === "ENOENT" || code === "ENOTDIR") return true;
+    throw error;
   }
 }
 
@@ -772,7 +805,8 @@ export async function captureSharedViewLocalDivergence(
     workspaceId,
     versionId: main.id,
   });
-  const { filePaths, directoryPaths } = await captureDiskPaths(realRoot);
+  const { filePaths, directoryPaths, unreadableDirs } =
+    await captureDiskPaths(realRoot);
   const pendingState = await readPendingMaterializationPathsForCapture(
     rootDir,
     tracked.map((entry) => entry.path),
@@ -847,13 +881,29 @@ export async function captureSharedViewLocalDivergence(
           }
 
           const disk = await readDiskContent(resolvedTarget);
-          const currentEntry =
-            (
-              await store.listTextFileMetadata!({
-                workspaceId,
-                versionId: main.id,
-              })
-            ).find((candidate) => candidate.path === entry.path) ?? entry;
+          const currentSnapshot = await store.readTextFile({
+            workspaceId,
+            versionId: main.id,
+            path: entry.path,
+          });
+          const currentEntry: {
+            contentKind: "text" | "binary";
+            sha256: string | null;
+            latestMomentId: string;
+          } =
+            currentSnapshot === null
+              ? entry
+              : {
+                  ...entry,
+                  contentKind:
+                    currentSnapshot.contentKind === "binary" ? "binary" : "text",
+                  sha256: currentSnapshot.sha256 ?? null,
+                  // The point-read comparison cannot supply the metadata row's
+                  // latestMomentId, so the spread keeps the pre-loop id. If a
+                  // queued save advanced this path before the callback, its disk
+                  // and head match above; while this ordered path lock is held,
+                  // no save can advance it between this check and moment fetch.
+                };
           if (diskMatchesSnapshot(disk, currentEntry)) {
             return {
               kind: pendingState.recordedPaths.has(entry.path)
@@ -941,6 +991,17 @@ export async function captureSharedViewLocalDivergence(
       continue;
     }
 
+    const belowUnreadableDirectory = [...unreadableDirs].some(
+      (directory) =>
+        directory === "" ||
+        entry.path === directory ||
+        entry.path.startsWith(`${directory}/`),
+    );
+    if (belowUnreadableDirectory) {
+      unjournalablePaths.push({ path: entry.path, reason: "unreadable" });
+      continue;
+    }
+
     let onDisk: "file" | "directory" | "symlink" | "absent";
     if (filePaths.has(entry.path)) {
       onDisk = "file";
@@ -967,7 +1028,14 @@ export async function captureSharedViewLocalDivergence(
     }
 
     if (onDisk === "absent") {
-      if (!(await pathConfirmedAbsentOnDisk(realRoot, entry.path))) continue;
+      let confirmedAbsent;
+      try {
+        confirmedAbsent = await pathConfirmedAbsentOnDisk(realRoot, entry.path);
+      } catch {
+        unjournalablePaths.push({ path: entry.path, reason: "unreadable" });
+        continue;
+      }
+      if (!confirmedAbsent) continue;
       await store.deleteTextFile({
         workspaceId,
         versionId: main.id,
@@ -984,8 +1052,15 @@ export async function captureSharedViewLocalDivergence(
       async (_readCurrent) => {
         const disk = await readDiskContent(resolve(realRoot, entry.path));
         if (disk.kind === "absent") {
-          if (!(await pathConfirmedAbsentOnDisk(realRoot, entry.path))) {
-            return "unchanged" as const;
+          try {
+            if (!(await pathConfirmedAbsentOnDisk(realRoot, entry.path))) {
+              return "unchanged" as const;
+            }
+          } catch {
+            return {
+              kind: "unjournalable" as const,
+              path: { path: entry.path, reason: "unreadable" as const },
+            };
           }
           await store.deleteTextFile({
             workspaceId,
@@ -1038,9 +1113,18 @@ export async function captureSharedViewLocalDivergence(
       const deleted = await withOrderedWorkspaceTargetPath(
         rootDir,
         resolvedTarget,
-        async () => {
-          if (!(await pathConfirmedAbsentOnDisk(realRoot, entry.path))) {
-            return false;
+        async (): Promise<
+          boolean | { kind: "unjournalable"; path: UnjournalablePath }
+        > => {
+          try {
+            if (!(await pathConfirmedAbsentOnDisk(realRoot, entry.path))) {
+              return false;
+            }
+          } catch {
+            return {
+              kind: "unjournalable",
+              path: { path: entry.path, reason: "unreadable" },
+            };
           }
           await store.deleteTextFile({
             workspaceId,
@@ -1051,7 +1135,9 @@ export async function captureSharedViewLocalDivergence(
           return true;
         },
       );
-      if (deleted) {
+      if (typeof deleted === "object") {
+        unjournalablePaths.push(deleted.path);
+      } else if (deleted) {
         capturedPaths += 1;
       }
       continue;
@@ -1073,8 +1159,15 @@ export async function captureSharedViewLocalDivergence(
         | { kind: "unchanged" }
         | { kind: "unjournalable"; path: UnjournalablePath }
       > => {
-        if (await pathConfirmedAbsentOnDisk(realRoot, path)) {
-          return { kind: "repaired" };
+        try {
+          if (await pathConfirmedAbsentOnDisk(realRoot, path)) {
+            return { kind: "repaired" };
+          }
+        } catch {
+          return {
+            kind: "unjournalable",
+            path: { path, reason: "unreadable" },
+          };
         }
 
         const disk = await readDiskContent(resolvedTarget);

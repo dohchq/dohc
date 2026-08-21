@@ -4625,11 +4625,12 @@ export function DesktopWorkspaceShell(props: {
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
       if (token !== shareRefreshToken.current) return;
-      setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
       if (outcome.status === "ended") {
+        setShareExclusions({ workspaceId, paths: [] });
         setShareViewEnded(true);
         return;
       }
+      setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
       if (outcome.changedPaths > 0) {
         await refreshFiles();
         // Re-read open editors: the shared view's files changed on disk.
@@ -5093,7 +5094,7 @@ export function DesktopWorkspaceShell(props: {
             <span
               data-testid="shared-view-excluded"
               title={shareExcludedPaths.map((entry) => entry.path).join("\n")}
-              className="flex shrink-0 items-center gap-1.5 rounded bg-warning/10 px-1.5 py-0.5 text-[11px] text-warning"
+              className="flex min-w-0 max-w-[280px] shrink items-center gap-1.5 truncate rounded bg-warning/10 px-1.5 py-0.5 text-[11px] text-warning"
             >
               {shareUnjournalableNotice(shareExcludedPaths)}
             </span>

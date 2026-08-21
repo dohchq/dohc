@@ -3596,7 +3596,7 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
   });
 
-  it("groups unjournalable files by cause and clears the notice after recovery", async () => {
+  it("groups unjournalable files by cause and clears the notice when the share ends", async () => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
     const outcomes = [
       {
@@ -3619,10 +3619,12 @@ describe("ui-state merge-on-load", () => {
         refusedDetail: null,
       },
       {
-        status: "unchanged" as const,
+        status: "ended" as const,
         changedPaths: 0,
         excludedPaths: [],
-        unjournalablePaths: [],
+        unjournalablePaths: [
+          { path: "docs/stale-after-end.md", reason: "unreadable" as const },
+        ],
         refusedOps: 0,
         refusedDetail: null,
       },
@@ -3642,6 +3644,11 @@ describe("ui-state merge-on-load", () => {
     });
 
     const notice = await screen.findByTestId("shared-view-excluded");
+    expect(notice.className).toContain("min-w-0");
+    expect(notice.className).toContain("max-w-[280px]");
+    expect(notice.className).toContain("shrink");
+    expect(notice.className).toContain("truncate");
+    expect(notice.className).not.toContain("shrink-0");
     expect(notice.textContent).toContain(
       "dohc could not track changes in docs/oversized.md.",
     );
@@ -3674,6 +3681,52 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("shared-view-excluded")).toBeNull();
     });
+    expect(screen.getByTestId("shared-view-banner").dataset.ended).toBe("true");
+  });
+
+  it("clears the unjournalable notice once an ordinary refresh recovers", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    const outcomes = [
+      {
+        status: "unchanged" as const,
+        changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [
+          { path: "docs/locked.md", reason: "unreadable" as const },
+        ],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+      {
+        status: "unchanged" as const,
+        changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+    ];
+    bridge.refreshSharedView = vi.fn(async () => {
+      const outcome = outcomes.shift();
+      if (!outcome) throw new Error("No refresh outcome left.");
+      return outcome;
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "edit",
+      },
+    });
+
+    await screen.findByTestId("shared-view-excluded");
+
+    await userEvent.click(screen.getByTestId("shared-view-refresh"));
+    await waitFor(() => {
+      expect(screen.queryByTestId("shared-view-excluded")).toBeNull();
+    });
+    expect(screen.getByTestId("shared-view-banner").dataset.ended).toBeUndefined();
   });
 
   it("keeps a late refresh from replacing the newer workspace notice", async () => {

@@ -2247,6 +2247,25 @@ describe("shared view refresh", () => {
     await expect(lstat(markerPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("refuses to write sidecars through a symlinked metadata directory", async () => {
+    const rootDir = await tempRoot();
+    const outsideDir = await tempRoot();
+    const metadataDir = join(rootDir, ".dohc");
+    await symlink(
+      outsideDir,
+      metadataDir,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const outsideBefore = await readdir(outsideDir);
+
+    await expect(
+      writePendingMaterializationPaths(rootDir, ["docs/pending.md"]),
+    ).rejects.toThrow("not a real directory");
+
+    expect(await readdir(outsideDir)).toEqual(outsideBefore);
+    expect((await lstat(metadataDir)).isSymbolicLink()).toBe(true);
+  });
+
   it("still journals a genuine edit while recovering an interrupted pull", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
@@ -2553,6 +2572,50 @@ describe("shared view refresh", () => {
       await store.close();
     }
   });
+
+  itNonRoot(
+    "reports a tracked path below an unreadable directory and still captures an absent directory",
+    async () => {
+      const rootDir = await tempRoot();
+      const relay = new FakeShareRelay();
+      const harness = daemonHarness(relay);
+      const path = "locked/tracked.md";
+      const parent = join(rootDir, "locked");
+      relay.addWrite(path, "tracked body");
+      await refreshSharedViewOnce(harness, {
+        rootDir,
+        workspaceId: WORKSPACE,
+        shareId: SHARE_ID,
+      });
+
+      const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+      try {
+        await denyRead(parent, "dir");
+        try {
+          await expect(
+            captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
+          ).resolves.toEqual({
+            capturedPaths: 0,
+            repairedPaths: 0,
+            unjournalablePaths: [{ path, reason: "unreadable" }],
+          });
+        } finally {
+          await restoreRead(parent, 0o755);
+        }
+
+        await rm(parent, { recursive: true });
+        await expect(
+          captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
+        ).resolves.toEqual({
+          capturedPaths: 1,
+          repairedPaths: 0,
+          unjournalablePaths: [],
+        });
+      } finally {
+        await store.close();
+      }
+    },
+  );
 
   it("reports and preserves a symlink that replaced a tracked file", async () => {
     const rootDir = await tempRoot();
