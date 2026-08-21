@@ -15,6 +15,15 @@ import { execFile } from "node:child_process";
 // `ps -A -o pid=,ppid=,lstart=` took 5-10 ms.
 const PROCESS_TABLE_READ_TIMEOUT_MS = 2_000;
 
+// Reserved out of the total settleMs budget so a SIGTERM-ignoring root that
+// exhausts the whole grace period still leaves the force round enough to
+// read the table and confirm the kill. Otherwise a full-grace holdout starves
+// the exact round that has to finish the job. Small relative to
+// PROCESS_TABLE_READ_TIMEOUT_MS/settleMs's defaults; measure local `ps` timing
+// before choosing different values, as with the read timeout above.
+const FORCE_READ_RESERVE_MS = 300;
+const FINAL_WAIT_RESERVE_MS = 300;
+
 // Limits ps stdout to 8 MiB, above execFile's 1 MiB default. At 41 measured
 // bytes per row, 64k rows need 2.6 MiB; this leaves about 3x headroom.
 const PROCESS_TABLE_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
@@ -62,7 +71,7 @@ export function processTreePids(
   table: readonly Pick<ProcessTableEntry, "pid" | "ppid">[],
   rootPid: number,
 ): number[] {
-  return collectTreePids(buildChildrenByParent(table), rootPid);
+  return collectTreePidsForRoots(buildChildrenByParent(table), [rootPid]);
 }
 
 function buildChildrenByParent(
@@ -78,12 +87,17 @@ function buildChildrenByParent(
   return childrenByParent;
 }
 
-function collectTreePids(
+function collectTreePidsForRoots(
   childrenByParent: ReadonlyMap<number, number[]>,
-  rootPid: number,
+  rootPids: readonly number[],
 ): number[] {
-  const ordered: number[] = [rootPid];
-  const seen = new Set<number>([rootPid]);
+  const ordered: number[] = [];
+  const seen = new Set<number>();
+  for (const rootPid of rootPids) {
+    if (seen.has(rootPid)) continue;
+    seen.add(rootPid);
+    ordered.push(rootPid);
+  }
   for (let index = 0; index < ordered.length; index += 1) {
     const pid = ordered[index];
     if (pid === undefined) continue;
@@ -220,9 +234,7 @@ async function signalProcessTreePosix(
     const roots = [rootPid, ...(options.alsoSignal ?? [])].filter(
       identityMatches,
     );
-    pids = [...new Set(
-      roots.flatMap((pid) => collectTreePids(childrenByParent, pid)),
-    )];
+    pids = collectTreePidsForRoots(childrenByParent, roots);
     identities = pids.flatMap((pid) => {
       const entry = entriesByPid.get(pid);
       return entry ? [{ pid, startedAt: entry.startedAt }] : [];
@@ -308,6 +320,11 @@ export async function stopProcessTreePosix(
   const isAlive = options.isAlive ?? isProcessAlive;
   const deadline = Date.now() + settleMs;
   const remaining = (): number => Math.max(0, deadline - Date.now());
+  const graceBudget = (): number =>
+    Math.max(
+      0,
+      remaining() - FORCE_READ_RESERVE_MS - FINAL_WAIT_RESERVE_MS,
+    );
   let captured: readonly number[] = [];
   let capturedIdentities: readonly ProcessIdentity[] = [];
   let unverifiable = false;
@@ -328,8 +345,8 @@ export async function stopProcessTreePosix(
 
   const settledPromise = typeof settled === "function" ? settled() : settled;
   await Promise.all([
-    Promise.race([settledPromise, unrefDelay(remaining())]),
-    waitForProcessExit(captured, remaining(), isAlive),
+    Promise.race([settledPromise, unrefDelay(graceBudget())]),
+    waitForProcessExit(captured, graceBudget(), isAlive),
   ]);
 
   let forceResultPids: readonly number[] = [];

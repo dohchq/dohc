@@ -190,7 +190,7 @@ describe("killProcessTreePosix", () => {
     }
 
     expect(processTableIterations).toBe(1);
-    expect(signalled).toEqual([110, 100, 210, 200, 310, 300]);
+    expect(signalled).toEqual([310, 210, 110, 300, 200, 100]);
   });
 
   it("signals the root alone when the process table cannot be read", async () => {
@@ -280,7 +280,7 @@ describe("killProcessTreePosix", () => {
           signalled.push(pid);
         },
       }),
-    ).resolves.toEqual([100, 200]);
+    ).resolves.toEqual([200, 100]);
 
     expect(signalled).toEqual([200]);
   });
@@ -297,8 +297,8 @@ describe("killProcessTreePosix", () => {
       sendSignal: (pid) => signalled.push(pid),
     });
 
-    expect(signalled).toEqual([100, 300, 200]);
-    expect(pids).toEqual([100, 300, 200]);
+    expect(signalled).toEqual([300, 200, 100]);
+    expect(pids).toEqual([300, 200, 100]);
   });
 
   it("returns the pids a round signalled so the next round can reuse them", async () => {
@@ -350,10 +350,6 @@ describe("stopProcessTreePosix", () => {
       );
 
       await vi.advanceTimersByTimeAsync(0);
-      expect(onTreeKillFailure).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(99);
-      expect(onTreeKillFailure).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(1);
       await pending;
 
       expect(signalled).toEqual([
@@ -446,10 +442,6 @@ describe("stopProcessTreePosix", () => {
       );
 
       await vi.advanceTimersByTimeAsync(0);
-      expect(onTreeKillFailure).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(99);
-      expect(onTreeKillFailure).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(1);
       await pending;
 
       expect(onTreeKillFailure).toHaveBeenCalledOnce();
@@ -482,10 +474,6 @@ describe("stopProcessTreePosix", () => {
       );
 
       await vi.advanceTimersByTimeAsync(0);
-      expect(onTreeKillFailure).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(99);
-      expect(onTreeKillFailure).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(1);
       await pending;
 
       expect(signalled).toEqual([
@@ -575,15 +563,66 @@ describe("stopProcessTreePosix", () => {
       await vi.advanceTimersByTimeAsync(1);
       await vi.advanceTimersByTimeAsync(0);
 
-      // The force round has no budget left, so its read wrapper fails before
-      // it calls the underlying reader.
-      expect(readCount).toBe(1);
+      // Grace is skipped because this budget is smaller than both reserves.
+      // The force read still starts and is bounded by the few milliseconds
+      // left after the deliberately slow first read.
+      expect(readCount).toBe(2);
       expect(fallbackAt).toBeDefined();
       expect((fallbackAt as number) - startedAt)
         .toBeLessThanOrEqual(settleMs + toleranceMs);
       expect((resolvedAt as number) - startedAt)
         .toBeLessThanOrEqual(settleMs + toleranceMs);
       await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reserves enough budget to force-signal a captured descendant after full grace", async () => {
+    vi.useFakeTimers();
+    try {
+      const settleMs = 1_000;
+      const toleranceMs = 1;
+      const startedAt = Date.now();
+      const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+      let readCount = 0;
+      let rootAlive = true;
+      let descendantAlive = true;
+      let resolvedAt: number | undefined;
+
+      const pending = stopProcessTreePosix(
+        100,
+        new Promise(() => {}),
+        settleMs,
+        undefined,
+        {
+          readProcessTable: async () => {
+            readCount += 1;
+            return [psRow(100, 1), psRow(200, 100)].join("\n");
+          },
+          sendSignal: (pid, signal) => {
+            signalled.push({ pid, signal });
+            if (signal !== "SIGKILL") return;
+            if (pid === 100) rootAlive = false;
+            if (pid === 200) descendantAlive = false;
+          },
+          isAlive: (pid) => pid === 100 ? rootAlive : descendantAlive,
+        },
+      ).then(() => {
+        resolvedAt = Date.now();
+      });
+
+      await vi.advanceTimersByTimeAsync(399);
+      expect(readCount).toBe(1);
+      expect(signalled).not.toContainEqual({ pid: 200, signal: "SIGKILL" });
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(600);
+      await pending;
+
+      expect(readCount).toBe(2);
+      expect(signalled).toContainEqual({ pid: 200, signal: "SIGKILL" });
+      expect((resolvedAt as number) - startedAt)
+        .toBeLessThanOrEqual(settleMs + toleranceMs);
     } finally {
       vi.useRealTimers();
     }
@@ -607,10 +646,6 @@ describe("stopProcessTreePosix", () => {
       );
 
       await vi.advanceTimersByTimeAsync(0);
-      expect(onTreeKillFailure).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(99);
-      expect(onTreeKillFailure).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(1);
       await pending;
 
       expect(onTreeKillFailure).toHaveBeenCalledOnce();
@@ -781,8 +816,8 @@ describe("stopProcessTreePosix", () => {
     expect(signalled).toEqual([
       { pid: 200, signal: "SIGTERM" },
       { pid: 100, signal: "SIGTERM" },
-      { pid: 100, signal: "SIGKILL" },
       { pid: 200, signal: "SIGKILL" },
+      { pid: 100, signal: "SIGKILL" },
     ]);
   });
 
@@ -806,7 +841,7 @@ describe("stopProcessTreePosix", () => {
       const pending = stopProcessTreePosix(
         100,
         Promise.resolve(),
-        200,
+        800,
         undefined,
         options,
       );

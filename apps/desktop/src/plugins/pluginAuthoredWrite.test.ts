@@ -136,6 +136,7 @@ describe("createPluginAuthoredTextWriter", () => {
       pluginId: string;
       write: { absolutePath: string; text: string };
     }[] = [];
+    const rekeys: Array<{ from: string; to: string }> = [];
     const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-authored-write-"));
     const write = createPluginAuthoredTextWriter(writerInput({
       capture,
@@ -151,6 +152,9 @@ describe("createPluginAuthoredTextWriter", () => {
           // this door write — and nothing else.
           expect(writes).toHaveLength(doorWrites.length + 1);
           doorWrites.push({ pluginId, write: doorWrite });
+        },
+        rekeyDoorWrittenSourceChange: (_pluginId, from, to) => {
+          rekeys.push({ from: from.absolutePath, to: to.absolutePath });
         },
       },
     }));
@@ -187,6 +191,10 @@ describe("createPluginAuthoredTextWriter", () => {
         ),
         options: { createOnly: false },
       });
+      expect(rekeys).toEqual([{
+        from: join(workspaceRoot, "plugins", "owned", "src", "index.ts"),
+        to: join(workspaceRoot, "plugins", "owned", "src", "index.ts"),
+      }]);
 
       await write("note.txt", "not plugin source\n", {
         overwrite: false,
@@ -215,6 +223,7 @@ describe("createPluginAuthoredTextWriter", () => {
         pluginId: string;
         write: { absolutePath: string; text: string };
       }[] = [];
+      const rekeys: Array<{ from: string; to: string }> = [];
 
       try {
         await mkdir(join(targetRoot, "plugins", "owned", "src"), {
@@ -229,11 +238,16 @@ describe("createPluginAuthoredTextWriter", () => {
           workspaceRoot,
           pipeline: {
             pluginIdForPath: (absolutePath) =>
-              absolutePath.startsWith(canonicalPluginRoot)
+              absolutePath.toLowerCase().startsWith(
+                canonicalPluginRoot.toLowerCase(),
+              )
                 ? "owned-plugin"
                 : null,
             handleDoorWrittenSourceChange: (pluginId, doorWrite) => {
               doorWrites.push({ pluginId, write: doorWrite });
+            },
+            rekeyDoorWrittenSourceChange: (_pluginId, from, to) => {
+              rekeys.push({ from: from.absolutePath, to: to.absolutePath });
             },
           },
         }));
@@ -245,11 +259,24 @@ describe("createPluginAuthoredTextWriter", () => {
 
         expect(doorWrites).toEqual([{
           pluginId: "owned-plugin",
-          write: { absolutePath: canonicalPath, text: "text\n" },
+          write: {
+            absolutePath: join(
+              workspaceRoot,
+              "PLUGINS",
+              "owned",
+              "SRC",
+              "index.ts",
+            ),
+            text: "text\n",
+          },
         }]);
-        expect(doorWrites[0]?.write.absolutePath.startsWith(workspaceRoot))
+        expect(rekeys).toEqual([{
+          from: join(workspaceRoot, "PLUGINS", "owned", "SRC", "index.ts"),
+          to: canonicalPath,
+        }]);
+        expect(rekeys[0]?.to.startsWith(workspaceRoot))
           .toBe(true);
-        expect(doorWrites[0]?.write.absolutePath.startsWith(targetRoot))
+        expect(rekeys[0]?.to.startsWith(targetRoot))
           .toBe(false);
       } finally {
         await rm(workspaceRoot, { force: true });
@@ -273,6 +300,7 @@ describe("createPluginAuthoredTextWriter", () => {
         handleDoorWrittenSourceChange: (pluginId) => {
           doorWrites.push(pluginId);
         },
+        rekeyDoorWrittenSourceChange: () => undefined,
       },
     }));
 
@@ -284,6 +312,7 @@ describe("createPluginAuthoredTextWriter", () => {
   it("canonicalizes the reported path when darwin is injected", async () => {
     const { capture } = recordingCapture();
     const reportedPaths: string[] = [];
+    const recoveredPaths: string[] = [];
     const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-authored-darwin-"));
     const canonicalPath = join(
       workspaceRoot,
@@ -306,6 +335,9 @@ describe("createPluginAuthoredTextWriter", () => {
           handleDoorWrittenSourceChange: (_pluginId, doorWrite) => {
             reportedPaths.push(doorWrite.absolutePath);
           },
+          rekeyDoorWrittenSourceChange: (_pluginId, _from, to) => {
+            recoveredPaths.push(to.absolutePath);
+          },
         },
       }));
 
@@ -314,7 +346,10 @@ describe("createPluginAuthoredTextWriter", () => {
         author,
       });
 
-      expect(reportedPaths).toEqual([canonicalPath]);
+      expect(reportedPaths).toEqual([
+        join(workspaceRoot, "plugins", "owned", "SRC", "NewDir", "a.ts"),
+      ]);
+      expect(recoveredPaths).toEqual([canonicalPath]);
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }
@@ -323,6 +358,7 @@ describe("createPluginAuthoredTextWriter", () => {
   it("recovers an NFD on-disk segment from an NFC caller path", async () => {
     const { capture } = recordingCapture();
     const reportedPaths: string[] = [];
+    const recoveredPaths: string[] = [];
     const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-authored-unicode-"));
     const decomposedDirectory = "cafe\u0301";
     const composedDirectory = "caf\u00e9";
@@ -347,6 +383,9 @@ describe("createPluginAuthoredTextWriter", () => {
           handleDoorWrittenSourceChange: (_pluginId, doorWrite) => {
             reportedPaths.push(doorWrite.absolutePath);
           },
+          rekeyDoorWrittenSourceChange: (_pluginId, _from, to) => {
+            recoveredPaths.push(to.absolutePath);
+          },
         },
       }));
 
@@ -356,7 +395,17 @@ describe("createPluginAuthoredTextWriter", () => {
         { overwrite: true, author },
       );
 
-      expect(reportedPaths).toEqual([canonicalPath]);
+      expect(reportedPaths).toEqual([
+        join(
+          workspaceRoot,
+          "PLUGINS",
+          "OWNED",
+          composedDirectory,
+          "SRC",
+          "a.ts",
+        ),
+      ]);
+      expect(recoveredPaths).toEqual([canonicalPath]);
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }
@@ -367,6 +416,7 @@ describe("createPluginAuthoredTextWriter", () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-authored-abort-"));
     const canonicalPath = join(workspaceRoot, "plugins", "owned", "src", "a.ts");
     const doorWrites: string[] = [];
+    const rekeys: string[] = [];
 
     try {
       await mkdir(dirname(canonicalPath), { recursive: true });
@@ -385,6 +435,9 @@ describe("createPluginAuthoredTextWriter", () => {
           handleDoorWrittenSourceChange: (_pluginId, doorWrite) => {
             doorWrites.push(doorWrite.absolutePath);
           },
+          rekeyDoorWrittenSourceChange: (_pluginId, _from, to) => {
+            rekeys.push(to.absolutePath);
+          },
         },
       }));
 
@@ -394,7 +447,10 @@ describe("createPluginAuthoredTextWriter", () => {
           author,
         }),
       ).rejects.toThrow("Plugin panel is no longer active.");
-      expect(doorWrites).toEqual([]);
+      expect(doorWrites).toEqual([
+        join(workspaceRoot, "PLUGINS", "OWNED", "SRC", "a.ts"),
+      ]);
+      expect(rekeys).toEqual([]);
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }
@@ -415,6 +471,7 @@ describe("createPluginAuthoredTextWriter", () => {
       return readResult;
     });
     const handleDoorWrittenSourceChange = vi.fn();
+    const rekeyDoorWrittenSourceChange = vi.fn();
     vi.resetModules();
     vi.doMock("node:fs/promises", () => ({ readdir: readdirMock }));
 
@@ -428,6 +485,7 @@ describe("createPluginAuthoredTextWriter", () => {
         pipeline: {
           pluginIdForPath: () => "owned-plugin",
           handleDoorWrittenSourceChange,
+          rekeyDoorWrittenSourceChange,
         },
       }));
 
@@ -442,14 +500,15 @@ describe("createPluginAuthoredTextWriter", () => {
       await expect(pending).rejects.toThrow(
         "Plugin panel is no longer active.",
       );
-      expect(handleDoorWrittenSourceChange).not.toHaveBeenCalled();
+      expect(handleDoorWrittenSourceChange).toHaveBeenCalledOnce();
+      expect(rekeyDoorWrittenSourceChange).not.toHaveBeenCalled();
     } finally {
       vi.doUnmock("node:fs/promises");
       vi.resetModules();
     }
   });
 
-  it("reports overlapping writes in their landing order after case recovery", async () => {
+  it("reports overlapping writes from separate writers in their landing order after case recovery", async () => {
     let releaseFirstRead: (entries: string[]) => void = () => undefined;
     const firstReadResult = new Promise<string[]>((resolve) => {
       releaseFirstRead = resolve;
@@ -471,7 +530,7 @@ describe("createPluginAuthoredTextWriter", () => {
     try {
       const { createPluginAuthoredTextWriter: createWriterWithMockedReaddir } =
         await import("./pluginAuthoredWrite");
-      const write = createWriterWithMockedReaddir(writerInput({
+      const input = writerInput({
         platform: "darwin",
         capture: {
           writeAuthoredTextFile: async () => {
@@ -484,15 +543,18 @@ describe("createPluginAuthoredTextWriter", () => {
           handleDoorWrittenSourceChange: (_pluginId, doorWrite) => {
             reportedTexts.push(doorWrite.text);
           },
+          rekeyDoorWrittenSourceChange: () => undefined,
         },
-      }));
+      });
+      const firstWriter = createWriterWithMockedReaddir(input);
+      const secondWriter = createWriterWithMockedReaddir(input);
 
-      const first = write("note.txt", "first\n", {
+      const first = firstWriter("note.txt", "first\n", {
         overwrite: true,
         author,
       });
       await vi.waitFor(() => expect(readdirMock).toHaveBeenCalledOnce());
-      const second = write("note.txt", "second\n", {
+      const second = secondWriter("note.txt", "second\n", {
         overwrite: true,
         author,
       });
@@ -511,13 +573,14 @@ describe("createPluginAuthoredTextWriter", () => {
     }
   });
 
-  it("canonicalizes before resolving ownership when darwin is injected", async () => {
+  it("resolves ownership at landing before canonicalizing when darwin is injected", async () => {
     const { capture } = recordingCapture();
     const ownerPaths: string[] = [];
     const doorWrites: {
       pluginId: string;
       write: { absolutePath: string; text: string };
     }[] = [];
+    const rekeys: Array<{ from: string; to: string }> = [];
     const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-authored-owner-"));
     const canonicalPluginRoot = join(workspaceRoot, "plugins", "owned");
     const canonicalPath = join(canonicalPluginRoot, "src", "a.ts");
@@ -532,12 +595,17 @@ describe("createPluginAuthoredTextWriter", () => {
         pipeline: {
           pluginIdForPath: (absolutePath) => {
             ownerPaths.push(absolutePath);
-            return absolutePath.startsWith(canonicalPluginRoot)
+            return absolutePath.toLowerCase().startsWith(
+              canonicalPluginRoot.toLowerCase(),
+            )
               ? "owned-plugin"
               : null;
           },
           handleDoorWrittenSourceChange: (pluginId, doorWrite) => {
             doorWrites.push({ pluginId, write: doorWrite });
+          },
+          rekeyDoorWrittenSourceChange: (_pluginId, from, to) => {
+            rekeys.push({ from: from.absolutePath, to: to.absolutePath });
           },
         },
       }));
@@ -549,9 +617,18 @@ describe("createPluginAuthoredTextWriter", () => {
 
       expect(doorWrites).toEqual([{
         pluginId: "owned-plugin",
-        write: { absolutePath: canonicalPath, text: "text\n" },
+        write: {
+          absolutePath: join(workspaceRoot, "PLUGINS", "OWNED", "src", "a.ts"),
+          text: "text\n",
+        },
       }]);
-      expect(ownerPaths).toEqual([canonicalPath]);
+      expect(ownerPaths).toEqual([
+        join(workspaceRoot, "PLUGINS", "OWNED", "src", "a.ts"),
+      ]);
+      expect(rekeys).toEqual([{
+        from: join(workspaceRoot, "PLUGINS", "OWNED", "src", "a.ts"),
+        to: canonicalPath,
+      }]);
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }
@@ -579,6 +656,7 @@ describe("createPluginAuthoredTextWriter", () => {
       pluginId: string;
       write: { absolutePath: string; text: string };
     }[] = [];
+    const rekeys: Array<{ from: string; to: string }> = [];
 
     try {
       await mkdir(vanishedDirectory, { recursive: true });
@@ -595,11 +673,16 @@ describe("createPluginAuthoredTextWriter", () => {
         },
         pipeline: {
           pluginIdForPath: (absolutePath) =>
-            absolutePath.startsWith(canonicalPluginRoot)
+            absolutePath.toLowerCase().startsWith(
+              canonicalPluginRoot.toLowerCase(),
+            )
               ? "owned-plugin"
               : null,
           handleDoorWrittenSourceChange: (pluginId, doorWrite) => {
             doorWrites.push({ pluginId, write: doorWrite });
+          },
+          rekeyDoorWrittenSourceChange: (_pluginId, from, to) => {
+            rekeys.push({ from: from.absolutePath, to: to.absolutePath });
           },
         },
       }));
@@ -611,8 +694,9 @@ describe("createPluginAuthoredTextWriter", () => {
 
       expect(doorWrites).toEqual([{
         pluginId: "owned-plugin",
-        write: { absolutePath: recoveredPath, text: "text\n" },
+        write: { absolutePath: callerPath, text: "text\n" },
       }]);
+      expect(rekeys).toEqual([{ from: callerPath, to: recoveredPath }]);
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }
@@ -621,6 +705,7 @@ describe("createPluginAuthoredTextWriter", () => {
   it("preserves the caller-spelled path when linux is injected", async () => {
     const { capture } = recordingCapture();
     const reportedPaths: string[] = [];
+    const recoveredPaths: string[] = [];
     const workspaceRoot = join("/tmp", "workspace");
     const write = createPluginAuthoredTextWriter(writerInput({
       capture,
@@ -630,6 +715,9 @@ describe("createPluginAuthoredTextWriter", () => {
         pluginIdForPath: () => "owned-plugin",
         handleDoorWrittenSourceChange: (_pluginId, doorWrite) => {
           reportedPaths.push(doorWrite.absolutePath);
+        },
+        rekeyDoorWrittenSourceChange: (_pluginId, _from, to) => {
+          recoveredPaths.push(to.absolutePath);
         },
       },
     }));
@@ -642,5 +730,6 @@ describe("createPluginAuthoredTextWriter", () => {
     expect(reportedPaths).toEqual([
       join(workspaceRoot, "plugins", "owned", "SRC", "NewDir", "a.ts"),
     ]);
+    expect(recoveredPaths).toEqual(reportedPaths);
   });
 });

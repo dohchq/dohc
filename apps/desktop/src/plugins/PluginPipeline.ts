@@ -196,6 +196,7 @@ export interface PluginPipelineOptions {
    * wasn't running to record it). Defaults to true so existing callers and
    * tests that don't care about this keep their current behavior. */
   isEngineCaptureAvailable?: () => boolean;
+  platform?: NodeJS.Platform;
   operations?: Partial<PluginPipelineOperations>;
 }
 
@@ -453,15 +454,27 @@ function candidateKey(candidate: InstalledPluginRecord): string {
 
 export function overlayDoorWrittenSourceDeltas(
   baselineFiles: readonly PluginSourceFileDigest[],
-  deltas: Iterable<readonly [string, { sha256: string; seq: number }]>,
+  deltas: Iterable<
+    readonly [
+      string,
+      { sha256: string; seq: number; provisional?: boolean },
+    ]
+  >,
+  platform: NodeJS.Platform = process.platform,
 ): PluginSourceFileDigest[] {
   const files = new Map(
     baselineFiles.map((file) => [file.relPath, file.sha256]),
   );
+  const byLowerCase = platform === "win32" || platform === "darwin"
+    ? new Map([...files.keys()].map((relPath) => [relPath.toLowerCase(), relPath]))
+    : undefined;
   for (
     const [relPath, delta] of [...deltas].sort((a, b) => a[1].seq - b[1].seq)
   ) {
-    files.set(relPath, delta.sha256);
+    const target = delta.provisional && byLowerCase
+      ? byLowerCase.get(relPath.toLowerCase()) ?? relPath
+      : relPath;
+    files.set(target, delta.sha256);
   }
   return [...files].map(([relPath, sha256]) => ({ relPath, sha256 }));
 }
@@ -470,6 +483,7 @@ export class PluginPipeline {
   private readonly workspaceRoot: string;
   private readonly dohcDir: string;
   private readonly operations: PluginPipelineOperations;
+  private readonly platform: NodeJS.Platform;
   private readonly statuses = new Map<string, PluginPipelinePluginStatus>();
   private readonly queues = new Map<string, PluginJobQueue>();
   private readonly uninstallConfirmations = new Map<string, UninstallConfirmation>();
@@ -479,13 +493,12 @@ export class PluginPipeline {
    * the write's order in doorWriteSeq. See handleDoorWrittenSourceChange
    * and doorApprovedHash — this overlay, applied to the persisted baseline
    * manifest, is the only tree the door path may auto-approve. Overlay
-   * paths match exactly: on win32, the write layer already reports the
-   * resolved on-disk spelling (see pluginAuthoredWrite.ts), so a delta key
-   * agrees with the live snapshot's key by construction.
+   * A landing-time key is provisional until pluginAuthoredWrite's async case
+   * recovery moves it to the spelling read from disk.
    */
   private readonly doorWrittenDeltas = new Map<
     string,
-    Map<string, { sha256: string; seq: number }>
+    Map<string, { sha256: string; seq: number; provisional?: boolean }>
   >();
   /** Orders door writes against each build's snapshot; see runFullBuild. */
   private doorWriteSeq = 0;
@@ -510,6 +523,7 @@ export class PluginPipeline {
     this.workspaceRoot = resolve(options.workspaceRoot);
     this.dohcDir = pluginDataDir(options.stateDir, this.workspaceRoot);
     this.operations = { ...DEFAULT_OPERATIONS, ...options.operations };
+    this.platform = options.platform ?? process.platform;
   }
 
   /**
@@ -681,7 +695,43 @@ export class PluginPipeline {
     for (const candidate of this.discovery) {
       if (isInside(resolve(candidate.rootPath), target)) return candidate.id;
     }
+    if (this.platform === "win32" || this.platform === "darwin") {
+      const lowerTarget = target.toLowerCase();
+      for (const candidate of this.discovery) {
+        if (isInside(resolve(candidate.rootPath).toLowerCase(), lowerTarget)) {
+          return candidate.id;
+        }
+      }
+    }
     return null;
+  }
+
+  private sourceRelPath(
+    candidate: InstalledPluginRecord,
+    absolutePath: string,
+  ): string | null {
+    const root = resolve(candidate.rootPath);
+    const target = resolve(absolutePath);
+    if (target === root) return null;
+    if (isInside(root, target)) {
+      return relative(root, target).replaceAll("\\", "/");
+    }
+    if (this.platform !== "win32" && this.platform !== "darwin") return null;
+    const lowerRoot = root.toLowerCase();
+    const lowerTarget = target.toLowerCase();
+    if (lowerTarget === lowerRoot || !isInside(lowerRoot, lowerTarget)) return null;
+    const rootSegments = root.split(/[\\/]+/).filter(Boolean);
+    const targetSegments = target.split(/[\\/]+/).filter(Boolean);
+    if (
+      rootSegments.length >= targetSegments.length ||
+      rootSegments.some(
+        (segment, index) => segment.toLowerCase() !==
+          targetSegments[index]?.toLowerCase(),
+      )
+    ) {
+      return null;
+    }
+    return targetSegments.slice(rootSegments.length).join("/");
   }
 
   install(pluginId: string): Promise<PluginPipelineActionResult> {
@@ -848,24 +898,57 @@ export class PluginPipeline {
   ): void {
     const candidate = this.validCandidate(pluginId);
     if (!candidate) return;
-    const root = resolve(candidate.rootPath);
-    const target = resolve(write.absolutePath);
-    if (target === root || !isInside(root, target)) return;
-    const relPath = relative(root, target).replaceAll("\\", "/");
+    const relPath = this.sourceRelPath(candidate, write.absolutePath);
+    if (relPath === null) return;
     // node_modules and .dohc are excluded from every source digest, so a
     // write under them cannot change the hash this predicate compares.
     if (relPath.split("/").some((segment) => EXCLUDED_SOURCE_NAMES.has(segment))) {
       return;
     }
     const deltas = this.doorWrittenDeltas.get(pluginId) ??
-      new Map<string, { sha256: string; seq: number }>();
+      new Map<
+        string,
+        { sha256: string; seq: number; provisional?: boolean }
+      >();
     deltas.set(relPath, {
       sha256: createHash("sha256").update(write.text, "utf8").digest("hex"),
       seq: ++this.doorWriteSeq,
+      provisional: true,
     });
     this.doorWrittenDeltas.set(pluginId, deltas);
     this.enqueueSourceRefresh(pluginId, () =>
       this.reconcileApprovedCandidate(pluginId, true));
+  }
+
+  /**
+   * Moves a door-written delta from its landing-time spelling to its recovered
+   * on-disk spelling, preserving its sequence. This settles one write; it
+   * does not create another. A missing source entry was already superseded.
+   */
+  rekeyDoorWrittenSourceChange(
+    pluginId: string,
+    from: { absolutePath: string },
+    to: { absolutePath: string },
+  ): void {
+    const candidate = this.validCandidate(pluginId);
+    if (!candidate) return;
+    const fromRelPath = this.sourceRelPath(candidate, from.absolutePath);
+    const toRelPath = this.sourceRelPath(candidate, to.absolutePath);
+    if (fromRelPath === null || toRelPath === null) return;
+    const deltas = this.doorWrittenDeltas.get(pluginId);
+    const delta = deltas?.get(fromRelPath);
+    if (!deltas || !delta) return;
+
+    const destination = deltas.get(toRelPath);
+    const pathChanged = fromRelPath !== toRelPath;
+    if (pathChanged) deltas.delete(fromRelPath);
+    if (!destination || destination.seq <= delta.seq) {
+      deltas.set(toRelPath, { sha256: delta.sha256, seq: delta.seq });
+    }
+    if (pathChanged) {
+      this.enqueueSourceRefresh(pluginId, () =>
+        this.reconcileApprovedCandidate(pluginId, true));
+    }
   }
 
   /**
@@ -1548,6 +1631,7 @@ export class PluginPipeline {
       overlayDoorWrittenSourceDeltas(
         baseline.files,
         this.doorWrittenDeltas.get(pluginId) ?? [],
+        this.platform,
       ),
     );
   }

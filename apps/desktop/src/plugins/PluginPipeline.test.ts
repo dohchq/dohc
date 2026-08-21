@@ -403,6 +403,22 @@ describe("overlayDoorWrittenSourceDeltas", () => {
       { relPath: "src/new.ts", sha256: "ccc" },
     ]);
   });
+
+  it("matches only provisional case drift to a baseline spelling", () => {
+    const files = overlayDoorWrittenSourceDeltas(
+      [{ relPath: "src/index.ts", sha256: "aaa" }],
+      new Map([
+        ["SRC/index.ts", { sha256: "bbb", seq: 1, provisional: true }],
+        ["SRC/final.ts", { sha256: "ccc", seq: 2 }],
+      ]),
+      "darwin",
+    );
+
+    expect(files).toEqual([
+      { relPath: "src/index.ts", sha256: "bbb" },
+      { relPath: "SRC/final.ts", sha256: "ccc" },
+    ]);
+  });
 });
 
 describe("PluginPipeline real filesystem lifecycle", () => {
@@ -466,7 +482,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
             () => {
               const plugin = pipeline.list()[0];
               return plugin?.status === "disabled-pending-approval" ||
-                plugin?.approvedHash !== originalHash;
+                (plugin?.status === "ready" &&
+                  plugin.approvedHash !== originalHash);
             },
             "Door write did not finish reconciliation.",
           );
@@ -482,6 +499,269 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       60_000,
     );
   }
+
+  it("attributes an authored write before delayed case recovery lets a watcher reconcile it", async () => {
+    const fixture = await createPluginWorkspace();
+    const recoveryStarted = deferred();
+    const releaseRecovery = deferred();
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    let readCount = 0;
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      readCount += 1;
+      if (readCount === 1) {
+        recoveryStarted.resolve();
+        await releaseRecovery.promise;
+      }
+      return actualFs.readdir(...args);
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+
+    const observedStatuses: string[] = [];
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      onStatusChange: (event) => {
+        if (event.kind === "changed") observedStatuses.push(event.plugin.status);
+      },
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      expect(pipeline.pluginIdForPath(
+        join(fixture.workspaceRoot, "PLUGINS", "EXAMPLE-PLUGIN", "src", "index.ts"),
+      )).toBe("example-plugin");
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      const originalHash = pipeline.list()[0]?.approvedHash;
+      observedStatuses.length = 0;
+
+      const { createPluginAuthoredTextWriter: createWriterWithDelayedRecovery } =
+        await import("./pluginAuthoredWrite");
+      const write = createWriterWithDelayedRecovery({
+        platform: "darwin",
+        signal: undefined,
+        requireWritableCapture: async () => ({
+          workspaceRoot: fixture.workspaceRoot,
+          capture: {
+            writeAuthoredTextFile: async (_absolutePath, text) => {
+              await writeFile(fixture.entryPath, text);
+            },
+          },
+        }),
+        pipeline: () => pipeline,
+      });
+      const pendingWrite = write(
+        join("plugins", "example-plugin", "SRC", "index.ts"),
+        [
+          'export const marker = "watcher-window";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"),
+        {
+          overwrite: true,
+          author: {
+            kind: "agent",
+            agentId: "plugin:example-plugin",
+            onBehalfOf: "local",
+            agentRunId: "spawn-1",
+          },
+        },
+      );
+      await recoveryStarted.promise;
+
+      await pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin/src/index.ts",
+        operation: "update",
+      }]);
+      await waitFor(
+        () =>
+          pipeline.list()[0]?.status === "disabled-pending-approval" ||
+          (pipeline.list()[0]?.status === "ready" &&
+            pipeline.list()[0]?.approvedHash !== originalHash),
+        "The watcher-window reconciliation did not settle.",
+        60_000,
+      );
+      const statusesDuringRecovery = [...observedStatuses];
+      releaseRecovery.resolve();
+      await pendingWrite;
+      await waitFor(
+        () =>
+          pipeline.list()[0]?.status === "ready" &&
+          pipeline.list()[0]?.approvedHash !== originalHash,
+        "The attributed write did not finish rebuilding.",
+        60_000,
+      );
+
+      expect(statusesDuringRecovery).not.toContain("disabled-pending-approval");
+    } finally {
+      releaseRecovery.resolve();
+      await pipeline.dispose();
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  }, 120_000);
+
+  it("keeps the second same-file write from two separate writers when the first recovery finishes last", async () => {
+    const fixture = await createPluginWorkspace();
+    const firstRecoveryStarted = deferred();
+    const releaseFirstRecovery = deferred();
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    let readCount = 0;
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      readCount += 1;
+      if (readCount === 1) {
+        firstRecoveryStarted.resolve();
+        await releaseFirstRecovery.promise;
+      }
+      return actualFs.readdir(...args);
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      const { createPluginAuthoredTextWriter: createIndependentWriter } =
+        await import("./pluginAuthoredWrite");
+      const input = {
+        platform: "darwin" as const,
+        signal: undefined,
+        requireWritableCapture: async () => ({
+          workspaceRoot: fixture.workspaceRoot,
+          capture: {
+            writeAuthoredTextFile: async (_absolutePath: string, text: string) => {
+              await writeFile(fixture.entryPath, text);
+            },
+          },
+        }),
+        pipeline: () => pipeline,
+      };
+      const firstWriter = createIndependentWriter(input);
+      const secondWriter = createIndependentWriter(input);
+      const relativePath = join(
+        "plugins",
+        "example-plugin",
+        "SRC",
+        "index.ts",
+      );
+      const firstWrite = firstWriter(
+        relativePath,
+        [
+          'export const marker = "writer-one";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"),
+        {
+          overwrite: true,
+          author: {
+            kind: "agent",
+            agentId: "plugin:example-plugin",
+            onBehalfOf: "local",
+            agentRunId: "spawn-1",
+          },
+        },
+      );
+      await firstRecoveryStarted.promise;
+      await secondWriter(
+        relativePath,
+        [
+          'export const marker = "writer-two";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"),
+        {
+          overwrite: true,
+          author: {
+            kind: "agent",
+            agentId: "plugin:example-plugin",
+            onBehalfOf: "local",
+            agentRunId: "spawn-2",
+          },
+        },
+      );
+      releaseFirstRecovery.resolve();
+      await firstWrite;
+
+      await vi.waitFor(
+        async () => {
+          expect(pipeline.list()[0]?.status).toBe("ready");
+          expect(await readFile(
+            liveBundlePath(fixture, "example-plugin"),
+            "utf8",
+          )).toContain("writer-two");
+        },
+        { timeout: 60_000, interval: 20 },
+      );
+      expect(pipeline.list()[0]?.disabledReason).toBeNull();
+    } finally {
+      releaseFirstRecovery.resolve();
+      await pipeline.dispose();
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  }, 120_000);
 
   it("installs, hot reloads with one coalesced follow-up, disables, enables, approves, and uninstalls", async () => {
     const fixture = await createPluginWorkspace();

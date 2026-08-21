@@ -68,6 +68,11 @@ export interface PluginDoorWritePipeline {
     pluginId: string,
     write: { absolutePath: string; text: string },
   ): void;
+  rekeyDoorWrittenSourceChange(
+    pluginId: string,
+    from: { absolutePath: string },
+    to: { absolutePath: string },
+  ): void;
 }
 
 export interface PluginAuthoredTextWriterInput {
@@ -108,7 +113,6 @@ export function createPluginAuthoredTextWriter(
   text: string,
   options: { overwrite: boolean; author: MomentAuthor },
 ) => Promise<{ path: string }> {
-  let notifyChain: Promise<void> = Promise.resolve();
   return async (path, text, { overwrite, author }) => {
     const platform = input.platform ?? process.platform;
     const { workspaceRoot, capture } = await input.requireWritableCapture();
@@ -120,32 +124,30 @@ export function createPluginAuthoredTextWriter(
       createOnly: !overwrite,
       signal: input.signal,
     });
-    // Preserve write landing order while asynchronous casing recovery runs.
-    const notify = notifyChain.then(() => undefined, () => undefined).then(
-      async () => {
-        let canonicalPath = absolutePath;
-        if (platform === "win32" || platform === "darwin") {
-          canonicalPath = await recoverOnDiskCasing(
-            workspaceRoot,
-            path,
-            input.signal,
-          );
-        }
-        if (input.signal?.aborted) {
-          throw new Error("Plugin panel is no longer active.");
-        }
-        const pipeline = input.pipeline();
-        const ownerId = pipeline?.pluginIdForPath(canonicalPath);
-        if (ownerId && pipeline) {
-          pipeline.handleDoorWrittenSourceChange(ownerId, {
-            absolutePath: canonicalPath,
-            text,
-          });
-        }
-      },
-    );
-    notifyChain = notify.then(() => undefined, () => undefined);
-    await notify;
+    const pipeline = input.pipeline();
+    const ownerId = pipeline?.pluginIdForPath(absolutePath);
+    if (ownerId && pipeline) {
+      pipeline.handleDoorWrittenSourceChange(ownerId, { absolutePath, text });
+    }
+
+    let recoveredPath = absolutePath;
+    if (platform === "win32" || platform === "darwin") {
+      recoveredPath = await recoverOnDiskCasing(
+        workspaceRoot,
+        path,
+        input.signal,
+      );
+    }
+    if (input.signal?.aborted) {
+      throw new Error("Plugin panel is no longer active.");
+    }
+    if (ownerId && pipeline) {
+      pipeline.rekeyDoorWrittenSourceChange(
+        ownerId,
+        { absolutePath },
+        { absolutePath: recoveredPath },
+      );
+    }
     return { path };
   };
 }
