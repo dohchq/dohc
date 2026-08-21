@@ -9,8 +9,9 @@ import { join } from "node:path";
  * moment a directory can't be read or a segment has no on-disk match, so a
  * transient failure or a not-yet-created leaf never blocks the caller with a
  * thrown error. `fullyRecovered` tells the caller whether every segment came
- * from a real directory entry; a caller that cannot retry later should treat
- * `false` as "use these segments as given for now", not as failure.
+ * from a real directory entry; `false` means folding stopped early (an
+ * unreadable directory or a segment with no on-disk match) and every remaining
+ * segment is the caller's own spelling, not a confirmed one.
  */
 export async function recoverOnDiskSegments(
   root: string,
@@ -40,7 +41,8 @@ export async function recoverOnDiskSegments(
         folding = false;
       } else {
         const normalizedSegment = segment.normalize("NFC");
-        const match = entries.find(
+        const match = entries.find((entry) => entry === segment) ??
+          entries.find(
             (entry) => entry.normalize("NFC") === normalizedSegment,
           ) ??
           entries.find(
@@ -52,6 +54,7 @@ export async function recoverOnDiskSegments(
           currentDir = join(currentDir, match);
           continue;
         }
+        fullyRecovered = false;
         folding = false;
       }
     }

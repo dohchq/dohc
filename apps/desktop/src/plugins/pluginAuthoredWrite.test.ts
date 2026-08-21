@@ -758,7 +758,7 @@ describe("createPluginAuthoredTextWriter", () => {
     }
   });
 
-  it("keeps recovered parent casing when a landed path vanishes before reporting", async () => {
+  it("does not rekey when a landed path vanishes before recovery", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-authored-vanished-"));
     const canonicalPluginRoot = join(workspaceRoot, "plugins", "owned");
     const vanishedDirectory = join(canonicalPluginRoot, "src", "Vanished");
@@ -767,12 +767,6 @@ describe("createPluginAuthoredTextWriter", () => {
       "PLUGINS",
       "OWNED",
       "SRC",
-      "Vanished",
-      "a.ts",
-    );
-    const recoveredPath = join(
-      canonicalPluginRoot,
-      "src",
       "Vanished",
       "a.ts",
     );
@@ -820,7 +814,7 @@ describe("createPluginAuthoredTextWriter", () => {
         pluginId: "owned-plugin",
         write: { absolutePath: callerPath, text: "text\n" },
       }]);
-      expect(rekeys).toEqual([{ from: callerPath, to: recoveredPath }]);
+      expect(rekeys).toEqual([]);
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }
