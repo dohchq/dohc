@@ -353,6 +353,7 @@ async function authoredDoorWrite(
       capture: {
         writeAuthoredTextFile: async (absolutePath, writtenText) => {
           await writeFile(absolutePath, writtenText);
+          return { resolvedAbsolutePath: absolutePath };
         },
       },
     }),
@@ -451,7 +452,7 @@ describe("overlayDoorWrittenSourceDeltas", () => {
     ]);
   });
 
-  it("folds provisional case variants for a new file in sequence order", () => {
+  it("keeps baseline-absent provisional case variants distinct until recovery confirms one", () => {
     const files = overlayDoorWrittenSourceDeltas(
       [],
       new Map([
@@ -461,7 +462,10 @@ describe("overlayDoorWrittenSourceDeltas", () => {
       "darwin",
     );
 
-    expect(files).toEqual([{ relPath: "SRC/new.ts", sha256: "latest" }]);
+    expect(files).toEqual([
+      { relPath: "SRC/new.ts", sha256: "first" },
+      { relPath: "src/new.ts", sha256: "latest" },
+    ]);
   });
 
   it("folds a provisional NFC path onto an NFD baseline spelling", () => {
@@ -526,8 +530,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         requireWritableCapture: async () => ({
           workspaceRoot: fixture.workspaceRoot,
           capture: {
-            writeAuthoredTextFile: async () => {
+            writeAuthoredTextFile: async (absolutePath) => {
               await writeFile(fixture.entryPath, text);
+              return { resolvedAbsolutePath: absolutePath };
             },
           },
         }),
@@ -891,6 +896,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           capture: {
             writeAuthoredTextFile: async (_absolutePath, text) => {
               await writeFile(canonicalPath, text);
+              return { resolvedAbsolutePath: _absolutePath };
             },
           },
         }),
@@ -1043,6 +1049,122 @@ describe("PluginPipeline real filesystem lifecycle", () => {
             : new Map(),
         );
       }
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.doUnmock("node:path");
+      vi.resetModules();
+    }
+  });
+
+  it("converges baseline-absent provisional case variants after recovery confirms one", async () => {
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    const actualPath = await vi.importActual<typeof import("node:path")>(
+      "node:path",
+    );
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      switch (actualPath.posix.resolve(String(args[0]))) {
+        case "/workspace/plugins/owned":
+          return ["SRC"];
+        case "/workspace/plugins/owned/SRC":
+          return ["new.ts"];
+        default:
+          throw new Error("Unexpected readdir path: " + String(args[0]));
+      }
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+    vi.doMock("node:path", () => ({
+      ...actualPath,
+      basename: actualPath.posix.basename,
+      dirname: actualPath.posix.dirname,
+      isAbsolute: actualPath.posix.isAbsolute,
+      join: actualPath.posix.join,
+      relative: actualPath.posix.relative,
+      resolve: actualPath.posix.resolve,
+      sep: actualPath.posix.sep,
+    }));
+
+    try {
+      const { PluginPipeline: PluginPipelineWithPosixPaths } =
+        await import("./PluginPipeline");
+      const { PluginHost: PluginHostWithPosixPaths } =
+        await import("./PluginHost");
+      let pipeline: InstanceType<typeof PluginPipelineWithPosixPaths>;
+      const host = new PluginHostWithPosixPaths({
+        stateDir: "/state",
+        workspaceRoot: "/workspace",
+        spawnTransport: fakeSpawnTransport(),
+        routeSdkRequest: async () => ({}),
+        onStatusChange: (pluginId, status) => {
+          pipeline.noteRuntimeStatus(pluginId, status);
+        },
+      });
+      pipeline = new PluginPipelineWithPosixPaths({
+        workspaceRoot: "/workspace",
+        stateDir: "/state",
+        pluginHost: host,
+        platform: "darwin",
+        pnpmRunnerEntry: "/runner",
+      });
+      const pipelineState = pipeline as unknown as {
+        discovery: InstalledPluginRecord[];
+        doorWrittenDeltas: DoorWrittenDeltas;
+        enqueueSourceRefresh(
+          pluginId: string,
+          run: () => Promise<void>,
+        ): void;
+        retryProvisionalDeltaRecovery(pluginId: string): Promise<void>;
+      };
+      pipelineState.discovery = [{
+        id: "owned",
+        directoryName: "owned",
+        rootPath: "/workspace/plugins/owned",
+        manifest: { version: 1, name: "owned", entry: "src/index.ts" },
+        iconPath: null,
+        diagnostics: [],
+        valid: true,
+      }];
+      pipelineState.enqueueSourceRefresh = () => undefined;
+
+      const firstText = "first\n";
+      const latestText = "latest\n";
+      pipeline.handleDoorWrittenSourceChange("owned", {
+        absolutePath: "/workspace/plugins/owned/SRC/new.ts",
+        text: firstText,
+      });
+      pipeline.handleDoorWrittenSourceChange("owned", {
+        absolutePath: "/workspace/plugins/owned/src/new.ts",
+        text: latestText,
+      });
+      expect(pipelineState.doorWrittenDeltas.get("owned")).toEqual(new Map([
+        ["SRC/new.ts", {
+          sha256: createHash("sha256").update(firstText, "utf8").digest("hex"),
+          seq: 1,
+          provisional: true,
+          provisionalOrigin: undefined,
+        }],
+        ["src/new.ts", {
+          sha256: createHash("sha256").update(latestText, "utf8").digest("hex"),
+          seq: 2,
+          provisional: true,
+          provisionalOrigin: undefined,
+        }],
+      ]));
+
+      await pipelineState.retryProvisionalDeltaRecovery("owned");
+
+      expect(pipelineState.doorWrittenDeltas.get("owned")).toEqual(new Map([[
+        "SRC/new.ts",
+        {
+          sha256: createHash("sha256").update(latestText, "utf8").digest("hex"),
+          seq: 2,
+        },
+      ]]));
     } finally {
       vi.doUnmock("node:fs/promises");
       vi.doUnmock("node:path");
@@ -1213,6 +1335,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           capture: {
             writeAuthoredTextFile: async (_absolutePath, text) => {
               await writeFile(fixture.entryPath, text);
+              return { resolvedAbsolutePath: _absolutePath };
             },
           },
         }),
@@ -1333,6 +1456,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           capture: {
             writeAuthoredTextFile: async (_absolutePath: string, text: string) => {
               await writeFile(fixture.entryPath, text);
+              return { resolvedAbsolutePath: _absolutePath };
             },
           },
         }),

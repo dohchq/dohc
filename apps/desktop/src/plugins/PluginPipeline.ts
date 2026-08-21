@@ -487,12 +487,10 @@ export function overlayDoorWrittenSourceDeltas(
   for (
     const [relPath, delta] of [...deltas].sort((a, b) => a[1].seq - b[1].seq)
   ) {
-    const lower = foldForCompare(relPath);
     const target = delta.provisional && byLowerCase && !baselineKeys.has(relPath)
-      ? byLowerCase.get(lower) ?? relPath
+      ? byLowerCase.get(foldForCompare(relPath)) ?? relPath
       : relPath;
     files.set(target, delta.sha256);
-    byLowerCase?.set(lower, target);
   }
   return [...files].map(([relPath, sha256]) => ({ relPath, sha256 }));
 }

@@ -3007,12 +3007,13 @@ describe("workspaceEngineCapture agent attribution", () => {
     );
     const engine = liveCapture(root, new VersionedLoopbackEngine());
 
-    await engine.writeAuthoredTextFile(
+    const result = await engine.writeAuthoredTextFile(
       join(root, "alias", "output.txt"),
       "canonical\n",
       { kind: "agent", agentId: "plugin:test", onBehalfOf: "local", agentRunId: "spawn" },
     );
 
+    expect(result.resolvedAbsolutePath).toBe(join(canonical, "output.txt"));
     await expect(readFile(join(canonical, "output.txt"), "utf8")).resolves.toBe(
       "canonical\n",
     );
@@ -3102,7 +3103,7 @@ describe("workspaceEngineCapture agent attribution", () => {
         "x".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES),
         author,
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ resolvedAbsolutePath: join(root, "at-limit.txt") });
     await expect(
       engine.writeAuthoredTextFile(
         join(root, "over-limit.txt"),

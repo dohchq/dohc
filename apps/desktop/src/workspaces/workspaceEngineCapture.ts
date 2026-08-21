@@ -383,12 +383,13 @@ export interface WorkspaceEngineCapture {
   registerExpectedEngineEvents(events: readonly ExpectedEngineEvent[]): () => void;
   // Writes one SDK-originated text file with an explicit per-operation
   // author. This never reads or changes the workspace's ambient agent slot.
+  // Returns the resolved path where the write landed.
   writeAuthoredTextFile(
     absolutePath: string,
     text: string,
     author: MomentAuthor,
     options?: { createOnly?: boolean; signal?: AbortSignal },
-  ): Promise<void>;
+  ): Promise<{ resolvedAbsolutePath: string }>;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
   // file through this capture's Rust workspace sessions. The session journals
   // editor edits as ydoc.update ops and, on each debounced settle, projects the
@@ -3495,6 +3496,7 @@ export function createWorkspaceEngineCapture(
           author,
         });
         await materialize([{ kind: "write", path, text }], policy);
+        return { resolvedAbsolutePath: resolvedAbsolute };
       });
     },
 

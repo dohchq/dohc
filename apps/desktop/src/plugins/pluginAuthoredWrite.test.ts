@@ -63,6 +63,7 @@ function recordingCapture(behavior?: {
           await writeFile(absolutePath, text);
         }
         writes.push({ absolutePath, text, options });
+        return { resolvedAbsolutePath: absolutePath };
       },
     },
   };
@@ -175,8 +176,9 @@ describe("createPluginAuthoredTextWriter", () => {
       signal: controller.signal,
       platform: "darwin",
       capture: {
-        writeAuthoredTextFile: async () => {
+        writeAuthoredTextFile: async (absolutePath) => {
           controller.abort();
+          return { resolvedAbsolutePath: absolutePath };
         },
       },
       pipeline: {
@@ -269,6 +271,51 @@ describe("createPluginAuthoredTextWriter", () => {
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }
+  });
+
+  it("attributes an in-workspace alias write to the path it actually landed at", async () => {
+    const workspaceRoot = join(tmpdir(), "dohc-authored-alias");
+    const canonicalPath = join(
+      workspaceRoot,
+      "plugins",
+      "owned",
+      "src",
+      "index.ts",
+    );
+    const doorWrites: {
+      pluginId: string;
+      write: { absolutePath: string; text: string };
+    }[] = [];
+    const rekeys: Array<{ from: string; to: string }> = [];
+    const write = createPluginAuthoredTextWriter(writerInput({
+      platform: "linux",
+      workspaceRoot,
+      capture: {
+        writeAuthoredTextFile: async () => ({
+          resolvedAbsolutePath: canonicalPath,
+        }),
+      },
+      pipeline: {
+        pluginIdForPath: (absolutePath) =>
+          absolutePath === canonicalPath ? "owned-plugin" : null,
+        handleDoorWrittenSourceChange: (pluginId, doorWrite) => {
+          doorWrites.push({ pluginId, write: doorWrite });
+        },
+        rekeyDoorWrittenSourceChange: (_pluginId, from, to) => {
+          rekeys.push({ from: from.absolutePath, to: to.absolutePath });
+        },
+      },
+    }));
+
+    await write(join("alias", "index.ts"), "text\n", {
+      overwrite: true,
+      author,
+    });
+
+    expect(doorWrites).toEqual([{
+      pluginId: "owned-plugin",
+      write: { absolutePath: canonicalPath, text: "text\n" },
+    }]);
   });
 
   it.skipIf(process.platform !== "win32")(
@@ -489,6 +536,7 @@ describe("createPluginAuthoredTextWriter", () => {
           writeAuthoredTextFile: async (_absolutePath, text) => {
             await writeFile(canonicalPath, text);
             controller.abort();
+            return { resolvedAbsolutePath: _absolutePath };
           },
         },
         pipeline: {
@@ -593,7 +641,9 @@ describe("createPluginAuthoredTextWriter", () => {
       const input = writerInput({
         platform: "darwin",
         capture: {
-          writeAuthoredTextFile: async () => undefined,
+          writeAuthoredTextFile: async (absolutePath) => ({
+            resolvedAbsolutePath: absolutePath,
+          }),
         },
         pipeline: {
           pluginIdForPath: () => "owned-plugin",
@@ -654,7 +704,11 @@ describe("createPluginAuthoredTextWriter", () => {
       const write = createWriterWithUnreadablePath(writerInput({
         platform: "darwin",
         workspaceRoot,
-        capture: { writeAuthoredTextFile: async () => undefined },
+        capture: {
+          writeAuthoredTextFile: async (absolutePath) => ({
+            resolvedAbsolutePath: absolutePath,
+          }),
+        },
         pipeline: {
           pluginIdForPath: () => "owned-plugin",
           handleDoorWrittenSourceChange: () => {
@@ -787,6 +841,7 @@ describe("createPluginAuthoredTextWriter", () => {
             expect(writeAuthor).toEqual(author);
             await writeFile(join(vanishedDirectory, "a.ts"), text);
             await rm(vanishedDirectory, { recursive: true });
+            return { resolvedAbsolutePath: absolutePath };
           },
         },
         pipeline: {
