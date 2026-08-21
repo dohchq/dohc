@@ -2739,6 +2739,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       return {
         pipeline,
+        entryPath: fixture.entryPath,
         statuses,
         buildCalls: () => buildCalls,
         failNextBuildPublish: () => {
@@ -2771,6 +2772,36 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           () => setup.pipeline.list()[0]?.status === "ready",
           "Plugin did not reach ready after retrying its build.",
         );
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("holds changed source for approval instead of approving it on rebuild", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await setup.failEstablishedBuild();
+        const approvedHash = setup.pipeline.list()[0]?.approvedHash;
+        await writeFile(setup.entryPath, [
+          'export const marker = "changed before retry";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+
+        expect(rebuilt).toMatchObject({
+          ok: true,
+          plugin: {
+            status: "disabled-pending-approval",
+            approvedHash,
+          },
+        });
+        expect(setup.pipeline.list()[0]).toMatchObject({
+          status: "disabled-pending-approval",
+          approvedHash,
+        });
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
       } finally {
         await setup.pipeline.dispose();
       }

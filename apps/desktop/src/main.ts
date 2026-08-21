@@ -654,6 +654,7 @@ import {
   loadPluginPanelRegistration,
   pluginLifecycleKey,
   rememberPluginRegistration,
+  resolveRegisteredPlugin,
   startPluginForPanel,
   type RegisteredPlugin,
 } from "./plugins/pluginPanelRegistration";
@@ -2848,20 +2849,20 @@ function invokeWorkspacePluginSdk(input: {
   );
 }
 
-// A plugin this workspace can serve panels for. The registration map only
-// remembers plugins a tab opened, and a view in the activity bar opens no
-// tab, so the pipeline's own discovery — where the manifest actually lives —
-// answers for the rest. Approval is unaffected either way: ensurePluginStarted
-// still hash-verifies before it executes anything, and panels still serve from
-// the approved snapshot rather than from pluginRoot.
+// A plugin this workspace can serve panels for. The pipeline's current
+// discovery owns the manifest. The registration map is only a fallback for a
+// plugin the pipeline does not currently expose. Approval is unaffected:
+// ensurePluginStarted still hash-verifies before it executes anything, and
+// panels still serve from the approved snapshot rather than from pluginRoot.
 function registeredPlugin(
   workspaceId: string,
   pluginId: string,
 ): RegisteredPlugin | undefined {
-  const remembered = pluginRegistrations.get(workspaceId)?.get(pluginId);
-  if (remembered) return remembered;
-  return pluginPipelines.get(workspaceId)?.pluginRegistration(pluginId) ??
-    undefined;
+  return resolveRegisteredPlugin(
+    pluginId,
+    pluginPipelines.get(workspaceId),
+    pluginRegistrations.get(workspaceId),
+  );
 }
 
 // Panels serve from the approved, hash-verified snapshot — never from
@@ -6787,6 +6788,13 @@ function registerIpcHandlers(
             () => ensurePluginStarted(workspace, plugin, { claim: false }),
           );
         },
+        ensureCurrent: () => {
+          if (!isCurrent()) {
+            throw new Error(
+              "The plugin command request was cancelled because the renderer changed.",
+            );
+          }
+        },
       }),
     );
   });
@@ -7265,8 +7273,10 @@ function registerIpcHandlers(
     pipeline.enable(pluginId));
   pluginAction(CHANNELS.approvePlugin, (pipeline, pluginId) =>
     pipeline.approve(pluginId));
-  pluginAction(CHANNELS.rebuildPlugin, (pipeline, pluginId) =>
-    pipeline.rebuild(pluginId));
+  pluginAction(CHANNELS.rebuildPlugin, (pipeline, pluginId, workspaceId) => {
+    stopPluginWebAppsForPlugin(workspaceId, pluginId);
+    return pipeline.rebuild(pluginId);
+  });
 
   ipcMain.handle(CHANNELS.pluginUninstallPreflight, async (event, payload) => {
     assertTrustedSender(event);

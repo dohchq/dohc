@@ -23,6 +23,20 @@ export interface RegisteredPlugin {
   manifest: DohcPluginManifest;
 }
 
+interface PluginRegistrationSource {
+  pluginRegistration(pluginId: string): RegisteredPlugin | null;
+}
+
+export function resolveRegisteredPlugin(
+  pluginId: string,
+  pipeline: PluginRegistrationSource | undefined,
+  remembered: ReadonlyMap<string, RegisteredPlugin> | undefined,
+): RegisteredPlugin | undefined {
+  return pipeline?.pluginRegistration(pluginId) ??
+    remembered?.get(pluginId) ??
+    undefined;
+}
+
 /**
  * Records the newest registration for a plugin in a workspace, replacing the
  * one before it. Keeping the first registration forever froze the manifest

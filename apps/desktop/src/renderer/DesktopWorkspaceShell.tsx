@@ -105,6 +105,7 @@ import { PluginsView } from "./workbench/PluginsView";
 import {
   pluginActivityViews,
   pluginCommandEntries,
+  pluginCommandPaletteId,
   resolvePluginView,
 } from "./workbench/pluginActivityViews";
 import { usePluginCatalog } from "./workbench/pluginCatalog";
@@ -4420,7 +4421,7 @@ export function DesktopWorkspaceShell(props: {
         run: () => mutateWb((state) => setView(state, view.viewId)),
       })),
       ...pluginCommandItems.map((entry) => ({
-        id: `plugin-command-${entry.pluginId}-${entry.commandId}`,
+        id: pluginCommandPaletteId(entry.pluginId, entry.commandId),
         label: `${entry.pluginTitle}: ${entry.title}`,
         run: () => {
           // No staleness guard is needed: DesktopRoot's

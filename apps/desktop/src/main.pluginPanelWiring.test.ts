@@ -134,12 +134,16 @@ describe("plugin panel main-process wiring", () => {
     expect(placementAt).toBeLessThan(lockAt);
 
     // A rail view opens no tab, so nothing fills the registration map for it.
-    // registeredPlugin must fall back to the pipeline's own discovery, or a
-    // view-only plugin's panel can never start. Behavior is pinned end to end
-    // by e2e/plugin-panel.spec.ts.
+    // registeredPlugin must still resolve from the pipeline's own discovery,
+    // or a view-only plugin's panel can never start. The precedence itself
+    // (pipeline first, remembered registration as fallback) is pinned
+    // behaviorally in pluginPanelRegistration.test.ts; this only pins that
+    // both sources are still wired in. Behavior is pinned end to end by
+    // e2e/plugin-panel.spec.ts.
     const lookup = functionSource("function registeredPlugin(");
-    expect(lookup).toContain("pluginRegistrations.get(workspaceId)?.get(pluginId)");
-    expect(lookup).toContain("pluginPipelines.get(workspaceId)?.pluginRegistration(pluginId)");
+    expect(lookup).toContain("resolveRegisteredPlugin(");
+    expect(lookup).toContain("pluginPipelines.get(workspaceId)");
+    expect(lookup).toContain("pluginRegistrations.get(workspaceId)");
   });
 
   it("authorizes panel SDK calls before routing them through the plugin host", () => {

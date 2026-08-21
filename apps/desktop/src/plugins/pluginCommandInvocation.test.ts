@@ -79,6 +79,38 @@ describe("invokeRegisteredPluginCommand", () => {
     expect(invokeCommand).not.toHaveBeenCalled();
   });
 
+  it("cancels after a successful start when the renderer changed", async () => {
+    const invokeCommand = vi.fn(async () => null);
+    const host = {
+      getSpawnId: vi.fn(() => "spawn-1"),
+      invokeCommand,
+    };
+    const ensureCurrent = vi.fn(() => {
+      throw new Error(
+        "The plugin command request was cancelled because the renderer changed.",
+      );
+    });
+
+    await expect(
+      invokeRegisteredPluginCommand({
+        input,
+        plugin: {
+          manifest: {
+            commands: [{ id: "hello.write", title: "Write hello note" }],
+          },
+        },
+        ensureStarted: async () => host,
+        ensureCurrent,
+      }),
+    ).resolves.toEqual({
+      status: "command-failed",
+      message:
+        "The plugin command request was cancelled because the renderer changed.",
+    });
+    expect(ensureCurrent).toHaveBeenCalledWith();
+    expect(invokeCommand).not.toHaveBeenCalled();
+  });
+
   it("reports a started plugin with no live process", async () => {
     const invokeCommand = vi.fn(async () => null);
     const ensureStarted = vi.fn(async () => ({

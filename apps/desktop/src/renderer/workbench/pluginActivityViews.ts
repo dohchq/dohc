@@ -23,6 +23,13 @@ export interface PluginCommandEntry {
   pluginTitle: string;
 }
 
+export function pluginCommandPaletteId(
+  pluginId: string,
+  commandId: string,
+): string {
+  return `plugin-command-${encodeURIComponent(pluginId)}/${encodeURIComponent(commandId)}`;
+}
+
 /** Every view the rail shows, in plugin order, then manifest order. */
 export function pluginActivityViews(
   plugins: readonly PluginStatusRecord[],

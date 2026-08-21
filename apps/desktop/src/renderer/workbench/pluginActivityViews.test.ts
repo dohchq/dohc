@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { PluginStatusRecord } from "../../ipc/bridgeContract";
 import {
   pluginActivityViews,
+  pluginCommandPaletteId,
   resolvePluginView,
 } from "./pluginActivityViews";
 import { pluginViewId } from "./workbenchState";
@@ -102,6 +103,14 @@ describe("pluginActivityViews", () => {
       "a-plugin/one",
       "a-plugin/two",
     ]);
+  });
+});
+
+describe("pluginCommandPaletteId", () => {
+  it("keeps hyphenated plugin and command ids distinct", () => {
+    expect(pluginCommandPaletteId("a-b", "c")).not.toBe(
+      pluginCommandPaletteId("a", "b-c"),
+    );
   });
 });
 

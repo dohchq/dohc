@@ -814,6 +814,7 @@ export class PluginPipeline {
   private buildFromCurrentSource(
     pluginId: string,
     candidate: InstalledPluginRecord & { manifest: DohcPluginManifest },
+    expectedHash?: string,
   ): Promise<PluginPipelineActionResult> {
     const staysDisabled =
       this.statuses.get(pluginId)?.disabledReason === "user";
@@ -823,6 +824,7 @@ export class PluginPipeline {
       disabledReasonAfterBuild: staysDisabled ? "user" : null,
       resetCrashAccounting: true,
       freshInstall: false,
+      expectedHash,
     });
   }
 
@@ -851,7 +853,11 @@ export class PluginPipeline {
           ),
         );
       }
-      return this.buildFromCurrentSource(pluginId, candidate);
+      return this.buildFromCurrentSource(
+        pluginId,
+        candidate,
+        state.approvedHash,
+      );
     });
   }
 

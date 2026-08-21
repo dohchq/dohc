@@ -10,6 +10,7 @@ import {
   loadPluginWebAppRegistration,
   pluginLifecycleKey,
   rememberPluginRegistration,
+  resolveRegisteredPlugin,
   startPluginForPanel,
   type RegisteredPlugin,
 } from "./pluginPanelRegistration";
@@ -266,6 +267,43 @@ describe("plugin panel registration", () => {
     expect(registrations.get("workspace-1")?.get("hello-plugin")?.manifest)
       .toBe(remembered.manifest);
     expect(remembered.manifest.panels?.[0]?.title).toBe("Hello again");
+  });
+
+  it("prefers the pipeline's current manifest over a remembered registration", () => {
+    const oldRegistration: RegisteredPlugin = {
+      pluginRoot: "plugins/hello-plugin",
+      manifest: {
+        version: 1,
+        name: "hello-plugin",
+        entry: "plugin.mjs",
+      },
+    };
+    const currentRegistration: RegisteredPlugin = {
+      pluginRoot: "plugins/hello-plugin",
+      manifest: {
+        version: 1,
+        name: "hello-plugin",
+        entry: "plugin.mjs",
+        commands: [{ id: "hello.write", title: "Write hello note" }],
+      },
+    };
+    const pipeline = {
+      pluginRegistration: () => currentRegistration,
+    };
+    const remembered = new Map([["hello-plugin", oldRegistration]]);
+
+    const resolved = resolveRegisteredPlugin(
+      "hello-plugin",
+      pipeline,
+      remembered,
+    );
+
+    expect(resolved).toBe(currentRegistration);
+    expect(
+      resolved?.manifest.commands?.find(
+        (command) => command.id === "hello.write",
+      ),
+    ).toEqual({ id: "hello.write", title: "Write hello note" });
   });
 
   it("claims a plugin host only when the panel's own start ran it (#779 round 10 B3)", async () => {

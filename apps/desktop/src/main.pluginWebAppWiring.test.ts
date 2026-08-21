@@ -217,6 +217,22 @@ describe("plugin web app main-process wiring", () => {
     expect(disableCallAt).toBeGreaterThan(disableStopAt);
   });
 
+  it("destroys a plugin's guest views before rebuilding its host", () => {
+    const rebuildAt = mainSource.indexOf("pluginAction(CHANNELS.rebuildPlugin,");
+    const rebuildStopAt = mainSource.indexOf(
+      "stopPluginWebAppsForPlugin(workspaceId, pluginId);",
+      rebuildAt,
+    );
+    const rebuildCallAt = mainSource.indexOf(
+      "return pipeline.rebuild(pluginId);",
+      rebuildAt,
+    );
+
+    expect(rebuildAt).toBeGreaterThan(-1);
+    expect(rebuildStopAt).toBeGreaterThan(rebuildAt);
+    expect(rebuildCallAt).toBeGreaterThan(rebuildStopAt);
+  });
+
   it("clears the guest partition's storage after a successful uninstall", () => {
     const uninstall = handler("uninstallPlugin");
     const stopViewsAt = uninstall.indexOf(
