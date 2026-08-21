@@ -256,14 +256,8 @@ export function PluginPanelPage(props: {
   // way a user changes it — settings, the command palette, or the OS flipping
   // while the mode is "system".
   //
-  // A layout effect, not a passive one: the panel becomes queryable (its
-  // iframe testid, its ready DOM) in the same commit that makes panelOrigin
-  // truthy, but a passive effect's flush is scheduled after that commit, not
-  // inside it. An attribute change landing in that gap fires no observer —
-  // MutationObserver never sees mutations from before it was created — and
-  // the panel silently keeps the theme it opened with. A layout effect runs
-  // synchronously in the same commit that exposes the panel, so nothing can
-  // observe the panel as ready before its theme watcher is armed.
+  // A layout effect, not a passive one: it arms in the same commit that
+  // makes the panel queryable, before anything could observe it un-watched.
   useLayoutEffect(() => {
     if (!panelOrigin) return;
     const root = document.documentElement;
