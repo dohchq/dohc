@@ -4,7 +4,6 @@ import {
   mkdir,
   open,
   readFile,
-  readdir,
   realpath,
   rename,
   rm,
@@ -439,7 +438,6 @@ export async function writeDiskContentToStore(input: {
   }
 }
 
-const CAPTURE_IGNORED_DIRS = new Set([".dohc", "node_modules", ".git"]);
 const PENDING_MATERIALIZATION_FILE = "pending-materialization.json";
 const PULL_IN_FLIGHT_FILE = "pull-in-flight.marker";
 const REFRESH_LIFECYCLE_LOCK = "refresh-lifecycle";
@@ -739,42 +737,6 @@ export async function clearPendingMaterializationPaths(
   );
 }
 
-async function captureDiskPaths(rootDir: string): Promise<{
-  filePaths: Set<string>;
-  directoryPaths: Set<string>;
-  unreadableDirs: Set<string>;
-}> {
-  const filePaths = new Set<string>();
-  const directoryPaths = new Set<string>();
-  const unreadableDirs = new Set<string>();
-  async function walk(dir: string, relativeDir: string): Promise<void> {
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT" && code !== "ENOTDIR") {
-        unreadableDirs.add(relativeDir);
-      }
-      return;
-    }
-    for (const entry of entries) {
-      if (entry.isSymbolicLink()) continue;
-      const path = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) {
-        if (!CAPTURE_IGNORED_DIRS.has(entry.name)) {
-          directoryPaths.add(path);
-          await walk(join(dir, entry.name), path);
-        }
-      } else if (entry.isFile()) {
-        filePaths.add(path);
-      }
-    }
-  }
-  await walk(rootDir, "");
-  return { filePaths, directoryPaths, unreadableDirs };
-}
-
 async function pathConfirmedAbsentOnDisk(resolvedTarget: string): Promise<boolean> {
   try {
     await lstat(resolvedTarget);
@@ -854,8 +816,6 @@ export async function captureSharedViewLocalDivergence(
     workspaceId,
     versionId: main.id,
   });
-  const { filePaths, directoryPaths, unreadableDirs } =
-    await captureDiskPaths(realRoot);
   const pendingState = await readPendingMaterializationPathsForCapture(
     rootDir,
     tracked.map((entry) => entry.path),
@@ -866,7 +826,6 @@ export async function captureSharedViewLocalDivergence(
   let repairedPaths = 0;
   const unjournalablePaths: UnjournalablePath[] = [];
   const visitedPendingPaths = new Set<string>();
-  const unreadableDirsList = [...unreadableDirs];
 
   const diskMatchesSnapshot = (
     disk: DiskTextState,
@@ -1049,32 +1008,22 @@ export async function captureSharedViewLocalDivergence(
       continue;
     }
 
-    const belowUnreadableDirectory = unreadableDirsList.some(
-      (directory) =>
-        directory === "" ||
-        entry.path === directory ||
-        entry.path.startsWith(`${directory}/`),
-    );
-    if (belowUnreadableDirectory) {
-      unjournalablePaths.push({ path: entry.path, reason: "unreadable" });
-      continue;
-    }
-
     let onDisk: "file" | "directory" | "symlink" | "absent";
-    if (filePaths.has(entry.path)) {
-      onDisk = "file";
-    } else if (directoryPaths.has(entry.path)) {
-      onDisk = "directory";
-    } else {
-      const stat = await lstat(resolve(realRoot, entry.path)).catch(() => null);
-      onDisk =
-        stat === null
-          ? "absent"
-          : stat.isSymbolicLink()
-            ? "symlink"
-            : stat.isDirectory()
-              ? "directory"
-              : "file";
+    try {
+      const stat = await lstat(resolve(realRoot, entry.path));
+      onDisk = stat.isSymbolicLink()
+        ? "symlink"
+        : stat.isDirectory()
+          ? "directory"
+          : "file";
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        onDisk = "absent";
+      } else {
+        unjournalablePaths.push({ path: entry.path, reason: "unreadable" });
+        continue;
+      }
     }
 
     if (onDisk === "symlink" || onDisk === "directory") {
