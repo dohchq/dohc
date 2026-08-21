@@ -89,18 +89,29 @@ describe("commandForSiteScript", () => {
     );
   });
 
-  it("recognizes npm run's documented boolean options between run and the script name, and after it", () => {
+  it("recognizes npm run's documented boolean options between run and the script name, and after it, and preserves them in the argv", () => {
     const site = packageSite({
       configuredScripts: { dev: "npm run --if-present dev --silent" },
     });
 
     expect(commandForSiteScript(site, "dev")).toEqual({
       command: "npm",
-      args: ["run", "dev"],
+      args: ["run", "dev", "--if-present", "--silent"],
     });
   });
 
-  it("still falls through to the uninspected literal command when it isn't a package manager at all", () => {
+  it("preserves --ignore-scripts in the rewritten command instead of silently running the hooks it suppresses", () => {
+    const site = packageSite({
+      configuredScripts: { dev: "npm run dev --ignore-scripts" },
+    });
+
+    expect(commandForSiteScript(site, "dev")).toEqual({
+      command: "npm",
+      args: ["run", "dev", "--ignore-scripts"],
+    });
+  });
+
+  it("still falls through to the literal command when it isn't a package manager at all, validated for loopback", () => {
     const site = packageSite({
       configuredScripts: { dev: "vite --host 127.0.0.1" },
     });
@@ -109,6 +120,41 @@ describe("commandForSiteScript", () => {
       command: "vite",
       args: ["--host", "127.0.0.1"],
     });
+
+    const hostile = packageSite({
+      configuredScripts: { dev: "vite --host 0.0.0.0" },
+    });
+    expect(() => commandForSiteScript(hostile, "dev")).toThrow(/loopback/);
+  });
+
+  it("validates a literal configured build command for loopback, not only dev/start", () => {
+    const site = packageSite({
+      configuredScripts: { build: "vite build --host 0.0.0.0" },
+    });
+
+    expect(() => commandForSiteScript(site, "build")).toThrow(/loopback/);
+  });
+
+  it("validates a package.json build script and its hooks for loopback, not only dev/start", () => {
+    const site = packageSite({
+      scripts: {
+        dev: "vite --host 127.0.0.1",
+        build: "vite build",
+        prebuild: "vite --host 0.0.0.0",
+      },
+    });
+
+    expect(() => commandForSiteScript(site, "build")).toThrow(/loopback/);
+  });
+
+  it("refuses a configured npm build wrapper in a shape it cannot validate, rather than falling through", () => {
+    const site = packageSite({
+      configuredScripts: { build: "npm run build --port 3000" },
+    });
+
+    expect(() => commandForSiteScript(site, "build")).toThrow(
+      /does not recognize as a script-run wrapper/,
+    );
   });
 
   it("refuses npm run dev --if-present with a hostile predev, rather than executing it unvalidated", () => {

@@ -148,7 +148,13 @@ function resolveArtifactRelativePath(
   artifactRoot: string,
   base: HtmlBaseResolution,
 ): string | null {
-  const raw = rawReference.trim().split(/[?#]/, 1)[0]?.trim() ?? "";
+  // A browser's URL parser normalizes `\` to `/` in the path of a special
+  // scheme (http/https/file) before resolution — on EVERY platform, not
+  // just Windows. Do the same here, on the raw reference, before any
+  // path-joining, so a site authored with backslash separators resolves
+  // the way it would in a real browser instead of naming a literal
+  // backslash-containing filename that never exists on disk.
+  const raw = rawReference.trim().split(/[?#]/, 1)[0]?.trim().replaceAll("\\", "/") ?? "";
   if (
     !raw ||
     raw.startsWith("#") ||
@@ -243,7 +249,13 @@ const JS_SCRIPT_TYPE_PATTERN =
  * JS MIME types are all executable. */
 function isExecutableScriptType(attrs: ReadonlyMap<string, string>): boolean {
   const type = attrs.get("type");
-  return !type || JS_SCRIPT_TYPE_PATTERN.test(type);
+  if (!type) return true;
+  // A `type` is a MIME type — only its ESSENCE (the type/subtype before any
+  // `;parameter=value`) is what a browser compares against the JS list.
+  // `text/javascript; charset=utf-8` is exactly as executable as
+  // `text/javascript` alone.
+  const essence = type.split(";", 1)[0]?.trim() ?? "";
+  return JS_SCRIPT_TYPE_PATTERN.test(essence);
 }
 
 /** A `<script>` with its own `src` never executes its body — the browser
@@ -368,7 +380,9 @@ function htmlBaseDirectoryFromDocument(
   if (contextBase.kind === "external") return { kind: "external" };
   let decoded: string;
   try {
-    decoded = decodeURIComponent(href.split(/[?#]/, 1)[0] ?? "");
+    // Same browser-URL-parser backslash normalization as
+    // resolveArtifactRelativePath — a <base href> is no less subject to it.
+    decoded = decodeURIComponent(href.split(/[?#]/, 1)[0] ?? "").replaceAll("\\", "/");
   } catch {
     return { kind: "external" };
   }
@@ -801,12 +815,23 @@ function domProducingTag(
  * in the file, and the tag it's known to produce — a small fixed-point pass
  * (not real lexical scoping) so a chain like
  * `const a = document.createElement("img"); const b = a;` still resolves,
- * without building a full scope resolver for a heuristic scanner. */
+ * without building a full scope resolver for a heuristic scanner.
+ *
+ * That flat, name-keyed map is unsound across scopes on its own: an
+ * unrelated function's `const img = {}` and this one's
+ * `const img = document.createElement("img")` share a map key with no
+ * scope resolver to tell them apart. Per the unprovable-stays-out rule,
+ * the conservative fix wins over a real scope resolver a heuristic scanner
+ * has no business building: a name declared or assigned ANYWHERE in the
+ * file with a non-DOM-producing value (or with two DIFFERENT DOM tags) is
+ * invalidated file-wide, never trusted again even where its OWN binding
+ * really is DOM-producing. */
 function collectDomProducingTags(
   program: AstNode,
   shadowedGlobals: ReadonlySet<string>,
 ): Map<string, DomProducingTag> {
   const tags = new Map<string, DomProducingTag>();
+  const invalidated = new Set<string>();
   for (let pass = 0; pass < 3; pass += 1) {
     let changed = false;
     walkAst(program, (node) => {
@@ -823,12 +848,28 @@ function collectDomProducingTags(
       }
       if (!isAstNode(target) || target.type !== "Identifier") return;
       const name = astString(target, "name");
-      if (!name || tags.has(name)) return;
+      if (!name || invalidated.has(name)) return;
       const tag = domProducingTag(source, tags, shadowedGlobals);
-      if (tag !== undefined) {
-        tags.set(name, tag);
-        changed = true;
+      if (tag === undefined) {
+        // No real initializer (a bare `let img;`) proves nothing either
+        // way — only an ACTUAL non-DOM-producing value invalidates.
+        if (source === null || source === undefined) return;
+        if (tags.delete(name)) changed = true;
+        invalidated.add(name);
+        return;
       }
+      const existing = tags.get(name);
+      if (existing !== undefined && existing !== tag) {
+        // Two DIFFERENT DOM tags for the same name is exactly the same
+        // cross-scope collision, just between two DOM-producing bindings
+        // instead of one DOM and one not — neither tag is trustworthy.
+        tags.delete(name);
+        invalidated.add(name);
+        changed = true;
+        return;
+      }
+      tags.set(name, tag);
+      changed = true;
     });
     if (!changed) break;
   }
@@ -908,6 +949,24 @@ function isBareModuleSpecifier(specifier: string): boolean {
  * maps don't rewrite those); a bare specifier resolves through the active
  * import map — an exact "imports" key first, then the longest matching
  * "prefix/" key — and an unmapped bare specifier resolves to nothing. */
+// Exact match first, then the LONGEST "prefix/" key the specifier starts
+// with — the same longest-prefix-match algorithm the spec applies to every
+// import-map entry, bare or URL-like alike.
+function resolveAgainstImportMapEntries(
+  specifier: string,
+  entries: ReadonlyMap<string, string>,
+): string | undefined {
+  const exact = entries.get(specifier);
+  if (exact !== undefined) return exact;
+  let bestPrefixKey: string | undefined;
+  for (const key of entries.keys()) {
+    if (!key.endsWith("/") || !specifier.startsWith(key)) continue;
+    if (!bestPrefixKey || key.length > bestPrefixKey.length) bestPrefixKey = key;
+  }
+  if (bestPrefixKey === undefined) return undefined;
+  return entries.get(bestPrefixKey)! + specifier.slice(bestPrefixKey.length);
+}
+
 function resolveModuleSpecifier(
   specifier: string,
   importMap: ImportMapResolution | undefined,
@@ -918,24 +977,17 @@ function resolveModuleSpecifier(
   if (!isBareModuleSpecifier(specifier)) {
     // A URL-like specifier still passes through the import map: the spec
     // normalizes it against the IMPORTING script's own base and matches
-    // that normalized form against the map's (already-normalized) keys.
-    // Unmatched, it resolves to itself — same as before this lookup existed.
+    // that normalized form against the map's (already-normalized) keys —
+    // an exact key OR the longest "prefix/" key it starts with. Unmatched,
+    // it resolves to itself — same as before this lookup existed.
     if (!importMap) return specifier;
     const normalized = resolveArtifactRelativePath(specifier, fromPath, artifactRoot, ownBase);
     const normalizedRelative = normalized ? pathRelativeToArtifact(artifactRoot, normalized) : null;
     if (normalizedRelative === null) return specifier;
-    return importMap.urlLikeImports.get(`/${normalizedRelative}`) ?? specifier;
+    return resolveAgainstImportMapEntries(`/${normalizedRelative}`, importMap.urlLikeImports) ?? specifier;
   }
   if (!importMap) return undefined;
-  const exact = importMap.imports.get(specifier);
-  if (exact !== undefined) return exact;
-  let bestPrefixKey: string | undefined;
-  for (const key of importMap.imports.keys()) {
-    if (!key.endsWith("/") || !specifier.startsWith(key)) continue;
-    if (!bestPrefixKey || key.length > bestPrefixKey.length) bestPrefixKey = key;
-  }
-  if (bestPrefixKey === undefined) return undefined;
-  return importMap.imports.get(bestPrefixKey)! + specifier.slice(bestPrefixKey.length);
+  return resolveAgainstImportMapEntries(specifier, importMap.imports);
 }
 
 function parseImportMap(text: string): ImportMapResolution | undefined {
@@ -1008,6 +1060,23 @@ function consumedUrlLiteral(
   if (direct !== undefined) return direct;
   if (isAstNode(node) && node.type === "Identifier") {
     return urlLiteralNames.get(astString(node, "name") ?? "");
+  }
+  return undefined;
+}
+
+/** `new Worker(url, { type: "module" })` loads its script as a MODULE, not
+ * classic — the second argument's `type` option decides the grammar the
+ * worker's own file needs to be parsed with, the same way a <script
+ * type="module"> element's own attribute does. A missing/non-"module" type
+ * (or a non-literal options object) stays classic, the existing default. */
+function workerScriptKind(optionsNode: unknown): ScriptKind | undefined {
+  if (!isAstNode(optionsNode) || optionsNode.type !== "ObjectExpression") return undefined;
+  for (const prop of astChildren(optionsNode, "properties")) {
+    if (!isAstNode(prop) || prop.type !== "Property") continue;
+    const key = astChild(prop, "key");
+    const keyName = isAstNode(key) && key.type === "Identifier" ? astString(key, "name") : undefined;
+    if (keyName !== "type") continue;
+    return stringLiteralValue(astChild(prop, "value")) === "module" ? "module" : undefined;
   }
   return undefined;
 }
@@ -1091,7 +1160,7 @@ function jsReferencesFromCode(
         if (!calleeName || shadowedGlobals.has(calleeName)) break;
         if (calleeName === "Worker" || calleeName === "SharedWorker") {
           const { value, scriptRelative } = consumedValue(args[0]);
-          addReference(value, !scriptRelative, true);
+          addReference(value, !scriptRelative, true, workerScriptKind(args[1]));
         }
         // `new URL(...)` alone only constructs a URL object — no request
         // happens until the result reaches a consumer (checked at each
@@ -1365,8 +1434,15 @@ function htmlReferencesFromDocument(
     ...attributeReferences,
     ...nestedReferences,
     ...cssReferences(cssTexts.join("\n")),
-    ...jsReferencesFromCode(classicJsTexts.join("\n"), "classic", context, documentPath, documentBase, artifactRoot, importMap),
-    ...jsReferencesFromCode(moduleJsTexts.join("\n"), "module", context, documentPath, documentBase, artifactRoot, importMap),
+    // Each <script> element parses on its OWN — the same way a browser runs
+    // each script tag independently — so a syntax error in one script never
+    // discards a later, syntactically valid script's own references.
+    ...classicJsTexts.flatMap((text) =>
+      jsReferencesFromCode(text, "classic", context, documentPath, documentBase, artifactRoot, importMap),
+    ),
+    ...moduleJsTexts.flatMap((text) =>
+      jsReferencesFromCode(text, "module", context, documentPath, documentBase, artifactRoot, importMap),
+    ),
     ...handlerTexts.flatMap((handler) =>
       jsReferencesFromEventHandler(handler, context, documentPath, documentBase, artifactRoot, importMap),
     ),
@@ -1468,6 +1544,18 @@ async function shareManifestForSite(
   const scanned = new Set<string>();
   const documentBaseKey = (base: HtmlBaseResolution): string =>
     base.kind === "local" ? `local:${base.directory}` : base.kind;
+  // Two documents can each declare their OWN import map and both reference
+  // the same external module — the map is part of what that module's own
+  // `import` specifiers resolve against, so a fingerprint of its entries
+  // has to be part of the dedupe key too, or the second document's map
+  // never gets its own scan of a module the first document's map already
+  // claimed.
+  const importMapKey = (importMap: ImportMapResolution | undefined): string => {
+    if (!importMap) return "none";
+    const entries = (map: ReadonlyMap<string, string>) =>
+      [...map].map(([key, value]) => `${key}=${value}`).sort().join(",");
+    return `${entries(importMap.imports)}|${entries(importMap.urlLikeImports)}`;
+  };
   // Every file is scanned with its own referring document's base — an
   // external .js/.mjs file has no <base> of its own, but a reference the
   // browser resolves against the DOCUMENT's base (fetch, an assignment-
@@ -1525,7 +1613,7 @@ async function shareManifestForSite(
       isManifest,
       importMap: inheritedImportMap,
     } = queue.shift()!;
-    const scanKey = `${current}::${documentBaseKey(inheritedDocumentBase)}::${context}::${scriptKind}::${executesAsCode}::${isManifest}`;
+    const scanKey = `${current}::${documentBaseKey(inheritedDocumentBase)}::${context}::${scriptKind}::${executesAsCode}::${isManifest}::${importMapKey(inheritedImportMap)}`;
     if (
       scanned.has(scanKey) ||
       (!isManifest && !/\.(?:html?|css|js|mjs|webmanifest)$/i.test(current))

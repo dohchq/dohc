@@ -1634,6 +1634,33 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("detect_sites ignores a non-site dohc.json whose only signal is a configured build.output PATH, not a real build", async () => {
+    await withWorkspace(async (ctx) => {
+      // Claims a build output at "dist", but nothing was ever actually
+      // built there — matches workspace-core's hasIndependentWebsiteSignal:
+      // an explicitly non-site config's own build.output claim can't be the
+      // independent signal that overrides its own type declaration.
+      await mkdir(join(ctx.root, "workflow-claims-build"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "workflow-claims-build/dohc.json"),
+        JSON.stringify({ type: "workflow", build: { output: "dist" } }),
+      );
+      // A sibling with the SAME non-site type but a REAL build directory on
+      // disk still counts, proving the detected-vs-configured distinction
+      // (not a blanket refusal of every build.output claim).
+      await mkdir(join(ctx.root, "workflow-real-build/dist"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "workflow-real-build/dohc.json"),
+        JSON.stringify({ type: "workflow" }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true, count: 1 });
+      if (!result.ok) return;
+      expect(result.sites.map((site) => site.root)).toEqual(["workflow-real-build"]);
+    });
+  });
+
   it("detect_sites honors a configured preview.entry over the bare index.html fallback", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "docs/public"), { recursive: true });

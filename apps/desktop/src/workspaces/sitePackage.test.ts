@@ -1283,6 +1283,167 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).not.toContain("import-map-key/lib.js");
   });
 
+  it("applies a trailing-slash import-map key as a prefix mapping to a URL-like specifier", async () => {
+    await mkdir(join(root, "import-map-prefix", "vendor"), { recursive: true });
+    await mkdir(join(root, "import-map-prefix", "lib"), { recursive: true });
+    await writeFile(
+      join(root, "import-map-prefix", "index.html"),
+      [
+        '<script type="importmap">{"imports": {"./lib/": "./vendor/"}}</script>',
+        '<script type="module">import "./lib/widget.js";</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "import-map-prefix", "vendor", "widget.js"), "export {};");
+    await writeFile(join(root, "import-map-prefix", "lib", "widget.js"), "private");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "import-map-prefix",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("import-map-prefix/vendor/widget.js");
+    expect(manifestOf(site)?.assets).not.toContain("import-map-prefix/lib/widget.js");
+  });
+
+  it("carries module grammar into the queue for new Worker(lit, { type: \"module\" })", async () => {
+    await mkdir(join(root, "worker-module-type"), { recursive: true });
+    await writeFile(
+      join(root, "worker-module-type", "index.html"),
+      '<script>new Worker("worker.js", { type: "module" });</script>',
+    );
+    // `export` is only legal in module grammar — classic grammar would fail
+    // to parse this entirely and miss the fetch() reference below it.
+    await writeFile(
+      join(root, "worker-module-type", "worker.js"),
+      'export {};\nfetch("target.txt");',
+    );
+    await writeFile(join(root, "worker-module-type", "target.txt"), "data");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "worker-module-type",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("worker-module-type/target.txt");
+  });
+
+  it("parses each inline <script> element separately — an earlier malformed one does not discard a later one's references", async () => {
+    await mkdir(join(root, "per-script-parse"), { recursive: true });
+    await writeFile(
+      join(root, "per-script-parse", "index.html"),
+      [
+        "<script>this is not valid javascript (((</script>",
+        '<script>fetch("target.txt");</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "per-script-parse", "target.txt"), "data");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "per-script-parse",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("per-script-parse/target.txt");
+  });
+
+  it("scans a shared module separately for each document's own import map", async () => {
+    // Both pages, shared.js, and both targets sit in the SAME directory —
+    // so documentBase, context, scriptKind, and executesAsCode are
+    // IDENTICAL between the two references to shared.js. Only the active
+    // import map differs, isolating that dimension of the dedupe key: with
+    // separate subdirectories, documentBase alone would already force two
+    // scans and this test would pass without exercising the fix at all.
+    await mkdir(join(root, "import-map-identity"), { recursive: true });
+    await writeFile(
+      join(root, "import-map-identity", "page-a.html"),
+      [
+        '<script type="importmap">{"imports": {"lib": "./from-a.js"}}</script>',
+        '<script type="module" src="shared.js"></script>',
+      ].join(""),
+    );
+    await writeFile(
+      join(root, "import-map-identity", "page-b.html"),
+      [
+        '<script type="importmap">{"imports": {"lib": "./from-b.js"}}</script>',
+        '<script type="module" src="shared.js"></script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "import-map-identity", "shared.js"), 'import "lib";');
+    await writeFile(join(root, "import-map-identity", "from-a.js"), "export {};");
+    await writeFile(join(root, "import-map-identity", "from-b.js"), "export {};");
+    await writeFile(
+      join(root, "import-map-identity", "index.html"),
+      [
+        '<iframe src="page-a.html"></iframe>',
+        '<iframe src="page-b.html"></iframe>',
+      ].join(""),
+    );
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "import-map-identity",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("import-map-identity/from-a.js");
+    expect(manifestOf(site)?.assets).toContain("import-map-identity/from-b.js");
+  });
+
+  it("treats a script type by its MIME essence, ignoring parameters like charset", async () => {
+    await mkdir(join(root, "mime-essence"), { recursive: true });
+    await writeFile(
+      join(root, "mime-essence", "index.html"),
+      '<script type="text/javascript; charset=utf-8">fetch("target.txt");</script>',
+    );
+    await writeFile(join(root, "mime-essence", "target.txt"), "data");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "mime-essence",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("mime-essence/target.txt");
+  });
+
+  it("does not let an unrelated scope's non-DOM binding of the same name grant DOM provenance", async () => {
+    await mkdir(join(root, "dom-scope"), { recursive: true });
+    await writeFile(
+      join(root, "dom-scope", "index.html"),
+      '<script src="app.js"></script>',
+    );
+    await writeFile(
+      join(root, "dom-scope", "app.js"),
+      [
+        "function real() {",
+        '  const img = document.createElement("img");',
+        '  img.src = "real.png";',
+        "}",
+        "function fake() {",
+        "  const img = {};",
+        '  img.src = "private.png";',
+        "}",
+      ].join("\n"),
+    );
+    await writeFile(join(root, "dom-scope", "real.png"), "image");
+    await writeFile(join(root, "dom-scope", "private.png"), "image");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "dom-scope",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("dom-scope/real.png");
+    expect(manifestOf(site)?.assets).not.toContain("dom-scope/private.png");
+  });
+
+  it("normalizes a backslash in a reference as a path separator, the way a browser's URL parser does", async () => {
+    await mkdir(join(root, "backslash-ref", "assets"), { recursive: true });
+    await writeFile(
+      join(root, "backslash-ref", "index.html"),
+      '<script src="assets\\app.js"></script>',
+    );
+    await writeFile(join(root, "backslash-ref", "assets", "app.js"), "");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "backslash-ref",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("backslash-ref/assets/app.js");
+  });
+
   it("parses an iframe's srcdoc as a nested document, resolved against the embedding document's base", async () => {
     await mkdir(join(root, "srcdoc"), { recursive: true });
     await writeFile(

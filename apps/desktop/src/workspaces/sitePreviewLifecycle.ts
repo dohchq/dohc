@@ -202,14 +202,19 @@ export function createSitePreviewLifecycle(input: {
       }
     },
 
-    stopAll(): void {
+    // Returns its stops' promises rather than firing them and forgetting —
+    // the will-quit teardown awaits this (bounded by its own existing stop
+    // deadline) so quit cannot outrun a preview process's hard-kill path.
+    async stopAll(): Promise<void> {
+      const stops: Promise<void>[] = [];
       for (const [key, active] of [...activePreviews]) {
         activePreviews.delete(key);
         if (active.state === "running") {
           active.releaseOrigin();
-          void active.handle.stop().catch(() => undefined);
+          stops.push(active.handle.stop().catch(() => undefined));
         }
       }
+      await Promise.all(stops);
     },
   };
 }

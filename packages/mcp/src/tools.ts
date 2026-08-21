@@ -1912,9 +1912,17 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
   const hasPackageSignal =
     files.has("package.json") &&
     (Object.keys(scripts).length > 0 || Boolean(frameworkConfig) || hasWebDependency(pkg));
+  // A directory ACTUALLY found on disk vs. the configured build.output PATH
+  // (a claim, whether or not anything was ever built there) are different
+  // signals — workspace-core's hasIndependentWebsiteSignal only accepts the
+  // former as the independent signal that overrides an explicit non-site
+  // type declaration; its own doc comment explains why (an explicitly
+  // non-site config's own build.output claim can't override its own type).
+  // Both detectors have to agree on that rule for the SAME input.
+  const detectedBuildOutputs = SITE_BUILD_OUTPUT_NAMES.filter((name) => directories.has(name));
   const buildOutputs = [
     configString(config?.build, "output"),
-    ...SITE_BUILD_OUTPUT_NAMES.filter((name) => directories.has(name)),
+    ...detectedBuildOutputs,
   ].filter((output): output is string => typeof output === "string" && output.length > 0);
   const uniqueBuildOutputs = [...new Set(buildOutputs)];
   const explicitNonSite = config?.type !== undefined && config.type !== "site";
@@ -1924,7 +1932,7 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
     !hasIndex &&
     !hasPackageSignal &&
     !frameworkConfig &&
-    uniqueBuildOutputs.length === 0
+    detectedBuildOutputs.length === 0
   ) {
     return null;
   }

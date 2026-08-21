@@ -191,6 +191,40 @@ describe("site preview lifecycle", () => {
     );
   });
 
+  it("stopAll resolves only after every running handle's own stop settles", async () => {
+    const previews = createSitePreviewLifecycle({
+      allowOrigin: allowLoopbackFrameOrigin,
+    });
+    const first = fakeProcessHandle("http://127.0.0.1:4175/");
+    const second = fakeProcessHandle("http://127.0.0.1:4176/");
+    let resolveFirstStop!: () => void;
+    first.handle.stop = vi.fn(
+      () => new Promise<void>((resolve) => { resolveFirstStop = resolve; }),
+    );
+    let secondStopped = false;
+    second.handle.stop = vi.fn(async () => {
+      secondStopped = true;
+    });
+    previews.remember("workspace-1", "site-a", first.handle);
+    previews.remember("workspace-1", "site-b", second.handle);
+
+    let stopAllSettled = false;
+    const stopAllPromise = previews.stopAll().then(() => {
+      stopAllSettled = true;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    // second's stop already resolved, but stopAll must still be waiting on
+    // first's — a fire-and-forget stopAll would already show settled here.
+    expect(secondStopped).toBe(true);
+    expect(stopAllSettled).toBe(false);
+
+    resolveFirstStop();
+    await stopAllPromise;
+    expect(stopAllSettled).toBe(true);
+  });
+
   it("ignores an old exit after a replacement reuses the same origin", () => {
     const previews = createSitePreviewLifecycle({
       allowOrigin: allowLoopbackFrameOrigin,

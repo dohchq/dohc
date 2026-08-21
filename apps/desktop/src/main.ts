@@ -1197,13 +1197,15 @@ async function withKeyedStartLock<T>(
 const withSitePreviewStartLock = <T>(key: string, operation: () => Promise<T>) =>
   withKeyedStartLock(sitePreviewStartLocks, key, operation);
 
-function stopSitePreviewsForQuit(): void {
+function stopSitePreviewsForQuit(): Promise<void> {
   // Called once, from the will-quit teardown — the first moment a quit can no
   // longer be cancelled (#579 review, r19). It used to run at
   // before-quit AND on electron-updater's before-quit-for-update, both of
   // which happen BEFORE the renderer's beforeunload can veto the exit. A user
   // who clicked "Go back" to keep working got their site previews stopped anyway. Idempotent regardless.
-  sitePreviews.stopAll();
+  // Awaited by the caller so quit cannot outrun a preview process's own
+  // hard-kill path — bounded by the will-quit handler's existing 3 s race.
+  return sitePreviews.stopAll();
 }
 
 async function stopSitePreviewsForWorkspace(workspaceId: string): Promise<void> {
@@ -3316,15 +3318,16 @@ async function stopPluginWorkspace(workspaceId: string): Promise<void> {
 }
 
 async function stopAllPluginWorkspaces(): Promise<void> {
-  stopSitePreviewsForQuit();
+  const sitePreviewStop = stopSitePreviewsForQuit();
   pluginPanelSdkAuthorities.revokeAll();
   destroyPluginWebAppViews(pluginWebAppViews.removeAll());
-  await Promise.allSettled(
-    [...new Set([
+  await Promise.allSettled([
+    sitePreviewStop,
+    ...[...new Set([
       ...pluginPipelines.keys(),
       ...[...runningPluginPanels.values()].map((panel) => panel.workspaceId),
     ])].map((workspaceId) => stopPluginWorkspace(workspaceId)),
-  );
+  ]);
   pluginRegistrations.clear();
 }
 

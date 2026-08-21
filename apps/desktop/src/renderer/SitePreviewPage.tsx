@@ -452,6 +452,9 @@ export function SitePreviewPage(props: {
 
   async function stop() {
     const request = ++previewStartRequestRef.current;
+    const requestContext = siteContext;
+    const isCurrent = () =>
+      request === previewStartRequestRef.current && requestContext === siteContextRef.current;
     logsRequestRef.current += 1;
     setLogsOpen(false);
     setActionError(null);
@@ -460,13 +463,13 @@ export function SitePreviewPage(props: {
         workspaceId: props.workspaceId,
         siteRoot: props.siteRoot,
       });
-      if (request !== previewStartRequestRef.current) return;
+      if (!isCurrent()) return;
       setPreview(null);
       setPreviewLogs([]);
       setStoppedByUser(true);
       setPreviewExited(false);
     } catch (error) {
-      if (request !== previewStartRequestRef.current) return;
+      if (!isCurrent()) return;
       setActionError(error instanceof Error ? error.message : "Could not stop preview.");
     }
   }
