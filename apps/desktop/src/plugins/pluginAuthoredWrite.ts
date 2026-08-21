@@ -71,9 +71,16 @@ export function createPluginAuthoredTextWriter(
     const pipeline = input.pipeline();
     const ownerId = pipeline?.pluginIdForPath(absolutePath);
     if (ownerId && pipeline) {
-      const reportedPath = process.platform === "win32"
-        ? realpathSync.native(absolutePath)
-        : absolutePath;
+      let reportedPath = absolutePath;
+      if (process.platform === "win32") {
+        try {
+          reportedPath = realpathSync.native(absolutePath);
+        } catch {
+          // The file vanished between the write and this report (for example a
+          // concurrent uninstall). The write itself succeeded; report the
+          // caller's spelling rather than failing a landed write.
+        }
+      }
       pipeline.handleDoorWrittenSourceChange(ownerId, {
         absolutePath: reportedPath,
         text,
