@@ -616,6 +616,7 @@ import {
 } from "./security/staticDirectoryPreview";
 import { PluginHost } from "./plugins/PluginHost";
 import { invokeRegisteredPluginCommand } from "./plugins/pluginCommandInvocation";
+import { PluginCommandHostClaims } from "./plugins/pluginCommandHostClaims";
 import {
   PluginPipeline,
   type PluginPipelineStatusEvent,
@@ -2704,6 +2705,17 @@ const pluginHostLifecycleLocks = new Map<string, Promise<void>>();
 // zero-to-running transition; any workspace-level plugin action clears it,
 // handing ownership back to the workspace.
 const panelStartedHosts = new Set<string>();
+// Commands can overlap and can share a host with panels or web apps. Their
+// claims need separate reference counts so one command cannot release another.
+const activeCommandClaims = new PluginCommandHostClaims();
+
+function claimHostForCommand(key: string): void {
+  activeCommandClaims.claim(key);
+}
+
+function releaseHostForCommand(key: string): void {
+  activeCommandClaims.release(key);
+}
 
 function pluginPanelKey(
   workspaceId: string,
@@ -2961,6 +2973,7 @@ async function stopPluginHostIfUnclaimed(
     // with the host's spawn, so it holds the host open exactly like a
     // sibling panel does.
     !pluginWebAppViews.hasForPlugin(workspaceId, pluginId) &&
+    !activeCommandClaims.has(pluginLifecycleKey(workspaceId, pluginId)) &&
     // Only stop the host if an on-demand open is the reason it's running at
     // all — an enabled, workspace-started plugin has no panel or tab to
     // answer to (#779 round 4 finding 3).
@@ -6614,6 +6627,7 @@ function registerIpcHandlers(
           pluginRoot: input.pluginRoot,
           pluginId: input.pluginId,
           panelId: input.panelId,
+          pluginRegistration: pluginPipelines.get(workspace.workspaceId),
         }),
       isCurrent,
     );
@@ -6785,31 +6799,41 @@ function registerIpcHandlers(
         message: `This workspace has no plugin "${input.pluginId}".`,
       });
     }
-    return InvokePluginCommandResult.parse(
-      await invokeRegisteredPluginCommand({
-        input,
-        plugin,
-        ensureStarted: async () => {
-          if (!isCurrent()) {
-            throw new Error(
-              "The plugin command request was cancelled because the renderer changed.",
+    const claimKey = pluginLifecycleKey(workspace.workspaceId, input.pluginId);
+    claimHostForCommand(claimKey);
+    try {
+      return InvokePluginCommandResult.parse(
+        await invokeRegisteredPluginCommand({
+          input,
+          plugin,
+          ensureStarted: async () => {
+            if (!isCurrent()) {
+              throw new Error(
+                "The plugin command request was cancelled because the renderer changed.",
+              );
+            }
+            assertWritableWorkspace(workspace);
+            return withPluginHostLifecycleLock(
+              claimKey,
+              () => ensurePluginStarted(workspace, plugin, { claim: false }),
             );
-          }
-          assertWritableWorkspace(workspace);
-          return withPluginHostLifecycleLock(
-            pluginLifecycleKey(workspace.workspaceId, input.pluginId),
-            () => ensurePluginStarted(workspace, plugin, { claim: false }),
-          );
-        },
-        ensureCurrent: () => {
-          if (!isCurrent()) {
-            throw new Error(
-              "The plugin command request was cancelled because the renderer changed.",
-            );
-          }
-        },
-      }),
-    );
+          },
+          ensureCurrent: () => {
+            if (!isCurrent()) {
+              throw new Error(
+                "The plugin command request was cancelled because the renderer changed.",
+              );
+            }
+          },
+        }),
+      );
+    } finally {
+      releaseHostForCommand(claimKey);
+      await withPluginHostLifecycleLock(
+        claimKey,
+        () => stopPluginHostIfUnclaimed(workspace.workspaceId, input.pluginId),
+      );
+    }
   });
 
   ipcMain.handle(CHANNELS.stopPluginPanel, async (event, payload) => {
@@ -6936,6 +6960,7 @@ function registerIpcHandlers(
           pluginRoot: input.pluginRoot,
           pluginId: input.pluginId,
           webAppId: input.webAppId,
+          pluginRegistration: pluginPipelines.get(workspace.workspaceId),
         }),
       isCurrent,
     );
@@ -7286,10 +7311,11 @@ function registerIpcHandlers(
     pipeline.enable(pluginId));
   pluginAction(CHANNELS.approvePlugin, (pipeline, pluginId) =>
     pipeline.approve(pluginId));
-  pluginAction(CHANNELS.rebuildPlugin, (pipeline, pluginId, workspaceId) => {
-    stopPluginWebAppsForPlugin(workspaceId, pluginId);
-    return pipeline.rebuild(pluginId);
-  });
+  pluginAction(CHANNELS.rebuildPlugin, (pipeline, pluginId, workspaceId) =>
+    pipeline.rebuild(pluginId, {
+      onOldRuntimeStopped: () =>
+        stopPluginWebAppsForPlugin(workspaceId, pluginId),
+    }));
 
   ipcMain.handle(CHANNELS.pluginUninstallPreflight, async (event, payload) => {
     assertTrustedSender(event);

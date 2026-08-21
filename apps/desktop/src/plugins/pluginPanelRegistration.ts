@@ -23,7 +23,7 @@ export interface RegisteredPlugin {
   manifest: DohcPluginManifest;
 }
 
-interface PluginRegistrationSource {
+export interface PluginRegistrationSource {
   pluginRegistration(pluginId: string): RegisteredPlugin | null;
 }
 
@@ -199,6 +199,7 @@ async function loadValidatedPluginManifest(input: {
   workspaceRoot: string;
   pluginRoot: string;
   pluginId: string;
+  pluginRegistration?: PluginRegistrationSource;
 }): Promise<{ pluginRoot: string; manifest: DohcPluginManifest }> {
   const requestedRoot = workspaceRelativePluginRoot(
     input.workspaceRoot,
@@ -227,16 +228,21 @@ async function loadValidatedPluginManifest(input: {
     throw new Error(`Plugin root is not a directory: ${input.pluginRoot}.`);
   }
 
-  const read = await readPluginManifestFile(pluginRoot);
-  if (!read.ok) {
-    throw new Error(`Plugin manifest is invalid. ${read.diagnostics.join("; ")}`);
+  const registered = input.pluginRegistration?.pluginRegistration(input.pluginId);
+  let manifest = registered?.manifest;
+  if (!manifest) {
+    const read = await readPluginManifestFile(pluginRoot);
+    if (!read.ok) {
+      throw new Error(`Plugin manifest is invalid. ${read.diagnostics.join("; ")}`);
+    }
+    manifest = read.manifest;
   }
-  if (read.manifest.name !== input.pluginId) {
+  if (manifest.name !== input.pluginId) {
     throw new Error(
-      `Plugin id "${input.pluginId}" does not match manifest name "${read.manifest.name}".`,
+      `Plugin id "${input.pluginId}" does not match manifest name "${manifest.name}".`,
     );
   }
-  return { pluginRoot, manifest: read.manifest };
+  return { pluginRoot, manifest };
 }
 
 export async function loadPluginPanelRegistration(input: {
@@ -244,6 +250,7 @@ export async function loadPluginPanelRegistration(input: {
   pluginRoot: string;
   pluginId: string;
   panelId: string;
+  pluginRegistration?: PluginRegistrationSource;
 }): Promise<PluginPanelRegistration> {
   const { pluginRoot, manifest } = await loadValidatedPluginManifest(input);
   const panel = manifest.panels?.find(
@@ -270,6 +277,7 @@ export async function loadPluginWebAppRegistration(input: {
   pluginRoot: string;
   pluginId: string;
   webAppId: string;
+  pluginRegistration?: PluginRegistrationSource;
 }): Promise<PluginWebAppRegistration> {
   const { pluginRoot, manifest } = await loadValidatedPluginManifest(input);
   const webApp = manifest.webApps?.find(

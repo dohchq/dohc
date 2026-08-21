@@ -88,6 +88,9 @@ describe("plugin panel main-process wiring", () => {
     expect(open).toContain("withPluginHostLifecycleLock(");
     expect(open).toContain("assertPluginPanelRequestCurrent(isCurrent);");
     expect(startAt).toBeGreaterThan(lockAt);
+    expect(open).toContain(
+      "pluginRegistration: pluginPipelines.get(workspace.workspaceId),",
+    );
   });
 
   it("serves the manifest panel and grants only main-derived SDK context", () => {
@@ -206,6 +209,12 @@ describe("plugin panel main-process wiring", () => {
       "pluginLifecycleKey(workspace.workspaceId, input.pluginId)",
     );
     expect(invoke).toContain("claim: false");
+    expect(invoke).toContain("claimHostForCommand(claimKey);");
+    expect(invoke).toContain("finally {");
+    expect(invoke).toContain("releaseHostForCommand(claimKey);");
+    expect(invoke).toContain(
+      "() => stopPluginHostIfUnclaimed(workspace.workspaceId, input.pluginId)",
+    );
   });
 
   it("wires the production authored-text writer with this invocation's own signal and pipeline (CERT779L D1)", () => {

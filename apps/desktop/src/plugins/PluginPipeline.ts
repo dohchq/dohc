@@ -110,11 +110,6 @@ export interface PluginCommandContribution {
   title: string;
 }
 
-type PluginRuntimeContributions = Pick<
-  PluginPipelinePluginStatus,
-  "commands" | "panels" | "webApps"
->;
-
 export interface PluginPipelinePluginStatus extends PluginMetadata {
   id: string;
   directoryName: string;
@@ -251,6 +246,12 @@ interface FullBuildOptions {
    * what they snapshot.
    */
   expectedHash?: string;
+  /** A second hash an explicit earlier approval already authorized in this run. */
+  alsoAcceptHash?: string;
+  /** Records this fresh snapshot as the bytes an explicit approve action authorized. */
+  rememberAsApprovedAttempt?: boolean;
+  /** Runs after the previous runtime has fully stopped and before publication. */
+  onOldRuntimeStopped?: () => void;
 }
 
 class PipelineFailure extends Error {
@@ -482,6 +483,7 @@ export class PluginPipeline {
   private readonly operations: PluginPipelineOperations;
   private readonly statuses = new Map<string, PluginPipelinePluginStatus>();
   private recoveredManifests = new Map<string, DohcPluginManifest>();
+  private lastApprovedAttemptHash = new Map<string, string>();
   private readonly queues = new Map<string, PluginJobQueue>();
   private readonly uninstallConfirmations = new Map<string, UninstallConfirmation>();
   /**
@@ -825,7 +827,13 @@ export class PluginPipeline {
   private buildFromCurrentSource(
     pluginId: string,
     candidate: InstalledPluginRecord & { manifest: DohcPluginManifest },
-    expectedHash?: string,
+    options: Pick<
+      FullBuildOptions,
+      | "expectedHash"
+      | "alsoAcceptHash"
+      | "rememberAsApprovedAttempt"
+      | "onOldRuntimeStopped"
+    > = {},
   ): Promise<PluginPipelineActionResult> {
     const staysDisabled =
       this.statuses.get(pluginId)?.disabledReason === "user";
@@ -835,7 +843,7 @@ export class PluginPipeline {
       disabledReasonAfterBuild: staysDisabled ? "user" : null,
       resetCrashAccounting: true,
       freshInstall: false,
-      expectedHash,
+      ...options,
     });
   }
 
@@ -846,11 +854,16 @@ export class PluginPipeline {
       // approving new content trusts that content, but must never silently
       // re-enable a plugin the user explicitly turned off before the
       // out-of-band change arrived (#779 round 3 finding 5).
-      return this.buildFromCurrentSource(pluginId, candidate);
+      return this.buildFromCurrentSource(pluginId, candidate, {
+        rememberAsApprovedAttempt: true,
+      });
     });
   }
 
-  rebuild(pluginId: string): Promise<PluginPipelineActionResult> {
+  rebuild(
+    pluginId: string,
+    options?: { onOldRuntimeStopped?: () => void },
+  ): Promise<PluginPipelineActionResult> {
     return this.enqueueAction(pluginId, async () => {
       const candidate = this.requireValidCandidate(pluginId);
       const state = this.statuses.get(pluginId);
@@ -878,7 +891,11 @@ export class PluginPipeline {
       return this.buildFromCurrentSource(
         pluginId,
         candidate,
-        record.approvedHash,
+        {
+          expectedHash: record.approvedHash,
+          alsoAcceptHash: this.lastApprovedAttemptHash.get(pluginId),
+          onOldRuntimeStopped: options?.onOldRuntimeStopped,
+        },
       );
     });
   }
@@ -1144,6 +1161,7 @@ export class PluginPipeline {
         );
         this.statuses.delete(pluginId);
         this.doorWrittenDeltas.delete(pluginId);
+        this.lastApprovedAttemptHash.delete(pluginId);
         // One directory is one discovery entry, so the deleted root — not the
         // id, which an invalid candidate does not share with its record — is
         // what identifies the entry that just went away.
@@ -1568,6 +1586,7 @@ export class PluginPipeline {
       await this.removePluginData(candidate.id);
       this.statuses.delete(candidate.id);
       this.doorWrittenDeltas.delete(candidate.id);
+      this.lastApprovedAttemptHash.delete(candidate.id);
       this.sourceChangedDuringInstall.delete(candidate.id);
       this.uninstallConfirmations.delete(candidate.id);
       this.emit({ kind: "removed", pluginId: candidate.id });
@@ -1640,9 +1659,13 @@ export class PluginPipeline {
       const snapshot = await this.snapshotOrThrow(validCandidate);
       unpublishedSource = snapshot;
       sourceHash = snapshot.sourceHash;
+      if (input.rememberAsApprovedAttempt) {
+        this.lastApprovedAttemptHash.set(candidate.id, snapshot.sourceHash);
+      }
       if (
         input.expectedHash !== undefined &&
-        snapshot.sourceHash !== input.expectedHash
+        snapshot.sourceHash !== input.expectedHash &&
+        snapshot.sourceHash !== input.alsoAcceptHash
       ) {
         // Ownership passes back only once the tree is actually gone: a
         // discard that rejects here has to reach the catch's own cleanup
@@ -1744,6 +1767,7 @@ export class PluginPipeline {
         await built.discard().catch(() => undefined);
         throw failureFromUnknown("state", "state-write-failed", error);
       }
+      this.lastApprovedAttemptHash.delete(candidate.id);
 
       // The old process stops before either publish. It is full-trust code
       // that knows its own live root, so leaving it running while the live
@@ -1753,6 +1777,7 @@ export class PluginPipeline {
       if (oldRuntime) {
         await this.options.pluginHost.stop(candidate.id);
         oldRuntimeStopped = true;
+        input.onOldRuntimeStopped?.();
       }
 
       // Both publishes happen only now, with the record that approves these
@@ -1827,6 +1852,7 @@ export class PluginPipeline {
         );
       }
 
+      this.recoveredManifests.delete(candidate.id);
       return this.success(this.setStatus(candidate, {
         status: input.startRuntime ? "starting" : "disabled",
         disabledReason: input.disabledReasonAfterBuild,
@@ -1857,7 +1883,6 @@ export class PluginPipeline {
           error: detail,
         });
       } else {
-        let liveContributions: PluginRuntimeContributions | undefined;
         if (oldRuntime !== null && !oldRuntimeStopped) {
           try {
             const manifestPath = join(
@@ -1874,11 +1899,6 @@ export class PluginPipeline {
               );
               if (parsed.success) {
                 this.recoveredManifests.set(candidate.id, parsed.data);
-                liveContributions = {
-                  commands: manifestCommands(parsed.data),
-                  panels: manifestPanels(parsed.data),
-                  webApps: manifestWebApps(parsed.data),
-                };
               }
             }
           } catch {
@@ -1891,9 +1911,8 @@ export class PluginPipeline {
           runtimeStatus: oldRuntime,
           sourceHash,
           error: detail,
-          ...liveContributions,
         });
-        return this.failure(candidate.id, detail, liveContributions);
+        return this.failure(candidate.id, detail);
       }
       return this.failure(candidate.id, detail);
     } finally {
@@ -2227,6 +2246,7 @@ export class PluginPipeline {
       );
       this.statuses.delete(pluginId);
       this.doorWrittenDeltas.delete(pluginId);
+      this.lastApprovedAttemptHash.delete(pluginId);
       this.emit({ kind: "removed", pluginId });
       return {
         ok: true,
@@ -2453,9 +2473,15 @@ export class PluginPipeline {
       settings: candidate.manifest
         ? manifestSettings(candidate.manifest)
         : current.settings,
-      webApps: patch.webApps ?? manifestWebApps(candidate.manifest),
-      panels: patch.panels ?? manifestPanels(candidate.manifest),
-      commands: patch.commands ?? manifestCommands(candidate.manifest),
+      webApps: patch.webApps ?? manifestWebApps(
+        this.recoveredManifests.get(candidate.id) ?? candidate.manifest,
+      ),
+      panels: patch.panels ?? manifestPanels(
+        this.recoveredManifests.get(candidate.id) ?? candidate.manifest,
+      ),
+      commands: patch.commands ?? manifestCommands(
+        this.recoveredManifests.get(candidate.id) ?? candidate.manifest,
+      ),
       diagnostics: boundedStatusLines(patch.diagnostics ?? current.diagnostics),
       warnings: boundedStatusLines(patch.warnings ?? current.warnings),
       error: patch.error === undefined ? cloneError(current.error) : cloneError(patch.error),
@@ -2472,7 +2498,6 @@ export class PluginPipeline {
   private failure(
     pluginId: string,
     error: PluginPipelineError,
-    contributions?: PluginRuntimeContributions,
   ): PluginPipelineActionResult {
     const current = this.statuses.get(pluginId);
     if (current && current.error !== error) {
@@ -2486,7 +2511,7 @@ export class PluginPipeline {
           diagnostics: current.diagnostics,
           valid: current.valid,
         },
-        { ...contributions, error, valid: current.valid },
+        { error, valid: current.valid },
       );
     }
     return {

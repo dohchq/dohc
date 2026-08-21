@@ -26,6 +26,7 @@ import {
   PluginStatusRecord,
 } from "../ipc/bridgeContract";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
+import { PLUGIN_HOST_METHODS } from "./pluginHostProtocol";
 import {
   discoverInstalledPlugins,
   type InstalledPluginRecord,
@@ -327,13 +328,15 @@ async function doorWrite(
 
 function fakeSpawnTransport(
   registeredCommands: () => string[] = () => [],
+  beforeRequest?: (method: string) => Promise<void> | void,
 ): PluginHostOptions["spawnTransport"] {
   return vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
-    request: async <T = unknown>(method: string): Promise<T> => (
-      method === "plugin.activate"
+    request: async <T = unknown>(method: string): Promise<T> => {
+      await beforeRequest?.(method);
+      return (method === PLUGIN_HOST_METHODS.activate
         ? { commands: registeredCommands(), drivers: [] }
-        : {}
-    ) as T,
+        : {}) as T;
+    },
     notify: () => undefined,
     dispose: async () => undefined,
   }));
@@ -2693,6 +2696,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       let failNextDiscard = false;
       let failPublish = false;
       let failRecordWrite = false;
+      let failBuild = false;
+      let nextStopGate: { entered: Deferred; release: Deferred } | null = null;
       let buildCalls = 0;
       let registeredCommands = (options.commands ?? [])
         .map((command) => command.id);
@@ -2701,7 +2706,16 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const host = new PluginHost({
         stateDir: fixture.stateDir,
         workspaceRoot: fixture.workspaceRoot,
-        spawnTransport: fakeSpawnTransport(() => [...registeredCommands]),
+        spawnTransport: fakeSpawnTransport(
+          () => [...registeredCommands],
+          async (method) => {
+            const gate = nextStopGate;
+            if (method !== PLUGIN_HOST_METHODS.deactivate || !gate) return;
+            nextStopGate = null;
+            gate.entered.resolve();
+            await gate.release.promise;
+          },
+        ),
         routeSdkRequest: async () => ({}),
         onStatusChange: (pluginId, status) => {
           pipeline.noteRuntimeStatus(pluginId, status);
@@ -2744,6 +2758,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           },
           build: async (input) => {
             buildCalls += 1;
+            if (failBuild) {
+              failBuild = false;
+              throw new Error("simulated build failure before the approval record write");
+            }
             const result = await buildPluginBundle(input);
             if (!result.ok || !failPublish) return result;
             failPublish = false;
@@ -2780,6 +2798,14 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         },
         failNextRecordWrite: () => {
           failRecordWrite = true;
+        },
+        failNextBuild: () => {
+          failBuild = true;
+        },
+        gateNextStop: () => {
+          const gate = { entered: deferred(), release: deferred() };
+          nextStopGate = gate;
+          return gate;
         },
         setRegisteredCommands: (commands: string[]) => {
           registeredCommands = [...commands];
@@ -2850,6 +2876,45 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
+    it("retries unchanged bytes after an approved build fails before the record write", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const oldApprovedHash = setup.pipeline.list()[0]?.approvedHash;
+        await writeFile(setup.entryPath, [
+          'export const marker = "approved before a transient build failure";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        setup.failNextBuild();
+
+        const approved = await setup.pipeline.approve("example-plugin");
+
+        expect(approved.ok).toBe(false);
+        const durableState = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!durableState.ok) throw new Error(durableState.warning);
+        expect(durableState.state.plugins["example-plugin"]?.approvedHash)
+          .toBe(oldApprovedHash);
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+
+        expect(rebuilt).toMatchObject({
+          ok: true,
+          plugin: { status: "starting" },
+        });
+        await waitFor(
+          () => setup.pipeline.list()[0]?.status === "ready",
+          "Plugin did not reach ready after retrying unchanged approved bytes.",
+        );
+        expect(setup.pipeline.list()[0]?.status)
+          .not.toBe("disabled-pending-approval");
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
     it("retries a failed build for an established plugin", async () => {
       const setup = await setupEstablishedPlugin();
       try {
@@ -2861,6 +2926,42 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         await waitFor(
           () => setup.pipeline.list()[0]?.status === "ready",
           "Plugin did not reach ready after retrying its build.",
+        );
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("tears down web apps only after the old runtime stops", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await setup.failEstablishedBuild();
+        const stopGate = setup.gateNextStop();
+        let callbackCalled = false;
+        let lateStart: Promise<unknown> | undefined;
+
+        const rebuilding = setup.pipeline.rebuild("example-plugin", {
+          onOldRuntimeStopped: () => {
+            callbackCalled = true;
+            lateStart = setup.pipeline.host.startWebApp(
+              "example-plugin",
+              "old-app",
+              null,
+            );
+            void lateStart.catch(() => undefined);
+          },
+        });
+
+        await stopGate.entered.promise;
+        expect(callbackCalled).toBe(false);
+        stopGate.release.resolve();
+        const rebuilt = await rebuilding;
+
+        expect(rebuilt.ok).toBe(true);
+        expect(callbackCalled).toBe(true);
+        if (!lateStart) throw new Error("The old-runtime stop callback did not run.");
+        await expect(lateStart).rejects.toThrow(
+          'Plugin "example-plugin" is not running.',
         );
       } finally {
         await setup.pipeline.dispose();
@@ -2907,6 +3008,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         expect(
           setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
         ).toEqual(oldCommands);
+        setup.pipeline.noteRuntimeStatus("example-plugin", "crashed");
+        setup.pipeline.noteRuntimeStatus("example-plugin", "starting");
+        setup.pipeline.noteRuntimeStatus("example-plugin", "ready");
+        expect(setup.pipeline.list()[0]?.commands).toEqual(oldCommands);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(oldCommands);
         const recoveredRegistration =
           setup.pipeline.pluginRegistration("example-plugin");
         expect(recoveredRegistration).not.toBeNull();
@@ -2934,6 +3042,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         expect(setup.pipeline.list()[0]?.commands).toEqual(newCommands);
         expect(setup.pipeline.host.getRegisteredCommands("example-plugin"))
           .toEqual(["new.cmd"]);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(newCommands);
       } finally {
         await setup.pipeline.dispose();
       }

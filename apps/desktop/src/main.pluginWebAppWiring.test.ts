@@ -44,6 +44,9 @@ describe("plugin web app main-process wiring", () => {
     expect(startAt).toBeGreaterThan(lockAt);
     expect(open).toContain("withPluginHostLifecycleLock(");
     expect(open).toContain("assertPluginPanelRequestCurrent(isCurrent);");
+    expect(open).toContain(
+      "pluginRegistration: pluginPipelines.get(workspace.workspaceId),",
+    );
   });
 
   it("builds the guest only after readiness and both post-start rechecks", () => {
@@ -178,6 +181,9 @@ describe("plugin web app main-process wiring", () => {
       "!pluginWebAppViews.hasForPlugin(workspaceId, pluginId) &&",
     );
     expect(unclaimed).toContain(
+      "!activeCommandClaims.has(pluginLifecycleKey(workspaceId, pluginId)) &&",
+    );
+    expect(unclaimed).toContain(
       "panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))",
     );
   });
@@ -217,20 +223,20 @@ describe("plugin web app main-process wiring", () => {
     expect(disableCallAt).toBeGreaterThan(disableStopAt);
   });
 
-  it("destroys a plugin's guest views before rebuilding its host", () => {
+  it("destroys a plugin's guest views after the old runtime stops", () => {
     const rebuildAt = mainSource.indexOf("pluginAction(CHANNELS.rebuildPlugin,");
-    const rebuildStopAt = mainSource.indexOf(
-      "stopPluginWebAppsForPlugin(workspaceId, pluginId);",
-      rebuildAt,
-    );
-    const rebuildCallAt = mainSource.indexOf(
-      "return pipeline.rebuild(pluginId);",
-      rebuildAt,
-    );
+    const rebuildEnd = mainSource.indexOf("\n\n  ipcMain.handle(", rebuildAt);
+    const rebuild = mainSource.slice(rebuildAt, rebuildEnd);
 
     expect(rebuildAt).toBeGreaterThan(-1);
-    expect(rebuildStopAt).toBeGreaterThan(rebuildAt);
-    expect(rebuildCallAt).toBeGreaterThan(rebuildStopAt);
+    expect(rebuild).toContain("pipeline.rebuild(pluginId, {");
+    expect(rebuild).toContain("onOldRuntimeStopped: () =>");
+    expect(rebuild).toContain(
+      "stopPluginWebAppsForPlugin(workspaceId, pluginId)",
+    );
+    expect(rebuild).not.toContain(
+      "stopPluginWebAppsForPlugin(workspaceId, pluginId);\n    return pipeline.rebuild",
+    );
   });
 
   it("notifies each owner when plugin teardown destroys its guest view", () => {

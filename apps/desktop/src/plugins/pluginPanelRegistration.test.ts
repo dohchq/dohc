@@ -146,6 +146,58 @@ describe("plugin panel registration", () => {
     ).rejects.toThrow();
   });
 
+  it("prefers a recovered manifest while preserving plugin-root validation", async () => {
+    const workspace = await scratch("dohc-plugin-panel-workspace-");
+    const pluginRoot = join(workspace, "plugins", "hello-plugin");
+    await writePlugin(pluginRoot);
+    const recovered: RegisteredPlugin = {
+      pluginRoot,
+      manifest: {
+        version: 1,
+        name: "hello-plugin",
+        entry: "plugin.mjs",
+        panels: [{
+          id: "old-panel",
+          title: "Old panel",
+          entry: "panel/index.html",
+          placement: "editor",
+        }],
+        webApps: [{ id: "old-app", title: "Old app", instanced: false }],
+      },
+    };
+    const pluginRegistration = {
+      pluginRegistration: () => recovered,
+    };
+
+    await expect(loadPluginPanelRegistration({
+      workspaceRoot: workspace,
+      pluginRoot,
+      pluginId: "hello-plugin",
+      panelId: "old-panel",
+      pluginRegistration,
+    })).resolves.toMatchObject({
+      manifest: recovered.manifest,
+      panel: { id: "old-panel" },
+    });
+    await expect(loadPluginWebAppRegistration({
+      workspaceRoot: workspace,
+      pluginRoot,
+      pluginId: "hello-plugin",
+      webAppId: "old-app",
+      pluginRegistration,
+    })).resolves.toMatchObject({
+      manifest: recovered.manifest,
+      webApp: { id: "old-app" },
+    });
+    await expect(loadPluginWebAppRegistration({
+      workspaceRoot: workspace,
+      pluginRoot: "../outside",
+      pluginId: "hello-plugin",
+      webAppId: "old-app",
+      pluginRegistration,
+    })).rejects.toThrow(/Invalid asset path|escapes the workspace/);
+  });
+
   it("refuses a plugin root outside the workspace", async () => {
     const workspace = await scratch("dohc-plugin-panel-workspace-");
     const outside = await scratch("dohc-plugin-panel-outside-");
