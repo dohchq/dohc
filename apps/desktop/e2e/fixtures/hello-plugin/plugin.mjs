@@ -131,6 +131,110 @@ switch (mode) {
     };
     break;
   }
+  case "instanced-static-web-app": {
+    const servers = new Map();
+    let pluginRoot = null;
+    handler = {
+      activate(ctx) {
+        pluginRoot = ctx.pluginRoot;
+        ctx.commands.register("webapp.running", () => [...servers.keys()].sort());
+      },
+      async startWebApp(_webAppId, instanceKey) {
+        const existing = servers.get(instanceKey);
+        if (existing) return { url: existing.url, title: `Preview ${instanceKey}` };
+        if (!pluginRoot) throw new Error("Fixture plugin root is unavailable.");
+
+        const { readFile } = await import("node:fs/promises");
+        const { createServer } = await import("node:http");
+        const { extname, join, resolve, sep } = await import("node:path");
+        const previewRoot = resolve(join(pluginRoot, "snapshot", "preview"));
+        const previewPrefix = `${previewRoot}${sep}`;
+        const contentTypes = new Map([
+          [".css", "text/css; charset=utf-8"],
+          [".html", "text/html; charset=utf-8"],
+          [".txt", "text/plain; charset=utf-8"],
+        ]);
+
+        const server = createServer(async (request, response) => {
+          let decodedPath;
+          try {
+            decodedPath = decodeURIComponent(
+              new URL(request.url ?? "/", "http://x").pathname,
+            );
+          } catch {
+            response.writeHead(400, {
+              "content-type": "text/plain; charset=utf-8",
+            });
+            response.end("Invalid path");
+            return;
+          }
+
+          const relativePath =
+            decodedPath === "/" ? "index.html" : decodedPath.replace(/^\/+/, "");
+          const target = resolve(join(previewRoot, relativePath));
+          if (target !== previewRoot && !target.startsWith(previewPrefix)) {
+            response.writeHead(400, {
+              "content-type": "text/plain; charset=utf-8",
+            });
+            response.end("Invalid path");
+            return;
+          }
+          if (
+            relativePath
+              .split(/[\\/]+/)
+              .filter(Boolean)
+              .some((segment) => segment === ".dohc")
+          ) {
+            response.writeHead(403, {
+              "content-type": "text/plain; charset=utf-8",
+            });
+            response.end("Forbidden");
+            return;
+          }
+
+          try {
+            const body = await readFile(target);
+            response.writeHead(200, {
+              "cache-control": "no-store",
+              "content-type":
+                contentTypes.get(extname(target).toLowerCase()) ??
+                "application/octet-stream",
+              "x-content-type-options": "nosniff",
+            });
+            response.end(body);
+          } catch {
+            response.writeHead(404, {
+              "content-type": "text/plain; charset=utf-8",
+            });
+            response.end("Not found");
+          }
+        });
+        await new Promise((resolveListen, rejectListen) => {
+          server.once("error", rejectListen);
+          server.listen(0, "127.0.0.1", resolveListen);
+        });
+        const address = server.address();
+        if (!address || typeof address === "string") {
+          await new Promise((resolveClose) => server.close(resolveClose));
+          throw new Error("Fixture preview server did not start.");
+        }
+        const url = `http://127.0.0.1:${address.port}/`;
+        servers.set(instanceKey, { server, url });
+        return { url, title: `Preview ${instanceKey}` };
+      },
+      async stopWebApp(_webAppId, instanceKey) {
+        const running = servers.get(instanceKey);
+        if (!running) return;
+        servers.delete(instanceKey);
+        await new Promise((resolveClose, rejectClose) => {
+          running.server.close((error) =>
+            error ? rejectClose(error) : resolveClose(),
+          );
+        });
+      },
+    };
+    break;
+  }
   case "web-app-hang":
     handler = {
       activate() {},

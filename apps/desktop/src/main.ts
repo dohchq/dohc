@@ -2104,35 +2104,11 @@ function mcpConfigFor(
 } {
   const command = process.env.DOHC_MCP_COMMAND?.trim() || "dohc-mcp";
   const home = stateDir();
-  const configuredSdkPackageJsonPath = process.env.DOHC_SDK_PACKAGE_JSON?.trim();
-  const packagedSdkPackageJsonPath = join(
-    process.resourcesPath,
-    "sdk-package",
-    "package.json",
-  );
-  const developmentSdkPackageJsonPath = resolve(
-    app.getAppPath(),
-    "..",
-    "..",
-    "packages",
-    "sdk",
-    "package.json",
-  );
-  const sdkPackageJsonPath =
-    configuredSdkPackageJsonPath ||
-    (existsSync(packagedSdkPackageJsonPath)
-      ? packagedSdkPackageJsonPath
-      : existsSync(developmentSdkPackageJsonPath)
-        ? developmentSdkPackageJsonPath
-        : undefined);
-  const sdkDependencyRange = process.env.DOHC_SDK_DEPENDENCY_RANGE?.trim();
   const args = ["--workspace", rootPath, "--home", home];
   // A share view hands out the MCP profile for its level (#646): the launched
   // server registers only the write tools that level grants. `null` is a local
   // workspace, which gets every tool.
   if (shareAccess) args.push("--share-access", shareAccess);
-  if (sdkPackageJsonPath) args.push("--sdk-package-json", sdkPackageJsonPath);
-  if (sdkDependencyRange) args.push("--sdk-dependency-range", sdkDependencyRange);
   return {
     command,
     args,

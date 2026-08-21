@@ -1,18 +1,15 @@
 # Spike: can Graph be rebuilt as a plugin?
 
 Date: 2026-08-19. Read-only spike; no production code changed. Base citations
-are against `feat/graph-plugin-spike` at `79454c1b`, which is main after the
-sites plugin (#840) and the built-in sites deletion (#841). Later corrections
-name the follow-up PR or commit they use. Companion to
-[`2026-08-17-sites-plugin-spike.md`](2026-08-17-sites-plugin-spike.md) and
+are against `feat/graph-plugin-spike` at `79454c1b`. Later corrections name
+the follow-up PR or commit they use. Companion to
 [`2026-08-13-plugin-system.md`](2026-08-13-plugin-system.md).
 
-The sites spike named Graph the natural second conversion: "the purest app of
+An earlier spike named Graph the natural second conversion: "the purest app of
 the four — a view computed from links the engine already indexes — and is the
 natural second conversion once P2 (events) and P1 (`ui.open`) exist, with fewer
-losses than Sites because it spawns nothing and embeds nothing"
-(`2026-08-17-sites-plugin-spike.md:456-460`). This spike checked that sentence
-against the code. **All three supporting claims are wrong.** The corrected
+losses than Sites because it spawns nothing and embeds nothing." This spike
+checked that sentence against the code. **All three supporting claims are wrong.** The corrected
 picture still supports converting, but not for free: the recommended plugin is
 a files-only graph.
 
@@ -47,7 +44,7 @@ The honest sizing: one **S** capability (`workspace.links`, serving the
 derivation core already runs for backlinks), one **S** renderer push (the
 rail's active document, on the channel that already pushes the theme), one **S**
 gesture (`ui.openPanel`, so the rail view can promote itself to a tab), and the
-**M** panel-subscription primitive the sites build already argued for. Exact
+**M** panel-subscription primitive tracked by issue #838. Exact
 editor layout adds an optional **S** host change for a chrome-free editor panel;
 without it, the plugin keeps the extra title band. The chat mentions mode does
 not convert and should not; a plugin graph is a files-only graph. Removing the
@@ -260,9 +257,8 @@ has.
 The `files.watch` refusal states its own reason: "A subscription needs a
 channel to push events on, and only a plugin's own process has one."
 (`pluginSdkHost.ts:216`). The plugin's process does get `files.watch`, but the
-process cannot render, and dohc routes exactly one message between a plugin's
-process and its panel — the web-app instance key
-(`2026-08-17-sites-plugin-spike.md:390-397`).
+process cannot render. dohc routes only the web-app instance key between a
+plugin process and panel.
 
 The panel iframe is not the constraint. It runs
 `sandbox="allow-forms allow-same-origin allow-scripts"`
@@ -300,7 +296,7 @@ wrong-shaped.
 | 8b | Open a file **at a heading** | LACKS | Graph opens with an anchor (`GraphView.tsx:474`, shell `openPathWithHeading`). The panel page reads only `target` and calls `onOpenPath(target)` with one argument (`PluginPanelPage.tsx:166-169`); the host's `position` passthrough (`workspaceSdkHost.ts:347`) is dropped. Moot if row 13 stays out, because heading nodes come from the same overlay. |
 | 9 | dohc-native look and interaction | AWKWARD | `ui.theme` plus the theme push (`PluginPanelPage.tsx:137-147,226-242`) carries all 14 color tokens Graph draws with. Base paint can use inline styles, but inline styles cannot express the `:active`, `:hover`, or `:focus-visible` descendant selectors or either `@keyframes` rule (`styles.css:816-900`). Graph nodes also suppress the normal outline (`GraphView.tsx:573-578`), so dropping those rules removes keyboard-focus visibility, hover feedback, and node and edge entrance animations. dohc's global `[data-reduce-motion='true']` reset suppresses those animations for the built-in Graph (`styles.css:121-130`). The theme application sets that attribute inside the panel (`packages/sdk/src/index.ts:244-256`), but the iframe does not receive the global stylesheet (`pluginPanelTheme.ts:1-3`). The L port must ship a panel stylesheet with the interaction and animation rules and copy the attribute-based reset. If it does not, the conversion ignores the accessibility setting. The theme carries two font-family stacks but not the font files, so a panel origin falls through to system families (`renderer/tokens.ts:103-115`). Typography and SVG label metrics will still differ. |
 | 9b | Native editor context menu | LACKS | The built-in page graph sits under the editor wrapper. Its right-clicks bubble to `onContextMenu`, which calls `showWorkbenchMenu("editor", ...)` (`DesktopWorkspaceShell.tsx:5384-5390`). A right-click inside `PluginPanelPage`'s iframe stays in the frame document, and the panel page has no route that forwards it (`PluginPanelPage.tsx:277-285`). The converted tab loses the native editor menu. |
-| 10 | Rebuild when files change | LACKS | `files.watch` refused on the panel path (`pluginSdkHost.ts:213-219`); tracked as open issue #838, which records zero product consumers today. Partial mitigation: `files.read` returns a `contentHash` (`workspaceAssets.ts:129-131`, passed through at `workspaceSdkHost.ts:271-277`), so a panel can poll for change without re-parsing. It is still polling. Sites polls on `visibilitychange` (`plugins/sites/ui/index.js:230-232`). |
+| 10 | Rebuild when files change | LACKS | `files.watch` refused on the panel path (`pluginSdkHost.ts:213-219`); tracked as open issue #838, which records zero product consumers today. Partial mitigation: `files.read` returns a `contentHash` (`workspaceAssets.ts:129-131`, passed through at `workspaceSdkHost.ts:271-277`), so a panel can poll for change without re-parsing. It is still polling. |
 | 11 | Rebuild when an edit settles | LACKS | Today's key folds in `latestMomentOrder` (`DesktopWorkspaceShell.tsx:4799-4801`). No SDK surfaces moments. A file-level watch would not be equivalent: a settle rewrites the artifact, so it may arrive as a file event, but nothing in the SDK says so. |
 | 12 | Know the active document | LACKS | This is rail behavior: `activeDocumentPath` drives ordering, centring, and the ring layout there (`DesktopWorkspaceShell.tsx:5222`; `GraphView.tsx:96-102,149-160,230-250`). The tab received `null` until [#842](https://github.com/dohc-ai/dohc/issues/842) was fixed (PR #844); both mounts now pass `activeDocumentPath`. No SDK member carries the rail's active path. |
 | 13 | Chat-thread nodes and chat edges | LACKS, and should stay LACKS | Needs engine capture, `syncWorkspaceSharedChannels`, and `linkedChatStoreFor` (`main.ts:4677-4700`). AGENTS.md puts identity, shares, and relay below any UI. |
@@ -310,9 +306,9 @@ wrong-shaped.
 
 | Primitive | Closes | Size | Why this size |
 | --- | --- | --- | --- |
-| **G1. `workspace.links`** — an SDK capability returning the full bounded files-only `WorkspaceGraph`: `nodes`, `edges`, `unresolvedLinks`, `scannedFileCount`, `omittedFileCount`, and `truncatedFileCount` (`workspaceGraph.ts:28-35`; `bridgeContract.ts:674-684`) | 1, 2, 3, 5 | **S** | `readWorkspaceGraph` is written and bounded (`workspaceGraph.ts:904-912`). The plumbing spans a `workspaceSdkHost.ts` case, an explicit `pluginSdkHost.ts` forwarding case because its default rejects unknown methods (`pluginSdkHost.ts:184-203,323-344`), capability and SDK exposure, and host/SDK tests. It stays S by the sites spike's P1 SDK-parity precedent, which routed `databases.*` and `ui.open` through the same layers (`2026-08-17-sites-plugin-spike.md:254-256`). G1 preserves the core loader's full-list classification above the 10,000-entry SDK cap, saves the per-file bridge calls, keeps one link resolver, and applies the secret floor. The panel must receive `unresolvedLinks`, `omittedFileCount`, and `truncatedFileCount` unchanged so it can keep the built-in incompleteness notices (`GraphView.tsx:427-438`). G1 must also revise the request deadline for `workspace.links`. The panel transport defaults to 10 seconds and accepts a per-call `timeoutMs` override (`packages/sdk/src/index.ts:69-72,428,499`), while the current graph IPC call has no deadline (`preload.ts:134-135`). One call can read up to 2,000 files sequentially (`workspaceGraph.ts:65-69,853-912`), so the default can reject a healthy workspace on slow storage. Measure the whole derivation on representative workspaces before setting either an evidence-based transport deadline or a per-call override. |
+| **G1. `workspace.links`** — an SDK capability returning the full bounded files-only `WorkspaceGraph`: `nodes`, `edges`, `unresolvedLinks`, `scannedFileCount`, `omittedFileCount`, and `truncatedFileCount` (`workspaceGraph.ts:28-35`; `bridgeContract.ts:674-684`) | 1, 2, 3, 5 | **S** | `readWorkspaceGraph` is written and bounded (`workspaceGraph.ts:904-912`). The plumbing spans a `workspaceSdkHost.ts` case, an explicit `pluginSdkHost.ts` forwarding case because its default rejects unknown methods (`pluginSdkHost.ts:184-203,323-344`), capability and SDK exposure, and host/SDK tests. G1 preserves the core loader's full-list classification above the 10,000-entry SDK cap, saves the per-file bridge calls, keeps one link resolver, and applies the secret floor. The panel must receive `unresolvedLinks`, `omittedFileCount`, and `truncatedFileCount` unchanged so it can keep the built-in incompleteness notices (`GraphView.tsx:427-438`). G1 must also revise the request deadline for `workspace.links`. The panel transport defaults to 10 seconds and accepts a per-call `timeoutMs` override (`packages/sdk/src/index.ts:69-72,428,499`), while the current graph IPC call has no deadline (`preload.ts:134-135`). One call can read up to 2,000 files sequentially (`workspaceGraph.ts:65-69,853-912`), so the default can reject a healthy workspace on slow storage. Measure the whole derivation on representative workspaces before setting either an evidence-based transport deadline or a per-call override. |
 | **G2. Active-document push** — the renderer sends the active workspace path to every mounted graph panel | 12 | **S** | Same channel and shape as the theme push (`PluginPanelPage.tsx:231-234`); the renderer already passes `activeDocumentPath` to the rail (`DesktopWorkspaceShell.tsx:5222`). Since the [#842](https://github.com/dohc-ai/dohc/issues/842) fix (PR #844), both built-in mounts receive `activeDocumentPath`, so G2 pushes to every mounted graph panel the plugin keeps — a rail-only push would reintroduce #842 in the editor panel. Needs the workspace/generation guard the panel's SDK responses already carry. |
-| **G3. Panel subscriptions** — a guarded relay from the workspace event feed to the panel that asked | 10, 11 | **M** | Named by the sites build as the next primitive (`2026-08-17-sites-plugin-spike.md:406-410`) and by issue #838. The feed exists and caps each plugin spawn at 16 open subscriptions (`plugins/pluginWorkspaceEvents.ts:5-14,88-95`), and the push direction exists; new work is per-panel subscriptions under the same guards, and a decision on whether a settled moment is visible at all. One settled batch emits one subscription event per changed path (`pluginWorkspaceEvents.ts:150-170`). A checkout can therefore deliver hundreds of callbacks, and each immediate `workspace.links` refresh can reread up to 2,000 files (`workspaceGraph.ts:65-69,853-912`). Before G3 can count as preserved push refresh, the graph panel must debounce the event burst into one scan or keep one scan in flight and set a dirty flag for one follow-up scan. The Sites panel is the precedent: issue #838's implementation clears and rearms a 300 ms timer before `load()` (`apps/desktop/plugins/sites/ui/index.js`, panel-watch commit `5aa04300`). |
+| **G3. Panel subscriptions** — a guarded relay from the workspace event feed to the panel that asked | 10, 11 | **M** | Issue #838 names this work. The feed exists and caps each plugin spawn at 16 open subscriptions (`plugins/pluginWorkspaceEvents.ts:5-14,88-95`), and the push direction exists; new work is per-panel subscriptions under the same guards, and a decision on whether a settled moment is visible at all. One settled batch emits one subscription event per changed path (`pluginWorkspaceEvents.ts:150-170`). A checkout can therefore deliver hundreds of callbacks, and each immediate `workspace.links` refresh can reread up to 2,000 files (`workspaceGraph.ts:65-69,853-912`). Before G3 can count as preserved push refresh, the graph panel must debounce the event burst into one scan or keep one scan in flight and set a dirty flag for one follow-up scan. |
 | **G4. `ui.openPanel`** — a panel asks dohc to open another of its own panels as a tab | 7b | **S** | The same shape as `ui.openWebApp` (`pluginSdkHost.ts:246-280`): the plugin id comes from the grant, never the request, and the renderer performs the open. The tab path already exists (`workbenchState.ts:78`) and is already a singleton. Without it, graph loses its maximize button. |
 | **G5. Panel identity context** — give a panel `{ panelId, placement }` in its host-provided context | 7d | **S**, optional | The renderer already knows both values and passes `placement` to the start request (`PluginPanelPage.tsx:29-45,67-72`). The host must expose them to the iframe, then cover the context shape and stale-panel guard in host and SDK tests. This is informational context, not authority. G5 is unnecessary if the two manifest entries use separate rail and editor entry wrappers. |
 
@@ -368,9 +364,8 @@ consumer:
 | `renderer/workbench/GraphView.test.tsx` | 333 |
 
 Neither moves unchanged. `GraphView.tsx` is 886 lines of React and TSX; the
-sites plugin's panel is vanilla JavaScript and HTML under `ui/`
-(`apps/desktop/plugins/sites/`), because a panel is static files with no
-bundler (`2026-08-17-sites-plugin-spike.md:392-395`). A converted graph either
+A plugin panel can use vanilla JavaScript and HTML under `ui/`, because a
+panel is static files with no bundler. A converted graph either
 adds a build step or is rewritten without React, and its tests are rewritten
 either way. Only the force-simulation arithmetic ports unchanged. The SVG uses
 Tailwind utilities such as `fill-panel`, `stroke-line`, `text-ink`, and
@@ -509,9 +504,8 @@ A `graph` plugin on today's SDK plus G1–G4:
   (`pluginWorkspaceEvents.ts:150-170`). Calling `workspace.links` from every
   callback can start hundreds of concurrent scans after a checkout, and each
   scan can reread 2,000 files. The panel must debounce the burst or allow one
-  scan in flight with a dirty flag for one follow-up. The Sites panel uses a
-  300 ms debounce for the same feed (`apps/desktop/plugins/sites/ui/index.js`,
-  panel-watch commit `5aa04300`). Moment-level parity still needs measurement.
+  scan in flight with a dirty flag for one follow-up. Moment-level parity still
+  needs measurement.
   Graph rebuilds on every settled moment today
   (`DesktopWorkspaceShell.tsx:4799-4801`). G3 relays workspace file events to
   the panel. Measure whether every settled edit produces the expected event,
@@ -641,9 +635,9 @@ below.
 Sequencing: G1, G2, and G4 are each small and useful beyond graph — a links
 capability serves any plugin that reasons about structure, an active-document
 push serves any panel that follows the user, and `ui.openPanel` serves any
-plugin whose rail view wants more room. G3 is already the sites build's named
-next primitive and issue #838's subject; justify it on its own merit, not on
-this conversion. Convert after all four, and coalesce G3 events before each G1
+plugin whose rail view wants more room. G3 is already issue #838's subject;
+justify it on its own merit, not on this conversion. Convert after all four,
+and coalesce G3 events before each G1
 scan. Use separate entry wrappers unless G5 lands. Converting before G1 forks
 the resolver that backlinks depends on, and that fork is the one cost here
 that gets worse the longer it exists.
@@ -653,8 +647,7 @@ that gets worse the longer it exists.
 1. Is link derivation substrate? G1 makes it an SDK capability and keeps one
    resolver; refusing it keeps the SDK smaller and forks the resolver.
 2. Does the converted graph ship in the app image or install into `plugins/`?
-   The same unresolved question the sites spike left open
-   (`2026-08-17-sites-plugin-spike.md:326-346`); graph does not add to it.
+   Graph does not settle that packaging question.
 3. Does the marketing site keep a graph panel? It imports the desktop component
    directly (`apps/site/src/DemoSidebar.tsx:9`), so the options are a forked
    copy, no graph in the demo, or a demo that runs real plugins.

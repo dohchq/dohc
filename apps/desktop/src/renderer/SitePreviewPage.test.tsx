@@ -447,7 +447,7 @@ describe("SitePreviewPage", () => {
     });
   });
 
-  it("keeps a plain static site shareable after dohc_add_sdk adds package metadata", () => {
+  it("keeps a plain static site shareable when it carries vendored SDK files", () => {
     expect(
       shareTargetForSite({
         ...site,

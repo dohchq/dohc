@@ -8,16 +8,13 @@ import {
   rm,
   stat,
   symlink,
-  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, parse, relative, sep } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
   createWorkspaceDirectory,
-  addSiteSdk,
   buildSite,
   createSite,
   deleteWorkspacePath,
@@ -148,10 +145,6 @@ const LEGACY_APPS_SEGMENT = `.${"apps"}`;
 const LEGACY_SDK_PACKAGE = `@dohc/${"app"}`;
 const importLegacySdk = `import "${LEGACY_SDK_PACKAGE}";\n`;
 
-const TEST_SDK_PACKAGE_JSON_PATH =
-  process.env.DOHC_TEST_SDK_PACKAGE_JSON?.trim() ||
-  join(dirname(fileURLToPath(import.meta.url)), "../../sdk/package.json");
-
 const emptyDesktopHistoryRequest: NonNullable<ToolContext["request"]> = async (request) => {
   if (request.verb === "moments") {
     return {
@@ -178,7 +171,6 @@ async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T
     return await fn({
       root,
       home,
-      sdkPackageJsonPath: TEST_SDK_PACKAGE_JSON_PATH,
       request: emptyDesktopHistoryRequest,
     });
   } finally {
@@ -331,7 +323,6 @@ describe("mcp tool path containment", () => {
         await expect(buildSite(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
         await expect(previewSite(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
         await expect(publishSite(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
-        await expect(addSiteSdk(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
       }
     });
   });
@@ -462,7 +453,6 @@ describe("mcp tool path containment", () => {
           () => buildSite(ctx, { siteRoot }),
           () => previewSite(ctx, { siteRoot }),
           () => publishSite(ctx, { siteRoot }),
-          () => addSiteSdk(ctx, { siteRoot }),
         ]) {
           await expect(run()).resolves.toMatchObject({
             ok: false,
@@ -1628,218 +1618,6 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it("add_sdk wires @dohc/sdk into a normal website package", async () => {
-    await withWorkspace(async (ctx) => {
-      await createSite(ctx, { path: "todo", title: "Todo" });
-      const result = await addSiteSdk(ctx, { siteRoot: "todo" });
-      expect(result).toMatchObject({
-        ok: true,
-        siteRoot: "todo",
-        packagePath: "todo/package.json",
-        dependency: "@dohc/sdk",
-      });
-      const packageJson = JSON.parse(await readFile(join(ctx.root, "todo/package.json"), "utf8"));
-      expect(packageJson.dependencies).toMatchObject({
-        "@dohc/sdk": "file:vendor/dohc-sdk",
-      });
-      await expect(
-        readFile(join(ctx.root, "todo/vendor/dohc-sdk/dist/index.js"), "utf8"),
-      ).resolves.toContain("createDohcClient");
-      expect(result.ok ? result.usage : "").toContain('import { dohc } from "@dohc/sdk"');
-    });
-  });
-
-  it("add_sdk gives plain static sites a browser-resolvable vendored import", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, "static-report"), { recursive: true });
-      await writeFile(
-        join(ctx.root, "static-report", "index.html"),
-        "<!doctype html><h1>Report</h1>\n",
-      );
-
-      const result = await addSiteSdk(ctx, { siteRoot: "static-report" });
-
-      expect(result).toMatchObject({
-        ok: true,
-        importMode: "vendored-browser-module",
-      });
-      expect(result.ok ? result.usage : "").toContain(
-        'import { dohc } from "./vendor/dohc-sdk/dist/index.js"',
-      );
-      await expect(
-        readFile(join(ctx.root, "static-report/vendor/dohc-sdk/dist/index.js"), "utf8"),
-      ).resolves.toContain("createDohcClient");
-    });
-  });
-
-  it("add_sdk treats configured sites without a bundler as browser-static", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, "configured-report"), { recursive: true });
-      await writeFile(
-        join(ctx.root, "configured-report", "index.html"),
-        "<!doctype html><h1>Configured report</h1>\n",
-      );
-      await writeFile(
-        join(ctx.root, "configured-report", "dohc.json"),
-        `${JSON.stringify({ type: "site", title: "Configured report" }, null, 2)}\n`,
-      );
-
-      const result = await addSiteSdk(ctx, { siteRoot: "configured-report" });
-
-      expect(result).toMatchObject({
-        ok: true,
-        importMode: "vendored-browser-module",
-      });
-      expect(result.ok ? result.usage : "").toContain(
-        'import { dohc } from "./vendor/dohc-sdk/dist/index.js"',
-      );
-    });
-  });
-
-  it("add_sdk keeps configured static-server sites on browser-resolvable imports", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, "configured-server"), { recursive: true });
-      await writeFile(join(ctx.root, "configured-server", "index.html"), "<h1>Report</h1>\n");
-      await writeFile(
-        join(ctx.root, "configured-server", "dohc.json"),
-        `${JSON.stringify({
-          type: "site",
-          title: "Configured server",
-          preview: { mode: "static", command: "python -m http.server" },
-        })}\n`,
-      );
-
-      const result = await addSiteSdk(ctx, { siteRoot: "configured-server" });
-
-      expect(result).toMatchObject({ ok: true, importMode: "vendored-browser-module" });
-      expect(result.ok ? result.usage : "").toContain(
-        'import { dohc } from "./vendor/dohc-sdk/dist/index.js"',
-      );
-    });
-  });
-
-  it("add_sdk keeps explicit dependency ranges browser-resolvable for static sites", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, "static-explicit"), { recursive: true });
-      await writeFile(join(ctx.root, "static-explicit", "index.html"), "<h1>Static</h1>\n");
-
-      const result = await addSiteSdk(
-        { ...ctx, sdkDependencyRange: "^9.4.0" },
-        { siteRoot: "static-explicit" },
-      );
-
-      expect(result).toMatchObject({ ok: true, importMode: "vendored-browser-module" });
-      expect(result.ok ? result.usage : "").toContain(
-        'import { dohc } from "./vendor/dohc-sdk/dist/index.js"',
-      );
-      const packageJson = JSON.parse(
-        await readFile(join(ctx.root, "static-explicit/package.json"), "utf8"),
-      );
-      expect(packageJson.dependencies).toMatchObject({ "@dohc/sdk": "^9.4.0" });
-      await expect(
-        readFile(join(ctx.root, "static-explicit/vendor/dohc-sdk/dist/index.js"), "utf8"),
-      ).resolves.toContain("createDohcClient");
-    });
-  });
-
-  it("add_sdk fails cleanly when a static site has no vendorable SDK source", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, "static-no-source"), { recursive: true });
-      await writeFile(join(ctx.root, "static-no-source", "index.html"), "<h1>Static</h1>\n");
-
-      const result = await addSiteSdk(
-        { ...ctx, sdkPackageJsonPath: undefined, sdkDependencyRange: "^9.4.0" },
-        { siteRoot: "static-no-source" },
-      );
-
-      expect(result).toMatchObject({
-        ok: false,
-        reason: expect.stringContaining("browser-resolvable import"),
-      });
-      await expect(stat(join(ctx.root, "static-no-source/package.json"))).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-    });
-  });
-
-  it.each(["missing", "unreadable"] as const)(
-    "add_sdk reports %s bundled SDK browser files without throwing",
-    async (fixture) => {
-      await withWorkspace(async (ctx) => {
-        const sdkDir = join(ctx.home, `sdk-${fixture}`);
-        await mkdir(join(sdkDir, "dist"), { recursive: true });
-        await writeFile(join(sdkDir, "package.json"), '{"version":"1.0.0"}\n');
-        await writeFile(join(sdkDir, "dist/index.d.ts"), "export {};\n");
-        if (fixture === "unreadable") {
-          await mkdir(join(sdkDir, "dist/index.js"));
-        }
-        await mkdir(join(ctx.root, "static-report"), { recursive: true });
-        await writeFile(join(ctx.root, "static-report/index.html"), "<h1>Report</h1>\n");
-
-        await expect(
-          addSiteSdk(
-            { ...ctx, sdkPackageJsonPath: join(sdkDir, "package.json") },
-            { siteRoot: "static-report" },
-          ),
-        ).resolves.toMatchObject({
-          ok: false,
-          reason: expect.stringMatching(/bundled @dohc\/sdk browser files|ENOENT|EISDIR/i),
-        });
-        await expect(
-          stat(join(ctx.root, "static-report/vendor/dohc-sdk")),
-        ).rejects.toMatchObject({ code: "ENOENT" });
-      });
-    },
-  );
-
-  it("add_sdk refreshes the SDK dependency range when package metadata changes", async () => {
-    await withWorkspace(async (ctx) => {
-      const sdkDir = join(ctx.home, "sdk-package");
-      const sdkPackageJsonPath = join(sdkDir, "package.json");
-      await mkdir(join(sdkDir, "dist"), { recursive: true });
-      await writeFile(join(sdkDir, "dist/index.js"), "export const version = 'test';\n");
-      await writeFile(join(sdkDir, "dist/index.d.ts"), "export declare const version: string;\n");
-      await writeFile(sdkPackageJsonPath, `${JSON.stringify({ version: "1.0.0" })}\n`);
-      const customCtx = { ...ctx, sdkPackageJsonPath };
-      await createSite(customCtx, { path: "todo", title: "Todo" });
-
-      await expect(addSiteSdk(customCtx, { siteRoot: "todo" })).resolves.toMatchObject({
-        ok: true,
-      });
-      await writeFile(sdkPackageJsonPath, `${JSON.stringify({ version: "2.0.0" })}\n`);
-      const bumped = new Date(Date.now() + 5000);
-      await utimes(sdkPackageJsonPath, bumped, bumped);
-
-      await expect(addSiteSdk(customCtx, { siteRoot: "todo" })).resolves.toMatchObject({
-        ok: true,
-      });
-      const packageJson = JSON.parse(await readFile(join(ctx.root, "todo/package.json"), "utf8"));
-      expect(packageJson.dependencies).toMatchObject({
-        "@dohc/sdk": "file:vendor/dohc-sdk",
-      });
-      const vendoredPackage = JSON.parse(
-        await readFile(join(ctx.root, "todo/vendor/dohc-sdk/package.json"), "utf8"),
-      );
-      expect(vendoredPackage.version).toBe("2.0.0");
-    });
-  });
-
-  it("add_sdk refuses to overwrite malformed package metadata", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, "todo"), { recursive: true });
-      await writeFile(join(ctx.root, "todo", "index.html"), "<h1>Todo</h1>");
-      await writeFile(join(ctx.root, "todo", "package.json"), "{ bad");
-
-      await expect(addSiteSdk(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
-        ok: false,
-        reason: expect.stringContaining("invalid package.json"),
-      });
-      await expect(readFile(join(ctx.root, "todo", "package.json"), "utf8")).resolves.toBe(
-        "{ bad",
-      );
-    });
-  });
-
   it("publish_site stops at the explicit dohc Cloud review boundary", async () => {
     await withWorkspace(async (ctx) => {
       await createSite(ctx, { path: "todo", title: "Todo" });
@@ -2350,17 +2128,6 @@ describe("a refused recordability boundary leaves the filesystem alone", () => {
     });
   });
 
-  it("refuses the sdk add, and package.json is untouched", async () => {
-    await withBlockedMetadataDir(async (ctx) => {
-      await mkdir(join(ctx.root, "sites", "landing"), { recursive: true });
-      await writeFile(join(ctx.root, "sites", "landing", "index.html"), "<h1>hi</h1>");
-
-      expect(await addSiteSdk(ctx, { siteRoot: "sites/landing" })).toMatchObject({ ok: false, reason: BLOCKED });
-      await expect(
-        stat(join(ctx.root, "sites", "landing", "package.json")),
-      ).rejects.toThrow();
-    });
-  });
 });
 
 // #638. The reserved rule used to read the path as SPELLED, and containment
@@ -2583,7 +2350,6 @@ describe("a symlink cannot alias a reserved area", () => {
       for (const result of [
         await buildSite(ctx, { siteRoot: "mine/landing" }),
         await testSite(ctx, { siteRoot: "mine/landing" }),
-        await addSiteSdk(ctx, { siteRoot: "mine/landing" }),
       ]) {
         expect(result.ok).toBe(false);
         expect("reason" in result ? result.reason : "no refusal").toMatch(/mounted share/i);
