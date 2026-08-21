@@ -16,6 +16,7 @@ import {
 import {
   captureSharedViewLocalDivergence,
   materializeSharedViewPaths,
+  readPendingMaterializationPaths,
   withShareViewRefreshLifecycleLock,
 } from "./sharedView";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
@@ -916,6 +917,9 @@ describe("share-view file operations through the real store", () => {
       await expect(
         readFile(join(view.rootPath, "docs", "plans", "one.md"), "utf8"),
       ).resolves.toBe("one\n");
+      await expect(readPendingMaterializationPaths(view.rootPath)).resolves.toEqual(
+        new Set(),
+      );
     },
     60_000,
   );
@@ -952,6 +956,9 @@ describe("share-view file operations through the real store", () => {
         "docs/plans/two.md",
         "docs/roadmap/one.md",
       ]);
+      const pending = await readPendingMaterializationPaths(view.rootPath);
+      expect(pending).toContain("docs/plans/one.md");
+      expect(pending).toContain("docs/roadmap/one.md");
     },
     60_000,
   );

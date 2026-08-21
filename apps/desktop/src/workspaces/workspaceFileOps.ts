@@ -137,11 +137,11 @@ async function materializeWithPendingRecord(
 async function markMutateMaterializeAndClear(
   rootPath: string,
   workspaceId: string,
-  paths: readonly string[],
-  changed: readonly ShareViewChangedPath[],
+  targets: { paths: readonly string[]; changed: readonly ShareViewChangedPath[] },
   store: CaptureVersionedTextStore,
   mutate: () => Promise<void>,
 ): Promise<void> {
+  const { paths, changed } = targets;
   if (paths.length > 0) await writePendingMaterializationPaths(rootPath, paths);
   await mutate();
   if (changed.length > 0) {
@@ -285,8 +285,7 @@ async function shareViewCreate(
     await markMutateMaterializeAndClear(
       input.rootPath,
       input.workspaceId,
-      [path],
-      changed,
+      { paths: [path], changed },
       store,
       async () => {
         await store.writeTextFile({
@@ -382,8 +381,7 @@ async function shareViewMove(
     await markMutateMaterializeAndClear(
       input.rootPath,
       input.workspaceId,
-      paths,
-      changed,
+      { paths, changed },
       store,
       async () => {
         const applied: { from: string; to: string }[] = [];
@@ -400,6 +398,9 @@ async function shareViewMove(
           }
         } catch (error) {
           await putBackMoves(store, input.workspaceId, main.id, applied);
+          // The store is back where it started, and materialization has not run.
+          // These markers no longer describe work that needs recovery.
+          await clearPendingMaterializationPaths(input.rootPath, paths);
           throw error;
         }
       },
@@ -490,8 +491,7 @@ async function shareViewDelete(
     await markMutateMaterializeAndClear(
       input.rootPath,
       input.workspaceId,
-      targets,
-      changed,
+      { paths: targets, changed },
       store,
       async () => {
         const applied: string[] = [];

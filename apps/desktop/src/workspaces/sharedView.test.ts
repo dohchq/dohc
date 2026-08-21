@@ -44,6 +44,7 @@ import {
 } from "./workspaceFileOps";
 import { routeWorkspaceTextWrite } from "./workspaceTextWrite";
 import { withOrderedWorkspaceTextPath } from "./workspaceAssets";
+import { shareViewTakesLocalWrites } from "./shareWriteGate";
 import {
   ShareUnavailableError,
   type PullShareViewResult,
@@ -1385,6 +1386,55 @@ describe("shared view refresh", () => {
     }
   });
 
+  it("returns a repair count when the post-capture metadata read fails", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/repaint-after-failed-metadata-read.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "granter body");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), "outside editor", "utf8");
+
+    const store = harness.openStore(target);
+    let metadataCalls = 0;
+    const failingStore: typeof store = {
+      ...store,
+      async listTextFileMetadata(input) {
+        metadataCalls += 1;
+        if (metadataCalls === 2) throw new Error("metadata read failed");
+        return await store.listTextFileMetadata!(input);
+      },
+    };
+    try {
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store: failingStore,
+          pull: harness.pullFor(target),
+          pinnedSelector: PINNED_SELECTOR,
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toEqual({
+        ok: false,
+        changedPaths: 1,
+        errorMessage: "metadata read failed",
+      });
+      expect(metadataCalls).toBe(2);
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("granter body");
+    } finally {
+      await store.close();
+    }
+  });
+
   it("repairs pending debris only when disk matches the recorded preimage", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
@@ -2169,47 +2219,51 @@ describe("shared view refresh", () => {
     }
   });
 
-  it.each(["view", "comment"] as const)(
-    "repairs a direct delete after a successful share-view create for %s access",
-    async (access) => {
-      const rootDir = await tempRoot();
-      const relay = new FakeShareRelay();
-      const harness = daemonHarness(relay);
-      relay.addWrite("docs/seed.md", "seed");
-      await refreshSharedViewOnce(harness, {
-        rootDir,
+  // The gate returns false for every access level except edit, so view and
+  // comment cannot reach distinct branches through this seam.
+  it("repairs a direct delete after a successful share-view create for a non-edit access level", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    const created = "docs/view-repair.md";
+    try {
+      await routeWorkspaceFileCreate({
         workspaceId: WORKSPACE,
-        shareId: SHARE_ID,
+        rootPath: rootDir,
+        shareView: { access: "edit", ended: false, granterEmail: null },
+        shareViewStore: () => store,
+        relativePath: created,
+        initialText: "restore me\n",
       });
+      await rm(join(rootDir, created));
+      const beforeIds = await momentIds(store);
 
-      const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
-      const created = `docs/${access}-repair.md`;
-      try {
-        await routeWorkspaceFileCreate({
-          workspaceId: WORKSPACE,
-          rootPath: rootDir,
-          shareView: { access: "edit", ended: false, granterEmail: null },
-          shareViewStore: () => store,
-          relativePath: created,
-          initialText: "restore me\n",
-        });
-        await rm(join(rootDir, created));
-        const beforeIds = await momentIds(store);
-
-        await expect(
-          captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, false),
-        ).resolves.toEqual({
-          capturedPaths: 0,
-          repairedPaths: 1,
-          unjournalablePaths: [],
-        });
-        expect(await readFile(join(rootDir, created), "utf8")).toBe("restore me\n");
-        expect(await momentIds(store)).toEqual(beforeIds);
-      } finally {
-        await store.close();
-      }
-    },
-  );
+      await expect(
+        captureSharedViewLocalDivergence(
+          rootDir,
+          WORKSPACE,
+          store,
+          shareViewTakesLocalWrites({ access: "view", ended: false }),
+        ),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
+      expect(await readFile(join(rootDir, created), "utf8")).toBe("restore me\n");
+      expect(await momentIds(store)).toEqual(beforeIds);
+    } finally {
+      await store.close();
+    }
+  });
 
   it("marks every move path until its projection is materialized", async () => {
     const rootDir = await tempRoot();

@@ -1537,23 +1537,22 @@ export async function refreshStandaloneShareViewOnce(
   return withShareViewRefreshLifecycleLock(input.rootDir, async () => {
     const captured = await captureStandaloneShareViewDivergence(input);
     const totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
-    const main = await input.store.ensureMainVersion({
-      workspaceId: input.workspaceId,
-    });
-    if (!input.store.listTextFileMetadata) {
-      throw new Error("Shared view reconciliation requires file metadata listing support.");
-    }
-    const preTrackedPaths = new Set(
-      (
-        await input.store.listTextFileMetadata({
-          workspaceId: input.workspaceId,
-          versionId: main.id,
-        })
-      ).map((entry) => entry.path),
-    );
-    let outcome: RefreshSharedViewOutcome;
     try {
-      outcome = await refreshSharedViewOnce({
+      const main = await input.store.ensureMainVersion({
+        workspaceId: input.workspaceId,
+      });
+      if (!input.store.listTextFileMetadata) {
+        throw new Error("Shared view reconciliation requires file metadata listing support.");
+      }
+      const preTrackedPaths = new Set(
+        (
+          await input.store.listTextFileMetadata({
+            workspaceId: input.workspaceId,
+            versionId: main.id,
+          })
+        ).map((entry) => entry.path),
+      );
+      const outcome = await refreshSharedViewOnce({
         ...input,
         excludeFromMaterialization: new Set(
           captured.unjournalablePaths.map((path) => path.path),
@@ -1562,6 +1561,15 @@ export async function refreshStandaloneShareViewOnce(
         trackPendingMaterialization: true,
         preTrackedPaths,
       });
+      return {
+        ok: true,
+        ...outcome,
+        status:
+          outcome.status === "unchanged" && totalLocalChanges > 0
+            ? "updated"
+            : outcome.status,
+        changedPaths: outcome.changedPaths + totalLocalChanges,
+      };
     } catch (error) {
       return {
         ok: false,
@@ -1569,14 +1577,5 @@ export async function refreshStandaloneShareViewOnce(
         errorMessage: error instanceof Error ? error.message : String(error),
       };
     }
-    return {
-      ok: true,
-      ...outcome,
-      status:
-        outcome.status === "unchanged" && totalLocalChanges > 0
-          ? "updated"
-          : outcome.status,
-      changedPaths: outcome.changedPaths + totalLocalChanges,
-    };
   });
 }
