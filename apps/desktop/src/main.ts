@@ -7248,6 +7248,17 @@ function registerIpcHandlers(
       // into the workspace and that write boundary must be legible on its
       // own, not inferred from a pipeline-lifecycle helper three calls away.
       assertWritableWorkspace(workspace);
+      // pipeline.list() only reflects discovery's LAST scan, which can be
+      // stale: a plugin created on disk by anything other than this handler
+      // (an agent, a second client) may not have reached it yet if the
+      // workspace's own file watcher hasn't settled its batch. Sampling IDs
+      // from a stale list let a not-yet-discovered directory's id through,
+      // so this forces the same rescan handleWatcherEvents already uses
+      // after the copy — but here, before existingPluginIds is sampled and
+      // before anything is copied.
+      await pipeline.handleWatcherEvents([
+        { operation: "update", path: "plugins" },
+      ]);
       // Sampled fresh, not reused from any earlier listOfferedPlugins call —
       // a plugin can be discovered under a different directory between an
       // offer showing and this request landing.

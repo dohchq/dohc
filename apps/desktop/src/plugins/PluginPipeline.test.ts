@@ -26,7 +26,7 @@ import {
   PluginStatusRecord,
 } from "../ipc/bridgeContract";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
-import { addOfferedPlugin } from "./pluginOffers";
+import { OfferedPluginAddError, addOfferedPlugin } from "./pluginOffers";
 import {
   discoverInstalledPlugins,
   type InstalledPluginRecord,
@@ -427,6 +427,86 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         status: "ready",
       });
       expect(pipeline.list()[0]?.approvedHash).toMatch(/^[0-9a-f]{64}$/);
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("refuses to add when discovery hasn't caught up with a same-id directory already on disk", async () => {
+    const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-offer-rescan-"));
+    roots.push(targetRoot);
+    const workspaceRoot = join(targetRoot, "workspace");
+    const stateDir = join(targetRoot, "state");
+    await mkdir(workspaceRoot, { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+
+    const builtinPluginsRoot = join(targetRoot, "builtin-plugins");
+    const builtinCodexRoot = join(builtinPluginsRoot, "codex");
+    await mkdir(join(builtinCodexRoot, "src"), { recursive: true });
+    await writeFile(
+      join(builtinCodexRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+    );
+    await writeFile(join(builtinCodexRoot, "src", "main.ts"), "export default {};\n");
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir,
+      workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot,
+      stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      expect(pipeline.list()).toEqual([]);
+
+      // Something other than this pipeline's own watcher — an agent, a
+      // second client — created a directory claiming id "codex" under a
+      // DIFFERENT name. The bytes are on disk, but this pipeline's own
+      // discovery has not rescanned yet: pipeline.list() is stale.
+      const renamedRoot = join(workspaceRoot, "plugins", "my-codex");
+      await mkdir(join(renamedRoot, "src"), { recursive: true });
+      await writeFile(
+        join(renamedRoot, "dohc-plugin.json"),
+        `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+      );
+      await writeFile(join(renamedRoot, "src", "main.ts"), "export default {};\n");
+      expect(pipeline.list()).toEqual([]);
+
+      // The fixed handler order: force the same rescan mechanism BEFORE
+      // sampling ids, not only after the copy.
+      await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
+      const existingPluginIds = new Set(pipeline.list().map((entry) => entry.id));
+      expect(existingPluginIds).toEqual(new Set(["codex"]));
+
+      await expect(
+        addOfferedPlugin({
+          builtinPluginsRoot,
+          workspaceRoot,
+          directoryName: "codex",
+          existingPluginIds,
+        }),
+      ).rejects.toBeInstanceOf(OfferedPluginAddError);
+
+      // Nothing copied.
+      await expect(
+        lstat(join(workspaceRoot, "plugins", "codex")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await pipeline.dispose();
     }
